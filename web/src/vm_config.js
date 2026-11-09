@@ -1003,6 +1003,7 @@
             const [cpuDetOpen, setCpuDetOpen] = useState(false);  // cloud: reported-model/level/flags folded
             const [cfgResult, setCfgResult] = useState(null);      // cloud: applied/failed after a save
             const [lastSaveErr, setLastSaveErr] = useState(null);  // cloud: message of the last failed save
+            const lastSaveErrRef = useRef(null);  // read after await (not from a stale render)
             const [externDirty, setExternDirty] = useState(false); // cloud: config changed underneath (SSE)
             const [cfgBandOpen, setCfgBandOpen] = useState(false); // cloud: footer change list
             const crv = useCrVc({ on: crVcEngine, vm, clusterId, authFetch, config, changes, nets: crNets });
@@ -2247,11 +2248,11 @@
                     } else {
                         const err = await response.json();
                         addToast(err.error || t('saveFailed'), 'error');
-                        setLastSaveErr(err.error || t('saveFailed'));
+                        lastSaveErrRef.current = err.error || t('saveFailed'); setLastSaveErr(err.error || t('saveFailed'));
                     }
                 } catch(error) {
                     addToast(t('connectionError'), 'error');
-                    setLastSaveErr(t('connectionError'));
+                    lastSaveErrRef.current = t('connectionError'); setLastSaveErr(t('connectionError'));
                 }
                 setSaving(false);
                 // LW Nov 2026 - the redesign reads what PVE keeps pending once it knows the outcome
@@ -6672,6 +6673,12 @@
                                         </div>
                                     );
                                     return (<>
+                                        {cfgResult && cfgResult.phase === 'failed' && (
+                                            <div className="cloud-cfg-result is-failed" style={{ width: '100%', marginBottom: 6 }}>
+                                                <span className="cloud-hc-badge is-critical">{cT('cloudCfgFailed', 'SAVE FAILED')}</span>
+                                                {cfgResult.err || ''}
+                                            </div>
+                                        )}
                                         {externDirty && (
                                             <div className="cloud-cfg-warn">{cT('cloudCfgExtern', 'The configuration changed underneath (another administrator?) — saving may overwrite foreign changes.')}</div>
                                         )}
@@ -6721,9 +6728,9 @@
                                     <button type="button" className="cloud-btn cloud-btn-primary" disabled={!hasChanges || saving}
                                         onClick={() => {
                                             const n = Object.keys(changes).length;
-                                            setLastSaveErr(null);
+                                            lastSaveErrRef.current = null; setLastSaveErr(null);
                                             Promise.resolve(handleSave()).then(ok => {
-                                                setCfgResult(ok ? { phase: 'applied', n, at: Date.now() } : { phase: 'failed', err: lastSaveErr, at: Date.now() });
+                                                setCfgResult(ok ? { phase: 'applied', n, at: Date.now() } : { phase: 'failed', err: lastSaveErrRef.current || lastSaveErr, at: Date.now() });
                                                 if (ok) setExternDirty(false);
                                             });
                                         }}>

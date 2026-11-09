@@ -1342,6 +1342,13 @@ class PegaProxDB:
                 except Exception as e:
                     logging.error(f"Failed to add directory_groups column: {e}")
 
+            if 'cloud_dashboard' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN cloud_dashboard TEXT")
+                    logging.info("Added cloud_dashboard column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add cloud_dashboard column: {e}")
+
         except Exception as e:
             logging.error(f"Error checking users schema: {e}")
         
@@ -4484,7 +4491,7 @@ class PegaProxDB:
              ldap_permissions, ldap_tenant,
              tenant_permissions, denied_permissions, oidc_sub, last_oidc_sync,
              layout_chosen, portal_only, sidebar_show_vmid, user_folder,
-             directory_groups)
+             directory_groups, cloud_dashboard)
             VALUES (?, ?, ?, ?, ?, ?,
                     COALESCE((SELECT created_at FROM users WHERE username = ?), ?),
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -4492,7 +4499,7 @@ class PegaProxDB:
                     ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
-                    COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]')),
+                    COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]'),
                     ?)
         ''', (
             username,
