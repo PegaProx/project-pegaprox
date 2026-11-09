@@ -149,17 +149,22 @@ apt has already seen. Moving `TRIXIE_IMAGE` in the workflow may change those byt
 
 Our `python3-sqlcipher3` is `0.6.4-0pegaprox1`. The other repository ships `0.6.4`, as
 `Architecture: all` with the x86_64 module only; ours sorts above it, so a host with both
-gets ours, and on arm64 the module then imports.
+gets ours, and on arm64 the module then imports. That holds while the other one stays at
+`0.6.4`: a `0.6.4-1` or `0.6.5` there sorts above ours.
 
 **The appliance images** take this package too, not the one of the other repository or its
 CDN. Each leg of `release-images.yml` (VM and LXC, amd64 and arm64) runs
 [`build-sqlcipher3-deb.sh`](build-sqlcipher3-deb.sh) for its architecture: `pip download`
 with `--require-hashes` of `python-debs/requirements.txt` for that one machine, then
 `build-python-debs.py --arch`, which builds what that architecture installs. The image
-installs it ahead of `pegaprox`. Its smoke test has PegaProx run `--keystore-status` in the
-image as the service user, and [`smoke_backend.py`](smoke_backend.py) fails the leg unless
-the backend is `sqlcipher`. The arm64 legs are `continue-on-error` (qemu): a failure there
-leaves that image out of the release instead of stopping the amd64 one.
+installs it ahead of `pegaprox`, and `/etc/apt/preferences.d/pegaprox-sqlcipher3` gives the
+other repository's `python3-sqlcipher3` priority -1, so no later upload there replaces it.
+Its smoke test has PegaProx run `--keystore-status` in the image as the service user, and
+[`smoke_backend.py`](smoke_backend.py) fails the leg unless the backend is `sqlcipher` and each
+database it lists is missing, empty or encrypted. The arm64 legs are `continue-on-error` (qemu): a failure there
+leaves that image out of the release instead of stopping the amd64 one, and the publish job
+names each image that did not come with a warning and in the run's summary (a missing amd64
+one fails it).
 
 ## The signing key
 

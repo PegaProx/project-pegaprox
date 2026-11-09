@@ -152,6 +152,15 @@ restarted. A database encrypted before (a config directory moved to another mach
 install replaced by the Debian package) does not open on plain SQLite: the start stops with
 `[FATAL] [DBCRYPTO]`, the reason and `... is encrypted and does not open until ...`.
 
+The appliance images keep the repository in the README for `pegaprox` and pin its
+`python3-sqlcipher3` away (`/etc/apt/preferences.d/pegaprox-sqlcipher3`), so an `apt upgrade`
+does not replace the one built for the image, not even with a later version from there.
+SQLCipher and OpenSSL are built into that module, so on an appliance they are updated with a
+new image, not by apt. Appliance images of 1.4.1 and before come without `python3-sqlcipher3`
+and run on plain SQLite; once a PegaProx that depends on it is installed in them from that
+repository, the rows of that repository above apply. `--keystore-status` shows which backend
+an appliance runs.
+
 The fallback is *not* unencrypted - sensitive fields (cluster passwords,
 2FA secrets, OIDC client secrets, API tokens) are still individually
 encrypted with AES-256-GCM, under their own key file `config/.pegaprox_aes256.key`. The fallback gives up on
