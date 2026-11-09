@@ -34,12 +34,13 @@ class Qemu:
     """The guest's monitor. `jobs` maps a drive to the second its job ends on its own (None:
     it runs until complete or cancel); every job sits at 100% and takes complete."""
 
-    def __init__(self, clock, jobs, log=''):
+    def __init__(self, clock, jobs, log='', garbled=None):
         self.clock = clock
         self.start = clock.now
         self.ends = dict(jobs)
         self.done = set()
         self.log = log
+        self.garbled = garbled              # (from, to) seconds in which qm monitor prints an error
         self.cmds = []
 
     def _listed(self):
@@ -50,6 +51,8 @@ class Qemu:
         self.cmds.append(cmd)
         verb, _, arg = cmd.partition(' ')
         if cmd == 'info block-jobs':
+            if self.garbled and self.garbled[0] <= self.clock.now - self.start < self.garbled[1]:
+                return "ERROR: VM 120 qmp command 'human-monitor-command' failed - got timeout"
             jobs = self._listed()
             if not jobs:
                 return 'No active jobs'
@@ -83,9 +86,9 @@ class Task:
         pass
 
 
-def _poll(monkeypatch, jobs, log=''):
+def _poll(monkeypatch, jobs, log='', **kw):
     clock = Clock()
-    q = Qemu(clock, jobs, log)
+    q = Qemu(clock, jobs, log, **kw)
     monkeypatch.setattr(time, 'sleep', clock.sleep)
     monkeypatch.setattr(time, 'time', clock.time)
     monkeypatch.setattr(time, 'monotonic', clock.monotonic)
@@ -124,3 +127,10 @@ def test_a_mirror_job_still_running_reaches_the_pivot(monkeypatch):
     assert ok is True, task.lines
     assert sorted(q.sent('block_job_complete')) == ['block_job_complete drive-scsi0',
                                                      'block_job_complete drive-scsi1']
+
+
+def test_an_error_text_in_place_of_the_job_list_is_no_news(monkeypatch):
+    """A monitor that timed out for a few polls does not end a mirror that is still running."""
+    ok, q, task = _poll(monkeypatch, {'drive-scsi0': None}, garbled=(20, 26))
+    assert ok is True, task.lines
+    assert not any('ended without a pivot' in line for line in task.lines), task.lines

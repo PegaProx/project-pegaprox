@@ -4008,6 +4008,10 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
         ok, jobs = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
         if not ok:
             continue
+        # NS Nov 2026 - qm monitor prints its own errors as text and exits 0. Only the reply of
+        # info block-jobs itself may say that a job is gone, an error text is no news.
+        if 'No active jobs' not in jobs and 'device ' not in jobs:
+            continue
         
         # Check each mirror
         all_near_100 = True
