@@ -1629,6 +1629,9 @@ def main(debug_mode=False):
             if _r.get('action') == 'migrated':
                 print(f"  ✓ {_db_name} auto-encrypted ({_r['rows_copied']} rows, {_r['duration_s']}s)")
                 print(f"    backup: {_r['backup_path']}")
+            elif _r.get('action') == 'no-backend' and _dbcrypto.SQLCIPHER_ERROR:
+                print(f"  ⚠ sqlcipher3 is installed but does not load here ({_dbcrypto.SQLCIPHER_ERROR}) - "
+                      f"{_db_name} stays plain until a package for this architecture is installed")
             elif _r.get('action') == 'no-backend':
                 print(f"  ⚠ sqlcipher3 not installed - {_db_name} stays plain (field-level encryption still active)")
     except RuntimeError as _e:

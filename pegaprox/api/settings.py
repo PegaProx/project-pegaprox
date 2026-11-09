@@ -3851,6 +3851,8 @@ def get_compliance_status():
         score = round(passed / len(checked) * 100, 1) if checked else None
         st = {c['id']: c['status'] for c in controls}
         default_pw = _check_default_password_in_use()
+        # names an installed SQLCipher package that does not load here
+        from pegaprox.core import dbcrypto
 
         return jsonify({
             'compliance_score': score,
@@ -3865,7 +3867,8 @@ def get_compliance_status():
                 'key_exists': key_info.get('exists', False),
                 'key_created': key_info.get('created'),
                 'last_rotation': key_info.get('last_modified'),
-                'backups_count': len(key_info.get('backups', []))
+                'backups_count': len(key_info.get('backups', [])),
+                'sqlcipher_error': dbcrypto.SQLCIPHER_ERROR,
             },
             'session': {
                 'timeout_seconds': settings.get('session_timeout', SESSION_TIMEOUT),
@@ -3884,6 +3887,7 @@ def get_compliance_status():
                 r for r in [
                     'Enable HTTPS with valid certificates (or enable reverse proxy mode if using nginx/Traefik)'
                     if st.get('https_enabled') == 'failed' else None,
+                    dbcrypto.sqlcipher_problem(),
                     'Reduce session timeout to 8 hours or less'
                     if st.get('session_timeout_compliant') == 'failed'
                     and int(settings.get('session_timeout', SESSION_TIMEOUT) or 0) > 28800 else None,

@@ -26,12 +26,51 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import threading
 from pathlib import Path
 from typing import Optional
 
 
 _LOG = logging.getLogger(__name__)
+
+
+# MK Nov 2026 (#1226) - a sqlcipher3 built for another machine or another Python installs
+# fine and then does not import (an x86_64 build in a deb that apt takes on arm64), and
+# that fell back to plain SQLite with the INFO line meant for "not installed". Nobody sees
+# that one: logging is not set up yet when this module loads. Installed but not loading
+# is a WARNING now, and the reason stays here for the status output.
+SQLCIPHER_ERROR: Optional[str] = None
+_SQLCIPHER_AT: Optional[str] = None
+
+
+def _load_failure(exc: BaseException) -> Optional[str]:
+    """Why an installed sqlcipher3 did not import, None when there is none to import."""
+    if isinstance(exc, ModuleNotFoundError) and exc.name == 'sqlcipher3':
+        return None
+    return f"{type(exc).__name__}: {' '.join(str(exc).split())}"
+
+
+def _package_dir() -> Optional[str]:
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec('sqlcipher3')
+        origin = spec and spec.origin
+        return os.path.dirname(origin) if origin else None
+    except Exception:
+        return None
+
+
+def sqlcipher_problem() -> Optional[str]:
+    """What to tell an admin when sqlcipher3 is installed but does not load, else None."""
+    if not SQLCIPHER_ERROR:
+        return None
+    at = f' at {_SQLCIPHER_AT}' if _SQLCIPHER_AT else ''
+    return (f"The SQLCipher package (sqlcipher3{at}) is installed but does not load on this "
+            f"machine ({platform.machine() or 'unknown machine'}, Python "
+            f"{platform.python_version()}): {SQLCIPHER_ERROR}. The database stays plain SQLite "
+            f"until a package built for this architecture is installed, and one encrypted "
+            f"before does not open until then.")
 
 
 # ─── Backend detection ──────────────────────────────────────────────────────
@@ -45,11 +84,17 @@ try:
 except Exception as _e:
     import sqlite3 as _sqlite_module  # type: ignore
     BACKEND = 'sqlite-plain'
-    _LOG.info("[DBCRYPTO] sqlcipher3 not available (%s) - DB will be plain "
-              "SQLite. Field-level encryption (AES-256-GCM) still applies. To "
-              "enable full-DB encryption, install the SQLCipher package of "
-              "requirements.txt (sqlcipher3-binary on Linux x86_64, sqlcipher3 "
-              "on aarch64, macOS and Windows).", _e)
+    SQLCIPHER_ERROR = _load_failure(_e)
+    if SQLCIPHER_ERROR is None:
+        _LOG.info("[DBCRYPTO] sqlcipher3 not available (%s) - DB will be plain "
+                  "SQLite. Field-level encryption (AES-256-GCM) still applies. To "
+                  "enable full-DB encryption, install the SQLCipher package of "
+                  "requirements.txt (sqlcipher3-binary on Linux x86_64, sqlcipher3 "
+                  "on aarch64, macOS and Windows).", _e)
+    else:
+        _SQLCIPHER_AT = _package_dir()
+        _LOG.warning("[DBCRYPTO] %s Field-level encryption (AES-256-GCM) still applies.",
+                     sqlcipher_problem())
 
 
 # Re-export Row, IntegrityError etc. so callers can `from .dbcrypto import Row`
@@ -163,8 +208,8 @@ def backend_status() -> dict:
     present = [s for s in files.values() if s not in ('missing', 'empty')]
     encrypted = BACKEND == 'sqlcipher' and bool(present) and all(s == 'encrypted' for s in present)
     if BACKEND != 'sqlcipher':
-        note = ("Full DB encryption unavailable on this platform. "
-                "Sensitive fields are still encrypted individually with AES-256-GCM.")
+        note = ((sqlcipher_problem() or "Full DB encryption unavailable on this platform.")
+                + " Sensitive fields are still encrypted individually with AES-256-GCM.")
     elif not present:
         note = "SQLCipher is available. No database found in this config directory."
     elif encrypted:
@@ -178,6 +223,7 @@ def backend_status() -> dict:
         'cipher': 'AES-256-CBC + HMAC-SHA512 (SQLCipher 4)' if BACKEND == 'sqlcipher' else None,
         'files': files,
         'note': note,
+        'sqlcipher_error': SQLCIPHER_ERROR,
     }
 
 
@@ -703,7 +749,8 @@ def ensure_db_encrypted(db_path: str) -> dict:
     if BACKEND != 'sqlcipher':
         # No sqlcipher3 → can't encrypt anyway. Field-level encryption still applies.
         _AUTO_MIG_DONE.add(db_path)
-        return {'action': 'no-backend', 'reason': 'sqlcipher3 not installed'}
+        return {'action': 'no-backend',
+                'reason': 'sqlcipher3 does not load' if SQLCIPHER_ERROR else 'sqlcipher3 not installed'}
 
     with _AUTO_MIG_LOCK:
         if db_path in _AUTO_MIG_DONE:
