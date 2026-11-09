@@ -5444,6 +5444,7 @@
             const [autoReconcile, setAutoReconcile] = useState(false); // #612 P2 — global drift auto-reconcile gate
 
             // #1154 - guided EVPN setup: prerequisite checks per node
+            const { layout } = useLayout();
             const [prereqData, setPrereqData] = useState(null);
             const [prereqLoading, setPrereqLoading] = useState(false);
             const [prereqError, setPrereqError] = useState(null);
@@ -5456,16 +5457,16 @@
                         body: JSON.stringify({ cluster_ids: form.cluster_ids }),
                     });
                     const j = r?.ok ? await r.json() : null;
-                    if (j) {
-                        setPrereqData(j);
-                        // Pre-fill peers from discovered underlay IPs
-                        if (j.node_ips && !form.peers) {
-                            const ips = Object.values(j.node_ips);
-                            if (ips.length) setForm(f => ({ ...f, peers: ips.join(', ') }));
-                        }
-                    } else setPrereqError(t('mcevpnPrereqFailed') || 'Prerequisites check failed');
+                    if (j) setPrereqData(j);
+                    else setPrereqError(t('mcevpnPrereqFailed') || 'Prerequisites check failed');
                 } catch (e) { setPrereqError(String(e?.message || e)); }
                 setPrereqLoading(false);
+            };
+            // another cluster selection invalidates the previous result
+            useEffect(() => { setPrereqData(null); setPrereqError(null); }, [form.cluster_ids]);
+            const useNodeIps = () => {
+                const ips = [...new Set(Object.values(prereqData?.node_ips || {}))];
+                if (ips.length) setForm(f => ({ ...f, peers: ips.join(', ') }));
             };
 
             const statusChip = (s) => {
@@ -5782,52 +5783,61 @@
                                         </div>
                                     </div>
 
-                                    {canManage && (
-                            <div className="mb-4 p-3 bg-blue-500/5 border border-blue-500/20 rounded-lg">
-                                <div className="flex items-center justify-between mb-2">
-                                    <span className="text-sm font-medium text-gray-300 flex items-center gap-2">
-                                        <svg className="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
-                                        {t('mcevpnPrereqTitle') || 'EVPN Prerequisites'} {prereqData && <span className="text-xs text-green-400">({prereqData.summary?.nodes_ok || 0}/{prereqData.summary?.nodes_checked || 0} {t('mcevpnPrereqReady') || 'nodes ready'})</span>}
-                                    </span>
-                                    <button onClick={runPrereqs} disabled={prereqLoading || !form.cluster_ids.length}
-                                        className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg text-white text-sm">
-                                        {prereqLoading ? (t('mcevpnPrereqChecking') || 'Checking…') : (t('mcevpnPrereqRun') || 'Run checks')}
-                                    </button>
-                                </div>
-                                {prereqError && <p className="text-xs text-red-400">{prereqError}</p>}
-                                {prereqData?.checks && (
-                                    <details className="mt-2">
-                                        <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-200">
-                                            {prereqData.checks.length} {t('mcevpnPrereqChecked') || 'nodes checked - click to expand'}
-                                        </summary>
-                                        <div className="mt-2 space-y-2 max-h-64 overflow-y-auto">
-                                            {prereqData.checks.map((nc, ni) => (
-                                                <div key={ni} className="text-xs">
-                                                    <div className="flex items-center gap-2 mb-1">
-                                                        <span className="font-medium text-gray-300">{nc.cluster_name}/{nc.node}</span>
-                                                        {nc.underlay_ip && <code className="text-blue-400 text-[10px]">{nc.underlay_ip}</code>}
-                                                        <span className={nc.items.every(i => i.status === 'ok') ? 'text-green-400' : 'text-yellow-400'}>
-                                                            {nc.items.filter(i => i.status === 'ok').length}/{nc.items.length}
-                                                        </span>
+                                    {canManage && layout !== 'corporate' && (
+                                        <div className="mb-4 p-3 bg-blue-500/5 border border-blue-500/20 rounded-lg">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <span className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                                                    <svg className="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
+                                                    {t('mcevpnPrereqTitle') || 'EVPN Prerequisites'} {prereqData && <span className="text-xs text-green-400">({prereqData.summary?.nodes_ok || 0}/{prereqData.summary?.nodes_checked || 0} {t('mcevpnPrereqReady') || 'nodes ready'})</span>}
+                                                </span>
+                                                <button onClick={runPrereqs} disabled={prereqLoading || !form.cluster_ids.length}
+                                                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg text-white text-sm">
+                                                    {prereqLoading ? (t('mcevpnPrereqChecking') || 'Checking…') : (t('mcevpnPrereqRun') || 'Run checks')}
+                                                </button>
+                                            </div>
+                                            {prereqError && <p className="text-xs text-red-400">{prereqError}</p>}
+                                            {prereqData?.checks && (
+                                                <details className="mt-2">
+                                                    <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-200">
+                                                        {prereqData.checks.length} {t('mcevpnPrereqChecked') || 'nodes checked - click to expand'}
+                                                    </summary>
+                                                    <div className="mt-2 space-y-2 max-h-64 overflow-y-auto">
+                                                        {prereqData.checks.map((nc, ni) => (
+                                                            <div key={ni} className="text-xs">
+                                                                <div className="flex items-center gap-2 mb-1">
+                                                                    <span className="font-medium text-gray-300">{nc.cluster_name}/{nc.node}</span>
+                                                                    {nc.mgmt_ip && <code className="text-blue-400 text-[10px]">{nc.mgmt_ip}</code>}
+                                                                    <span className={nc.items.every(i => i.status === 'ok') ? 'text-green-400' : 'text-yellow-400'}>
+                                                                        {nc.items.filter(i => i.status === 'ok').length}/{nc.items.length}
+                                                                    </span>
+                                                                </div>
+                                                                {nc.items.filter(i => i.status !== 'ok').map(it => (
+                                                                    <div key={it.id} className="flex items-start gap-1.5 pl-4 text-[11px]">
+                                                                        <span className={it.status === 'fail' ? 'text-red-400' : 'text-yellow-400'}>{it.status === 'fail' ? '✗' : '⚠'}</span>
+                                                                        <span className="text-gray-400">{it.label}: <span className="text-gray-500">{it.detail}</span>
+                                                                            {it.fix_hint && <code className="text-blue-400 ml-1">{it.fix_hint}</code>}
+                                                                        </span>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        ))}
                                                     </div>
-                                                    {nc.items.filter(i => i.status !== 'ok').map(it => (
-                                                        <div key={it.id} className="flex items-start gap-1.5 pl-4 text-[11px]">
-                                                            <span className={it.status === 'fail' ? 'text-red-400' : 'text-yellow-400'}>{it.status === 'fail' ? '✗' : '⚠'}</span>
-                                                            <span className="text-gray-400">{it.label}: <span className="text-gray-500">{it.detail}</span>
-                                                                {it.fix_hint && <code className="text-blue-400 ml-1">{it.fix_hint}</code>}
-                                                            </span>
-                                                        </div>
-                                                    ))}
+                                                </details>
+                                            )}
+                                            {prereqData && (
+                                                <div className="mt-2">
+                                                    <button type="button" onClick={useNodeIps} disabled={!Object.keys(prereqData.node_ips || {}).length}
+                                                        className="px-2.5 py-1 border border-blue-500/40 hover:bg-blue-500/10 disabled:opacity-50 rounded-lg text-xs text-blue-300">
+                                                        {t('mcevpnPrereqUseIps') || 'Use node IPs as peers'}
+                                                    </button>
+                                                    <p className="text-xs text-gray-500 mt-1">{t('mcevpnPrereqMgmtHint') || 'These are the management IPs PegaProx reaches the nodes on. If your EVPN underlay runs on a separate network, enter those addresses instead.'}</p>
                                                 </div>
-                                            ))}
+                                            )}
+                                            {!prereqData && !prereqLoading && (
+                                                <p className="text-xs text-gray-500 mt-1">{t('mcevpnPrereqHint') || 'Checks FRR/BGP, ifupdown2, interfaces.d, IP-forwarding and NTP on every node via read-only SSH.'}</p>
+                                            )}
                                         </div>
-                                    </details>
-                                )}
-                                {!prereqData && !prereqLoading && (
-                                    <p className="text-xs text-gray-500 mt-1">{t('mcevpnPrereqHint') || 'Checks FRR/BGP, ifupdown2, interfaces.d, IP-forwarding, NTP and VXLAN on every node via read-only SSH.'}</p>
-                                )}
-                            </div>
-                        )}
+                                    )}
                                     {plan && (
                                         <div className={`p-3 rounded-lg border text-xs ${plan.ok ? 'bg-green-500/10 border-green-500/30' : 'bg-yellow-500/10 border-yellow-500/30'}`}>
                                             <div className={`font-semibold mb-1.5 ${plan.ok ? 'text-green-400' : 'text-yellow-400'}`}>{plan.ok ? (t('mcevpnPreviewOk') || 'Pre-flight OK — every member is reachable and conflict-free.') : (t('mcevpnPreviewIssues') || 'Pre-flight found issues:')}</div>
