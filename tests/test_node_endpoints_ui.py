@@ -193,3 +193,8 @@ def test_a_save_that_drops_node_passwords_says_so():
     src = _read('web', 'src', 'dashboard.js')
     assert 'onSaved(clean, (done && done.node_passwords_cleared) || [])' in src
     assert "if (cleared.length) setNodeCredsNotice(" in src
+
+
+def test_a_late_save_answer_only_updates_the_cluster_it_saved():
+    src = _read('web', 'src', 'dashboard.js')
+    assert 'prev && prev.id === selectedCluster.id ? {...prev, node_endpoints: v} : prev' in src

@@ -26659,7 +26659,8 @@
                                                                 authFetch={authFetch} addToast={addToast} t={t}
                                                                 canEdit={can('cluster.config')} haReadOnly={haReadOnly}
                                                                 onSaved={(v, cleared) => {
-                                                                    setSelectedCluster(prev => prev ? {...prev, node_endpoints: v} : prev);
+                                                                    // the cluster that was saved: another may be selected by the time the save answers
+                                                                    setSelectedCluster(prev => prev && prev.id === selectedCluster.id ? {...prev, node_endpoints: v} : prev);
                                                                     if (cleared.length) setNodeCredsNotice({ clusterId: selectedCluster.id, name: selectedCluster.name,
                                                                         host: selectedCluster.host, nodes: cleared, reason: 'moved' });
                                                                 }} />
