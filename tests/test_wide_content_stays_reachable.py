@@ -8,13 +8,15 @@ Drives the built bundle in headless Chromium with the fake server of the pixel g
 Playwright is not installed.
 """
 import pathlib
+import re
 
 import pytest
 
 from test_corp_redesigned_guard_ui import _GuardApp, _GuardServer, VIEW_READS, VIEW_RESOURCES, VIEW_STORAGE, go
 from test_ha_ui import CLUSTER, NODE_METRICS, SSE_TOKEN, VM, _App, _FakeServer, browser  # noqa: F401
 
-BUNDLE = pathlib.Path(__file__).resolve().parent.parent / 'web' / 'index.html'
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+BUNDLE = ROOT / 'web' / 'index.html'
 WIDTHS = [1366, 1280, 1024]
 CASES = [('corporate', 'alerts'), ('corporate', 'insights'), ('corporate', 'perf'), ('corporate', 'node_certs'),
          ('corporate', 'node_repos'), ('corporate', 'node_network'), ('modern', 'harden'), ('modern', 'insights')]
@@ -89,19 +91,82 @@ def test_runtime_more_actions_of_a_resource_card_opens_with_the_mouse(browser, w
         app.ctx.close()
 
 
-@pytest.mark.parametrize('layout,width,display', [('corporate-redesigned', 1024, 'table'), ('corporate-redesigned', 600, 'block'),
-                                                  ('corporate', 1024, 'block'), ('corporate', 1600, 'table')])
-def test_runtime_what_a_data_grid_is_at_each_width(browser, layout, width, display):  # noqa: F811
-    server = _GuardServer(bundle=BUNDLE.read_bytes(), layout=layout)
-    app = _GuardApp(browser, server, viewport=(width, 800))
+def _node_view(browser, layout, view, width):  # noqa: F811
+    server = _GuardServer(bundle=BUNDLE.read_bytes(), layout=layout, extra=VIEW_READS.get(view), resources=VIEW_RESOURCES.get(view))
+    app = _GuardApp(browser, server, storage=VIEW_STORAGE.get(view), viewport=(width, 700))
+    go(app, layout, view)
+    return app
+
+
+@pytest.mark.parametrize('width', [1100, 1024])
+def test_runtime_a_grid_of_classic_corporate_keeps_its_head_while_the_page_scrolls(browser, width):  # noqa: F811
+    """A grid that is a scroll box of its own loses its sticky head, so only the pane of a node tab (below) is one:
+    the guests of a node are not in it, and their head has to stay at the top while the page scrolls."""
+    app = _node_view(browser, 'corporate', 'node_guests', width)
     try:
-        app.page.wait_for_timeout(300)
-        got = app.page.evaluate('''() => {
-          const t = document.createElement('table');
-          t.className = 'corp-datagrid';
-          document.body.appendChild(t);
-          return getComputedStyle(t).display;
+        found = app.page.evaluate('''() => {
+          const t = [...document.querySelectorAll('table.corp-datagrid')].find(t => t.getBoundingClientRect().width);
+          const body = t.tBodies[0];
+          for (let i = 0; i < 80; i++) body.appendChild(body.rows[0].cloneNode(true));
+          window.scrollBy(0, 600);
+          return {head: Math.round(t.querySelector('th').getBoundingClientRect().top), scrolled: Math.round(window.scrollY)};
         }''')
-        assert got == display
+        assert found['scrolled'] > 300, found
+        assert 0 <= found['head'] < 60, found
     finally:
         app.close()
+
+
+def test_runtime_a_short_grid_of_classic_corporate_fills_its_space_below_1200(browser):  # noqa: F811
+    app = _node_view(browser, 'corporate', 'node_guests', 1100)
+    try:
+        found = app.page.evaluate('''() => {
+          const t = [...document.querySelectorAll('table.corp-datagrid')].find(t => t.getBoundingClientRect().width);
+          return {table: Math.round(t.getBoundingClientRect().width), row: Math.round(t.rows[0].getBoundingClientRect().width)};
+        }''')
+        assert abs(found['table'] - found['row']) <= 1, found
+    finally:
+        app.close()
+
+
+@pytest.mark.parametrize('width', [1100, 1024])
+def test_runtime_the_pane_of_a_node_tab_scrolls_the_grid_that_does_not_fit(browser, width):  # noqa: F811
+    app = _node_view(browser, 'corporate', 'node_repos', width)
+    try:
+        found = app.page.evaluate('''() => {
+          const pane = document.querySelector('.corp-node-pane');
+          if (!pane) return {overflow: 'no pane of a node tab'};
+          const t = pane.querySelector('table.corp-datagrid');
+          pane.scrollLeft = pane.scrollWidth;
+          return {overflow: getComputedStyle(pane).overflowX, wider: pane.scrollWidth > pane.clientWidth,
+                  end: Math.round(t.getBoundingClientRect().right), win: innerWidth};
+        }''')
+        assert found['overflow'] == 'auto' and found['wider'], found
+        assert found['end'] <= found['win'] + 1, found
+    finally:
+        app.close()
+
+
+def test_runtime_the_pane_of_a_node_tab_is_no_scroll_box_in_the_redesign_and_above_1200(browser):  # noqa: F811
+    for layout, width in (('corporate-redesigned', 1024), ('corporate', 1400)):
+        app = _node_view(browser, layout, 'node_repos', width)
+        try:
+            panes = app.page.evaluate("[...document.querySelectorAll('.corp-node-pane')].map(p => getComputedStyle(p).overflowX)")
+            assert all(o == 'visible' for o in panes), (layout, width, panes)
+            if layout == 'corporate':
+                assert panes, 'the pane of a node tab is gone'
+        finally:
+            app.close()
+
+
+def test_the_pane_is_the_scroll_box_and_no_grid_is_one():
+    """CI has no browser, so the runtime tests above skip there: a grid of classic Corporate that is a scroll
+    box of its own loses its sticky head, which a revert to the first version of this fix would bring back."""
+    css = (ROOT / 'web' / 'index.html.original').read_text(encoding='utf-8')
+    for selector, rule in re.findall(r'([^{}\n]*\.corp-datagrid)\s*\{([^}]*)\}', css):
+        assert 'overflow-x' not in rule and 'display: block' not in rule, selector
+    media = re.search(r'@media \(max-width: 1200px\) \{\s*([^{]*\.corp-node-pane)\s*\{([^}]*)\}', css)
+    assert media and 'overflow-x: auto' in media.group(2)
+    # the classic CSS does not know the redesign (test_corp_redesigned_plumbing), so the redesign just does not get the class
+    src = (ROOT / 'web' / 'src' / 'node_modals.js').read_text(encoding='utf-8')
+    assert src.count("isCorpRedesigned ? 'flex-1 min-w-0 pl-4' : 'flex-1 min-w-0 pl-4 corp-node-pane'") == 2

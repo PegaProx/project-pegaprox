@@ -6044,7 +6044,7 @@
                                     <button className={`corp-subnav-item ${monitorSubTab === 'tasks' ? 'active' : ''}`} onClick={() => { setMonitorSubTab('tasks'); if (monitorSubTab === 'tasks' && !data.tasks) loadTabData('tasks'); }}>{t('tasks')}</button>
                                     <button className={`corp-subnav-item ${monitorSubTab === 'timeline' ? 'active' : ''}`} onClick={() => setMonitorSubTab('timeline')} data-corp-node-timeline>{t('tlTab')}</button>
                                 </div>
-                                <div className="flex-1 min-w-0 pl-4">
+                                <div className={isCorpRedesigned ? 'flex-1 min-w-0 pl-4' : 'flex-1 min-w-0 pl-4 corp-node-pane'}>
                                     {/* LW Nov 2026 - the figures, the charts and their data quality of the redesign (cr_perf.js) */}
                                     {monitorSubTab === 'performance' && isCorpRedesigned && (
                                         <CrBoundary key={navKey} id="node-perf">
@@ -6154,7 +6154,7 @@
                                     <button className={`corp-subnav-item ${configSubTab === 'repos' ? 'active' : ''}`} onClick={() => { setConfigSubTab('repos'); if (configSubTab === 'repos' && !data.repos) loadTabData('repos'); }}>{t('repositories')}</button>
                                     <button className={`corp-subnav-item ${configSubTab === 'ceph' ? 'active' : ''}`} onClick={() => { setConfigSubTab('ceph'); if (configSubTab === 'ceph' && !data.ceph) loadTabData('ceph'); }}>Ceph</button>
                                 </div>
-                                <div className="flex-1 min-w-0 pl-4">
+                                <div className={isCorpRedesigned ? 'flex-1 min-w-0 pl-4' : 'flex-1 min-w-0 pl-4 corp-node-pane'}>
                                     {configSubTab === 'dns' && data.dns === null && !crSys && <div role="alert" className="text-sm text-red-400 mb-3">{t('dnsReadFailed').replace('{reason}', data.dnsError || t('connectionError'))} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
                                     {configSubTab === 'hosts' && data.hosts === null && !crSys && <div role="alert" className="text-sm text-red-400 mb-3">{t('hostsReadFailed')} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
                                     {/* LW Nov 2026 - the redesign draws these five of a PVE node in section cards (cr_nodecfg.js), outside
