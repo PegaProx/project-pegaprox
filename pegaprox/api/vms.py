@@ -8985,6 +8985,8 @@ def _pve_console_ws_auth(manager, fresh_ticket=None, reuse_manager_auth=False):
 
     No Host here: websocket-client writes its own from the URL or its host option, and a
     second one is a duplicate header pveproxy refuses with 400. JB Nov 2026 (#1329)
+    That came with libpve-http-server-perl 6.0.6 (PVE 9, end of Oct 2026), which refuses a
+    repeated Cookie or Content-Length too; older ones joined the two values. MK Nov 2026
     """
     headers = {}
     if reuse_manager_auth:
