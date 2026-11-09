@@ -12785,7 +12785,17 @@ async def ssh_handler(websocket):
     node_ip = None
     cluster_host = None
     node_ips = {}
+    ssh_port = 22
     known_only = False
+
+    def _ssh_port_of(v):
+        # JB Nov 2026 - both answers carry the cluster's ssh_port for this login; a number
+        # in range or 22, the way the app reads it
+        try:
+            p = int(v)
+        except (TypeError, ValueError):
+            return 22
+        return p if 0 < p < 65536 else 22
     try:
         if ws_token:
             # NS Aug 2026 (Aikido pentest) — shell=node makes /validate enforce the node.shell
@@ -12837,6 +12847,7 @@ async def ssh_handler(websocket):
                 ctx = payload.get('cluster_context') or {}
                 cluster_host = ctx.get('host')
                 node_ips = ctx.get('node_ips') or {}
+                ssh_port = _ssh_port_of(ctx.get('ssh_port'))
                 print(f"validate→ host={cluster_host} node_ips={node_ips}")
             except Exception as e:
                 print(f"Could not parse validate payload: {e}")
@@ -12854,6 +12865,7 @@ async def ssh_handler(websocket):
                     creds = rc.json()
                     cluster_host = creds.get('host')
                     node_ips = creds.get('node_ips', {})
+                    ssh_port = _ssh_port_of(creds.get('ssh_port'))
             except Exception as e:
                 print(f"Could not get node IP from API: {e}")
 
@@ -13017,7 +13029,7 @@ async def ssh_handler(websocket):
                 
                 if pkey:
                     print(f"Using SSH key authentication")
-                    ssh.connect(_ssh_host, port=22, username=ssh_user, pkey=pkey, timeout=10, look_for_keys=False, allow_agent=False)
+                    ssh.connect(_ssh_host, port=ssh_port, username=ssh_user, pkey=pkey, timeout=10, look_for_keys=False, allow_agent=False)
                     _persist_ssh_hostkeys()
                 else:
                     raise Exception("Could not parse SSH key - unsupported format")
@@ -13028,7 +13040,7 @@ async def ssh_handler(websocket):
                 return
         else:
             # Password authentication
-            ssh.connect(_ssh_host, port=22, username=ssh_user, password=ssh_pass, timeout=10, look_for_keys=False, allow_agent=False)
+            ssh.connect(_ssh_host, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=10, look_for_keys=False, allow_agent=False)
             _persist_ssh_hostkeys()
 
         channel = ssh.invoke_shell(term='xterm-256color', width=120, height=40)
@@ -13708,7 +13720,7 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
         # Connect
         ssh.connect(
             hostname=_ssh_host,
-            port=22,
+            port=getattr(manager.config, 'ssh_port', 22) or 22,
             username=ssh_user,
             password=ssh_pass,
             timeout=30,
