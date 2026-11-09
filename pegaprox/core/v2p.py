@@ -4975,7 +4975,8 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
 
 
 def _qemu_open_reason(output):
-    # JB Nov 2026 (#1269) - qemu-img repeats the whole json spec before it says why, which used up any cut-off
+    # JB Nov 2026 (#1269) - qemu-img repeats the whole json spec before it says why, which used up any cut-off.
+    # NS Nov 2026 - callers hand it redacted output: cut first and a password at the cut would keep a piece of itself
     _, sep, reason = output.rpartition("}': ")
     reason = reason.strip()
     return reason[:300] if sep and reason else output[-300:]
@@ -5690,7 +5691,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         qemu_ssh_works = True
         task.log("QEMU SSH driver: connection OK")
     else:
-        task.log(f"QEMU SSH driver test failed: {_qemu_open_reason(qtest_out)}")
+        task.log(f"QEMU SSH driver test failed: {_qemu_open_reason(task._redact(qtest_out))}")
         # Try alternative: qemu-img with simpler SSH URL syntax
         import urllib.parse
         qt2_url = f"ssh://{esxi_user}@{esxi_host}{urllib.parse.quote(esxi_test_path, safe='/')}"
@@ -5795,7 +5796,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             
             task.log("HTTPS boot config written")
         else:
-            task.log(f"QEMU HTTPS test failed: {_qemu_open_reason(ht_out)}")
+            task.log(f"QEMU HTTPS test failed: {_qemu_open_reason(task._redact(ht_out))}")
     
     # ----------------------------------------------------------------
     # Method 3: SSHFS-backed boot (OpenSSH handles ESXi algorithms)
