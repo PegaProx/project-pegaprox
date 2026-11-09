@@ -240,7 +240,7 @@ def get_user_preferences():
         'ui_layout': user.get('ui_layout', 'modern'),
         'taskbar_auto_expand': user.get('taskbar_auto_expand', True),  # NS: Default true for backward compat
         'sidebar_show_vmid': user.get('sidebar_show_vmid', False),
-        'cloud_dashboard': user.get('cloud_dashboard', None),  # NS Jul 2026 — corporate sidebar VMIDs
+        'cloud_dashboard': user.get('cloud_dashboard', None),  # cloud layout widget layout (JSON), absent = default
         'default_theme': default_theme
     })
 
@@ -376,7 +376,7 @@ def update_user_preferences():
 
     # LW: Mar 2026 - track if user has explicitly chosen a layout
     
-    # NS Nov 2026 — Cloud layout personal dashboard (PHASE 4)
+    # NS Nov 2026 - Cloud layout personal dashboard (PHASE 4)
     if 'cloud_dashboard' in data:
         cd = data['cloud_dashboard']
         if cd is None or cd == '':
