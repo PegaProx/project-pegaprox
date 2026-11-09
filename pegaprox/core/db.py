@@ -328,6 +328,9 @@ class PegaProxDB:
             # Note: with SQLCipher, WAL is still supported but the WAL/SHM
             # auxiliary files are also encrypted — backups must include them.
             self._local.conn.execute("PRAGMA journal_mode = WAL")
+            # MK Nov 2026 - and synchronous=NORMAL with it. connect() set it already where the
+            # file was in WAL; a new file is only now (dbcrypto.wal_normal, sync_wal)
+            dbcrypto.wal_normal(self._local.conn)
         return self._local.conn
     
     @property
@@ -3198,6 +3201,10 @@ class PegaProxDB:
             return
         retired = USERS_FILE_ENCRYPTED + '.migrated'
         try:
+            # MK Nov 2026 - the accounts in the table on disk first: a power cut right after an
+            # import (synchronous=NORMAL) would leave the table without them and the file
+            # moved aside, where nothing reads it
+            dbcrypto.sync_wal(self.db_path)
             os.replace(USERS_FILE_ENCRYPTED, retired)
             logging.info(f"Legacy user file moved to {retired}, the database holds the accounts")
         except OSError as e:
@@ -5073,11 +5080,17 @@ class PegaProxDB:
         try:
             out = work(conn.cursor())
             conn.commit()
-            return out
         except Exception:
             if began:
                 conn.rollback()
             raise
+        # MK Nov 2026 - on disk before anything acts on it. The connections run
+        # synchronous=NORMAL, and a power cut takes the last commits: a checkpoint lost
+        # under the anchor beside the key reads as cut away, and rows the SIEM targets and
+        # the evidence bundles already hold would be numbered again. What was committed
+        # before (the action an entry is about) lands with it.
+        dbcrypto.sync_wal(self.db_path)
+        return out
 
     def _ensure_audit_genesis(self):
         try:
@@ -5589,7 +5602,8 @@ class PegaProxDB:
                 'created_at': datetime.now().isoformat(), 'pruned_rows': gone,
                 'legacy_count': count, 'legacy_digest': digest, 'legacy_changed': changed,
                 'cutoff': cutoff_iso})
-        cp = dbcrypto.run_off_hub(_work, self.db_path, commit=True)
+        # durable: the anchor and the SIEM targets get the checkpoint next (_audit_chain_txn)
+        cp = dbcrypto.run_off_hub(_work, self.db_path, commit=True, durable=True)
         if cp:
             self._after_checkpoint(cp)
         return cp
@@ -6261,6 +6275,16 @@ class PegaProxDB:
                 stats['errors'].append(f"Commit failed, rotation rolled back: {e}")
                 stats['success'] = False
                 return stats
+            # MK Nov 2026 - the new key is on disk since step 4, so the rows it opens have to be
+            # too before anything goes on: under synchronous=NORMAL a power cut could leave
+            # them on the old key under the new key file. They are committed, so a failed sync
+            # keeps the new key and names the copy of the old one.
+            try:
+                dbcrypto.sync_wal(self.db_path)
+            except OSError as e:
+                logging.error(f"Key rotation: the re-encrypted rows could not be synced to disk ({e}); "
+                              f"after a power cut they may need the old key from {backup_file}")
+                stats['errors'].append(f"The re-encrypted rows could not be synced to disk: {e}")
 
             # 5. Update in-memory key
             self.aes_key = new_key
@@ -6642,6 +6666,10 @@ class PegaProxDB:
             cursor = self.conn.cursor()
             marked = _replay_sr_failover_state(cursor)
             self.conn.commit()
+            # MK Nov 2026 - the columns came with an earlier commit and are all that says the
+            # replay ran: a power cut (synchronous=NORMAL) that kept them and took the replay
+            # would leave the marks unset for good
+            dbcrypto.sync_wal(self.db_path)
             self._sr_replay_owed = False
         logging.info(f"site_recovery_vms: {marked} guest(s) failed over, replayed from the failover events")
         return marked

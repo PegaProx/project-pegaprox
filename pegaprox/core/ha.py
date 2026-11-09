@@ -4055,6 +4055,12 @@ def apply_snapshot(snap):
             except Exception as e:
                 logging.warning(f"[HA] could not hash the tables of the sync: {e}")
         conn.commit()
+        # MK Nov 2026 - on disk before the state file says this cv is held here (the
+        # connections run synchronous=NORMAL): a power cut that kept the record and took
+        # the rows would leave this member naming a cv it lacks the content of, also once
+        # it leads
+        from pegaprox.core import dbcrypto
+        dbcrypto.sync_wal(db.db_path)
     except Exception as e:
         try:
             conn.rollback()
@@ -4640,6 +4646,12 @@ def note_config_etag(raw, upto=None, data=None, held=None):
         rec['hist'] = hist[-LINEAGE_KEEP:]
         if rec != old:
             try:
+                # MK Nov 2026 - the content this cv names on disk before the record: the
+                # members get it under that cv, and a power cut that took it here
+                # (synchronous=NORMAL) would have them wipe it with the next step
+                from pegaprox.core import dbcrypto
+                from pegaprox.core.db import get_db
+                dbcrypto.sync_wal(get_db().db_path)
                 _commit_locked(dict(st, cv=rec))
             except Exception as e:
                 raise HaError(f'The config version could not be saved: {e}')
@@ -12995,13 +13007,19 @@ def _recovery_table(cur):
 
 def _recovery_write(sql, args):
     try:
+        from pegaprox.core import dbcrypto
         from pegaprox.core.db import get_db
-        conn = get_db().conn
+        db = get_db()
+        conn = db.conn
         with _recovery_lock:
             cur = conn.cursor()
             _recovery_table(cur)
             cur.execute(sql, args)
             conn.commit()
+            # MK Nov 2026 - a step is written down before it is taken, and some cannot be
+            # taken back (a fence, a config moved off the node): on disk first, also under
+            # synchronous=NORMAL
+            dbcrypto.sync_wal(db.db_path)
         return True
     except Exception as e:
         logging.error(f"[HA] could not write the recovery journal: {e}")

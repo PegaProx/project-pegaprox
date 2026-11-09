@@ -194,13 +194,55 @@ def connect(db_path: str, *, timeout: float = 30.0, **kwargs):
 
     When the plain SQLite backend is active, the key step is a no-op.
 
+    A database in WAL mode gets synchronous=NORMAL on the connection (wal_normal).
+
     All standard sqlite3 kwargs (check_same_thread, isolation_level, etc.)
     are forwarded.
     """
     conn = _sqlite_module.connect(db_path, timeout=timeout, **kwargs)
     if BACKEND == 'sqlcipher':
         _apply_sqlcipher_pragmas(conn, db_path)
+    wal_normal(conn)
     return conn
+
+
+# MK Nov 2026 - SQLite's default synchronous=FULL syncs the WAL at every commit, 8 to 9 ms
+# against 0.12 ms here, and a commit on the hub holds every greenlet for that long. In WAL
+# mode NORMAL keeps the database consistent through a power cut and syncs at each
+# checkpoint; what a power cut (not a crashed process) can take is the last commits before
+# it. The setting is per connection, so every connection gets it here. Not in rollback-
+# journal mode, where NORMAL is not safe against a power cut. A commit that something
+# outside the database relies on is followed by sync_wal.
+def wal_normal(conn) -> bool:
+    """synchronous=NORMAL on `conn` when its database is in WAL mode. True when it set it;
+    a connection it cannot ask keeps what SQLite gave it (FULL)."""
+    try:
+        mode = conn.execute('PRAGMA journal_mode').fetchone()[0]
+        if str(mode).lower() != 'wal':
+            return False
+        conn.execute('PRAGMA synchronous = NORMAL')
+        return True
+    except Exception:
+        return False
+
+
+def sync_wal(db_path) -> bool:
+    """fsync the WAL of `db_path`: for a commit made under NORMAL, what FULL does in the
+    commit. Called after one that something outside the database relies on (a file
+    written next, a peer or a SIEM target told, a key file already on disk), before that
+    happens. The connections to a file share one WAL, so the commits of all of them up to
+    now land. Without a WAL file nothing waits (the last connection checkpointed it into
+    the database, with a sync), and it returns False. Raises OSError when the sync fails:
+    what was to follow must not happen then."""
+    try:
+        fd = os.open(f'{db_path}-wal', os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return True
 
 
 def _apply_sqlcipher_pragmas(conn, db_path: str) -> None:
@@ -521,11 +563,12 @@ def run_heavy_write(statements=None, build=None):
         return _work()
 
 
-def run_off_hub(work, db_path, commit=False):
+def run_off_hub(work, db_path, commit=False, durable=False):
     """work(conn) on a fresh connection to db_path inside gevent's threadpool, inline
     without a hub. MK Oct 2026 - for jobs that read and write in one transaction (the
     audit prune and the chain walk); commit=True commits what work did, an exception
-    rolls it back."""
+    rolls it back. durable=True syncs the commit to disk before it returns (sync_wal),
+    in the worker as well."""
     def _run():
         conn = connect(db_path, timeout=30, check_same_thread=False)
         try:
@@ -533,6 +576,8 @@ def run_off_hub(work, db_path, commit=False):
             out = work(conn)
             if commit:
                 conn.commit()
+                if durable:
+                    sync_wal(db_path)
             return out
         except Exception:
             try:
