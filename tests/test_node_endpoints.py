@@ -289,3 +289,11 @@ def test_the_connected_cooldown_key_carries_a_port_of_its_own():
     m._connected_api_port = None
     m.current_host = HOST
     assert m._connected_cooldown_key() == HOST
+
+
+def test_the_cooldown_key_is_the_name_the_reconnect_tried_not_its_ip():
+    m = _mgr(NAT)
+    m._original_host = 'pve.example.net'
+    m.current_host = '198.51.100.20'
+    m._connected_api_port = 8007
+    assert m._connected_cooldown_key() == '[pve.example.net]:8007'

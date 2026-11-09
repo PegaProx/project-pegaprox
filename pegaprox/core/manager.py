@@ -1372,8 +1372,11 @@ class PegaProxManager:
         return host if port in (None, self.cluster_api_port) else f'[{host}]:{port}'
 
     def _connected_cooldown_key(self):
-        """The cooldown key of the host and API port this manager is connected to."""
-        return self._candidate_key(self.current_host or self.config.host, self.api_port)
+        """The cooldown key of the host and API port this manager is connected to. By the
+        candidate as connect_to_proxmox tried it: current_host can be the resolved IP of a
+        host name, and the reconnect checks the name."""
+        host = getattr(self, '_original_host', None) or self.current_host or self.config.host
+        return self._candidate_key(host, self.api_port)
 
     def _host_recently_failed(self, host):
         if not host:
