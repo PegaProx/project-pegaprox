@@ -149,8 +149,9 @@ def test_nothing_else_compares_the_layout_string():
 def test_the_new_file_is_built_and_shipped():
     build = _read('web', 'Dev', 'build.sh')
     # every variant file once, between cloud.js and dashboard.js, its primitives first (round 11
-    # checks the property instead of the list, which grows with each module)
-    block = re.search(r'\n    cloud\.js\n((?:    cr[a-z_]*\.js\n)+)    dashboard\.js\n', build)
+    # checks the property instead of the list, which grows with each module). The blueprints of Modern
+    # and Cloud follow them: they draw the rules of cr_blueprints.js (#1220)
+    block = re.search(r'\n    cloud\.js\n((?:    cr[a-z_]*\.js\n)+)(?:    blueprints\.js\n)?    dashboard\.js\n', build)
     assert block, 'the variant files are built between cloud.js and dashboard.js'
     built = re.findall(r'cr[a-z_]*\.js', block.group(1))
     assert built[:2] == ['cr.js', 'cr_views.js'] and sorted(built) == sorted(CR_FILES), built

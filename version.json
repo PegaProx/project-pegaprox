@@ -309,6 +309,7 @@
     "web/src/cr_isosync.js",
     "web/src/cr_blueprints.js",
     "web/src/cr_images.js",
+    "web/src/blueprints.js",
     "web/src/cr_tasks.js",
     "web/src/cr_topology.js",
     "web/src/cr_updates.js",

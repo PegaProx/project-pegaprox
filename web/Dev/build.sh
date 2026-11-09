@@ -91,6 +91,7 @@ SRC_FILES=(
     cr_modules.js
     cr_blueprints.js
     cr_images.js
+    blueprints.js
     dashboard.js
 )
 

@@ -11,8 +11,8 @@ recent deploys are listed by the page around the section, which hands it a templ
 blueprint from (prefillTemplate) and hears of saves and deletes (onSaved, onDeleted). What the section
 reads itself is told apart from the page's reads by a wrapped mount (_wrapped) that records them.
 
-Only Corporate Redesigned has the section: classic Corporate, Modern and Cloud draw the library as
-before. Runtime tests drive the built bundle in headless Chromium against the guard fake of
+Only Corporate Redesigned has this section: classic Corporate draws the library as before, Modern and
+Cloud draw the same blueprints in their own look (tests/test_blueprints_modern_cloud_ui.py). Runtime tests drive the built bundle in headless Chromium against the guard fake of
 tests/test_corp_redesigned_guard_ui.py with the blueprint routes as the server answers them (_BpServer).
 The counterproof runs this file against an older bundle: PEGAPROX_CR_BUNDLE=<path to index.html>.
 LW Nov 2026
@@ -1164,8 +1164,9 @@ def test_runtime_prefill_template_opens_a_new_blueprint_of_that_image(open_app):
 
 # --- only in Corporate Redesigned --------------------------------------------------------------
 
-@pytest.mark.parametrize('layout', ['corporate', 'modern'])
-def test_runtime_classic_layouts_draw_the_library_without_blueprints(open_app, layout):
+# Modern draws its own blueprints since (#1220): tests/test_blueprints_modern_cloud_ui.py
+def test_runtime_classic_corporate_draws_the_library_without_blueprints(open_app):
+    layout = 'corporate'
     app = open_app(layout=layout)
     page = _templates(app, layout)
     page.get_by_text('Debian 13 (Trixie)').first.wait_for(timeout=8000)

@@ -3358,6 +3358,18 @@
         body[data-layout="cloud"] .cloud-mounted .hover\:bg-blue-700:hover { background: var(--cloud-accent-hover) !important; }
         /* orange primaries (bg-proxmox-orange hover:bg-orange-600) flashed orange on hover */
         body[data-layout="cloud"] .cloud-mounted .hover\:bg-orange-600:hover { background: var(--cloud-accent-hover) !important; }
+        /* LW Nov 2026 (#1220) - the blueprints of Modern and Cloud (blueprints.js) write their text in the colours of
+           the palette instead of text-white, so the light palette of Modern (corporateLight) and of Cloud reads too.
+           Cloud light names its muted colour differently: the secondary text of the shell stands in for it */
+        .bp-fg { color: var(--color-text, #FFFFFF); }
+        .bp-muted { color: var(--color-textMuted, #8B949E); }
+        body[data-layout="cloud"] .cloud-mounted .bp-muted { color: var(--cloud-text-secondary, #b3c6d4); }
+        /* its hints and badges use the -400 shades of the dark palettes; on a light one they take the -700 ones */
+        body.light-theme [data-bp] .text-yellow-400, body[data-cloud-theme="light"] [data-bp] .text-yellow-400 { color: #a16207; }
+        body.light-theme [data-bp] .text-green-400, body[data-cloud-theme="light"] [data-bp] .text-green-400 { color: #15803d; }
+        body.light-theme [data-bp] .text-red-400, body[data-cloud-theme="light"] [data-bp] .text-red-400 { color: #b91c1c; }
+        body.light-theme [data-bp] .text-purple-400, body[data-cloud-theme="light"] [data-bp] .text-purple-400 { color: #7e22ce; }
+        body.light-theme [data-bp] .text-blue-400 { color: #1d4ed8; }
 
         /* icon button */
         .cloud-icon-btn { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:var(--radius-md); background:transparent; border:1px solid transparent; color:var(--cloud-text-secondary); cursor:pointer; flex:0 0 auto; transition:background .12s, color .12s; }

@@ -2050,8 +2050,8 @@ def test_compliance_stays_a_reading_tab_on_a_standby(dash):
     # holds() decides this tab (and the sub tabs of it, with the change plans' request button),
     # whether a standby offers a console on the active, the console entries of a member
     # that opens them itself, whether the Corporate Redesigned dashboard reads the audit trail,
-    # and whether its template sub tab reads the blueprints (#1220; writing them asks can())
-    assert len(re.findall(r'\bholds\(', dash)) == 11
+    # and whether its template sub tab reads the blueprints, the one of Modern too (#1220; writing them asks can())
+    assert len(re.findall(r'\bholds\(', dash)) == 12
     assert 'const onActiveItems = (permission, search, disabled = false) => !holds(permission) ? [] : [{' in dash
     assert 'const menuAllows = (i) => !i.perm || (i.console ? holds(i.perm) : can(i.perm));' in dash
     drift = _function(dash, 'DriftTab')

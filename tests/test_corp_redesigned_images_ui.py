@@ -5,7 +5,8 @@ blueprint handing the image to the blueprint editor, one list of the recent depl
 builds for this cluster or all clusters, and the ways there (the Resources button, the cluster menu
 and Ctrl+K).
 
-Classic Corporate, Modern and Cloud keep the Cloud-Init Template Library with its cards. Runtime
+Classic Corporate, Modern and Cloud keep the Cloud-Init Template Library with its cards (Modern and
+Cloud with their own blueprints above them, tests/test_blueprints_modern_cloud_ui.py). Runtime
 tests drive the built bundle in headless Chromium against the blueprint fake of
 tests/test_corp_redesigned_blueprints_ui.py with the library routes as templates_lib.py answers them.
 The counterproof runs this file against an older bundle: PEGAPROX_CR_BUNDLE=<path to index.html>.
@@ -775,8 +776,9 @@ def test_runtime_no_way_there_without_vm_create(open_app):
 
 # --- only in Corporate Redesigned --------------------------------------------------------------
 
-@pytest.mark.parametrize('layout', ['corporate', 'modern'])
-def test_runtime_classic_layouts_keep_the_library_and_have_no_way_there(open_app, layout):
+# Modern has its own blueprints and ways there since (#1220): tests/test_blueprints_modern_cloud_ui.py
+def test_runtime_classic_corporate_keeps_the_library_and_has_no_way_there(open_app):
+    layout = 'corporate'
     app = open_app(layout=layout)
     page = _templates(app, layout)
     page.get_by_text('Debian 13 (Trixie)').first.wait_for(timeout=8000)
@@ -873,7 +875,9 @@ def test_the_page_hands_the_blueprints_their_props_and_clears_the_image_after():
 
 def test_the_classic_library_stays_for_every_other_layout():
     dash = _read('web', 'src', 'dashboard.js')
-    assert "{ id: 'templates', label: isCorpRedesigned ? t('crBpNavTab') : (t('templateLibrary') || 'Templates'), icon: Icons.Package }," in dash
+    # Modern names it after its blueprints above the cards (#1220), classic Corporate keeps the name
+    assert ("{ id: 'templates', label: isCorpRedesigned ? t('crBpNavTab') : isCorporate ? (t('templateLibrary') || 'Templates') "
+            ": t('bpNavTab'), icon: Icons.Package },") in dash
     mount = dash.index('<TemplatesLibraryTab\n')
     assert dash[dash.rindex('{automationSubTab', 0, mount):mount].startswith(
         "{automationSubTab === 'templates' && !isCorpRedesigned && (")
@@ -881,7 +885,7 @@ def test_the_classic_library_stays_for_every_other_layout():
     assert "isAdmin={isAdmin} nav={crTaskNav} />" in dash[dash.index('<CrBlueprintsTab '):]
 
 
-def test_the_ways_there_are_corporate_redesigned_only():
+def test_the_ways_there_of_corporate_redesigned():
     dash = _read('web', 'src', 'dashboard.js')
     assert ("openBlueprints: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); "
             "setAutomationSubTab('templates'); } },") in dash
@@ -892,10 +896,10 @@ def test_the_ways_there_are_corporate_redesigned_only():
     menu = dash[dash.index('const buildContextMenuItemsRaw = '):dash.index('const buildContextMenuItems = ')]
     assert ("...(isCorpRedesigned && (!cluster.cluster_type || cluster.cluster_type === 'proxmox') ? [\n"
             "                            { perm: 'vm.create', label: t('crBpNavDeploy'),") in menu
-    # Ctrl+K: an action of the redesign only
+    # Ctrl+K: an action of the redesign, and of Modern since its own blueprints (#1220), never of classic Corporate
     pal = dash[dash.index('<CommandPalette'):]
     pal = pal[:pal.index('/>')]
-    assert "extraActions={isCorpRedesigned && can('vm.create') && " in pal
-    assert "else if (id === 'cr-blueprints' && crTaskNav) {" in pal
+    assert "extraActions={(isCorpRedesigned || !isCorporate) && can('vm.create') && " in pal
+    assert "else if (id === 'cr-blueprints' && (crTaskNav || mdBpNav)) {" in pal
     fn = dash[dash.index('function CommandPalette('):dash.index('// Fuzzy-ish scoring')]
     assert '...(extraActions || []),' in fn and 'onAction, extraActions, t]);' in fn

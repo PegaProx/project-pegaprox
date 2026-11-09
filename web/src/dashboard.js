@@ -21422,6 +21422,20 @@
                     setActiveTab('timeline');
                 },
             } : undefined;
+            // LW Nov 2026 (#1220) - where the blueprints of Modern lead (blueprints.js): Automation > Blueprints &
+            // Templates of a cluster, and the guest list of its cluster for a guest a deploy made
+            const mdBpNav = !isCorporate ? {
+                nodesOf: (cid) => (selectedCluster && selectedCluster.id === cid ? clusterMetrics : (sidebarClusterData[cid]?.metrics || null)),
+                openBlueprints: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('templates'); } },
+                openGuest: (cid, guest) => {
+                    const cl = clusters.find(c => c.id === cid);
+                    if (!cl || !guest) return;
+                    askGuestDetail(cl, guest);
+                    crIntoCluster(cid);
+                    setSelectedSidebarVm({...guest, _clusterId: cl.id}); setSelectedSidebarNode(null);
+                    setActiveTab('resources'); setResourcesSubTab('management');
+                },
+            } : undefined;
             const crGlobalView = sidebarTopology ? (t('topologyView') || 'Topology')
                 : sidebarWorldmap ? (t('worldMap') || 'World Map')
                 : sidebarGuests ? t('allGuestsTitle')
@@ -23270,6 +23284,14 @@
                                                                     {t('crBpNavDeploy')}
                                                                 </button>
                                                             )}
+                                                            {/* LW Nov 2026 (#1220) - Modern: the same way to Automation > Blueprints & Templates */}
+                                                            {!isCorporate && can('vm.create') && (
+                                                                <button type="button" onClick={() => mdBpNav.openBlueprints(selectedCluster.id)} data-bp-nav="resources"
+                                                                    className="flex items-center gap-2 px-4 py-2 bg-proxmox-darker rounded-lg text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors">
+                                                                    <Icons.Template className="w-4 h-4" />
+                                                                    {t('crBpNavDeploy')}
+                                                                </button>
+                                                            )}
                                                             </>)}
                                                             {/* LW Oct 2026 - quick CSV export of the current VM list, with the inventory of each guest (ui.js) */}
                                                             <InventoryCsvButton
@@ -23812,7 +23834,7 @@
                                                         { id: 'scripts', label: t('customScripts') || 'Scripts', icon: Icons.Terminal },
                                                         { id: 'snapshots', label: t('snapPoliciesTitle') || 'Snapshots', icon: Icons.Camera },
                                                         { id: 'replication', label: t('replicationOverview') || 'Replication', icon: Icons.RefreshCw },
-                                                        { id: 'templates', label: isCorpRedesigned ? t('crBpNavTab') : (t('templateLibrary') || 'Templates'), icon: Icons.Package },
+                                                        { id: 'templates', label: isCorpRedesigned ? t('crBpNavTab') : isCorporate ? (t('templateLibrary') || 'Templates') : t('bpNavTab'), icon: Icons.Package },
                                                         { id: 'apps', label: t('ociTabLabel'), icon: Icons.Container },
                                                         { id: 'hardening', label: t('hardenNode') || 'Harden PVE Node', icon: Icons.Shield },
                                                     ].map(sub => (
@@ -24376,6 +24398,11 @@
                                                         <CrBlueprintsTab cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
                                                             canRead={holds('vm.create')} canWrite={can('vm.create')} isAdmin={isAdmin} nav={crTaskNav} />
                                                     </CrBoundary>
+                                                )}
+                                                {/* LW Nov 2026 (#1220) - Modern: the blueprints above the library cards (blueprints.js) */}
+                                                {automationSubTab === 'templates' && !isCorporate && selectedCluster?.id && (
+                                                    <Blueprints key={selectedCluster.id} cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
+                                                        canRead={holds('vm.create')} canWrite={can('vm.create')} nav={mdBpNav} />
                                                 )}
                                                 {/* NS May 2026 — Cloud-Init Template Library sub-tab */}
                                                 {automationSubTab === 'templates' && !isCorpRedesigned && (
@@ -32642,7 +32669,7 @@
                             onClose={() => setShowCommandPalette(false)}
                             authFetch={authFetch}
                             onPickHit={(hit) => { setShowCommandPalette(false); navigateToResult(hit); }}
-                            extraActions={isCorpRedesigned && can('vm.create') && clusters.some(c => !c.cluster_type || c.cluster_type === 'proxmox')
+                            extraActions={(isCorpRedesigned || !isCorporate) && can('vm.create') && clusters.some(c => !c.cluster_type || c.cluster_type === 'proxmox')
                                 ? [['cr-blueprints', t('crBpNavDeploy'), 'Template']] : undefined}
                             onPickCluster={(c) => { setSelectedCluster(c); setActiveTab('overview'); setShowCommandPalette(false); }}
                             onPickVm={(vm) => {
@@ -32665,11 +32692,11 @@
                                 else if (id === 'goto-reports') setActiveTab('reports');
                                 else if (id === 'goto-plugins') setActiveTab('plugins');
                                 else if (id === 'goto-settings') setActiveTab('settings');
-                                else if (id === 'cr-blueprints' && crTaskNav) {
-                                    // the open cluster, else the first Proxmox VE one
+                                else if (id === 'cr-blueprints' && (crTaskNav || mdBpNav)) {
+                                    // the open cluster, else the first Proxmox VE one (Modern too, #1220)
                                     const pve = (c) => !!c && (!c.cluster_type || c.cluster_type === 'proxmox');
                                     const c = pve(selectedCluster) ? selectedCluster : clusters.find(pve);
-                                    if (c) crTaskNav.openBlueprints(c.id);
+                                    if (c) (crTaskNav || mdBpNav).openBlueprints(c.id);
                                 }
                             }}
                         />

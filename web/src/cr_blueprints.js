@@ -249,18 +249,16 @@
             );
         }
 
-        // The create and edit dialog. bp: the blueprint to edit, null for a new one (templateId: the
-        // library image a new one starts from). bridges: names the bridge fields suggest (the network
-        // of one node of this cluster, read when it opens)
-        function CrBpEditor({ bp, templateId, authFetch, bridges, onCancel, onSaved }) {
-            const { t } = useTranslation();
+        // What an editor holds (this one and the one of blueprints.js): the form, the library images,
+        // the checks and the save. bp: the blueprint to edit, null for a new one (templateId: the
+        // library image a new one starts from)
+        function crBpUseEditor({ bp, templateId, authFetch, t, onSaved }) {
             const [form, setForm] = useState(() => crBpForm(bp, templateId));
             const [cat, setCat] = useState({ state: 'idle', rows: [], why: '' });
             const [tried, setTried] = useState(false);
             const [busy, setBusy] = useState(false);
             const [server, setServer] = useState(null);
             const [failed, setFailed] = useState(0);
-            const box = useRef(null);
             const tplSrc = form.source_kind === 'template';
             const win = tplSrc && form.os === 'windows';
             // the library images, once and only when the source is the library
@@ -272,12 +270,6 @@
                     else setCat({ state: 'error', rows: [], why: crDriftReadText(read, t) });
                 });
             }, [tplSrc]);
-            // a save that did not go through: the first error it left, at the top or at a field, into view
-            useEffect(() => {
-                if (!failed || !box.current) return;
-                const first = box.current.querySelector('[data-cr-upd-note="bp-save"], [data-cr-nc-hint="error"]');
-                if (first && first.scrollIntoView) first.scrollIntoView({ block: 'nearest' });
-            }, [failed]);
             const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); if (server && server.field === k) setServer(null); };
             const setNic = (i, k, v) => setForm(f => ({ ...f, nics: f.nics.map((n, j) => (j === i ? { ...n, [k]: v } : n)) }));
             const errs = crBpCheck(form, t);
@@ -304,6 +296,22 @@
             const general = server && (!server.field || !fields.includes(server.field));
             const diskHolder = tplSrc ? t('crBpDiskKeepTpl')
                 : picked && Number(picked.disk_gb) > 0 ? crFill(t('crBpDiskPhImage'), { gb: picked.disk_gb }) : t('crBpDiskKeep');
+            return { form, setForm, set, setNic, cat, busy, server, failed, tplSrc, win, err, odd, picked, save, general, diskHolder };
+        }
+
+        // The create and edit dialog. bridges: names the bridge fields suggest (the network of one
+        // node of this cluster, read when it opens)
+        function CrBpEditor({ bp, templateId, authFetch, bridges, onCancel, onSaved }) {
+            const { t } = useTranslation();
+            const { form, setForm, set, setNic, cat, busy, server, failed, tplSrc, win, err, odd, picked, save, general, diskHolder } =
+                crBpUseEditor({ bp, templateId, authFetch, t, onSaved });
+            const box = useRef(null);
+            // a save that did not go through: the first error it left, at the top or at a field, into view
+            useEffect(() => {
+                if (!failed || !box.current) return;
+                const first = box.current.querySelector('[data-cr-upd-note="bp-save"], [data-cr-nc-hint="error"]');
+                if (first && first.scrollIntoView) first.scrollIntoView({ block: 'nearest' });
+            }, [failed]);
             return (
                 <CrUpdDialog id="bp-editor" wide sticky busy={busy} onCancel={onCancel}
                     title={bp ? crFill(t('crBpEditorEdit'), { name: bp.name }) : t('crBpEditorNew')}
@@ -485,39 +493,10 @@
             return <CrUpdNote tone="info" id="bp-tpl"><span data-cr-bp-tpl="build">{t('crBpTplBuild')}</span></CrUpdNote>;
         }
 
-        // A deploy that runs: its row read every CR_BP_POLL while it is queued or running and this
-        // view is open; the server goes on with it when the dialog is closed
+        // The progress of a deploy that runs, while its dialog is open
         function CrBpProgress({ dep, onRow }) {
             const { t } = useTranslation();
-            const [row, setRow] = useState(null);
-            const [fail, setFail] = useState('');
-            const onRowRef = useRef(onRow);
-            onRowRef.current = onRow;
-            useEffect(() => {
-                let gone = false;
-                let timer = null;
-                const tick = async () => {
-                    const read = await crBpReadRow(dep.authFetch, `${API_URL}/blueprints/deployments/${encodeURIComponent(dep.id)}`);
-                    if (gone) return;
-                    if (read.state === 'ok') {
-                        setRow(read.body);
-                        setFail('');
-                        onRowRef.current(read.body);
-                        if (!crBpLive(read.body.status)) return;
-                    } else {
-                        setFail(crDriftReadText(read, t));
-                    }
-                    timer = setTimeout(tick, CR_BP_POLL);
-                };
-                tick();
-                return () => { gone = true; if (timer) clearTimeout(timer); };
-            }, [dep.id]);
-            const status = row ? row.status : 'queued';
-            const step = row && CR_BP_STEPS.includes(row.step) ? row.step : (row && row.status === 'completed' ? 'done' : 'template');
-            const at = CR_BP_STEPS.indexOf(step);
-            const steps = CR_BP_STEPS.filter(s => s !== 'template' || dep.build_needed || step === 'template');
-            const pct = row && Number.isFinite(Number(row.progress)) ? Math.max(0, Math.min(100, Number(row.progress))) : 0;
-            const log = row && typeof row.log === 'string' ? row.log.split('\n').filter(Boolean).slice(-30) : [];
+            const { row, fail, status, at, steps, pct, log } = crBpUseProgress(dep, onRow, t);
             return (
                 <div className="cr-bp-progress" data-cr-bp-progress={dep.id} data-cr-bp-status={status}>
                     <div className="cr-bp-progline">
@@ -555,9 +534,45 @@
             );
         }
 
-        // The deploy dialog: where to, then the progress of the deploy it started
-        function CrBpDeploy({ bp, clusters, clusterId, authFetch, canWrite, nav, onClose, onStarted }) {
-            const { t } = useTranslation();
+        // A deploy that runs, for the progress views (this one and the one of blueprints.js): its row
+        // read every CR_BP_POLL while it is queued or running and the view is open; the server goes
+        // on with it when the dialog is closed
+        function crBpUseProgress(dep, onRow, t) {
+            const [row, setRow] = useState(null);
+            const [fail, setFail] = useState('');
+            const onRowRef = useRef(onRow);
+            onRowRef.current = onRow;
+            useEffect(() => {
+                let gone = false;
+                let timer = null;
+                const tick = async () => {
+                    const read = await crBpReadRow(dep.authFetch, `${API_URL}/blueprints/deployments/${encodeURIComponent(dep.id)}`);
+                    if (gone) return;
+                    if (read.state === 'ok') {
+                        setRow(read.body);
+                        setFail('');
+                        onRowRef.current(read.body);
+                        if (!crBpLive(read.body.status)) return;
+                    } else {
+                        setFail(crDriftReadText(read, t));
+                    }
+                    timer = setTimeout(tick, CR_BP_POLL);
+                };
+                tick();
+                return () => { gone = true; if (timer) clearTimeout(timer); };
+            }, [dep.id]);
+            const status = row ? row.status : 'queued';
+            const step = row && CR_BP_STEPS.includes(row.step) ? row.step : (row && row.status === 'completed' ? 'done' : 'template');
+            const at = CR_BP_STEPS.indexOf(step);
+            const steps = CR_BP_STEPS.filter(s => s !== 'template' || dep.build_needed || step === 'template');
+            const pct = row && Number.isFinite(Number(row.progress)) ? Math.max(0, Math.min(100, Number(row.progress))) : 0;
+            const log = row && typeof row.log === 'string' ? row.log.split('\n').filter(Boolean).slice(-30) : [];
+            return { row, fail, status, step, at, steps, pct, log };
+        }
+
+        // What a deploy dialog holds (this one and the one of blueprints.js): where to, the reads a
+        // picked cluster and node want, the checks, the deploy and then the deploy it started
+        function crBpUseDeploy({ bp, clusters, clusterId, authFetch, t, onStarted }) {
             const tplSrc = crBpIsTpl(bp);
             const win = crBpIsWin(bp);
             const nics = Array.isArray(bp.nics) ? bp.nics.filter(Boolean) : [];
@@ -577,7 +592,6 @@
             const [server, setServer] = useState(null);
             const [dep, setDep] = useState(null);
             const [row, setRow] = useState(null);
-            const [showPw, setShowPw] = useState(false);
             const seq = useRef({ c: 0, n: 0 });
             const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setServer(s => (s && s.field === k ? null : s)); };
 
@@ -712,11 +726,9 @@
 
             const cl = targets.find(c => c.id === form.cluster_id);
             const done = row && row.status === 'completed';
-            const openGuest = () => {
-                const node = (row && row.node) || dep.node;
-                onClose();
-                nav.openGuest(dep.cid, { vmid: Number(dep.vmid), node, type: 'qemu', name: dep.name, status: form.start ? 'running' : 'stopped' });
-            };
+            // the guest a finished deploy made, as the guest views of the task center take it
+            const guest = () => (dep ? { vmid: Number(dep.vmid), node: (row && row.node) || dep.node, type: 'qemu', name: dep.name,
+                                         status: form.start ? 'running' : 'stopped' } : null);
             const tplHint = () => {
                 if (tpl.state === 'loading') return t('crNcReading');
                 if (tpl.state === 'error') return crFill(t('crBpTplListFailed'), { reason: tpl.why });
@@ -729,6 +741,22 @@
             const keyNames = win ? [] : crBpKeyNames(bp.sshkeys);
             const access = keyNames.length ? crFill(t(bp.ciuser ? 'crBpAccess' : 'crBpAccessNoUser'),
                 { keys: keyNames.join(', '), user: bp.ciuser || '', by: bp.created_by || '-' }) : '';
+            const general = server && !server.field;
+            return { tplSrc, win, nics, targets, form, set, setVmidTyped, nodes, stores, tpl, net, vnets, tried, busy, server, dep, row, setRow,
+                     tplRows, mapped, away, storeRows, missing, errs, err, longName, go, tplHint, access, cl, done, guest, general };
+        }
+
+        // The deploy dialog: where to, then the progress of the deploy it started
+        function CrBpDeploy({ bp, clusters, clusterId, authFetch, canWrite, nav, onClose, onStarted }) {
+            const { t } = useTranslation();
+            const { tplSrc, win, targets, form, set, setVmidTyped, nodes, stores, tpl, vnets, busy, server, dep, setRow, tplRows, away,
+                    storeRows, missing, err, longName, go, tplHint, access, cl, done, guest, general } = crBpUseDeploy({ bp, clusters, clusterId, authFetch, t, onStarted });
+            const [showPw, setShowPw] = useState(false);
+            const openGuest = () => {
+                const g = guest();
+                onClose();
+                nav.openGuest(dep.cid, g);
+            };
             const footer = dep ? (
                 <>
                     {done && nav && typeof nav.openGuest === 'function' && (
@@ -742,7 +770,6 @@
                     <CrButton variant="primary" onClick={go} disabled={busy || !canWrite || !targets.length} data-cr-bp-deploy-go="">{busy ? t('crBpStarting') : t('crBpDeployGo')}</CrButton>
                 </>
             );
-            const general = server && !server.field;
             return (
                 <CrUpdDialog id="bp-deploy" sticky busy={busy} onCancel={onClose} footer={footer}
                     title={crFill(t(dep ? 'crBpProgTitle' : 'crBpDeployTitle'), { name: bp.name })}

@@ -953,6 +953,18 @@ AUTO_TEMPLATES = {
          'vmid': 9001, 'storage': 'local-lvm', 'status': 'completed', 'progress': 100, 'error': '', 'started_by': 'admin',
          'started_at': '2026-10-30T08:30:00', 'finished_at': '2026-10-30T08:32:00'}]}),
     ('GET', '/api/clusters/c1/templates/existing'): (200, {'templates': [{'vmid': 9001, 'name': 'tpl-debian-13', 'node': 'pve1'}]}),
+    # Modern draws its blueprints above the cards (#1220): one of them and its deploy
+    ('GET', '/api/blueprints'): (200, {'blueprints': [
+        {'id': 'b1', 'name': 'web-small', 'description': 'Small web front end', 'source_kind': 'library', 'os': 'linux',
+         'templates': {}, 'template_id': 'debian-13', 'template_name': 'Debian 13 (Trixie)', 'template_missing': False,
+         'cores': 2, 'memory': 2048, 'disk_gb': 20, 'cpu': '', 'nics': [{'bridge': 'vmbr0', 'vlan': None, 'model': 'virtio', 'firewall': True}],
+         'ciuser': 'debian', 'sshkeys': '', 'ip_mode': 'dhcp', 'nameserver': '', 'searchdomain': '', 'ciupgrade': True,
+         'tags': ['web'], 'start': True, 'created_by': 'admin', 'created_at': '2026-10-30T08:00:00',
+         'updated_at': '2026-10-30T08:00:00', 'can_edit': True}]}),
+    ('GET', '/api/blueprints/deployments'): (200, {'deployments': [
+        {'id': 'r1', 'blueprint_id': 'b1', 'blueprint_name': 'web-small', 'cluster_id': 'c1', 'node': 'pve1', 'vmid': 120,
+         'name': 'web-01', 'status': 'completed', 'step': 'done', 'progress': 100, 'error': '', 'started_by': 'admin',
+         'started_at': '2026-10-30T08:40:00', 'finished_at': '2026-10-30T08:42:00'}]}),
 }
 RES_READS = {'res_snapshots': {('POST', '/api/snapshots/overview'): (200, RES_SNAPS)},
              'auto_affinity': {('GET', '/api/clusters/c1/affinity-rules'): (200, AUTO_AFFINITY)},
@@ -1510,9 +1522,10 @@ def go(app, layout, view):
         page.locator('button', has_text='Affinity').first.click()
         page.get_by_text('web with cache').first.wait_for(timeout=8000)
     elif view == 'auto_templates':
-        # (#1220) the library cards with what the cluster has of each
+        # (#1220) the library cards with what the cluster has of each; Modern names the sub tab after the
+        # blueprints it draws above them
         page.locator('button', has_text=_exact('Automation')).first.click()
-        page.locator('button', has_text='Cloud-Init Template Library').first.click()
+        page.locator('button', has_text=re.compile(r'^\s*(Cloud-Init Template Library|Blueprints & Templates)\s*$')).first.click()
         page.get_by_text('Company Ubuntu').first.wait_for(timeout=8000)
     elif view == 'res_list':
         # (#1220) the guest list with the create buttons under it

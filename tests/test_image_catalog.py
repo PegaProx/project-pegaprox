@@ -344,7 +344,8 @@ def _library(browser, layout, role):
     else:
         page.get_by_text('Testi').first.click()
         page.locator('button', has_text='Automation').first.click()
-        page.locator('button', has_text='Cloud-Init Template Library').first.click()
+        # Modern calls the sub tab after the blueprints above the cards (#1220)
+        page.locator('button', has_text=re.compile(r'^\s*(Cloud-Init Template Library|Blueprints & Templates)\s*$')).first.click()
     page.get_by_text('Ubuntu 26.04 LTS (Resolute)').first.wait_for(timeout=8000)
     page.wait_for_timeout(300)
     return app
