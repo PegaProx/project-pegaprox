@@ -4055,12 +4055,6 @@ def apply_snapshot(snap):
             except Exception as e:
                 logging.warning(f"[HA] could not hash the tables of the sync: {e}")
         conn.commit()
-        # MK Nov 2026 - on disk before the state file says this cv is held here (the
-        # connections run synchronous=NORMAL): a power cut that kept the record and took
-        # the rows would leave this member naming a cv it lacks the content of, also once
-        # it leads
-        from pegaprox.core import dbcrypto
-        dbcrypto.sync_wal(db.db_path)
     except Exception as e:
         try:
             conn.rollback()
@@ -4073,6 +4067,19 @@ def apply_snapshot(snap):
         raise
 
     # the rows are in; nothing below raises, so a caller that got here can count them
+    # MK Nov 2026 - on disk before the state file says this cv is held here (the
+    # connections run synchronous=NORMAL): a power cut that kept the record and took
+    # the rows would leave this member naming a cv it lacks the content of, also once
+    # it leads. A sync that fails takes nothing back, the rows are committed: what
+    # follows from them still happens, only the cv is not recorded, and the next sync
+    # compares row by row
+    from pegaprox.core import dbcrypto
+    unsynced = ''
+    try:
+        dbcrypto.sync_wal(db.db_path)
+    except OSError as e:
+        unsynced = f'the rows were not synced to disk ({e})'
+        logging.error(f"[HA] sync from {snap.get('instance_id')}: {unsynced}")
     with _journal_lock:
         _journal['pending'] = []
     _orphans['not_kept'] = None
@@ -4084,8 +4091,10 @@ def apply_snapshot(snap):
     problem = _adopt_group(snap)
     if problem:
         summary['file_errors'].append(problem)
+    if unsynced:
+        summary['file_errors'].append(unsynced)
     summary['tombstones_owed'] = _tombstones_owed(snap)
-    rec = _note_applied(snap, lineage, their_epoch, held, mark)
+    rec = None if unsynced else _note_applied(snap, lineage, their_epoch, held, mark)
     _after_apply()
     if rec and rec.get('mark'):
         # last: it gives the hub away once more, and everything else is in place
@@ -8039,6 +8048,12 @@ def set_group_timezone(name):
             try:
                 if st['role'] != ROLE_ACTIVE or group_timezone() != before:
                     raise HaError("The group's time zone changed meanwhile - try again")
+                # MK Nov 2026 - the stamps on disk before the zone: under synchronous=NORMAL a
+                # power cut could keep the state file and take them, and after a first change
+                # nothing in the database would say which zone they are in (stamps_settle)
+                from pegaprox.core import dbcrypto
+                from pegaprox.core.db import get_db
+                dbcrypto.sync_wal(get_db().db_path)
                 _commit_locked(dict(st, timezone=name))
                 return True
             except Exception as e:

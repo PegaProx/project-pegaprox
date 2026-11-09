@@ -101,6 +101,21 @@ def _watch_anchor(db, disk, monkeypatch):
     monkeypatch.setattr(db, '_write_audit_anchor', write)
 
 
+def _wal_sync_fails(monkeypatch, armed=lambda: True):
+    """The disk fails each sync of the WAL while armed() says so. Returns the list of the
+    syncs it failed."""
+    real = os.fsync
+    failed = []
+
+    def fsync(fd):
+        if os.readlink(f'/proc/self/fd/{fd}').endswith('-wal') and armed():
+            failed.append(fd)
+            raise OSError(5, 'Input/output error')
+        return real(fd)
+    monkeypatch.setattr(os, 'fsync', fsync)
+    return failed
+
+
 def _pragmas(conn):
     return (conn.execute('PRAGMA journal_mode').fetchone()[0],
             conn.execute('PRAGMA synchronous').fetchone()[0])
@@ -211,6 +226,25 @@ def test_a_checkpoint_whose_sync_failed_leaves_the_anchor_where_it_was(db, monke
         assert fh.read() == before
 
 
+def test_a_database_behind_a_symlink_is_synced_where_sqlite_keeps_the_wal(db, monkeypatch, tmp_path):
+    """A config folder moved by hand, with a symlink where the database was (before
+    PEGAPROX_CONFIG_DIR): SQLite keeps the WAL beside the file the link points at, and a
+    sync that looked beside the link found none and synced nothing."""
+    _add(db, 3)
+    db.conn.close()
+    db._local.conn = None
+    assert not os.path.exists(db.db_path + '-wal')
+    real = tmp_path / 'pegaprox.db'
+    os.replace(db.db_path, real)
+    os.symlink(real, db.db_path)
+    disk = _Disk(monkeypatch, db)
+    _watch_anchor(db, disk, monkeypatch)
+    assert db.audit_checkpoint()['kind'] == 'periodic'
+    assert os.path.exists(f'{real}-wal') and not os.path.exists(db.db_path + '-wal')
+    assert disk.unsynced_at('anchor') == []
+    assert disk.commits() == [(1, 'wal')]
+
+
 # --- the field key and the legacy files --------------------------------------------------
 
 def test_a_key_rotation_has_its_rows_on_disk_before_it_goes_on(db, monkeypatch):
@@ -278,6 +312,39 @@ def test_a_failover_mark_is_on_disk_before_the_guest_moves(db, monkeypatch):
     assert disk.commits() == [(1, 'wal')]
 
 
+def test_a_failover_mark_that_did_not_reach_the_disk_is_taken_back(db, monkeypatch):
+    """The mark is committed when its sync fails. The guest does not move then, and the
+    mark goes again: left, it would hold the replication of a guest that is still at the
+    source."""
+    from pegaprox.background import site_recovery as sr
+    from test_sr_per_guest_failover import SRC, TGT, _mgr, _plan, _state
+    _plan(db)
+    monkeypatch.setitem(sr.cluster_managers, SRC, _mgr(SRC))
+    monkeypatch.setitem(sr.cluster_managers, TGT, _mgr(TGT))
+    started = []
+    monkeypatch.setattr(sr, '_start_replicated_vm',
+                        lambda mgr, vmid, vtype='qemu': started.append(vmid) or (True, ''))
+    monkeypatch.setattr(sr, '_source_vm_is_running', lambda mgr, vmid: (False, True))
+    monkeypatch.setattr(sr, '_target_vmid_exists', lambda mgr, vmid: False)
+    monkeypatch.setattr(sr, '_broadcast_progress', lambda *a, **kw: None)
+    monkeypatch.setattr(sr, '_fire_webhook', lambda *a, **kw: None)
+    # the disk fails the sync of the mark that goes in before the step, nothing else
+    marking = []
+    real = sr._mark_guest
+
+    def mark(vm, kind, *a, **kw):
+        marking.append(kind)
+        try:
+            return real(vm, kind, *a, **kw)
+        finally:
+            marking.pop()
+    monkeypatch.setattr(sr, '_mark_guest', mark)
+    failed = _wal_sync_fails(monkeypatch, armed=lambda: bool(marking and marking[-1]))
+    sr.execute_failover('p1', 'emergency', [101], [101])
+    assert len(failed) == 1 and started == []
+    assert _state(db) == {100: '', 101: '', 102: ''}
+
+
 # --- HA ----------------------------------------------------------------------------------
 
 def _rec(role_seen):
@@ -336,3 +403,68 @@ def test_a_step_of_a_node_recovery_is_on_disk_before_it_is_taken(env, db, monkey
     assert rows == [('fence', 0)]
     assert disk.unsynced_at('fence') == []
     assert disk.commits() == [(1, 'wal')]
+
+
+def test_a_member_whose_sync_to_disk_fails_finishes_the_apply_and_records_no_cv(env, db, seed, monkeypatch):
+    """The rows are committed when the sync fails, so what follows from them still happens:
+    here the sessions of a user whose password the leader reset end. Only the cv is not
+    recorded, the next sync compares row by row, and the sync status says why."""
+    _instance(env, A, role='active', members={B: _rec('standby')})
+    seed.user('alice')
+    snap = _wire(ha.build_snapshot())
+    _instance(env, B, role='standby', source=A, members={A: _rec('active')}, cv={'joined': True})
+    # what this member holds of alice is not what the leader sends
+    db.conn.execute("UPDATE users SET password_hash = 'older' WHERE username = 'alice'")
+    db.conn.commit()
+    held = ha.cv_entry()
+    ended = []
+    monkeypatch.setattr(ha, '_end_sessions', ended.append)
+    failed = _wal_sync_fails(monkeypatch, armed=lambda: not failed)
+    try:
+        summary = ha.apply_snapshot(snap)
+    except OSError:
+        summary = None
+    assert len(failed) == 1
+    assert ended == [['alice']]
+    assert summary and any('not synced to disk' in p for p in summary['file_errors']), summary
+    assert ha.cv_entry() == held != snap['hist'][-1]
+
+
+def _stamp(db):
+    return db.conn.execute("SELECT last_run FROM scheduled_tasks WHERE id = 't1'").fetchone()[0]
+
+
+def _zoned_leader(env, db):
+    _instance(env, A, role='active', members={B: _rec('standby')}, timezone='Europe/Vienna')
+    db.conn.execute("INSERT INTO scheduled_tasks (id, cluster_id, name, task_type, schedule, last_run) "
+                    "VALUES ('t1', 'c1', 'hourly', 'start', '{}', '2026-10-05T10:15:10')")
+    db.conn.commit()
+
+
+def test_the_stamps_a_new_zone_moved_are_on_disk_before_the_state_file_names_it(env, db, monkeypatch):
+    """A power cut that kept the state file and took the stamps would leave them in the old
+    zone under the new one, and after a first change nothing says so: an hourly schedule
+    would skip the hours between the two zones, or fire again."""
+    _zoned_leader(env, db)
+    disk = _Disk(monkeypatch, db)
+    real = ha._write_locked
+
+    def write(st, strict=None):
+        if st.get('timezone') == 'America/New_York':
+            disk.mark('zone')
+        return real(st, strict=strict)
+    monkeypatch.setattr(ha, '_write_locked', write)
+    assert ha.set_group_timezone('America/New_York') is True
+    assert _stamp(db) == '2026-10-05T04:15:10'
+    assert disk.unsynced_at('zone') == []
+    assert disk.commits() == [(1, 'wal')]
+
+
+def test_a_zone_whose_moved_stamps_cannot_be_synced_stays_as_it_was(env, db, monkeypatch):
+    _zoned_leader(env, db)
+    failed = _wal_sync_fails(monkeypatch, armed=lambda: not failed)
+    with pytest.raises(ha.StateNotWritten):
+        ha.set_group_timezone('America/New_York')
+    assert len(failed) == 1
+    assert ha.group_timezone() == 'Europe/Vienna'
+    assert _stamp(db) == '2026-10-05T10:15:10'

@@ -684,10 +684,16 @@ def _disconnect_test_nics(tgt_mgr, node, vmid, vm_type='qemu'):
             'unsupported': False, 'error': '; '.join(failed)}
 
 
+class _MarkNotOnDisk(Exception):
+    """_mark_guest wrote the mark, and the sync of it to disk failed."""
+
+
 def _mark_guest(vm, kind, send=False, dr_vmid=None):
     """Record where a plan guest is now: kind is the failover that moved it, '' home again,
     dr_vmid its VMID on the DR site, which the failback brings it home from.
-    With send the members of an automatic group get it at once (ha.send_on)."""
+    With send the members of an automatic group get it at once (ha.send_on).
+    _MarkNotOnDisk when the mark is written but not synced: a caller about to act on it
+    takes it back."""
     db = get_db()
     db.execute('UPDATE site_recovery_vms SET failed_over = ?, failed_over_at = ?, failed_over_vmid = ? '
                'WHERE id = ?',
@@ -696,7 +702,10 @@ def _mark_guest(vm, kind, send=False, dr_vmid=None):
     # MK Nov 2026 - on disk before anything goes on: the guest's replication job holds off by
     # it (HELD_JOB_SQL) and the failback goes by it, and under synchronous=NORMAL a power cut
     # takes the last commits
-    dbcrypto.sync_wal(db.db_path)
+    try:
+        dbcrypto.sync_wal(db.db_path)
+    except OSError as e:
+        raise _MarkNotOnDisk(f'written, but not synced to disk: {e}') from e
     if send:
         ha.send_on(f"where guest {vm.get('vmid')} of a recovery plan is")
 
@@ -905,6 +914,9 @@ def execute_failover(plan_id, failover_type='planned', authorized_vmids=None, on
                     _mark_guest(vm, failover_type, send=True, dr_vmid=dr_vmid)
                     marked = True
                 except Exception as e:
+                    # one that is written, only not on disk, is taken back below like any
+                    # mark of a guest that did not move
+                    marked = isinstance(e, _MarkNotOnDisk)
                     err = f"not started: could not record that the guest moves: {e}"
             if err is not None:
                 ok = False

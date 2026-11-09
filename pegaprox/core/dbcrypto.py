@@ -235,7 +235,8 @@ def sync_wal(db_path) -> bool:
     the database, with a sync), and it returns False. Raises OSError when the sync fails:
     what was to follow must not happen then."""
     try:
-        fd = os.open(f'{db_path}-wal', os.O_RDONLY)
+        # SQLite keeps the WAL beside the file a symlinked database points at
+        fd = os.open(os.path.realpath(db_path) + '-wal', os.O_RDONLY)
     except FileNotFoundError:
         return False
     try:
