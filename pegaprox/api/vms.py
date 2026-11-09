@@ -5434,7 +5434,7 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
                 ssh_user=_ssh_user, ssh_port=_ssh_port,
                 ssh_key_content=getattr(mgr.config, 'ssh_key', '') or '',
                 ssh_password=ssh_password_to(mgr, host),
-                target_host='127.0.0.1', target_port=_api_port,
+                target_host='127.0.0.1', target_port=getattr(mgr, 'cluster_api_port', 8006) or 8006,
             )
             target_host, target_port = '127.0.0.1', tunnel_endpoint.local_port
     except Exception as te:
@@ -5677,7 +5677,7 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
                     ssh_user=_ssh_user, ssh_port=_ssh_port,
                     ssh_key_content=getattr(mgr.config, 'ssh_key', '') or '',
                     ssh_password=ssh_password_to(mgr, host),
-                    target_host='127.0.0.1', target_port=port,
+                    target_host='127.0.0.1', target_port=getattr(mgr, 'cluster_api_port', 8006) or 8006,
                 )
                 target_host = '127.0.0.1'
                 target_port = tunnel_endpoint.local_port
@@ -11822,7 +11822,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                         ssh_key_content=_ssh_key,
                         ssh_password=_ssh_pass,
                         target_host='127.0.0.1',
-                        target_port=port,
+                        target_port=getattr(manager, 'cluster_api_port', 8006) or 8006,
                     )
                     # Reroute the WSS through the local listener
                     tunnel_target_host = '127.0.0.1'
