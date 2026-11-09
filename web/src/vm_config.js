@@ -987,11 +987,11 @@
             // (restart classes, the pending changes panel, the General tab in sections)
             // (a Proxmox VE cluster only: the restart rules are those of qemu-server)
             const { isCorpRedesigned } = useLayout();
-            // NS Nov 2026 — the cloud layout gets its own chrome (third branch below) and
+            // NS Nov 2026 - the cloud layout gets its own chrome (third branch below) and
             // consumes the SAME restart/pending engine read-only: classification for the
             // change band. The crVc content swap stays corporate-redesign-only.
             const isCloud = variant === 'cloud';
-            // the modal's raw t() echoes missing keys back — the cloud chrome strings need
+            // the modal's raw t() echoes missing keys back - the cloud chrome strings need
             // real fallbacks until they exist in every language
             const cT = (k, fb) => { const v = t(k); return v === k ? fb : v; };
             const crVcCluster = allClusters.find(c => c.id === clusterId);
@@ -2100,7 +2100,10 @@
             };
 
             // MK: cross-cluster replication handlers
+            const creatingXRepl = useRef(false);
             const handleCreateXRepl = async () => {
+                if (creatingXRepl.current) return;
+                creatingXRepl.current = true;
                 try {
                     const srcBridges = [...new Set((config?.networks || []).map(n => n.bridge).filter(Boolean))];
                     const payload = {
@@ -2131,6 +2134,8 @@
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
+                } finally {
+                    creatingXRepl.current = false;
                 }
             };
 
@@ -3113,7 +3118,7 @@
                                     <div className="cloud-cfg-head-title">
                                         <h2>{vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`}</h2>
                                         <div className="cloud-cfg-head-meta">
-                                            <span className={'cloud-hc-badge ' + (vm.status === 'running' ? 'is-healthy' : vm.status === 'stopped' ? 'is-na' : 'is-unknown')}>{String(vm.status || '—').toUpperCase()}</span>
+                                            <span className={'cloud-hc-badge ' + (vm.status === 'running' ? 'is-healthy' : vm.status === 'stopped' ? 'is-na' : 'is-unknown')}>{String(vm.status || ' - ').toUpperCase()}</span>
                                             <span className="cloud-detail-id">#{vm.vmid} · {isQemu ? 'VM' : 'CT'} · {crVcCluster?.display_name || crVcCluster?.name || clusterId} · {vm.node}</span>
                                         </div>
                                     </div>
@@ -3266,7 +3271,7 @@
                                             {isCloud && (
                                                 <div className="cloud-cfg-sec-h">
                                                     <span className="cloud-cfg-sec-t">{cT('cloudCfgSecConfig', 'Configuration')}</span>
-                                                    <span className="cloud-cfg-sec-s">{cT('cloudCfgSecConfigHint', 'identity and description — saved with the VM')}</span>
+                                                    <span className="cloud-cfg-sec-s">{cT('cloudCfgSecConfigHint', 'identity and description - saved with the VM')}</span>
                                                 </div>
                                             )}
                                             <div className="grid grid-cols-2 gap-4">
@@ -3390,7 +3395,7 @@
                                                         <div className="col-span-3 cfg-live-head">
                                                             <span className={'cloud-hc-rail-dot ' + (config.status.status === 'running' ? 'is-healthy' : 'is-na')}></span>
                                                             <span className="cfg-live-title">{cT('cloudCfgLive', 'Current operation')}</span>
-                                                            <span className="cloud-cell-muted">{cT('cloudCfgLiveHint', 'live values from the host — read-only')}</span>
+                                                            <span className="cloud-cell-muted">{cT('cloudCfgLiveHint', 'live values from the host - read-only')}</span>
                                                         </div>
                                                     )}
                                                     <div>
@@ -6680,7 +6685,7 @@
                                             </div>
                                         )}
                                         {externDirty && (
-                                            <div className="cloud-cfg-warn">{cT('cloudCfgExtern', 'The configuration changed underneath (another administrator?) — saving may overwrite foreign changes.')}</div>
+                                            <div className="cloud-cfg-warn">{cT('cloudCfgExtern', 'The configuration changed underneath (another administrator?) - saving may overwrite foreign changes.')}</div>
                                         )}
                                         <button type="button" className="cloud-cfg-band-toggle" onClick={() => setCfgBandOpen(o => !o)}>
                                             <span className="cloud-hc-badge is-warning">{rows.length} {cT('cloudCfgChanged', 'unsaved')}</span>
@@ -6697,7 +6702,7 @@
                                                     <div key={x.key} className="cloud-cfg-band-row">
                                                         <span className="cloud-table-mono">{x.key}</span>
                                                         <span className="cloud-cfg-band-diff">
-                                                            <span className="cloud-cell-muted">{x.old != null ? String(x.old).slice(0, 48) : '—'}</span>
+                                                            <span className="cloud-cell-muted">{x.old != null ? String(x.old).slice(0, 48) : ' - '}</span>
                                                             <span className="cloud-cfg-band-arrow">→</span>
                                                             <span>{x.value != null ? String(x.value).slice(0, 48) : <em>({cT('cloudCfgRemoved', 'removed')})</em>}</span>
                                                         </span>

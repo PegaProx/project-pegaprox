@@ -3105,9 +3105,9 @@
            Tailwind utils + hardcoded px), so this block is zero-regression — it only goes
            load-bearing for the Cloud-specific card-grid components. */
         body[data-layout="cloud"] {
-            /* Nov 2026 — enterprise pass: calmer navy scale, flatter elevation, denser rhythm.
+            /* Nov 2026 - enterprise pass: calmer navy scale, flatter elevation, denser rhythm.
                Identity kept (deep navy + cyan-blue accent); radius 14→8, spacing tightened,
-               cards are border-driven (shadow none) the way vCenter-class consoles work. */
+               cards are border-driven (shadow none) the way enterprise consoles work. */
             --color-darker: #040a13;
             --color-dark:   #081120;
             --color-card:   #0c1929;
@@ -3146,7 +3146,7 @@
             --cloud-border-subtle: #14263a;
             --cloud-border-medium: #1e3450;
             --cloud-border-strong: #2c4a6a;
-            /* elevation — reserved for overlays (menus, panels); cards stay flat */
+            /* elevation - reserved for overlays (menus, panels); cards stay flat */
             --cloud-shadow-sm: 0 1px 2px rgba(2,8,16,0.50);
             --cloud-shadow-md: 0 2px 10px rgba(2,8,16,0.45);
             --cloud-shadow-lg: 0 8px 24px rgba(2,8,16,0.50), 0 2px 6px rgba(2,8,16,0.40);
@@ -3198,7 +3198,7 @@
         .cloud-content-main { position:relative; flex:1 1 auto; min-height:0; min-width:0; display:flex; }
         .cloud-content-scroll { flex:1 1 auto; min-width:0; overflow-y:auto; padding:var(--space-md) var(--space-lg) var(--space-lg); }
         /* Fluid content width (Iteration 2): the old 1560px cap starved wide
-           screens — the viewport is the limit now. Readability on ultra-wide
+           screens - the viewport is the limit now. Readability on ultra-wide
            comes from the grids' own column tracks, not a page-wide box. */
         .cloud-body { display:flex; flex-direction:column; gap:var(--space-md); width:100%; max-width:none; }
         .cloud-nav { width:220px; flex:0 0 220px; background:var(--cloud-surface-1); border-right:1px solid var(--cloud-border-subtle); padding:0 0 var(--space-sm); overflow:hidden; display:flex; flex-direction:column; }
@@ -3366,7 +3366,7 @@
         /* recolour the common blue "primary" accents used by the modern components to the cloud accent */
         body[data-layout="cloud"] .cloud-mounted .bg-blue-600, body[data-layout="cloud"] .cloud-mounted .bg-blue-500 { background: var(--cloud-accent) !important; color: #04121a !important; }
         /* Iteration 3: the mounted storage config (DatastoreTab & friends) keeps its
-           two-column structure — these map its remaining classic tones to cloud ones.
+           two-column structure - these map its remaining classic tones to cloud ones.
            Still scoped to .cloud-mounted: cloud-native views and every other layout
            are untouched. */
         body[data-layout="cloud"] .cloud-mounted .text-gray-300 { color: var(--color-text) !important; }
@@ -3375,7 +3375,7 @@
         body[data-layout="cloud"] .cloud-mounted .rounded-lg, body[data-layout="cloud"] .cloud-mounted .rounded-xl { border-radius: var(--radius-lg) !important; }
         body[data-layout="cloud"] .cloud-mounted .hover\:bg-proxmox-hover:hover { background: var(--cloud-surface-2) !important; }
 
-        /* ── Iteration 10: surface unification — deeper compat for shared sections ── */
+        /* ── Iteration 10: surface unification - deeper compat for shared sections ── */
         /* tables inside mounted shared sections pick up cloud-table rhythm */
         body[data-layout="cloud"] .cloud-mounted table { border-collapse: collapse; width: 100%; font-size: 0.8rem; }
         body[data-layout="cloud"] .cloud-mounted table thead th { text-align: left; font-size: 0.66rem; letter-spacing: 0.07em; text-transform: uppercase; color: var(--cloud-text-muted); font-weight: 650; padding: 8px 12px; border-bottom: 1px solid var(--cloud-border-medium); background: var(--cloud-surface-1); white-space: nowrap; }
@@ -3411,7 +3411,7 @@
         .cloud-icon-btn svg { width:17px; height:17px; }
         .cloud-icon-btn-danger:hover { color:#f4868a; }
 
-        /* KPI tiles — Nov 2026: flat, uniform, single accent. The per-card rainbow
+        /* KPI tiles - Nov 2026: flat, uniform, single accent. The per-card rainbow
            gradients are gone; one quiet cyan tint keeps the row scannable. */
         .cloud-kpi-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(176px, 1fr)); gap:var(--space-md); }
         .cloud-kpi { position:relative; display:flex; align-items:center; gap:var(--space-md); padding:var(--space-md) var(--space-lg); border-radius:var(--radius-lg); border:1px solid var(--cloud-border-subtle); background:var(--cloud-surface-3); box-shadow:none; transition:border-color .12s, background .12s; }
@@ -3441,7 +3441,7 @@
         .cloud-bar-fill { height:100%; border-radius:var(--radius-pill); transition:width .3s ease; }
         .cloud-bar-val { width:82px; flex:0 0 82px; text-align:right; color:var(--cloud-text-muted); font-variant-numeric:tabular-nums; font-size:0.75rem; }
 
-        /* task list (legacy rows — kept for compatibility) */
+        /* task list (legacy rows - kept for compatibility) */
         .cloud-tasklist { display:flex; flex-direction:column; margin-top:var(--space-xs); }
         .cloud-task-row { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--cloud-border-subtle); font-size:0.8rem; }
         .cloud-task-row:last-child { border-bottom:none; }
@@ -3635,7 +3635,7 @@
         .cloud-clearfilters:hover { text-decoration:underline; }
         .cloud-empty-action { margin-top:var(--space-sm); }
 
-        /* ── Nov 2026 — Cloud overview, enterprise pass: utilization meters, top
+        /* ── Nov 2026 - Cloud overview, enterprise pass: utilization meters, top
               consumers and the activity timeline. Dense, border-driven, quiet. ── */
         /* utilization meters (replace the conic gauges on the overview) */
         .cloud-meter-rows { display:flex; flex-direction:column; justify-content:center; }
@@ -3672,7 +3672,7 @@
         .cloud-act-node { color:var(--cloud-text-muted); font-size:0.75rem; white-space:nowrap; }
         .cloud-act-time { margin-left:auto; color:var(--cloud-text-muted); white-space:nowrap; font-size:0.72rem; font-variant-numeric:tabular-nums; }
 
-        /* keyboard focus rings — one consistent accent ring across cloud controls */
+        /* keyboard focus rings - one consistent accent ring across cloud controls */
         body[data-layout="cloud"] .cloud-btn:focus-visible,
         body[data-layout="cloud"] .cloud-icon-btn:focus-visible,
         body[data-layout="cloud"] .cloud-nav-item:focus-visible,
@@ -3683,7 +3683,7 @@
         body[data-layout="cloud"] .cloud-link-btn:focus-visible,
         body[data-layout="cloud"] .cloud-search-clear:focus-visible { outline:2px solid var(--cloud-accent-line); outline-offset:1px; }
 
-        /* ── Nov 2026 (PHASE 3/4) — widget engine: grid, spans, drag states, customize bar ── */
+        /* ── Nov 2026 (PHASE 3/4) - widget engine: grid, spans, drag states, customize bar ── */
         .cloud-widget-grid { display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); gap:var(--space-md); align-items:start; }
         .cloud-widget-cell { display:flex; min-width:0; }
         .cloud-widget-cell > .cloud-widget { flex:1 1 auto; min-width:0; }
@@ -3718,18 +3718,18 @@
         .cloud-ch-meta { display:flex; align-items:center; gap:8px; font-size:0.72rem; color:var(--cloud-text-muted); }
         .cloud-ch-warn { color:var(--cloud-warning); font-weight:600; }
         .cloud-ch-meter { margin-top:auto; }
-        /* PHASE 5 — meters row on the cluster cards (All-Clusters overview) */
+        /* PHASE 5 - meters row on the cluster cards (All-Clusters overview) */
         .cloud-cluster-meters { display:flex; flex-direction:column; gap:8px; padding-top:2px; }
-        /* PHASE 6 — inline tags on instance rows */
+        /* PHASE 6 - inline tags on instance rows */
         .cloud-table-tags { display:inline-flex; align-items:center; gap:4px; margin-left:8px; vertical-align:middle; }
         .cloud-table-tags .cloud-chip-tag { font-size:0.66rem; padding:0 6px; }
         .cloud-table-tags-more { font-size:0.68rem; color:var(--cloud-text-muted); }
 
         /* ============================================================
-           ITERATION 2 — unified compute experience (VMs / Containers /
+           ITERATION 2 - unified compute experience (VMs / Containers /
            App-Containers). Fluid width lives on .cloud-body above; this block
            is column rhythm for the instance tables and the cloud variant of
-           the OCI catalog (scoped to the cloud layout only — the component is
+           the OCI catalog (scoped to the cloud layout only - the component is
            shared with Corporate, which keeps its own styling).
            ============================================================ */
 
@@ -3740,11 +3740,11 @@
         .cloud-table .cloud-col-host { width:136px; }
         .cloud-table .cloud-col-res { width:172px; }
         .cloud-table .cloud-col-uptime { width:104px; }
-        /* the guest name is the primary identifier — say so typographically */
+        /* the guest name is the primary identifier - say so typographically */
         .cloud-table .cloud-table-name-text { max-width:none; font-weight:600; color:var(--color-text); }
         .cloud-table .cloud-table-name-icon { color:var(--cloud-text-muted); }
         .cloud-table-row:hover .cloud-table-name-icon { color:var(--cloud-accent); }
-        /* a hair more breathing on full-hd and up — density stays enterprise */
+        /* a hair more breathing on full-hd and up - density stays enterprise */
         @media (min-width:1920px) {
             .cloud-table thead th { padding-top:10px; padding-bottom:10px; }
             .cloud-table td { padding-top:10px; padding-bottom:10px; }
@@ -3805,7 +3805,7 @@
         body[data-layout="cloud"] .cloud-oci-dialog-foot { display:flex; justify-content:flex-end; gap:8px; margin-top:var(--space-md); }
 
         /* ============================================================
-           ITERATION 3 — guest detail experience (VM / CT), datastore
+           ITERATION 3 - guest detail experience (VM / CT), datastore
            details and storage config. Same tokens, no new patterns.
            ============================================================ */
 
@@ -3853,7 +3853,7 @@
         .cloud-hc-checked { font-size:0.68rem; color:var(--cloud-text-muted); font-variant-numeric:tabular-nums; }
         .cloud-hc-action { margin-top:2px; }
         .cloud-hc-legend { padding:10px var(--space-md); font-size:0.7rem; line-height:1.6; }
-        /* Iteration 4 — impact line + compact overview summary + header resource chips */
+        /* Iteration 4 - impact line + compact overview summary + header resource chips */
         .cloud-hc-impact { font-size:0.72rem; color:var(--cloud-text-secondary); border-left:2px solid var(--cloud-border-strong, #2a3f57); padding-left:8px; }
         .cloud-hc-impact.is-critical { color:#f1a3a3; border-left-color:var(--cloud-error); }
         .cloud-hc-mini { display:grid; grid-template-columns:1fr 1fr; gap:4px 12px; }
@@ -3869,7 +3869,7 @@
         .cloud-res-sparks svg { display:block; }
 
         /* ============================================================
-           ITERATION 5 — operations-center composition (VM/CT detail).
+           ITERATION 5 - operations-center composition (VM/CT detail).
            Two zones: resources left, collapsible health rail right.
            ============================================================ */
         .cloud-ov-layout { display:grid; grid-template-columns:minmax(0,1.7fr) minmax(320px,1fr); gap:var(--space-md); align-items:start; }
@@ -3888,7 +3888,7 @@
         .cloud-res-tile-bottom { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:34px; }
         .cloud-res-tile-sub { font-size:0.72rem; color:var(--cloud-text-secondary); font-variant-numeric:tabular-nums; }
         .cloud-res-tile-spark svg { display:block; }
-        /* console strip — compact band instead of a placeholder box */
+        /* console strip - compact band instead of a placeholder box */
         .cloud-console-strip { display:flex; align-items:center; gap:12px; padding:10px var(--space-md); min-height:0; }
         .cloud-console-thumb { width:128px; height:80px; object-fit:contain; object-position:top left; background:#000; border-radius:var(--radius-sm); border:1px solid var(--cloud-border-medium); cursor:pointer; flex:0 0 auto; }
         .cloud-console-ico { display:inline-flex; align-items:center; justify-content:center; width:36px; height:36px; border-radius:var(--radius-md); background:var(--cloud-surface-1); border:1px solid var(--cloud-border-subtle); color:var(--cloud-accent); flex:0 0 auto; }
@@ -3925,7 +3925,7 @@
         .cloud-tabs-sep { align-self:stretch; width:1px; margin:6px 8px; background:var(--cloud-border-subtle); }
 
         /* ============================================================
-           ITERATION 6 — the VM config modal, cloud chrome (variant).
+           ITERATION 6 - the VM config modal, cloud chrome (variant).
            Grid shell: header / nav+body / footer; content keeps its
            own markup and is re-skinned through .cloud-mounted.
            ============================================================ */
@@ -3954,7 +3954,7 @@
         /* body */
         .cloud-cfg-body { grid-area:body; min-height:0; }
         .cloud-cfg .cfg-hide { display:none; }
-        /* status strip (General) — read-only facts, not inputs */
+        /* status strip (General) - read-only facts, not inputs */
         .cloud-cfg-body .cfg-status-strip { background:transparent !important; border:1px dashed var(--cloud-border-medium); border-radius:var(--radius-md); gap:10px 16px; }
         .cloud-cfg-sec-h { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
         .cloud-cfg-sec-t { font-size:0.82rem; font-weight:650; color:var(--color-text); }

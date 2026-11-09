@@ -561,7 +561,7 @@
         // thresholds ([{value, label, color}], drawn as dashed lines where they fall on the scale), legend
         // (false when the view toggles the series itself; a dataset can come with hidden and dash),
         // markGaps (shades the slots without any sample) and resize (draws again when the box changes width)
-        // Detect light theme for chart chrome — Corporate light sets data-corp-theme,
+        // Detect light theme for chart chrome - Corporate light sets data-corp-theme,
         // the cloud layout sets data-cloud-theme; either means light chart chrome.
         function chartLightMode() {
             try {
