@@ -26,9 +26,9 @@ the first hit for the lifetime of the process.
 | 1 | `PEGAPROX_DB_KEY` env var | Docker secrets, k8s, CI | Accepts urlsafe-base64 (44 chars) **or** hex (64 chars) |
 | 2 | `${CREDENTIALS_DIRECTORY}/db-key` | systemd `LoadCredentialEncrypted=` | TPM2- or host-key-bound. Strongest at-rest option |
 | 3 | `PEGAPROX_KEY_FILE` env var → file | Custom path, e.g. NFS mount | chmod 0600 (or 0640 root:pegaprox) |
-| 4 | `/etc/pegaprox/secret.key` | **`deploy.sh` install default** | chmod **0640** root:pegaprox - group-read required so the systemd unit (running as `pegaprox`) can load it. 0600 root:pegaprox is unreadable for the service. |
+| 4 | `/etc/pegaprox/secret.key` | **`deploy.sh` and Debian package default** | chmod **0640** root:pegaprox - group-read required so the systemd unit (running as `pegaprox`) can load it. 0600 root:pegaprox is unreadable for the service. |
 | 5 | `~/.config/pegaprox/secret.key` | Single-user / dev install | chmod 0600 (owner = user running PegaProx) |
-| 6 | `config/.pegaprox.key` (CONFIG_DIR) | **Legacy** - pre-0.9.9.3 | Triggers deprecation warning on every boot |
+| 6 | `config/.pegaprox.key` (CONFIG_DIR) | **Legacy** - pre-0.9.9.3 | Triggers deprecation warning on every boot. The same file is the Fernet key the database layer reads old field values with, so PegaProx creates it on every install |
 
 The loader **rejects** any file-based tier whose permissions have group-write,
 group-exec, or *any* other-user bits set - an accidentally chmod-755'd key file
@@ -86,6 +86,29 @@ It only reads: where it finds no key it says so instead of creating one. JSON ou
 `SQLite format 3`), so it shows a database that is still plain even where SQLCipher is
 installed; `encrypted_at_rest` is true only when every database found is encrypted.
 
+### The Debian package
+
+The package depends on `python3-sqlcipher3`, so its first start encrypts the database. With
+no key in `/etc/pegaprox` that start would make one in `config/`, next to the database.
+`packaging/debian/master_key.py` puts it there first: the unit runs it as root before every
+start (`ExecStartPre=+`), and the postinst runs it on a host where systemd runs. An image
+built with the package (the appliances) has no systemd running at build time, so each copy
+makes its own key at its first start. What it does, by what it finds:
+
+| State | What happens |
+|---|---|
+| `PEGAPROX_DB_KEY`, a `db-key` credential or an existing `PEGAPROX_KEY_FILE` in the unit (drop-ins included) | Nothing, the key is yours |
+| `/etc/pegaprox/secret.key` there | Kept as it is. A root-owned key the service cannot read (0600, other group) gets 0640 root:pegaprox. A key others can read or write, or one that does not open an encrypted database, stops the start with the reason in the journal |
+| No key, no database encrypted yet (fresh install, upgrade on a plain database) | A new key, 0640 root:pegaprox; the next start encrypts the database with it |
+| No key, a database encrypted already (a start with sqlcipher3 before the package did this) | The key that opens it, `~/.config/pegaprox/secret.key` of the service user or `config/.pegaprox.key`, is copied to `/etc/pegaprox/secret.key` byte for byte, never a new one |
+| Anything else (an encrypted database no known key opens, a database file it cannot read) | No key is written, and the start stops with the reason |
+
+The config directory comes from the unit (`WorkingDirectory`, `PEGAPROX_CONFIG_DIR`), so a
+moved one is found. After a copy `config/.pegaprox.key` stays where it is, and with it a
+backup of `config/` still holds the database key. Deleting it makes PegaProx create a new
+one at the next start; field values from before the switch to AES-256-GCM that are still
+sealed with the old one can then no longer be read.
+
 ---
 
 ## 2. SQLCipher full-DB encryption (`pegaprox/core/dbcrypto.py`)
@@ -106,7 +129,9 @@ each page carries an HMAC-SHA512 tag.
 | 32-bit ARM (armv7) | none, no wheel | Plain SQLite + field-level AES-256-GCM |
 | Docker image, amd64 and arm64 | as above | **Full DB encryption** |
 | Docker image, arm/v7 | none | Plain SQLite + field-level AES-256-GCM |
-| Debian package, appliances | none, Debian has no Python binding | Plain SQLite + field-level AES-256-GCM |
+| Debian package from apt.pegaprox.com, amd64 and arm64 | `python3-sqlcipher3`, built per architecture from the sqlcipher3 wheels | **Full DB encryption** |
+| Debian package from the repository in the README, appliances, amd64 | `python3-sqlcipher3` of that repository | **Full DB encryption** |
+| Debian package from the repository in the README, appliances, arm64 | that `python3-sqlcipher3` holds the x86_64 module only, the import fails | Plain SQLite + field-level AES-256-GCM |
 
 The two packages install the same `sqlcipher3` module and must never be installed side by
 side; the markers in requirements.txt give every platform one of them at most.
@@ -305,6 +330,9 @@ This is the recommended posture for production Linux deployments.
    ```ini
    LoadCredentialEncrypted=db-key:/etc/pegaprox/secret.key.cred
    ```
+
+   With the Debian package, put it in a drop-in (`sudo systemctl edit pegaprox`): the unit
+   file is the package's. Its key step leaves the key alone while the unit loads `db-key`.
 
 5. Reload + restart:
 

@@ -117,17 +117,21 @@ PegaProx implements the following security measures:
 
 - **Database encryption at rest:** Where the `sqlcipher3` module is available, the whole
   database is encrypted with SQLCipher 4 (AES-256-CBC + HMAC-SHA512). That is the case for
-  installs with `deploy.sh` or pip on Linux x86_64 and aarch64, macOS and Windows, and for the
-  amd64 and arm64 Docker images. The Debian package, the appliance images and the 32-bit ARM
-  Docker image use plain SQLite. On every install,
+  installs with `deploy.sh` or pip on Linux x86_64 and aarch64, macOS and Windows, for the
+  amd64 and arm64 Docker images, and for the Debian package and the appliance images on
+  amd64. The 32-bit ARM Docker image uses plain SQLite, and so do the Debian package and the
+  appliances on arm64 where their `python3-sqlcipher3` holds the x86_64 module only (the one
+  of apt.pegaprox.com is built for arm64). On every install,
   sensitive fields (cluster passwords, SSH keys, API token secrets, TOTP secrets) are also
   encrypted individually with AES-256-GCM. PegaProx warns at startup when the database stays
   plain SQLite, and the `--keystore-status` option shows the active mode and the key source.
 - **Key management:** The master key is loaded from `PEGAPROX_DB_KEY`, a systemd
   `LoadCredentialEncrypted` credential, `PEGAPROX_KEY_FILE` or `/etc/pegaprox/secret.key`.
-  `deploy.sh` creates `/etc/pegaprox/secret.key`. Docker, the Debian package and the appliance
-  keep their keys in the config directory by default, so treat a backup of `config/` as secret
-  or move the key out of it.
+  `deploy.sh` creates `/etc/pegaprox/secret.key`, the Debian package before PegaProx starts
+  (an appliance at its first start). A package install whose database was encrypted before
+  keeps that key: it is copied there from the config directory, where the old file stays.
+  Docker keeps its key in the config directory by default, so treat a backup of `config/` as
+  secret or move the key out of it.
 - **Encrypted exports:** Configuration backups are always password-protected and encrypted
   with AES-256-GCM, with the key derived from the password by PBKDF2-HMAC-SHA256.
 - **Password hashing:** Local user passwords are hashed with Argon2id. Hashes from older
