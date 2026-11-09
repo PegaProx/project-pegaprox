@@ -67,7 +67,8 @@ It only reads: where it finds no key it says so instead of creating one. JSON ou
     "config_dir": "/opt/PegaProx/config",
     "is_legacy": false,
     "tier": 4,
-    "recommendation": "Key is outside the DB directory which is good. Consider upgrading to systemd LoadCredentialEncrypted..."
+    "recommendation": "Key is outside the DB directory which is good. Consider upgrading to systemd LoadCredentialEncrypted...",
+    "sqlcipher_error": null
   },
   "db": {
     "backend": "sqlcipher",
@@ -77,7 +78,8 @@ It only reads: where it finds no key it says so instead of creating one. JSON ou
       "/opt/PegaProx/config/pegaprox.db": "encrypted",
       "/opt/PegaProx/config/syslog.db": "encrypted"
     },
-    "note": "Full database encryption is active."
+    "note": "Full database encryption is active.",
+    "sqlcipher_error": null
   }
 }
 ```
@@ -136,6 +138,15 @@ each page carries an HMAC-SHA512 tag.
 
 The two packages install the same `sqlcipher3` module and must never be installed side by
 side; the markers in requirements.txt give every platform one of them at most.
+
+A SQLCipher package that is installed but does not load (the arm64 row above, or a build for
+another Python) is not taken for a missing one. Every start writes a warning with the reason
+and the machine and Python version to the service log, `--keystore-status` has the reason
+in `sqlcipher_error` and says it in the `note` of `db` and in the `recommendation` or
+`message` of `keystore`, and the Compliance tab of the settings lists it under
+Recommendations. The key step of the Debian package names it too when it cannot check a key.
+PegaProx then runs on plain SQLite as in the rows above, until a package built for that
+machine is installed and PegaProx restarted.
 
 The fallback is *not* unencrypted - sensitive fields (cluster passwords,
 2FA secrets, OIDC client secrets, API tokens) are still individually
