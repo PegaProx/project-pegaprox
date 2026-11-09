@@ -10,7 +10,9 @@ then gets the blueprint's CPU, memory, NICs, Cloud-Init and disk size, and start
 
 A PVE template belongs to one cluster. The library image is what every cluster can
 fetch, so a blueprint points at the image and each cluster keeps its own template of it.
-No password is ever stored in a blueprint; a deploy may send one for that one VM.
+No password is ever stored in a blueprint; a deploy may send one for that one VM. Its
+Cloud-Init user and SSH keys do go into every VM deployed from it, so a blueprint is seen
+in the tenant of the account that saved it only; an admin's is seen by everyone.
 
 A blueprint can also start from a template that is already on a cluster (source_kind
 'template'), which is how Windows gets in: the library holds Linux cloud images only. The
@@ -32,7 +34,7 @@ from urllib.parse import quote
 from flask import Blueprint, jsonify, request
 
 from pegaprox.globals import cluster_managers
-from pegaprox.utils.auth import require_auth, build_authz_user
+from pegaprox.utils.auth import require_auth, build_authz_user, load_users
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.sanitization import validate_ssh_user
 from pegaprox.api.helpers import check_cluster_access, scope_vm_rows
@@ -283,8 +285,8 @@ def _os(r):
 
 def _mappings(bp_id=None):
     """{blueprint id: {cluster id: template vmid}}, only the templates the caller may
-    clone on a cluster they reach: the list of blueprints is one for every account, and a
-    VMID nobody may clone is of no use to them."""
+    clone on a cluster they reach: a blueprint belongs to no one cluster, and a VMID the
+    caller may not clone is of no use to them."""
     sql, args = 'SELECT blueprint_id, cluster_id, vmid FROM blueprint_templates', ()
     if bp_id is not None:
         sql, args = sql + ' WHERE blueprint_id = ?', (bp_id,)
@@ -342,6 +344,40 @@ def _get(bp_id):
     return get_db().conn.execute('SELECT * FROM vm_blueprints WHERE id = ?', (bp_id,)).fetchone()
 
 
+def _seen_by(caller):
+    """Which blueprint rows the caller sees, as a test of a row. A deploy puts the
+    blueprint's Cloud-Init user and SSH keys into the new VM, so a blueprint stays in the
+    tenant of the account that saved it. An admin's is for everyone (an admin reaches
+    every guest anyway) and an admin sees them all. One whose account is gone, or a user
+    table that cannot be read, leaves it to the admins."""
+    if _is_admin(caller):
+        return lambda r: True
+    from pegaprox.utils.rbac import acts_as_admin, DEFAULT_TENANT_ID
+    me, users = _current_user(), load_users()
+    home = caller.get('tenant_id') or DEFAULT_TENANT_ID
+
+    def seen(r):
+        by = r['created_by'] or ''
+        if by and by == me:
+            return True
+        owner = users.get(by)
+        if not by or not isinstance(owner, dict):
+            return False
+        if acts_as_admin(dict(owner, username=by)):
+            return True
+        return (owner.get('tenant_id') or DEFAULT_TENANT_ID) == home
+    return seen
+
+
+def _get_seen(bp_id, caller=None):
+    """The blueprint row, or None when there is none or the caller does not see it: to
+    them it is not there."""
+    row = _get(bp_id)
+    if row is None or not _seen_by(caller or _caller())(row):
+        return None
+    return row
+
+
 def _store_values(f):
     return (f['name'], f['description'], f['template_id'], f['cores'], f['memory'], f['disk_gb'],
             f['cpu'], json.dumps(f['nics']), f['ciuser'], f['sshkeys'], f['ip_mode'],
@@ -361,11 +397,13 @@ def _answer(bp_id, code=200):
 @bp.route('/api/blueprints', methods=['GET'])
 @require_auth(perms=['vm.create'])
 def list_blueprints():
-    """Every blueprint, newest first. One list for every account, like the custom
-    images of the template library; editing is the creator's or an admin's."""
-    me, admin = _current_user(), _is_admin(_caller())
-    rows = get_db().conn.execute('SELECT * FROM vm_blueprints ORDER BY created_at DESC').fetchall()
-    maps = _mappings()
+    """The blueprints the caller sees, newest first: their own tenant's, the admins', and
+    for an admin all of them. Editing is the creator's or an admin's."""
+    caller = _caller()
+    me, admin, seen = _current_user(), _is_admin(caller), _seen_by(caller)
+    rows = [r for r in get_db().conn.execute('SELECT * FROM vm_blueprints ORDER BY created_at DESC').fetchall()
+            if seen(r)]
+    maps = _mappings() if rows else {}
     return jsonify({'blueprints': [_row(r, me, admin, maps.get(r['id'])) for r in rows]})
 
 
@@ -401,7 +439,7 @@ def create_blueprint():
 
 def _owned(bp_id):
     """(row, error answer) for a change to blueprint `bp_id` by the caller."""
-    row = _get(bp_id)
+    row = _get_seen(bp_id)
     if row is None:
         return None, (jsonify({'error': 'not found'}), 404)
     if (row['created_by'] or '') != _current_user() and not _is_admin(_caller()):
@@ -679,7 +717,7 @@ def blueprint_template(cluster_id, bp_id):
         cerr = require_unconfined(cluster_id)
         if cerr:
             return cerr
-    row = _get(bp_id)
+    row = _get_seen(bp_id, caller)
     if row is None:
         return jsonify({'error': 'not found'}), 404
     node = request.args.get('node', '')
@@ -1045,7 +1083,7 @@ def deploy_blueprint(bp_id):
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({'error': 'the body is a JSON object'}), 400
-    row = _get(bp_id)
+    row = _get_seen(bp_id)
     if row is None:
         return jsonify({'error': 'not found'}), 404
     library, windows = _kind(row) == 'library', _os(row) == 'windows'

@@ -44418,7 +44418,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Every blueprint, newest first. One list for every account, like the custom images of the template library; editing is the creator's or an admin's.",
+        "summary": "The blueprints the caller sees, newest first: their own tenant's, the admins', and for an admin all of them. Editing is the creator's or an admin's.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {

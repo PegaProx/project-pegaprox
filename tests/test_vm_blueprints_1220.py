@@ -168,6 +168,68 @@ def test_without_vm_create_there_are_no_blueprints(api, seed):
     assert _create(viewer).status_code == 403
 
 
+# --- who sees a blueprint ---------------------------------------------------------------
+
+PERMS = ['vm.create', 'cluster.view']
+
+
+@pytest.fixture
+def tenants(seed):
+    import pegaprox.utils.rbac as rbac
+    seed.tenant('t_a', ['c1'])
+    seed.tenant('t_b', ['c1'])
+    rbac.invalidate_tenants_cache()
+    yield
+    rbac.invalidate_tenants_cache()
+
+
+def _ids(client):
+    return sorted(b['id'] for b in client.get('/api/blueprints').get_json()['blueprints'])
+
+
+def test_a_blueprint_stays_in_the_tenant_of_the_account_that_saved_it(api, seed, admin, tenants, no_thread):
+    # its Cloud-Init user and keys go into every VM deployed from it: a deploy from
+    # another tenant would let the one who saved it into that tenant's VM
+    api.set_manager('c1', _mgr())
+    tim = api.as_user(seed.user('tim', tenant_id='t_a', permissions=PERMS))
+    tess = api.as_user(seed.user('tess', tenant_id='t_a', permissions=PERMS))
+    uma = api.as_user(seed.user('uma', tenant_id='t_b', permissions=PERMS))
+    ann = api.as_user(seed.user('ann', permissions=PERMS))
+    bid = _create(tim).get_json()['blueprint']['id']
+    assert _ids(tim) == _ids(tess) == _ids(admin) == [bid]
+    assert _ids(uma) == _ids(ann) == []
+    for other in (uma, ann):
+        assert other.get(f'/api/clusters/c1/blueprints/{bid}/template?node=pve1').status_code == 404
+        assert _deploy(other, bid, vmid=150).status_code == 404
+        assert other.put(f'/api/blueprints/{bid}', json=GOOD).status_code == 404
+        assert other.delete(f'/api/blueprints/{bid}').status_code == 404
+    assert no_thread == []
+    assert _deploy(tess, bid, vmid=150).status_code == 202
+
+
+def test_an_admins_blueprint_is_seen_in_every_tenant(api, seed, admin, tenants):
+    bid = _create(admin).get_json()['blueprint']['id']
+    for name, extra in (('tim', {'tenant_id': 't_a'}), ('uma', {'tenant_id': 't_b'}), ('ann', {})):
+        assert _ids(api.as_user(seed.user(name, permissions=PERMS, **extra))) == [bid], name
+
+
+def test_a_blueprint_whose_account_is_gone_stays_with_the_admins(api, seed, admin, monkeypatch):
+    # the default tenant: an account nobody can find must not read as one of it
+    tim = api.as_user(seed.user('tim', permissions=PERMS))
+    tess = api.as_user(seed.user('tess', permissions=PERMS))
+    bid = _create(tim).get_json()['blueprint']['id']
+    mine = _create(tess).get_json()['blueprint']['id']
+    seed.db.delete_user('tim')
+    assert _ids(tess) == [mine]
+    assert _ids(admin) == sorted([bid, mine])
+    # a user table that does not answer names nobody's tenant either
+    seed.user('tim', permissions=PERMS)
+    assert _ids(tess) == sorted([bid, mine])
+    with monkeypatch.context() as m:
+        m.setattr(bpmod, 'load_users', lambda *a, **kw: {})
+        assert _ids(tess) == [mine]
+
+
 def test_a_blueprint_whose_image_left_the_library_says_so(admin, seed):
     bid = _create(admin).get_json()['blueprint']['id']
     seed.db.conn.execute("UPDATE vm_blueprints SET template_id = 'custom-gone-abc' WHERE id = ?", (bid,))
