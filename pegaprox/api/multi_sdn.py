@@ -855,7 +855,10 @@ def _check_node_prereqs(mgr, node_name):
                       'fix_hint': fix_hint})
 
     # What PegaProx reaches the node on; the UI labels it as the management
-    # address so nobody mistakes it for the EVPN underlay address
+    # address so nobody mistakes it for the EVPN underlay address. _get_node_ip
+    # also refreshes the stored address; nodes without a per-node credential
+    # row have no stored address at all, so a stored-only read would answer
+    # nothing on cluster-wide-credential installs.
     try:
         mgmt_ip = mgr._get_node_ip(node_name)
     except Exception:

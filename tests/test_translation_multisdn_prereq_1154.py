@@ -15,7 +15,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
 KEYS = ['mcevpnPrereqTitle', 'mcevpnPrereqReady', 'mcevpnPrereqRun', 'mcevpnPrereqChecking',
         'mcevpnPrereqPickFirst', 'mcevpnPrereqFailed', 'mcevpnPrereqChecked', 'mcevpnPrereqHint',
-        'mcevpnPrereqUseIps', 'mcevpnPrereqMgmtHint']
+        'mcevpnPrereqUseIps', 'mcevpnPrereqMgmtHint',
+        'mcevpnPrereqMemberErr', 'mcevpnPrereqReplacePeers']
 
 
 def _blocks():

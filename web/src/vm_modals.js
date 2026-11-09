@@ -5448,25 +5448,31 @@
             const [prereqData, setPrereqData] = useState(null);
             const [prereqLoading, setPrereqLoading] = useState(false);
             const [prereqError, setPrereqError] = useState(null);
+            // an answer from before the last selection change is stale and dropped
+            const prereqSeq = useRef(0);
             const runPrereqs = async () => {
                 if (!form.cluster_ids.length) { setPrereqError(t('mcevpnPrereqPickFirst') || 'Select at least one cluster first.'); return; }
+                const mine = ++prereqSeq.current;
                 setPrereqLoading(true); setPrereqError(null);
                 try {
                     const r = await authFetch(`${API_URL}/multi-sdn/prerequisites`, {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ cluster_ids: form.cluster_ids }),
                     });
+                    if (mine !== prereqSeq.current) return;
                     const j = r?.ok ? await r.json() : null;
                     if (j) setPrereqData(j);
                     else setPrereqError(t('mcevpnPrereqFailed') || 'Prerequisites check failed');
-                } catch (e) { setPrereqError(String(e?.message || e)); }
-                setPrereqLoading(false);
+                } catch (e) { if (mine === prereqSeq.current) setPrereqError(String(e?.message || e)); }
+                finally { setPrereqLoading(false); }   // a dropped run must not park the spinner
             };
             // another cluster selection invalidates the previous result
-            useEffect(() => { setPrereqData(null); setPrereqError(null); }, [form.cluster_ids]);
+            useEffect(() => { prereqSeq.current++; setPrereqData(null); setPrereqError(null); }, [form.cluster_ids]);
             const useNodeIps = () => {
                 const ips = [...new Set(Object.values(prereqData?.node_ips || {}))];
-                if (ips.length) setForm(f => ({ ...f, peers: ips.join(', ') }));
+                if (!ips.length) return;
+                if (form.peers.trim() && !window.confirm(t('mcevpnPrereqReplacePeers') || 'Replace the current peers with the node management IPs?')) return;
+                setForm(f => ({ ...f, peers: ips.join(', ') }));
             };
 
             const statusChip = (s) => {
@@ -5796,6 +5802,13 @@
                                                 </button>
                                             </div>
                                             {prereqError && <p className="text-xs text-red-400">{prereqError}</p>}
+                                            {prereqData?.errors?.length > 0 && prereqData.errors.map(err => (
+                                                <p key={err.cluster_id} className="text-xs text-red-400">
+                                                    {(t('mcevpnPrereqMemberErr') || 'Cluster {name} could not be checked: {reason}')
+                                                        .replace('{name}', clusterName(err.cluster_id))
+                                                        .replace('{reason}', err.reason)}
+                                                </p>
+                                            ))}
                                             {prereqData?.checks && (
                                                 <details className="mt-2">
                                                     <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-200">
