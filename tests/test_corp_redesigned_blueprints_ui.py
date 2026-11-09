@@ -975,6 +975,32 @@ def test_runtime_a_node_without_shared_storage_says_so_for_a_template_elsewhere(
     assert ('POST', '/api/blueprints/b6/deploy') not in app.server.calls
 
 
+def test_runtime_the_deploy_dialog_names_the_keys_that_go_into_the_vm_and_who_saved_them(open_app):
+    # a deploy puts the blueprint's keys into the VM whoever starts it: the one who saved them
+    # can sign in there, so the dialog says whose they are before the VM exists
+    bare = _bp('b7', 'bare-keys', ciuser='', created_by='bob',
+               sshkeys='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOpenkey12\n# retired\nssh-rsa AAAAB3NzaC1yc2E ci build box')
+    app = open_app(blueprints=[OTHER, WIN, bare])
+    page = _page(app)
+    note = page.locator('[data-cr-bp-access]')
+    page.locator('[data-cr-bp-deploy="b3"]').click()
+    _need(page, '[data-cr-bp-deploy-form="b3"]', 'the deploy dialog opens')
+    assert note.get_attribute('data-cr-bp-access') == 'alice'
+    assert note.inner_text() == 'Goes into the VM: the SSH keys admin@lab for the user debian, saved in the blueprint by alice.'
+    page.locator('[data-cr-bp-deploy-cancel]').click()
+    page.locator('[data-cr-bp-deploy="b7"]').click()
+    _need(page, '[data-cr-bp-deploy-form="b7"]', 'the deploy dialog opens')
+    assert note.inner_text() == ('Goes into the VM: the SSH keys ssh-ed25519 …penkey12, ci build box for the default user '
+                                 'of the image, saved in the blueprint by bob.')
+    page.locator('[data-cr-bp-deploy-cancel]').click()
+    # Windows takes no keys, so there is nothing to name
+    page.locator('[data-cr-bp-deploy="b5"]').click()
+    _need(page, '[data-cr-bp-deploy-form="b5"]', 'the deploy dialog opens')
+    page.wait_for_timeout(300)
+    assert note.count() == 0
+    _no_errors(app)
+
+
 def test_runtime_a_linux_template_without_a_remembered_one_asks_for_it(open_app):
     app = open_app(progress=[DONE])
     page = _page(app)

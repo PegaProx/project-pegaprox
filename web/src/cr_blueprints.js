@@ -151,6 +151,16 @@
                 .filter(([l]) => l && !l.startsWith('#') && !CR_BP_KEY_RE.test(l)).map(([, n]) => n);
         }
 
+        // one short name per SSH key: its comment, else its type and the end of the key
+        function crBpKeyNames(text) {
+            return String(text || '').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#')).map(l => {
+                const [type, body, ...rest] = l.split(/\s+/);
+                const note = rest.join(' ');
+                if (note) return note.length > 40 ? `${note.slice(0, 39)}…` : note;
+                return `${type} …${String(body || '').slice(-8)}`;
+            });
+        }
+
         // a VM name proposed from the blueprint name
         function crBpVmName(name) {
             const s = String(name || '').toLowerCase().replace(/[^a-z0-9.-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 50);
@@ -715,6 +725,10 @@
                 if (form.template_vmid && form.template_vmid === mapped) return t('crBpTplMapped');
                 return bp.can_edit ? t('crBpTplRemember') : '';
             };
+            // the keys go into the VM as the one who saved the blueprint left them, whoever deploys it
+            const keyNames = win ? [] : crBpKeyNames(bp.sshkeys);
+            const access = keyNames.length ? crFill(t(bp.ciuser ? 'crBpAccess' : 'crBpAccessNoUser'),
+                { keys: keyNames.join(', '), user: bp.ciuser || '', by: bp.created_by || '-' }) : '';
             const footer = dep ? (
                 <>
                     {done && nav && typeof nav.openGuest === 'function' && (
@@ -814,6 +828,11 @@
                             <p className="cr-bp-fine" data-cr-bp-summary="">
                                 {crFill(t('crBpDeploySummary'), { hw: crBpHw(bp, t), net: crBpNet(bp, t), ip: t(CR_BP_IP_WORD[bp.ip_mode] || 'crBpIpDhcp') })}
                             </p>
+                            {access && (
+                                <CrUpdNote tone="info" id="bp-access">
+                                    <span data-cr-bp-access={bp.created_by || ''}>{access}</span>
+                                </CrUpdNote>
+                            )}
                             {missing.length > 0 && (
                                 <CrUpdNote tone="warning" id="bp-bridges">
                                     <span data-cr-bp-bridge-missing={missing.join(' ')}>
