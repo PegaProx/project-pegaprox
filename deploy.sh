@@ -528,17 +528,18 @@ finally:
     sleep 8
 
     # Set port in database if not default
+    # NS Nov 2026 - through PegaProx itself, as the service user in its directory: the
+    # sqlite3 CLI cannot open the SQLCipher database, so this failed on every encrypted install
     if [ "$ACCESS_PORT" != 5000 ]; then
         print_info "Configuring port $ACCESS_PORT..."
-        PEGAPROX_DB="$INSTALL_DIR/config/pegaprox.db"
-
-        if [ -f "$PEGAPROX_DB" ]; then
-            sqlite3 "$PEGAPROX_DB" "INSERT OR REPLACE INTO server_settings (key, value) VALUES ('port', '$ACCESS_PORT');" 2>/dev/null && {
-                echo "Restarting with new port..."
-                systemctl restart pegaprox
-                sleep 5
-                print_success "Port set to $ACCESS_PORT"
-            } || print_warning "Set port manually in Settings > Server"
+        if (cd "$INSTALL_DIR" && runuser -u "$SERVICE_USER" -- "$INSTALL_DIR/venv/bin/python" \
+                "$INSTALL_DIR/$PYTHON_FILE" --set-port "$ACCESS_PORT"); then
+            echo "Restarting with new port..."
+            systemctl restart pegaprox
+            sleep 5
+            print_success "Port set to $ACCESS_PORT"
+        else
+            print_warning "Set port manually in Settings > Server"
         fi
     fi
 
