@@ -454,9 +454,18 @@ def test_the_check_comes_before_the_upload(job):
     assert text.index(CHECK) < text.index('- name: Artefakt sichern')
 
 
-def _status_file(tmp_path, monkeypatch, backend):
-    """--keystore-status as PegaProx prints it, with `backend` as the driver it found."""
+def _status_file(tmp_path, monkeypatch, backend, files=None):
+    """--keystore-status as PegaProx prints it, with `backend` as the driver it found and a
+    config directory of its own: no database in it, or `files`, name to 'plain', 'encrypted'
+    or 'empty'."""
+    import pegaprox.constants
     from pegaprox.core import dbcrypto
+    cfg = tmp_path / 'config'
+    cfg.mkdir()
+    heads = {'plain': b'SQLite format 3\x00' + bytes(84), 'encrypted': os.urandom(100), 'empty': b''}
+    for name, state in (files or {}).items():
+        (cfg / name).write_bytes(heads[state])
+    monkeypatch.setattr(pegaprox.constants, 'CONFIG_DIR', str(cfg))
     monkeypatch.setattr(dbcrypto, 'BACKEND', backend)
     out = ('Gevent monkey-patching applied\n'
            + json.dumps({'keystore': {'ok': False, 'source': 'none'}, 'db': dbcrypto.backend_status()}, indent=2)
@@ -537,3 +546,39 @@ def test_a_brace_in_a_log_line_ahead_of_the_status_is_not_taken_for_it(tmp_path,
     path.write_text('[KEYSTORE] {"backend": "sqlcipher"} said someone\n' + path.read_text())
     r = _smoke_backend(path)
     assert r.returncode == 1 and 'runs its database on sqlite-plain' in r.stdout
+
+
+@pytest.mark.parametrize('files', [{}, {'pegaprox.db': 'encrypted'}, {'pegaprox.db': 'encrypted', 'syslog.db': 'empty'}])
+def test_the_backend_check_passes_a_database_that_is_encrypted_or_not_there_yet(tmp_path, monkeypatch, files):
+    r = _smoke_backend(_status_file(tmp_path, monkeypatch, 'sqlcipher', files))
+    assert r.returncode == 0, r.stdout
+    assert r.stdout == 'smoke: PegaProx in the image runs its database on SQLCipher\n'
+
+
+def test_the_backend_check_fails_a_plain_database_next_to_sqlcipher(tmp_path, monkeypatch):
+    """The driver loads, the database stayed plain (PEGAPROX_DISABLE_AUTO_ENCRYPT in the image,
+    an auto-encrypt that did not run): the driver alone passed that."""
+    path = _status_file(tmp_path, monkeypatch, 'sqlcipher', {'pegaprox.db': 'plain', 'syslog.db': 'encrypted'})
+    r = _smoke_backend(path)
+    assert r.returncode == 1
+    db = tmp_path / 'config' / 'pegaprox.db'
+    assert r.stdout == f'::error::PegaProx in the image runs SQLCipher, but its database {db} is plain\n'
+
+
+def test_a_database_it_cannot_read_is_no_pass(tmp_path):
+    path = tmp_path / 'keystore-status.json'
+    path.write_text(json.dumps({'db': {'backend': 'sqlcipher', 'files': {
+        '/var/lib/pegaprox/config/pegaprox.db': 'unreadable (PermissionError)',
+        '/var/lib/pegaprox/config/syslog.db': 'missing'}}}, indent=2) + '\n')
+    r = _smoke_backend(path)
+    assert r.returncode == 1
+    assert r.stdout == ('::error::PegaProx in the image runs SQLCipher, but its database '
+                        '/var/lib/pegaprox/config/pegaprox.db is unreadable (PermissionError)\n')
+
+
+def test_a_release_without_the_file_list_is_checked_by_its_driver(tmp_path):
+    """--keystore-status of 1.4.1 and before, which a dispatch build without a tag installs."""
+    path = tmp_path / 'keystore-status.json'
+    path.write_text(json.dumps({'keystore': {}, 'db': {'backend': 'sqlcipher', 'encrypted_at_rest': True}},
+                               indent=2) + '\n')
+    assert _smoke_backend(path).returncode == 0
