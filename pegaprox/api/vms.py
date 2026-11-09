@@ -5449,7 +5449,8 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
         pve_ws = ws_client.create_connection(
             pve_ws_url,
             sslopt=({} if _verify_tls else {"cert_reqs": _ssl.CERT_NONE}),
-            header={"Cookie": f"PVEAuthCookie={pve_ticket}", "Host": f"{host}:{port}"},
+            header={"Cookie": f"PVEAuthCookie={pve_ticket}"},
+            host=f"{host}:{port}",
             redirect_limit=0,
             timeout=timeout,
         )
@@ -5691,8 +5692,9 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
             pve_ws = ws_client.create_connection(
                 pve_ws_url,
                 sslopt=({} if _verify_tls else {"cert_reqs": _ssl.CERT_NONE}),
-                header=_pve_console_ws_auth(mgr, f"{host}:{port}", pve_ticket,
+                header=_pve_console_ws_auth(mgr, pve_ticket,
                                             reuse_manager_auth=_reuse_manager_auth),
+                host=f"{host}:{port}",          # the node, also through the tunnel
                 redirect_limit=0,
                 timeout=VNC_PVE_CONNECT_TIMEOUT,
             )
@@ -8966,7 +8968,7 @@ def _pve_console_ws_path(node, vm_type, vmid, vnc_port, vnc_ticket):
             f"?port={vnc_port}&vncticket={url_quote(str(vnc_ticket), safe='')}")
 
 
-def _pve_console_ws_auth(manager, netloc, fresh_ticket=None, reuse_manager_auth=False):
+def _pve_console_ws_auth(manager, fresh_ticket=None, reuse_manager_auth=False):
     """Headers for the upgrade to PVE's vncwebsocket.
 
     PVE binds a vncproxy ticket to whoever asked for it. When we reuse the ticket
@@ -8980,8 +8982,11 @@ def _pve_console_ws_auth(manager, netloc, fresh_ticket=None, reuse_manager_auth=
 
     Without passthrough we issued the vncproxy call ourselves with fresh_ticket,
     so that is the right cookie to send. MK Sep 2026
+
+    No Host here: websocket-client writes its own from the URL or its host option, and a
+    second one is a duplicate header pveproxy refuses with 400. JB Nov 2026 (#1329)
     """
-    headers = {"Host": netloc}
+    headers = {}
     if reuse_manager_auth:
         if getattr(manager, '_using_api_token', False) and getattr(manager, '_api_token', None):
             headers['Authorization'] = f"PVEAPIToken={manager._api_token}"
@@ -11369,7 +11374,7 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
         pve_ws = websocket.create_connection(
             pve_ws_url,
             sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
-            header=_pve_console_ws_auth(manager, f"{host}:{port}", pve_ticket,
+            header=_pve_console_ws_auth(manager, pve_ticket,
                                         reuse_manager_auth=_reuse_manager_auth),
             redirect_limit=0,
             timeout=VNC_PVE_CONNECT_TIMEOUT
@@ -11839,7 +11844,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             # denied - invalid PVEVNC ticket" on PVE 9.1.x. Reuse the manager's
             # stored auth instead. Backwards-compat path keeps the fresh login.
             ws_auth_header = _pve_console_ws_auth(
-                manager, f"{tunnel_target_host}:{tunnel_target_port}", pve_ticket,
+                manager, pve_ticket,
                 reuse_manager_auth=bool(pve_port_q and pve_ticket_q) or _token_auth)
 
             # MK Apr 2026 — ws_client.create_connection is synchronous; offload to
@@ -12424,7 +12429,7 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
         pve_ws = websocket.create_connection(
             pve_ws_url,
             sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
-            header=_pve_console_ws_auth(manager, f"{host}:{port}", pve_ticket,
+            header=_pve_console_ws_auth(manager, pve_ticket,
                                         reuse_manager_auth=_reuse_manager_auth),
             redirect_limit=0,
             timeout=VNC_PVE_CONNECT_TIMEOUT
