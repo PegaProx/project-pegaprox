@@ -36,10 +36,14 @@ sys.exit(mod.main(args))
 '''
 
 
-def _fake(tmp_path):
-    """The real package's layout with a build this interpreter does not take."""
+def _fake(tmp_path, empty=False):
+    """The real package's layout with a build this interpreter does not take, or the empty
+    directory that is left when one of the two packages sharing it is removed."""
     pkg = tmp_path / 'fake' / 'sqlcipher3'
     pkg.mkdir(parents=True)
+    if empty:
+        (pkg / '__pycache__').mkdir()
+        return tmp_path / 'fake'
     (pkg / '__init__.py').write_text('from sqlcipher3.dbapi2 import *\n')
     (pkg / 'dbapi2.py').write_text('from sqlcipher3._sqlite3 import *\n')
     taken = importlib.machinery.EXTENSION_SUFFIXES
@@ -93,6 +97,19 @@ def test_a_package_that_does_not_load_is_named_as_that(host, tmp_path):
     assert 'is installed but does not load on this machine' in said[0]
     assert "ModuleNotFoundError: No module named 'sqlcipher3._sqlite3'" in said[0]
     assert 'is python3-sqlcipher3 installed?' not in said[0]
+    assert said[0].endswith('Not copying a key that may be the wrong one. Nothing was changed.')
+    assert not host.key.exists()
+
+
+def test_an_empty_package_directory_is_named_instead_of_a_traceback(host, tmp_path):
+    host.db.write_bytes(os.urandom(8192))
+    _write_key(host.legacy)
+    r = host.run(_fake(tmp_path, empty=True))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert 'Traceback' not in r.stderr, r.stderr
+    said = _refusal(r.stderr)
+    assert len(said) == 1, r.stderr
+    assert 'ImportError: the sqlcipher3 found has no driver in it' in said[0]
     assert said[0].endswith('Not copying a key that may be the wrong one. Nothing was changed.')
     assert not host.key.exists()
 
