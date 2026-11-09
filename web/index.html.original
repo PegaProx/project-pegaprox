@@ -3702,11 +3702,21 @@
 
             /* JB Nov 2026 - the shell clips sideways (#727), so the buttons at the end of a row of a page are gone on a
                phone. There are hundreds of these rows, so this goes by their shape. */
-            .pp-main-row .flex-1, .cloud-content .flex-1 { min-width: 0; }
-            .pp-main-row .flex.items-center.justify-between, .pp-main-row .flex.items-center.gap-1, .pp-main-row .flex.items-center.gap-2,
-            .pp-main-row .flex.items-center.gap-3, .pp-main-row .flex.gap-1, .pp-main-row .flex.gap-2, .pp-main-row .corp-toolbar,
-            .cloud-content .flex.items-center.justify-between, .cloud-content .flex.items-center.gap-1, .cloud-content .flex.items-center.gap-2,
-            .cloud-content .flex.items-center.gap-3, .cloud-content .flex.gap-1, .cloud-content .flex.gap-2, .pp-main-row .cr-seg {
+            /* NS Nov 2026 - Cloud goes by the scroll box of the page, not .cloud-content: the topbar sits in that, and its
+               nine flags wrapped it to 350 px. A column or a button is no row and keeps the width of its content (the
+               Summary columns of a guest in Corporate overlapped, the labels of the buttons in Hardening ran into each other). */
+            .pp-main-row .flex-1, .cloud-content-scroll .flex-1 { min-width: 0; }
+            .pp-main-row .flex.items-center.justify-between:not(.flex-col):not(button),
+            .pp-main-row .flex.items-center.gap-1:not(.flex-col):not(button), .pp-main-row .flex.items-center.gap-2:not(.flex-col):not(button),
+            .pp-main-row .flex.items-center.gap-3:not(.flex-col):not(button), .pp-main-row .flex.items-center.gap-4:not(.flex-col):not(button),
+            .pp-main-row .flex.gap-1:not(.flex-col):not(button), .pp-main-row .flex.gap-2:not(.flex-col):not(button),
+            .cloud-content-scroll .flex.items-center.justify-between:not(.flex-col):not(button),
+            .cloud-content-scroll .flex.items-center.gap-1:not(.flex-col):not(button),
+            .cloud-content-scroll .flex.items-center.gap-2:not(.flex-col):not(button),
+            .cloud-content-scroll .flex.items-center.gap-3:not(.flex-col):not(button),
+            .cloud-content-scroll .flex.items-center.gap-4:not(.flex-col):not(button), .cloud-content-scroll .flex.gap-1:not(.flex-col):not(button),
+            .cloud-content-scroll .flex.gap-2:not(.flex-col):not(button),
+            .pp-main-row .corp-toolbar, .pp-main-row .cr-seg {
                 flex-wrap: wrap; row-gap: 6px; min-width: 0;
             }
 
