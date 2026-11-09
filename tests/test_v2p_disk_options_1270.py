@@ -9,6 +9,7 @@ start: the guest would not boot with it.
 
 The migrations run against the ESXi host and Proxmox node of test_v2p_tpm_and_folder_copy.
 """
+import inspect
 import re
 
 import pytest
@@ -94,6 +95,14 @@ def test_the_cache_mode_is_a_pve_token_or_nothing(cache, want):
 
 def test_cache_and_aio_go_on_together():
     assert _opts(disk_cache='directsync', aio_mode='native') == ',cache=directsync,aio=native'
+
+
+def test_every_attach_of_a_final_disk_carries_the_drive_options():
+    # the rescue of an unused volume attaches a final disk too, and a bare attach drops them
+    attaches = re.findall(r'qm set \{task\.proxmox_vmid\} --\{disk_bus\}\{\w+\} \{\w*vol\w*\}(\S*)',
+                          inspect.getsource(v2p))
+    assert len(attaches) >= 11, attaches
+    assert [a for a in attaches if not a.startswith('{task._disk_attach_opts()}')] == []
 
 
 # -- the start of the migration --------------------------------------------------------------

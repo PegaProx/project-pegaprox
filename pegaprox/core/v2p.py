@@ -244,9 +244,10 @@ class V2PMigrationTask:
 
     def _disk_attach_opts(self):
         # #598 — extra drive options appended to a FINAL target-disk attach only.
-        # aio_mode is whitelisted in __init__ to one of three literal tokens, so
-        # the returned suffix can never carry shell/config metacharacters. Returns
-        # '' by default (no behaviour change; PVE default aio=io_uring).
+        # aio_mode and disk_cache are whitelisted in __init__ to literal tokens and
+        # disk_iothread is a bool, so the returned suffix can never carry shell/config
+        # metacharacters. Returns '' when none of them applies (PVE default: no IO
+        # thread, cache=none, aio=io_uring).
         opts = ''
         # JB Nov 2026 (#1270) - PVE runs a disk in its own IO thread only on VirtIO Block or on
         # SCSI behind virtio-scsi-single; elsewhere the flag is ignored or refused
@@ -7072,7 +7073,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 unused_vol = um.group(2)
                 di = unused_idx  # map unused0 → disk0, etc.
                 rc_rescue, out_rescue, _ = _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {unused_vol} 2>&1", timeout=15)
+                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {unused_vol}{task._disk_attach_opts()} 2>&1", timeout=15)
                 if rc_rescue == 0:
                     task.log(f"  Rescued unused{unused_idx} → {disk_bus}{di}: {unused_vol} ✓")
                     attached_count += 1
