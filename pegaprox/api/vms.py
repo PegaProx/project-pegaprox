@@ -15221,15 +15221,18 @@ def get_xcp_os_types(cluster_id):
     return jsonify(mgr.get_os_types())
 
 
-def _start_after_create_refused(config):
-    """403 when the new guest is to be started by someone who may create but not start."""
-    if not config.get('start'):
+def _start_after_create_refused(config, manager):
+    """403 when the new guest is to be started by someone who may create but not start.
+    The permission is the one the power route asks for: xapi.vm.power on XCP-ng, vm.start
+    elsewhere. NS Nov 2026"""
+    if not isinstance(config, dict) or not config.get('start'):
         return None
+    needed = 'xapi.vm.power' if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng' else 'vm.start'
     from pegaprox.utils.rbac import has_permission
-    if has_permission(build_authz_user(request.session.get('user', ''), request.session), 'vm.start'):
+    if has_permission(build_authz_user(request.session.get('user', ''), request.session), needed):
         return None
-    return jsonify({'error': 'Starting the guest after creation needs the vm.start permission',
-                    'code': 'MISSING_PERMISSION', 'required': 'vm.start'}), 403
+    return jsonify({'error': f'Starting the guest after creation needs the {needed} permission',
+                    'code': 'MISSING_PERMISSION', 'required': needed}), 403
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/qemu', methods=['POST'])
@@ -15257,7 +15260,9 @@ def create_vm_api(cluster_id, node):
             return jsonify({'error': 'Permission denied: xapi.vm.create'}), 403
 
     vm_config = request.json or {}
-    _serr = _start_after_create_refused(vm_config)
+    if not isinstance(vm_config, dict):
+        return jsonify({'error': 'Expected a JSON object'}), 400
+    _serr = _start_after_create_refused(vm_config, manager)
     if _serr:
         return _serr
 
@@ -15352,7 +15357,7 @@ def create_container_api(cluster_id, node):
     ct_config = request.json or {}
     if not isinstance(ct_config, dict):
         return jsonify({'error': 'Expected a JSON object'}), 400
-    _serr = _start_after_create_refused(ct_config)
+    _serr = _start_after_create_refused(ct_config, manager)
     if _serr:
         return _serr
 

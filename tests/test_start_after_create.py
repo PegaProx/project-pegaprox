@@ -87,3 +87,42 @@ class TestRoute:
         r = self._post(api.as_user(user), kind, {'vmid': 100, 'start': True})
         assert r.status_code == 403
         called.assert_not_called()
+
+
+class TestXcpng:
+    """XCP-ng starts a guest under xapi.vm.power, so that is what the box asks for there."""
+
+    def _fake(self, api):
+        fake = api.make_fake_manager(CID, cluster_type='xcpng', create_vm={'success': True, 'vmid': 'u-1'})
+        fake.is_connected = True
+        api.set_manager(CID, fake)
+        return fake.create_vm
+
+    def test_xapi_vm_power_is_enough_without_vm_start(self, api, seed):
+        called = self._fake(api)
+        user = seed.user('xo', role='viewer', permissions=['vm.create', 'xapi.vm.create', 'xapi.vm.power'])
+        r = api.as_user(user).post(f'/api/clusters/{CID}/nodes/n1/qemu', json={'name': 'a', 'start': True})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        called.assert_called_once()
+
+    def test_vm_start_is_not_what_starts_a_guest_there(self, api, seed):
+        called = self._fake(api)
+        user = seed.user('xo', role='viewer', permissions=['vm.create', 'xapi.vm.create', 'vm.start'])
+        r = api.as_user(user).post(f'/api/clusters/{CID}/nodes/n1/qemu', json={'name': 'a', 'start': True})
+        assert r.status_code == 403
+        assert r.get_json()['required'] == 'xapi.vm.power'
+        called.assert_not_called()
+
+    def test_creating_without_the_box_needs_no_power_permission(self, api, seed):
+        called = self._fake(api)
+        user = seed.user('xo', role='viewer', permissions=['vm.create', 'xapi.vm.create'])
+        r = api.as_user(user).post(f'/api/clusters/{CID}/nodes/n1/qemu', json={'name': 'a', 'start': False})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        called.assert_called_once()
+
+    def test_a_body_that_is_no_object_is_refused_as_one(self, api, seed):
+        called = self._fake(api)
+        user = seed.user('xo', role='viewer', permissions=['vm.create', 'xapi.vm.create'])
+        r = api.as_user(user).post(f'/api/clusters/{CID}/nodes/n1/qemu', json=['start'])
+        assert r.status_code == 400 and 'JSON object' in r.get_json()['error'], r.get_data(as_text=True)
+        called.assert_not_called()
