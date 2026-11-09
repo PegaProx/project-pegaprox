@@ -61,16 +61,21 @@ def _package_dir() -> Optional[str]:
         return None
 
 
-def sqlcipher_problem() -> Optional[str]:
-    """What to tell an admin when sqlcipher3 is installed but does not load, else None."""
+def sqlcipher_problem(encrypted: Optional[str] = None) -> Optional[str]:
+    """What to tell an admin when sqlcipher3 is installed but does not load, else None.
+    With `encrypted`, the path of a database encrypted before, it is about that one."""
     if not SQLCIPHER_ERROR:
         return None
     at = f' at {_SQLCIPHER_AT}' if _SQLCIPHER_AT else ''
-    return (f"The SQLCipher package (sqlcipher3{at}) is installed but does not load on this "
+    # the same CPU with another Python is this case too, so it names both
+    fits = 'a package built for this machine and this Python version'
+    said = (f"The SQLCipher package (sqlcipher3{at}) is installed but does not load on this "
             f"machine ({platform.machine() or 'unknown machine'}, Python "
-            f"{platform.python_version()}): {SQLCIPHER_ERROR}. The database stays plain SQLite "
-            f"until a package built for this architecture is installed, and one encrypted "
-            f"before does not open until then.")
+            f"{platform.python_version()}): {SQLCIPHER_ERROR}.")
+    if encrypted:
+        return f"{said} {encrypted} is encrypted and does not open until {fits} is installed."
+    return (f"{said} The database stays plain SQLite until {fits} is installed, and one "
+            f"encrypted before does not open until then.")
 
 
 # ─── Backend detection ──────────────────────────────────────────────────────
@@ -735,13 +740,25 @@ def ensure_db_encrypted(db_path: str) -> dict:
 
     Returns a dict with: action, state_before, state_after, [backup_path,
     duration_s, rows_copied].  Does NOT raise on routine cases; raises only
-    for unrecoverable situations (corrupt DB, unknown-key encrypted DB).
+    for unrecoverable situations (corrupt DB, unknown-key encrypted DB, an
+    encrypted DB without SQLCipher).
 
     Opt-out: set PEGAPROX_DISABLE_AUTO_ENCRYPT=1 to keep a plain DB.
     """
     db_path = os.path.abspath(db_path)
     if db_path in _AUTO_MIG_DONE:
         return {'action': 'already-checked'}
+    # MK Nov 2026 (#1226) - a database encrypted before (a config directory moved to arm64,
+    # a pip install swapped for the deb) does not open on plain SQLite, opt-out or not.
+    # Saying "stays plain" and failing at the first query with "file is not a database"
+    # helps nobody, so the start refuses here with the reason.
+    if BACKEND != 'sqlcipher' and file_state(db_path) == 'encrypted':
+        raise RuntimeError(
+            "[DBCRYPTO] " + (sqlcipher_problem(encrypted=db_path)
+                             or f"{db_path} is encrypted and sqlcipher3 is not installed, so it does "
+                                "not open. Install the SQLCipher package of requirements.txt "
+                                "(python3-sqlcipher3 for the Debian package).")
+            + " Refusing to start.")
     if os.environ.get('PEGAPROX_DISABLE_AUTO_ENCRYPT', '').lower() in ('1', 'true', 'yes'):
         _LOG.info("[DBCRYPTO] PEGAPROX_DISABLE_AUTO_ENCRYPT set — skipping auto-encrypt check")
         _AUTO_MIG_DONE.add(db_path)

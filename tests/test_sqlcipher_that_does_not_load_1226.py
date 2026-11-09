@@ -130,7 +130,10 @@ def test_an_installed_sqlcipher3_that_does_not_load_is_a_warning(tmp_path, kind,
     assert 'is installed but does not load on this machine' in text
     assert reason in text
     assert f'({platform.machine()}, Python {platform.python_version()})' in text
-    assert 'stays plain SQLite until a package built for this architecture is installed' in text
+    # the same CPU with another Python lands here too
+    assert ('stays plain SQLite until a package built for this machine and this Python version '
+            'is installed') in text
+    assert 'architecture' not in text
     assert str(tmp_path / 'fake' / 'sqlcipher3') in text
     assert 'not available' not in text
     assert out['error'] == reason
@@ -173,6 +176,98 @@ def test_without_logging_set_up_the_warning_still_reaches_stderr(tmp_path):
     said = _bare_import(tmp_path, _fake(tmp_path, 'other-build'))
     assert 'is installed but does not load on this machine' in said
     assert _bare_import(tmp_path, None) == ''
+
+
+# --- the start lines of main(), run from the source without starting anything -------------
+
+_START = r'''
+import ast, logging, os, sys
+root, fake = sys.argv[1:3]
+sys.path[:] = [p for p in sys.path if 'site-packages' not in p and 'dist-packages' not in p]
+if fake:
+    sys.path.insert(0, fake)
+sys.path.insert(0, root)
+src = os.path.join(root, 'pegaprox', 'app.py')
+main = next(n for n in ast.parse(open(src, encoding='utf-8').read()).body
+            if isinstance(n, ast.FunctionDef) and n.name == 'main')
+block = min((n for n in ast.walk(main) if isinstance(n, ast.Try) and any(
+    getattr(c.func, 'attr', None) == 'ensure_db_encrypted' for c in ast.walk(n) if isinstance(c, ast.Call))),
+    key=lambda n: n.end_lineno - n.lineno)
+exec(compile(ast.Module(body=[block], type_ignores=[]), src, 'exec'),
+     {'__name__': 'start', 'os': os, 'sys': sys, 'logging': logging})
+'''
+
+
+def _start(tmp_path, fake, db):
+    """What the auto-encrypt step of main() prints for config/pegaprox.db in `db` state."""
+    cfg = tmp_path / 'config'
+    cfg.mkdir()
+    if db == 'plain':
+        import sqlite3
+        c = sqlite3.connect(cfg / 'pegaprox.db')
+        c.execute('CREATE TABLE t (a)')
+        c.commit()
+        c.close()
+    else:
+        # all that is read without a key: no SQLite magic in front
+        (cfg / 'pegaprox.db').write_bytes(os.urandom(8192))
+    r = subprocess.run([sys.executable, '-I', '-B', '-c', _START, str(ROOT), str(fake or '')],
+                       cwd=tmp_path, env=_env(tmp_path), capture_output=True, text=True, timeout=120)
+    assert 'auto-encrypt check failed' not in r.stderr, r.stderr[-3000:]
+    return r, str(cfg / 'pegaprox.db')
+
+
+def test_the_start_line_says_why_a_plain_database_stays_plain(tmp_path):
+    r, _ = _start(tmp_path, _fake(tmp_path, 'other-build'), 'plain')
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert ("sqlcipher3 is installed but does not load here (ModuleNotFoundError: No module named "
+            "'sqlcipher3._sqlite3') - pegaprox.db stays plain until a package built for this "
+            "machine and this Python version is installed") in r.stdout
+    assert 'not installed' not in r.stdout
+
+
+def test_without_a_package_the_start_line_is_the_old_one(tmp_path):
+    r, _ = _start(tmp_path, None, 'plain')
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert 'sqlcipher3 not installed - pegaprox.db stays plain (field-level encryption still active)' in r.stdout
+    assert 'does not load' not in r.stdout
+
+
+def test_an_encrypted_database_it_cannot_open_stops_the_start(tmp_path):
+    """Moved to arm64, or a pip install replaced by the deb: before, the line said the
+    database stays plain and the first query failed with "file is not a database"."""
+    r, db = _start(tmp_path, _fake(tmp_path, 'other-build'), 'encrypted')
+    assert r.returncode == 1, r.stdout + r.stderr
+    fatal = [ln for ln in r.stdout.splitlines() if ln.startswith('[FATAL]')]
+    assert len(fatal) == 1, r.stdout
+    assert '[DBCRYPTO] The SQLCipher package (sqlcipher3 at ' in fatal[0]
+    assert "is installed but does not load on this machine" in fatal[0]
+    assert "ModuleNotFoundError: No module named 'sqlcipher3._sqlite3'" in fatal[0]
+    assert fatal[0].endswith(f'{db} is encrypted and does not open until a package built for this '
+                             'machine and this Python version is installed. Refusing to start.')
+    assert 'stays plain' not in r.stdout
+
+
+def test_one_that_is_missing_stops_the_start_too(tmp_path):
+    r, db = _start(tmp_path, None, 'encrypted')
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert (f'[FATAL] [DBCRYPTO] {db} is encrypted and sqlcipher3 is not installed, so it does not '
+            'open.') in r.stdout
+    assert 'stays plain' not in r.stdout
+
+
+@pytest.mark.parametrize('error', [None, 'ImportError: wrong ELF class: ELFCLASS32'])
+def test_the_opt_out_does_not_open_an_encrypted_database_either(tmp_path, monkeypatch, error):
+    monkeypatch.setattr(dbcrypto, 'BACKEND', 'sqlite-plain')
+    monkeypatch.setattr(dbcrypto, 'SQLCIPHER_ERROR', error, raising=False)
+    monkeypatch.setenv('PEGAPROX_DISABLE_AUTO_ENCRYPT', '1')
+    db = tmp_path / 'pegaprox.db'
+    db.write_bytes(os.urandom(8192))
+    with pytest.raises(RuntimeError, match='is encrypted and .* Refusing to start'):
+        dbcrypto.ensure_db_encrypted(str(db))
+    plain = tmp_path / 'plain.db'
+    plain.write_bytes(b'SQLite format 3\x00' + bytes(4080))
+    assert dbcrypto.ensure_db_encrypted(str(plain)) == {'action': 'opt-out'}
 
 
 # --- the status where the key's own message is ---------------------------------------------
@@ -233,6 +328,33 @@ def test_the_compliance_view_says_nothing_when_it_loads(api, seed, monkeypatch):
     body = _compliance(api, seed)
     assert body['encryption']['sqlcipher_error'] is None
     assert not any('SQLCipher' in r for r in body['recommendations'])
+
+
+def _set_port_on(tmp_path, monkeypatch, head):
+    from pegaprox import constants
+    from pegaprox.cli import set_port
+    db = tmp_path / 'config' / 'pegaprox.db'
+    db.parent.mkdir()
+    db.write_bytes(head + os.urandom(4096))
+    monkeypatch.setattr(constants, 'DATABASE_FILE', str(db))
+    monkeypatch.setattr(constants, 'CONFIG_OWNED_BY_US', True)
+    monkeypatch.setattr(dbcrypto, 'BACKEND', 'sqlite-plain')
+    return set_port.main(['8443']), str(db)
+
+
+def test_set_port_says_why_it_cannot_open_an_encrypted_database(tmp_path, monkeypatch, capsys, broken):
+    code, db = _set_port_on(tmp_path, monkeypatch, os.urandom(16))
+    err = capsys.readouterr().err
+    assert code == 4
+    assert 'is installed but does not load on this machine' in err and 'wrong ELF class' in err
+    assert f'{db} is encrypted and does not open until' in err
+
+
+def test_set_port_without_a_package_keeps_its_line(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(dbcrypto, 'SQLCIPHER_ERROR', None, raising=False)
+    code, db = _set_port_on(tmp_path, monkeypatch, os.urandom(16))
+    assert code == 4
+    assert capsys.readouterr().err == f'{db} is encrypted, and sqlcipher3 does not import here\n'
 
 
 def test_migrate_db_says_why_it_is_blocked(tmp_path, monkeypatch, capsys, broken):
