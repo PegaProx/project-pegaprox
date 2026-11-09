@@ -3193,10 +3193,12 @@ def _inject_virtio_drivers(pve_mgr, task):
     # Surface the interesting lines — keep the log compact.
     # Most markers are once-per-run; COPIED/SKIP/COPY_FAILED are per-driver
     # so we log all of them (otherwise we'd hide which drivers actually staged).
-    _multi = ('COPIED ', 'SKIP ', 'COPY_FAILED ')
-    for marker in ['WIN_PART=', 'WDIR=', 'VER_NAME=', 'VER_BUILD=', 'SUBDIR_PRIMARY=', 'SUBDIR_FALLBACKS=', 'SUBDIR=', 'COPIED ', 'SKIP ', 'COPY_FAILED ', 'MSI_STAGED ', 'MSI_MISSING', 'SVC_REGISTERED', 'SVC_FAILED', 'INJECTION_OK']:
+    # JB Nov 2026 (#1247) - MSI_STAGED comes once per package, and every marker starts
+    # its line: as a substring, MSI_MISSING also took the guest agent's line.
+    _multi = ('COPIED ', 'SKIP ', 'COPY_FAILED ', 'MSI_STAGED ')
+    for marker in ['WIN_PART=', 'WDIR=', 'VER_NAME=', 'VER_BUILD=', 'SUBDIR_PRIMARY=', 'SUBDIR_FALLBACKS=', 'SUBDIR=', 'COPIED ', 'SKIP ', 'COPY_FAILED ', 'MSI_STAGED ', 'MSI_MISSING', 'GUEST_AGENT_MSI_MISSING', 'SVC_REGISTERED', 'SVC_FAILED', 'INJECTION_OK']:
         for line in out_str.splitlines():
-            if marker in line:
+            if line.strip().startswith(marker):
                 task.log(f"[VirtIO] {line.strip()}")
                 if marker not in _multi:
                     break
