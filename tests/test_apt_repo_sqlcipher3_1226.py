@@ -186,6 +186,14 @@ def test_what_keystore_status_must_not_say(tmp_path, over, says):
     assert len(bad) == 1 and says in bad[0], bad
 
 
+def test_a_package_that_does_not_load_is_reported_with_its_reason(tmp_path):
+    why = "ModuleNotFoundError: No module named 'sqlcipher3._sqlite3'"
+    bad = smoke.check(_status(db__backend='sqlite-plain', db__sqlcipher_error=why),
+                      str(_rootfs(tmp_path)), owner=os.getuid())
+    assert bad == [f'the database backend is sqlite-plain: python3-sqlcipher3 is installed and '
+                   f'does not load ({why})']
+
+
 def test_the_key_next_to_the_database_fails(tmp_path):
     """The case the PR is about: the database key in the config directory."""
     bad = smoke.check(_status(), str(_rootfs(tmp_path, fernet=KEY + b'\n')), owner=os.getuid())

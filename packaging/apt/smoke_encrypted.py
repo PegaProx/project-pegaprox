@@ -55,7 +55,10 @@ def check(status, root, owner=0):
         bad.append(f'the master key is {ks.get("source_path") or ks.get("source")} '
                    f'(tier {ks.get("tier")}), not {KEY}')
     if db.get('backend') != 'sqlcipher':
-        bad.append(f'the database backend is {db.get("backend")}: python3-sqlcipher3 does not import')
+        # NS Nov 2026 - the status says why when the package is there and does not load
+        why = db.get('sqlcipher_error')
+        bad.append(f'the database backend is {db.get("backend")}: python3-sqlcipher3 '
+                   + (f'is installed and does not load ({why})' if why else 'does not import'))
     state = (db.get('files') or {}).get(DATABASE)
     if state != 'encrypted' or db.get('encrypted_at_rest') is not True:
         bad.append(f'{DATABASE} is {state}, encrypted_at_rest {db.get("encrypted_at_rest")}')
