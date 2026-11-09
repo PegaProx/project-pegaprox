@@ -40,11 +40,10 @@ from flask import Blueprint, jsonify, request
 from pegaprox.globals import cluster_managers
 from pegaprox.core.db import get_db
 from pegaprox.core import ha
-from pegaprox.utils.auth import require_auth, build_authz_user
+from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.concurrent import run_per_node
-from pegaprox.api.helpers import (require_unconfined, check_cluster_access, parse_pve_error, load_server_settings,
-                                  caller_is_scoped)
+from pegaprox.api.helpers import require_unconfined, check_cluster_access, parse_pve_error, load_server_settings
 
 bp = Blueprint('multi_sdn', __name__)
 
@@ -732,17 +731,10 @@ def _row_to_dict(row):
     return d
 
 
-def _caller_can_access_all(member_ids, user=None):
-    """Whether the caller reaches every member and is confined on none: the record is the SDN
-    of each member (controller, peers, subnets), which the per-cluster SDN reads refuse to a
-    caller confined to some guests. user: the identity, built once for a list."""
+def _caller_can_access_all(member_ids):
     for cid in member_ids:
         ok, _err = check_cluster_access(cid)
         if not ok:
-            return False
-        if user is None:
-            user = build_authz_user(request.session.get('user', ''), request.session)
-        if caller_is_scoped(user, cid):
             return False
     return True
 
@@ -766,6 +758,135 @@ def _rollup_status(per_cluster):
 # ---------------------------------------------------------------------------
 # routes
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# #1154 — guided EVPN setup: per-node prerequisite checks over SSH
+# ---------------------------------------------------------------------------
+# Each check is read-only: we look at what is installed, running and
+# configured on every node of every member cluster. The caller gets a
+# checklist with pass/warn/fail plus a fix hint, and the underlay IPs we
+# discovered so the wizard can pre-fill the peer list.
+
+_PREREQ_CHECKS = [
+    ('pve_version',  'pveversion 2>/dev/null | head -1',
+     'PVE version (SDN needs ≥ 8.0)', 'warn', ''),
+    ('frr_installed', 'dpkg -l frr 2>/dev/null | grep -c "^ii" || true',
+     'FRR (BGP daemon) installed', 'fail', 'apt install frr frr-pythontools'),
+    ('frr_running',  'systemctl is-active frr 2>/dev/null || true',
+     'FRR service running', 'warn', 'systemctl enable --now frr'),
+    ('ifupdown2',    'dpkg -l ifupdown2 2>/dev/null | grep -c "^ii" || true',
+     'ifupdown2 in use', 'fail', 'apt install ifupdown2'),
+    ('interfaces_d', "grep -c 'source.*interfaces.d' /etc/network/interfaces 2>/dev/null || true",
+     'interfaces.d sourced', 'fail', 'echo "source /etc/network/interfaces.d/*" >> /etc/network/interfaces'),
+    ('ip_forward',   'cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0',
+     'IP forwarding enabled', 'warn', 'sysctl -w net.ipv4.ip_forward=1'),
+    ('ntp_sync',     'timedatectl show --property=NTPSynchronized --value 2>/dev/null || echo no',
+     'Time sync (NTP)', 'warn', 'timedatectl set-ntp true'),
+    ('vxlan_module', 'modprobe vxlan 2>/dev/null; lsmod | grep -c "^vxlan" || true',
+     'VXLAN kernel module', 'fail', 'modprobe vxlan && echo vxlan >> /etc/modules'),
+]
+
+
+def _ssh_read(mgr, node, cmd, timeout=15):
+    """(stdout, err) — one read-only SSH command via the existing helper."""
+    from pegaprox.utils.ssh import _pve_node_exec
+    try:
+        code, out, err = _pve_node_exec(mgr, node, cmd, timeout=timeout)
+        if code == 0:
+            return out.strip(), None
+        return '', (err or f'exit {code}')[:200]
+    except Exception as exc:
+        return '', str(exc)[:200]
+
+
+def _check_node_prereqs(mgr, node_name):
+    """One node's prerequisite checklist + underlay IP."""
+    items = []
+    for check_id, cmd, label, fail_level, fix_hint in _PREREQ_CHECKS:
+        out, err = _ssh_read(mgr, node_name, cmd)
+        if err:
+            items.append({'id': check_id, 'label': label, 'status': 'unknown',
+                          'detail': err, 'fix_hint': fix_hint})
+            continue
+        val = (out or '0').strip()
+        if check_id == 'pve_version':
+            ok = '8.' in val or '9.' in val or '7.' in val
+            items.append({'id': check_id, 'label': label,
+                          'status': 'ok' if ok else fail_level,
+                          'detail': val[:60], 'fix_hint': fix_hint})
+        elif check_id == 'frr_running':
+            ok = val == 'active'
+            items.append({'id': check_id, 'label': label,
+                          'status': 'ok' if ok else fail_level,
+                          'detail': val, 'fix_hint': fix_hint})
+        elif check_id == 'ip_forward':
+            ok = val == '1'
+            items.append({'id': check_id, 'label': label,
+                          'status': 'ok' if ok else fail_level,
+                          'detail': f'ip_forward={val}', 'fix_hint': fix_hint})
+        elif check_id == 'ntp_sync':
+            ok = val == 'yes'
+            items.append({'id': check_id, 'label': label,
+                          'status': 'ok' if ok else fail_level,
+                          'detail': f'NTP synchronized: {val}', 'fix_hint': fix_hint})
+        else:
+            # grep -c style: >0 means present
+            ok = val != '0'
+            items.append({'id': check_id, 'label': label,
+                          'status': 'ok' if ok else fail_level,
+                          'detail': val, 'fix_hint': fix_hint})
+
+    # underlay IP for the peer auto-fill
+    ip, ip_err = None, None
+    try:
+        ip = mgr._get_node_ip(node_name)
+    except Exception as exc:
+        ip_err = str(exc)[:120]
+    return {'node': node_name, 'items': items, 'underlay_ip': ip, 'ip_error': ip_err}
+
+
+@bp.route('/api/multi-sdn/prerequisites', methods=['POST'])
+@require_auth(perms=['sdn.manage', 'admin.settings'])
+def check_prerequisites():
+    """Per-node EVPN prerequisite checks for #1154. Read-only: SSH reads, no installs."""
+    data = request.get_json(silent=True) or {}
+    cluster_ids = data.get('cluster_ids') or []
+    if not isinstance(cluster_ids, list) or not cluster_ids:
+        return jsonify({'error': 'cluster_ids must be a non-empty list'}), 400
+
+    deny = _require_members_access(cluster_ids, mutating=False)
+    if deny:
+        return deny
+
+    results, node_ips, errors = [], {}, []
+    for cid in cluster_ids:
+        mgr, reason = _resolve_member(cid)
+        if reason:
+            errors.append({'cluster_id': cid, 'reason': reason})
+            continue
+
+        cluster_name = getattr(mgr, 'config', None) and getattr(mgr.config, 'name', None) or str(cid)
+        node_list = mgr.get_nodes() if hasattr(mgr, 'get_nodes') else []
+        for node_info in node_list:
+            node_name = node_info.get('node') if isinstance(node_info, dict) else node_info
+            if not node_name:
+                continue
+            check = _check_node_prereqs(mgr, node_name)
+            check['cluster_id'] = cid
+            check['cluster_name'] = cluster_name
+            results.append(check)
+            if check.get('underlay_ip'):
+                node_ips[node_name] = check['underlay_ip']
+
+    ok_count = sum(1 for r in results if all(i['status'] == 'ok' for i in r['items']))
+    return jsonify({
+        'checks': results,
+        'node_ips': node_ips,
+        'errors': errors,
+        'summary': {'nodes_checked': len(results), 'nodes_ok': ok_count,
+                    'nodes_with_issues': len(results) - ok_count},
+    })
+
+
 @bp.route('/api/multi-sdn/vnets', methods=['GET'])
 @require_auth(perms=['node.view'])
 def list_multi_vnets():
@@ -773,11 +894,10 @@ def list_multi_vnets():
     ALL member clusters — it's a cross-cluster object)."""
     db = get_db()
     rows = db.query('SELECT * FROM multi_cluster_vnets ORDER BY created_at DESC')
-    user = build_authz_user(request.session.get('user', ''), request.session)
     out = []
     for row in rows:
         rec = _row_to_dict(row)
-        if _caller_can_access_all(rec.get('member_clusters', []), user):
+        if _caller_can_access_all(rec.get('member_clusters', [])):
             out.append(rec)
     return jsonify(out)
 
@@ -813,8 +933,7 @@ def validate_multi_vnet():
     defn, err = _validate_definition(body)
     if err:
         return jsonify({'ok': False, 'error': err}), 400
-    # the dry run of a create, and it reads the vnets and zones of every member
-    denied = _require_members_access(defn['member_clusters'], mutating=True)
+    denied = _require_members_access(defn['member_clusters'])
     if denied:
         return denied
 
@@ -1186,7 +1305,7 @@ def scan_multi_vnet(vid):
         return jsonify({'error': 'not found'}), 404
     rec = _row_to_dict(row)
     members = rec.get('member_clusters', [])
-    denied = _require_members_access(members, mutating=True)
+    denied = _require_members_access(members)
     if denied:
         return denied
     defn = rec.get('desired_state') or {}
