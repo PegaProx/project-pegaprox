@@ -26,6 +26,7 @@ from pegaprox.utils.sanitization import sanitize_identifier, sanitize_int, sanit
 from pegaprox.utils.ssh import get_ssh_connection_stats
 from pegaprox.utils.concurrent import GEVENT_AVAILABLE
 from pegaprox.utils.audit import log_audit, get_client_ip
+from pegaprox.utils.index_page import serve_index
 from pegaprox.api.helpers import (
     load_server_settings, save_server_settings, check_cluster_access,
     get_login_settings, get_session_timeout, safe_error,
@@ -3968,35 +3969,15 @@ def index():
     a fresh browser (no localStorage yet) hits cdn.jsdelivr while waiting
     for /auth/check to come back. We rewrite a tiny prelude into <head>
     so the loader sees the flag synchronously on its first read.
+
+    MK Nov 2026 - read once, each coding compressed once, a reload gets its 304 and the
+    flag changes the ETag (utils/index_page.py). Every route that sends the page goes there.
     """
-    import os as _os
-    air_gap = bool(load_server_settings().get('air_gap_mode', False))
-    index_path = _os.path.join(WEB_DIR, 'index.html')
-    if not air_gap:
-        return send_from_directory(WEB_DIR, 'index.html')
-    try:
-        with open(index_path, 'r', encoding='utf-8') as f:
-            html = f.read()
-        prelude = (
-            "<script>"
-            "try{localStorage.setItem('pegaprox-air-gap','1');}catch(_){}"
-            "window.__pegaproxAirGap=true;"
-            "</script>"
-        )
-        # inject right after <head> open tag so it precedes everything
-        if '<head>' in html:
-            html = html.replace('<head>', '<head>' + prelude, 1)
-        else:
-            html = prelude + html
-        resp = make_response(html)
-        resp.headers['Content-Type'] = 'text/html; charset=utf-8'
-        # don't let proxies cache an air-gapped response — toggling the flag
-        # off must take effect on the next reload, not whenever the cache decides
-        resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-        return resp
-    except Exception:
-        logging.exception("[index] air-gap prelude injection failed; falling back to plain index.html")
-        return send_from_directory(WEB_DIR, 'index.html')
+    return _send_page()
+
+
+def _send_page():
+    return serve_index(WEB_DIR, bool(load_server_settings().get('air_gap_mode', False)))
 
 
 def _plugin_page_here(plugin_id):
@@ -4058,7 +4039,7 @@ def oidc_callback_page():
     Identity providers redirect here with ?code=xxx&state=yyy
     The frontend JS picks up the params and calls the API callback endpoint
     """
-    return send_from_directory(WEB_DIR, 'index.html')
+    return _send_page()
 
 @bp.route('/api/status', methods=['GET'])
 def get_status():

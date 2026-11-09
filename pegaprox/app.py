@@ -97,7 +97,19 @@ def create_app():
     ]
     app.config['COMPRESS_LEVEL'] = 6
     app.config['COMPRESS_MIN_SIZE'] = 500
-    Compress(app)
+    # MK Nov 2026 - a file response is a stream, and flask-compress leaves gzip out for
+    # streams by default: a client that only offers gzip got /static/css as it is
+    app.config['COMPRESS_ALGORITHM_STREAMING'] = ['zstd', 'br', 'gzip', 'deflate']
+    # The page (utils/index_page.py) brings its own codings and ETags and is marked for it.
+    # flask-compress must not touch it, it would even gzip the plain one for "gzip;q=0".
+    app.config['COMPRESS_REGISTER'] = False
+    _compress = Compress(app)
+
+    @app.after_request
+    def compress_response(response):
+        if getattr(response, 'pp_encoded', False):
+            return response
+        return _compress.after_request(response)
 
     # Max request size - NS: Feb 2026 - separate limit for file uploads (#82)
     _default_max = int(os.environ.get('PEGAPROX_MAX_REQUEST_SIZE', 10 * 1024 * 1024))  # 10 MB default for API
@@ -772,7 +784,7 @@ _LENGTH_RE = re.compile(r'[0-9]{1,9}')
 _STOOD_IN_FOR = {
     'before': ('validate_request', 'check_ip_whitelist', 'hold_portal_only_accounts',
                'refuse_writes_on_standby', 'count_around_a_read'),
-    'after': ('after_request', 'add_security_headers', 'tell_the_members_about_a_write',
+    'after': ('compress_response', 'add_security_headers', 'tell_the_members_about_a_write',
               'say_no_lease_after_a_refused_write', '_say_we_hold_the_key'),
 }
 
