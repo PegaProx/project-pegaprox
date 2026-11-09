@@ -1362,6 +1362,13 @@ class PegaProxManager:
             self._host_last_failure[host] = time.time()
             self.logger.debug(f"[HOST] '{host}' marked cold; will skip for {self._host_skip_window}s")
 
+    def _candidate_key(self, host, port):
+        """The cooldown key of one connect candidate. Several nodes can share an address
+        behind per-node forwards, each on its own API port: a port that failed must not
+        cool down the others. The cluster's own port keeps the bare host, the key the
+        other callers of _mark_host_failure use."""
+        return host if port in (None, self.cluster_api_port) else f'[{host}]:{port}'
+
     def _host_recently_failed(self, host):
         if not host:
             return False
@@ -1678,7 +1685,7 @@ class PegaProxManager:
             # UI polls) wastes 10s on the dead primary before reaching the
             # working fallback. If ALL hosts are recently-cold we still try
             # them so the breaker eventually self-clears.
-            warm_hosts = [c for c in hosts_to_try if not self._host_recently_failed(c[0])]
+            warm_hosts = [c for c in hosts_to_try if not self._host_recently_failed(self._candidate_key(*c))]
             if warm_hosts:
                 if len(warm_hosts) < len(hosts_to_try):
                     cold = [c[0] for c in hosts_to_try if c not in warm_hosts]
@@ -1742,7 +1749,7 @@ class PegaProxManager:
 
                             self.logger.info(f"Connected to Proxmox at {host} using API Token")
                             self._reset_auth_failures()  # MK (#444)
-                            self._clear_host_failure(host)  # MK May 2026 — host is warm again
+                            self._clear_host_failure(self._candidate_key(host, host_api_port))  # MK May 2026 — host is warm again
 
                             if not self.config.fallback_hosts:
                                 self._auto_discover_fallback_hosts()
@@ -1841,7 +1848,7 @@ class PegaProxManager:
                                 self._try_create_api_token(session, host)
 
                             self._reset_auth_failures()  # MK (#444)
-                            self._clear_host_failure(host)  # MK May 2026 — host is warm again
+                            self._clear_host_failure(self._candidate_key(host, host_api_port))  # MK May 2026 — host is warm again
                             return True
                         elif resp.status_code == 401:
                             # MK May 2026 (#444) — stale creds. Don't try fallbacks
@@ -1861,7 +1868,7 @@ class PegaProxManager:
                     self.logger.warning(f"Connection timeout to {host}")
                     self.is_connected = False
                     self.connection_error = f"Timeout connecting to {host}"
-                    self._mark_host_failure(host)   # skip on next call for _host_skip_window
+                    self._mark_host_failure(self._candidate_key(host, host_api_port))   # skip on next call for _host_skip_window
                 except requests.exceptions.SSLError as ssl_err:
                     # MK: separate SSL errors so the user actually knows what went wrong
                     self.logger.warning(f"SSL error connecting to {host}: {ssl_err}")
@@ -1869,12 +1876,12 @@ class PegaProxManager:
                     self.connection_error = f"SSL error connecting to {host} - check certificate or try hostname instead of IP"
                     # SSL errors are usually a config problem, not host-down — still mark
                     # the host so we don't burn the timeout repeatedly while admin fixes it
-                    self._mark_host_failure(host)
+                    self._mark_host_failure(self._candidate_key(host, host_api_port))
                 except requests.exceptions.ConnectionError:
                     self.logger.warning(f"Cannot connect to {host}")
                     self.is_connected = False
                     self.connection_error = f"Cannot connect to {host}"
-                    self._mark_host_failure(host)
+                    self._mark_host_failure(self._candidate_key(host, host_api_port))
                 except Exception as e:
                     self.logger.warning(f"Error connecting to {host}: {e}")
                     self.is_connected = False
@@ -13078,7 +13085,6 @@ echo "AGENT_INSTALLED_OK"
         configured = node_endpoint_of(self.config, node_name).get('host')
         if configured:
             self.logger.debug(f"[NodeIP] {node_name} -> {configured} (configured endpoint)")
-            self._reset_node_failures(node_name)
             node_creds.note_address(getattr(self, 'id', None), node_name, configured, primary=True)
             return configured
 
