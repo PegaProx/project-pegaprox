@@ -2548,8 +2548,10 @@ def _register_uefi_fallback_loader(pve_mgr, task, guest_running=False):
             "echo 'fallback loader already in place'; exit 0; fi\n"
         )
         if guest_running:
-            script += ("echo 'the VM is running, so nothing was written: without EFI/BOOT/BOOTX64.EFI "
-                       "this Windows guest may need a boot entry after a restart'\n")
+            # NS Nov 2026 (#1268) - a loader that differs from bootmgfw.efi is normal after Windows updates
+            # and boots, only a missing one is worth a warning
+            script += ("if [ -f \"$DST\" ]; then echo 'a different fallback loader is there, left as it is "
+                       "while the VM runs'; else echo 'no BOOTX64.EFI, nothing written while the VM runs'; fi\n")
         else:
             script += ("mkdir -p \"$MNT/EFI/BOOT\"\n"
                        "cp -f \"$MGR\" \"$DST\" && sync && echo 'fallback loader installed'\n")
@@ -2563,6 +2565,11 @@ def _register_uefi_fallback_loader(pve_mgr, task, guest_running=False):
         out_str = str(out or '').strip()
         if rc == 0 and ('installed' in out_str or 'already in place' in out_str):
             task.log(f"EFI fallback loader: {out_str.splitlines()[-1] if out_str else 'OK'}")
+        elif rc == 0 and guest_running and 'no BOOTX64.EFI' in out_str:
+            _result_warning(task, "EFI fallback loader: the VM runs on this disk, so BOOTX64.EFI was not written to "
+                                  "its EFI partition. If this Windows guest does not boot after a full stop and "
+                                  "start, copy EFI\\Microsoft\\Boot\\bootmgfw.efi to EFI\\Boot\\bootx64.efi there "
+                                  "(mountvol S: /S inside the guest, create the folder if it is missing).")
         else:
             task.log(f"EFI fallback loader skipped (non-fatal): rc={rc} {out_str[-300:]}")
     except Exception as e:
@@ -5442,7 +5449,7 @@ def _log_efidisk_result(task, rc, out, pre_keys):
     if rc == 0:
         task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
     else:
-        task.log(f"  ⚠ EFI disk could not be allocated, boot entries will not persist: {str(out or '').strip()[-200:]}")
+        _result_warning(task, f"EFI disk could not be allocated, boot entries will not persist: {str(out or '').strip()[-200:]}")
 
 
 def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, esxi_pass,
