@@ -11,10 +11,11 @@
 #                      next to dists/ and an index.html with the install lines is written;
 #                      the smoke test leaves it out.
 #
-# One suite, trixie, one component, main. Every package is Architecture: all; apt-ftparchive
-# lists them in binary-all and in each of binary-amd64/arm64, so either kind of host finds
-# them whether or not its apt reads binary-all. Release gets Origin/Label PegaProx and is
-# signed twice, InRelease (inline) and Release.gpg (detached).
+# One suite, trixie, one component, main. apt-ftparchive lists an Architecture: all package
+# in binary-all and in each of binary-amd64/arm64, so either kind of host finds it whether or
+# not its apt reads binary-all; python3-sqlcipher3 comes once per architecture and is listed
+# in its own (NS Nov 2026). Release gets Origin/Label PegaProx and is signed twice, InRelease
+# (inline) and Release.gpg (detached).
 #
 # Env: APT_SUITE (trixie), APT_COMPONENT (main), APT_ARCHES ("all amd64 arm64"),
 #      APT_SITE_URL (https://apt.pegaprox.com, only used for index.html)
@@ -108,8 +109,8 @@ if [ -n "$KEYRING" ]; then
   [ "$fpr" = "$KEY" ] || { echo "build-apt-repo: $KEYRING is $fpr, the repo is signed by $KEY" >&2; exit 1; }
   cp "$KEYRING" pegaprox-archive-keyring.asc
   pretty=$(sed -E 's/(....)/\1 /g; s/ $//; s/^(.{24}) /\1  /' <<< "$fpr")
-  rows=$(awk -F': ' '$1 == "Package" { p = $2 } $1 == "Version" { print "<tr><td>" p "</td><td>" $2 "</td></tr>" }' \
-    "dists/$SUITE/$COMP/binary-all/Packages" | sort -u)
+  rows=$(cat dists/"$SUITE"/"$COMP"/binary-*/Packages \
+    | awk -F': ' '$1 == "Package" { p = $2 } $1 == "Version" { print "<tr><td>" p "</td><td>" $2 "</td></tr>" }' | sort -u)
   cat > index.html <<HTML
 <!doctype html>
 <html lang="en">

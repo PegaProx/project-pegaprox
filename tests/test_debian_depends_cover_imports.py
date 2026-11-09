@@ -157,12 +157,13 @@ def test_trixie_python3_fido2_stays_out():
 
 def test_what_trixie_lacks_is_built_by_the_repo():
     built = {p['deb'] for p in _load('build_python_debs', 'packaging/apt/build-python-debs.py').PACKAGES.values()}
-    assert built == {'python3-flask-sock', 'python3-xenapi'}
+    assert built == {'python3-flask-sock', 'python3-xenapi', 'python3-sqlcipher3'}
     assert built <= depends_of(_control())
     with open(os.path.join(ROOT, 'packaging', 'apt', 'python-debs', 'requirements.txt'), encoding='utf-8') as fh:
         pins = fh.read()
-    for name in ('flask-sock', 'xenapi'):
-        assert re.search(rf'^{name}==\S+ \\\n\s+--hash=sha256:[0-9a-f]{{64}}$', pins, re.M), name
+    # one hash per wheel: sqlcipher3 has one for each architecture
+    for name, hashes in (('flask-sock', 1), ('xenapi', 1), ('sqlcipher3', 2)):
+        assert re.search(rf'^{name}==\S+' + r' \\\n\s+--hash=sha256:[0-9a-f]{64}' * hashes + '$', pins, re.M), name
     for deb in built:
         assert os.path.isfile(os.path.join(ROOT, 'packaging', 'apt', 'python-debs', f'{deb}.copyright'))
 

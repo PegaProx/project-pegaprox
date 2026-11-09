@@ -21,26 +21,33 @@ Signing key: **`5E04 573B 4064 7A94 F0DE  28F8 493A F556 F30B 55C1`**
 is [`pegaprox-archive-keyring.asc`](pegaprox-archive-keyring.asc) in this directory, and the
 site serves that very file.
 
-Debian trixie only, amd64 and arm64. Every package in the repo is `Architecture: all`; the
-rest of what PegaProx needs comes from trixie itself. The repo carries:
+Debian trixie only, amd64 and arm64. Every package in the repo but `python3-sqlcipher3` is
+`Architecture: all`, that one comes once per architecture; the rest of what PegaProx needs
+comes from trixie itself. The repo carries:
 
 | package | from |
 |---|---|
 | `pegaprox` | built from `debian/` of the released tag, every release since the repo went live stays in the pool |
 | `python3-flask-sock` | the flask-sock wheel from PyPI, pinned in [`python-debs/requirements.txt`](python-debs/requirements.txt) |
 | `python3-xenapi` | the XenAPI wheel from PyPI, pinned there as well |
+| `python3-sqlcipher3` | the sqlcipher3 wheels from PyPI for trixie's Python 3.13 (manylinux, x86_64 and aarch64), pinned there as well. SQLCipher and OpenSSL are built into its module, so their security updates come with a new sqlcipher3, not from Debian |
 
-Two things a `.deb` install does without, because trixie has nothing that fits:
+**Full database encryption.** With `python3-sqlcipher3` the first start encrypts the
+database with SQLCipher. The key goes to `/etc/pegaprox/secret.key` (0640 root:pegaprox)
+before that: the unit runs `packaging/debian/master_key.py` as root before every start, the
+postinst runs it too where systemd runs. Without it the key store would make the key in the
+config directory, next to the database. An install whose database a start already
+encrypted with `config/.pegaprox.key` keeps that key: it is copied to `/etc/pegaprox`, byte
+for byte. `/usr/bin/pegaprox/pegaprox-wrapper --keystore-status` (as the `pegaprox` user, in
+`/var/lib/pegaprox`) shows the key source and the state of each database file.
+[`docs/SECURITY.md`](../../docs/SECURITY.md) has what it does in each case.
+
+One thing a `.deb` install does without, because trixie has nothing that fits:
 
 - **WebAuthn hardware keys.** trixie's `python3-fido2` is 1.2; with 1.x the options PegaProx
   hands to the browser keep raw bytes and `register/begin` fails in `jsonify` (PegaProx
   wants 2.2.1, see `requirements.txt`). The package does not depend on it, so WebAuthn stays
   off, as `api/webauthn.py` intends when fido2 is missing. TOTP works.
-- **Full database encryption.** `sqlcipher3` is not packaged in Debian. `core/dbcrypto.py`
-  falls back to plain SQLite and the Fernet encryption of the secret fields stays;
-  `/usr/bin/pegaprox/pegaprox-wrapper --keystore-status` (as the `pegaprox` user, in
-  `/var/lib/pegaprox`) reports the backend as `sqlite-plain`. An encrypted database brought
-  over from a Docker or pip install does not open there ("file is not a database").
 
 ## How the workflow builds it
 
@@ -48,7 +55,7 @@ Each job gets only what it needs:
 
 | job | runs when | may | does |
 |---|---|---|---|
-| `build` | always | read the repo | `dpkg-buildpackage -b` of `debian/` in a pinned `debian:trixie` container, the two python3 debs from wheels fetched with `pip download --require-hashes --no-deps`, then the smoke test below |
+| `build` | always | read the repo | `dpkg-buildpackage -b` of `debian/` in a pinned `debian:trixie` container, the python3 debs from wheels fetched with `pip download --require-hashes --no-deps` (once per architecture), then the smoke test below |
 | `publish` | release (not a pre-release), or a manual run from `main` | read releases and attestations, **the signing key** | collects the pegaprox debs of the earlier releases and this run's debs, signs `dists/` with [`build-apt-repo.sh`](build-apt-repo.sh) |
 | `deploy` | after `publish` | Pages (`github-pages` environment) | puts the signed tree on Pages |
 | `attach` | release | write the release | adds `pegaprox_<version>_all.deb` to the release |
@@ -66,6 +73,10 @@ container adds it with `signed-by` next to Debian's own sources and nothing else
 version, imports every module the package depends on and lists the optional ones
 ([`deb_imports.py`](deb_imports.py)), then boots that tree with `systemd-nspawn` the way
 `release-images.yml` tests the LXC template and waits for PegaProx to answer on port 5000.
+Then [`smoke_encrypted.py`](smoke_encrypted.py) checks `--keystore-status` and the booted
+tree: the database is SQLCipher, its key is `/etc/pegaprox/secret.key` (0640 root:pegaprox),
+and no file in the config directory holds it. No systemd runs where the package is
+installed, so it is the unit's first start that made that key, as on an appliance.
 
 **Old versions.** Pages replaces the whole site on each deploy, so the pool is rebuilt every
 time from the `pegaprox_*_all.deb` assets of the earlier releases. Each one is checked with
@@ -128,10 +139,17 @@ reason PegaProx runs without it.
 For a library trixie does not package: add the pinned wheel to `python-debs/requirements.txt`
 (version and sha256 from PyPI, and give a fresh upstream release two weeks), an entry in
 `PACKAGES` of [`build-python-debs.py`](build-python-debs.py) with the Debian names of its
-requirements, and `python-debs/<package>.copyright`. Only pure-Python wheels
-(`py3-none-any`) are handled. They are rebuilt on every run, and the same wheel in the same
+requirements, and `python-debs/<package>.copyright`. A pure-Python wheel (`py3-none-any`)
+becomes an `Architecture: all` package. A C extension (`'binary': True`, sqlcipher3) needs
+its `cp313` manylinux wheel for every machine in `ARCHES`, a hash for each in
+`requirements.txt`, and its package depends on exactly that Python and on the glibc the
+wheel names. They are rebuilt on every run, and the same wheel in the same
 pinned trixie image gives the same `.deb` byte for byte, so a publish does not change files
 apt has already seen. Moving `TRIXIE_IMAGE` in the workflow may change those bytes once.
+
+Our `python3-sqlcipher3` is `0.6.4-0pegaprox1`. The other repository ships `0.6.4`, as
+`Architecture: all` with the x86_64 module only; ours sorts above it, so a host with both
+gets ours, and on arm64 the module then imports.
 
 ## The signing key
 
