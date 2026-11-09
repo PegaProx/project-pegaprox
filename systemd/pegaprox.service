@@ -14,6 +14,11 @@ Type=simple
 User=pegaprox
 Group=pegaprox
 WorkingDirectory=/var/lib/pegaprox
+# NS Nov 2026 (#1226): as root, before every start, the master key goes to /etc/pegaprox
+# (packaging/debian/master_key.py), so a first start with SQLCipher never makes one next
+# to the database. Where it cannot tell which key a database needs, the start fails here.
+ExecStartPre=+/usr/bin/python3 -I -B /usr/lib/pegaprox/packaging/debian/master_key.py \
+    --key /etc/pegaprox/secret.key --state-dir /var/lib/pegaprox --user pegaprox --unit pegaprox.service
 ExecStart=/usr/bin/pegaprox/pegaprox-wrapper
 
 Restart=on-failure

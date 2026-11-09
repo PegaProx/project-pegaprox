@@ -259,9 +259,11 @@ def _fake_root_postinst(tmp_path):
         (stubs / cmd).chmod(0o755)
     me = f'{pwd.getpwuid(os.getuid()).pw_name}:{grp.getgrgid(os.getgid()).gr_name}'
     text = _read('debian', 'pegaprox.postinst')
-    for path in ('/var/lib/pegaprox', '/usr/share/pegaprox', '/usr/lib/pegaprox'):
+    for path in ('/var/lib/pegaprox', '/usr/share/pegaprox', '/usr/lib/pegaprox', '/etc/pegaprox'):
         text = text.replace(path, str(root) + path)
     text = text.replace('--owner pegaprox:pegaprox', f'--owner {me}')
+    # as in an image build: the master key step is test_debian_master_key_1226.py's
+    text = text.replace('/run/systemd/system', str(tmp_path / 'no-systemd'))
     script = tmp_path / 'postinst'
     script.write_text(text)
     env = dict(os.environ, PATH=f'{stubs}:{os.environ.get("PATH", "")}')
