@@ -8,15 +8,19 @@ the page went out no-store and without any ETag.
 
 Now the file is read once, each coding is compressed once and has its own ETag, a reload
 gets its 304, Accept-Encoding is honoured with its q-values, and the air-gap flag
-changes the ETag. Everything goes through the real app and its routes.
+changes the ETag. The other files flask-compress codes (/static, the plugin pages, the
+service worker) get their 304 too. Everything goes through the real app and its routes.
 """
 import gzip
 import os
+import types
 import zlib
 
 import gevent
+import gevent.monkey
 import pytest
 
+import pegaprox.api.plugins as plugins_mod
 import pegaprox.api.settings as settings_mod
 from pegaprox.api.helpers import save_server_settings
 
@@ -37,6 +41,12 @@ except ImportError:
 
 CODINGS = [c for c, mod in (('zstd', zstd), ('br', brotli), ('gzip', gzip)) if mod is not None]
 BEST = CODINGS[0]
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+PLUGIN_PAGES = [('/portal', 'client_portal', 'portal.html'),
+                ('/portal/my-vms', 'client_portal', 'portal.html'),
+                ('/status', 'status_page', 'status.html')]
 
 PRELUDE = (b"<script>try{localStorage.setItem('pegaprox-air-gap','1');}catch(_){}"
            b"window.__pegaproxAirGap=true;</script>")
@@ -314,6 +324,39 @@ def test_each_coding_is_compressed_once_not_per_request(api, fetch, page, monkey
     assert calls.count(coding) == 1, calls
 
 
+def test_a_compression_runs_off_the_hub_and_once_for_all_who_wait(fetch, page, monkeypatch):
+    """On the real bundle a compression takes about 0.4 s of C code that never yields. On
+    the hub it would hold every other request of the process that long."""
+    real_sleep = gevent.monkey.get_original('time', 'sleep')
+    real_gzip = gzip.compress
+    calls = []
+
+    def slow_gzip(*a, **kw):
+        calls.append('gzip')
+        # blocks its thread like the compressor does, gevent's sleep would yield
+        real_sleep(0.3)
+        return real_gzip(*a, **kw)
+    monkeypatch.setattr(gzip, 'compress', slow_gzip)
+    # the file is read, the plain page needs no compression
+    assert fetch().get_data() == page.read_bytes()
+
+    done = []
+
+    def one(coding):
+        r = fetch(coding=coding)
+        body = r.get_data()
+        done.append(coding)
+        return r.headers.get('Content-Encoding'), body
+    jobs = [gevent.spawn(one, 'gzip') for _ in range(3)] + [gevent.spawn(one, None)]
+    gevent.joinall(jobs, timeout=60, raise_error=True)
+    # the plain page was answered while the three waited for one compression
+    assert done[0] is None, done
+    assert calls == ['gzip'], calls
+    assert [j.value[0] for j in jobs] == ['gzip', 'gzip', 'gzip', None]
+    assert len({j.value[1] for j in jobs[:3]}) == 1
+    assert gzip.decompress(jobs[0].value[1]) == page.read_bytes()
+
+
 def test_the_security_headers_stay_on_the_page_and_its_304(fetch, page):
     first = fetch(coding=BEST)
     again = fetch(coding=BEST, etag=first.headers['ETag'])
@@ -341,3 +384,67 @@ def test_a_gzip_client_gets_static_css_gzipped_and_its_304(fetch):
     assert again.status_code == 304
     # the cache policy of /static is untouched
     assert r.headers['Cache-Control'] == 'no-cache'
+
+
+@pytest.mark.parametrize('coding', CODINGS)
+def test_static_js_goes_out_compressed_and_its_reload_gets_a_304(fetch, coding):
+    # Python 3.12+ sends .js as text/javascript, which flask-compress was not told about
+    for name in ('chart.umd.min.js', 'novnc/core/display.js'):
+        with open(os.path.join(ROOT, 'static', 'js', name), 'rb') as fh:
+            js = fh.read()
+        r = fetch(f'/static/js/{name}', coding=coding)
+        assert r.status_code == 200
+        assert r.headers.get('Content-Encoding') == coding, (name, r.mimetype)
+        assert _decode(coding, r.get_data()) == js
+        again = fetch(f'/static/js/{name}', coding=coding, etag=r.headers['ETag'])
+        assert again.status_code == 304, (name, r.headers['ETag'])
+        assert r.headers['Cache-Control'] == 'no-cache'
+
+
+@pytest.fixture
+def plugin_pages(tmp_path, monkeypatch):
+    folder = tmp_path / 'plugins'
+    pages = {}
+    for _, plugin, name in PLUGIN_PAGES:
+        (folder / plugin).mkdir(parents=True, exist_ok=True)
+        pages[plugin] = _page(plugin.encode())
+        (folder / plugin / name).write_bytes(pages[plugin])
+        monkeypatch.setitem(plugins_mod._loaded_plugins, plugin, types.SimpleNamespace())
+    monkeypatch.setattr(plugins_mod, 'PLUGINS_DIR', str(folder))
+    return pages
+
+
+@pytest.mark.parametrize('coding', CODINGS)
+@pytest.mark.parametrize('url,plugin,name', PLUGIN_PAGES)
+def test_a_plugin_page_reload_gets_a_304_in_every_coding(fetch, plugin_pages, url, plugin, name, coding):
+    # a streamed body keeps its request context until it is read, so each one is read at once
+    r = fetch(url, coding=coding)
+    assert r.status_code == 200
+    assert r.headers.get('Content-Encoding') == coding
+    assert _decode(coding, r.get_data()) == plugin_pages[plugin]
+    etag = r.headers['ETag']
+
+    again = fetch(url, coding=coding, etag=etag)
+    assert again.status_code == 304, (url, coding, etag)
+    assert again.get_data() == b''
+    assert again.headers['ETag'] == etag
+    assert fetch(url, method='head', coding=coding, etag=etag).status_code == 304
+    stale = fetch(url, coding=coding, etag='"other"')
+    assert stale.status_code == 200
+    assert _decode(coding, stale.get_data()) == plugin_pages[plugin]
+
+
+@pytest.mark.parametrize('coding', CODINGS)
+def test_the_service_worker_reload_gets_a_304_and_keeps_its_headers(fetch, coding):
+    with open(os.path.join(ROOT, 'web', 'sw.js'), 'rb') as fh:
+        sw = fh.read()
+    r = fetch('/sw.js', coding=coding)
+    assert r.status_code == 200
+    assert r.headers.get('Content-Encoding') == coding
+    assert _decode(coding, r.get_data()) == sw
+    again = fetch('/sw.js', coding=coding, etag=r.headers['ETag'])
+    assert again.status_code == 304
+    assert again.get_data() == b''
+    for resp in (r, again):
+        assert resp.headers['Cache-Control'] == 'no-cache, no-store, must-revalidate'
+        assert resp.headers['Service-Worker-Allowed'] == '/'

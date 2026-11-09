@@ -91,8 +91,10 @@ def create_app():
     # else: no CORS init = browser same-origin policy applies (safest default)
 
     # Gzip compression
+    # MK Nov 2026 - text/javascript is what Python 3.12+ guesses for .js, Flask's /static
+    # sends that, and react, chart, jspdf and noVNC went out uncompressed
     app.config['COMPRESS_MIMETYPES'] = [
-        'text/html', 'text/css', 'text/xml', 'text/plain',
+        'text/html', 'text/css', 'text/xml', 'text/plain', 'text/javascript',
         'application/json', 'application/javascript', 'application/xml'
     ]
     app.config['COMPRESS_LEVEL'] = 6
@@ -109,7 +111,15 @@ def create_app():
     def compress_response(response):
         if getattr(response, 'pp_encoded', False):
             return response
-        return _compress.after_request(response)
+        coded = 'Content-Encoding' in response.headers
+        response = _compress.after_request(response)
+        # send_file compared If-None-Match with the file's plain ETag before flask-compress put
+        # ":gzip" (":zstd", ...) behind it, and for a stream flask-compress only looks again on
+        # /static. So /portal, /status and /sw.js never got their 304 once they were compressed.
+        if (response.is_streamed and not coded and 'Content-Encoding' in response.headers
+                and request.method in ('GET', 'HEAD')):
+            response.make_conditional(request)
+        return response
 
     # Max request size - NS: Feb 2026 - separate limit for file uploads (#82)
     _default_max = int(os.environ.get('PEGAPROX_MAX_REQUEST_SIZE', 10 * 1024 * 1024))  # 10 MB default for API
