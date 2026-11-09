@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn the pinned wheels of packaging/apt/python-debs/ into .debs.
 
-    python3 -I packaging/apt/build-python-debs.py <wheel-dir> <out-dir>
+    python3 -I packaging/apt/build-python-debs.py [--arch amd64|arm64] <wheel-dir> <out-dir>
 
 Three of the libraries pegaprox depends on are not in trixie (flask-sock, XenAPI,
 sqlcipher3). The package is the wheel's files under /usr/lib/python3/dist-packages, a
@@ -18,6 +18,11 @@ The wheel-dir holds exactly what `pip download --require-hashes` fetched from
 python-debs/requirements.txt. Every file is checked against the wheel's RECORD, every
 requirement of the wheel must map to a Depends entry here, and the same wheel gives the
 same .deb (dates from the wheel, root ownership, no build-time paths).
+
+With --arch the wheel-dir holds what pip fetched for that one machine, and the debs are what
+that architecture installs: the Architecture: all ones and the binary ones of <arch>. The
+appliance images build their python3-sqlcipher3 that way (build-sqlcipher3-deb.sh). NS Nov
+2026 (#1226)
 
 NS Oct 2026
 """
@@ -289,12 +294,16 @@ def build(wheel_path, out_dir):
 
 
 def main(argv):
-    if len(argv) != 3:
-        sys.exit('usage: build-python-debs.py <wheel-dir> <out-dir>')
-    wheel_dir, out_dir = argv[1], argv[2]
+    args = argv[1:]
+    arches = sorted(ARCHES.values())
+    if args[:1] == ['--arch'] and len(args) == 4 and args[1] in arches:
+        arches, args = [args[1]], args[2:]
+    if len(args) != 2 or args[0].startswith('-'):
+        sys.exit(f'usage: build-python-debs.py [--arch {"|".join(sorted(ARCHES.values()))}] <wheel-dir> <out-dir>')
+    wheel_dir, out_dir = args
     wheels = sorted(f for f in os.listdir(wheel_dir) if f.endswith('.whl'))
     want = sorted((name, arch) for name, spec in PACKAGES.items()
-                  for arch in (sorted(ARCHES.values()) if spec.get('binary') else ['all']))
+                  for arch in (arches if spec.get('binary') else ['all']))
     got = sorted((_norm(w[1]), w[3]) for w in map(_wheel, wheels))
     if got != want:
         _fail(f'expected one wheel each for {want}, found {wheels}')
