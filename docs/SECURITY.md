@@ -139,14 +139,17 @@ each page carries an HMAC-SHA512 tag.
 The two packages install the same `sqlcipher3` module and must never be installed side by
 side; the markers in requirements.txt give every platform one of them at most.
 
-A SQLCipher package that is installed but does not load (the arm64 row above, or a build for
-another Python) is not taken for a missing one. Every start writes a warning with the reason
-and the machine and Python version to the service log, `--keystore-status` has the reason
-in `sqlcipher_error` and says it in the `note` of `db` and in the `recommendation` or
-`message` of `keystore`, and the Compliance tab of the settings lists it under
-Recommendations. The key step of the Debian package names it too when it cannot check a key.
-PegaProx then runs on plain SQLite as in the rows above, until a package built for that
-machine is installed and PegaProx restarted.
+A SQLCipher package that is installed but does not load (the arm64 row above, a build for
+another Python, or an empty `sqlcipher3` directory) is not taken for a missing one. Every
+start writes a warning with the reason and the machine and Python version to the service
+log, `--keystore-status` has the reason in `sqlcipher_error` and says it in the `note` of
+`db` and in the `recommendation` or `message` of `keystore`, and the Compliance tab of the
+settings lists it under Recommendations. The key step of the Debian package, `--migrate-db`
+and `--set-port` name it too. PegaProx then runs on plain SQLite as in the rows above, until
+a package built for that machine and that Python version is installed and PegaProx
+restarted. A database encrypted before (a config directory moved to another machine, a pip
+install replaced by the Debian package) does not open on plain SQLite: the start stops with
+`[FATAL] [DBCRYPTO]`, the reason and `... is encrypted and does not open until ...`.
 
 The fallback is *not* unencrypted - sensitive fields (cluster passwords,
 2FA secrets, OIDC client secrets, API tokens) are still individually
@@ -156,7 +159,8 @@ metadata-at-rest (table names, audit-log timestamps, session IDs).
 You can force-disable SQLCipher by uninstalling the SQLCipher package (`sqlcipher3-binary` or `sqlcipher3`) and
 restarting - the connection layer detects the missing module and falls
 back transparently. **Note**: any DB already encrypted will become
-unreadable until the module is reinstalled - there is no automatic
+unreadable until the module is reinstalled, and the start stops with
+`[FATAL] [DBCRYPTO] ... is encrypted and sqlcipher3 is not installed` - there is no automatic
 decrypt-back-to-plain step.
 
 ### Cipher parameters
@@ -255,7 +259,7 @@ somewhere safe right after the migration and delete that copy yourself.
 | Code | Meaning |
 |------|---------|
 | 0 | Migration successful, encrypted DB is now active |
-| 2 | `sqlcipher3` not installed - install the SQLCipher package of requirements.txt first |
+| 2 | `sqlcipher3` not installed, or installed and does not load here (the reason is printed) - install the SQLCipher package of requirements.txt, built for this machine and this Python version, first |
 | 3 | Existing DB already encrypted with a **different** key (refuses to clobber) |
 | 4 | Source DB is corrupt - repair before retrying |
 | 5 | Row-count verification failed - encrypted DB *not* swapped in |
