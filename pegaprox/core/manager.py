@@ -1355,12 +1355,14 @@ class PegaProxManager:
     # Per-host failure cache for connect_to_proxmox host iteration. We don't
     # need the full backoff machinery here — just "did this host time out
     # very recently? skip it for the next minute".
-    def _mark_host_failure(self, host):
+    def _mark_host_failure(self, host, port=None):
         if not host:
             return
+        eff_port = port if port is not None else getattr(self, 'current_api_port', None)
+        key = self._candidate_key(host, eff_port) if eff_port is not None else host
         with self._host_failure_lock:
-            self._host_last_failure[host] = time.time()
-            self.logger.debug(f"[HOST] '{host}' marked cold; will skip for {self._host_skip_window}s")
+            self._host_last_failure[key] = time.time()
+            self.logger.debug(f"[HOST] '{key}' marked cold; will skip for {self._host_skip_window}s")
 
     def _candidate_key(self, host, port):
         """The cooldown key of one connect candidate. Several nodes can share an address
@@ -1368,6 +1370,10 @@ class PegaProxManager:
         cool down the others. The cluster's own port keeps the bare host, the key the
         other callers of _mark_host_failure use."""
         return host if port in (None, self.cluster_api_port) else f'[{host}]:{port}'
+
+    def _connected_cooldown_key(self):
+        """The cooldown key of the host and API port this manager is connected to."""
+        return self._candidate_key(self.current_host or self.config.host, self.api_port)
 
     def _host_recently_failed(self, host):
         if not host:

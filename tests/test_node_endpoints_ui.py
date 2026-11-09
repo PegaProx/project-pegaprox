@@ -187,3 +187,9 @@ def test_the_credential_goes_in_the_field_the_server_names():
 def test_a_poll_of_the_cluster_list_does_not_wipe_what_is_typed():
     src = _read('web', 'src', 'dashboard.js')
     assert '[cluster.id, savedKey]' in src and '[cluster.id, saved]' not in src
+
+
+def test_a_save_that_drops_node_passwords_says_so():
+    src = _read('web', 'src', 'dashboard.js')
+    assert 'onSaved(clean, (done && done.node_passwords_cleared) || [])' in src
+    assert "if (cleared.length) setNodeCredsNotice(" in src

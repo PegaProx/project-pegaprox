@@ -220,7 +220,7 @@ def get_datacenter_status(cluster_id):
             # a walk timed out / errored — mark the primary cold AND force an
             # immediate reconnect so manager.host pivots to a warm fallback for the
             # next request (otherwise the host pointer still points at the dead one).
-            manager._mark_host_failure(host)
+            manager._mark_host_failure(manager._connected_cooldown_key())
             try:
                 manager.is_connected = False
                 manager.connect_to_proxmox()
@@ -688,7 +688,7 @@ def set_datacenter_options(cluster_id):
         try:
             response = manager._create_session().put(url, data=data, timeout=30)
         except requests.exceptions.Timeout:
-            manager._mark_host_failure(host)
+            manager._mark_host_failure(manager._connected_cooldown_key())
             try:
                 manager.is_connected = False
                 manager.connect_to_proxmox()

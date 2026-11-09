@@ -384,7 +384,7 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
                 # NS May 2026 — `timeout` here is paramiko's CONNECT timeout
                 # (TCP+auth), not command-exec. Use the dedicated connect
                 # phase budget so dead hosts fail in 8s rather than 30s.
-                client3.connect(host, username=user, password=password,
+                client3.connect(host, port=port, username=user, password=password,
                                timeout=connect_timeout,
                                banner_timeout=connect_timeout,
                                auth_timeout=connect_timeout,

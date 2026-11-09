@@ -278,3 +278,14 @@ def test_the_map_is_in_the_cluster_config_response(env):
     assert r.status_code == 200, r.get_data(as_text=True)
     row = next(c for c in r.get_json() if c['id'] == 'c1')
     assert row['node_endpoints'] == NAT
+
+
+def test_the_connected_cooldown_key_carries_a_port_of_its_own():
+    """A slow node endpoint is marked cold under its own port, the key the reconnect checks."""
+    m = _mgr(NAT)
+    m.current_host = PUBLIC
+    m._connected_api_port = 8007
+    assert m._connected_cooldown_key() == f'[{PUBLIC}]:8007'
+    m._connected_api_port = None
+    m.current_host = HOST
+    assert m._connected_cooldown_key() == HOST

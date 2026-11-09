@@ -2200,9 +2200,11 @@
                         addToast(await PegaProxApiErrors.message(r, t('saveError')), 'error');
                         return;
                     }
+                    // a save that moved where the credential goes drops the nodes' own passwords
+                    const done = await r.json().catch(() => null);
                     setSecret('');
                     setNeedsSecret(false);
-                    onSaved(clean);
+                    onSaved(clean, (done && done.node_passwords_cleared) || []);
                     addToast(t('nodeEpSaved'));
                 } finally {
                     setSaving(false);
@@ -21052,7 +21054,7 @@
                                 onClose={() => setCloudBulk(null)} />
                         )}
                         {cloudBulkMigrate && selectedCluster && (
-                            <BulkMigrateModal vms={cloudBulkMigrate} nodes={Object.keys(clusterMetrics)} clusterId={selectedCluster.id}
+                            <BulkMigrateModal vms={cloudBulkMigrate} nodes={Array.from(new Set([...Object.keys(clusterMetrics || {}), ...((selectedCluster && selectedCluster.nodes) || []), ...Object.keys((selectedCluster && selectedCluster.node_endpoints) || {})])).sort()} clusterId={selectedCluster.id}
                                 onMigrate={handleBulkMigrate} onClose={() => setCloudBulkMigrate(null)} />
                         )}
                         {configNode && selectedCluster && (
@@ -26656,7 +26658,11 @@
                                                                 nodes={Object.keys(clusterMetrics)}
                                                                 authFetch={authFetch} addToast={addToast} t={t}
                                                                 canEdit={can('cluster.config')} haReadOnly={haReadOnly}
-                                                                onSaved={v => setSelectedCluster(prev => prev ? {...prev, node_endpoints: v} : prev)} />
+                                                                onSaved={(v, cleared) => {
+                                                                    setSelectedCluster(prev => prev ? {...prev, node_endpoints: v} : prev);
+                                                                    if (cleared.length) setNodeCredsNotice({ clusterId: selectedCluster.id, name: selectedCluster.name,
+                                                                        host: selectedCluster.host, nodes: cleared, reason: 'moved' });
+                                                                }} />
                                                         </div>
                                                     )}
 
