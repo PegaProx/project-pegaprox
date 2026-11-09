@@ -25,8 +25,9 @@ By what it finds, in the order the key store reads it (pegaprox/core/keystore.py
 - whatever it cannot tell apart: nothing is written, and it says why
 
 The config directory comes from the unit (WorkingDirectory, PEGAPROX_CONFIG_DIR) where
-systemd answers, else <state-dir>/config. Exit status 0 when the key is in place or not
-ours to place, 1 when it refused, 2 on wrong arguments.
+systemd answers, else <state-dir>/config. A symlink in /etc/pegaprox is followed, as the
+key store does, but nothing it points to is changed here. Exit status 0 when the key is in
+place or not ours to place, 1 when it refused, 2 on wrong arguments.
 """
 import argparse
 import base64
@@ -212,26 +213,43 @@ def _service_can_enter(st, uid, gid):
     return bool(st.st_mode & stat.S_IXOTH)
 
 
-def _key_dir(path, owner, gid, uid):
+def _key_dir(path, owner, gid, uid, repair=True):
+    """The directory of the key, made where it is missing. The key store takes a key the
+    service cannot get to for none and goes on to the config directory, so the service has
+    to get through it. A symlink is followed and what it points to is left alone, so one
+    the service cannot enter is refused."""
     d = os.path.dirname(path)
     try:
-        st = os.lstat(d)
+        st = os.stat(d)
     except FileNotFoundError:
-        os.mkdir(d, DIR_MODE)
-        os.chown(d, owner, gid)
-        os.chmod(d, DIR_MODE)
+        if os.path.islink(d):
+            raise Refused(f'{d} is a symlink to {os.readlink(d)}, which is not there')
+        if repair:
+            os.mkdir(d, DIR_MODE)
+            os.chown(d, owner, gid)
+            os.chmod(d, DIR_MODE)
         return
     if not stat.S_ISDIR(st.st_mode):
         raise Refused(f'{d} is not a directory')
-    if st.st_uid == owner and not _service_can_enter(st, uid, gid):
+    if _service_can_enter(st, uid, gid):
+        return
+    if os.path.islink(d):
+        raise Refused(f'{d} points to {os.path.realpath(d)}, which the service user cannot enter. '
+                      f'Give that one the group {grp.getgrgid(gid).gr_name} and g+rx')
+    if repair and st.st_uid == owner:
         os.chown(d, owner, gid)
         os.chmod(d, stat.S_IMODE(st.st_mode) | stat.S_IRGRP | stat.S_IXGRP)
         info(f'{d}: the service user could not reach the key, its group is now {grp.getgrgid(gid).gr_name}')
 
 
 def check_existing(path, owner, uid, gid):
-    """The key in `path`, its permissions repaired where that is the known deploy.sh case."""
-    st = os.lstat(path)
+    """The key in `path`, its permissions repaired where that is the known deploy.sh case.
+    Through a symlink it is read and checked as the key store does, but not repaired: a
+    target the service cannot read is refused."""
+    _key_dir(path, owner, gid, uid, repair=False)
+    if not os.path.exists(path):
+        raise Refused(f'{path} is a symlink to {os.readlink(path)}, which is not there')
+    st = os.stat(path)
     if not stat.S_ISREG(st.st_mode):
         raise Refused(f'{path} is not a regular file')
     mode = stat.S_IMODE(st.st_mode)
@@ -240,6 +258,10 @@ def check_existing(path, owner, uid, gid):
                       'or write. Check who had access, then chmod 0640 it')
     _, raw = _read_key(path)
     if st.st_uid == owner and (st.st_gid != gid or not mode & stat.S_IRGRP):
+        if os.path.islink(path):
+            raise Refused(f'{path} points to {os.path.realpath(path)}, which is {mode:04o} with group '
+                          f'id {st.st_gid}: the service cannot read it. Give that one {KEY_MODE:04o} '
+                          f'and the group {grp.getgrgid(gid).gr_name}')
         os.chown(path, owner, gid)
         os.chmod(path, KEY_MODE)
         info(f'{path} was {mode:04o} with group id {st.st_gid}, the service could not read it: '

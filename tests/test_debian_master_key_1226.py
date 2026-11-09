@@ -330,6 +330,84 @@ def test_an_empty_database_file_counts_as_none(host):
     assert host.key.is_file()
 
 
+# --- symlinks in /etc/pegaprox -------------------------------------------------------------------
+# The key store follows them, so a setup that starts today has to start after the upgrade too.
+
+@needs_sqlcipher
+def test_a_symlinked_key_dir_with_a_good_key_starts(host, tmp_path):
+    real = tmp_path / 'secrets'
+    real.mkdir(mode=0o750)
+    data = write_key(real / 'secret.key', mode=0o640)
+    encrypted_db(host.db, data)
+    host.key.parent.symlink_to(real)
+    assert next_start_state(host) == 'encrypted'
+    r = host.run()
+    assert r.returncode == 0 and r.stdout == '' and r.stderr == ''
+    assert (real / 'secret.key').read_bytes() == data and host.key.parent.is_symlink()
+
+
+@needs_sqlcipher
+def test_a_symlinked_key_with_a_good_key_starts(host, tmp_path):
+    real = tmp_path / 'mounted' / 'pegaprox.key'
+    data = write_key(real, mode=0o640)
+    encrypted_db(host.db, data)
+    host.key.parent.mkdir(mode=0o750)
+    host.key.symlink_to(real)
+    assert next_start_state(host) == 'encrypted'
+    r = host.run()
+    assert r.returncode == 0 and r.stdout == '' and r.stderr == ''
+    assert real.read_bytes() == data and host.key.is_symlink()
+
+
+def test_a_fresh_key_goes_into_a_symlinked_dir(host, tmp_path):
+    real = tmp_path / 'secrets'
+    real.mkdir(mode=0o750)
+    host.key.parent.symlink_to(real)
+    r = host.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (real / 'secret.key').is_file() and _mode(real / 'secret.key') == 0o640
+    assert host.key.parent.is_symlink()
+    mk = keystore.load_master_key()
+    keystore.reset_cache()
+    assert mk.source_path == str(host.key) and mk.key_b64 == (real / 'secret.key').read_bytes()
+
+
+def test_what_a_symlink_points_to_is_not_repaired(host, tmp_path):
+    """A plain key file the service cannot read gets 0640 (deploy.sh before #417). Through a
+    symlink that would change a file outside /etc/pegaprox, so the start stops instead."""
+    real = tmp_path / 'mounted' / 'pegaprox.key'
+    data = write_key(real, mode=0o600)
+    host.key.parent.mkdir(mode=0o750)
+    host.key.symlink_to(real)
+    r = host.run()
+    assert r.returncode == 1
+    assert 'the service cannot read it' in r.stderr and str(real) in r.stderr
+    assert _mode(real) == 0o600 and real.read_bytes() == data and host.key.is_symlink()
+
+
+def test_a_symlinked_dir_the_service_cannot_enter_is_refused(host, tmp_path):
+    """The key store takes a key it cannot get to for none and makes one in config/."""
+    real = tmp_path / 'secrets'
+    real.mkdir(mode=0o700)
+    real.chmod(0o600)
+    host.key.parent.symlink_to(real)
+    try:
+        r = host.run()
+    finally:
+        real.chmod(0o700)
+    assert r.returncode == 1 and 'cannot enter' in r.stderr
+    assert os.listdir(real) == []
+
+
+def test_a_dangling_symlink_is_refused_and_left(host, tmp_path):
+    host.key.parent.mkdir(mode=0o750)
+    host.key.symlink_to(tmp_path / 'not-mounted' / 'pegaprox.key')
+    r = host.run()
+    assert r.returncode == 1 and 'which is not there' in r.stderr
+    assert host.key.is_symlink() and not (tmp_path / 'not-mounted').exists()
+    assert os.listdir(host.key.parent) == ['secret.key']
+
+
 # --- what the unit says --------------------------------------------------------------------
 
 def _fake_systemctl(tmp_path, show='', cat=''):

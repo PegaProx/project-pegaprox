@@ -98,7 +98,7 @@ makes its own key at its first start. What it does, by what it finds:
 | State | What happens |
 |---|---|
 | `PEGAPROX_DB_KEY`, a `db-key` credential or an existing `PEGAPROX_KEY_FILE` in the unit (drop-ins included) | Nothing, the key is yours |
-| `/etc/pegaprox/secret.key` there | Kept as it is. A root-owned key the service cannot read (0600, other group) gets 0640 root:pegaprox. A key others can read or write, or one that does not open an encrypted database, stops the start with the reason in the journal |
+| `/etc/pegaprox/secret.key` there | Kept as it is. A root-owned key the service cannot read (0600, other group) gets 0640 root:pegaprox. A key others can read or write, or one that does not open an encrypted database, stops the start with the reason in the journal. A symlink (the file or `/etc/pegaprox`) is followed as the key store follows it, but what it points to is not changed: if the service cannot read it there, the start stops |
 | No key, no database encrypted yet (fresh install, upgrade on a plain database) | A new key, 0640 root:pegaprox; the next start encrypts the database with it |
 | No key, a database encrypted already (a start with sqlcipher3 before the package did this) | The key that opens it, `~/.config/pegaprox/secret.key` of the service user or `config/.pegaprox.key`, is copied to `/etc/pegaprox/secret.key` byte for byte, never a new one |
 | Anything else (an encrypted database no known key opens, a database file it cannot read) | No key is written, and the start stops with the reason |
