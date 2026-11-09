@@ -5143,22 +5143,31 @@ def clone_vm_api(cluster_id, node, vm_type, vmid):
             for ci_key in ('ciuser', 'cipassword', 'sshkeys', 'ipconfig0', 'ipconfig1', 'nameserver', 'searchdomain'):
                 if data.get(ci_key):
                     ci_params[ci_key] = data[ci_key]
-            if ci_params:
+            if ci_params and getattr(manager, 'cluster_type', 'proxmox') != 'proxmox':
+                # NS Nov 2026 - an XCP-ng clone has no task id and no config endpoint to put these on
+                _ci_warn = 'The clone was started, but Cloud-Init settings are applied on Proxmox clusters only.'
+            elif ci_params:
+                _ci_why = ''
                 try:
                     upid = result.get('data')
                     if upid and not manager._wait_for_task(node, upid, timeout=600):
-                        raise RuntimeError('the clone task did not finish')
-                    clone_node = data.get('target_node') or node
-                    ci_url = f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{clone_node}/qemu/{newid}/config"
-                    # JB Nov 2026 - all of it goes in this one request, so a refusal loses user, password, keys and
-                    # address together, and the guest comes up without them while the clone reads as a success
-                    ci_resp = manager._api_post(ci_url, data=ci_params)
-                    if ci_resp.status_code != 200:
-                        raise RuntimeError(f"HTTP {ci_resp.status_code} {str(getattr(ci_resp, 'text', '') or '')[:200]}")
-                    logging.info(f"[CLONE] Applied Cloud-Init config to VM {newid}: {list(ci_params.keys())}")
+                        _ci_why = 'the clone task did not finish'
+                    else:
+                        clone_node = data.get('target_node') or node
+                        ci_url = f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{clone_node}/qemu/{newid}/config"
+                        # JB Nov 2026 - all of it goes in this one request, so a refusal loses user, password, keys and
+                        # address together, and the guest comes up without them while the clone reads as a success
+                        ci_resp = manager._api_post(ci_url, data=ci_params)
+                        if ci_resp.status_code != 200:
+                            _ci_why = parse_pve_error(ci_resp.text, f'HTTP {ci_resp.status_code}')
+                        else:
+                            logging.info(f"[CLONE] Applied Cloud-Init config to VM {newid}: {list(ci_params.keys())}")
                 except Exception as e:
-                    logging.warning(f"[CLONE] Cloud-Init config failed for {newid}: {e}")
-                    _ci_warn = f"The clone was started, but its Cloud-Init settings were not applied: {e}"
+                    # an exception names hosts and ports: the log gets it, the caller a fixed text
+                    _ci_why = safe_error(e, 'an internal error occurred')
+                if _ci_why:
+                    logging.warning(f"[CLONE] Cloud-Init config failed for {newid}: {_ci_why}")
+                    _ci_warn = f"The clone was started, but its Cloud-Init settings were not applied: {_ci_why}"
 
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'system')

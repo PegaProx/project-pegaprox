@@ -20250,8 +20250,10 @@
                                 target_storage: cloneConfig.target_storage,
                                 description: cloneConfig.description,
                                 // JB Nov 2026 - the dialog asks for these and the route applies them, and they stopped here
+                                // NS Nov 2026 - Proxmox takes sshkeys urlencoded, one key a line with a closing newline
                                 ...Object.fromEntries(['ciuser', 'cipassword', 'sshkeys', 'ipconfig0', 'nameserver', 'searchdomain']
-                                    .filter(k => cloneConfig[k]).map(k => [k, cloneConfig[k]]))
+                                    .filter(k => String(cloneConfig[k] || '').trim())
+                                    .map(k => [k, k === 'sshkeys' ? encodeURIComponent(cloneConfig[k].trim() + '\n') : cloneConfig[k]]))
                             })
                         }
                     );
