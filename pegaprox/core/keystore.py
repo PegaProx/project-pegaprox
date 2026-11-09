@@ -11,7 +11,8 @@ Order of precedence (highest first):
   3. PEGAPROX_KEY_FILE          — env var pointing to a custom location
   4. /etc/pegaprox/secret.key   — system-service install default
   5. ~/.config/pegaprox/secret.key — user install default
-  6. CONFIG_DIR/secret.key      — legacy fallback (deprecation-warned)
+  6. CONFIG_DIR/.pegaprox.key   - legacy fallback (deprecation-warned); the same file is
+                                  the Fernet key core/db.py reads old fields with
 
 All file-based candidates must be chmod 0600 (owner-only) or 0640 (owner +
 group-read, which is what the system-service install uses so the systemd
@@ -200,7 +201,7 @@ def _resolve(generate: bool = True) -> Optional[MasterKey]:
     if _safe_is_file(p):
         return _from_file(p, source='user-config')
 
-    # Tier 6 (legacy): CONFIG_DIR/secret.key — warned-on-use
+    # Tier 6 (legacy): CONFIG_DIR/.pegaprox.key, warned-on-use
     legacy = _legacy_key_path()
     if _safe_is_file(legacy):
         mk = _from_file(legacy, source='legacy:CONFIG_DIR', strict_perms=False)
@@ -285,7 +286,7 @@ def _generate_at(path: Path, source: str, is_legacy: bool = False) -> MasterKey:
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 def _legacy_key_path() -> Path:
-    """The 0.9.9.x default location — CONFIG_DIR/secret.key.
+    """The 0.9.9.x default location, CONFIG_DIR/.pegaprox.key (constants.KEY_FILE).
     Imported lazily to avoid circular imports with pegaprox.constants."""
     try:
         from pegaprox.constants import KEY_FILE

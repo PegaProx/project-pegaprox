@@ -14,7 +14,7 @@ importable (a pip wheel on Linux x86_64 and aarch64, macOS and Windows), every P
 is automatically AES-256-CBC + HMAC-SHA512 encrypted at rest using the
 master key resolved by `pegaprox.core.keystore`.
 
-When sqlcipher3 is NOT importable (32-bit ARM, the Debian package), we fall back to plain sqlite3.  In that case the existing
+When sqlcipher3 is NOT importable (32-bit ARM, no SQLCipher package), we fall back to plain sqlite3.  In that case the existing
 field-level encryption + the new Multi-Tier key-location protection still
 apply — graceful degradation.
 
