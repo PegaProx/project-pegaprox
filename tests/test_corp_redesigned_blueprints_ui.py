@@ -12,7 +12,8 @@ blueprint from (prefillTemplate) and hears of saves and deletes (onSaved, onDele
 reads itself is told apart from the page's reads by a wrapped mount (_wrapped) that records them.
 
 Only Corporate Redesigned has this section: classic Corporate draws the library as before, Modern and
-Cloud draw the same blueprints in their own look (tests/test_blueprints_modern_cloud_ui.py). Runtime tests drive the built bundle in headless Chromium against the guard fake of
+Cloud draw the same blueprints in their own look (tests/test_blueprints_modern_cloud_ui.py). Runtime
+tests drive the built bundle in headless Chromium against the guard fake of
 tests/test_corp_redesigned_guard_ui.py with the blueprint routes as the server answers them (_BpServer).
 The counterproof runs this file against an older bundle: PEGAPROX_CR_BUNDLE=<path to index.html>.
 LW Nov 2026

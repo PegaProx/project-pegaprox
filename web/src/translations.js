@@ -10465,7 +10465,7 @@
                 crBpStorageNoShared: "Das Template liegt auf {node}, und dieser Node hat keinen gemeinsamen Storage für Disk-Images. Den Node des Templates wählen oder ein Template auf gemeinsamem Storage.",
                 crBpAccess: "Kommt in die VM: die SSH-Keys {keys} für den Benutzer {user}, im Blueprint gespeichert von {by}.",
                 crBpAccessNoUser: "Kommt in die VM: die SSH-Keys {keys} für den Standardbenutzer des Images, im Blueprint gespeichert von {by}.",
-                bpNavTab: "Blueprints und Templates",
+                bpNavTab: "Blueprints & Templates",
                 bpRecentDesc: "Aus einem Blueprint bereitgestellte Gäste, die neuesten zuerst.",
                 bpRecentNone: "Auf diesem Cluster wurde noch kein Gast aus einem Blueprint bereitgestellt.",
                 bpRecentNoneAll: "Auf keinem Cluster wurde bisher ein Gast aus einem Blueprint bereitgestellt.",

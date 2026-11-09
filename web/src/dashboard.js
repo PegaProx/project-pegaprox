@@ -21426,7 +21426,8 @@
             // Templates of a cluster, and the guest list of its cluster for a guest a deploy made
             const mdBpNav = !isCorporate ? {
                 nodesOf: (cid) => (selectedCluster && selectedCluster.id === cid ? clusterMetrics : (sidebarClusterData[cid]?.metrics || null)),
-                openBlueprints: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('templates'); } },
+                // from the top of the page, where the tab bar and the section start
+                openBlueprints: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('templates'); window.scrollTo(0, 0); } },
                 openGuest: (cid, guest) => {
                     const cl = clusters.find(c => c.id === cid);
                     if (!cl || !guest) return;
@@ -23253,14 +23254,15 @@
                                                             } : undefined}
                                                         />
                                                         
-                                                        {/* Create VM/CT Buttons - not on a standby (#625), the export stays */}
-                                                        <div className={`flex gap-3 ${isCorporate ? 'mt-2' : 'mt-4'}`}>
+                                                        {/* Create VM/CT Buttons - not on a standby (#625), the export stays.
+                                                            LW Nov 2026 (#1220) - Modern wraps whole buttons when the row runs out of width */}
+                                                        <div className={`flex gap-3 ${isCorporate ? 'mt-2' : 'mt-4 flex-wrap'}`}>
                                                             {!haReadOnly && (<>
                                                             <button
                                                                 onClick={() => setShowCreateVm('qemu')}
                                                                 className={isCorporate
                                                                     ? 'flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-[13px] text-white hover:bg-blue-700 border border-blue-700'
-                                                                    : 'flex items-center gap-2 px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 transition-colors'
+                                                                    : 'flex items-center gap-2 px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 transition-colors whitespace-nowrap'
                                                                 }
                                                             >
                                                                 <Icons.Plus className={isCorporate ? 'w-3 h-3' : ''} />
@@ -23270,7 +23272,7 @@
                                                                 onClick={() => setShowCreateVm('lxc')}
                                                                 className={isCorporate
                                                                     ? 'flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 text-[13px] text-white hover:bg-purple-700 border border-purple-700'
-                                                                    : 'flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-lg text-white hover:bg-purple-700 transition-colors'
+                                                                    : 'flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-lg text-white hover:bg-purple-700 transition-colors whitespace-nowrap'
                                                                 }
                                                             >
                                                                 <Icons.Plus className={isCorporate ? 'w-3 h-3' : ''} />
@@ -23285,9 +23287,9 @@
                                                                 </button>
                                                             )}
                                                             {/* LW Nov 2026 (#1220) - Modern: the same way to Automation > Blueprints & Templates */}
-                                                            {!isCorporate && can('vm.create') && (
+                                                            {!isCorporate && can('vm.create') && (!selectedCluster.cluster_type || selectedCluster.cluster_type === 'proxmox') && (
                                                                 <button type="button" onClick={() => mdBpNav.openBlueprints(selectedCluster.id)} data-bp-nav="resources"
-                                                                    className="flex items-center gap-2 px-4 py-2 bg-proxmox-darker rounded-lg text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors">
+                                                                    className="flex items-center gap-2 px-4 py-2 bg-proxmox-darker rounded-lg bp-fg hover:bg-proxmox-hover border border-proxmox-border transition-colors whitespace-nowrap">
                                                                     <Icons.Template className="w-4 h-4" />
                                                                     {t('crBpNavDeploy')}
                                                                 </button>
@@ -23301,7 +23303,7 @@
                                                                 addToast={addToast}
                                                                 className={isCorporate
                                                                     ? 'corp-vm-btn corp-vm-btn-ghost disabled:opacity-50'
-                                                                    : 'flex items-center gap-2 px-4 py-2 bg-proxmox-darker rounded-lg text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors'
+                                                                    : 'flex items-center gap-2 px-4 py-2 bg-proxmox-darker rounded-lg text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors whitespace-nowrap'
                                                                 }
                                                                 label={t('exportCsv') || 'Export CSV'}
                                                             />

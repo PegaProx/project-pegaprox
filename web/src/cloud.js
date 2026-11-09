@@ -2586,25 +2586,53 @@
                 settings: T('cloud.settings') || 'Settings',
             };
 
+            // LW Nov 2026 (#1220) - a guest of a blueprint deploy on another cluster: it opens once the first
+            // list of that cluster has it, else that list says it is gone. Leaving the page or the cluster drops it
+            const [bpWant, setBpWant] = React.useState(null);
+            const bpGone = (vmid) => addToast && addToast(String(T('guestNotInClusterList') || 'Guest {id} is not in the list of this cluster').replace('{id}', vmid), 'warning');
+            React.useEffect(() => {
+                if (!bpWant) return undefined;
+                if (bpWant.cid !== cid) { setBpWant(null); return undefined; }
+                const onFrame = (e) => {
+                    const d = (e && e.detail) || {};
+                    if (d.cluster_id !== bpWant.cid || !Array.isArray(d.rows)) return;
+                    const hit = d.rows.find(r => r && r.vmid === bpWant.vmid && r.type === bpWant.type);
+                    setBpWant(null);
+                    if (hit) setDetailRes({ ...hit, _clusterId: bpWant.cid });
+                    else bpGone(bpWant.vmid);
+                };
+                window.addEventListener('pegaprox-resources-frame', onFrame);
+                return () => window.removeEventListener('pegaprox-resources-frame', onFrame);
+            }, [bpWant, cid]);
+
             const selectSection = (id) => {
                 // Settings + Users open the full admin modal (same one classic uses) rather
                 // than a placeholder page — keep the current content underneath. -- NS
                 if (id === 'settings' || id === 'users') { onOpenSettings && onOpenSettings(); return; }
                 setSection(id);
                 setDetailRes(null);
+                setBpWant(null);
             };
             const openDetail = (r) => setDetailRes(r);
             // where the blueprints lead: the guest a deploy made opens on the VMs page of its cluster,
-            // and the editor suggests the bridges of a node of this one
+            // and the editor suggests the bridges of a node of this one. A guest this cluster does not list
+            // (deleted since) is said, not drawn as a guest of unknown state with a Start button
             const bpNav = {
                 nodesOf: (id) => (id === cid ? clusterMetrics : null),
                 openGuest: (id, guest) => {
                     const cl = safeClusters.find(c => c && c.id === id);
                     if (!cl || !guest) return;
-                    const known = id === cid && safeResources.find(r => r && r.vmid === guest.vmid && r.type === guest.type);
-                    if (id !== cid) setSelectedCluster(cl);
+                    if (id === cid) {
+                        const known = safeResources.find(r => r && r.vmid === guest.vmid && r.type === guest.type);
+                        if (!known) { bpGone(guest.vmid); return; }
+                        setSection('vms');
+                        setDetailRes({ ...known, _clusterId: id });
+                        return;
+                    }
+                    setSelectedCluster(cl);
                     setSection('vms');
-                    setDetailRes({ ...(known || guest), _clusterId: id });
+                    setDetailRes(null);
+                    setBpWant({ cid: id, vmid: guest.vmid, type: guest.type });
                 },
             };
             const pveCluster = !!selectedCluster && (!selectedCluster.cluster_type || selectedCluster.cluster_type === 'proxmox');

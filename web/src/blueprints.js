@@ -42,14 +42,15 @@
             },
         };
         // text, tint and border of the Cloud chips and notes: the status colours of the shell (cloudStatusMeta),
-        // which read on its dark and on its light theme
+        // made for its dark theme. The fourth is the text of a chip on the light one, where those read at
+        // 2:1; a darker shade of the same colour (.bp-tone in index.html.original picks one)
         const BP_CLOUD_TONE = {
-            neutral: ['#8aa4b8', 'rgba(138,164,184,0.14)', 'rgba(138,164,184,0.30)'],
-            info: ['#2f9fe0', 'rgba(56,189,248,0.14)', 'rgba(56,189,248,0.36)'],
-            success: ['#1bbf8a', 'rgba(45,212,167,0.16)', 'rgba(45,212,167,0.42)'],
-            warning: ['#e0a82e', 'rgba(245,185,69,0.16)', 'rgba(245,185,69,0.42)'],
-            error: ['#e0686c', 'rgba(248,113,113,0.14)', 'rgba(248,113,113,0.36)'],
-            template: ['#9f7aea', 'rgba(168,85,247,0.14)', 'rgba(168,85,247,0.38)'],
+            neutral: ['#8aa4b8', 'rgba(138,164,184,0.14)', 'rgba(138,164,184,0.30)', '#475569'],
+            info: ['#2f9fe0', 'rgba(56,189,248,0.14)', 'rgba(56,189,248,0.36)', '#0369a1'],
+            success: ['#1bbf8a', 'rgba(45,212,167,0.16)', 'rgba(45,212,167,0.42)', '#047857'],
+            warning: ['#e0a82e', 'rgba(245,185,69,0.16)', 'rgba(245,185,69,0.42)', '#854d0e'],
+            error: ['#e0686c', 'rgba(248,113,113,0.14)', 'rgba(248,113,113,0.36)', '#b91c1c'],
+            template: ['#9f7aea', 'rgba(168,85,247,0.14)', 'rgba(168,85,247,0.38)', '#7e22ce'],
         };
         // true inside the Cloud layout (set by Blueprints for everything under it)
         const BpCloud = createContext(false);
@@ -61,15 +62,26 @@
         // few responsive grid classes), a wide field over the whole row
         const bpGrid = (min) => ({ display: 'grid', gap: '0.75rem', gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${min}), 1fr))` });
         const BP_WIDE = { gridColumn: '1 / -1' };
+        // '2 vCPU · 4 GB · template size' with each part on one line: a table short of room breaks it after a dot
+        const bpParts = (text) => {
+            const parts = String(text).split(' · ');
+            return parts.map((part, i) => (
+                <React.Fragment key={i}>{i > 0 && ' '}<span className="whitespace-nowrap">{i < parts.length - 1 ? `${part} ·` : part}</span></React.Fragment>
+            ));
+        };
 
+        // bp-chip: a glyph in it is drawn at the size of its text (most icons of icons.js keep their own size)
         function BpBadge({ tone = 'neutral', title, children, ...rest }) {
             const cloud = useContext(BpCloud);
             if (cloud) {
-                const [color, background, borderColor] = BP_CLOUD_TONE[tone] || BP_CLOUD_TONE.neutral;
-                return <span className="cloud-chip cloud-chip-status whitespace-nowrap" style={{ color, background, borderColor }} title={title} {...rest}>{children}</span>;
+                const [color, background, borderColor, light] = BP_CLOUD_TONE[tone] || BP_CLOUD_TONE.neutral;
+                return (
+                    <span className="cloud-chip cloud-chip-status bp-chip bp-tone whitespace-nowrap" title={title} {...rest}
+                        style={{ '--bp-tone': color, '--bp-tone-light': light, background, borderColor }}>{children}</span>
+                );
             }
             return (
-                <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap ${BP_TONE[tone] || BP_TONE.neutral}`}
+                <span className={`bp-chip inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap ${BP_TONE[tone] || BP_TONE.neutral}`}
                     title={title} {...rest}>{children}</span>
             );
         }
@@ -143,12 +155,19 @@
         // A Modern dialog (in Cloud on the surface of the shell): the title on top, the body scrolls, the
         // buttons stay at the bottom. Escape and a click beside it close it, not while it sends (busy); a
         // press that started inside and ended outside (selecting the text of a field) is no click beside it.
-        // It is a child of the spaced section, whose top margin would leave a strip above the backdrop
+        // It is a child of the spaced section, whose top margin would leave a strip above the backdrop.
+        // The focus goes into it, Tab stays in it, and the button that opened it has the focus again after
         function BpModal({ id, title, sub, icon, wide, busy, onClose, footer, children }) {
             const { t } = useTranslation();
             const kit = useBpKit();
             const downOutside = useRef(false);
+            const box = useRef(null);
+            const back = useRef(typeof document !== 'undefined' ? document.activeElement : null);
             const Glyph = icon || Icons.Template;
+            useEffect(() => {
+                if (box.current) box.current.focus({ preventScroll: true });
+                return () => crFocusBack(back.current);
+            }, []);
             useEffect(() => {
                 const key = (e) => { if (e.key === 'Escape' && !busy) onClose(); };
                 window.addEventListener('keydown', key);
@@ -159,7 +178,8 @@
                     onMouseDown={e => { downOutside.current = e.target === e.currentTarget; }}
                     onClick={e => { if (downOutside.current && e.target === e.currentTarget && !busy) onClose(); }}>
                     <div className={`${kit.cloud ? 'bp-cloud-dialog' : 'bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl'} w-full ${wide ? 'max-w-4xl' : 'max-w-2xl'} max-h-[90vh] flex flex-col`}
-                        role="dialog" aria-modal="true" aria-labelledby={`bp-${id}-title`}>
+                        role="dialog" aria-modal="true" aria-labelledby={`bp-${id}-title`} ref={box} tabIndex={-1} style={{ outline: 'none' }}
+                        onKeyDown={e => { if (e.key === 'Tab') crKeepTab(e, box.current); }}>
                         <div className="flex items-start justify-between gap-3 px-5 pt-4 pb-3 border-b border-proxmox-border">
                             <div className="min-w-0">
                                 <h3 id={`bp-${id}-title`} className="text-base font-semibold bp-fg flex items-center gap-2">
@@ -315,6 +335,8 @@
 
                         <BpGroup id="ci" title={t('crBpGroupCi')}>
                             {win && <BpNote tone="info" id="win"><span data-bp-win-note="">{t('crBpWinNote')}</span></BpNote>}
+                            {/* the keys under the grid: a field over the whole row would keep the empty track of
+                                auto-fit, and the four fields would stop short of the right edge */}
                             <div style={bpGrid('10rem')}>
                                 {!win && (
                                     <BpField id="ciuser" label={t('crBpFUser')} error={err('ciuser')}
@@ -331,15 +353,15 @@
                                     {input('nameserver', { className: `${kit.input} font-mono` })}
                                 </BpField>
                                 {!win && <BpField id="searchdomain" label={t('crBpFSearch')} error={err('searchdomain')}>{input('searchdomain')}</BpField>}
-                                {!win && (
-                                    <BpField id="sshkeys" label={t('crBpFKeys')} wide error={err('sshkeys')}
-                                        hint={odd.length ? crFill(t('crBpKeysOdd'), { n: odd.join(', ') }) : `${t('crBpFKeysHint')} ${t('crBpNoPassword')}`}
-                                        tone={odd.length ? 'warning' : undefined}>
-                                        <textarea id="bp-f-sshkeys" className={`${kit.input} font-mono text-xs`} rows={3} value={form.sshkeys} spellCheck={false}
-                                            placeholder="ssh-ed25519 AAAA... user@host" onChange={e => set('sshkeys', e.target.value)} data-bp-input="sshkeys" />
-                                    </BpField>
-                                )}
                             </div>
+                            {!win && (
+                                <BpField id="sshkeys" label={t('crBpFKeys')} error={err('sshkeys')}
+                                    hint={odd.length ? crFill(t('crBpKeysOdd'), { n: odd.join(', ') }) : `${t('crBpFKeysHint')} ${t('crBpNoPassword')}`}
+                                    tone={odd.length ? 'warning' : undefined}>
+                                    <textarea id="bp-f-sshkeys" className={`${kit.input} font-mono text-xs`} rows={3} value={form.sshkeys} spellCheck={false}
+                                        placeholder="ssh-ed25519 AAAA... user@host" onChange={e => set('sshkeys', e.target.value)} data-bp-input="sshkeys" />
+                                </BpField>
+                            )}
                         </BpGroup>
 
                         <BpGroup id="opts" title={t('crBpGroupDeploy')}>
@@ -758,8 +780,10 @@
             const n = list.rows.length;
             return (
                 <div className={cloud ? 'space-y-5' : 'space-y-4'} data-bp="" data-bp-layout={layout}>
+                    {/* the text takes what the buttons leave, so they stay top right at 1280 px in every language;
+                        only a narrow window puts them under it, on the right */}
                     <div className="flex items-start justify-between flex-wrap gap-2">
-                        <div className="min-w-0">
+                        <div className="min-w-0" style={{ flex: '1 1 20rem' }}>
                             <h2 className="text-lg font-semibold bp-fg flex items-center gap-2 flex-wrap">
                                 <Icons.Template className="w-5 h-5 text-proxmox-orange" />
                                 {t('crBpTitle')}
@@ -769,7 +793,7 @@
                             </h2>
                             <p className="text-xs text-gray-500 mt-0.5 max-w-3xl">{t('crBpDesc')}</p>
                         </div>
-                        <div className="flex gap-2">
+                        <div className="flex gap-2 flex-shrink-0 ml-auto">
                             <button type="button" className={kit.btn} onClick={loadList} disabled={list.busy} data-bp-refresh="">
                                 <Icons.RefreshCw className="w-3.5 h-3.5" />{t('refresh')}
                             </button>
@@ -790,7 +814,9 @@
                         )
                         : !rows.length ? <BpNote tone="info" id="empty"><span data-bp-empty="">{t('crBpEmpty')}</span></BpNote>
                         : (
-                            <div className={cloud ? 'cloud-card cloud-table-card cloud-table-scroll' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-x-auto'}>
+                            <div className={cloud ? 'cloud-card cloud-table-card cloud-table-scroll relative' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-x-auto relative'}>
+                                {/* relative: the sr-only head of the last column stays in the scroller (a narrow Cloud
+                                    window scrolled the whole page sideways for it) */}
                                 <table className={cloud ? 'cloud-table' : 'w-full text-sm'} aria-label={t('crBpTitle')} data-bp-table="">
                                     <thead>
                                         <tr className={cloud ? undefined : 'text-left text-xs bp-muted border-b border-proxmox-border'}>
@@ -809,8 +835,9 @@
                                             const gone = !tplRow && r.template_missing;
                                             return (
                                                 <tr key={r.id} className={cloud ? 'cloud-table-row cloud-table-row-static' : 'border-b border-proxmox-border/50 hover:bg-proxmox-hover'} data-bp-row={r.id}>
-                                                    {/* the tags and who saved it under the name: at 1280 px the row keeps its actions in view */}
-                                                    <td className={td} style={{ minWidth: 160 }}>
+                                                    {/* the tags and who saved it under the name: at 1280 px the row keeps its actions in view.
+                                                        A name of 64 characters without a break wraps as well */}
+                                                    <td className={td} style={{ minWidth: 160, overflowWrap: 'anywhere' }}>
                                                         <div className="font-medium bp-fg">{r.name}</div>
                                                         {r.description && <div className="text-xs text-gray-500 mt-0.5">{r.description}</div>}
                                                         <div className="flex flex-wrap items-center gap-1 mt-1">
@@ -832,14 +859,14 @@
                                                             <span data-bp-image="missing"><BpBadge tone="warning" title={t('crBpImageGoneHint')}><Icons.AlertTriangle className="w-3 h-3" />{t('crBpImageGone')}</BpBadge></span>
                                                         ) : <span className="bp-fg" data-bp-source-cell="library" data-bp-image={r.template_id}>{crBpSourceText(r, t)}</span>}
                                                     </td>
-                                                    <td className={`${td} text-xs bp-muted whitespace-nowrap`} data-bp-hw={r.id}>{crBpHw(r, t)}</td>
+                                                    <td className={`${td} text-xs bp-muted`} data-bp-hw={r.id}>{bpParts(crBpHw(r, t))}</td>
                                                     <td className={`${td} text-xs`} style={{ maxWidth: 190 }}>
                                                         <span className="block truncate font-mono bp-muted" title={crBpNet(r, t)} data-bp-net={r.id}>{crBpNet(r, t)}</span>
                                                         <span className="block mt-0.5 bp-muted" data-bp-ip={r.ip_mode || 'dhcp'}>{`${t('crBpColIp')} ${t(CR_BP_IP_WORD[r.ip_mode] || 'crBpIpDhcp')}`}</span>
                                                     </td>
                                                     <td className={td}>
                                                         {/* Deploy last, so it stands in one column whether Edit and Delete are there or not */}
-                                                        <div className="flex items-center justify-end gap-1">
+                                                        <div className="flex items-center justify-end gap-1 whitespace-nowrap">
                                                             {r.can_edit && (
                                                                 <>
                                                                     <button type="button" className={kit.icon} disabled={!write} title={why || t('edit')} aria-label={t('edit')}

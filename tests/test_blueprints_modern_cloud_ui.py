@@ -7,6 +7,8 @@ another node needs, the Windows password and the 15 characters of its computer n
 into the VM), the progress and the recent deploys of this cluster or of all of them. In Modern the
 Resources button and Ctrl+K lead there, in Cloud the button next to New VM; an account without vm.create
 reads nothing, a standby shows the list and changes nothing. Classic Corporate keeps the library alone.
+At 1280 px the Resources row, the header and the list fit in German and Italian, the chips read on the
+light palettes, a dialog keeps the focus, and Cloud says so of a guest its list does not have.
 
 The rules are the redesign's (crBpUseEditor, crBpUseDeploy, crBpUseProgress in cr_blueprints.js), so
 these tests drive what the two looks draw of them; the ones that are the same in both run in each
@@ -24,8 +26,8 @@ import pytest
 from test_corp_redesigned_blueprints_ui import (  # noqa: F401 (browser is a fixture)
     BUNDLE, DASHES, DB, DONE, FAILED, GOLD, OTHER, RECENT, RUNNING, WEB, WIN, _BpServer, _bp, _box, _count, _need,
     _no_errors, _wait, browser)
-from test_corp_redesigned_guard_ui import _GuardApp
-from test_ha_ui import BASE
+from test_corp_redesigned_guard_ui import RESOURCES, _GuardApp
+from test_ha_ui import BASE, CLUSTER, VM
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # the sub tab: its name in Modern, and the one classic Corporate (and the older bundles) keep
@@ -36,6 +38,10 @@ LAYOUTS = ['modern', 'cloud']
 CLOUD_PAGE = re.compile(r'^\s*(Blueprints & Templates|Templates)\s*$')
 # a deploy of the second cluster for All clusters
 ELSEWHERE = dict(RECENT[0], id='r3', cluster_id='c2', node='lab1', vmid=300, name='web-lab', started_at='2026-11-08T09:10:00')
+# the guests the deploys made, as the list of the cluster has them once they are there: the one of the
+# progress (105) and the finished one of the recent deploys (120)
+MADE = dict(VM, vmid=105, name='web-small')
+WEB_01 = dict(VM, vmid=120, name='web-01')
 
 
 class _MdServer(_BpServer):
@@ -56,8 +62,11 @@ class _MdServer(_BpServer):
 def open_app(browser):
     apps = []
 
-    def _open(layout='modern', viewport=(1600, 1000), bundle=None, storage=None, **kw):
-        app = _GuardApp(browser, _MdServer(bundle=bundle or BUNDLE, layout=layout, **kw), viewport=viewport, storage=storage)
+    def _open(layout='modern', viewport=(1600, 1000), bundle=None, storage=None, clusters=None, **kw):
+        server = _MdServer(bundle=bundle or BUNDLE, layout=layout, **kw)
+        if clusters is not None:
+            server.clusters = clusters
+        app = _GuardApp(browser, server, viewport=viewport, storage=storage)
         app.layout = layout
         apps.append(app)
         return app
@@ -168,7 +177,7 @@ def test_runtime_the_sub_tab_has_its_new_name(open_app):
     page = german.page
     page.get_by_text('Testi').first.click()
     page.locator('button', has_text=re.compile(r'^\s*Automatisierung\s*$')).first.click()
-    page.locator('button', has_text=re.compile(r'^\s*Blueprints und Templates\s*$')).first.click()
+    page.locator('button', has_text=re.compile(r'^\s*Blueprints & Templates\s*$')).first.click()
     _need(page, '[data-bp]', 'the German tab label leads to the blueprints')
 
 
@@ -497,7 +506,7 @@ def test_runtime_the_deploy_dialog_names_the_keys_and_who_saved_them(open_app, l
 @pytest.mark.parametrize('layout', LAYOUTS)
 def test_runtime_the_server_notes_show_and_the_progress_is_read_until_done(open_app, layout):
     notes = ['Windows uses the first 15 characters of the name as its computer name']
-    app = open_app(layout=layout, progress=[RUNNING, RUNNING, DONE], warnings=notes)
+    app = open_app(layout=layout, progress=[RUNNING, RUNNING, DONE], warnings=notes, resources=RESOURCES + [MADE])
     page = _page(app)
     _deploy(page)
     page.locator('[data-bp-dep="storage"] option[value="local-lvm"]').wait_for(state='attached', timeout=4000)
@@ -547,7 +556,7 @@ def test_runtime_a_refused_deploy_stays_in_the_dialog(open_app):
 
 @pytest.mark.parametrize('layout', LAYOUTS)
 def test_runtime_recent_deploys_of_this_cluster_or_of_all(open_app, layout):
-    app = open_app(layout=layout)
+    app = open_app(layout=layout, resources=RESOURCES + [WEB_01])
     page = _page(app)
     box = page.locator('[data-bp-recent="cluster"]')
     box.locator('[data-bp-recent-row]').first.wait_for(timeout=8000)
@@ -748,12 +757,26 @@ def test_runtime_cloud_names_the_page_after_both(open_app):
     assert page.locator('.cloud-nav-item-active').inner_text().strip() == 'Blueprints & Templates'
     assert page.locator('.cloud-breadcrumb-leaf').inner_text().strip() == 'Blueprints & Templates'
     assert page.locator('.cloud-nav-item', has_text=re.compile(r'^\s*Templates\s*$')).count() == 0
-    german = open_app(layout='cloud', language='de')
-    page = german.page
-    _cloud_nav(page, 'Blueprints und Templates')
-    _need(page, '[data-bp]', 'the German name of the page leads to the blueprints')
-    # on one line of the nav
-    assert page.locator('.cloud-nav-item-active .cloud-nav-item-label').evaluate('e => e.getClientRects().length === 1 && e.scrollWidth <= e.clientWidth')
+
+
+def _nav_names():
+    """bpNavTab of each language as the bundle under test has it (de, en, zh, pl, fr, es, pt, ko, it)."""
+    names = re.findall(r'bpNavTab:\s*"([^"]+)"', BUNDLE or _read('web', 'index.html'))
+    assert len(names) == 9
+    return dict(zip(['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it'], names))
+
+
+@pytest.mark.parametrize('lang', ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it'])
+def test_runtime_cloud_the_name_of_the_page_stays_on_one_line_of_the_nav(open_app, lang):
+    page = open_app(layout='cloud', language=lang).page
+    _cloud_nav(page, _nav_names()[lang])
+    _need(page, '[data-bp]', f'the name of the page in {lang} leads to the blueprints')
+    # the active entry is bold: it is as high as an entry of one line (German wrapped there)
+    page.wait_for_timeout(200)
+    heights = page.evaluate("""() => [...document.querySelectorAll('.cloud-nav-item')].map(e => [
+        e.classList.contains('cloud-nav-item-active'), Math.round(e.getBoundingClientRect().height)])""")
+    active = [h for on, h in heights if on]
+    assert len(active) == 1 and active[0] == min(h for on, h in heights if not on), heights
 
 
 def test_runtime_cloud_the_vms_page_leads_there(open_app):
@@ -805,6 +828,228 @@ def test_runtime_cloud_on_a_standby_lists_them_and_changes_nothing(open_app):
     assert page.locator('[data-bp-nav]').count() == 0
 
 
+# --- 1280 px, the light palettes, the keyboard -------------------------------------------------
+
+# the way to the blueprints in German and Italian: Automation, then the sub tab or the Cloud page
+AUTOMATION = {'de': 'Automatisierung', 'it': 'Automazione'}
+# the contrast of the text of an element on what lies under it (the tints laid over the first opaque
+# background up the tree, else white)
+CONTRAST = """(sel) => {
+    const el = document.querySelector(sel);
+    const rgb = (s) => { const m = s.match(/[\\d.]+/g).map(Number); return [m[0], m[1], m[2], m.length > 3 ? m[3] : 1]; };
+    const lum = (c) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+        return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); };
+    const layers = [];
+    for (let e = el; e; e = e.parentElement) {
+        const c = rgb(getComputedStyle(e).backgroundColor);
+        if (c[3] > 0) layers.push(c);
+        if (c[3] >= 1) break;
+    }
+    let bg = [255, 255, 255];
+    for (const [r, g, b, a] of layers.reverse()) bg = [r * a + bg[0] * (1 - a), g * a + bg[1] * (1 - a), b * a + bg[2] * (1 - a)];
+    const [hi, lo] = [lum(rgb(getComputedStyle(el).color)), lum(bg)].sort((x, y) => y - x);
+    return Math.round((hi + 0.05) / (lo + 0.05) * 100) / 100;
+}"""
+# the chips of the list and of the recent deploys
+CHIPS = {'count': '[data-bp-count]', 'all clusters': '[data-bp-scope="all"]', 'template': '[data-bp-row="b5"] [data-bp-source-cell] span',
+         'image removed': '[data-bp-row="b4"] [data-bp-image="missing"] > span', 'completed': '[data-bp-recent-row="r1"] [data-bp-state]',
+         'failed': '[data-bp-recent-row="r2"] [data-bp-state]'}
+
+
+def _page_in(app, lang):
+    """_page for an account that reads the app in German or Italian."""
+    page = app.page
+    name = _nav_names()[lang]
+    if app.layout == 'cloud':
+        _cloud_nav(page, name)
+    else:
+        page.get_by_text('Testi').first.click()
+        page.locator('button', has_text=re.compile(rf'^\s*{AUTOMATION[lang]}\s*$')).first.click()
+        page.locator('button', has_text=re.compile(rf'^\s*{re.escape(name)}\s*$')).first.click()
+    _need(page, '[data-bp-row]', f'the blueprints in {lang}')
+    page.wait_for_timeout(300)
+    return page
+
+
+def _resources(page, label='Resources'):
+    page.get_by_text('Testi').first.click()
+    page.locator('button', has_text=re.compile(rf'^\s*{label}\s*$')).first.click()
+    page.locator('[data-bp-nav="resources"]').wait_for(timeout=8000)
+
+
+def test_runtime_the_resources_row_wraps_whole_buttons(open_app):
+    # in German the four buttons are wider than the row at 1280 px
+    page = open_app(language='de', viewport=(1280, 800)).page
+    _resources(page, 'Ressourcen')
+    # each button: where it starts, on how many lines its label stands, and that it ends in the row
+    row = page.evaluate("""() => { const row = document.querySelector('[data-bp-nav="resources"]').parentElement, box = row.getBoundingClientRect();
+        return [...row.children].map(k => {
+            const tops = new Set(), walk = document.createTreeWalker(k, NodeFilter.SHOW_TEXT), range = document.createRange();
+            for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+                if (!n.textContent.trim()) continue;
+                range.selectNodeContents(n);
+                for (const q of range.getClientRects()) tops.add(Math.round(q.top));
+            }
+            const r = k.getBoundingClientRect();
+            return [Math.round(r.y), tops.size, r.right <= box.right + 0.5]; }); }""")
+    # the row breaks between them, no label breaks in two
+    assert len(row) == 4 and len({y for y, _, _ in row}) > 1, row
+    assert all(lines == 1 and inside for _, lines, inside in row), row
+
+
+def test_runtime_the_resources_button_lands_on_the_top_of_the_page(open_app):
+    page = open_app(viewport=(1280, 800)).page
+    _resources(page)
+    page.evaluate('() => window.scrollTo(0, document.documentElement.scrollHeight)')
+    page.locator('[data-bp-nav="resources"]').click()
+    _need(page, '[data-bp-row]', 'the Resources button leads to the blueprints')
+    page.wait_for_timeout(300)
+    assert page.evaluate('() => window.scrollY') == 0
+    # the title of the section is in view, under the header
+    top = _box(page, '[data-bp] h2')['y']
+    assert page.evaluate("() => document.querySelector('header').getBoundingClientRect().bottom") <= top < 800
+
+
+def test_runtime_an_esxi_cluster_has_no_way_to_the_blueprints(open_app):
+    esxi = dict(CLUSTER, id='e1', name='ESXI-Test', display_name='ESXI-Test', cluster_type='esxi', host='10.0.0.9')
+    app = open_app(clusters=[esxi, CLUSTER])
+    page = app.page
+    page.get_by_text('ESXI-Test').first.click()
+    page.locator('button', has_text=re.compile(r'^\s*Resources\s*$')).first.click()
+    page.get_by_text('Create new VM').first.wait_for(timeout=8000)
+    page.wait_for_timeout(500)
+    assert page.locator('[data-bp-nav]').count() == 0
+    # its Proxmox VE neighbour has it
+    _resources(page)
+
+
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_at_1280_the_buttons_stay_on_the_title_row(open_app, layout):
+    page = _page_in(open_app(layout=layout, language='de', viewport=(1280, 800)), 'de')
+    head, new, sec = _box(page, '[data-bp] h2'), _box(page, '[data-bp-new]'), _box(page, '[data-bp]')
+    assert abs(new['y'] - head['y']) < 4, (head, new)
+    assert abs((new['x'] + new['width']) - (sec['x'] + sec['width'])) < 1.5, (new, sec)
+
+
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_the_cloud_init_fields_fill_their_row(open_app, layout):
+    page = _page(open_app(layout=layout))
+    page.locator('[data-bp-edit="b2"]').click()
+    _need(page, '[data-bp-editor="b2"]', 'Edit opens the editor')
+    page.wait_for_timeout(300)
+    box = page.evaluate("""() => { const g = document.querySelector('[data-bp-group="ci"]').getBoundingClientRect();
+        const f = (id) => document.querySelector(`[data-bp-group="ci"] [data-bp-field="${id}"]`).getBoundingClientRect();
+        return { left: g.left, right: g.right, search: f('searchdomain').right, keys: [f('sshkeys').left, f('sshkeys').right] }; }""")
+    # the four fields end where the group ends, the keys run under them over the whole width
+    assert abs(box['search'] - box['right']) < 1.5, box
+    assert abs(box['keys'][0] - box['left']) < 1 and abs(box['keys'][1] - box['right']) < 1.5, box
+
+
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_at_1280_the_list_fits_in_italian_and_with_a_long_name(open_app, layout):
+    fits = """() => { const sc = document.querySelector('[data-bp-table]').parentElement; const c = sc.getBoundingClientRect();
+        const d = [...document.querySelectorAll('[data-bp-deploy]')].map(b => b.getBoundingClientRect().right);
+        return [sc.scrollWidth - sc.clientWidth, Math.max(...d) <= c.right]; }"""
+    page = _page_in(open_app(layout=layout, language='it', viewport=(1280, 800)), 'it')
+    assert page.evaluate(fits) == [0, True]
+    # a name of 64 characters without a break
+    long = _bp('l1', 'x' * 64, tags=['production'])
+    page = _page(open_app(layout=layout, viewport=(1280, 800), blueprints=[long, copy.deepcopy(WEB)]))
+    assert page.evaluate(fits) == [0, True]
+    assert _row(page, 'b1').inner_text().count('2 vCPU · 2 GB · 20 GB') == 1
+
+
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_a_dialog_takes_the_focus_and_hands_it_back(open_app, layout):
+    page = _page(open_app(layout=layout))
+    inside = "() => document.querySelector('[data-bp-modal=\"editor\"]').contains(document.activeElement)"
+    page.locator('[data-bp-new]').click()
+    _need(page, '[data-bp-editor="new"]', 'New blueprint opens the editor')
+    assert page.evaluate(inside)
+    # Tab goes round the fields of the dialog, either way, and never to the page behind it
+    for key in ['Tab'] * 40 + ['Shift+Tab'] * 5:
+        page.keyboard.press(key)
+        assert page.evaluate(inside), key
+    page.keyboard.press('Escape')
+    assert _wait(page, lambda: page.locator('[data-bp-modal]').count() == 0)
+    assert page.evaluate("() => document.activeElement && document.activeElement.hasAttribute('data-bp-new')")
+
+
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_a_glyph_in_a_chip_is_as_small_as_its_text(open_app, layout):
+    page = _page(open_app(layout=layout))
+    for sel in (CHIPS['all clusters'], CHIPS['image removed']):
+        # icons.js draws the globe and the triangle at 20 px whatever class they are given
+        size = page.locator(f'{sel} svg').evaluate('e => [e.getBoundingClientRect().width, e.getBoundingClientRect().height]')
+        assert size == [12, 12], (sel, size)
+        # and the chip is as high as it is without its glyph
+        heights = page.evaluate("""(sel) => { const e = document.querySelector(sel), g = e.querySelector('svg');
+            const a = e.getBoundingClientRect().height; g.style.display = 'none';
+            const b = e.getBoundingClientRect().height; g.style.display = ''; return [a, b]; }""", sel)
+        assert heights[0] == heights[1], (sel, heights)
+
+
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_the_chips_read_on_the_light_palette(open_app, layout):
+    if layout == 'cloud':
+        app = open_app(layout=layout, storage={'pegaprox-cloud-theme': 'light'})
+    else:
+        app = open_app()
+        app.page.evaluate("applyTheme('corporateLight')")
+    page = _page(app)
+    page.locator('[data-bp-recent-row]').first.wait_for(timeout=8000)
+    ratios = {k: page.evaluate(CONTRAST, sel) for k, sel in CHIPS.items()}
+    assert all(r >= 4.5 for r in ratios.values()), ratios
+    # the triangle is in the colour of its chip
+    tri = page.evaluate(f"""() => [getComputedStyle(document.querySelector('{CHIPS["image removed"]}')).color,
+        getComputedStyle(document.querySelector('{CHIPS["image removed"]} svg')).color]""")
+    assert tri[0] == tri[1], tri
+    if layout == 'modern':
+        # and the way there on the Resources page reads too
+        _resources(page)
+        assert page.evaluate(CONTRAST, '[data-bp-nav="resources"]') >= 4.5
+
+
+def test_runtime_cloud_at_900_px_the_page_does_not_scroll_sideways(open_app):
+    page = _page(open_app(layout='cloud', viewport=(900, 700)))
+    page.wait_for_timeout(300)
+    assert page.evaluate('() => document.documentElement.scrollWidth') <= 900
+
+
+def test_runtime_cloud_a_guest_that_is_gone_is_said_not_opened(open_app):
+    # 120 was deployed and deleted since: the list of the cluster no longer has it
+    app = open_app(layout='cloud')
+    page = _page(app)
+    page.locator('[data-bp-guest="120"]').first.click()
+    _need(page, 'text=Guest 120 is not in the list of this cluster', 'a guest the cluster does not list is said', timeout=4000)
+    page.wait_for_timeout(300)
+    # no page of a guest of unknown state with a Start button: the blueprints stay
+    assert page.locator('[data-bp]').count() == 1
+    assert page.locator('.cloud-nav-item-active').inner_text().strip() == 'Blueprints & Templates'
+    _no_errors(app)
+
+
+LAB = dict(CLUSTER, id='c2', name='Lab', display_name='Lab', host='10.0.0.2')
+
+
+@pytest.mark.parametrize('vmid', [100, 300])
+def test_runtime_cloud_a_guest_of_another_cluster_waits_for_the_list_of_that_cluster(open_app, vmid):
+    # Lab lists 100 (the fake has one list for every cluster), not 300
+    app = open_app(layout='cloud', clusters=[CLUSTER, LAB])
+    app.server.recent = [dict(ELSEWHERE, vmid=vmid, name='web01' if vmid == 100 else 'web-lab')]
+    page = _page(app)
+    page.locator('[data-bp-recent-scope="all"]').click()
+    page.locator(f'[data-bp-guest="{vmid}"]').click()
+    if vmid == 100:
+        _guest_opened(app, 'web01')
+    else:
+        _need(page, 'text=Guest 300 is not in the list of this cluster', 'a guest the list of Lab does not have is said', timeout=6000)
+        # the VMs page of Lab, without a page of a guest of unknown state
+        assert page.locator('.cloud-nav-item-active').inner_text().strip() == 'Virtual Machines'
+        assert page.locator('.cloud-breadcrumb-leaf').inner_text().strip() == 'Virtual Machines'
+    _no_errors(app)
+
+
 # --- classic Corporate stays as it is -----------------------------------------------------------
 
 def test_runtime_classic_corporate_keeps_the_library_alone(open_app):
@@ -845,7 +1090,8 @@ def test_modern_mounts_the_section_and_classic_corporate_does_not():
     assert ("label: isCorpRedesigned ? t('crBpNavTab') : isCorporate ? (t('templateLibrary') || 'Templates') : t('bpNavTab')") in dash
     # the ways there: the Resources button of Modern, Ctrl+K for the redesign and Modern
     btn = dash.index('data-bp-nav="resources"')
-    assert "{!isCorporate && can('vm.create') && (" in dash[btn - 400:btn]
+    assert ("{!isCorporate && can('vm.create') && (!selectedCluster.cluster_type || selectedCluster.cluster_type === 'proxmox') && ("
+            in dash[btn - 400:btn])
     assert "extraActions={(isCorpRedesigned || !isCorporate) && can('vm.create') && " in dash
     assert "if (c) (crTaskNav || mdBpNav).openBlueprints(c.id);" in dash
     nav = dash[dash.index('const mdBpNav = '):dash.index('const crGlobalView = ')]
@@ -878,7 +1124,7 @@ def test_the_cloud_look_is_scoped_to_the_cloud_layout():
     start = html.index('/* in Cloud they take the controls of the shell (blueprints.js)')
     block = html[start:html.index('/* icon button */', start)]
     rules = [ln.strip() for ln in block.split('\n') if '{' in ln]
-    assert len(rules) == 10 and all(r.startswith('body[data-layout="cloud"]') for r in rules), rules
+    assert len(rules) == 12 and all(r.startswith('body[data-layout="cloud"]') for r in rules), rules
     src = _read('web', 'src', 'blueprints.js')
     # Modern keeps its controls: the kit hands it the very classes it had
     assert "modern: { input: BP_INPUT, btn: BP_BTN, go: BP_BTN_GO, small: BP_BTN_ROW, icon: BP_BTN_ICON }," in src
@@ -957,8 +1203,8 @@ def test_every_key_is_in_all_nine_languages_after_the_blueprint_keys():
             assert re.search(rf'^                {k}: ', block, re.M).start() < pinned, (lang, k)
             assert not any(d in found[0] for d in DASHES), (lang, k)
             assert sorted(re.findall(r'\{[a-z]+\}', found[0])) == sorted(re.findall(r'\{[a-z]+\}', en[k])), (lang, k)
-    # translated, not the English text
+    # translated, not the English text; German names the page as English does (crBpNavTab too)
     for k in ('bpNavTab', 'bpRecentDesc', 'bpRecentNone', 'bpRecentNoneAll'):
         for lang in blocks:
-            if lang != 'en':
+            if lang != 'en' and (lang, k) != ('de', 'bpNavTab'):
                 assert re.search(rf'^                {k}: "(.*)",$', blocks[lang], re.M).group(1) != en[k], (lang, k)
