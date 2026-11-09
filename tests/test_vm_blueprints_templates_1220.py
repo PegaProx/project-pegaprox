@@ -3,7 +3,7 @@
 The template library holds Linux cloud images only. A blueprint can also start from a
 template already on a cluster: it is picked per cluster at the first deploy there and
 remembered. For a Windows template PVE writes a configdrive2 for cloudbase-init, which
-signs in with its own Admin user: PVE drops the Cloud-Init user and the search domains
+sets the password on its own administrator account: PVE drops the Cloud-Init user and the search domains
 for Windows and keeps the password in plain text in the VM config. So a Windows blueprint
 keeps neither user nor keys, each deploy sends a password, and the node has to run a
 qemu-server that does Windows Cloud-Init (8.2.4).
@@ -188,7 +188,7 @@ def test_a_windows_template_blueprint_keeps_nothing_windows_would_drop(admin):
     assert r.status_code == 201, r.get_json()
     got = r.get_json()['blueprint']
     assert (got['source_kind'], got['os'], got['template_id'], got['templates']) == ('template', 'windows', '', {})
-    # cloudbase-init has its own Admin user, PVE drops the search domains for Windows
+    # cloudbase-init has its own administrator account, PVE drops the search domains for Windows
     assert (got['ciuser'], got['sshkeys'], got['searchdomain'], got['ciupgrade']) == ('', '', '', True)
     assert got['nics'] == [] and got['nameserver'] == '10.0.0.53'
     assert got['template_missing'] is False and got['template_name'] == ''

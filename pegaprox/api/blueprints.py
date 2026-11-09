@@ -234,7 +234,8 @@ def _fields(body):
         if not isinstance(template_id, str) or not templates_lib._lookup_template(template_id):
             raise _Bad('pick an image from the template library', 'template_id')
     windows = os_kind == 'windows'
-    # cloudbase-init signs in with its own Admin user and PVE drops the search domains
+    # cloudbase-init sets the password on the administrator account named in its own config
+    # (Administrator or Admin) and PVE drops the search domains
     # for Windows, so none of that is kept where nothing would read it
     ciuser = '' if windows else _str(body, 'ciuser', 32)
     if ciuser and not validate_ssh_user(ciuser):
@@ -1078,8 +1079,8 @@ def deploy_blueprint(bp_id):
         if not isinstance(cipassword, str) or len(cipassword) > 128 or _NAME_CTRL.search(cipassword):
             raise _Bad('the password is up to 128 characters, no control characters', 'cipassword')
         if windows and not cipassword:
-            # cloudbase-init sets it on its Admin user; without one nobody signs in
-            raise _Bad('a Windows VM needs the password of its Admin user', 'cipassword')
+            # cloudbase-init sets it on the administrator account; without one nobody signs in
+            raise _Bad('a Windows VM needs a password for its administrator account', 'cipassword')
         template_vmid = None
         if not library:
             raw_tv = body.get('template_vmid')
