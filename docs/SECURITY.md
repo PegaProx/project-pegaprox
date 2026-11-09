@@ -300,31 +300,44 @@ This is the recommended posture for production Linux deployments.
 
 ### Setup
 
-1. Generate the key (one-time):
+The credential has to hold the key the database is encrypted with now. An install that has
+started with SQLCipher (`deploy.sh`, the Debian package, the appliances) has an encrypted
+database already, and a new key in the credential locks it out: PegaProx then stops at the
+start with `[FATAL] [DBCRYPTO] ... does not unlock it`. So wrap the key it uses. The commands
+run as the service user in the directory the service runs in (`/var/lib/pegaprox` for the
+Debian package, `/opt/PegaProx` for `deploy.sh`, see
+[Inspecting the active tier](#inspecting-the-active-tier)).
+
+1. See which key that is and which databases it encrypts:
 
    ```bash
-   python3 -c 'import secrets, base64;
-   print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())' \
-     | sudo tee /tmp/pegaprox-key.txt
+   # Debian package, appliances:
+   sudo -u pegaprox sh -c 'cd /var/lib/pegaprox && /usr/bin/pegaprox/pegaprox-wrapper --keystore-status'
+   # deploy.sh:
+   cd /opt/PegaProx && sudo -u pegaprox ./venv/bin/python pegaprox_multi_cluster.py --keystore-status
    ```
 
-2. Wrap it with systemd-creds:
+   `keystore.source_path` is the key file, `db.files` the state of each database.
+
+2. Wrap that key with systemd-creds. `--print-key` prints it, so no plaintext copy is
+   written on the way:
 
    ```bash
    # Host-key bound (works everywhere):
-   sudo systemd-creds encrypt --name=db-key /tmp/pegaprox-key.txt \
-        /etc/pegaprox/secret.key.cred
+   sudo -u pegaprox sh -c 'cd /var/lib/pegaprox && /usr/bin/pegaprox/pegaprox-wrapper --print-key' \
+     | sudo systemd-creds encrypt --name=db-key - /etc/pegaprox/secret.key.cred
 
    # TPM2-bound (stronger, requires TPM2 chip):
-   sudo systemd-creds encrypt --name=db-key --with-key=tpm2 \
-        /tmp/pegaprox-key.txt /etc/pegaprox/secret.key.cred
+   sudo -u pegaprox sh -c 'cd /var/lib/pegaprox && /usr/bin/pegaprox/pegaprox-wrapper --print-key' \
+     | sudo systemd-creds encrypt --name=db-key --with-key=tpm2 - /etc/pegaprox/secret.key.cred
    ```
 
-3. **Shred the plaintext copy:**
+   With `deploy.sh`, the first line is
+   `cd /opt/PegaProx && sudo -u pegaprox ./venv/bin/python pegaprox_multi_cluster.py --print-key`.
 
-   ```bash
-   sudo shred -u /tmp/pegaprox-key.txt
-   ```
+3. **Keep an offline copy** of the key file from step 1 (password vault, see
+   [Backup discipline](#backup-discipline)). After step 7 it is the only way back when the
+   credential cannot be unsealed any more.
 
 4. Edit `/etc/systemd/system/pegaprox.service` and add to `[Service]`:
 
@@ -342,18 +355,32 @@ This is the recommended posture for production Linux deployments.
    sudo systemctl restart pegaprox
    ```
 
-6. Verify:
+6. Verify that PegaProx started with it. The `[KEYSTORE]` line alone does not show that: it is
+   written before the database is opened.
 
    ```bash
-   journalctl -u pegaprox -n 50 | grep '\[KEYSTORE\]'
+   journalctl -u pegaprox --since -5min | grep -E '\[KEYSTORE\]|\[FATAL\]'
    # → [KEYSTORE] master key source: systemd-credential (/run/credentials/pegaprox.service/db-key)
+   #   and no [FATAL] line
+   systemctl is-active pegaprox
+   # → active, and still a minute later
    ```
 
-7. Once verified, **delete the legacy file** if you migrated from Tier 6:
+   Then log in to the web UI. `[FATAL] [DBCRYPTO] ... does not unlock it` means the credential
+   holds another key: take the `LoadCredentialEncrypted=` line out again, restart, and go back
+   to step 1.
+
+7. Only when step 6 passed and the copy of step 3 is in place, remove the key file the
+   credential replaces, if it is `/etc/pegaprox/secret.key`:
 
    ```bash
-   sudo shred -u /etc/pegaprox/secret.key   # or config/.pegaprox.key
+   sudo shred -u /etc/pegaprox/secret.key
    ```
+
+   Never delete `config/.pegaprox.key`, even where it was the key in step 1: it is also the
+   Fernet key the database layer reads old field values with (see
+   [The Debian package](#the-debian-package)). Where it was the database key, a backup of
+   `config/` still holds that key, so keep such backups as secret as the key.
 
 ### Recovering from a TPM2 reset
 
