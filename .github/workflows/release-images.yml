@@ -160,12 +160,19 @@ jobs:
       - name: Tools installieren
         run: |
           sudo apt-get update
+          # python3-pip for the wheel download of build-sqlcipher3-deb.sh, dpkg-deb is there anyway
           sudo apt-get install -y \
-            debootstrap rsync systemd-container curl xz-utils qemu-user-static binfmt-support
+            debootstrap rsync systemd-container curl xz-utils qemu-user-static binfmt-support python3-pip
           sudo update-binfmts --enable qemu-aarch64 || true
           sudo snap install distrobuilder --classic
           export PATH="$PATH:/snap/bin"
           distrobuilder --version
+
+      # NS Nov 2026 (#1226) - python3-sqlcipher3 is a C extension, one package per architecture.
+      # Built for this leg from the wheels apt.pegaprox.com pins, with its script; the files
+      # section of the definition copies it into the rootfs.
+      - name: python3-sqlcipher3 bauen
+        run: bash packaging/apt/build-sqlcipher3-deb.sh "${{ matrix.arch }}" "$RUNNER_TEMP/sqlcipher3-deb"
 
       - name: distrobuilder-Definition schreiben
         run: |
@@ -216,8 +223,15 @@ jobs:
                   - systemd-sysv
                 action: install
 
+          files:
+            # the python3-sqlcipher3 of the step before. distrobuilder copies files after
+            # post-packages, so the install below runs at post-files, with it in place
+            - generator: copy
+              source: ${RUNNER_TEMP}/sqlcipher3-deb/python3-sqlcipher3.deb
+              path: /var/cache/pegaprox-image/python3-sqlcipher3.deb
+
           actions:
-            - trigger: post-packages
+            - trigger: post-files
               action: |-
                 #!/bin/sh
                 set -eu
@@ -238,17 +252,18 @@ jobs:
                 # that is the check working - confirm the new artifact before bumping.
                 wget https://cdn.gyptazy.com/debian/python3-flask-sock/python3-flask-sock_0.7.1_all.deb
                 wget https://cdn.gyptazy.com/debian/python3-xenapi/python3-xenapi_26.8.1_all.deb
-                wget https://cdn.gyptazy.com/debian/python3-sqlcipher3/python3-sqlcipher3_0.6.4_all.deb
                 cat > /tmp/deb.sha256 <<'SUMS'
                 125ec5a4e2bbc10c57b7b9e3ab05aecda5edf1b8f6646aff4131cab441b53c24  python3-flask-sock_0.7.1_all.deb
                 db36397c5db4448459dee349fc2a0b6f147ddf4b346dc8480687903c38fc822e  python3-xenapi_26.8.1_all.deb
-                6f6c099beecc54f53808d94ed43c43d41e872a572ba3aff3b83c7a035f5e06c2  python3-sqlcipher3_0.6.4_all.deb
                 SUMS
                 sed -i 's/^[[:space:]]*//' /tmp/deb.sha256
                 sha256sum -c /tmp/deb.sha256
                 dpkg -i python3-flask-sock_0.7.1_all.deb
                 dpkg -i python3-xenapi_26.8.1_all.deb
-                dpkg -i python3-sqlcipher3_0.6.4_all.deb
+                # NS Nov 2026 (#1226) - ahead of pegaprox, which depends on it. Not the one on
+                # the CDN: that one says Architecture all and holds the x86_64 module only
+                dpkg -i /var/cache/pegaprox-image/python3-sqlcipher3.deb
+                rm -rf /var/cache/pegaprox-image
                 install -d -m 0755 /etc/apt/keyrings
                 curl -fsSL https://git.gyptazy.com/api/packages/gyptazy/debian/repository.key \\
                   -o /etc/apt/keyrings/gyptazy.asc
@@ -287,6 +302,7 @@ jobs:
               --boot \
               --bind-ro=/etc/resolv.conf \
               > /tmp/nspawn.log 2>&1 &
+            NSPAWN_PID=$!
           else
             sudo docker import --platform linux/arm64 rootfs.tar.xz pegaprox-lxc-smoke:arm64
             sudo docker run -d \
@@ -322,13 +338,27 @@ jobs:
             sudo machinectl poweroff pegaprox-test 2>/dev/null || true
             sleep 3
             sudo machinectl terminate pegaprox-test 2>/dev/null || true
+            # NS Nov 2026 (#1226) - what PegaProx says about its database, as the service user
+            # in its directory. A second nspawn on the tree once the booted one has let go of it
+            for _ in $(seq 1 30); do ps -p "$NSPAWN_PID" >/dev/null || break; sleep 1; done
+            timeout 120 sudo systemd-nspawn -D /tmp/ct/rootfs --quiet --pipe --register=no \
+              --user=pegaprox --chdir=/var/lib/pegaprox \
+              /usr/bin/pegaprox/pegaprox-wrapper --keystore-status > "$RUNNER_TEMP/keystore-status.json" || true
           else
+            # the same in the running container (under qemu, so with time to spare)
+            timeout 300 sudo docker exec -u pegaprox -w /var/lib/pegaprox pegaprox-test \
+              /usr/bin/pegaprox/pegaprox-wrapper --keystore-status > "$RUNNER_TEMP/keystore-status.json" || true
             echo "----- Container-Logs -----"
             sudo docker logs pegaprox-test || true
             sudo docker rm -f pegaprox-test 2>/dev/null || true
           fi
+          echo "----- --keystore-status -----"
+          cat "$RUNNER_TEMP/keystore-status.json" || true
 
           [ "$OK" -eq 1 ] || { echo "::error::PegaProx kam im LXC nicht hoch"; exit 1; }
+          # port 5000 answers on plain SQLite too. On arm64 this fails the leg, and with it the
+          # upload of its template (continue-on-error: the amd64 release goes out without it)
+          python3 -I packaging/apt/smoke_backend.py "$RUNNER_TEMP/keystore-status.json"
           echo "LXC Smoke-Test erfolgreich."
 
       - name: Template umbenennen
@@ -370,7 +400,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             qemu-utils qemu-system-x86 qemu-system-arm qemu-efi-aarch64 \
-            cloud-image-utils curl
+            cloud-image-utils curl python3-pip
+
+      # NS Nov 2026 (#1226) - as in build-lxc; the first-boot installer takes it from the image
+      - name: python3-sqlcipher3 bauen
+        run: bash packaging/apt/build-sqlcipher3-deb.sh "${{ matrix.arch }}" "$RUNNER_TEMP/sqlcipher3-deb"
 
       - name: Debian Cloud-Image laden + Checksum verifizieren
         run: |
@@ -439,9 +473,17 @@ jobs:
           sha256sum -c /tmp/deb.sha256
           dpkg -i python3-flask-sock_0.7.1_all.deb
           dpkg -i python3-xenapi_26.8.1_all.deb
+          # NS Nov 2026 (#1226) - the python3-sqlcipher3 the workflow built for this arch, ahead
+          # of pegaprox: apt would take the Architecture all one of the third-party repo, which
+          # holds the x86_64 module only
+          dpkg -i /var/cache/pegaprox-image/python3-sqlcipher3.deb
+          rm -f /var/cache/pegaprox-image/python3-sqlcipher3.deb
           apt-get -y install sudo sqlite3 ca-certificates curl qemu-guest-agent
           apt-get -y install pegaprox sshpass
           systemctl enable pegaprox || true
+          # what PegaProx says about its database; the workflow checks it after this boot
+          (cd /var/lib/pegaprox && runuser -u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper --keystore-status) \
+            > /var/cache/pegaprox-image/keystore-status.json || true
 
           # --- Login-User mit sudo ---
           if ! id pegaprox_admin >/dev/null 2>&1; then
@@ -809,6 +851,8 @@ jobs:
           sudo cp gyptazy.list /mnt/img/etc/apt/sources.list.d/gyptazy.list
 
           sudo cp install-pegaprox.sh /mnt/img/usr/local/sbin/install-pegaprox.sh
+          sudo install -D -m 0644 "$RUNNER_TEMP/sqlcipher3-deb/python3-sqlcipher3.deb" \
+            /mnt/img/var/cache/pegaprox-image/python3-sqlcipher3.deb
           sudo cp pegaprox-setup      /mnt/img/usr/local/bin/pegaprox-setup
           sudo cp pegaprox-setup-auto /mnt/img/usr/local/bin/pegaprox-setup-auto
           sudo chmod 0755 /mnt/img/usr/local/sbin/install-pegaprox.sh \
@@ -924,6 +968,9 @@ jobs:
           [ -n "$ROOT" ] || { echo "::error::Root-Partition nicht gefunden"; exit 1; }
           sudo mkdir -p /mnt/img
           sudo mount "$ROOT" /mnt/img
+          # NS Nov 2026 (#1226) - what PegaProx said about its database in the smoke boot,
+          # checked below once the image is clean
+          sudo cat /mnt/img/var/cache/pegaprox-image/keystore-status.json > "$RUNNER_TEMP/keystore-status.json" || true
           R=/mnt/img
 
           # PegaProx state: a fresh database, keys and TLS pair on the user's first start
@@ -935,6 +982,8 @@ jobs:
           sudo rm -f "$R/usr/local/sbin/install-pegaprox.sh" \
                      "$R/etc/systemd/system/pegaprox-firstboot.service" \
                      "$R/etc/systemd/system/multi-user.target.wants/pegaprox-firstboot.service"
+          # and what it had from the build: the python3-sqlcipher3 deb, the status of PegaProx
+          sudo rm -rf "$R/var/cache/pegaprox-image"
           # SSH host keys: generated on first boot instead (cloud-init does not run there)
           sudo rm -f "$R"/etc/ssh/ssh_host_*
           sudo tee "$R/etc/systemd/system/pegaprox-ssh-hostkeys.service" >/dev/null <<'UNIT'
@@ -975,6 +1024,11 @@ jobs:
           sudo sync
           sudo umount /mnt/img
           sudo qemu-nbd --disconnect /dev/nbd0
+          # port 5000 answered on plain SQLite too. On arm64 this fails the leg before its image
+          # is uploaded (continue-on-error: the amd64 release goes out without it)
+          echo "----- --keystore-status of the smoke boot -----"
+          cat "$RUNNER_TEMP/keystore-status.json" || true
+          python3 -I packaging/apt/smoke_backend.py "$RUNNER_TEMP/keystore-status.json" || FAIL=1
           [ "$FAIL" -eq 0 ] || exit 1
           echo "Image bereinigt."
 
