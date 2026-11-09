@@ -4060,6 +4060,8 @@ def remove_node_from_cluster(cluster_id, node_name):
         cluster_config = mgr.config
         ssh_user = node_login(cluster_config)
         ssh_key_content = getattr(cluster_config, 'ssh_key', '') or ''
+        # JB Nov 2026 - both logins below went to 22 whatever the cluster had set
+        ssh_port = getattr(cluster_config, 'ssh_port', 22) or 22
         
         # Find an online node to execute the removal from
         host, port = mgr.host, mgr.api_port
@@ -4111,13 +4113,13 @@ def remove_node_from_cluster(cluster_id, node_name):
                     except:
                         continue
                 if pkey:
-                    ssh.connect(online_node_ip, port=22, username=ssh_user, pkey=pkey, timeout=30)
+                    ssh.connect(online_node_ip, port=ssh_port, username=ssh_user, pkey=pkey, timeout=30)
                     connected = True
             except Exception as key_err:
                 logging.debug(f"[RemoveNode] SSH key auth failed: {key_err}")
         
         if not connected and ssh_password:
-            ssh.connect(online_node_ip, port=22, username=ssh_user, password=ssh_password, timeout=30)
+            ssh.connect(online_node_ip, port=ssh_port, username=ssh_user, password=ssh_password, timeout=30)
             connected = True
         
         if not connected:
@@ -4173,13 +4175,13 @@ def remove_node_from_cluster(cluster_id, node_name):
                             # no persist here: this connects to a node being REMOVED —
                             # pinning its key would wrongly reject-on-change if the node
                             # is later reinstalled and re-added.
-                            ssh_cleanup.connect(removed_node_ip, port=22, username=ssh_user, pkey=pkey, timeout=15)
+                            ssh_cleanup.connect(removed_node_ip, port=ssh_port, username=ssh_user, pkey=pkey, timeout=15)
                             cleanup_connected = True
                     except:
                         pass
                 if not cleanup_connected and ssh_password:
                     try:
-                        ssh_cleanup.connect(removed_node_ip, port=22, username=ssh_user, password=ssh_password, timeout=15)
+                        ssh_cleanup.connect(removed_node_ip, port=ssh_port, username=ssh_user, password=ssh_password, timeout=15)
                         cleanup_connected = True
                     except:
                         pass
