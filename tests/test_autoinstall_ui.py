@@ -222,7 +222,8 @@ def test_the_cloud_shell_reads_the_flag_off_the_current_user(cloud):
     # that forwards either: the answer URL the page shows would be the standby's own
     assert 'const canAutoInstall = !!(currentUser && currentUser.autoinstall_access) && !haStandby;' in cloud
     shell = cloud[cloud.index('function CloudShell('):]
-    assert shell.index('const { ha, haStandby, haConsolesElsewhere } = useAuth();') < shell.index('const canAutoInstall =')
+    # haReadOnly is read there as well, for the blueprints (#1220)
+    assert shell.index('const { ha, haStandby, haConsolesElsewhere, haReadOnly } = useAuth();') < shell.index('const canAutoInstall =')
     assert 'canAutoInstall={canAutoInstall}' in cloud
 
 

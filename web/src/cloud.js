@@ -442,7 +442,8 @@
                     { id: 'schedules', label: t('schedules'), icon: 'Clock' },
                     { id: 'scripts', label: t('cloudNavScripts'), icon: 'Terminal' },
                     { id: 'snapshotpolicies', label: t('cloudNavSnapshotPolicies'), icon: 'Camera' },
-                    { id: 'templates', label: t('cloudNavTemplates'), icon: 'Copy' },
+                    // LW Nov 2026 (#1220) - the blueprints sit above the library there
+                    { id: 'templates', label: t('bpNavTab'), icon: 'Copy' },
                     { id: 'alerts', label: t('alertChannels'), icon: 'Bell' },
                 ] },
                 { label: t('cloudNavInfrastructure'), items: [
@@ -704,7 +705,7 @@
         }
 
         // ── instances list (VMs / Containers) ──────────────────────
-        function CloudInstanceList({ rows, kind, clusterId, act, onOpen, onCreate, t }) {
+        function CloudInstanceList({ rows, kind, clusterId, act, onOpen, onCreate, onBlueprints, t }) {
             const safe = Array.isArray(rows) ? rows : [];
             const [query, setQuery] = React.useState('');
             const [statusFilter, setStatusFilter] = React.useState('all');
@@ -771,6 +772,12 @@
             return (
                 <div className="cloud-body">
                     <CloudPageHeader title={title} sub={`${safe.length} ${kind === 'lxc' ? (t('cloud.containersUnit') || 'containers') : (t('cloud.vmsUnit') || 'virtual machines')}`}>
+                        {/* LW Nov 2026 (#1220) - to the blueprints of this cluster */}
+                        {onBlueprints && kind !== 'lxc' && (
+                            <button type="button" className="cloud-btn" onClick={onBlueprints} data-bp-nav="cloud-vms">
+                                <Icons.Template /> {t('crBpNavDeploy')}
+                            </button>
+                        )}
                         {canCreate && (
                             <button type="button" className="cloud-btn cloud-btn-primary" onClick={() => onCreate(kind === 'lxc' ? 'lxc' : 'qemu')}>
                                 <Icons.Plus /> {kind === 'lxc' ? (t('newContainer') || 'New Container') : (t('newVm') || 'New VM')}
@@ -2473,10 +2480,12 @@
             // server-computed, already false for tenant/cluster-confined users; a standby
             // installs nothing (#625), like the sidebar entry in the other two layouts. Not
             // even a forwarding one: the answer URL it would show is this instance's own.
-            const { ha, haStandby, haConsolesElsewhere } = useAuth();
+            const { ha, haStandby, haConsolesElsewhere, haReadOnly } = useAuth();
             const canAutoInstall = !!(currentUser && currentUser.autoinstall_access) && !haStandby;
             const holdsPerm = (perm) => !!isAdmin || (Array.isArray(currentUser && currentUser.permissions) && currentUser.permissions.includes(perm));
             const canChanges = holdsPerm('changes.view');
+            // LW Nov 2026 (#1220) - the blueprints (blueprints.js) read with vm.create, a standby lists them and changes nothing
+            const canBp = holdsPerm('vm.create');
 
             // PegaProx t() ECHOES the key back on a miss, so `t('cloud.x') || 'Fallback'`
             // would render the raw key. treat key-echo as "no translation". -- NS
@@ -2555,7 +2564,7 @@
                 topology: T('topology') || 'Topology',
                 compliance: T('compliance') || 'Compliance',
                 snapshotpolicies: T('snapshotPolicies') || 'Snapshot Policies',
-                templates: T('templatesLibrary') || 'Templates',
+                templates: T('bpNavTab') || 'Blueprints & Templates',
                 insights: T('insights') || 'Insights',
                 costs: T('costDashboard') || 'Costs',
                 power: T('powerTitle') || 'Power & Carbon',
@@ -2585,6 +2594,21 @@
                 setDetailRes(null);
             };
             const openDetail = (r) => setDetailRes(r);
+            // where the blueprints lead: the guest a deploy made opens on the VMs page of its cluster,
+            // and the editor suggests the bridges of a node of this one
+            const bpNav = {
+                nodesOf: (id) => (id === cid ? clusterMetrics : null),
+                openGuest: (id, guest) => {
+                    const cl = safeClusters.find(c => c && c.id === id);
+                    if (!cl || !guest) return;
+                    const known = id === cid && safeResources.find(r => r && r.vmid === guest.vmid && r.type === guest.type);
+                    if (id !== cid) setSelectedCluster(cl);
+                    setSection('vms');
+                    setDetailRes({ ...(known || guest), _clusterId: id });
+                },
+            };
+            const pveCluster = !!selectedCluster && (!selectedCluster.cluster_type || selectedCluster.cluster_type === 'proxmox');
+            const toBlueprints = canBp && !haReadOnly && pveCluster ? () => selectSection('templates') : undefined;
 
             // detail crumb when open
             const crumbs = ['Cloud', sectionLabels[section] || 'Overview'];
@@ -2599,7 +2623,7 @@
                         body = <CloudDashboard clusters={safeClusters} resources={safeResources} metrics={clusterMetrics} dcStatus={dcStatus} tasks={tasks} onNav={selectSection} t={T} />;
                         break;
                     case 'vms':
-                        body = <CloudInstanceList rows={vms} kind="qemu" clusterId={cid} act={act} onOpen={openDetail} onCreate={act.createVm} t={T} />;
+                        body = <CloudInstanceList rows={vms} kind="qemu" clusterId={cid} act={act} onOpen={openDetail} onCreate={act.createVm} onBlueprints={toBlueprints} t={T} />;
                         break;
                     case 'containers':
                         body = <CloudInstanceList rows={cts} kind="lxc" clusterId={cid} act={act} onOpen={openDetail} onCreate={act.createVm} t={T} />;
@@ -2686,7 +2710,12 @@
                         break;
                     case 'templates':
                         body = (
-                            <div className="cloud-mounted">
+                            <div className="cloud-mounted cloud-body">
+                                {/* the blueprints above the library, as in Modern */}
+                                {cid && (
+                                    <Blueprints key={cid} cluster={selectedCluster} clusters={safeClusters} authFetch={authFetch} addToast={addToast}
+                                        canRead={canBp} canWrite={canBp && !haReadOnly} nav={bpNav} cloud />
+                                )}
                                 <TemplatesLibraryTab clusterId={cid} clusterName={selectedCluster && selectedCluster.name} authFetch={authFetch} addToast={addToast} t={T} isAdmin={isAdmin} isCorporate={false} />
                             </div>
                         );

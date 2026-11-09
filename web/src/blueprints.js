@@ -1,7 +1,9 @@
         // LW Nov 2026 (#1220) - blueprints for Modern and Cloud.
         // The blueprints of Corporate Redesigned (cr_blueprints.js) drawn the way the Modern tabs are:
-        // Automation > Blueprints & Templates shows them above the library cards, Cloud mounts the same
-        // section in its .cloud-mounted frame (cloud), where the proxmox-* classes take the Cloud colours.
+        // Automation > Blueprints & Templates shows them above the library cards. Cloud mounts the same
+        // section on its Blueprints & Templates page (cloud): there the buttons, fields, tables, chips and
+        // switches are the ones of the Cloud shell (cloud-btn, cloud-input, cloud-table ... in cloud.js),
+        // the rest takes the Cloud colours of its .cloud-mounted frame.
         // What a blueprint holds, the bodies it sends and the reads of the dialogs are the redesign's
         // (the crBp* helpers and crBpUseEditor / crBpUseDeploy / crBpUseProgress), so both looks follow
         // one set of rules. The section reads the blueprints and the recent deploys of this cluster once;
@@ -30,12 +32,42 @@
         const BP_BTN_GO = 'px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed';
         const BP_BTN_ROW = 'px-2 py-1 border border-proxmox-border rounded text-xs bp-fg hover:bg-proxmox-hover flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed';
         const BP_BTN_ICON = 'p-1.5 rounded bp-muted hover:bg-proxmox-hover disabled:opacity-50 disabled:cursor-not-allowed';
+        // and as the Cloud pages draw them
+        const BP_KIT = {
+            modern: { input: BP_INPUT, btn: BP_BTN, go: BP_BTN_GO, small: BP_BTN_ROW, icon: BP_BTN_ICON },
+            cloud: {
+                input: 'cloud-input disabled:opacity-50', btn: 'cloud-btn disabled:opacity-50 disabled:cursor-not-allowed',
+                go: 'cloud-btn cloud-btn-primary disabled:opacity-50 disabled:cursor-not-allowed',
+                small: 'cloud-btn cloud-btn-sm disabled:opacity-50 disabled:cursor-not-allowed', icon: 'cloud-icon-btn',
+            },
+        };
+        // text, tint and border of the Cloud chips and notes: the status colours of the shell (cloudStatusMeta),
+        // which read on its dark and on its light theme
+        const BP_CLOUD_TONE = {
+            neutral: ['#8aa4b8', 'rgba(138,164,184,0.14)', 'rgba(138,164,184,0.30)'],
+            info: ['#2f9fe0', 'rgba(56,189,248,0.14)', 'rgba(56,189,248,0.36)'],
+            success: ['#1bbf8a', 'rgba(45,212,167,0.16)', 'rgba(45,212,167,0.42)'],
+            warning: ['#e0a82e', 'rgba(245,185,69,0.16)', 'rgba(245,185,69,0.42)'],
+            error: ['#e0686c', 'rgba(248,113,113,0.14)', 'rgba(248,113,113,0.36)'],
+            template: ['#9f7aea', 'rgba(168,85,247,0.14)', 'rgba(168,85,247,0.38)'],
+        };
+        // true inside the Cloud layout (set by Blueprints for everything under it)
+        const BpCloud = createContext(false);
+        function useBpKit() {
+            const cloud = useContext(BpCloud);
+            return { cloud, ...BP_KIT[cloud ? 'cloud' : 'modern'] };
+        }
         // the field grids: as many columns of at least min as there is room for (the static Tailwind build has
         // few responsive grid classes), a wide field over the whole row
         const bpGrid = (min) => ({ display: 'grid', gap: '0.75rem', gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${min}), 1fr))` });
         const BP_WIDE = { gridColumn: '1 / -1' };
 
         function BpBadge({ tone = 'neutral', title, children, ...rest }) {
+            const cloud = useContext(BpCloud);
+            if (cloud) {
+                const [color, background, borderColor] = BP_CLOUD_TONE[tone] || BP_CLOUD_TONE.neutral;
+                return <span className="cloud-chip cloud-chip-status whitespace-nowrap" style={{ color, background, borderColor }} title={title} {...rest}>{children}</span>;
+            }
             return (
                 <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap ${BP_TONE[tone] || BP_TONE.neutral}`}
                     title={title} {...rest}>{children}</span>
@@ -43,11 +75,14 @@
         }
 
         function BpNote({ tone = 'info', id, children }) {
+            const cloud = useContext(BpCloud);
             const [box, icon, glyph] = BP_NOTE[tone] || BP_NOTE.info;
             const Glyph = Icons[glyph];
+            const [color, background, borderColor] = BP_CLOUD_TONE[tone] || BP_CLOUD_TONE.info;
             return (
-                <div className={`border rounded-lg p-3 text-xs bp-fg flex items-start gap-2 ${box}`} data-bp-note={id} data-bp-tone={tone}>
-                    <Glyph className={`w-4 h-4 flex-shrink-0 ${icon}`} />
+                <div className={`border rounded-lg p-3 text-xs bp-fg flex items-start gap-2 ${cloud ? '' : box}`} data-bp-note={id} data-bp-tone={tone}
+                    style={cloud ? { background, borderColor } : undefined}>
+                    {cloud ? <span className="bp-note-icon" style={{ color }}><Glyph /></span> : <Glyph className={`w-4 h-4 flex-shrink-0 ${icon}`} />}
                     <div className="min-w-0 flex-1">{children}</div>
                 </div>
             );
@@ -82,11 +117,13 @@
 
         // two or more buttons of which one is picked (the source of a blueprint, the scope of the deploys)
         function BpSeg({ label, value, options, onPick, attr }) {
+            const cloud = useContext(BpCloud);
             return (
-                <div className="inline-flex rounded-lg border border-proxmox-border overflow-hidden" role="group" aria-label={label}>
+                <div className={cloud ? 'cloud-segment' : 'inline-flex rounded-lg border border-proxmox-border overflow-hidden'} role="group" aria-label={label}>
                     {options.map(([v, text]) => (
                         <button key={v} type="button" aria-pressed={value === v} onClick={() => onPick(v)} {...{ [attr]: v }}
-                            className={`px-3 py-1.5 text-sm ${value === v ? 'bg-proxmox-orange text-white' : 'bp-fg hover:bg-proxmox-hover'}`}>
+                            className={cloud ? `cloud-segment-btn${value === v ? ' is-active' : ''}`
+                                : `px-3 py-1.5 text-sm ${value === v ? 'bg-proxmox-orange text-white' : 'bp-fg hover:bg-proxmox-hover'}`}>
                             {text}
                         </button>
                     ))}
@@ -103,11 +140,13 @@
             );
         }
 
-        // A Modern dialog: the title on top, the body scrolls, the buttons stay at the bottom. Escape and
-        // a click beside it close it, not while it sends (busy); a press that started inside and ended
-        // outside (selecting the text of a field) is no click beside it
+        // A Modern dialog (in Cloud on the surface of the shell): the title on top, the body scrolls, the
+        // buttons stay at the bottom. Escape and a click beside it close it, not while it sends (busy); a
+        // press that started inside and ended outside (selecting the text of a field) is no click beside it.
+        // It is a child of the spaced section, whose top margin would leave a strip above the backdrop
         function BpModal({ id, title, sub, icon, wide, busy, onClose, footer, children }) {
             const { t } = useTranslation();
+            const kit = useBpKit();
             const downOutside = useRef(false);
             const Glyph = icon || Icons.Template;
             useEffect(() => {
@@ -116,10 +155,10 @@
                 return () => window.removeEventListener('keydown', key);
             }, [busy, onClose]);
             return (
-                <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" data-bp-modal={id}
+                <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" style={{ margin: 0 }} data-bp-modal={id}
                     onMouseDown={e => { downOutside.current = e.target === e.currentTarget; }}
                     onClick={e => { if (downOutside.current && e.target === e.currentTarget && !busy) onClose(); }}>
-                    <div className={`bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl w-full ${wide ? 'max-w-4xl' : 'max-w-2xl'} max-h-[90vh] flex flex-col`}
+                    <div className={`${kit.cloud ? 'bp-cloud-dialog' : 'bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl'} w-full ${wide ? 'max-w-4xl' : 'max-w-2xl'} max-h-[90vh] flex flex-col`}
                         role="dialog" aria-modal="true" aria-labelledby={`bp-${id}-title`}>
                         <div className="flex items-start justify-between gap-3 px-5 pt-4 pb-3 border-b border-proxmox-border">
                             <div className="min-w-0">
@@ -129,7 +168,7 @@
                                 </h3>
                                 {sub && <p className="text-xs text-gray-500 mt-0.5">{sub}</p>}
                             </div>
-                            <button type="button" className={BP_BTN_ICON} onClick={onClose} disabled={busy} aria-label={t('close')} title={t('close')} data-bp-modal-close={id}>
+                            <button type="button" className={kit.icon} onClick={onClose} disabled={busy} aria-label={t('close')} title={t('close')} data-bp-modal-close={id}>
                                 <Icons.X className="w-4 h-4" />
                             </button>
                         </div>
@@ -147,6 +186,7 @@
             const { t } = useTranslation();
             const { form, setForm, set, setNic, cat, busy, server, failed, tplSrc, win, err, odd, picked, save, general, diskHolder } =
                 crBpUseEditor({ bp, templateId, authFetch, t, onSaved });
+            const kit = useBpKit();
             const box = useRef(null);
             // a save that did not go through: the first error it left, on top or at a field, into view
             useEffect(() => {
@@ -155,15 +195,15 @@
                 if (first && first.scrollIntoView) first.scrollIntoView({ block: 'nearest' });
             }, [failed]);
             const input = (k, extra = {}) => (
-                <input id={`bp-f-${k}`} className={BP_INPUT} value={form[k]} spellCheck={false} onChange={e => set(k, e.target.value)} data-bp-input={k} {...extra} />
+                <input id={`bp-f-${k}`} className={kit.input} value={form[k]} spellCheck={false} onChange={e => set(k, e.target.value)} data-bp-input={k} {...extra} />
             );
             return (
                 <BpModal id="editor" wide busy={busy} onClose={onCancel}
                     title={bp ? crFill(t('crBpEditorEdit'), { name: bp.name }) : t('crBpEditorNew')}
                     footer={(
                         <>
-                            <button type="button" className={BP_BTN} onClick={onCancel} disabled={busy} data-bp-editor-cancel="">{t('cancel')}</button>
-                            <button type="button" className={BP_BTN_GO} onClick={save} disabled={busy} data-bp-editor-save="">
+                            <button type="button" className={kit.btn} onClick={onCancel} disabled={busy} data-bp-editor-cancel="">{t('cancel')}</button>
+                            <button type="button" className={kit.go} onClick={save} disabled={busy} data-bp-editor-save="">
                                 {busy ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Save className="w-3.5 h-3.5" />}
                                 {busy ? t('crNcSaving') : t('save')}
                             </button>
@@ -181,7 +221,7 @@
                             <BpField id="name" label={t('crBpFName')} error={err('name')}>{input('name', { maxLength: 64, spellCheck: undefined })}</BpField>
                             {tplSrc ? (
                                 <BpField id="os" label={t('crBpFOs')} error={err('os')} hint={t('crBpFOsHint')}>
-                                    <select id="bp-f-os" className={BP_INPUT} value={form.os} onChange={e => set('os', e.target.value)} data-bp-input="os">
+                                    <select id="bp-f-os" className={kit.input} value={form.os} onChange={e => set('os', e.target.value)} data-bp-input="os">
                                         {CR_BP_OS.map(o => <option key={o} value={o}>{t(CR_BP_OS_WORD[o])}</option>)}
                                     </select>
                                 </BpField>
@@ -189,7 +229,7 @@
                                 <BpField id="template_id" label={t('crBpFImage')} error={err('template_id')}
                                     hint={cat.state === 'error' ? crFill(t('crBpCatalogFailed'), { reason: cat.why }) : t('crBpFImageHint')}
                                     tone={cat.state === 'error' ? 'warning' : undefined}>
-                                    <select id="bp-f-template_id" className={BP_INPUT} value={form.template_id} onChange={e => set('template_id', e.target.value)}
+                                    <select id="bp-f-template_id" className={kit.input} value={form.template_id} onChange={e => set('template_id', e.target.value)}
                                         disabled={cat.state === 'loading' || cat.state === 'idle'} data-bp-input="template_id">
                                         <option value="">{cat.state === 'ok' || cat.state === 'error' ? t('crBpFImagePick') : t('crNcReading')}</option>
                                         {form.template_id && !picked && cat.state !== 'loading' && (
@@ -211,7 +251,7 @@
                                 <BpField id="memory" label={t('crBpFMemory')} error={err('memory')}>
                                     <div className="flex gap-2">
                                         {input('memory', { inputMode: 'decimal' })}
-                                        <select className={BP_INPUT} style={{ width: 'auto' }} value={form.memUnit} onChange={e => set('memUnit', e.target.value)} aria-label={t('crBpMemUnit')} data-bp-input="memUnit">
+                                        <select className={kit.input} style={{ width: 'auto' }} value={form.memUnit} onChange={e => set('memUnit', e.target.value)} aria-label={t('crBpMemUnit')} data-bp-input="memUnit">
                                             <option value="GB">GB</option>
                                             <option value="MB">MB</option>
                                         </select>
@@ -222,7 +262,7 @@
                                 </BpField>
                                 <BpField id="cpu" label={t('crBpFCpu')} error={err('cpu')}
                                     hint={tplSrc ? t('crBpFCpuHintTpl') : picked && picked.cpu ? crFill(t('crBpFCpuHintImage'), { cpu: picked.cpu }) : t('crBpFCpuHint')}>
-                                    {input('cpu', { placeholder: 'x86-64-v2-AES', className: `${BP_INPUT} font-mono` })}
+                                    {input('cpu', { placeholder: 'x86-64-v2-AES', className: `${kit.input} font-mono` })}
                                 </BpField>
                             </div>
                         </BpGroup>
@@ -239,22 +279,22 @@
                                                 style={{ gridTemplateColumns: '2.75rem minmax(0, 1.3fr) minmax(0, 0.8fr) minmax(0, 1fr) auto 2rem' }}>
                                                 <span className="font-mono text-xs bp-muted" style={{ paddingTop: 28 }}>{`net${i}`}</span>
                                                 <BpField id={`nic${i}-bridge`} label={t('crBpFBridge')} error={err(`nic${i}-bridge`)}>
-                                                    <input id={`bp-f-nic${i}-bridge`} className={`${BP_INPUT} font-mono`} value={n.bridge} spellCheck={false}
+                                                    <input id={`bp-f-nic${i}-bridge`} className={`${kit.input} font-mono`} value={n.bridge} spellCheck={false}
                                                         list={bridges.length ? 'bp-bridges' : undefined} onChange={e => setNic(i, 'bridge', e.target.value)} data-bp-nic-bridge={i} />
                                                 </BpField>
                                                 <BpField id={`nic${i}-vlan`} label={t('crBpFVlan')} error={err(`nic${i}-vlan`)}>
-                                                    <input id={`bp-f-nic${i}-vlan`} className={BP_INPUT} inputMode="numeric" value={n.vlan} placeholder={t('crBpVlanNone')}
+                                                    <input id={`bp-f-nic${i}-vlan`} className={kit.input} inputMode="numeric" value={n.vlan} placeholder={t('crBpVlanNone')}
                                                         onChange={e => setNic(i, 'vlan', e.target.value)} data-bp-nic-vlan={i} />
                                                 </BpField>
                                                 <BpField id={`nic${i}-model`} label={t('crBpFModel')}>
-                                                    <select id={`bp-f-nic${i}-model`} className={BP_INPUT} value={n.model} onChange={e => setNic(i, 'model', e.target.value)} data-bp-nic-model={i}>
+                                                    <select id={`bp-f-nic${i}-model`} className={kit.input} value={n.model} onChange={e => setNic(i, 'model', e.target.value)} data-bp-nic-model={i}>
                                                         {CR_BP_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
                                                     </select>
                                                 </BpField>
                                                 <div style={{ paddingTop: 26 }}><BpCheck checked={n.firewall} onChange={v => setNic(i, 'firewall', v)} label={t('crBpFFirewall')} data-bp-nic-fw={i} /></div>
                                                 <div style={{ paddingTop: 22 }}>
                                                     {form.nics.length > 1 && (
-                                                        <button type="button" className={`${BP_BTN_ICON} hover:text-red-400`} data-bp-nic-remove={i}
+                                                        <button type="button" className={`${kit.icon} hover:text-red-400`} data-bp-nic-remove={i}
                                                             onClick={() => setForm(f => ({ ...f, nics: f.nics.filter((_, j) => j !== i) }))}
                                                             title={crFill(t('crBpRemoveNic'), { n: `net${i}` })} aria-label={crFill(t('crBpRemoveNic'), { n: `net${i}` })}>
                                                             <Icons.X className="w-4 h-4" />
@@ -265,7 +305,7 @@
                                         ))}
                                     </ul>
                                     {form.nics.length < CR_BP_MAX_NICS && (
-                                        <button type="button" className={BP_BTN_ROW} onClick={() => setForm(f => ({ ...f, nics: [...f.nics, crBpNic()] }))} data-bp-nic-add="">
+                                        <button type="button" className={kit.small} onClick={() => setForm(f => ({ ...f, nics: [...f.nics, crBpNic()] }))} data-bp-nic-add="">
                                             <Icons.Plus className="w-3 h-3" />{t('crBpAddNic')}
                                         </button>
                                     )}
@@ -283,19 +323,19 @@
                                     </BpField>
                                 )}
                                 <BpField id="ip_mode" label={t('crBpFIpMode')} error={err('ip_mode')} hint={form.ip_mode === 'static' ? t('crBpIpStaticHint') : ''}>
-                                    <select id="bp-f-ip_mode" className={BP_INPUT} value={form.ip_mode} onChange={e => set('ip_mode', e.target.value)} data-bp-input="ip_mode">
+                                    <select id="bp-f-ip_mode" className={kit.input} value={form.ip_mode} onChange={e => set('ip_mode', e.target.value)} data-bp-input="ip_mode">
                                         {CR_BP_IP_MODES.map(m => <option key={m} value={m}>{t(CR_BP_IP_WORD[m])}</option>)}
                                     </select>
                                 </BpField>
                                 <BpField id="nameserver" label={t('crBpFDns')} error={err('nameserver')} hint={t('crBpFDnsHint')}>
-                                    {input('nameserver', { className: `${BP_INPUT} font-mono` })}
+                                    {input('nameserver', { className: `${kit.input} font-mono` })}
                                 </BpField>
                                 {!win && <BpField id="searchdomain" label={t('crBpFSearch')} error={err('searchdomain')}>{input('searchdomain')}</BpField>}
                                 {!win && (
                                     <BpField id="sshkeys" label={t('crBpFKeys')} wide error={err('sshkeys')}
                                         hint={odd.length ? crFill(t('crBpKeysOdd'), { n: odd.join(', ') }) : `${t('crBpFKeysHint')} ${t('crBpNoPassword')}`}
                                         tone={odd.length ? 'warning' : undefined}>
-                                        <textarea id="bp-f-sshkeys" className={`${BP_INPUT} font-mono text-xs`} rows={3} value={form.sshkeys} spellCheck={false}
+                                        <textarea id="bp-f-sshkeys" className={`${kit.input} font-mono text-xs`} rows={3} value={form.sshkeys} spellCheck={false}
                                             placeholder="ssh-ed25519 AAAA... user@host" onChange={e => set('sshkeys', e.target.value)} data-bp-input="sshkeys" />
                                     </BpField>
                                 )}
@@ -337,7 +377,10 @@
         function BpProgress({ dep, onRow }) {
             const { t } = useTranslation();
             const { row, fail, status, at, steps, pct, log } = crBpUseProgress(dep, onRow, t);
+            const cloud = useContext(BpCloud);
             const bar = status === 'failed' ? 'bg-red-500' : status === 'completed' ? 'bg-green-500' : 'bg-blue-500';
+            // the meter of the Cloud shell in its status colours
+            const fill = status === 'failed' ? 'var(--cloud-error)' : status === 'completed' ? 'var(--cloud-success)' : 'var(--cloud-accent)';
             return (
                 <div className="space-y-3" data-bp-progress={dep.id} data-bp-status={status}>
                     <div className="flex items-center gap-2 flex-wrap">
@@ -345,9 +388,9 @@
                         <span className="font-mono text-sm bp-fg">{crFill(t('crBpGuestLine'), { name: dep.name, vmid: dep.vmid })}</span>
                         <span className="text-xs text-gray-500 ml-auto">{`${Math.round(pct)}%`}</span>
                     </div>
-                    <div className="h-2 bg-proxmox-dark border border-proxmox-border rounded-full overflow-hidden" role="progressbar"
+                    <div className={cloud ? 'cloud-meter cloud-meter-lg' : 'h-2 bg-proxmox-dark border border-proxmox-border rounded-full overflow-hidden'} role="progressbar"
                         aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct} aria-label={t('crBpProgress')}>
-                        <div className={`h-full rounded-full ${bar}`} style={{ width: `${pct}%` }} />
+                        {cloud ? <div style={{ width: `${pct}%`, background: fill }} /> : <div className={`h-full rounded-full ${bar}`} style={{ width: `${pct}%` }} />}
                     </div>
                     <ol className="flex flex-wrap gap-1.5" aria-label={t('crBpProgress')}>
                         {steps.map(s => {
@@ -391,6 +434,7 @@
             const { t } = useTranslation();
             const { tplSrc, win, targets, form, set, setVmidTyped, nodes, stores, tpl, vnets, busy, server, dep, setRow, tplRows, away,
                     storeRows, missing, err, longName, go, tplHint, access, cl, done, guest, general } = crBpUseDeploy({ bp, clusters, clusterId, authFetch, t, onStarted });
+            const kit = useBpKit();
             const [showPw, setShowPw] = useState(false);
             const openGuest = () => {
                 const g = guest();
@@ -400,16 +444,16 @@
             const footer = dep ? (
                 <>
                     {done && nav && typeof nav.openGuest === 'function' && (
-                        <button type="button" className={BP_BTN_GO} onClick={openGuest} data-bp-open-guest={dep.vmid}>
+                        <button type="button" className={kit.go} onClick={openGuest} data-bp-open-guest={dep.vmid}>
                             <Icons.ExternalLink className="w-3.5 h-3.5" />{crFill(t('crBpOpenGuest'), { vmid: dep.vmid })}
                         </button>
                     )}
-                    <button type="button" className={BP_BTN} onClick={onClose} data-bp-deploy-close="">{t('close')}</button>
+                    <button type="button" className={kit.btn} onClick={onClose} data-bp-deploy-close="">{t('close')}</button>
                 </>
             ) : (
                 <>
-                    <button type="button" className={BP_BTN} onClick={onClose} disabled={busy} data-bp-deploy-cancel="">{t('cancel')}</button>
-                    <button type="button" className={BP_BTN_GO} onClick={go} disabled={busy || !canWrite || !targets.length} data-bp-deploy-go="">
+                    <button type="button" className={kit.btn} onClick={onClose} disabled={busy} data-bp-deploy-cancel="">{t('cancel')}</button>
+                    <button type="button" className={kit.go} onClick={go} disabled={busy || !canWrite || !targets.length} data-bp-deploy-go="">
                         {busy ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Play className="w-3.5 h-3.5" />}
                         {busy ? t('crBpStarting') : t('crBpDeployGo')}
                     </button>
@@ -428,14 +472,14 @@
                             {!targets.length ? <BpNote tone="warning" id="noclusters">{t('crBpNoClusters')}</BpNote> : (
                                 <div style={bpGrid('15rem')}>
                                     <BpField id="cluster_id" label={t('crBpFCluster')} error={err('cluster_id')}>
-                                        <select id="bp-f-cluster_id" className={BP_INPUT} value={form.cluster_id} onChange={e => set('cluster_id', e.target.value)} data-bp-dep="cluster_id">
+                                        <select id="bp-f-cluster_id" className={kit.input} value={form.cluster_id} onChange={e => set('cluster_id', e.target.value)} data-bp-dep="cluster_id">
                                             {targets.map(c => <option key={c.id} value={c.id}>{c.display_name || c.name}</option>)}
                                         </select>
                                     </BpField>
                                     <BpField id="node" label={t('crBpFNode')} error={err('node')}
                                         hint={nodes.state === 'error' ? crFill(t('crBpNodesFailed'), { reason: nodes.why }) : nodes.state === 'ok' && !nodes.rows.length ? t('crBpNoNodes') : ''}
                                         tone={nodes.state === 'error' || (nodes.state === 'ok' && !nodes.rows.length) ? 'warning' : undefined}>
-                                        <select id="bp-f-node" className={BP_INPUT} value={form.node} onChange={e => set('node', e.target.value)}
+                                        <select id="bp-f-node" className={kit.input} value={form.node} onChange={e => set('node', e.target.value)}
                                             disabled={nodes.state !== 'ok' || !nodes.rows.length} data-bp-dep="node">
                                             {nodes.state === 'loading' && <option value="">{t('crNcReading')}</option>}
                                             {nodes.rows.map(n => <option key={n} value={n}>{n}</option>)}
@@ -443,20 +487,20 @@
                                     </BpField>
                                     <BpField id="storage" label={t('crBpFStorage')} error={err('storage')} hint={storeHint}
                                         tone={stores.state === 'error' || (stores.state === 'ok' && (!stores.rows.length || (away && !storeRows.length))) ? 'warning' : undefined}>
-                                        <select id="bp-f-storage" className={BP_INPUT} value={form.storage} onChange={e => set('storage', e.target.value)}
+                                        <select id="bp-f-storage" className={kit.input} value={form.storage} onChange={e => set('storage', e.target.value)}
                                             disabled={stores.state !== 'ok' || !storeRows.length} data-bp-dep="storage">
                                             {stores.state === 'loading' && <option value="">{t('crNcReading')}</option>}
                                             {storeRows.map(s => <option key={s} value={s}>{s}</option>)}
                                         </select>
                                     </BpField>
                                     <BpField id="vmid" label={t('crBpFVmid')} error={err('vmid')} hint={t('crBpFVmidHint')}>
-                                        <input id="bp-f-vmid" className={BP_INPUT} inputMode="numeric" value={form.vmid}
+                                        <input id="bp-f-vmid" className={kit.input} inputMode="numeric" value={form.vmid}
                                             onChange={e => { setVmidTyped(true); set('vmid', e.target.value); }} data-bp-dep="vmid" />
                                     </BpField>
                                     {tplSrc && (
                                         <BpField id="template_vmid" label={t('crBpFTemplate')} wide error={err('template_vmid')} hint={tplHint()}
                                             tone={tpl.state === 'error' || (tpl.state === 'ok' && !tplRows.length) ? 'warning' : undefined}>
-                                            <select id="bp-f-template_vmid" className={BP_INPUT} value={form.template_vmid} onChange={e => set('template_vmid', e.target.value)}
+                                            <select id="bp-f-template_vmid" className={kit.input} value={form.template_vmid} onChange={e => set('template_vmid', e.target.value)}
                                                 disabled={tpl.state !== 'ok' || !tplRows.length} data-bp-dep="template_vmid">
                                                 <option value="">{tpl.state === 'loading' ? t('crNcReading') : t('crBpFTemplatePick')}</option>
                                                 {tplRows.map(x => {
@@ -472,24 +516,24 @@
                                     )}
                                     <BpField id="vmname" label={t('crBpFVmName')} wide error={err('name')}
                                         hint={longName ? crFill(t('crBpWinNameLong'), { n: CR_BP_WIN_NAME }) : ''} tone={longName ? 'warning' : undefined}>
-                                        <input id="bp-f-vmname" className={BP_INPUT} value={form.name} spellCheck={false} maxLength={63} onChange={e => set('name', e.target.value)} data-bp-dep="name" />
+                                        <input id="bp-f-vmname" className={kit.input} value={form.name} spellCheck={false} maxLength={63} onChange={e => set('name', e.target.value)} data-bp-dep="name" />
                                     </BpField>
                                     {bp.ip_mode === 'static' && (
                                         <>
                                             <BpField id="ip" label={t('crBpFIp')} error={err('ip')}>
-                                                <input id="bp-f-ip" className={`${BP_INPUT} font-mono`} value={form.ip} spellCheck={false} placeholder="10.0.0.5/24" onChange={e => set('ip', e.target.value)} data-bp-dep="ip" />
+                                                <input id="bp-f-ip" className={`${kit.input} font-mono`} value={form.ip} spellCheck={false} placeholder="10.0.0.5/24" onChange={e => set('ip', e.target.value)} data-bp-dep="ip" />
                                             </BpField>
                                             <BpField id="gw" label={t('crBpFGw')} error={err('gw')}>
-                                                <input id="bp-f-gw" className={`${BP_INPUT} font-mono`} value={form.gw} spellCheck={false} placeholder="10.0.0.1" onChange={e => set('gw', e.target.value)} data-bp-dep="gw" />
+                                                <input id="bp-f-gw" className={`${kit.input} font-mono`} value={form.gw} spellCheck={false} placeholder="10.0.0.1" onChange={e => set('gw', e.target.value)} data-bp-dep="gw" />
                                             </BpField>
                                         </>
                                     )}
                                     <BpField id="password" label={t(win ? 'crBpFPasswordWin' : 'crBpFPassword')} wide error={err('password')}
                                         hint={t(win ? 'crBpFPasswordHintWin' : 'crBpFPasswordHint')}>
                                         <div className="flex gap-2">
-                                            <input id="bp-f-password" type={showPw ? 'text' : 'password'} className={BP_INPUT} value={form.password} autoComplete="new-password"
+                                            <input id="bp-f-password" type={showPw ? 'text' : 'password'} className={kit.input} value={form.password} autoComplete="new-password"
                                                 spellCheck={false} required={win} onChange={e => set('password', e.target.value)} data-bp-dep="password" />
-                                            <button type="button" className={`${BP_BTN} flex-shrink-0`} aria-pressed={showPw} title={t('crBpPwShow')} aria-label={t('crBpPwShow')}
+                                            <button type="button" className={`${kit.btn} flex-shrink-0`} aria-pressed={showPw} title={t('crBpPwShow')} aria-label={t('crBpPwShow')}
                                                 onClick={() => setShowPw(v => !v)} data-bp-pw-show="">
                                                 <Icons.Eye className={`w-4 h-4 ${showPw ? 'text-proxmox-orange' : ''}`} />
                                             </button>
@@ -556,31 +600,39 @@
             const rows = list.rows.filter(Boolean).slice().sort((a, b) => String(b.started_at || '').localeCompare(String(a.started_at || '')));
             const shown = rows.slice(0, BP_RECENT_MAX);
             const name = (id) => { const c = byId.get(id); return c ? c.display_name || c.name || c.id : id || ''; };
-            const th = 'px-3 py-2 font-medium';
-            const td = 'px-3 py-1.5';
+            const kit = useBpKit();
+            const cloud = kit.cloud;
+            const th = cloud ? '' : 'px-3 py-2 font-medium';
+            const td = cloud ? '' : 'px-3 py-1.5';
+            // a table card of the Cloud shell: the table runs from edge to edge, a line of text keeps the
+            // padding of the toolbar above it
+            const pad = cloud ? { padding: 'var(--space-md)' } : undefined;
+            const failed = list.state === 'error' && <BpNote tone="warning" id="recent-error">{crFill(t('crImgRecentBpFailed'), { reason: list.why })}</BpNote>;
             return (
-                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 space-y-3" data-bp-recent={scope}>
-                    <div className="flex items-start justify-between flex-wrap gap-2">
+                <div className={cloud ? 'cloud-card cloud-table-card' : 'bg-proxmox-card border border-proxmox-border rounded-xl p-4 space-y-3'} data-bp-recent={scope}>
+                    <div className={cloud ? 'cloud-toolbar' : 'flex items-start justify-between flex-wrap gap-2'}>
                         <div>
-                            <h3 className="text-sm font-semibold bp-fg flex items-center gap-2"><Icons.Clock className="w-4 h-4 text-proxmox-orange" />{t('crImgRecentTitle')}</h3>
+                            {cloud ? (
+                                <h3 className="cloud-toolbar-title flex items-center gap-2"><span className="cloud-toolbar-icon"><Icons.Clock /></span>{t('crImgRecentTitle')}</h3>
+                            ) : <h3 className="text-sm font-semibold bp-fg flex items-center gap-2"><Icons.Clock className="w-4 h-4 text-proxmox-orange" />{t('crImgRecentTitle')}</h3>}
                             <p className="text-xs text-gray-500 mt-0.5">{t('bpRecentDesc')}</p>
                         </div>
                         <div className="flex items-center gap-2">
                             <BpSeg label={t('crImgScope')} value={scope} onPick={setScope} attr="data-bp-recent-scope"
                                 options={[['cluster', t('crImgScopeHere')], ['all', t('crImgScopeAll')]]} />
-                            <button type="button" className={BP_BTN} onClick={() => read(scope)} disabled={list.busy} data-bp-recent-refresh="">
+                            <button type="button" className={kit.btn} onClick={() => read(scope)} disabled={list.busy} data-bp-recent-refresh="">
                                 <Icons.RefreshCw className={`w-3.5 h-3.5 ${list.busy ? 'animate-spin' : ''}`} />{t('refresh')}
                             </button>
                         </div>
                     </div>
-                    {list.state === 'error' && <BpNote tone="warning" id="recent-error">{crFill(t('crImgRecentBpFailed'), { reason: list.why })}</BpNote>}
-                    {list.state === 'loading' ? <p className="text-xs text-gray-500" data-bp-recent-loading="">{t('crNcReading')}</p>
-                        : list.state === 'ok' && !rows.length ? <p className="text-xs text-gray-500" data-bp-recent-empty="">{t(inAll ? 'bpRecentNoneAll' : 'bpRecentNone')}</p>
+                    {cloud && failed ? <div style={pad}>{failed}</div> : failed}
+                    {list.state === 'loading' ? <p className="text-xs text-gray-500" style={pad} data-bp-recent-loading="">{t('crNcReading')}</p>
+                        : list.state === 'ok' && !rows.length ? <p className="text-xs text-gray-500" style={pad} data-bp-recent-empty="">{t(inAll ? 'bpRecentNoneAll' : 'bpRecentNone')}</p>
                         : rows.length > 0 && (
-                            <div className="overflow-x-auto">
-                                <table className="w-full text-xs">
+                            <div className={cloud ? 'cloud-table-scroll' : 'overflow-x-auto'}>
+                                <table className={cloud ? 'cloud-table' : 'w-full text-xs'}>
                                     <thead>
-                                        <tr className="text-left bp-muted border-b border-proxmox-border">
+                                        <tr className={cloud ? undefined : 'text-left bp-muted border-b border-proxmox-border'}>
                                             <th className={th}>{t('bpColBlueprint')}</th>
                                             <th className={th}>{t('crImgColGuest')}</th>
                                             {inAll && <th className={th}>{t('crImgColCluster')}</th>}
@@ -595,7 +647,7 @@
                                             const label = r.name ? `${r.name} (${r.vmid})` : String(r.vmid ?? '');
                                             const pct = Number(r.progress);
                                             return (
-                                                <tr key={r.id} className="border-b border-proxmox-border/50" data-bp-recent-row={r.id}>
+                                                <tr key={r.id} className={cloud ? 'cloud-table-row cloud-table-row-static' : 'border-b border-proxmox-border/50'} data-bp-recent-row={r.id}>
                                                     <td className={`${td} bp-fg`}>{r.blueprint_name || r.blueprint_id || ''}</td>
                                                     <td className={td}>
                                                         {r.status === 'completed' && r.vmid && nav && typeof nav.openGuest === 'function' ? (
@@ -621,7 +673,7 @@
                                 </table>
                             </div>
                         )}
-                    {rows.length > shown.length && <p className="text-xs text-gray-500">{crFill(t('crImgRecentNewest'), { max: shown.length, n: rows.length })}</p>}
+                    {rows.length > shown.length && <p className={cloud ? 'cloud-table-note' : 'text-xs text-gray-500'}>{crFill(t('crImgRecentNewest'), { max: shown.length, n: rows.length })}</p>}
                 </div>
             );
         }
@@ -630,11 +682,11 @@
 
         // canRead: the account holds vm.create (the routes ask for it); canWrite: it may use it here (not
         // on a standby). nav: openGuest(cid, guest) for the guest a deploy made, nodesOf(cid) for the
-        // bridges the editor suggests (both optional). cloud: drawn inside the Cloud layout
-        function BpSection({ cluster, clusters, authFetch, addToast, canRead, canWrite, nav, cloud }) {
+        // bridges the editor suggests (both optional). Which look it takes comes from Blueprints (BpCloud)
+        function BpSection({ cluster, clusters, authFetch, addToast, canRead, canWrite, nav }) {
             const { t } = useTranslation();
             const { haReadOnly } = useAuth();
-            const { isCloud } = useLayout();
+            const kit = useBpKit();
             const cid = cluster && cluster.id;
             const [list, setList] = useState({ state: 'loading', rows: [], why: '' });
             const [editor, setEditor] = useState(null);
@@ -645,7 +697,8 @@
             const [ran, setRan] = useState(0);
             const write = canWrite && !haReadOnly;
             const why = !write ? t(haReadOnly ? 'crBpStandby' : 'crBpNeedsPerm') : undefined;
-            const layout = (cloud === undefined ? isCloud : cloud) ? 'cloud' : 'modern';
+            const cloud = kit.cloud;
+            const layout = cloud ? 'cloud' : 'modern';
 
             const loadList = async () => {
                 if (!canRead) return;
@@ -700,25 +753,27 @@
                 );
             }
             const rows = list.rows.slice().sort((a, b) => crCompare(a.name || '', b.name || ''));
-            const th = 'px-3 py-2 font-medium whitespace-nowrap';
-            const td = 'px-3 py-2';
+            const th = cloud ? 'whitespace-nowrap' : 'px-3 py-2 font-medium whitespace-nowrap';
+            const td = cloud ? '' : 'px-3 py-2';
+            const n = list.rows.length;
             return (
-                <div className="space-y-4" data-bp="" data-bp-layout={layout}>
+                <div className={cloud ? 'space-y-5' : 'space-y-4'} data-bp="" data-bp-layout={layout}>
                     <div className="flex items-start justify-between flex-wrap gap-2">
                         <div className="min-w-0">
                             <h2 className="text-lg font-semibold bp-fg flex items-center gap-2 flex-wrap">
                                 <Icons.Template className="w-5 h-5 text-proxmox-orange" />
                                 {t('crBpTitle')}
-                                {list.state === 'ok' && <BpBadge tone="neutral" data-bp-count={list.rows.length}>{list.rows.length}</BpBadge>}
+                                {list.state === 'ok' && (cloud ? <span className="cloud-count-chip" data-bp-count={n}>{n}</span>
+                                    : <BpBadge tone="neutral" data-bp-count={n}>{n}</BpBadge>)}
                                 <BpBadge tone="info" title={t('crBpAllClustersHint')} data-bp-scope="all"><Icons.Globe className="w-3 h-3" />{t('crBpAllClusters')}</BpBadge>
                             </h2>
                             <p className="text-xs text-gray-500 mt-0.5 max-w-3xl">{t('crBpDesc')}</p>
                         </div>
                         <div className="flex gap-2">
-                            <button type="button" className={BP_BTN} onClick={loadList} disabled={list.busy} data-bp-refresh="">
+                            <button type="button" className={kit.btn} onClick={loadList} disabled={list.busy} data-bp-refresh="">
                                 <Icons.RefreshCw className="w-3.5 h-3.5" />{t('refresh')}
                             </button>
-                            <button type="button" className={BP_BTN_GO} onClick={() => openEditor(null)} disabled={!write} title={why} data-bp-new="">
+                            <button type="button" className={kit.go} onClick={() => openEditor(null)} disabled={!write} title={why} data-bp-new="">
                                 <Icons.Plus className="w-3.5 h-3.5" />{t('crBpNew')}
                             </button>
                         </div>
@@ -729,16 +784,16 @@
                             <BpNote tone="error" id="error">
                                 <div className="flex items-center justify-between gap-2 flex-wrap" data-bp-error="">
                                     <span>{crFill(t('crBpReadFailed'), { reason: list.why })}</span>
-                                    <button type="button" className={BP_BTN_ROW} onClick={loadList}>{t('retry')}</button>
+                                    <button type="button" className={kit.small} onClick={loadList}>{t('retry')}</button>
                                 </div>
                             </BpNote>
                         )
                         : !rows.length ? <BpNote tone="info" id="empty"><span data-bp-empty="">{t('crBpEmpty')}</span></BpNote>
                         : (
-                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-x-auto">
-                                <table className="w-full text-sm" aria-label={t('crBpTitle')} data-bp-table="">
+                            <div className={cloud ? 'cloud-card cloud-table-card cloud-table-scroll' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-x-auto'}>
+                                <table className={cloud ? 'cloud-table' : 'w-full text-sm'} aria-label={t('crBpTitle')} data-bp-table="">
                                     <thead>
-                                        <tr className="text-left text-xs bp-muted border-b border-proxmox-border">
+                                        <tr className={cloud ? undefined : 'text-left text-xs bp-muted border-b border-proxmox-border'}>
                                             <th className={th}>{t('crBpColName')}</th>
                                             <th className={th}>{t('crBpColSource')}</th>
                                             <th className={th}>{t('crBpColHw')}</th>
@@ -753,13 +808,13 @@
                                             const tags = Array.isArray(r.tags) ? r.tags.filter(Boolean) : [];
                                             const gone = !tplRow && r.template_missing;
                                             return (
-                                                <tr key={r.id} className="border-b border-proxmox-border/50 hover:bg-proxmox-hover" data-bp-row={r.id}>
+                                                <tr key={r.id} className={cloud ? 'cloud-table-row cloud-table-row-static' : 'border-b border-proxmox-border/50 hover:bg-proxmox-hover'} data-bp-row={r.id}>
                                                     {/* the tags and who saved it under the name: at 1280 px the row keeps its actions in view */}
                                                     <td className={td} style={{ minWidth: 160 }}>
                                                         <div className="font-medium bp-fg">{r.name}</div>
                                                         {r.description && <div className="text-xs text-gray-500 mt-0.5">{r.description}</div>}
                                                         <div className="flex flex-wrap items-center gap-1 mt-1">
-                                                            {tags.map(x => <span key={x} className="text-[10px] px-1.5 py-0.5 bg-proxmox-dark border border-proxmox-border rounded bp-muted" data-bp-tag={x}>{x}</span>)}
+                                                            {tags.map(x => <span key={x} className={cloud ? 'cloud-chip cloud-chip-tag' : 'text-[10px] px-1.5 py-0.5 bg-proxmox-dark border border-proxmox-border rounded bp-muted'} data-bp-tag={x}>{x}</span>)}
                                                             {r.created_by && (
                                                                 <span className="text-[11px] bp-muted flex items-center gap-1" title={t('crBpColBy')} data-bp-by={r.created_by}>
                                                                     <Icons.User className="w-3 h-3" />{r.created_by}
@@ -787,14 +842,14 @@
                                                         <div className="flex items-center justify-end gap-1">
                                                             {r.can_edit && (
                                                                 <>
-                                                                    <button type="button" className={BP_BTN_ICON} disabled={!write} title={why || t('edit')} aria-label={t('edit')}
+                                                                    <button type="button" className={kit.icon} disabled={!write} title={why || t('edit')} aria-label={t('edit')}
                                                                         onClick={() => openEditor(r)} data-bp-edit={r.id}><Icons.Edit className="w-3.5 h-3.5" /></button>
-                                                                    <button type="button" className={`${BP_BTN_ICON} hover:text-red-400`} disabled={!write}
+                                                                    <button type="button" className={`${kit.icon} hover:text-red-400`} disabled={!write}
                                                                         title={why || crFill(t('crBpDeleteTitle'), { name: r.name })} aria-label={crFill(t('crBpDeleteTitle'), { name: r.name })}
                                                                         onClick={() => setDel(r)} data-bp-delete={r.id}><Icons.Trash2 className="w-3.5 h-3.5" /></button>
                                                                 </>
                                                             )}
-                                                            <button type="button" className={BP_BTN_ROW} disabled={!write || gone} title={gone ? t('crBpImageGoneHint') : why}
+                                                            <button type="button" className={kit.small} disabled={!write || gone} title={gone ? t('crBpImageGoneHint') : why}
                                                                 onClick={() => setDeploy(r)} data-bp-deploy={r.id}>
                                                                 <Icons.Play className="w-3 h-3 text-proxmox-orange" />{t('crBpDeploy')}
                                                             </button>
@@ -820,8 +875,9 @@
                             title={crFill(t('crBpDeleteTitle'), { name: del.name })}
                             footer={(
                                 <>
-                                    <button type="button" className={BP_BTN} onClick={() => setDel(null)} disabled={delBusy} data-bp-confirm-cancel="">{t('cancel')}</button>
-                                    <button type="button" className="px-3 py-1.5 bg-red-600 hover:bg-red-700 rounded-lg text-sm text-white flex items-center gap-1.5 disabled:opacity-50"
+                                    <button type="button" className={kit.btn} onClick={() => setDel(null)} disabled={delBusy} data-bp-confirm-cancel="">{t('cancel')}</button>
+                                    <button type="button" className={cloud ? `${kit.btn} cloud-btn-danger`
+                                        : 'px-3 py-1.5 bg-red-600 hover:bg-red-700 rounded-lg text-sm text-white flex items-center gap-1.5 disabled:opacity-50'}
                                         onClick={remove} disabled={delBusy} data-bp-confirm-go="">
                                         <Icons.Trash2 className="w-3.5 h-3.5" />{t('delete')}
                                     </button>
@@ -848,15 +904,25 @@
                     <BpNote tone="error" id="boundary">
                         <div className="flex items-center justify-between gap-2 flex-wrap">
                             <span>{this.props.t('crBoundaryTitle')}</span>
-                            <button type="button" className={BP_BTN_ROW} onClick={() => this.setState({ error: null })}>{this.props.t('retry')}</button>
+                            <button type="button" className={BP_KIT[this.context ? 'cloud' : 'modern'].small} onClick={() => this.setState({ error: null })}>{this.props.t('retry')}</button>
                         </div>
                     </BpNote>
                 );
             }
         }
 
-        // The mount for Modern and Cloud: { cluster, clusters, authFetch, addToast, canRead, canWrite, nav, cloud }
+        // the look of its retry button
+        BpBoundary.contextType = BpCloud;
+
+        // The mount for Modern and Cloud: { cluster, clusters, authFetch, addToast, canRead, canWrite, nav, cloud }.
+        // cloud (or the Cloud layout when it is left out) gives everything under it the controls of the Cloud shell
         function Blueprints(props) {
             const { t } = useTranslation();
-            return <BpBoundary t={t}><BpSection {...props} /></BpBoundary>;
+            const { isCloud } = useLayout();
+            const cloud = props.cloud === undefined ? isCloud : !!props.cloud;
+            return (
+                <BpCloud.Provider value={cloud}>
+                    <BpBoundary t={t}><BpSection {...props} /></BpBoundary>
+                </BpCloud.Provider>
+            );
         }

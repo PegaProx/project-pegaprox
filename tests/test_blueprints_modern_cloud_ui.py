@@ -1,16 +1,17 @@
-"""Blueprints in Modern (#1220): Automation > Blueprints & Templates draws the blueprints of the
-redesign above the library cards, in the Modern look (web/src/blueprints.js). The list with what each
-blueprint holds, the editor and the body it sends (a library image and a Windows template), the deploy
-dialog (where to, the template the server would use or build, the shared storage a template of another
-node needs, the Windows password and the 15 characters of its computer name, the keys that go into
-the VM), the progress and the recent deploys of this cluster or of all of them. The Resources button
-and Ctrl+K lead there; an account without vm.create reads nothing, a standby shows the list and
-changes nothing. Classic Corporate keeps the library alone.
+"""Blueprints in Modern and Cloud (#1220): Automation > Blueprints & Templates of Modern and the page of
+the same name in Cloud draw the blueprints of the redesign above the library cards (web/src/blueprints.js),
+Modern in its look, Cloud with the buttons, fields, tables, chips and switches of its shell. The list with
+what each blueprint holds, the editor and the body it sends (a library image and a Windows template), the
+deploy dialog (where to, the template the server would use or build, the shared storage a template of
+another node needs, the Windows password and the 15 characters of its computer name, the keys that go
+into the VM), the progress and the recent deploys of this cluster or of all of them. In Modern the
+Resources button and Ctrl+K lead there, in Cloud the button next to New VM; an account without vm.create
+reads nothing, a standby shows the list and changes nothing. Classic Corporate keeps the library alone.
 
 The rules are the redesign's (crBpUseEditor, crBpUseDeploy, crBpUseProgress in cr_blueprints.js), so
-these tests drive what Modern draws of them. Cloud mounts the same section (cloud prop). Runtime tests
-use the fake of tests/test_corp_redesigned_blueprints_ui.py (_BpServer). The counterproof runs this
-file against an older bundle: PEGAPROX_CR_BUNDLE=<path to index.html>.
+these tests drive what the two looks draw of them; the ones that are the same in both run in each
+(LAYOUTS). Runtime tests use the fake of tests/test_corp_redesigned_blueprints_ui.py (_BpServer). The
+counterproof runs this file against an older bundle: PEGAPROX_CR_BUNDLE=<path to index.html>.
 LW Nov 2026
 """
 import copy
@@ -30,6 +31,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # the sub tab: its name in Modern, and the one classic Corporate (and the older bundles) keep
 TAB = re.compile(r'^\s*(Blueprints & Templates|Cloud-Init Template Library)\s*$')
 LIB = 'Cloud-Init Template Library'
+LAYOUTS = ['modern', 'cloud']
+# the page in the Cloud nav (Templates before)
+CLOUD_PAGE = re.compile(r'^\s*(Blueprints & Templates|Templates)\s*$')
 # a deploy of the second cluster for All clusters
 ELSEWHERE = dict(RECENT[0], id='r3', cluster_id='c2', node='lab1', vmid=300, name='web-lab', started_at='2026-11-08T09:10:00')
 
@@ -52,8 +56,9 @@ class _MdServer(_BpServer):
 def open_app(browser):
     apps = []
 
-    def _open(layout='modern', viewport=(1600, 1000), bundle=None, **kw):
-        app = _GuardApp(browser, _MdServer(bundle=bundle or BUNDLE, layout=layout, **kw), viewport=viewport)
+    def _open(layout='modern', viewport=(1600, 1000), bundle=None, storage=None, **kw):
+        app = _GuardApp(browser, _MdServer(bundle=bundle or BUNDLE, layout=layout, **kw), viewport=viewport, storage=storage)
+        app.layout = layout
         apps.append(app)
         return app
     yield _open
@@ -62,8 +67,13 @@ def open_app(browser):
 
 
 def _templates(app):
-    """Automation > Blueprints & Templates of Testi (Cloud-Init Template Library before)."""
+    """Automation > Blueprints & Templates of Testi (Cloud-Init Template Library before), in Cloud the
+    page of that name (Templates before) of the cluster it picked, Testi."""
     page = app.page
+    if app.layout == 'cloud':
+        app.mark = len(app.server.calls)
+        page.locator('.cloud-nav-item', has_text=CLOUD_PAGE).first.click()
+        return page
     page.get_by_text('Testi').first.click()
     page.locator('button', has_text=re.compile(r'^\s*Automation\s*$')).first.click()
     app.mark = len(app.server.calls)
@@ -73,9 +83,22 @@ def _templates(app):
 
 def _page(app):
     page = _templates(app)
-    _need(page, '[data-bp]', 'the blueprints are on the template sub tab of Modern')
+    where = 'on the Blueprints & Templates page of Cloud' if app.layout == 'cloud' else 'on the template sub tab of Modern'
+    _need(page, '[data-bp]', f'the blueprints are {where}')
     _need(page, '[data-bp-row]', 'the blueprint list is filled')
     return page
+
+
+def _guest_opened(app, name):
+    """Open guest led to the guest list of its cluster: Resources of Modern, the guest on the VMs page of Cloud."""
+    page = app.page
+    assert _wait(page, lambda: page.locator('[data-bp]').count() == 0)
+    if app.layout == 'cloud':
+        assert _wait(page, lambda: page.locator('.cloud-breadcrumb-leaf').count() == 1
+                     and page.locator('.cloud-breadcrumb-leaf').inner_text().strip() == name)
+        assert page.locator('.cloud-nav-item-active').inner_text().strip() == 'Virtual Machines'
+        return
+    page.get_by_text('Create new VM').first.wait_for(timeout=8000)
 
 
 def _row(page, bid):
@@ -149,8 +172,9 @@ def test_runtime_the_sub_tab_has_its_new_name(open_app):
     _need(page, '[data-bp]', 'the German tab label leads to the blueprints')
 
 
-def test_runtime_edit_and_delete_only_where_the_account_may_and_delete_asks(open_app):
-    app = open_app()
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_edit_and_delete_only_where_the_account_may_and_delete_asks(open_app, layout):
+    app = open_app(layout=layout)
     page = _page(app)
     assert page.locator('[data-bp-edit="b1"]').count() == 1 and page.locator('[data-bp-delete="b1"]').count() == 1
     assert page.locator('[data-bp-edit="b3"]').count() == 0 and page.locator('[data-bp-delete="b3"]').count() == 0
@@ -183,8 +207,9 @@ def _new(page):
     page.locator('[data-bp-input="template_id"] option[value="c0ffee12"]').wait_for(state='attached', timeout=4000)
 
 
-def test_runtime_a_library_blueprint_is_checked_and_sends_the_body_the_server_takes(open_app):
-    app = open_app()
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_a_library_blueprint_is_checked_and_sends_the_body_the_server_takes(open_app, layout):
+    app = open_app(layout=layout)
     page = _page(app)
     _new(page)
     assert page.locator('[data-bp-source="library"]').get_attribute('aria-pressed') == 'true'
@@ -246,8 +271,9 @@ def test_runtime_a_refusal_of_the_server_stands_at_its_field(open_app):
     assert 'database is locked' in note.inner_text() and 'HTTP 500' in note.inner_text()
 
 
-def test_runtime_a_windows_template_blueprint_leaves_out_what_windows_ignores(open_app):
-    app = open_app()
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_a_windows_template_blueprint_leaves_out_what_windows_ignores(open_app, layout):
+    app = open_app(layout=layout)
     page = _page(app)
     _new(page)
     page.locator('[data-bp-source="template"]').click()
@@ -274,8 +300,9 @@ def test_runtime_a_windows_template_blueprint_leaves_out_what_windows_ignores(op
         'ip_mode': 'dhcp', 'nameserver': '', 'searchdomain': '', 'ciupgrade': True, 'tags': [], 'start': True}
 
 
-def test_runtime_edit_fills_the_form_and_puts_it(open_app):
-    app = open_app()
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_edit_fills_the_form_and_puts_it(open_app, layout):
+    app = open_app(layout=layout)
     page = _page(app)
     page.locator('[data-bp-edit="b2"]').click()
     _need(page, '[data-bp-editor="b2"]', 'Edit opens the editor of that blueprint')
@@ -303,8 +330,9 @@ def _options(page, field):
     return page.evaluate(f"() => [...document.querySelectorAll('[data-bp-dep=\"{field}\"] option')].map(o => o.value)")
 
 
-def test_runtime_a_library_deploy_reads_where_to_and_sends_its_body(open_app):
-    app = open_app(progress=[DONE])
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_a_library_deploy_reads_where_to_and_sends_its_body(open_app, layout):
+    app = open_app(layout=layout, progress=[DONE])
     page = _page(app)
     _deploy(page)
     page.locator('[data-bp-dep="storage"] option[value="local-lvm"]').wait_for(state='attached', timeout=4000)
@@ -361,10 +389,11 @@ def test_runtime_a_bridge_the_node_lacks_is_said(open_app):
     assert page.locator('[data-bp-deploy-go]').is_enabled()
 
 
-def test_runtime_a_template_of_another_node_offers_shared_storage_only(open_app):
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_a_template_of_another_node_offers_shared_storage_only(open_app, layout):
     pve2 = [{'storage': 'local-zfs', 'content': 'images,rootdir', 'enabled': 1, 'active': 1, 'shared': 0},
             {'storage': 'ceph', 'content': 'images', 'enabled': 1, 'active': 1, 'shared': 1}]
-    app = open_app(extra={('GET', '/api/clusters/c1/nodes/pve2/storage'): (200, pve2)})
+    app = open_app(layout=layout, extra={('GET', '/api/clusters/c1/nodes/pve2/storage'): (200, pve2)})
     page = _page(app)
     _deploy(page, 'b6')
     page.locator('[data-bp-dep="template_vmid"] option[value="9200"]').wait_for(state='attached', timeout=4000)
@@ -402,8 +431,9 @@ def test_runtime_a_node_without_shared_storage_says_so(open_app):
     assert ('POST', '/api/blueprints/b6/deploy') not in app.server.calls
 
 
-def test_runtime_a_windows_deploy_needs_the_administrator_password_and_warns_past_15(open_app):
-    app = open_app(progress=[RUNNING])
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_a_windows_deploy_needs_the_administrator_password_and_warns_past_15(open_app, layout):
+    app = open_app(layout=layout, progress=[RUNNING])
     page = _page(app)
     _deploy(page, 'b5')
     pick = page.locator('[data-bp-dep="template_vmid"]')
@@ -444,10 +474,11 @@ def test_runtime_a_windows_deploy_needs_the_administrator_password_and_warns_pas
     assert page.locator('[data-bp-step="template"]').count() == 0
 
 
-def test_runtime_the_deploy_dialog_names_the_keys_and_who_saved_them(open_app):
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_the_deploy_dialog_names_the_keys_and_who_saved_them(open_app, layout):
     bare = _bp('b7', 'bare-keys', ciuser='', created_by='bob',
                sshkeys='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOpenkey12\n# retired\nssh-rsa AAAAB3NzaC1yc2E ci build box')
-    app = open_app(blueprints=[OTHER, WIN, bare])
+    app = open_app(layout=layout, blueprints=[OTHER, WIN, bare])
     page = _page(app)
     note = page.locator('[data-bp-access]')
     _deploy(page, 'b3')
@@ -463,9 +494,10 @@ def test_runtime_the_deploy_dialog_names_the_keys_and_who_saved_them(open_app):
     assert note.count() == 0
 
 
-def test_runtime_the_server_notes_show_and_the_progress_is_read_until_done(open_app):
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_the_server_notes_show_and_the_progress_is_read_until_done(open_app, layout):
     notes = ['Windows uses the first 15 characters of the name as its computer name']
-    app = open_app(progress=[RUNNING, RUNNING, DONE], warnings=notes)
+    app = open_app(layout=layout, progress=[RUNNING, RUNNING, DONE], warnings=notes)
     page = _page(app)
     _deploy(page)
     page.locator('[data-bp-dep="storage"] option[value="local-lvm"]').wait_for(state='attached', timeout=4000)
@@ -482,8 +514,7 @@ def test_runtime_the_server_notes_show_and_the_progress_is_read_until_done(open_
     assert 'configured' in page.locator('[data-bp-log]').text_content()
     # Open guest leads to the guest list of its cluster
     page.locator('[data-bp-open-guest="105"]').click()
-    assert _wait(page, lambda: page.locator('[data-bp]').count() == 0)
-    page.get_by_text('Create new VM').first.wait_for(timeout=8000)
+    _guest_opened(app, 'web-small')
 
 
 def test_runtime_a_failed_deploy_stops_the_reads_and_says_why(open_app):
@@ -514,8 +545,9 @@ def test_runtime_a_refused_deploy_stays_in_the_dialog(open_app):
 
 # --- the recent deploys ------------------------------------------------------------------------
 
-def test_runtime_recent_deploys_of_this_cluster_or_of_all(open_app):
-    app = open_app()
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_recent_deploys_of_this_cluster_or_of_all(open_app, layout):
+    app = open_app(layout=layout)
     page = _page(app)
     box = page.locator('[data-bp-recent="cluster"]')
     box.locator('[data-bp-recent-row]').first.wait_for(timeout=8000)
@@ -536,13 +568,13 @@ def test_runtime_recent_deploys_of_this_cluster_or_of_all(open_app):
     # a finished guest opens in the guest list of its cluster
     page.locator('[data-bp-recent-scope="cluster"]').click()
     page.locator('[data-bp-guest="120"]').first.click()
-    assert _wait(page, lambda: page.locator('[data-bp]').count() == 0)
-    page.get_by_text('Create new VM').first.wait_for(timeout=8000)
+    _guest_opened(app, 'web-01')
     _no_errors(app)
 
 
-def test_runtime_recent_deploys_say_when_there_are_none_and_follow_a_new_one(open_app):
-    app = open_app(progress=[RUNNING])
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_recent_deploys_say_when_there_are_none_and_follow_a_new_one(open_app, layout):
+    app = open_app(layout=layout, progress=[RUNNING])
     app.server.recent = []
     page = _page(app)
     _need(page, '[data-bp-recent-empty]', 'no deploy yet is said')
@@ -627,6 +659,152 @@ def test_runtime_a_standby_shows_the_list_and_changes_nothing(open_app):
     assert page.locator('[data-bp-nav]').count() == 0
 
 
+# --- Cloud ---------------------------------------------------------------------------------------
+
+def _cloud_nav(page, label):
+    page.locator('.cloud-nav-item', has_text=re.compile(rf'^\s*{re.escape(label)}\s*$')).first.click()
+
+
+def _classes(page, selector):
+    return (page.locator(selector).first.get_attribute('class') or '').split()
+
+
+def test_runtime_cloud_draws_them_with_the_controls_of_its_shell(open_app):
+    app = open_app(layout='cloud')
+    page = _page(app)
+    page.wait_for_timeout(400)
+    assert page.locator('[data-bp-layout="cloud"]').count() == 1
+    # in the frame of the mounted pages, above the library, which stays
+    assert page.locator('.cloud-mounted [data-bp]').count() == 1
+    lib = page.get_by_text(LIB, exact=True).first
+    lib.wait_for(timeout=8000)
+    sec = _box(page, '[data-bp]')
+    assert sec['y'] + sec['height'] <= lib.bounding_box()['y']
+    assert page.evaluate("() => [...document.querySelectorAll('[data-bp-row]')].map(e => e.dataset.bpRow)") == ['b2', 'b3', 'b4', 'b6', 'b1', 'b5']
+    # the buttons, table cards, chips and switches of the shell
+    assert 'cloud-btn-primary' in _classes(page, '[data-bp-new]') and 'cloud-btn' in _classes(page, '[data-bp-refresh]')
+    assert 'cloud-btn-sm' in _classes(page, '[data-bp-deploy="b1"]') and 'cloud-icon-btn' in _classes(page, '[data-bp-edit="b1"]')
+    assert 'cloud-table' in _classes(page, '[data-bp-table]')
+    assert page.locator('.cloud-card.cloud-table-card [data-bp-table]').count() == 1
+    assert 'cloud-count-chip' in _classes(page, '[data-bp-count]') and 'cloud-chip' in _classes(page, '[data-bp-scope="all"]')
+    assert 'cloud-chip-tag' in _classes(page, '[data-bp-row="b1"] [data-bp-tag="web"]')
+    assert 'cloud-chip' in _classes(page, '[data-bp-row="b5"] [data-bp-source-cell="template"] span')
+    assert page.locator('.cloud-card.cloud-table-card[data-bp-recent] > .cloud-toolbar').count() == 1
+    assert page.locator('[data-bp-recent] .cloud-segment [data-bp-recent-scope="cluster"].is-active').count() == 1
+    assert page.locator('[data-bp-recent] table.cloud-table [data-bp-recent-row="r1"]').count() == 1
+    assert page.locator('[data-bp] .bg-proxmox-orange, [data-bp] .bg-proxmox-card').count() == 0
+    # and in the dialogs
+    page.locator('[data-bp-new]').click()
+    _need(page, '[data-bp-editor="new"]', 'New blueprint opens the editor')
+    assert 'cloud-input' in _classes(page, '[data-bp-input="name"]') and 'cloud-input' in _classes(page, '[data-bp-input="ip_mode"]')
+    assert page.locator('[data-bp-editor] .cloud-segment [data-bp-source="library"].is-active').count() == 1
+    assert page.locator('[data-bp-modal="editor"] > .bp-cloud-dialog').count() == 1
+    assert 'cloud-btn-primary' in _classes(page, '[data-bp-editor-save]') and 'cloud-icon-btn' in _classes(page, '[data-bp-modal-close]')
+    # one read of the list and one of the deploys of this cluster
+    assert _count(app, 'GET', '/api/blueprints') == 1
+    assert [u for u in app.server.urls if '/api/blueprints/deployments' in u] == [f'{BASE}/api/blueprints/deployments?cluster_id=c1']
+    _no_errors(app)
+
+
+# the surface of a card and of a dialog, the text, the muted text and the text of a primary button of the
+# two Cloud themes
+CLOUD_THEME = {'dark': ('rgb(22, 48, 74)', 'rgb(230, 241, 248)', 'rgb(138, 164, 184)', 'rgb(4, 20, 28)'),
+               'light': ('rgb(255, 255, 255)', 'rgb(22, 34, 46)', 'rgb(106, 122, 137)', 'rgb(255, 255, 255)')}
+
+
+@pytest.mark.parametrize('theme', ['dark', 'light'])
+def test_runtime_cloud_takes_the_colours_of_its_dark_and_light_theme(open_app, theme):
+    app = open_app(layout='cloud', storage={'pegaprox-cloud-theme': theme})
+    page = _page(app)
+    assert page.evaluate('() => document.body.dataset.cloudTheme') == theme
+    css = lambda sel, prop: page.evaluate('([s, p]) => getComputedStyle(document.querySelector(s))[p]', [sel, prop])
+    card, text, muted, on_primary = CLOUD_THEME[theme]
+    assert css('[data-bp-recent]', 'backgroundColor') == card
+    assert css('[data-bp-row="b1"] td .bp-fg', 'color') == text and css('[data-bp] h2', 'color') == text
+    assert css('[data-bp-row="b1"] td .text-gray-500', 'color') == muted
+    assert css('[data-bp-new]', 'color') == on_primary
+    page.locator('[data-bp-delete="b1"]').click()
+    _need(page, '[data-bp-confirm="delete"]', 'Delete asks before it deletes')
+    assert css('[data-bp-modal="delete"] > .bp-cloud-dialog', 'backgroundColor') == card
+    assert css('[data-bp-confirm="delete"]', 'color') == text
+    # the danger button of the shell is pink on the dark theme, a darker red on the light one
+    assert css('[data-bp-confirm-go]', 'color') == ('rgb(244, 134, 138)' if theme == 'dark' else 'rgb(185, 28, 28)')
+    _no_errors(app)
+
+
+@pytest.mark.parametrize('layout', LAYOUTS)
+def test_runtime_a_dialog_dims_the_whole_window(open_app, layout):
+    page = _page(open_app(layout=layout))
+    page.locator('[data-bp-delete="b1"]').click()
+    _need(page, '[data-bp-modal="delete"]', 'Delete opens its dialog')
+    # the section spaces its children; the backdrop of a dialog is one of them and starts at the top all the same
+    box = page.evaluate("""() => { const r = document.querySelector('[data-bp-modal]').getBoundingClientRect();
+        return [r.top, r.left, r.width, r.height, innerWidth, innerHeight]; }""")
+    assert box[:4] == [0, 0, box[4], box[5]], box
+
+
+def test_runtime_cloud_names_the_page_after_both(open_app):
+    page = _page(open_app(layout='cloud'))
+    assert page.locator('.cloud-nav-item-active').inner_text().strip() == 'Blueprints & Templates'
+    assert page.locator('.cloud-breadcrumb-leaf').inner_text().strip() == 'Blueprints & Templates'
+    assert page.locator('.cloud-nav-item', has_text=re.compile(r'^\s*Templates\s*$')).count() == 0
+    german = open_app(layout='cloud', language='de')
+    page = german.page
+    _cloud_nav(page, 'Blueprints und Templates')
+    _need(page, '[data-bp]', 'the German name of the page leads to the blueprints')
+    # on one line of the nav
+    assert page.locator('.cloud-nav-item-active .cloud-nav-item-label').evaluate('e => e.getClientRects().length === 1 && e.scrollWidth <= e.clientWidth')
+
+
+def test_runtime_cloud_the_vms_page_leads_there(open_app):
+    app = open_app(layout='cloud')
+    page = app.page
+    _cloud_nav(page, 'Virtual Machines')
+    btn = page.locator('[data-bp-nav="cloud-vms"]')
+    btn.wait_for(timeout=8000)
+    assert btn.inner_text().strip() == 'Deploy VM from blueprint' and 'cloud-btn' in _classes(page, '[data-bp-nav="cloud-vms"]')
+    # in the header of the page, in front of New VM
+    new = page.locator('.cloud-page-header-actions button', has_text=re.compile(r'^\s*New VM\s*$'))
+    a, b = btn.bounding_box(), new.bounding_box()
+    assert abs(a['y'] - b['y']) < 2 and a['x'] < b['x']
+    # a container comes from no blueprint
+    _cloud_nav(page, 'Containers')
+    page.locator('.cloud-page-title', has_text='Containers').wait_for(timeout=8000)
+    assert page.locator('[data-bp-nav]').count() == 0
+    _cloud_nav(page, 'Virtual Machines')
+    page.locator('[data-bp-nav="cloud-vms"]').click()
+    _need(page, '[data-bp-row]', 'the button leads to the blueprints of the cluster')
+    assert page.locator('.cloud-nav-item-active').inner_text().strip() == 'Blueprints & Templates'
+
+
+def test_runtime_cloud_without_vm_create_reads_nothing_and_has_no_button(open_app):
+    app = open_app(layout='cloud', admin=False, permissions=['cluster.view', 'vm.view'])
+    page = _templates(app)
+    _need(page, '[data-bp-noperm]', 'an account without vm.create is told why')
+    page.wait_for_timeout(500)
+    assert page.locator('[data-bp-row], [data-bp-recent]').count() == 0
+    assert [c for c in app.server.calls if c[1].startswith('/api/blueprints')] == []
+    _cloud_nav(page, 'Virtual Machines')
+    page.locator('.cloud-page-title', has_text='Virtual Machines').wait_for(timeout=8000)
+    page.wait_for_timeout(300)
+    assert page.locator('[data-bp-nav]').count() == 0
+
+
+def test_runtime_cloud_on_a_standby_lists_them_and_changes_nothing(open_app):
+    app = open_app(layout='cloud', role='standby')
+    page = _page(app)
+    _need(page, '[data-bp-standby]', 'a standby says why nothing can be changed here')
+    new = page.locator('[data-bp-new]')
+    assert new.is_disabled() and 'standby' in new.get_attribute('title')
+    assert page.locator('[data-bp-deploy="b1"]').is_disabled() and page.locator('[data-bp-edit="b1"]').is_disabled()
+    assert page.locator('[data-bp-delete="b1"]').is_disabled()
+    page.locator('[data-bp-recent-row]').first.wait_for(timeout=8000)
+    _cloud_nav(page, 'Virtual Machines')
+    page.locator('.cloud-page-title', has_text='Virtual Machines').wait_for(timeout=8000)
+    page.wait_for_timeout(300)
+    assert page.locator('[data-bp-nav]').count() == 0
+
+
 # --- classic Corporate stays as it is -----------------------------------------------------------
 
 def test_runtime_classic_corporate_keeps_the_library_alone(open_app):
@@ -674,6 +852,39 @@ def test_modern_mounts_the_section_and_classic_corporate_does_not():
     assert nav.startswith('const mdBpNav = !isCorporate ? {') and 'openGuest: (cid, guest) =>' in nav and 'nodesOf: (cid) =>' in nav
 
 
+def test_cloud_mounts_the_section_above_the_library_and_names_the_page():
+    cloud = _read('web', 'src', 'cloud.js')
+    mounts = [m.start() for m in re.finditer(r'<Blueprints\b', cloud)]
+    assert len(mounts) == 1
+    case = cloud[cloud.index("case 'templates':"):cloud.index("case 'insights':")]
+    at = case.index('<Blueprints ')
+    assert at < case.index('<TemplatesLibraryTab') and '<div className="cloud-mounted cloud-body">' in case[:at]
+    assert ('canRead={canBp} canWrite={canBp && !haReadOnly} nav={bpNav} cloud />') in case
+    assert "const canBp = holdsPerm('vm.create');" in cloud and 'haReadOnly } = useAuth();' in cloud
+    # the nav and the crumb say what the page holds now
+    assert "{ id: 'templates', label: t('bpNavTab'), icon: 'Copy' }," in cloud
+    assert "templates: T('bpNavTab') || 'Blueprints & Templates'," in cloud and 'cloudNavTemplates' not in cloud
+    # the button of the VMs page only, for whoever may deploy, not on a standby, on a Proxmox VE cluster
+    assert "const toBlueprints = canBp && !haReadOnly && pveCluster ? () => selectSection('templates') : undefined;" in cloud
+    vms = [ln for ln in cloud.split('\n') if '<CloudInstanceList ' in ln]
+    assert len(vms) == 2 and 'kind="qemu"' in vms[0] and 'onBlueprints={toBlueprints}' in vms[0] and 'onBlueprints' not in vms[1]
+    assert "{onBlueprints && kind !== 'lxc' && (" in cloud and 'data-bp-nav="cloud-vms"' in cloud
+    nav = cloud[cloud.index('const bpNav = {'):cloud.index('const pveCluster = ')]
+    assert 'nodesOf: (id) => (id === cid ? clusterMetrics : null),' in nav and "setSection('vms');" in nav
+
+
+def test_the_cloud_look_is_scoped_to_the_cloud_layout():
+    html = _read('web', 'index.html.original')
+    start = html.index('/* in Cloud they take the controls of the shell (blueprints.js)')
+    block = html[start:html.index('/* icon button */', start)]
+    rules = [ln.strip() for ln in block.split('\n') if '{' in ln]
+    assert len(rules) == 10 and all(r.startswith('body[data-layout="cloud"]') for r in rules), rules
+    src = _read('web', 'src', 'blueprints.js')
+    # Modern keeps its controls: the kit hands it the very classes it had
+    assert "modern: { input: BP_INPUT, btn: BP_BTN, go: BP_BTN_GO, small: BP_BTN_ROW, icon: BP_BTN_ICON }," in src
+    assert not re.search(r'className=\{BP_(INPUT|BTN|BTN_GO|BTN_ROW|BTN_ICON)\}', src)
+
+
 def test_one_set_of_rules_for_both_looks():
     src = _read('web', 'src', 'blueprints.js')
     for hook in ('crBpUseEditor({ bp, templateId, authFetch, t, onSaved })', 'crBpUseDeploy({ bp, clusters, clusterId, authFetch, t, onStarted })',
@@ -699,8 +910,12 @@ def test_one_set_of_rules_for_both_looks():
 def test_the_mount_takes_the_props_cloud_needs():
     src = _read('web', 'src', 'blueprints.js')
     sig = re.search(r'function BpSection\(\{([^}]*)\}\)', src).group(1)
-    assert [p.strip() for p in sig.split(',')] == ['cluster', 'clusters', 'authFetch', 'addToast', 'canRead', 'canWrite', 'nav', 'cloud']
-    assert 'function Blueprints(props) {' in src and '<BpSection {...props} />' in src
+    assert [p.strip() for p in sig.split(',')] == ['cluster', 'clusters', 'authFetch', 'addToast', 'canRead', 'canWrite', 'nav']
+    # the look is set once, for the section, its dialogs and the note of the boundary
+    mount = src[src.index('function Blueprints(props) {'):]
+    assert "const cloud = props.cloud === undefined ? isCloud : !!props.cloud;" in mount
+    assert '<BpCloud.Provider value={cloud}>' in mount and '<BpBoundary t={t}><BpSection {...props} /></BpBoundary>' in mount
+    assert src.count('const BpCloud = createContext(false);') == 1 and 'BpBoundary.contextType = BpCloud;' in src
     # inside .cloud-mounted the palette text follows Cloud as well
     html = _read('web', 'index.html.original')
     assert '.bp-fg { color: var(--color-text, #FFFFFF); }' in html
@@ -722,7 +937,7 @@ NEW_KEYS = ('bpNavTab', 'bpRecentDesc', 'bpRecentNone', 'bpRecentNoneAll', 'bpCo
 
 def test_every_key_is_in_all_nine_languages_after_the_blueprint_keys():
     used = set(re.findall(r"'((?:crBp|crImg|bp)[A-Za-z]+)'", _read('web', 'src', 'blueprints.js')))
-    used |= set(re.findall(r"t\('(bp[A-Za-z]+)'\)", _read('web', 'src', 'dashboard.js')))
+    used |= set(re.findall(r"t\('(bp[A-Za-z]+)'\)", _read('web', 'src', 'dashboard.js') + _read('web', 'src', 'cloud.js')))
     assert set(NEW_KEYS) <= used and len(used) > 120
     src = _read('web', 'src', 'translations.js')
     starts = [(m.start(), m.group(1)) for m in re.finditer(r'^            ([a-z]{2}): \{$', src, re.M)]

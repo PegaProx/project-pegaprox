@@ -3370,6 +3370,19 @@
         body.light-theme [data-bp] .text-red-400, body[data-cloud-theme="light"] [data-bp] .text-red-400 { color: #b91c1c; }
         body.light-theme [data-bp] .text-purple-400, body[data-cloud-theme="light"] [data-bp] .text-purple-400 { color: #7e22ce; }
         body.light-theme [data-bp] .text-blue-400 { color: #1d4ed8; }
+        /* in Cloud they take the controls of the shell (blueprints.js); what is left of the Modern look gets the
+           surfaces, lines and muted text of the Cloud theme */
+        body[data-layout="cloud"] [data-bp-layout="cloud"] .text-gray-500 { color: var(--cloud-text-muted); }
+        body[data-layout="cloud"] [data-bp-layout="cloud"] .border-proxmox-border { border-color: var(--cloud-divider) !important; }
+        body[data-layout="cloud"] [data-bp-layout="cloud"] input[type="checkbox"] { accent-color: var(--cloud-accent); }
+        body[data-layout="cloud"] [data-bp-layout="cloud"] .cloud-btn:disabled:hover { background: var(--cloud-surface-2); }
+        body[data-layout="cloud"] [data-bp-layout="cloud"] .cloud-btn-primary:disabled:hover { background: var(--cloud-accent); }
+        /* the pink of the shell's danger button is made for its dark theme */
+        body[data-layout="cloud"][data-cloud-theme="light"] [data-bp-layout="cloud"] .cloud-btn-danger { color: #b91c1c; border-color: rgba(185,28,28,0.4); }
+        body[data-layout="cloud"][data-cloud-theme="light"] [data-bp-layout="cloud"] .cloud-btn-danger:hover { color: #991b1b; }
+        body[data-layout="cloud"] .bp-cloud-dialog { background: var(--cloud-surface-3); border: 1px solid var(--cloud-border-medium); border-radius: var(--radius-lg); box-shadow: var(--cloud-shadow-xl); }
+        body[data-layout="cloud"] .bp-note-icon { display: inline-flex; flex-shrink: 0; }
+        body[data-layout="cloud"] .bp-note-icon svg { width: 16px; height: 16px; }
 
         /* icon button */
         .cloud-icon-btn { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:var(--radius-md); background:transparent; border:1px solid transparent; color:var(--cloud-text-secondary); cursor:pointer; flex:0 0 auto; transition:background .12s, color .12s; }
