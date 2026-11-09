@@ -3618,8 +3618,10 @@
         .pp-drawer-toggle, .pp-drawer-backdrop, .pp-drawer-close { display: none; }
 
         /* JB Nov 2026 - the shell clips sideways (#727), so what does not fit into the header is gone and not a
-           scroll away, the user menu with its logout first. From 1600 on it stays on one line as it was. */
-        @media (max-width: 1599px) {
+           scroll away, the user menu with its logout first. NS Nov 2026 - from 821, the phone layout below has its
+           own rule, to 1645: the box of the header stops at 1600 and its row, 1552 wide, is 47 px short, which the
+           margin beside the box hides only from 1646 on. Above that wrapping would make two lines of one. */
+        @media (min-width: 821px) and (max-width: 1645px) {
             .pp-header-actions { flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; }
         }
 

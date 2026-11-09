@@ -8,6 +8,7 @@ Drives the built bundle in headless Chromium and Firefox with the fake server of
 skips where Playwright or the browser is not installed.
 """
 import pathlib
+import re
 
 import pytest
 
@@ -15,16 +16,22 @@ from test_corp_redesigned_guard_ui import _GuardApp, _GuardServer
 
 ENGINES = ['chromium', 'firefox']
 LAYOUTS = ['modern', 'corporate', 'corporate-redesigned', 'cloud']
-# 820 and below is the phone layout of #189, which has its own tests
-WIDTHS = [1599, 1500, 1440, 1366, 1280, 1100, 1024, 900, 821]
-BUNDLE = pathlib.Path(__file__).resolve().parent.parent / 'web' / 'index.html'
+# 820 and below is the phone layout of (#189), which has its own tests. 1700 is the one line header the
+# others are counted against, 1600 to 1645 is where the box of the header is narrower than its row
+WIDTHS = [1700, 1645, 1620, 1600, 1599, 1500, 1440, 1366, 1280, 1100, 1024, 900, 821]
+WIDE = 1700
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+BUNDLE = ROOT / 'web' / 'index.html'
+SOURCE = ROOT / 'web' / 'index.html.original'
 
 OUT = '''() => {
   const roots = document.querySelectorAll('header, .cloud-topbar');
   const out = [];
+  let count = 0;
   for (const root of roots) for (const n of root.querySelectorAll('button, a, input, select')) {
     const r = n.getBoundingClientRect();
     if (!r.width || !r.height || n.closest('.cr-skip') || n.classList.contains('cr-skip')) continue;
+    count++;
     const x = r.x + r.width / 2, y = r.y + r.height / 2;
     const top = document.elementFromPoint(x, y);
     const hit = !!top && (n === top || n.contains(top) || top.contains(n));
@@ -33,7 +40,7 @@ OUT = '''() => {
                 Math.round(r.left), Math.round(r.right)]);
     }
   }
-  return {roots: roots.length, out};
+  return {roots: roots.length, out, count};
 }'''
 
 
@@ -72,6 +79,9 @@ def open_at(browsers):
     def _open(engine, layout, width=1600):
         app = _GuardApp(browsers(engine), _GuardServer(bundle=BUNDLE.read_bytes(), layout=layout), viewport=(width, 800))
         apps.append(app)
+        # the fake has no event stream, so 4 s after the load a banner (sticky, z-index 100) floats over the top of
+        # the page, and a header seen after it reads as covered
+        app.page.add_style_tag(content='[style*="sticky"][style*="z-index: 100"] { display: none !important; }')
         return app
     yield _open
     for app in apps:
@@ -84,18 +94,21 @@ def test_runtime_every_control_of_the_header_is_in_the_window(open_at, engine, l
     app = open_at(engine, layout)
     page = app.page
     page.wait_for_timeout(500)
-    lost = {}
+    lost, wide = {}, None
     for width in WIDTHS:
         page.set_viewport_size({'width': width, 'height': 800})
         # on a busy machine the header is still settling right after the resize
         for _ in range(20):
             page.wait_for_timeout(150)
             seen = page.evaluate(OUT)
-            if not seen['out']:
+            if not seen['out'] and (wide is None or seen['count'] == wide):
                 break
         assert seen['roots'] == 1, (width, seen)
-        if seen['out']:
-            lost[width] = seen['out']
+        if width == WIDE:
+            wide = seen['count']
+        # a rule that hides a control instead of wrapping it leaves nothing outside the window
+        if seen['out'] or seen['count'] != wide:
+            lost[width] = seen['out'] or f"{seen['count']} controls, {wide} at {WIDE}"
     assert not lost, lost
 
 
@@ -139,3 +152,31 @@ def test_runtime_the_cloud_top_bar_stays_in_the_window_of_a_phone(open_at, engin
     page.wait_for_timeout(500)
     seen = page.evaluate(OUT)
     assert seen['roots'] == 1 and seen['out'] == [], seen
+
+
+@pytest.mark.parametrize('engine', ENGINES)
+@pytest.mark.parametrize('layout', ['modern', 'corporate-redesigned'])
+@pytest.mark.parametrize('width', [820, 412])
+def test_runtime_the_phone_keeps_the_action_row_it_had(open_at, engine, layout, width):
+    """Wrapping is for desktop widths: below 821 the row of (#189) stays where it began."""
+    app = open_at(engine, layout, width=width)
+    page = app.page
+    page.wait_for_timeout(500)
+    got = page.evaluate("getComputedStyle(document.querySelector('.pp-header-actions')).justifyContent")
+    assert got != 'flex-end', got
+
+
+def test_the_wrap_rules_are_in_the_source():
+    """CI has no browser, so the browser tests above skip there: this reads the rules themselves."""
+    css = SOURCE.read_text(encoding='utf-8')
+
+    def body(selector):
+        found = re.search(r'^\s*' + re.escape(selector) + r' \{([^}]*)\}', css, re.M)
+        assert found, selector
+        return found.group(1).replace(' ', '')
+    media = re.search(r'@media \(min-width: 821px\) and \(max-width: (\d+)px\) \{\s*\.pp-header-actions \{([^}]*)\}', css)
+    assert media and 'flex-wrap:wrap' in media.group(2).replace(' ', ''), 'the header actions of Modern wrap'
+    # the box of the header ends at 1600 and its row is 47 px short of the actions: wrapping has to reach 1645
+    assert int(media.group(1)) >= 1645
+    assert 'flex-wrap:wrap' in body('.cloud-topbar')
+    assert 'flex-wrap:wrap' in body('.cloud-topbar-actions')
