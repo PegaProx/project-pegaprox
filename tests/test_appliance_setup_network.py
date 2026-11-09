@@ -18,6 +18,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -635,3 +636,106 @@ def test_a_release_without_the_file_list_is_checked_by_its_driver(tmp_path):
     path.write_text(json.dumps({'keystore': {}, 'db': {'backend': 'sqlcipher', 'encrypted_at_rest': True}},
                                indent=2) + '\n')
     assert _smoke_backend(path).returncode == 0
+
+
+# --- the third-party python3-sqlcipher3 stays out of the images ------------------------------------
+# Both images keep that repo for pegaprox. Its python3-sqlcipher3 is 0.6.4, Architecture all with
+# the x86_64 module, and sorts under ours (0.6.4-0pegaprox1); a later upload there would not, and an
+# apt upgrade on arm64 would swap the module that does not load back in. Each image pins it away.
+
+PIN = '/etc/apt/preferences.d/pegaprox-sqlcipher3'
+OURS = '0.6.4-0pegaprox1'
+LATER = ('Package: python3-sqlcipher3\nVersion: 0.6.5\nArchitecture: all\nMaintainer: upstream\n'
+         'Filename: pool/trixie/main/python3-sqlcipher3_0.6.5_all.deb\nSize: 1\n'
+         'Description: Sqlite with encryption\n\n')
+
+
+def _candidate(tmp_path, source, pref):
+    """apt's candidate for python3-sqlcipher3 on arm64 with ours installed, the deb line `source`
+    offering 0.6.5 as Architecture all, and `pref` in preferences.d (None: none). Offline: the
+    index of that source is written in by hand, apt-cache reads it as if fetched."""
+    if not shutil.which('apt-cache'):
+        pytest.skip('needs apt-cache')
+    m = re.fullmatch(r'deb (?:\[[^\]]*\] )?https?://(\S+?)/? (\S+) (\S+)', source.strip())
+    assert m, source
+    site, suite, comp = m.groups()
+    root = tmp_path / 'apt'
+    for d in ('etc/apt/preferences.d', 'etc/apt/apt.conf.d', 'lists/partial', 'cache/archives/partial', 'dpkg'):
+        (root / d).mkdir(parents=True)
+    (root / 'etc/apt/sources.list').write_text(source.strip() + '\n')
+    if pref is not None:
+        (root / 'etc/apt/preferences.d/pegaprox-sqlcipher3').write_text(pref)
+    lists = str(root / 'lists' / site.replace('/', '_')) + f'_dists_{suite}'
+    with open(f'{lists}_Release', 'w') as fh:
+        fh.write(f'Origin: upstream\nSuite: {suite}\nCodename: {suite}\nComponents: {comp}\n'
+                 'Architectures: all amd64\n')
+    with open(f'{lists}_{comp}_binary-all_Packages', 'w') as fh:
+        fh.write(LATER)
+    (root / 'dpkg/status').write_text(f'Package: python3-sqlcipher3\nStatus: install ok installed\n'
+                                      f'Maintainer: PegaProx\nArchitecture: arm64\nVersion: {OURS}\n'
+                                      'Description: sqlcipher3\n\n')
+    conf = root / 'apt.conf'
+    conf.write_text(f'Dir::Etc "{root}/etc/apt/";\nDir::State::lists "{root}/lists/";\n'
+                    f'Dir::State::status "{root}/dpkg/status";\nDir::Cache "{root}/cache/";\n'
+                    'Dir::Cache::pkgcache "";\nDir::Cache::srcpkgcache "";\n'
+                    'APT::Architecture "arm64";\nAPT::Architectures { "arm64"; };\n')
+    r = subprocess.run(['apt-cache', 'policy', 'python3-sqlcipher3'], capture_output=True, text=True,
+                       timeout=60, env={'APT_CONFIG': str(conf), 'LC_ALL': 'C', 'PATH': '/usr/bin:/bin'})
+    assert r.returncode == 0, r.stderr
+    m = re.search(r'^\s*Candidate: (\S+)$', r.stdout, re.M)
+    assert m, r.stdout
+    return m.group(1)
+
+
+def _lxc_action():
+    """The post-files action as distrobuilder gets it: the definition heredoc expanded by bash,
+    as on the runner, then the action's YAML block."""
+    m = re.search(r'^( *)cat > packaging/lxc/pegaprox-lxc\.yaml <<YAML\n.*?^\1YAML$', _read(WF), re.M | re.S)
+    assert m, 'build-lxc no longer writes its distrobuilder definition'
+    heredoc = re.sub(r'\$\{\{.*?\}\}', 'arm64', _dedent(m.group(0), m.group(1)))
+    r = subprocess.run(['bash', '-c', heredoc.replace('cat > packaging/lxc/pegaprox-lxc.yaml', 'cat', 1)],
+                       capture_output=True, text=True, timeout=10,
+                       env={'PATH': '/usr/bin:/bin', 'DEBIAN_RELEASE': 'trixie', 'RUNNER_TEMP': '/runner-temp'})
+    assert r.returncode == 0, r.stderr
+    a = re.search(r'^  - trigger: post-files\n    action: \|-\n(.*?)^\S', r.stdout, re.M | re.S)
+    assert a, r.stdout
+    return _dedent(a.group(1), ' ' * 6)
+
+
+def test_the_lxc_rootfs_pins_it_before_it_has_the_repo(sandbox):
+    root = sandbox / 'root'
+    for d in ('etc/apt/preferences.d', 'etc/apt/sources.list.d', 'var/cache/pegaprox-image', 'tmp'):
+        (root / d).mkdir(parents=True)
+    pin, repo = root / PIN.lstrip('/'), root / 'etc/apt/sources.list.d/gyptazy.list'
+    log = sandbox / 'calls.log'
+    (sandbox / 'bin' / 'apt-get').write_text(
+        f'#!/bin/sh\necho "apt-get $* pin=$([ -f {pin} ] && echo y || echo n) '
+        f'repo=$([ -f {repo} ] && echo y || echo n)" >> "{log}"\n')
+    for cmd in ('wget', 'sha256sum', 'dpkg', 'curl', 'chpasswd', 'systemctl'):
+        (sandbox / 'bin' / cmd).write_text(f'#!/bin/sh\necho "{cmd} $*" >> "{log}"\nexit 0\n')
+    for p in (sandbox / 'bin').iterdir():
+        p.chmod(0o755)
+    script = re.sub(r'(?<![\w/])/(var|tmp)/', lambda m: f'{root}/{m.group(1)}/', _lxc_action())
+    r = _run(sandbox, script)
+    assert r.returncode == 0, r.stdout + r.stderr
+    # every apt run that has the repo has the pin too
+    assert [c for c in log.read_text().splitlines() if c.startswith('apt-get') and 'repo=y' in c] \
+        == ['apt-get update pin=y repo=y', 'apt-get -y install pegaprox sshpass pin=y repo=y']
+    # the same pin as the VM image's, and apt keeps ours with it
+    assert pin.read_text() == _heredoc('gyptazy.pref')
+    assert _candidate(sandbox, repo.read_text(), pin.read_text()) == OURS
+
+
+def test_the_vm_image_has_the_pin_next_to_the_repo(tmp_path):
+    m = re.search(r'^( *)cat > gyptazy\.list <<GYPTLIST\n(.*?)^\1GYPTLIST$', _read(WF), re.M | re.S)
+    assert m, 'build-vm no longer writes gyptazy.list'
+    source = _dedent(m.group(2), m.group(1)).replace('${DEBIAN_RELEASE}', 'trixie')
+    # what an apt upgrade would take from that repo once it uploads above ours, without and with it
+    assert _candidate(tmp_path / 'without', source, None) == '0.6.5'
+    assert _candidate(tmp_path / 'with', source, _heredoc('gyptazy.pref')) == OURS
+    flat = _flat(_step('build-vm', 'Dateien per qemu-nbd einhängen'))
+    copy = f'sudo install -D -m 0644 gyptazy.pref /mnt/img{PIN}'
+    assert flat.index('sudo cp gyptazy.list /mnt/img/etc/apt/sources.list.d/gyptazy.list') < flat.index(copy) \
+        < flat.index('sudo umount /mnt/img')
+    # and the cleanup after the smoke boot leaves it there
+    assert 'preferences.d' not in _step('build-vm', 'Zustand des Testboots aus dem Image entfernen')
