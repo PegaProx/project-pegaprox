@@ -22,6 +22,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -88,9 +89,35 @@ def host(tmp_path, monkeypatch):
     monkeypatch.setattr(keystore, 'SYSTEM_KEY_PATH', h.key)
     monkeypatch.setattr(keystore, '_legacy_key_path', lambda: h.legacy)
     monkeypatch.setattr(keystore, '_CACHED', None)
+    # an app another test left running still reads its key from its own threads; with the
+    # paths above it would make one in config/ of this host
+    me, resolve = threading.get_ident(), keystore._resolve
+
+    def own_resolve(generate=True):
+        if threading.get_ident() != me:
+            raise RuntimeError('the key store points at a test host')
+        return resolve(generate)
+    monkeypatch.setattr(keystore, '_resolve', own_resolve)
     monkeypatch.setattr(dbcrypto, '_AUTO_MIG_DONE', set())
     monkeypatch.setenv('PEGAPROX_PLAIN_BACKUP_RETENTION_S', '0')
     return h
+
+
+def test_a_key_store_call_from_another_thread_leaves_the_host_alone(host):
+    """The fixture guards itself: in one CI process, the loops of an app an integration test
+    left behind call the key store at any time."""
+    errors = []
+
+    def stray():
+        try:
+            keystore.load_master_key()
+        except RuntimeError as e:
+            errors.append(str(e))
+    t = threading.Thread(target=stray)
+    t.start()
+    t.join()
+    assert errors == ['the key store points at a test host']
+    assert not host.legacy.exists() and keystore._CACHED is None
 
 
 def write_key(path, data=None, mode=0o600):
