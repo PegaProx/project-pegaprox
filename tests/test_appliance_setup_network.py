@@ -423,19 +423,72 @@ def test_the_cleanup_drops_what_the_build_brought_into_the_image(sandbox):
 def test_the_lxc_smoke_test_asks_pegaprox_on_both_archs():
     step = _step('build-lxc', 'Smoke-Test (Container starten + HTTP-Check)')
     flat = _flat(step)
-    amd64 = ('sudo systemd-nspawn -D /tmp/ct/rootfs --quiet --pipe --register=no --user=pegaprox '
-             '--chdir=/var/lib/pegaprox /usr/bin/pegaprox/pegaprox-wrapper --keystore-status '
-             '> "$RUNNER_TEMP/keystore-status.json"')
+    amd64 = ('timeout 120 sudo nsenter --target "$LEADER" --mount --uts --ipc --pid -- sh -c '
+             "'cd /var/lib/pegaprox && exec runuser -u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper "
+             "--keystore-status' > \"$RUNNER_TEMP/keystore-status.json\"")
     arm64 = ('sudo docker exec -u pegaprox -w /var/lib/pegaprox pegaprox-test /usr/bin/pegaprox/pegaprox-wrapper '
              '--keystore-status > "$RUNNER_TEMP/keystore-status.json"')
-    # amd64: a second nspawn on the tree, once the booted one is gone; arm64: in the running container
-    assert flat.index('NSPAWN_PID=$!') < flat.index('sudo machinectl terminate pegaprox-test') \
-        < flat.index('ps -p "$NSPAWN_PID"') < flat.index(amd64)
+    # both in the running container, before it goes down: no wait on its shutdown, no second
+    # nspawn on the tree
+    assert flat.index(amd64) < flat.index('sudo machinectl poweroff pegaprox-test')
     assert flat.index(arm64) < flat.index('sudo docker rm -f pegaprox-test')
+    assert flat.count('systemd-nspawn') == 1 and 'NSPAWN_PID' not in flat
+    # not systemd-run -M: that talks to a D-Bus in the container, and the rootfs has none
+    assert 'sudo systemd-run' not in flat
     # and the check fails the step, after the port check
     assert step.startswith('      - name: Smoke-Test') and '          set -e\n' in step
     assert f'          {CHECK}\n' in step
     assert step.index('PegaProx kam im LXC nicht hoch') < step.index(CHECK) < step.index('LXC Smoke-Test erfolgreich')
+
+
+def _amd64_tail(sandbox, leader):
+    """The amd64 end of the LXC smoke step from the port wait on, with the host tools stubbed:
+    machinectl knows the container with `leader` as its Leader PID (none for ''), nsenter
+    answers as PegaProx in there would."""
+    log = sandbox / 'calls.log'
+    stubs = {
+        'curl': '#!/bin/sh\nexit 0\n',
+        'ss': '#!/bin/sh\nexit 0\n',
+        'tail': '#!/bin/sh\nexit 0\n',
+        'timeout': '#!/bin/sh\nshift\nexec "$@"\n',
+        'machinectl': f'#!/bin/sh\necho "machinectl $*" >> "{log}"\n'
+                      f'[ "$1" = show ] && [ -n "{leader}" ] && echo "{leader}"\nexit 0\n',
+        'nsenter': f'#!/bin/sh\necho "nsenter $*" >> "{log}"\n'
+                   'printf \'{\\n  "db": {"backend": "sqlcipher", "files": {"/var/lib/pegaprox/config/pegaprox.db": '
+                   '"encrypted"}}\\n}\\n\'\n',
+    }
+    for name, body in stubs.items():
+        (sandbox / 'bin' / name).write_text(body)
+        (sandbox / 'bin' / name).chmod(0o755)
+    (sandbox / 'bin' / 'python3').write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    (sandbox / 'bin' / 'python3').chmod(0o755)
+    step = _step('build-lxc', 'Smoke-Test (Container starten + HTTP-Check)')
+    script = _from_line(step, 'echo "Warte auf PegaProx auf Port ${PVE_PORT}..."').replace(
+        '${{ matrix.arch }}', 'amd64')
+    out = sandbox / 'out'
+    out.mkdir()
+    r = subprocess.run(['bash', '-c', 'set -e\n' + script], cwd=ROOT, capture_output=True, text=True, timeout=60,
+                       env={'PATH': f"{sandbox / 'bin'}:/usr/bin:/bin", 'RUNNER_TEMP': str(out), 'PVE_PORT': '5000'})
+    return r, (log.read_text().splitlines() if log.exists() else [])
+
+
+def test_the_amd64_status_comes_from_the_running_container(sandbox):
+    r, calls = _amd64_tail(sandbox, '4242')
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert 'smoke: PegaProx in the image runs its database on SQLCipher' in r.stdout
+    assert 'LXC Smoke-Test erfolgreich.' in r.stdout
+    ask = ("nsenter --target 4242 --mount --uts --ipc --pid -- sh -c cd /var/lib/pegaprox && exec runuser "
+           "-u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper --keystore-status")
+    assert calls == ['machinectl show pegaprox-test --property=Leader --value', ask,
+                     'machinectl poweroff pegaprox-test', 'machinectl terminate pegaprox-test']
+
+
+def test_a_container_that_is_gone_says_so_and_fails_the_step(sandbox):
+    r, calls = _amd64_tail(sandbox, '')
+    assert r.returncode == 1
+    assert '::error::the container pegaprox-test is not running any more' in r.stdout
+    assert '::error::no --keystore-status of PegaProx in the image' in r.stdout
+    assert not [c for c in calls if c.startswith('nsenter')]
 
 
 def test_the_vm_cleanup_checks_what_the_smoke_boot_said():
@@ -523,7 +576,7 @@ def test_the_backend_check_fails_plain_sqlite(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('text', [
-    '',                                                                   # docker exec or nspawn failed
+    '',                                                                   # docker exec or nsenter failed
     'Gevent monkey-patching applied\nTraceback (most recent call last):\n  ...\n',
     '{\n  "db": {"backend": "sqlcipher"\n',                               # cut off
     '{\n  "keystore": {"ok": true}\n}\n',

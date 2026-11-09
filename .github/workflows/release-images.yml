@@ -302,7 +302,6 @@ jobs:
               --boot \
               --bind-ro=/etc/resolv.conf \
               > /tmp/nspawn.log 2>&1 &
-            NSPAWN_PID=$!
           else
             sudo docker import --platform linux/arm64 rootfs.tar.xz pegaprox-lxc-smoke:arm64
             sudo docker run -d \
@@ -335,15 +334,21 @@ jobs:
             tail -n 40 /tmp/nspawn.log || true
             echo "----- Lauschende Ports auf dem Host -----"
             sudo ss -tlnp || true
+            # what PegaProx says about its database, as the service user in its directory, asked
+            # in the running container before it goes down. systemd-run -M would need a D-Bus in
+            # there and this rootfs has none; nsenter's --wd opens the directory on the host,
+            # hence the cd in the shell
+            LEADER=$(sudo machinectl show pegaprox-test --property=Leader --value 2>/dev/null || true)
+            if [ -n "$LEADER" ]; then
+              timeout 120 sudo nsenter --target "$LEADER" --mount --uts --ipc --pid -- sh -c \
+                'cd /var/lib/pegaprox && exec runuser -u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper --keystore-status' \
+                > "$RUNNER_TEMP/keystore-status.json" || true
+            else
+              echo "::error::the container pegaprox-test is not running any more, nothing to ask about its database"
+            fi
             sudo machinectl poweroff pegaprox-test 2>/dev/null || true
             sleep 3
             sudo machinectl terminate pegaprox-test 2>/dev/null || true
-            # NS Nov 2026 (#1226) - what PegaProx says about its database, as the service user
-            # in its directory. A second nspawn on the tree once the booted one has let go of it
-            for _ in $(seq 1 30); do ps -p "$NSPAWN_PID" >/dev/null || break; sleep 1; done
-            timeout 120 sudo systemd-nspawn -D /tmp/ct/rootfs --quiet --pipe --register=no \
-              --user=pegaprox --chdir=/var/lib/pegaprox \
-              /usr/bin/pegaprox/pegaprox-wrapper --keystore-status > "$RUNNER_TEMP/keystore-status.json" || true
           else
             # the same in the running container (under qemu, so with time to spare)
             timeout 300 sudo docker exec -u pegaprox -w /var/lib/pegaprox pegaprox-test \
@@ -968,8 +973,8 @@ jobs:
           [ -n "$ROOT" ] || { echo "::error::Root-Partition nicht gefunden"; exit 1; }
           sudo mkdir -p /mnt/img
           sudo mount "$ROOT" /mnt/img
-          # NS Nov 2026 (#1226) - what PegaProx said about its database in the smoke boot,
-          # checked below once the image is clean
+          # what PegaProx said about its database in the smoke boot, checked below once the
+          # image is clean
           sudo cat /mnt/img/var/cache/pegaprox-image/keystore-status.json > "$RUNNER_TEMP/keystore-status.json" || true
           R=/mnt/img
 
