@@ -87,4 +87,5 @@ but it can take the commits made since the log was last synced: metrics, alert a
 state, a sign-out made just before. What something else relies on is synced right away,
 together with everything committed before it: every audit log entry and checkpoint, a key
 rotation, the failover marks of a recovery plan, and in an HA group the configuration version
-an instance records and the steps of a node recovery.
+an instance records, the steps of a node recovery and the last-run stamps a change of the
+group's time zone moves.
