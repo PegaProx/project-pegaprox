@@ -528,12 +528,10 @@ jobs:
               valid_domains "$DOMAINS" && break; echo -e "${R}Invalid domain${N}"
             done
           }
-          find_db() {
-            for db in /var/lib/pegaprox/pegaprox.db /var/lib/pegaprox/config/pegaprox.db \
-                      /etc/pegaprox/pegaprox.db /usr/lib/pegaprox/config/pegaprox.db \
-                      /opt/PegaProx/config/pegaprox.db; do
-              [ -f "$db" ] && { echo "$db"; return; }
-            done
+          # NS Nov 2026 - through PegaProx itself, as its user in its directory: the sqlite3 CLI
+          # cannot open the SQLCipher database the appliance has
+          set_port() {
+            (cd /var/lib/pegaprox && runuser -u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper --set-port "$1")
           }
 
           [ "$EUID" -ne 0 ] && { echo -e "${R}Please run as root: sudo pegaprox-setup${N}"; exit 1; }
@@ -633,16 +631,11 @@ jobs:
           sleep 8
 
           if [ "$ACCESS_PORT" != 5000 ]; then
-            DB=$(find_db)
-            if [ -n "$DB" ]; then
-              if sqlite3 "$DB" "INSERT OR REPLACE INTO server_settings (key, value) VALUES ('port','$ACCESS_PORT');" 2>/dev/null; then
-                systemctl restart pegaprox 2>/dev/null || true; sleep 4
-                echo -e "${G}Port set to $ACCESS_PORT${N}"
-              else
-                echo -e "${Y}Could not set port automatically - please set it in the settings.${N}"
-              fi
+            if set_port "$ACCESS_PORT"; then
+              systemctl restart pegaprox 2>/dev/null || true; sleep 4
+              echo -e "${G}Port set to $ACCESS_PORT${N}"
             else
-              echo -e "${Y}Database not found - set the port under Settings > Server.${N}"
+              echo -e "${Y}Could not set port automatically - please set it under Settings > Server.${N}"
             fi
           fi
 
@@ -684,7 +677,8 @@ jobs:
 
           log(){ echo "[$(date '+%H:%M:%S')] $1"; }
           mask_to_cidr(){ case "$1" in 255.255.255.0) echo 24;; 255.255.254.0) echo 23;; 255.255.252.0) echo 22;; 255.255.248.0) echo 21;; 255.255.240.0) echo 20;; 255.255.0.0) echo 16;; 255.0.0.0) echo 8;; *) echo "";; esac; }
-          find_db(){ for db in /var/lib/pegaprox/pegaprox.db /var/lib/pegaprox/config/pegaprox.db /etc/pegaprox/pegaprox.db /usr/lib/pegaprox/config/pegaprox.db /opt/PegaProx/config/pegaprox.db; do [ -f "$db" ] && { echo "$db"; return; }; done; }
+          # the sqlite3 CLI cannot open the SQLCipher database (see pegaprox-setup)
+          set_port(){ (cd /var/lib/pegaprox && runuser -u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper --set-port "$1"); }
 
           for arg in "$@"; do case $arg in
             --ip=*) IP="${arg#*=}";;
@@ -750,12 +744,9 @@ jobs:
           sleep 8
 
           if [ "$PORT" != 5000 ]; then
-            DB=$(find_db || true)
-            if [ -n "$DB" ]; then
-              sqlite3 "$DB" "INSERT OR REPLACE INTO server_settings (key, value) VALUES ('port','$PORT');" 2>/dev/null \
-                && { systemctl restart pegaprox 2>/dev/null || true; sleep 4; log "Port set to $PORT"; } \
-                || log "Could not set port automatically"
-            fi
+            set_port "$PORT" \
+              && { systemctl restart pegaprox 2>/dev/null || true; sleep 4; log "Port set to $PORT"; } \
+              || log "Could not set port automatically"
           fi
 
           if systemctl is-active --quiet pegaprox; then
@@ -937,6 +928,9 @@ jobs:
 
           # PegaProx state: a fresh database, keys and TLS pair on the user's first start
           sudo find "$R/var/lib/pegaprox" -mindepth 1 -delete
+          # NS Nov 2026 (#1226) - and the master key the package put in /etc/pegaprox during
+          # this boot: the unit makes each appliance its own before its first start
+          sudo sh -c "rm -f $R/etc/pegaprox/secret.key $R/etc/pegaprox/secret.key.new.*"
           # the installer ran in the smoke boot; it must not run again on the user's machine
           sudo rm -f "$R/usr/local/sbin/install-pegaprox.sh" \
                      "$R/etc/systemd/system/pegaprox-firstboot.service" \
@@ -973,6 +967,7 @@ jobs:
           FAIL=0
           if grep -q '^debian:' "$R/etc/passwd"; then echo "::error::cloud-init default user is in the image"; FAIL=1; fi
           if [ -n "$(sudo ls -A "$R/var/lib/pegaprox")" ]; then echo "::error::/var/lib/pegaprox is not empty"; FAIL=1; fi
+          if sudo sh -c "ls $R/etc/pegaprox/secret.key*" >/dev/null 2>&1; then echo "::error::the master key of the smoke boot is in the image"; FAIL=1; fi
           if ls "$R"/etc/ssh/ssh_host_* >/dev/null 2>&1; then echo "::error::SSH host keys are in the image"; FAIL=1; fi
           if [ -s "$R/etc/machine-id" ]; then echo "::error::machine-id is set"; FAIL=1; fi
           if [ -e "$R/etc/netplan/50-cloud-init.yaml" ]; then echo "::error::the smoke boot's netplan file is in the image"; FAIL=1; fi

@@ -194,3 +194,71 @@ def test_the_cleanup_refuses_an_image_that_still_has_it(sandbox):
     r = _run(sandbox, f'R={root}\n' + keep + '[ "$FAIL" -eq 0 ] || exit 1\n', move_etc=False)
     assert r.returncode == 1
     assert "the smoke boot's netplan file is in the image" in r.stdout
+
+
+# --- NS Nov 2026: the port, and the master key of the smoke boot (#1226) ------------------------
+
+def _port_stubs(sandbox, answer=0):
+    log = sandbox / 'calls.log'
+    for cmd, code in (('runuser', answer), ('sqlite3', 0)):
+        p = sandbox / 'bin' / cmd
+        p.write_text(f'#!/bin/sh\necho "$PWD {cmd} $*" >> "{log}"\nexit {code}\n')
+        p.chmod(0o755)
+    (sandbox / 'root' / 'var' / 'lib' / 'pegaprox').mkdir(parents=True)
+    return log
+
+
+def _with_state_dir(sandbox, script):
+    return script.replace('/var/lib/pegaprox', f"{sandbox / 'root'}/var/lib/pegaprox")
+
+
+@pytest.mark.parametrize('answer', [0, 4])
+def test_the_wizard_sets_the_port_through_pegaprox(sandbox, answer):
+    """The sqlite3 CLI cannot open the SQLCipher database the appliance has: the port goes
+    in through the PegaProx CLI, as the service user in its directory."""
+    log = _port_stubs(sandbox, answer)
+    r = _run(sandbox, _with_state_dir(sandbox, _heredoc('pegaprox-setup')),
+             stdin='\n'.join(['', '2', '', '2', '', 'n']) + '\n')
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = log.read_text().splitlines()
+    assert calls == [f"{sandbox / 'root'}/var/lib/pegaprox runuser -u pegaprox -- "
+                     '/usr/bin/pegaprox/pegaprox-wrapper --set-port 443']
+    assert ('Port set to 443' in r.stdout) == (answer == 0)
+    assert ('Could not set port automatically' in r.stdout) == (answer != 0)
+
+
+@pytest.mark.parametrize('answer', [0, 4])
+def test_the_unattended_setup_sets_the_port_through_pegaprox(sandbox, answer):
+    log = _port_stubs(sandbox, answer)
+    r = _run(sandbox, _with_state_dir(sandbox, _heredoc('pegaprox-setup-auto')), ['--dhcp', '--port=8443'])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert log.read_text().splitlines() == [
+        f"{sandbox / 'root'}/var/lib/pegaprox runuser -u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper --set-port 8443"]
+    assert ('Port set to 8443' in r.stdout) == (answer == 0)
+
+
+def test_the_cleanup_drops_the_master_key_of_the_smoke_boot(sandbox):
+    """The smoke boot installs the package with systemd running, so its postinst puts a
+    master key in /etc/pegaprox. Shipped, every appliance would have that one key."""
+    root = sandbox / 'root'
+    _smoke_boot_root(root)
+    (root / 'etc/pegaprox').mkdir()
+    (root / 'etc/pegaprox/secret.key').write_text('smoke-boot key')
+    (root / 'etc/pegaprox/secret.key.new.1234').write_text('half written')
+    (root / 'etc/pegaprox/.setup-complete').write_text('')
+    r = _run(sandbox, f'R={root}\n' + _cleanup_scrub() + '[ "$FAIL" -eq 0 ] || exit 1\n', move_etc=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sorted(os.listdir(root / 'etc/pegaprox')) == ['.setup-complete']
+
+
+def test_the_cleanup_refuses_an_image_with_a_master_key(sandbox):
+    root = sandbox / 'root'
+    _smoke_boot_root(root)
+    (root / 'etc/pegaprox').mkdir()
+    (root / 'etc/pegaprox/secret.key').write_text('smoke-boot key')
+    scrub = _cleanup_scrub()
+    keep = re.sub(r'^sudo sh -c "rm -f \$R/etc/pegaprox/secret\.key .*"\n', '', scrub, flags=re.M)
+    assert keep != scrub
+    r = _run(sandbox, f'R={root}\n' + keep + '[ "$FAIL" -eq 0 ] || exit 1\n', move_etc=False)
+    assert r.returncode == 1
+    assert 'the master key of the smoke boot is in the image' in r.stdout
