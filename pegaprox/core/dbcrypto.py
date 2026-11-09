@@ -246,6 +246,30 @@ def sync_wal(db_path) -> bool:
     return True
 
 
+def sync_file(path) -> None:
+    """fsync the file `path` and the directory it is in, for a file just written that the
+    database depends on (a key, the plain copy before the encryption): whole, and there by
+    its name, after a power cut. Raises OSError when the file cannot be synced; a directory
+    that cannot be is logged, some filesystems never sync one."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    parent = os.path.dirname(os.path.abspath(path))
+    try:
+        dfd = os.open(parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    except OSError as e:
+        _LOG.warning("[DBCRYPTO] could not open %s to sync it: %s", parent, e)
+        return
+    try:
+        os.fsync(dfd)
+    except OSError as e:
+        _LOG.warning("[DBCRYPTO] could not sync the directory %s: %s", parent, e)
+    finally:
+        os.close(dfd)
+
+
 def _apply_sqlcipher_pragmas(conn, db_path: str) -> None:
     """Apply the SQLCipher PRAGMAs required to unlock + harden the DB.
 
@@ -765,6 +789,9 @@ def _run_inline_migration(db_path: str) -> dict:
         # 1. backup
         shutil.copy2(db_path, backup_path)
         os.chmod(backup_path, 0o600)
+        # MK Nov 2026 - on disk before the swap takes the plain file away: it is the one
+        # copy that opens without the key
+        sync_file(backup_path)
         _LOG.info("[DBCRYPTO] backup → %s", backup_path)
 
         # 2. encrypt

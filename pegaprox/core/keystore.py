@@ -267,8 +267,13 @@ def _generate_at(path: Path, source: str, is_legacy: bool = False) -> MasterKey:
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, key_b64)
+        # MK Nov 2026 - on disk, and its name with it, before anything is sealed with it: a
+        # power cut soon after a first start left an empty key beside a database that is
+        # encrypted with it
+        os.fsync(fd)
     finally:
         os.close(fd)
+    _sync_dir(path.parent)
     try:
         os.chmod(path, 0o600)
     except Exception as e:
@@ -287,6 +292,21 @@ def _legacy_key_path() -> Path:
         return Path(KEY_FILE)
     except Exception:
         return Path('config') / 'secret.key'
+
+
+def _sync_dir(path: Path) -> None:
+    """fsync the directory `path`, so a file just made in it is still there after a power
+    cut. Best effort: a filesystem that cannot sync a directory is no reason to refuse."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError as e:
+        _LOG.warning("[KEYSTORE] could not sync the directory %s: %s", path, e)
+    finally:
+        os.close(fd)
 
 
 def _enforce_perms(path: Path) -> None:

@@ -275,6 +275,9 @@ class PegaProxDB:
             except Exception as e:
                 logging.error(f"SECURITY: Could not set key file permissions: {e}")
                 raise RuntimeError(f"Cannot secure encryption key file: {e}")
+            # MK Nov 2026 - on disk before a field is sealed with it: a power cut soon after
+            # the first start left an empty key file, and the start after it refuses one
+            dbcrypto.sync_file(aes_key_file)
             logging.info("Generated new AES-256-GCM encryption key")
         
         self.aesgcm = AESGCM(aes_key)
@@ -298,6 +301,8 @@ class PegaProxDB:
                 os.chmod(KEY_FILE, 0o600)
             except Exception as e:
                 logging.warning(f"Could not set Fernet key file permissions: {e}")
+            # the keystore's legacy tier reads the same file as the SQLCipher master key
+            dbcrypto.sync_file(KEY_FILE)
             self.fernet = Fernet(fernet_key)
             logging.info("Generated legacy Fernet key (for compatibility)")
 
@@ -6246,6 +6251,10 @@ class PegaProxDB:
                     f.flush()
                     os.fsync(f.fileno())
                 os.chmod(backup_file, 0o600)
+                # MK Nov 2026 - and its name, before the key file is written over in place: a
+                # power cut in that write leaves a short key, and the start refuses it and
+                # points at this copy
+                dbcrypto.sync_file(backup_file)
 
                 with open(aes_key_file, 'wb') as f:
                     f.write(new_key)
