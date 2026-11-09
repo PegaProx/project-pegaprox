@@ -25,14 +25,17 @@ By what it finds, in the order the key store reads it (pegaprox/core/keystore.py
 - whatever it cannot tell apart: nothing is written, and it says why
 
 The config directory comes from the unit (WorkingDirectory, PEGAPROX_CONFIG_DIR) where
-systemd answers, else <state-dir>/config. A symlink in /etc/pegaprox is followed, as the
-key store does, but nothing it points to is changed here. Exit status 0 when the key is in
+systemd answers, else <state-dir>/config. Everything in it and in the home is read as the
+service user, in a child: that is what the key store will see, and the service user can put
+a symlink there that root would follow. A symlink in /etc/pegaprox is followed, as the key
+store does, but nothing it points to is changed here. Exit status 0 when the key is in
 place or not ours to place, 1 when it refused, 2 on wrong arguments.
 """
 import argparse
 import base64
 import fnmatch
 import grp
+import json
 import os
 import pwd
 import secrets
@@ -140,9 +143,39 @@ def unit_view(unit):
     return env, workdir, creds
 
 
-# --- the databases ----------------------------------------------------------------------
+# --- as the service user ----------------------------------------------------------------
 
-def opens(db_path, raw, uid, gid):
+def as_service(svc, fn):
+    """fn() in a child that runs as the service user (svc: its passwd entry), the bytes it
+    returns handed back. None when the child did not get that far."""
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        code = 3
+        try:
+            os.close(r)
+            # SQLCipher writes its own error lines to stderr on a wrong key
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, 2)
+            if os.geteuid() != svc.pw_uid:
+                os.initgroups(svc.pw_name, svc.pw_gid)
+                os.setgid(svc.pw_gid)
+                os.setuid(svc.pw_uid)
+            out = fn()
+            with os.fdopen(w, 'wb') as fh:
+                fh.write(out)
+            code = 0
+        except BaseException:
+            pass
+        os._exit(code)
+    os.close(w)
+    with os.fdopen(r, 'rb') as fh:
+        out = fh.read()
+    _, status = os.waitpid(pid, 0)
+    return out if os.waitstatus_to_exitcode(status) == 0 else None
+
+
+def opens(db_path, raw, svc):
     """True when `raw` unlocks the SQLCipher database, False when SQLCipher says it is not
     a database with it, None when that cannot be told (no sqlcipher3, locked, unreadable).
     Opened as the service user, read-only, the way dbcrypto.connect keys it: a root-owned
@@ -151,47 +184,63 @@ def opens(db_path, raw, uid, gid):
         import sqlcipher3
     except Exception:
         return None
-    pid = os.fork()
-    if pid == 0:
-        code = 3
+
+    def check():
         try:
-            # SQLCipher writes its own error lines to stderr on a wrong key
-            devnull = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(devnull, 2)
-            if os.geteuid() != uid:
-                os.setgroups([])
-                os.setgid(gid)
-                os.setuid(uid)
             conn = sqlcipher3.connect(f'file:{quote(db_path)}?mode=ro', uri=True, timeout=10)
             try:
                 conn.execute('PRAGMA cipher_memory_security = OFF')
                 conn.execute(f"PRAGMA key = \"x'{raw.hex()}'\"")
                 conn.execute('PRAGMA cipher_compatibility = 4')
                 conn.execute('SELECT count(*) FROM sqlite_master').fetchone()
-                code = 0
             finally:
                 conn.close()
         except sqlcipher3.DatabaseError as e:
-            code = 2 if 'not a database' in str(e) else 3
-        except BaseException:
-            code = 3
-        os._exit(code)
-    _, status = os.waitpid(pid, 0)
-    return {0: True, 2: False}.get(os.waitstatus_to_exitcode(status))
+            return b'wrong' if 'not a database' in str(e) else b'unknown'
+        return b'open'
+    return {b'open': True, b'wrong': False}.get(as_service(svc, check))
 
 
-def db_states(config_dir):
-    states = {}
+def survey(config_dir, home, key_file):
+    """What the service user finds, as JSON: the state of each database, the files sealed
+    before the database, the key files of tiers 5 and 6 that are there (in that order, with
+    their bytes) and whether PEGAPROX_KEY_FILE is. Run through as_service: the config
+    directory is the service user's, so a symlink in it may point anywhere root can read,
+    and one on an NFS export with root_squash is readable for the service, not for root."""
+    seen = {'dbs': {}, 'sealed': [], 'keys': [],
+            'key_file': bool(key_file) and os.path.isfile(key_file)}
     for name in DATABASES:
         path = os.path.join(config_dir, name)
-        states[path] = file_state(path)
-    odd = [f'{p} ({s})' for p, s in states.items() if s not in ('missing', 'empty', 'plain', 'encrypted')]
+        seen['dbs'][path] = file_state(path)
+    seen['sealed'] = [os.path.join(config_dir, n) for n in LEGACY_SEALED
+                      if os.path.exists(os.path.join(config_dir, n))]
+    for cand in _known_keys(home, config_dir):
+        # the key store takes the first that is a file, readable or not
+        if not os.path.isfile(cand):
+            continue
+        try:
+            with open(cand, 'rb') as fh:
+                seen['keys'].append([cand, base64.b64encode(fh.read(4096)).decode(), None])
+        except OSError as e:
+            seen['keys'].append([cand, None, e.strerror])
+    return json.dumps(seen).encode()
+
+
+def db_states(dbs):
+    odd = [f'{p} ({s})' for p, s in dbs.items() if s not in ('missing', 'empty', 'plain', 'encrypted')]
     if odd:
         raise Refused(f'cannot read {", ".join(odd)}')
-    return [p for p, s in states.items() if s == 'encrypted']
+    return [p for p, s in dbs.items() if s == 'encrypted']
 
 
 # --- the key file -----------------------------------------------------------------------
+
+def _key_of(path, data):
+    raw = decode_key(data)
+    if raw is None:
+        raise Refused(f'{path} holds no 32-byte key')
+    return raw
+
 
 def _read_key(path):
     try:
@@ -199,10 +248,7 @@ def _read_key(path):
             data = fh.read(4096)
     except OSError as e:
         raise Refused(f'cannot read {path}: {e.strerror}')
-    raw = decode_key(data)
-    if raw is None:
-        raise Refused(f'{path} holds no 32-byte key')
-    return data, raw
+    return data, _key_of(path, data)
 
 
 def _service_can_enter(st, uid, gid):
@@ -303,22 +349,19 @@ def _known_keys(home, config_dir):
             os.path.join(config_dir, LEGACY_KEY)]
 
 
-def _who_opens(db, keys, uid, gid):
-    for cand in keys:
-        try:
-            _, raw = _read_key(cand)
-        except Refused:
-            continue
-        if opens(db, raw, uid, gid):
+def _who_opens(db, keys, svc):
+    for cand, data, _ in keys:
+        raw = decode_key(data) if data is not None else None
+        if raw and opens(db, raw, svc):
             return cand
     return None
 
 
 def place_key(a):
-    pw = pwd.getpwnam(a.user)
-    uid, gid = pw.pw_uid, pw.pw_gid
+    svc = pwd.getpwnam(a.user)
+    uid, gid = svc.pw_uid, svc.pw_gid
     owner = pwd.getpwnam(a.key_owner).pw_uid
-    home = a.home or pw.pw_dir
+    home = a.home or svc.pw_dir
     env, workdir, creds = unit_view(a.unit)
     if env.get('PEGAPROX_DB_KEY', '').strip():
         info(f'{a.unit} sets PEGAPROX_DB_KEY, its master key is not touched here')
@@ -329,49 +372,54 @@ def place_key(a):
     key_file = env.get('PEGAPROX_KEY_FILE', '').strip()
     if key_file.startswith('~/'):
         key_file = os.path.join(home, key_file[2:])
-    if key_file and os.path.isfile(key_file):
-        info(f'{a.unit} reads its master key from {key_file} (PEGAPROX_KEY_FILE), it is not touched here')
-        return 0
 
     base = home if workdir == '~' else workdir or a.state_dir
     config_dir = os.path.join(base, env.get('PEGAPROX_CONFIG_DIR', '').strip() or 'config')
-    encrypted = db_states(config_dir)
-    keys = _known_keys(home, config_dir)
+    out = as_service(svc, lambda: survey(config_dir, home, key_file))
+    if out is None:
+        raise Refused(f'could not look into {config_dir} as {a.user}')
+    seen = json.loads(out)
+    if seen['key_file']:
+        info(f'{a.unit} reads its master key from {key_file} (PEGAPROX_KEY_FILE), it is not touched here')
+        return 0
+    encrypted = db_states(seen['dbs'])
+    keys = [(p, base64.b64decode(d) if d is not None else None, err) for p, d, err in seen['keys']]
 
     if os.path.lexists(a.key):
         raw = check_existing(a.key, owner, uid, gid)
         for db in encrypted:
-            if opens(db, raw, uid, gid) is False:
-                other = _who_opens(db, keys, uid, gid)
+            if opens(db, raw, svc) is False:
+                other = _who_opens(db, keys, svc)
                 raise Refused(f'{db} is encrypted, and {a.key} does not open it, PegaProx will not '
                               'start so. ' + (f'{other} opens it: check both, then copy that one to {a.key}'
                                               if other else 'Neither does a key file of the config directory'))
         return 0
 
     # the key the key store would take today, with nothing in --key
-    current = next((k for k in keys if os.path.isfile(k)), None)
-    sealed = [os.path.join(config_dir, n) for n in LEGACY_SEALED
-              if os.path.exists(os.path.join(config_dir, n))]
+    current, data, err = keys[0] if keys else (None, None, None)
+    sealed = seen['sealed']
 
     if encrypted or (current and sealed):
         if not current:
             raise Refused(f'{", ".join(encrypted)} is encrypted, and there is no key file this '
                           f'package knows of. Not making one: put the key that opens it in {a.key}')
-        data, raw = _read_key(current)
+        if data is None:
+            raise Refused(f'cannot read {current}: {err}')
+        raw = _key_of(current, data)
         for db in encrypted:
-            ok = opens(db, raw, uid, gid)
+            ok = opens(db, raw, svc)
             if ok is None:
                 raise Refused(f'cannot check whether {current} opens {db} (is python3-sqlcipher3 '
                               'installed?). Not copying a key that may be the wrong one')
             if not ok:
-                other = _who_opens(db, keys, uid, gid)
+                other = _who_opens(db, keys, svc)
                 raise Refused(f'{db} is encrypted, and {current} does not open it. Not making a key: '
                               + (f'{other} opens it, copy that one to {a.key}' if other
                                  else f'put the key that opens it in {a.key}'))
         write_new(a.key, data, owner, gid, uid)
         info(f'copied {current} to {a.key}, the key {", ".join(encrypted + sealed)} '
              f'{"is" if len(encrypted + sealed) == 1 else "are"} encrypted with. No new key was made')
-        if current == keys[-1]:
+        if current == os.path.join(config_dir, LEGACY_KEY):
             info(f'{current} stays: the database layer reads old fields with it too, so a '
                  f'backup of {config_dir} still holds the key (docs/SECURITY.md)')
         return 0

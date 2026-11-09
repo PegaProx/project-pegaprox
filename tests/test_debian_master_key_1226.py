@@ -408,6 +408,85 @@ def test_a_dangling_symlink_is_refused_and_left(host, tmp_path):
     assert os.listdir(host.key.parent) == ['secret.key']
 
 
+# --- what is the service user's is read as the service user --------------------------------------
+
+_SPY = r'''
+import builtins, os, sys, types
+helper, log, *watched = sys.argv[1:4]
+args = sys.argv[4:]
+watched = [os.path.join(w, '') for w in watched]
+mod = types.ModuleType('pp_master_key_spy')
+mod.__file__ = helper
+exec(compile(open(helper, encoding='utf-8').read(), helper, 'exec'), mod.__dict__)
+
+def note(what, path):
+    p = os.path.abspath(os.fsdecode(path))
+    if any(p.startswith(w) for w in watched):
+        with real_open(log, 'a') as fh:
+            fh.write(f'{what} {os.getpid()} {p}\n')
+
+# root, as under ExecStartPre: the drop to the service user only says that it happened
+os.geteuid = lambda: 0
+os.initgroups = os.setgroups = os.setgid = lambda *a: None
+def setuid(uid):
+    with real_open(log, 'a') as fh:
+        fh.write(f'drop {os.getpid()} -\n')
+os.setuid = setuid
+real_open, real_stat, real_lstat = builtins.open, os.stat, os.lstat
+def spy_open(file, *a, **k):
+    if isinstance(file, (str, bytes, os.PathLike)):
+        note('open', file)
+    return real_open(file, *a, **k)
+def spy_stat(path, *a, **k):
+    if isinstance(path, (str, bytes, os.PathLike)):
+        note('stat', path)
+    return real_stat(path, *a, **k)
+def spy_lstat(path, *a, **k):
+    if isinstance(path, (str, bytes, os.PathLike)):
+        note('stat', path)
+    return real_lstat(path, *a, **k)
+builtins.open, os.stat, os.lstat = spy_open, spy_stat, spy_lstat
+sys.exit(mod.main(args))
+'''
+
+
+def _spied_run(host, tmp_path):
+    log = tmp_path / 'spy.log'
+    log.write_text('')
+    args = [sys.executable, '-I', '-B', '-c', _SPY, str(HELPER), str(log), str(host.state),
+            '--key', str(host.key), '--state-dir', str(host.state), '--user', ME, '--key-owner', ME,
+            '--home', str(host.home)]
+    # the spy watches the state dir only; the home key is under it here too
+    r = subprocess.run(args, capture_output=True, text=True, timeout=120)
+    lines = [ln.split(' ', 2) for ln in log.read_text().splitlines()]
+    dropped = {pid for what, pid, _ in lines if what == 'drop'}
+    as_root = [f'{what} {p}' for what, pid, p in lines if what != 'drop' and pid not in dropped]
+    seen = {p for what, pid, p in lines if what != 'drop'}
+    return r, as_root, seen
+
+
+@pytest.mark.parametrize('case', ['sealed', pytest.param('encrypted', marks=needs_sqlcipher)])
+def test_root_reads_nothing_of_the_service_users_files(host, tmp_path, case):
+    """The config directory and the home belong to the service user: a symlink there could
+    lead root to a file only root may read, and that would land in /etc/pegaprox 0640
+    root:pegaprox. A config directory on NFS with root_squash, on the other hand, only the
+    service can read. Every look into them happens in the child that dropped to it."""
+    host.home = host.state / 'home'
+    host.home.mkdir()
+    legacy = write_key(host.legacy)
+    if case == 'sealed':
+        plain_db(host.db)
+        (host.config / 'clusters.enc').write_bytes(b'gAAAA-sealed')
+    else:
+        encrypted_db(host.db, legacy)
+    r, as_root, seen = _spied_run(host, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert host.key.read_bytes() == legacy
+    # the spy saw the helper at work in there, and none of it as root
+    assert f'{host.legacy}' in seen and f'{host.db}' in seen
+    assert as_root == []
+
+
 # --- what the unit says --------------------------------------------------------------------
 
 def _fake_systemctl(tmp_path, show='', cat=''):

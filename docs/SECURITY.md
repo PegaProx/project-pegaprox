@@ -104,7 +104,8 @@ makes its own key at its first start. What it does, by what it finds:
 | Anything else (an encrypted database no known key opens, a database file it cannot read) | No key is written, and the start stops with the reason |
 
 The config directory comes from the unit (`WorkingDirectory`, `PEGAPROX_CONFIG_DIR`), so a
-moved one is found. After a copy `config/.pegaprox.key` stays where it is, and with it a
+moved one is found. It and the home of the service user are read as the service user, as
+PegaProx reads them. After a copy `config/.pegaprox.key` stays where it is, and with it a
 backup of `config/` still holds the database key. Deleting it makes PegaProx create a new
 one at the next start; field values from before the switch to AES-256-GCM that are still
 sealed with the old one can then no longer be read.
