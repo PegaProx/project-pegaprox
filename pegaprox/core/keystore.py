@@ -380,12 +380,17 @@ def _tier_for_source(source: str) -> int:
 def _recommendation_for(mk: MasterKey) -> Optional[str]:
     if mk.is_legacy:
         where = os.path.abspath(mk.source_path) if mk.source_path else 'the config directory'
+        # MK Nov 2026 - it said to delete the old file after the copy. That file is also
+        # db.fernet: deleting it makes db.py create a new one, and old field values sealed
+        # with it can no longer be read
         return (
             "The master key sits in the config directory, next to the database it protects. "
             f"To move it out: stop PegaProx, copy {where} to /etc/pegaprox/secret.key "
-            "(mode 0640, owner root, group of the service user), start PegaProx, check that "
-            "this status shows /etc/pegaprox/secret.key, then delete the old file. systemd "
-            "LoadCredentialEncrypted is the strongest option."
+            "(mode 0640, owner root, group of the service user), start PegaProx and check that "
+            "this status shows /etc/pegaprox/secret.key. Do not delete the old file: the "
+            "database layer reads old field values with it too, so a backup of the config "
+            "directory still holds the key and has to be kept as secret (docs/SECURITY.md). "
+            "systemd LoadCredentialEncrypted is the strongest option."
         )
     if _tier_for_source(mk.source) >= 4:
         return (

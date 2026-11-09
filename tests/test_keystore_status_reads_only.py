@@ -58,6 +58,8 @@ def test_a_legacy_key_is_named_by_its_full_path_with_steps_that_exist(no_key):
     rec = st['recommendation']
     assert 'secure-key' not in rec
     assert str(no_key / 'config' / '.pegaprox.key') in rec and '/etc/pegaprox/secret.key' in rec
+    # the file is db.fernet as well: a copy, never a move
+    assert 'copy ' in rec and 'then delete' not in rec and 'Do not delete the old file' in rec
 
 
 def test_the_status_reports_the_key_the_server_holds(no_key):
