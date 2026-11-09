@@ -49,12 +49,15 @@ import os
 import sys
 
 USE_GEVENT = os.environ.get('PEGAPROX_NO_GEVENT', '').lower() not in ('1', 'true', 'yes')
+# MK Nov 2026 - with --print-key stdout is the key and nothing else, it goes into
+# systemd-creds. The lines below came out after it in a pipe.
+_SAY = sys.stderr if '--print-key' in sys.argv else sys.stdout
 
 if USE_GEVENT:
     try:
         from gevent import monkey
         monkey.patch_all()
-        print("Gevent monkey-patching applied")
+        print("Gevent monkey-patching applied", file=_SAY)
         # NS 2026-06-05 — scale runtime limits for large fleets (30+ clusters /
         # 100+ nodes). The node-status fan-out pools + keep-alive sessions need
         # fd headroom, and gevent's default 10-thread pool (used by the DNS
@@ -68,18 +71,18 @@ if USE_GEVENT:
             _newsoft = _want if _hard == _res.RLIM_INFINITY else min(_want, _hard)
             _res.setrlimit(_res.RLIMIT_NOFILE, (_newsoft, _hard))
             _eff = _res.getrlimit(_res.RLIMIT_NOFILE)[0]
-            print(f"File-descriptor limit: {_eff}")
+            print(f"File-descriptor limit: {_eff}", file=_SAY)
             if _eff < 8192:
-                print(f"WARNING: low fd limit ({_eff}) — for 20+ clusters set LimitNOFILE=65536 in the systemd unit")
+                print(f"WARNING: low fd limit ({_eff}) - for 20+ clusters set LimitNOFILE=65536 in the systemd unit", file=_SAY)
         except Exception as _e:
-            print(f"Could not raise fd limit: {_e}")
+            print(f"Could not raise fd limit: {_e}", file=_SAY)
         try:
             from gevent import get_hub as _ghub
             _tp = int(os.environ.get('PEGAPROX_THREADPOOL_SIZE', '50'))
             _ghub().threadpool.maxsize = _tp
-            print(f"Gevent threadpool size: {_tp}")
+            print(f"Gevent threadpool size: {_tp}", file=_SAY)
         except Exception as _e:
-            print(f"Could not set gevent threadpool size: {_e}")
+            print(f"Could not set gevent threadpool size: {_e}", file=_SAY)
     except ImportError:
         pass
 
@@ -106,9 +109,9 @@ def _disable_simple_websocket_deflate():
                 kw.pop('extensions', None)
                 super().__init__(*a, **kw)
         _swws.AcceptConnection = _NoExtAccept
-        print('[ws-patch] simple-websocket PerMessageDeflate disabled')
+        print('[ws-patch] simple-websocket PerMessageDeflate disabled', file=_SAY)
     except Exception as _e:
-        print(f'[ws-patch] could not disable deflate: {_e}')
+        print(f'[ws-patch] could not disable deflate: {_e}', file=_SAY)
 
 _disable_simple_websocket_deflate()
 
