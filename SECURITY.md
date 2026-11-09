@@ -118,10 +118,10 @@ PegaProx implements the following security measures:
 - **Database encryption at rest:** Where the `sqlcipher3` module is available, the whole
   database is encrypted with SQLCipher 4 (AES-256-CBC + HMAC-SHA512). That is the case for
   installs with `deploy.sh` or pip on Linux x86_64 and aarch64, macOS and Windows, for the
-  amd64 and arm64 Docker images, and for the Debian package and the appliance images on
-  amd64. The 32-bit ARM Docker image uses plain SQLite, and so do the Debian package and the
-  appliances on arm64 where their `python3-sqlcipher3` holds the x86_64 module only (the one
-  of apt.pegaprox.com is built for arm64). On every install,
+  amd64 and arm64 Docker images and appliance images, and for the Debian package on amd64.
+  The 32-bit ARM Docker image uses plain SQLite, and so does the Debian package on arm64
+  where its `python3-sqlcipher3` holds the x86_64 module only (the one of apt.pegaprox.com,
+  and the one the appliance images build, is built for arm64). On every install,
   sensitive fields (cluster passwords, SSH keys, API token secrets, TOTP secrets) are also
   encrypted individually with AES-256-GCM. PegaProx warns at startup when the database stays
   plain SQLite, and the `--keystore-status` option shows the active mode and the key source.

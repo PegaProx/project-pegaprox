@@ -151,6 +151,16 @@ Our `python3-sqlcipher3` is `0.6.4-0pegaprox1`. The other repository ships `0.6.
 `Architecture: all` with the x86_64 module only; ours sorts above it, so a host with both
 gets ours, and on arm64 the module then imports.
 
+**The appliance images** take this package too, not the one of the other repository or its
+CDN. Each leg of `release-images.yml` (VM and LXC, amd64 and arm64) runs
+[`build-sqlcipher3-deb.sh`](build-sqlcipher3-deb.sh) for its architecture: `pip download`
+with `--require-hashes` of `python-debs/requirements.txt` for that one machine, then
+`build-python-debs.py --arch`, which builds what that architecture installs. The image
+installs it ahead of `pegaprox`. Its smoke test has PegaProx run `--keystore-status` in the
+image as the service user, and [`smoke_backend.py`](smoke_backend.py) fails the leg unless
+the backend is `sqlcipher`. The arm64 legs are `continue-on-error` (qemu): a failure there
+leaves that image out of the release instead of stopping the amd64 one.
+
 ## The signing key
 
 - Private key: `APT_GPG_PRIVATE_KEY`, ASCII-armored, no passphrase, a secret of the
@@ -193,6 +203,7 @@ in DNS and GitHub has issued the certificate for it, the URL above does not answ
 
 ## Not switched over yet
 
-`README.md` and `release-images.yml` still install from the third-party repository. They
-move to this one once its maintainer and we have agreed how the two repositories relate
-(and with that, which way `SUFFIX` points).
+`README.md` and `release-images.yml` still install from the third-party repository (the
+images all but `python3-sqlcipher3`, see above). They move to this one once its maintainer
+and we have agreed how the two repositories relate (and with that, which way `SUFFIX`
+points).

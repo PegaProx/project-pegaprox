@@ -133,8 +133,9 @@ each page carries an HMAC-SHA512 tag.
 | Docker image, amd64 and arm64 | as above | **Full DB encryption** |
 | Docker image, arm/v7 | none | Plain SQLite + field-level AES-256-GCM |
 | Debian package from apt.pegaprox.com, amd64 and arm64 | `python3-sqlcipher3`, built per architecture from the sqlcipher3 wheels | **Full DB encryption** |
-| Debian package from the repository in the README, appliances, amd64 | `python3-sqlcipher3` of that repository | **Full DB encryption** |
-| Debian package from the repository in the README, appliances, arm64 | that `python3-sqlcipher3` holds the x86_64 module only, the import fails | Plain SQLite + field-level AES-256-GCM |
+| Debian package from the repository in the README, amd64 | `python3-sqlcipher3` of that repository | **Full DB encryption** |
+| Debian package from the repository in the README, arm64 | that `python3-sqlcipher3` holds the x86_64 module only, the import fails | Plain SQLite + field-level AES-256-GCM |
+| Appliance images (VM, LXC), amd64 and arm64 | `python3-sqlcipher3` the image build makes for its architecture, from the wheels and with the script of apt.pegaprox.com; an image whose PegaProx does not report SQLCipher is not published | **Full DB encryption** |
 
 The two packages install the same `sqlcipher3` module and must never be installed side by
 side; the markers in requirements.txt give every platform one of them at most.
