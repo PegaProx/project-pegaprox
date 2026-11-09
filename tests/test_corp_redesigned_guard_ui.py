@@ -38,8 +38,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # a27042b1 the "Contributing" label of the node hardware health that showed its key name,
 # c61a5e24 the Modern resources list that scrolls sideways instead of cutting columns off,
 # 5d61ba09 the Modern resources search with one icon, which moves the list up by its height,
-# f0fac2bc the blueprints in Modern and Cloud (a button in the resources row, the renamed template tab)
-BASE_REV = os.environ.get('PEGAPROX_GUARD_BASE', 'f0fac2bc')
+# f0fac2bc the blueprints in Modern and Cloud (a button in the resources row, the renamed template tab),
+# 848e4a56 the Modern header that wraps up to 1645 px, so at 1600 every Modern view starts 24 px lower
+BASE_REV = os.environ.get('PEGAPROX_GUARD_BASE', '848e4a56')
 
 # 2026-10-30 09:00:00 UTC, what Date.now() says in every guarded page
 FIXED = calendar.timegm((2026, 10, 30, 9, 0, 0))
