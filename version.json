@@ -127,6 +127,7 @@
     "pegaprox/cli/__init__.py",
     "pegaprox/cli/gen_openapi.py",
     "pegaprox/cli/migrate_db.py",
+    "pegaprox/cli/set_port.py",
     "pegaprox/constants.py",
     "pegaprox/core/__init__.py",
     "pegaprox/core/acme.py",
