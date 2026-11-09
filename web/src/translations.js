@@ -977,6 +977,8 @@
                 nodeEpBadPort: "Ports muessen zwischen 1 und 65535 liegen.",
                 nodeEpCredNeeded: "Einen Node woanders hin zu zeigen schickt die Zugangsdaten des Clusters dorthin. Gib das Passwort oder das Token-Secret noch einmal ein.",
                 nodeEpCredPlaceholder: "Cluster-Passwort oder Token-Secret",
+        nodePasswordsCleared: 'Node-Passwörter zurückgesetzt (erneute Auth nötig für):',
+        nodePasswordsCleared: 'Node passwords cleared (re-auth required for):',
                 nodeEpSaved: "Node-Adressen gespeichert",
                 nodeEpUnsaved: "nicht gespeichert",
                 clusterDeleted: 'Cluster gelöscht',
