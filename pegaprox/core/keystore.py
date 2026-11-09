@@ -89,10 +89,11 @@ def load_master_key() -> MasterKey:
             return _CACHED
         _CACHED = _resolve()
         if _CACHED.is_legacy:
+            # MK Nov 2026 - copy, not move: the old file is also db.fernet (see _recommendation_for)
             _LOG.warning(
-                "[KEYSTORE] master key loaded from legacy location %s — "
-                "recommended: move to /etc/pegaprox/secret.key or use systemd "
-                "LoadCredentialEncrypted. See docs/SECURITY.md.",
+                "[KEYSTORE] master key loaded from legacy location %s - "
+                "recommended: copy it to /etc/pegaprox/secret.key and keep the old file, "
+                "or use systemd LoadCredentialEncrypted. See docs/SECURITY.md.",
                 _CACHED.source_path,
             )
         else:

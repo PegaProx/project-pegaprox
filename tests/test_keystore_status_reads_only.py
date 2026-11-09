@@ -62,6 +62,17 @@ def test_a_legacy_key_is_named_by_its_full_path_with_steps_that_exist(no_key):
     assert 'copy ' in rec and 'then delete' not in rec and 'Do not delete the old file' in rec
 
 
+def test_the_start_warning_of_a_legacy_key_says_copy_too(no_key, caplog):
+    """The line every start logs gave the same advice as the status once did: move it."""
+    (no_key / 'config').mkdir()
+    (no_key / 'config' / '.pegaprox.key').write_bytes(base64.urlsafe_b64encode(os.urandom(32)))
+    with caplog.at_level('WARNING', logger=keystore.__name__):
+        assert keystore.load_master_key().is_legacy
+    said = ' '.join(r.getMessage() for r in caplog.records if '[KEYSTORE]' in r.getMessage())
+    assert 'legacy location' in said
+    assert 'move to' not in said and 'keep the old file' in said
+
+
 def test_the_status_reports_the_key_the_server_holds(no_key):
     held = keystore.MasterKey(b'x', b'y', 'env:PEGAPROX_DB_KEY')
     keystore._CACHED = held
