@@ -21061,7 +21061,7 @@
                             <NodeModal node={configNode} clusterId={selectedCluster.id} clusterType={selectedCluster.cluster_type || 'proxmox'} onClose={() => setConfigNode(null)} addToast={addToast} />
                         )}
                         {dashMigrateVm && (
-                            <MigrateModal vm={dashMigrateVm} nodes={Object.keys(clusterMetrics)} clusterId={dashMigrateVm._clusterId || selectedCluster?.id} onMigrate={handleMigrate} onClose={() => setDashMigrateVm(null)} />
+                            <MigrateModal vm={dashMigrateVm} nodes={Array.from(new Set([...Object.keys(clusterMetrics || {}), ...((selectedCluster && selectedCluster.nodes) || []), ...Object.keys((selectedCluster && selectedCluster.node_endpoints) || {})])).sort()} clusterId={dashMigrateVm._clusterId || selectedCluster?.id} onMigrate={handleMigrate} onClose={() => setDashMigrateVm(null)} />
                         )}
                         {dashCloneVm && (
                             <CloneVmModal vm={dashCloneVm} nodes={Object.keys(clusterMetrics)} clusterId={dashCloneVm._clusterId || selectedCluster?.id} storages={clusterDatastores} onClone={handleCloneVm} onClose={() => setDashCloneVm(null)} />

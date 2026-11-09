@@ -1,3 +1,4 @@
+from pegaprox.models.tasks import ssh_port_of
 # -*- coding: utf-8 -*-
 """VM operations, snapshots, backups, replication & console routes - split from monolith dec 2025, NS/MK"""
 
@@ -11801,7 +11802,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                 try:
                     from pegaprox.utils import vnc_tunnel as _vt
                     _ssh_user = node_login(manager.config)
-                    _ssh_port = getattr(manager.config, 'ssh_port', 22) or 22
+                    _ssh_port = ssh_port_of(manager.config, node) if (node and "node" in locals()) else (getattr(manager.config, "ssh_port", 22) or 22)
                     _ssh_key = getattr(manager.config, 'ssh_key', '') or ''
                     _ssh_pass = ssh_password_to(manager, host)
                     # MK Apr 2026 — _vt.acquire() is sync. On the *first* call for a
