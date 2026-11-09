@@ -1222,6 +1222,30 @@ jobs:
         with:
           path: dist
 
+      # NS Nov 2026 - an arm64 leg that failed (its smoke test among others) reads as success
+      # here, continue-on-error, and the upload takes what the globs find. Say which images
+      # did not come; without an amd64 one there is nothing to release.
+      - name: Images vollständig?
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          FAIL=0
+          for ARCH in amd64 arm64; do
+            for F in "pegaprox-$VERSION-lxc-$ARCH.tar.xz" "pegaprox-latest-lxc-$ARCH.tar.xz" \
+                     "pegaprox-$VERSION-vm-$ARCH.qcow2" "pegaprox-vm-$ARCH.qcow2" \
+                     "pegaprox-$VERSION-vm-$ARCH.ova" "pegaprox-latest-vm-$ARCH.ova"; do
+              [ -n "$(find dist -type f -name "$F" -print -quit)" ] && continue
+              if [ "$ARCH" = amd64 ]; then
+                echo "::error::$F is missing, no release without the amd64 images"
+                FAIL=1
+              else
+                echo "::warning::$F is missing: its arm64 build failed, the release goes out without it"
+              fi
+              echo "- \`$F\` is missing from this release" >> "$GITHUB_STEP_SUMMARY"
+            done
+          done
+          [ "$FAIL" -eq 0 ]
+
       - name: Checksums erzeugen
         run: |
           cd dist

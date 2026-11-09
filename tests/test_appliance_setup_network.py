@@ -739,3 +739,65 @@ def test_the_vm_image_has_the_pin_next_to_the_repo(tmp_path):
         < flat.index('sudo umount /mnt/img')
     # and the cleanup after the smoke boot leaves it there
     assert 'preferences.d' not in _step('build-vm', 'Zustand des Testboots aus dem Image entfernen')
+
+
+# --- publish names the images that did not come ----------------------------------------------------
+# A failed arm64 leg reads as success for publish (continue-on-error) and the upload takes what its
+# globs find, so an arm64 image could go missing from a release without a word.
+
+VERSION = 'v1.4.2'
+
+
+def _images(arch):
+    return [f'pegaprox-{VERSION}-lxc-{arch}.tar.xz', f'pegaprox-latest-lxc-{arch}.tar.xz',
+            f'pegaprox-{VERSION}-vm-{arch}.qcow2', f'pegaprox-vm-{arch}.qcow2',
+            f'pegaprox-{VERSION}-vm-{arch}.ova', f'pegaprox-latest-vm-{arch}.ova']
+
+
+def _publish_check(tmp_path, present):
+    """The check step on a dist/ as download-artifact lays it out, with `present` in it."""
+    for name in present:
+        arch = 'arm64' if '-arm64.' in name else 'amd64'
+        d = tmp_path / 'dist' / (('lxc-template-' if '-lxc-' in name else 'vm-image-') + arch)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_bytes(b'image')
+    summary = tmp_path / 'summary.md'
+    script = _from_line(_step('publish', 'Images vollständig?'), 'FAIL=0')
+    r = subprocess.run(['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', script], cwd=tmp_path,
+                       capture_output=True, text=True, timeout=30,
+                       env={'PATH': '/usr/bin:/bin', 'VERSION': VERSION, 'GITHUB_STEP_SUMMARY': str(summary)})
+    return r, (summary.read_text() if summary.exists() else '')
+
+
+def test_a_full_release_passes_without_a_word(tmp_path):
+    r, summary = _publish_check(tmp_path, _images('amd64') + _images('arm64'))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout == '' and summary == ''
+
+
+@pytest.mark.parametrize('gone', [_images('arm64')[:2], _images('arm64')[2:], _images('arm64')])
+def test_a_missing_arm64_image_is_a_warning_and_in_the_summary(tmp_path, gone):
+    r, summary = _publish_check(tmp_path, [n for n in _images('amd64') + _images('arm64') if n not in gone])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.splitlines() == [f'::warning::{n} is missing: its arm64 build failed, the release goes out '
+                                     'without it' for n in gone]
+    assert summary.splitlines() == [f'- `{n}` is missing from this release' for n in gone]
+
+
+def test_a_missing_amd64_image_stops_the_release(tmp_path):
+    gone = f'pegaprox-{VERSION}-vm-amd64.qcow2'
+    r, summary = _publish_check(tmp_path, [n for n in _images('amd64') + _images('arm64') if n != gone])
+    assert r.returncode == 1
+    assert r.stdout == f'::error::{gone} is missing, no release without the amd64 images\n'
+    assert summary == f'- `{gone}` is missing from this release\n'
+
+
+def test_the_check_runs_before_anything_is_signed_or_uploaded():
+    text = _job('publish')
+    assert text.index('actions/download-artifact@') < text.index('- name: Images vollständig?') \
+        < text.index('- name: Checksums erzeugen') < text.index('- name: Herkunft der Images signieren') \
+        < text.index('- name: An Release anhängen')
+    # the version comes in through the environment, not into the script
+    step = _step('publish', 'Images vollständig?')
+    assert '          VERSION: ${{ needs.prepare.outputs.version }}\n' in step
+    assert step.count('${{') == 1
