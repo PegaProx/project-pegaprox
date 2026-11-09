@@ -2652,7 +2652,7 @@
                                             placeholder={reconfigureConfig?.has_ssh_key ? t('sshKeyStoredKeep') : '-----BEGIN OPENSSH PRIVATE KEY-----'} rows={4} />
                                         {reconfigureConfig?.has_ssh_key && (
                                             <label className="flex items-center gap-2 text-xs text-gray-400">
-                                                <input type="checkbox" data-ssh-key-remove checked={!!config.ssh_key_remove} disabled={!!config.ssh_key}
+                                                <input type="checkbox" data-ssh-key-remove checked={!!config.ssh_key_remove} disabled={!!(config.ssh_key || '').trim()}
                                                     onChange={e => setConfig({...config, ssh_key_remove: e.target.checked})} />
                                                 {t('sshKeyRemove')}
                                             </label>

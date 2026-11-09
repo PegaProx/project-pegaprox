@@ -436,6 +436,10 @@ def reconfigure_cluster(cluster_id):
     for field in ['name', 'host', 'user']:
         if field not in data:
             return jsonify({'error': f'Missing required field: {field}'}), 400
+    # NS Nov 2026 (#1251) - a key field with nothing but whitespace in it is no key: it must not
+    # replace the stored one, which the dialog cannot read back, nor pass the check below
+    if isinstance(data.get('ssh_key'), str) and not data['ssh_key'].strip():
+        data['ssh_key'] = ''
     # JB Nov 2026 (#1251) - the dialog cannot read a stored key back, so an empty field keeps it
     # and the stored key goes only on an explicit remove, a real true like the other flags
     _remove_key = data.pop('ssh_key_remove', False) is True

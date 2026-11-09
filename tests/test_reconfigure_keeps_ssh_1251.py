@@ -5,7 +5,8 @@ back and sent no SSH user or port at all, so saving it with SSH untouched wiped 
 and the nodes were then reached under the API user's name with no key.
 
 An empty key field keeps the key, a typed one replaces it, and only ssh_key_remove drops it,
-so a key can still be removed. The key itself never comes back to the browser.
+so a key can still be removed. A field with nothing but whitespace in it counts as empty.
+The key itself never comes back to the browser.
 """
 import types
 
@@ -78,6 +79,21 @@ def test_only_a_real_true_removes_the_key(reconfigure, flag):
     assert reconfigure(ssh_key_remove=flag).ssh_key == KEY
 
 
+@pytest.mark.parametrize('blank', [' ', '\n', ' \t\r\n '])
+def test_a_blank_key_field_is_no_key_and_keeps_the_stored_one(reconfigure, blank):
+    assert reconfigure(ssh_key=blank).ssh_key == KEY
+
+
+@pytest.mark.parametrize('blank', [' ', '\n', ' \t\r\n '])
+def test_a_blank_key_field_does_not_stop_the_remove_flag(reconfigure, blank):
+    assert reconfigure(ssh_key=blank, ssh_key_remove=True).ssh_key == ''
+
+
+def test_a_blank_key_is_no_credential_for_the_required_check(reconfigure):
+    with pytest.raises(AssertionError, match='SSH key is required'):
+        reconfigure(ssh_key='\n', **{'pass': ''})
+
+
 def test_the_remove_flag_is_no_setting(reconfigure):
     assert not hasattr(reconfigure(ssh_key_remove=True), 'ssh_key_remove')
 
@@ -106,3 +122,17 @@ def test_the_dialog_reads_the_user_and_that_a_key_exists_but_never_the_key(api, 
     body = got.get_json()
     assert body['ssh_user'] == 'backupadmin' and body['has_ssh_key'] is True
     assert 'PRIVATE KEY' not in got.get_data(as_text=True) and 'ssh_key' not in body
+
+
+# the stored row, not only the live config: a removed key stays removed after the next save
+from test_ha_api import ha_env  # noqa: E402,F401
+from test_ha_settings_writers import no_cluster  # noqa: E402,F401
+from test_ha_claim import claimed, pve, me  # noqa: E402,F401
+from test_reconfigure_keeps_what_it_is_not_sent_1322 import held, _reconfigure  # noqa: E402,F401
+
+
+def test_a_removed_key_is_gone_from_the_database_and_stays_gone(held):
+    assert _reconfigure(held).ssh_key and held.db.get_cluster('c1')['ssh_key']
+    assert _reconfigure(held, ssh_key_remove=True).ssh_key == ''
+    assert held.db.get_cluster('c1')['ssh_key'] == ''
+    assert _reconfigure(held).ssh_key == '' and held.db.get_cluster('c1')['ssh_key'] == ''
