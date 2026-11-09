@@ -769,7 +769,7 @@ def _rollup_status(per_cluster):
 
 
 # ---------------------------------------------------------------------------
-# #1154 — guided EVPN setup: per-node prerequisite checks over SSH.
+# #1154 - guided EVPN setup: per-node prerequisite checks over SSH.
 # Read-only: one batched SSH command per node, no state changes, no installs.
 # ---------------------------------------------------------------------------
 
@@ -790,7 +790,7 @@ echo "mtu=$(cat /sys/class/net/$(ip route show default 2>/dev/null | awk '{print
 
 
 def _ssh_read(mgr, node, cmd, timeout=20):
-    """(stdout, err) — one read-only SSH command via the existing helper."""
+    """(stdout, err) - one read-only SSH command via the existing helper."""
     from pegaprox.utils.ssh import _pve_node_exec
     try:
         code, out, err = _pve_node_exec(mgr, node, cmd, timeout=timeout)
@@ -854,7 +854,7 @@ def _check_node_prereqs(mgr, node_name):
                       'detail': raw[:60] if raw else 'no data',
                       'fix_hint': fix_hint})
 
-    # Underlay IP (management IP — the wizard tells the operator to verify
+    # Underlay IP (management IP - the wizard tells the operator to verify
     # this is the right underlay interface, not just blindly accept it)
     try:
         underlay_ip = mgr._get_node_ip(node_name)
@@ -872,7 +872,7 @@ def check_prerequisites():
     """Per-node EVPN prerequisite checks for #1154.
 
     Read-only SSH reads. The caller must reach every member cluster
-    unconfined — these probes expose host-level state and IPs, which a
+    unconfined - these probes expose host-level state and IPs, which a
     VM-scoped caller has no business seeing (#1154 review).
     """
     data = request.get_json(silent=True) or {}
@@ -880,8 +880,8 @@ def check_prerequisites():
     if not isinstance(cluster_ids, list) or not cluster_ids:
         return jsonify({'error': 'cluster_ids must be a non-empty list'}), 400
 
-    # mutating=False (read-only), but still require unconfined — host-level
-    # SSH output and node IPs are not for VM-ACL-scoped callers
+    # the probes are read-only, but the gate is mutating=True on purpose:
+    # host-level SSH output and node IPs are not for VM-ACL-scoped callers
     deny = _require_members_access(cluster_ids, mutating=True)
     if deny:
         return deny
