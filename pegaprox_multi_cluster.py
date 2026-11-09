@@ -187,6 +187,10 @@ if __name__ == '__main__':
         from pegaprox.cli.migrate_db import main as _migrate_main
         sub_args = [a for a in sys.argv[1:] if a != '--migrate-db']
         sys.exit(_migrate_main(sub_args))
+    elif '--set-port' in sys.argv:
+        # MK Nov 2026 - for the installers, which wrote it with the sqlite3 CLI
+        from pegaprox.cli.set_port import main as _set_port_main
+        sys.exit(_set_port_main([a for a in sys.argv[1:] if a != '--set-port']))
     elif '--print-key' in sys.argv:
         # Print the resolved master key (base64) — for use by `systemd-creds
         # encrypt`, secret-manager handoff, or `.env` setup.  Output goes to
@@ -220,6 +224,7 @@ Options:
   --migrate-db      migrate plain SQLite DB to SQLCipher (see --migrate-db --help)
   --print-key       print the resolved master key (base64) to stdout
   --keystore-status JSON dump of key-source + DB-backend status
+  --set-port N      write the listen port into the database (from the next start on)
   --help, -h        this message
   witness ...       the witness of an automatic group instead (witness --help)
 
