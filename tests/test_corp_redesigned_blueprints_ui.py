@@ -930,6 +930,51 @@ def test_runtime_another_node_keeps_only_a_template_it_can_clone(open_app):
     assert body['template_vmid'] == 9102 and body['node'] == 'pve2' and body['storage'] == 'local-zfs'
 
 
+def test_runtime_a_template_of_another_node_offers_shared_storage_only(open_app):
+    # PVE clones a template of another node into shared storage only and the server refuses the rest
+    pve2 = [{'storage': 'local-zfs', 'content': 'images,rootdir', 'enabled': 1, 'active': 1, 'shared': 0},
+            {'storage': 'ceph', 'content': 'images', 'enabled': 1, 'active': 1, 'shared': 1}]
+    app = open_app(extra={('GET', '/api/clusters/c1/nodes/pve2/storage'): (200, pve2)})
+    page = _page(app)
+    page.locator('[data-cr-bp-deploy="b6"]').click()
+    _need(page, '[data-cr-bp-deploy-form="b6"]', 'the deploy dialog opens')
+    stores = lambda: page.evaluate("() => [...document.querySelectorAll('[data-cr-bp-dep=\"storage\"] option')].map(o => o.value)")
+    page.locator('[data-cr-bp-dep="template_vmid"] option[value="9200"]').wait_for(state='attached', timeout=4000)
+    page.locator('[data-cr-bp-dep="node"]').select_option('pve2')
+    assert _wait(page, lambda: stores() == ['local-zfs', 'ceph'])
+    hint = page.locator('[data-cr-nc-field="bp-storage"] [data-cr-nc-hint]')
+    assert hint.count() == 0 or 'shared storage only' not in hint.inner_text()
+    # rocky-9-golden sits on pve1: on pve2 only ceph is left, and picked
+    page.locator('[data-cr-bp-dep="template_vmid"] option[value="9200"]').wait_for(state='attached', timeout=4000)
+    page.locator('[data-cr-bp-dep="template_vmid"]').select_option('9200')
+    assert _wait(page, lambda: stores() == ['ceph'])
+    assert page.locator('[data-cr-bp-dep="storage"]').input_value() == 'ceph'
+    assert 'The template is on pve1: a clone onto this node goes to shared storage only.' == hint.inner_text()
+    page.locator('[data-cr-bp-deploy-go]').click()
+    assert _wait(page, lambda: ('POST', '/api/blueprints/b6/deploy') in app.server.calls)
+    body = app.server.bodies['/api/blueprints/b6/deploy'][-1]
+    assert body['template_vmid'] == 9200 and body['node'] == 'pve2' and body['storage'] == 'ceph'
+
+
+def test_runtime_a_node_without_shared_storage_says_so_for_a_template_elsewhere(open_app):
+    app = open_app()
+    page = _page(app)
+    page.locator('[data-cr-bp-deploy="b6"]').click()
+    _need(page, '[data-cr-bp-deploy-form="b6"]', 'the deploy dialog opens')
+    page.locator('[data-cr-bp-dep="template_vmid"] option[value="9200"]').wait_for(state='attached', timeout=4000)
+    page.locator('[data-cr-bp-dep="node"]').select_option('pve2')
+    page.locator('[data-cr-bp-dep="template_vmid"] option[value="9200"]').wait_for(state='attached', timeout=4000)
+    page.locator('[data-cr-bp-dep="template_vmid"]').select_option('9200')
+    sel = page.locator('[data-cr-bp-dep="storage"]')
+    assert _wait(page, lambda: sel.is_disabled())
+    hint = page.locator('[data-cr-nc-field="bp-storage"] [data-cr-nc-hint]')
+    assert hint.get_attribute('data-cr-nc-hint') == 'warning'
+    assert hint.inner_text().startswith('The template is on pve1 and this node has no shared storage for disk images.')
+    page.locator('[data-cr-bp-deploy-go]').click()
+    page.wait_for_timeout(300)
+    assert ('POST', '/api/blueprints/b6/deploy') not in app.server.calls
+
+
 def test_runtime_a_linux_template_without_a_remembered_one_asks_for_it(open_app):
     app = open_app(progress=[DONE])
     page = _page(app)

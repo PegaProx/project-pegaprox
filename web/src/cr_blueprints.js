@@ -620,9 +620,11 @@
                 crDriftRead(authFetch, `${at}/storage`).then(read => {
                     if (my !== seq.current.n) return;
                     if (read.state !== 'ok') { setStores({ state: 'error', rows: [], why: crDriftReadText(read, t) }); return; }
-                    const rows = [...new Set(crBpList(read.body).filter(s => s && s.enabled !== 0 && s.active !== 0
-                        && String(s.content || '').split(',').includes('images')).map(s => s.storage || s.name).filter(Boolean))];
-                    setStores({ state: 'ok', rows, why: '' });
+                    const usable = crBpList(read.body).filter(s => s && s.enabled !== 0 && s.active !== 0
+                        && String(s.content || '').split(',').includes('images'));
+                    const names = (list) => [...new Set(list.map(s => s.storage || s.name).filter(Boolean))];
+                    const rows = names(usable);
+                    setStores({ state: 'ok', rows, shared: names(usable.filter(s => Number(s.shared) === 1 || s.shared === true)), why: '' });
                     setForm(f => ({ ...f, storage: rows.includes(f.storage) ? f.storage : (rows[0] || '') }));
                 });
                 crDriftRead(authFetch, `${base}/blueprints/${encodeURIComponent(bp.id)}/template?node=${encodeURIComponent(node)}`).then(read => {
@@ -646,6 +648,14 @@
 
             const tplRows = tplSrc && tpl.state === 'ok' && Array.isArray(tpl.body.templates) ? tpl.body.templates.filter(x => x && x.vmid != null) : [];
             const mapped = tplSrc && tpl.state === 'ok' && tpl.body.mapped != null ? String(tpl.body.mapped) : '';
+            // PVE clones a template of another node into shared storage only
+            const picked = tplSrc ? tplRows.find(x => String(x.vmid) === String(form.template_vmid)) : null;
+            const away = picked && picked.node && picked.node !== form.node ? picked.node : '';
+            const storeRows = away ? stores.rows.filter(s => (stores.shared || []).includes(s)) : stores.rows;
+            useEffect(() => {
+                if (stores.state !== 'ok' || storeRows.includes(form.storage)) return;
+                setForm(f => ({ ...f, storage: storeRows[0] || '' }));
+            }, [away, stores]);
             // the bridges of the blueprint the node does not have and the cluster has no VNet of
             const missing = net.state === 'ok' && vnets.state !== 'loading'
                 ? [...new Set(nics.map(n => n.bridge).filter(b => b && !net.bridges.includes(b) && !vnets.rows.includes(b)))] : [];
@@ -759,11 +769,14 @@
                                         </CrBpField>
                                     )}
                                     <CrBpField id="storage" label={t('crBpFStorage')} error={err('storage')}
-                                        hint={stores.state === 'error' ? crFill(t('crBpStoragesFailed'), { reason: stores.why }) : stores.state === 'ok' && !stores.rows.length ? t('crBpNoStorages') : ''}>
+                                        hint={stores.state === 'error' ? crFill(t('crBpStoragesFailed'), { reason: stores.why })
+                                            : stores.state === 'ok' && !stores.rows.length ? t('crBpNoStorages')
+                                            : stores.state === 'ok' && away ? crFill(t(storeRows.length ? 'crBpStorageSharedOnly' : 'crBpStorageNoShared'), { node: away }) : ''}
+                                        tone={stores.state === 'ok' && away && !storeRows.length ? 'warning' : undefined}>
                                         <select id="cr-nc-bp-storage" className="cr-select" value={form.storage} onChange={e => set('storage', e.target.value)}
-                                            disabled={stores.state !== 'ok' || !stores.rows.length} data-cr-bp-dep="storage">
+                                            disabled={stores.state !== 'ok' || !storeRows.length} data-cr-bp-dep="storage">
                                             {stores.state === 'loading' && <option value="">{t('crNcReading')}</option>}
-                                            {stores.rows.map(s => <option key={s} value={s}>{s}</option>)}
+                                            {storeRows.map(s => <option key={s} value={s}>{s}</option>)}
                                         </select>
                                     </CrBpField>
                                     <CrBpField id="vmname" label={t('crBpFVmName')} error={err('name')}
