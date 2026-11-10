@@ -185,6 +185,15 @@ def ssh_login_args(user, host):
     return ['-l', user, '--', str(host)]
 
 
+def _port_or_22(value):
+    """An SSH port as a number, 22 for none and for anything that is not a port."""
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 22
+    return value if 0 < value < 65536 else 22
+
+
 def _feed_stdin(stdin, data):
     """Hand `data` to a remote command's stdin and close it, so a read there sees the end.
     A channel that went away is the command's problem: it reads nothing and says so."""
@@ -200,12 +209,17 @@ def _feed_stdin(stdin, data):
 
 
 def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
-              connect_timeout=8, stdin_data=None):
+              connect_timeout=8, stdin_data=None, port=22):
     """Execute command on remote host via SSH.
     Handles ESXi which only allows 'keyboard-interactive' and 'publickey'.
 
     stdin_data: text for the command's stdin, for a secret that must not be part of
     `cmd` (a command line is readable by every local account while it runs).
+
+    port: where sshd listens. MK Nov 2026 - all four ways in below dialled 22, so a PVE
+    cluster whose nodes listen elsewhere got no node command from this path. For any
+    other port the pin is looked up and stored as [host]:port, the name paramiko and
+    OpenSSH give it.
 
     ESXi SSH quirks:
     - Only allows keyboard-interactive and publickey auth (NOT password)
@@ -233,6 +247,7 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
     # one spelling from here on: the guard, the host-key pin, the TCP connect and the ssh
     # argv all see the address that is dialled, never '[addr]' (#1158)
     host = bare_host(host)
+    port = _port_or_22(port)
     last_err = ''
     errors = []
     try:
@@ -249,7 +264,7 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         """Pre-create socket with explicit connect_timeout — paramiko.Transport
         won't fail-fast on dead hosts otherwise.  IPv4 + IPv6 aware."""
         try:
-            return _socket.create_connection((host, 22), timeout=connect_timeout)
+            return _socket.create_connection((host, port), timeout=connect_timeout)
         except Exception:
             return None
     
@@ -313,13 +328,13 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         try:
             _sock = _make_sock()
             if _sock is None:
-                raise Exception(f'TCP connect to {host}:22 timed out after {connect_timeout}s')
+                raise Exception(f'TCP connect to {host}:{port} timed out after {connect_timeout}s')
             transport = paramiko.Transport(_sock)
             _configure_transport_algorithms(transport)
             transport.connect()
             # verify the server key BEFORE sending credentials (a manual Transport
             # bypasses the SSHClient host-key policy). Raises on changed/unknown key.
-            verify_transport_host_key(transport, host, paramiko)
+            verify_transport_host_key(transport, host, paramiko, port=port)
 
             def _ki_handler(title, instructions, prompt_list):
                 return [password] * len(prompt_list)
@@ -345,11 +360,11 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
                 
                 _sock2 = _make_sock()
                 if _sock2 is None:
-                    raise Exception(f'TCP connect to {host}:22 timed out after {connect_timeout}s')
+                    raise Exception(f'TCP connect to {host}:{port} timed out after {connect_timeout}s')
                 transport2 = paramiko.Transport(_sock2)
                 _configure_transport_algorithms(transport2)
                 transport2.connect()
-                verify_transport_host_key(transport2, host, paramiko)
+                verify_transport_host_key(transport2, host, paramiko, port=port)
 
                 def _ki_handler2(title, instructions, prompt_list):
                     return [password] * len(prompt_list)
@@ -380,7 +395,7 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
                 # NS May 2026 — `timeout` here is paramiko's CONNECT timeout
                 # (TCP+auth), not command-exec. Use the dedicated connect
                 # phase budget so dead hosts fail in 8s rather than 30s.
-                client3.connect(host, username=user, password=password,
+                client3.connect(host, port=port, username=user, password=password,
                                timeout=connect_timeout,
                                banner_timeout=connect_timeout,
                                auth_timeout=connect_timeout,
@@ -438,6 +453,8 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
              '-o', 'HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256',
              '-o', 'PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519',
              '-o', 'KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256']
+        if port != 22:
+            ssh_args.extend(['-p', str(port)])
         # NS Apr 2026 — ControlMaster opt-in. Adds connection-sharing args.
         # If the helper can't create the socket dir, returns []  → no-op.
         if use_controlmaster:
@@ -478,6 +495,12 @@ def node_login(config):
     """
     user = getattr(config, 'ssh_user', '') or ''
     return (user.strip() if isinstance(user, str) else '') or 'root'
+
+
+def node_ssh_port(config):
+    """The port every SSH path dials this cluster's nodes on: the cluster's ssh_port, 22
+    when none is set (the save route only takes 1..65535)."""
+    return _port_or_22(getattr(config, 'ssh_port', 22))
 
 
 def ssh_password_for(config):
@@ -849,7 +872,7 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
             return 1, '', f"cannot run node commands on '{node}': {_why}"
         rc, out, err = _ssh_exec(node_host, _ssh_user, _ssh_pass, cmd,
                                   timeout=timeout, use_controlmaster=use_controlmaster,
-                                  stdin_data=stdin_data)
+                                  stdin_data=stdin_data, port=node_ssh_port(pve_mgr.config))
         # SSH error patterns that indicate the node itself is dead, not the cmd
         looks_like_node_down = (
             rc != 0 and any(s in str(err).lower() for s in (

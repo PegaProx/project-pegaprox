@@ -102,7 +102,7 @@ from pegaprox.models.tasks import (MaintenanceTask, PegaProxConfig, balancer_coo
 from pegaprox.core.config import save_config
 from pegaprox.utils.realtime import broadcast_sse, is_cluster_watched
 from pegaprox.utils.ssh import get_ssh_connection_stats, _ssh_track_connection, ssh_password_for, node_login
-from pegaprox.utils.ssh import ssh_login_args, bare_host, is_ipv6_literal
+from pegaprox.utils.ssh import ssh_login_args, bare_host, is_ipv6_literal, node_ssh_port
 from pegaprox.utils.concurrent import GEVENT_PATCHED
 from pegaprox.core.db import get_db
 from pegaprox.core import ha  # PegaProx's own warm standby (#625), not PVE HA
@@ -8684,7 +8684,7 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
                 _hkc, _kh = cli_hostkey_opts()
                 result = node_cmd(
                     ['ssh', '-o', 'ConnectTimeout=5', '-o', f'StrictHostKeyChecking={_hkc}',
-                     '-o', f'UserKnownHostsFile={_kh}',
+                     '-o', f'UserKnownHostsFile={_kh}', *self._ssh_port_args(),
                      '--', f'{ssh_user}@{ssh_host}', 'poweroff'],
                     capture_output=True, timeout=15, host=str(ssh_host)
                 )
@@ -10953,6 +10953,17 @@ echo "AGENT_INSTALLED_OK"
                 self.logger.warning(f"[SSH] {e} - set a valid SSH user for this cluster")
             return None
 
+    def _ssh_port_args(self):
+        """'-p <port>' for the command-line SSH family and the SSH fence when this
+        cluster's nodes listen somewhere other than 22, nothing for 22 (the argv stays
+        what it always was).
+
+        MK Nov 2026 - none of them passed a port, so with ssh_port set the HA checks, the
+        in-band BMC read and the fence all knocked on 22. With -p, OpenSSH pins the host
+        as [host]:port, the name paramiko gives it too."""
+        port = node_ssh_port(self.config)
+        return [] if port == 22 else ['-p', str(port)]
+
     def _ssh_run_command_output(self, host: str, user: str, command: str, timeout: int = 30) -> str:
         """Run SSH command and return output - HA PRIORITY (no rate limiting)
 
@@ -10984,7 +10995,7 @@ echo "AGENT_INSTALLED_OK"
             result = node_cmd(
                 ['ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                  '-o', f'UserKnownHostsFile={_kh}',
-                 '-o', 'BatchMode=yes', *login, command],
+                 '-o', 'BatchMode=yes', *self._ssh_port_args(), *login, command],
                 capture_output=True, text=True, timeout=timeout, host=host
             )
             if result.returncode == 0:
@@ -11049,7 +11060,7 @@ echo "AGENT_INSTALLED_OK"
                 result = node_cmd(
                     ['ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                      '-o', f'UserKnownHostsFile={_kh}',
-                     '-i', key_file, *login, command],
+                     '-i', key_file, *self._ssh_port_args(), *login, command],
                     capture_output=True, text=True, timeout=timeout, host=host
                 )
                 if result.returncode == 0:
@@ -11109,7 +11120,7 @@ echo "AGENT_INSTALLED_OK"
             result = node_cmd(
                 ['sshpass', '-e', 'ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                  '-o', f'UserKnownHostsFile={_kh}',
-                 *login, command],
+                 *self._ssh_port_args(), *login, command],
                 capture_output=True, text=True, timeout=timeout, env=env, host=host
             )
             if result.returncode == 0:
@@ -12147,6 +12158,7 @@ echo "AGENT_INSTALLED_OK"
             ssh_cmd = ['ssh', '-o', f'StrictHostKeyChecking={_hkc}', '-o', f'UserKnownHostsFile={_kh}', '-o', f'ConnectTimeout={ct}', '-o', 'BatchMode=yes']
             if key_file:
                 ssh_cmd.extend(['-i', key_file])
+            ssh_cmd.extend(self._ssh_port_args())
             ssh_cmd.extend(login)
             ssh_cmd.append(command)
             
@@ -12282,6 +12294,7 @@ echo "AGENT_INSTALLED_OK"
             ssh_cmd = [
                 'sshpass', '-e',
                 'ssh', '-o', f'StrictHostKeyChecking={_hkc}', '-o', f'UserKnownHostsFile={_kh}', '-o', f'ConnectTimeout={ct}',
+                *self._ssh_port_args(),
                 *login,
                 command
             ]

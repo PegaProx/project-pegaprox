@@ -2,8 +2,9 @@
 
 The route runs `pvecm delnode` on a node that stays and then cleans the removed node up,
 each over its own SSH login. Both dialled port 22 whatever the cluster had set, so a
-cluster whose nodes listen elsewhere could not remove a node at all. Every other node
-path (_ssh_connect, _ssh_exec) already takes the cluster's ssh_port.
+cluster whose nodes listen elsewhere could not remove a node at all. _ssh_connect takes
+the cluster's ssh_port too, and so do _ssh_exec behind _pve_node_exec and the manager's
+command-line ssh (test_node_commands_use_the_cluster_ssh_port.py).
 
 paramiko is a stub that records each connect, nothing leaves the machine.
 """
