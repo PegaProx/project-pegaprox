@@ -34990,6 +34990,35 @@
         "x-pegaprox-auth": "public"
       }
     },
+    "/i18n/{lang}.json": {
+      "get": {
+        "operationId": "settings.serve_language_file_get",
+        "tags": [
+          "settings"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "A language file of the web interface",
+        "description": "Public like the page itself, the login form shows in the language too. Kept for good\nwhen ?v= names the file as it is now, revalidated by its ETag otherwise.",
+        "parameters": [
+          {
+            "name": "lang",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "public"
+      }
+    },
     "/status": {
       "get": {
         "operationId": "settings.status_page_get",
