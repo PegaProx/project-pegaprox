@@ -1362,9 +1362,290 @@
         }
 
         // ── instance detail (full view with tabs) ──────────────────
-        function CloudInstanceDetail({ resource, act, onBack, t }) {
-            const [tab, setTab] = React.useState('info');
-            React.useEffect(() => { setTab('info'); }, [resource && resource.vmid, resource && resource._clusterId]);
+        function cloudFmtRate(v) {
+            const n = Number(v) || 0;
+            if (n >= 1024 ** 3) return (n / 1024 ** 3).toFixed(1) + ' GiB/s';
+            if (n >= 1024 ** 2) return (n / 1024 ** 2).toFixed(1) + ' MiB/s';
+            if (n >= 1024) return (n / 1024).toFixed(1) + ' KiB/s';
+            return Math.round(n) + ' B/s';
+        }
+
+        function cloudFmtTs(epoch) {
+            const n = Number(epoch);
+            if (!n || !isFinite(n)) return null;
+            const d = new Date(n * 1000);
+            return d.toLocaleString();
+        }
+
+        // one metric chart + its stats row (current/avg/min/max, last update).
+        // Colors are hex, not CSS vars - a canvas cannot resolve var(--…).
+        // formatValue + label flow into LineChart so the y-axis AND the tooltip
+        // speak the metric's unit (a missing label made tooltips say "undefined").
+
+        const CLOUD_HC = {
+            healthy:  { cls: 'is-healthy',  label: 'HEALTHY' },
+            warning:  { cls: 'is-warning',  label: 'WARNING' },
+            critical: { cls: 'is-critical', label: 'CRITICAL' },
+            unknown:  { cls: 'is-unknown',  label: 'UNKNOWN' },
+            na:       { cls: 'is-na',       label: 'N/A' },
+        };
+
+        const CLOUD_HC_ORDER = { critical: 0, warning: 1, healthy: 2, unknown: 3, na: 4 };
+
+        function cloudHcMeaning(id, t) {
+            const m = {
+                backup: t('cloud.hcMeaningBackup') || 'Proof: a current, restorable backup exists.',
+                sla: t('cloud.hcMeaningSla') || 'Proof: backups arrive within the defined recovery objective.',
+                restore: t('cloud.hcMeaningRestore') || 'Proof: a restore has actually been tested and timed.',
+                agent: t('cloud.hcMeaningAgent') || 'In-guest facts (IPs, filesystems, clean shutdowns).',
+                ha: t('cloud.hcMeaningHa') || 'Automatic restart on node failure.',
+                migrate: t('cloud.hcMeaningMigrate') || 'Readiness to move this guest to another node.',
+                audit: t('cloud.hcMeaningAudit') || 'Traceable change history, verified installation-wide.',
+            };
+            return m[id] || null;
+        }
+
+        // overview right rail: collapsed = one line, expanded = meaning/impact/action/proof
+
+        function CloudHcBadge({ state }) {
+            const tone = CLOUD_HC[state] || CLOUD_HC.unknown;
+            return <span className={'cloud-hc-badge ' + tone.cls}>{tone.label}</span>;
+        }
+        // what each check PROVES - one sentence per id, shown in the rail and the
+        // full state tab so a badge alone never has to carry the meaning
+
+        function CloudHcRow({ title, state, desc, checked, action, impact, meaning, children }) {
+            const tone = CLOUD_HC[state] || CLOUD_HC.unknown;
+            return (
+                <div className={'cloud-hc-row ' + tone.cls}>
+                    <div className="cloud-hc-head">
+                        <span className="cloud-hc-title">{title}</span>
+                        <CloudHcBadge state={state} />
+                    </div>
+                    {meaning && <div className="cloud-hc-meaning">{meaning}</div>}
+                    {desc && <div className="cloud-hc-desc">{desc}</div>}
+                    {impact && <div className={'cloud-hc-impact' + (state === 'critical' ? ' is-critical' : '')}>{impact}</div>}
+                    {checked && <div className="cloud-hc-checked">{checked}</div>}
+                    {children}
+                    {action && <div className="cloud-hc-action">{action}</div>}
+                </div>
+            );
+        }
+
+        // bytes/s → readable rate (metrics come back as bytes per second)
+
+        function CloudHcRailRow({ row, open, onToggle, t, meaning, extraAction }) {
+            const tone = CLOUD_HC[row.state] || CLOUD_HC.unknown;
+            return (
+                <div className={'cloud-hc-rail-row ' + tone.cls + (open ? ' is-open' : '')}>
+                    <button type="button" className="cloud-hc-rail-head" onClick={onToggle} aria-expanded={open}>
+                        <span className={'cloud-hc-rail-dot ' + tone.cls}></span>
+                        <span className="cloud-hc-rail-name">{row.title}</span>
+                        <span className="cloud-hc-rail-find">{row.desc}</span>
+                        <CloudHcBadge state={row.state} />
+                        <span className="cloud-hc-rail-chev">{open ? '▾' : '▸'}</span>
+                    </button>
+                    {open && (
+                        <div className="cloud-hc-rail-body">
+                            {meaning && <div className="cloud-hc-rail-meaning">{meaning}</div>}
+                            {row.impact && <div className={'cloud-hc-impact' + (row.state === 'critical' ? ' is-critical' : '')}>{row.impact}</div>}
+                            {(row.checked || extraAction) && (
+                                <div className="cloud-hc-rail-foot">
+                                    {row.checked && <span className="cloud-hc-checked">{t('cloud.hcLastProof') || 'Last proof'}: {row.checked}</span>}
+                                    {extraAction}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // one resource tile for the overview panel: value, meter, optional real trend
+
+        function CloudResTile({ label, value, sub, pct, spark, sparkColor, sparkTitle, foot }) {
+            return (
+                <div className="cloud-res-tile">
+                    <div className="cloud-res-tile-top">
+                        <span className="cloud-res-tile-label">{label}</span>
+                        <span className="cloud-res-tile-value">{value}</span>
+                    </div>
+                    {pct != null && (
+                        <div className="cloud-meter cloud-res-tile-meter"><div style={{ width: Math.min(100, pct) + '%', background: cloudThresholdColor(pct) }} /></div>
+                    )}
+                    <div className="cloud-res-tile-bottom">
+                        {sub && <span className="cloud-res-tile-sub">{sub}</span>}
+                        {spark && <span className="cloud-res-tile-spark" title={sparkTitle}><Sparkline data={spark} color={sparkColor} width={150} height={34} /></span>}
+                        {foot && !spark && <span className="cloud-res-tile-sub">{foot}</span>}
+                    </div>
+                </div>
+            );
+        }
+
+        function CloudMetricChart({ title, data, timestamps, fmt, color, sub }) {
+            const clean = (data || []).map(v => (v == null || !isFinite(Number(v)) ? null : Number(v)));
+            const vals = clean.filter(v => v != null);
+            const has = vals.length > 0;
+            const cur = has ? vals[vals.length - 1] : null;
+            const avg = has ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+            const min = has ? Math.min(...vals) : null;
+            const max = has ? Math.max(...vals) : null;
+            const lastTs = cloudFmtTs((timestamps || []).filter(Boolean).slice(-1)[0]);
+            const fmtV = fmt || (v => String(Math.round(v * 100) / 100));
+            return (
+                <div className="cloud-card cloud-chart-card">
+                    <div className="cloud-chart-head">
+                        <span className="cloud-chart-title">{title}{sub ? <span className="cloud-chart-sub"> · {sub}</span> : null}</span>
+                        {has ? (
+                            <span className="cloud-chart-stats">
+                                <span>cur <b>{fmtV(cur)}</b></span>
+                                <span>ø <b>{fmtV(avg)}</b></span>
+                                <span>min <b>{fmtV(min)}</b></span>
+                                <span>max <b>{fmtV(max)}</b></span>
+                            </span>
+                        ) : <span className="cloud-chart-stats cloud-cell-muted">no data</span>}
+                    </div>
+                    {has ? (
+                        <>
+                            <LineChart label={title} data={clean} timestamps={timestamps} color={color || '#22d3ee'} formatValue={fmtV} unit=" " markGaps />
+                            {lastTs && <div className="cloud-chart-upd">{lastTs}</div>}
+                        </>
+                    ) : (
+                        <div className="cloud-chart-empty">{timestamps && timestamps.length ? 'No samples in this window.' : 'No history recorded for this guest.'}</div>
+                    )}
+                </div>
+            );
+        }
+
+        // Betriebszustand: every row needs real evidence - see the phase brief.
+        // Anything without a source renders unknown/na, never healthy.
+
+        function cloudGuestHealthRows({ r, isCt, cfg, guest, backupStatus, recovery, ha, migrate, t, onMigrateCheck, migrateChecking, compact }) {
+            const rows = [];
+            const ageTxt = (h) => (h == null ? null : (h < 48 ? Math.round(h) + ' h ago' : Math.round(h / 24) + ' d ago'));
+
+            // Backup (from the cluster's per-VM backup status)
+            const bs = backupStatus && backupStatus[r.vmid];
+            if (!backupStatus) {
+                rows.push({ id: 'backup', title: t('cloud.hcBackup') || 'Backup', state: 'unknown', desc: t('cloud.hcNoData') || 'Backup status not available.' });
+            } else if (!bs) {
+                rows.push({ id: 'backup', title: t('cloud.hcBackup') || 'Backup', state: 'unknown', desc: t('cloud.hcNoEntry') || 'No backup record for this guest.', link: 'backups' });
+            } else {
+                const st = bs.status === 'ok' ? 'healthy' : (bs.status === 'warn' ? 'warning' : (bs.status === 'no-backup' ? 'critical' : 'warning'));
+                const bits = [];
+                if (bs.last_backup_age_hours != null) bits.push((t('cloud.hcLastBackup') || 'Last backup') + ': ' + (ageTxt(bs.last_backup_age_hours) || ' - '));
+                if (bs.count_30d != null) bits.push('30d: ' + bs.count_30d);
+                if (bs.encrypted) bits.push(t('cloud.hcEncrypted') || 'encrypted');
+                if (bs.last_verify_age_hours != null) bits.push((t('cloud.hcVerified') || 'verified') + ' ' + ageTxt(bs.last_verify_age_hours));
+                rows.push({ id: 'backup', title: t('cloud.hcBackup') || 'Backup', state: st, desc: bits.join(' · '), checked: bs.last_backup_ts ? cloudFmtTs(bs.last_backup_ts) : null, link: 'backups',
+                                            impact: st === 'critical' ? (t('cloud.hcImpBackupC') || 'No current backup - data loss on failure.') : st === 'warning' ? (t('cloud.hcImpBackupW') || 'Backup protection degraded.') : null });
+            }
+
+            // Backup SLA (recovery report carries rpo_state per guest)
+            const g = recovery && recovery.guest;
+            if (recovery && g) {
+                const m = { ok: 'healthy', warning: 'warning', breached: 'critical', no_backup: 'critical', disabled: 'na', unknown: 'unknown' };
+                const bits = [];
+                if (g.sla_hours != null) bits.push('SLA ≤ ' + g.sla_hours + ' h');
+                if (g.newest_backup_age_hours != null) bits.push((t('cloud.hcNewest') || 'newest backup') + ' ' + ageTxt(g.newest_backup_age_hours));
+                if (g.backup_count != null) bits.push(g.backup_count + ' ' + (t('cloud.hcBackups') || 'backups'));
+                rows.push({ id: 'sla', title: t('cloud.hcSla') || 'Backup SLA', state: m[g.rpo_state] || 'unknown', desc: bits.join(' · '), checked: g.newest_backup_at ? cloudFmtTs(g.newest_backup_at) : null, link: 'backups',
+                                            impact: (g.rpo_state === 'breached' || g.rpo_state === 'no_backup') ? (t('cloud.hcImpSlaC') || 'Defined recovery objective is not met.') : g.rpo_state === 'warning' ? (t('cloud.hcImpSlaW') || 'Recovery objective at risk.') : null });
+            } else {
+                rows.push({ id: 'sla', title: t('cloud.hcSla') || 'Backup SLA', state: 'unknown', desc: t('cloud.hcNoRecoveryData') || 'SLA evaluation not available.' });
+            }
+
+            // Restore tests (documented recovery evidence)
+            if (recovery && g) {
+                const m = { ok: 'healthy', stale: 'warning', rto_missed: 'warning', failing: 'critical', never: 'warning' };
+                const bits = [];
+                if (g.last_success_at) bits.push((t('cloud.hcLastTest') || 'last success') + ' ' + cloudFmtTs(g.last_success_at));
+                if (g.measured_seconds != null && g.rto_seconds != null) bits.push('RTO ' + g.measured_seconds + '/' + g.rto_seconds + 's');
+                if (g.state === 'never') bits.push(t('cloud.hcNeverTested') || 'No restore test documented.');
+                if (g.last_failure_at) bits.push((t('cloud.hcLastFailure') || 'last failure') + ' ' + cloudFmtTs(g.last_failure_at));
+                rows.push({ id: 'restore', title: t('cloud.hcRestore') || 'Restore test', state: m[g.state] || 'unknown', desc: bits.join(' · '), checked: g.last_test_at ? cloudFmtTs(g.last_test_at) : null, link: 'backups',
+                                            impact: g.state === 'failing' ? (t('cloud.hcImpRestC') || 'Restore failed - backups may not be usable.') : g.state === 'never' || g.state === 'stale' ? (t('cloud.hcImpRestW') || 'Restore capability is unproven.') : null });
+            } else {
+                rows.push({ id: 'restore', title: t('cloud.hcRestore') || 'Restore test', state: 'unknown', desc: t('cloud.hcNoRecoveryData') || 'SLA evaluation not available.' });
+            }
+
+            // Guest agent (qemu only - an LXC guest has no qemu-guest-agent by design)
+            if (isCt) {
+                rows.push({ id: 'agent', title: t('cloud.hcAgent') || 'Guest agent', state: 'na', desc: t('cloud.hcAgentLxc') || 'Not applicable: LXC guests report without a QEMU guest agent.' });
+            } else if (!cfg && !guest) {
+                rows.push({ id: 'agent', title: t('cloud.hcAgent') || 'Guest agent', state: 'unknown', desc: t('cloud.hcNoData') || 'Guest data not available.' });
+            } else {
+                const enabled = !!(cfg && (cfg.options && cfg.options.agent || (cfg.raw && cfg.raw.agent)));
+                if (guest && guest.agent_running) {
+                    rows.push({ id: 'agent', title: t('cloud.hcAgent') || 'Guest agent', state: 'healthy', desc: (guest.os_pretty_name || 'agent') + ' · ' + (t('cloud.hcAgentReachable') || 'reachable, reporting data') });
+                } else if (enabled) {
+                    rows.push({ id: 'agent', title: t('cloud.hcAgent') || 'Guest agent', state: guest ? 'warning' : 'unknown', desc: guest ? (t('cloud.hcAgentEnabledNotRunning') || 'Enabled in the config but not reachable (guest off or agent not installed).') : (t('cloud.hcNoData') || 'Guest data not available.'), impact: guest ? (t('cloud.hcImpAgent') || 'No in-guest facts (IPs, filesystems); some actions are limited.') : null });
+                } else {
+                    rows.push({ id: 'agent', title: t('cloud.hcAgent') || 'Guest agent', state: 'na', desc: t('cloud.hcAgentDisabled') || 'Not enabled in the VM configuration.' });
+                }
+            }
+
+            // Proxmox HA (guest HA resources; unconfigured is a valid na)
+            if (!ha) {
+                rows.push({ id: 'ha', title: 'HA', state: 'unknown', desc: t('cloud.hcNoData') || 'Guest data not available.' });
+            } else {
+                const mine = ha.find(h => h && h.sid === (isCt ? 'ct:' : 'vm:') + r.vmid);
+                if (!mine) {
+                    rows.push({ id: 'ha', title: 'HA', state: 'na', desc: t('cloud.hcHaNone') || 'Not configured for Proxmox HA.' });
+                } else {
+                    const st = (mine.state === 'started' || mine.state === 'stopped') ? 'healthy'
+                        : (mine.state === 'ignored' || mine.state === 'disabled') ? 'na'
+                        : (mine.state === 'error') ? 'critical' : 'warning';
+                    const haImpact = mine.state === 'error' ? (t('cloud.hcImpHaC') || 'No automatic restart on node failure.') : (st === 'warning') ? (t('cloud.hcImpHaW') || 'HA is reconfiguring - protection temporarily reduced.') : null;
+                    const bits = [mine.state];
+                    if (mine.group) bits.push((t('cloud.hcHaGroup') || 'group') + ' ' + mine.group);
+                    if (mine.node) bits.push('@' + mine.node);
+                    rows.push({ id: 'ha', title: 'HA', state: st, desc: bits.join(' · '), impact: haImpact });
+                }
+            }
+
+            // Migration readiness - only judged when a check actually ran
+            if (!migrate) {
+                rows.push({
+                    id: 'migrate', title: t('cloud.hcMigrate') || 'Migration', state: 'unknown',
+                    desc: t('cloud.hcMigrateIdle') || 'Not checked yet.',
+                    action: compact ? null : (
+                    <button type="button" className="cloud-btn cloud-btn-sm" onClick={onMigrateCheck} disabled={migrateChecking}>
+                        <Icons.ArrowRight /> {migrateChecking ? (t('cloud.hcChecking') || 'Checking…') : (t('cloud.hcCheckNow') || 'Run check')}
+                    </button>),
+                });
+            } else if (migrate.error) {
+                rows.push({ id: 'migrate', title: t('cloud.hcMigrate') || 'Migration', state: 'unknown', desc: migrate.error, action: compact ? null : <button type="button" className="cloud-btn cloud-btn-sm" onClick={onMigrateCheck}><Icons.ArrowRight /> {t('cloud.hcCheckNow') || 'Run check'}</button> });
+            } else if (migrate.supported === false) {
+                rows.push({ id: 'migrate', title: t('cloud.hcMigrate') || 'Migration', state: 'critical', desc: t('cloud.hcMigrateUnsupported') || 'Migration not supported for this guest.' });
+            } else {
+                const snapN = Number(migrate.snapshot_count) || 0;
+                rows.push({
+                    id: 'migrate', title: t('cloud.hcMigrate') || 'Migration',
+                    state: snapN > 0 ? 'warning' : 'healthy',
+                    desc: snapN > 0
+                        ? (t('cloud.hcMigrateSnaps') || 'Possible, but {n} snapshot(s) restrict online migration.').replace('{n}', snapN)
+                        : (t('cloud.hcMigrateOk') || 'No blocking conditions found.'),
+                    checked: t('cloud.hcMigrateCheckedNow') || 'just checked',
+                    impact: snapN > 0 ? (t('cloud.hcImpMigrate') || 'Online migration may not be possible.') : null,
+                });
+            }
+
+            // Audit chain integrity is installation-wide; there is no per-guest
+            // proof, so this stays honestly n/a instead of green.
+            rows.push({ id: 'audit', title: t('cloud.hcAudit') || 'Audit integrity', state: 'na', desc: t('cloud.hcAuditNa') || 'Verified installation-wide in the audit log, not per guest.' });
+
+            rows.sort((a, b) => (CLOUD_HC_ORDER[a.state] ?? 9) - (CLOUD_HC_ORDER[b.state] ?? 9));
+            return rows;
+        }
+
+        function CloudInstanceDetail({ resource, act, onBack, t, authFetch, clusterName, holdsPerm, addToast }) {
+            const [tab, setTab] = React.useState('overview');
+            const [protSub, setProtSub] = React.useState('snapshots');   // Schutz-Tab: Snapshots | Backups | Replication
+            const [hcOpen, setHcOpen] = React.useState({});   // overview rail: which rows are expanded
+            React.useEffect(() => { setTab('overview'); setProtSub('snapshots'); setMigrate(null); }, [resource && resource.vmid, resource && resource._clusterId]);
+            const [migrate, setMigrate] = React.useState(null);
+            const [migrChecking, setMigrChecking] = React.useState(false);
             if (!resource) return null;
             const r = resource;
             const isCt = r.type === 'lxc';
@@ -1374,12 +1655,149 @@
             const memMax = Number(r.maxmem) || 0, memUse = Number(r.mem) || 0;
             const diskMax = Number(r.maxdisk) || 0, diskUse = Number(r.disk) || 0;
             const tags = cloudTagList(r.tags);
+            const can = (p) => !holdsPerm || !!holdsPerm(p);
 
+            const cid = r._clusterId;
+            const base = (authFetch && cid != null && r.node) ? `${API_URL}/clusters/${cid}/vms/${encodeURIComponent(r.node)}/${r.type}/${r.vmid}` : null;
+
+            // ── live data, lazy per tab. A null url means "not on this tab". ──
+            const cfgQ = useCloudApi(authFetch, base ? `${base}/config` : null, [base]);
+            const guestQ = useCloudApi(authFetch, base ? `${base}/guest-info` : null, [base]);
+            const bsQ = useCloudApi(authFetch, (tab === 'health' || (tab === 'protection' && protSub === 'backups') || tab === 'overview') && base ? `${API_URL}/clusters/${cid}/vms-backup-status` : null, [base, tab]);
+            const recQ = useCloudApi(authFetch, (tab === 'health' || tab === 'overview') && base ? `${API_URL}/clusters/${cid}/recovery-report/${r.vmid}` : null, [base, tab]);
+            const replQ = useCloudApi(authFetch, tab === 'protection' && protSub === 'replication' && base ? `${API_URL}/clusters/${cid}/replication?vmid=${r.vmid}` : null, [base, tab]);
+            // pending config changes (apply on reboot) - the honest "needs restart" source
+            const pendQ = useCloudApi(authFetch, ['hardware', 'config', 'disks', 'network'].includes(tab) && base ? `${base}/pending` : null, [base, tab]);
+            const haQ = useCloudApi(authFetch, (tab === 'health' || tab === 'overview') && base ? `${API_URL}/clusters/${cid}/proxmox-ha/resources` : null, [base, tab]);
+            const [tf, setTf] = React.useState('hour');
+            const rrdQ = useCloudApi(authFetch, tab === 'monitor' && base ? `${base}/rrd/${tf}` : null, [base, tab, tf]);
+            // Design-Sprint: live hour trend for the overview resource card (same source as Monitoring)
+            const sparkQ = useCloudApi(authFetch, tab === 'overview' && base ? `${base}/rrd/hour` : null, [base, tab]);
+            const snapQ = useCloudApi(authFetch, tab === 'protection' && protSub === 'snapshots' && base ? `${base}/snapshots` : null, [base, tab, protSub]);
+            const bakQ = useCloudApi(authFetch, tab === 'protection' && protSub === 'backups' && base ? `${base}/backups` : null, [base, tab, protSub]);
+            const dsQ = useCloudApi(authFetch, ((tab === 'protection' && protSub === 'backups') || tab === 'disks') && base ? `${API_URL}/clusters/${cid}/datastores` : null, [base, tab]);
+            const taskQ = useCloudApi(authFetch, (tab === 'tasks' || tab === 'overview') && base ? `${API_URL}/clusters/${cid}/nodes/${encodeURIComponent(r.node)}/tasks?vmid=${r.vmid}&limit=200` : null, [base, tab]);
+
+            const runMigrateCheck = async () => {
+                if (!base || !authFetch) return;
+                setMigrChecking(true);
+                try {
+                    const resp = await authFetch(`${base}/migrate-check`);
+                    if (resp && resp.ok) setMigrate(await resp.json().catch(() => ({})));
+                    else setMigrate({ error: resp && resp.status === 403 ? 'Permission denied' : 'HTTP ' + (resp ? resp.status : 0) });
+                } catch (e) { setMigrate({ error: String((e && e.message) || e) }); }
+                setMigrChecking(false);
+            };
+
+            // console preview: real screendump via the API, honest when absent
+            const [shot, setShot] = React.useState({ state: 'idle' });
+            React.useEffect(() => {
+                let alive = true; let url = null;
+                if (tab !== 'overview' || isCt || !running || !base || !authFetch) { setShot({ state: 'idle' }); return () => { alive = false; }; }
+                setShot({ state: 'loading' });
+                authFetch(`${base}/screenshot?fresh=1`)
+                    .then(async resp => {
+                        if (!alive) return;
+                        if (resp && resp.ok) { const blob = await resp.blob(); url = URL.createObjectURL(blob); if (alive) setShot({ state: 'ok', url }); }
+                        else if (alive) setShot({ state: 'err' });
+                    })
+                    .catch(() => { if (alive) setShot({ state: 'err' }); });
+                return () => { alive = false; if (url) URL.revokeObjectURL(url); };
+            }, [tab, base, running, isCt]);
+
+            // snapshot actions (confirm → API → toast), permissions enforced server-side too
+            const snapAct = async (snap, what) => {
+                const q = what === 'rollback'
+                    ? (t('cloud.snapRollbackQ') || 'Roll the guest back to snapshot')
+                    : (t('cloud.snapDeleteQ') || 'Permanently delete snapshot');
+                if (!window.confirm(`${q} "${snap.name}"?`)) return;
+                const resp = await authFetch(`${base}/snapshots/${encodeURIComponent(snap.name)}`, { method: what === 'rollback' ? 'POST' : 'DELETE' });
+                const j = resp ? await resp.json().catch(() => ({})) : {};
+                if (resp && resp.ok) { addToast && addToast(j.message || (t('cloud.taskStarted') || 'Task started'), 'success'); snapQ.reload(); }
+                else addToast && addToast(j.error || (t('cloud.actionFailed') || 'Action failed'), 'error');
+            };
+
+            // backup create (real vzdump start) + restore wizard + delete
+            const [bForm, setBForm] = React.useState({ storage: '', mode: 'snapshot', notes: '' });
+            const [bBusy, setBBusy] = React.useState(false);
+            const [wiz, setWiz] = React.useState(null);
+            const backupStorages = React.useMemo(() => {
+                const d = dsQ.data; if (!d) return [];
+                const out = [];
+                const shared = Array.isArray(d.shared) ? d.shared : Object.values(d.shared || {});
+                shared.forEach(s => { if (s && String(s.content || '').includes('backup')) out.push(s.storage || s.name); });
+                const local = d.local || {};
+                Object.keys(local).forEach(n => (Array.isArray(local[n]) ? local[n] : []).forEach(s => { if (s && String(s.content || '').includes('backup')) out.push((s.storage || s.name) + ' (' + n + ')'); }));
+                return out.filter(Boolean);
+            }, [dsQ.data]);
+            const backupAbsStorage = (pick) => String(pick || '').split(' (')[0];
+            const createBackup = async () => {
+                if (!bForm.storage) return;
+                setBBusy(true);
+                try {
+                    const resp = await authFetch(`${base}/backups/create`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ storage: backupAbsStorage(bForm.storage), mode: bForm.mode, notes: bForm.notes || '' }),
+                    });
+                    const j = resp ? await resp.json().catch(() => ({})) : {};
+                    if (resp && resp.ok) { addToast && addToast(t('cloud.taskStarted') || 'Task started', 'success'); bakQ.reload(); setBForm(f => ({ ...f, notes: '' })); }
+                    else addToast && addToast(j.error || (t('cloud.actionFailed') || 'Action failed'), 'error');
+                } finally { setBBusy(false); }
+            };
+            const delBackup = async (b) => {
+                if (!window.confirm((t('cloud.bakDeleteQ') || 'Permanently delete backup') + ' ' + (b.filename || b.volid) + '?')) return;
+                const resp = await authFetch(`${base}/backups/${encodeURIComponent(b.volid)}`, { method: 'DELETE' });
+                const j = resp ? await resp.json().catch(() => ({})) : {};
+                if (resp && resp.ok) { addToast && addToast(t('cloud.taskStarted') || 'Task started', 'success'); bakQ.reload(); }
+                else addToast && addToast(j.error || (t('cloud.actionFailed') || 'Action failed'), 'error');
+            };
+
+            // datastore lookup (type/health/usage for the storage tab)
+            const dsFind = (name) => {
+                const d = dsQ.data; if (!d || !name) return null;
+                const shared = Array.isArray(d.shared) ? d.shared : Object.values(d.shared || {});
+                let hit = shared.find(x => x && (x.storage === name || x.name === name));
+                if (hit) return hit;
+                const local = d.local || {};
+                for (const k of Object.keys(local)) {
+                    hit = (Array.isArray(local[k]) ? local[k] : []).find(x => x && x.storage === name);
+                    if (hit) return hit;
+                }
+                return null;
+            };
+
+            const cfg = cfgQ.data;
+            const hw = (cfg && cfg.hardware) || {};
+            const opts = (cfg && cfg.options) || {};
+            const disks = (cfg && cfg.disks) || [];
+            const nets = (cfg && cfg.networks) || [];
+            const raw = (cfg && cfg.raw) || {};
+            const guest = guestQ.data && !guestQ.error ? guestQ.data : null;
+            // the endpoint answers a list; index it by vmid once, an array
+            // subscript would read the wrong guest's posture
+            const bsMap = Array.isArray(bsQ.data)
+                ? Object.fromEntries(bsQ.data.map(b => [b.vmid, b])) : (bsQ.data || null);
+            const bs = !bsQ.error ? (bsMap && bsMap[r.vmid]) || null : null;
+            const recovery = recQ.data && !recQ.error ? recQ.data : null;
+            const haList = haQ.error ? null : (haQ.data || null);
+
+            // 8 areas in 4 clusters; protection bundles snapshots/backups/replication
             const tabs = [
-                { id: 'info', label: t('cloud.tabInfo') || 'Info' },
-                { id: 'capacity', label: t('cloud.tabCapacity') || 'Capacity' },
-                { id: 'network', label: t('cloud.tabNetwork') || 'Network' },
+                { id: 'overview', icon: 'Grid', label: t('cloud.tabInfo') || 'Overview', group: 0 },
+                { id: 'health', icon: 'Activity', label: t('cloud.tabHealth') || 'Operational state', group: 1 },
+                { id: 'monitor', icon: 'BarChart', label: t('cloud.tabMonitor') || 'Monitoring', group: 1 },
+                { id: 'tasks', icon: 'Clock', label: t('cloud.tabTasks') || 'Tasks & Events', group: 1 },
+                { id: isCt ? 'config' : 'hardware', icon: 'Cog', label: isCt ? (t('cloud.tabConfig') || 'Configuration') : (t('cloud.tabHardware') || 'Hardware'), group: 2 },
+                { id: 'disks', icon: 'HardDrive', label: t('cloud.tabDisks') || 'Disks', group: 2 },
+                { id: 'network', icon: 'Network', label: t('cloud.tabNetwork') || 'Network', group: 2 },
+                { id: 'protection', icon: 'Shield', label: t('cloud.tabProtection') || 'Protection', group: 3 },
             ];
+            // legacy tab ids still used by links: route them into the protection sub-view
+            const goto = (id) => {
+                if (['snapshots', 'backups', 'replication'].includes(id)) { setTab('protection'); setProtSub(id); }
+                else setTab(id);
+            };
+            const tabActive = (id) => tab === id || (id === 'protection' && tab === 'protection');
 
             // primary action buttons in the bar (contextual) + full kebab
             const primary = !act.has('vmAction') ? [] : running
@@ -1389,16 +1807,48 @@
                 ]
                 : [{ label: t('start') || 'Start', icon: 'Play', primary: true, onClick: () => act.vmAction(r, 'start') }];
 
+            const MeterCard = ({ label, pct, sub, color }) => (
+                <div className="cloud-meter-block">
+                    <div className="cloud-meter-label">{label} · {pct}%</div>
+                    <div className="cloud-meter cloud-meter-lg"><div style={{ width: Math.min(100, pct) + '%', background: color || cloudThresholdColor(pct) }} /></div>
+                    <div className="cloud-meter-sub">{sub}</div>
+                </div>
+            );
+            const diskPct = diskMax > 0 ? Math.round(diskUse / diskMax * 100) : 0;
+
+            const TaskMiniRow = ({ tk }) => (
+                <tr className="cloud-table-row">
+                    <td><span className={'cloud-task-dot ' + (tk.status === 'running' ? 'is-run' : tk.exitstatus === 'OK' || tk.status === 'OK' ? 'is-ok' : 'is-err')} /></td>
+                    <td>{tk.type || 'task'}</td>
+                    <td className="cloud-table-mono">{tk.id || ''}</td>
+                    <td>{tk.pegaprox_user || tk.user || ''}</td>
+                    <td className="cloud-table-mono cloud-cell-muted">{tk.starttime ? cloudFmtTs(tk.starttime) : ''}</td>
+                </tr>
+            );
+
             return (
                 <div className="cloud-body">
-                    <div className="cloud-detail-head">
+                    <div className={'cloud-detail-head is-' + (r.status || 'unknown')}>
                         <button type="button" className="cloud-icon-btn cloud-back-btn" onClick={onBack} title={t('cloud.back') || 'Back'}><Icons.ArrowLeft /></button>
                         <span className="cloud-detail-icon">{isCt ? <Icons.Box /> : <Icons.Server />}</span>
                         <div className="cloud-detail-titlewrap">
                             <h1 className="cloud-detail-title">{r.name || ('guest-' + (r.vmid != null ? r.vmid : ''))}</h1>
                             <div className="cloud-detail-meta">
                                 <CloudStatusChip status={r.status} />
-                                <span className="cloud-detail-id">#{r.vmid} · {isCt ? 'Container' : 'VM'} · {r.node || '—'}</span>
+                                <span className="cloud-detail-id">#{r.vmid} · {isCt ? 'Container' : 'VM'} · {clusterName || cid || ' - '} · {r.node || ' - '}{running && r.uptime ? ' · ' + cloudFmtUptime(r.uptime) : ''}</span>
+                                {tags.length > 0 && (
+                                    <span className="cloud-detail-tags">
+                                        {tags.slice(0, 4).map(tg => <span className="cloud-chip cloud-chip-tag" key={tg}>{tg}</span>)}
+                                        {tags.length > 4 && <span className="cloud-table-tags-more">+{tags.length - 4}</span>}
+                                    </span>
+                                )}
+                                <span className="cloud-detail-res">
+                                    <span className="cloud-res-chip" title="vCPU">{Number(r.maxcpu) || 0} vCPU</span>
+                                    {memMax > 0 && <span className="cloud-res-chip" title={t('cloud.ram') || 'Memory'}>{cloudFmtBytes(memUse)} / {cloudFmtBytes(memMax)}
+                                        <span className="cloud-res-chip-bar"><div style={{ width: memP + '%', background: cloudThresholdColor(memP) }} /></span></span>}
+                                    {diskMax > 0 && <span className="cloud-res-chip" title={t('cloud.disk') || 'Disk'}>{cloudFmtBytes(diskUse)} / {cloudFmtBytes(diskMax)}
+                                        <span className="cloud-res-chip-bar"><div style={{ width: Math.round(diskUse / diskMax * 100) + '%', background: cloudThresholdColor(Math.round(diskUse / diskMax * 100)) }} /></span></span>}
+                                </span>
                             </div>
                         </div>
                         <div className="cloud-detail-actions">
@@ -1419,84 +1869,633 @@
                     </div>
 
                     <div className="cloud-tabs">
-                        {tabs.map(tb => (
-                            <button type="button" key={tb.id} className={'cloud-tab' + (tab === tb.id ? ' cloud-tab-active' : '')} onClick={() => setTab(tb.id)}>{tb.label}</button>
-                        ))}
+                        {tabs.map((tb, i) => {
+                            const TI = Icons[tb.icon] || Icons.Box;
+                            const prev = tabs[i - 1];
+                            return (
+                                <React.Fragment key={tb.id}>
+                                    {prev && prev.group !== tb.group && <span className="cloud-tabs-sep" aria-hidden="true"></span>}
+                                    <button type="button" className={'cloud-tab' + (tab === tb.id ? ' cloud-tab-active' : '')} onClick={() => { setTab(tb.id); if (tb.id !== 'protection') setProtSub('snapshots'); }}>
+                                        <TI /> {tb.label}
+                                    </button>
+                                </React.Fragment>
+                            );
+                        })}
                     </div>
 
-                    {tab === 'info' && (
-                        <div className="cloud-kv-grid">
-                            <CloudKVPanel title={t('cloud.information') || 'Information'}>
-                                <CloudKVRow label={t('cloud.colId') || 'ID'} value={r.vmid} />
-                                <CloudKVRow label={t('cloud.colName') || 'Name'} value={r.name} />
-                                <CloudKVRow label={t('cloud.type') || 'Type'} value={isCt ? 'Container (LXC)' : 'Virtual Machine'} />
-                                <CloudKVRow label={t('cloud.colStatus') || 'Status'} value={<CloudStatusChip status={r.status} />} />
-                                <CloudKVRow label={t('cloud.colNode') || 'Host'} value={r.node} />
-                                <CloudKVRow label={t('cloud.uptime') || 'Uptime'} value={cloudFmtUptime(r.uptime)} />
-                                {r.pool && <CloudKVRow label={t('cloud.pool') || 'Pool'} value={r.pool} />}
-                                {r.template ? <CloudKVRow label={t('cloud.template') || 'Template'} value="Yes" /> : null}
-                            </CloudKVPanel>
-                            <CloudKVPanel title={t('cloud.tabCapacity') || 'Capacity'}>
-                                <CloudKVRow label={t('cloud.vcpu') || 'vCPU'} value={Number(r.maxcpu) || '—'} />
-                                <CloudKVRow label={t('cloud.cpuUsage') || 'CPU usage'} value={cpuP + '%'} />
-                                <CloudKVRow label={t('cloud.ram') || 'Memory'} value={memMax ? cloudFmtBytes(memMax) : '—'} />
-                                <CloudKVRow label={t('cloud.ramInUse') || 'Memory used'} value={`${cloudFmtBytes(memUse)} (${memP}%)`} />
-                                {diskMax > 0 && <CloudKVRow label={t('cloud.disk') || 'Disk'} value={`${cloudFmtBytes(diskUse)} / ${cloudFmtBytes(diskMax)}`} />}
-                            </CloudKVPanel>
-                            <CloudKVPanel title={t('cloud.tabNetwork') || 'Network'}>
-                                <CloudKVRow label={t('cloud.ip') || 'IP address'} value={r.ip || (Array.isArray(r.ip_addresses) ? r.ip_addresses[0] : null)} />
-                                <CloudKVRow label={t('cloud.colNode') || 'Host'} value={r.node} />
-                            </CloudKVPanel>
-                            {tags.length > 0 && (
-                                <CloudKVPanel title={t('cloud.tags') || 'Tags'}>
-                                    <div className="cloud-tag-wrap">
-                                        {tags.map((tg, i) => <span className="cloud-chip cloud-chip-tag" key={i}><Icons.Tag /> {tg}</span>)}
+                    {/* ── Overview: operations center (resources left, health rail right) ── */}
+                    {tab === 'overview' && (() => {
+                        const sm = (sparkQ.data && sparkQ.data.metrics) || {};
+                        const has = (a) => Array.isArray(a) && a.some(v => v != null && isFinite(Number(v)));
+                        const rows = cloudGuestHealthRows({ r, isCt, cfg, guest, backupStatus: bsQ.error ? null : bsMap, recovery, ha: haList, migrate, t, onMigrateCheck: runMigrateCheck, migrateChecking: migrChecking, compact: true });
+                        const worst = rows.reduce((w, x) => (CLOUD_HC_ORDER[x.state] ?? 9) < (CLOUD_HC_ORDER[w.state] ?? 9) ? x : w, rows[0]);
+                        const cnt = (s) => rows.filter(x => x.state === s).length;
+                        const consoleState = !running
+                            ? (t('cloud.consoleOff') || 'Console is available while the guest is running.')
+                            : isCt ? (t('cloud.consoleLxc') || 'An LXC console is a terminal session.')
+                            : shot.state === 'ok' ? (t('cloud.consoleLive') || 'Live preview')
+                            : (t('cloud.consoleNoPreviewShort') || 'No live preview available right now.');
+                        return (
+                            <div className="cloud-ov-layout">
+                                <div className="cloud-ov-left">
+                                    <div className="cloud-card cloud-res-panel">
+                                        <div className="cloud-chart-head">
+                                            <span className="cloud-chart-title">{t('cloud.resources') || 'Resources'}</span>
+                                            <div className="cloud-chart-stats">
+                                                <button type="button" className="cloud-link-btn" onClick={() => setTab('monitor')}>{t('cloud.tabMonitor') || 'Monitoring'} →</button>
+                                            </div>
+                                        </div>
+                                        <div className="cloud-res-tiles">
+                                            <CloudResTile label={t('cloud.colCpu') || 'CPU'} value={cpuP + '%'} sub={`${Number(r.maxcpu) || 0} vCPU`}
+                                                pct={cpuP} spark={has(sm.cpu) ? sm.cpu : null} sparkColor="#22d3ee" sparkTitle={(t('cloud.colCpu') || 'CPU') + ' · 1h'} />
+                                            <CloudResTile label={t('cloud.ram') || 'Memory'} value={memP + '%'} sub={memMax ? `${cloudFmtBytes(memUse)} / ${cloudFmtBytes(memMax)}` : null}
+                                                pct={memP} spark={has(sm.memory) ? sm.memory : null} sparkColor="#a855f7" sparkTitle={(t('cloud.ram') || 'Memory') + ' · 1h'} />
+                                            <CloudResTile label={t('cloud.disk') || 'Storage'} value={(diskMax > 0 ? Math.round(diskUse / diskMax * 100) : 0) + '%'}
+                                                sub={diskMax > 0 ? `${cloudFmtBytes(diskUse)} / ${cloudFmtBytes(diskMax)}` : null} pct={diskMax > 0 ? Math.round(diskUse / diskMax * 100) : null}
+                                                foot={t('cloud.seeDisks') || 'per-disk view: Disks'} />
+                                            <CloudResTile label={t('cloud.network') || 'Network'} value={`↓ ${cloudFmtRate(r.netin)} · ↑ ${cloudFmtRate(r.netout)}`}
+                                                sub={has(sm.net_in) || has(sm.net_out) ? null : (t('cloud.noTrend') || 'no trend data')}
+                                                spark={has(sm.net_in) ? sm.net_in : null} sparkColor="#2dd4bf" sparkTitle={t('cloud.netIn') || 'Network in'} foot={has(sm.net_out) ? null : null}
+                                                pct={null} />
+                                        </div>
                                     </div>
-                                </CloudKVPanel>
-                            )}
+                                    <div className="cloud-card cloud-console-strip">
+                                        {shot.state === 'ok'
+                                            ? <img className="cloud-console-thumb" src={shot.url} alt="console" onClick={() => act.has('openConsole') && act.openConsole(r)} />
+                                            : <span className="cloud-console-ico"><Icons.Monitor /></span>}
+                                        <div className="cloud-console-txt">
+                                            <b>{t('console') || 'Console'}</b>
+                                            <span className="cloud-cell-muted">{consoleState}</span>
+                                        </div>
+                                        <div className="cloud-console-actions">
+                                            {act.has('openConsole') && <button type="button" className="cloud-btn cloud-btn-sm" onClick={() => act.openConsole(r)}><Icons.Monitor /> {t('console') || 'Console'}</button>}
+                                            {act.has('openLxcShell') && isCt && <button type="button" className="cloud-btn cloud-btn-sm" onClick={() => act.openLxcShell(r)}><Icons.Terminal /> {t('shell') || 'Shell'}</button>}
+                                            {act.has('openSpice') && running && !isCt && <button type="button" className="cloud-btn cloud-btn-sm" onClick={() => act.openSpice(r)}><Icons.ExternalLink /> {t('spiceConsole') || 'SPICE'}</button>}
+                                        </div>
+                                    </div>
+                                    <div className="cloud-card cloud-table-card">
+                                        <div className="cloud-toolbar">
+                                            <div className="cloud-toolbar-left"><span className="cloud-toolbar-title">{t('cloud.recentActivity') || 'Recent activity'}</span></div>
+                                            <div className="cloud-toolbar-right">
+                                                <button type="button" className="cloud-link-btn" onClick={() => goto('tasks')}>{t('cloud.viewAll') || 'View all'}</button>
+                                            </div>
+                                        </div>
+                                        {taskQ.loading ? <div className="cloud-table-note">{t('cloud.loading') || 'Loading…'}</div>
+                                            : (taskQ.data && Array.isArray(taskQ.data) ? taskQ.data : []).length === 0
+                                                ? <div className="cloud-empty">{t('cloud.noRecentTasks') || 'No recent tasks.'}</div>
+                                                : <div className="cloud-table-scroll"><table className="cloud-table"><thead><tr><th></th><th>{t('cloud.colType') || 'Type'}</th><th>{t('cloud.colId') || 'Target'}</th><th>{t('cloud.colUser') || 'User'}</th><th>{t('cloud.colWhen') || 'When'}</th></tr></thead>
+                                                    <tbody>{(taskQ.data || []).slice(0, 6).map((tk, i) => <TaskMiniRow tk={tk} key={tk.upid || i} />)}</tbody></table></div>}
+                                    </div>
+                                </div>
+                                <div className="cloud-ov-right">
+                                    <div className="cloud-card cloud-hc-rail">
+                                        <div className="cloud-hc-rail-top">
+                                            <span className="cloud-chart-title">{t('cloud.tabHealth') || 'Operational state'}</span>
+                                            {worst && <span className={'cloud-hc-badge ' + (CLOUD_HC[worst.state] || CLOUD_HC.unknown).cls}>{(CLOUD_HC[worst.state] || CLOUD_HC.unknown).label}</span>}
+                                            <button type="button" className="cloud-link-btn" onClick={() => goto('health')}>{t('cloud.railDetails') || 'All details'}</button>
+                                        </div>
+                                        <div className="cloud-hc-band" aria-hidden="true">
+                                            {['critical', 'warning', 'healthy', 'unknown', 'na'].map(st => cnt(st) > 0 && (
+                                                <div key={st} className={'seg-' + st} style={{ width: (cnt(st) / rows.length * 100) + '%' }} />
+                                            ))}
+                                        </div>
+                                        {rows.map((row, i) => (
+                                            <CloudHcRailRow key={row.id} row={row} t={t} meaning={row.id === 'agent' && guest && guest.os_pretty_name ? `${cloudHcMeaning(row.id, t)} · ${guest.os_pretty_name}${guest.kernel_version ? ' · ' + guest.kernel_version : ''}` : cloudHcMeaning(row.id, t)}
+                                                open={hcOpen[row.id] != null ? hcOpen[row.id] : (worst && row.id === worst.id && worst.state !== 'healthy' && worst.state !== 'na')}
+                                                onToggle={() => setHcOpen(o => ({ ...o, [row.id]: !(hcOpen[row.id] != null ? hcOpen[row.id] : (worst && row.id === worst.id && worst.state !== 'healthy' && worst.state !== 'na')) }))}
+                                                extraAction={row.link && <button type="button" className="cloud-link-btn" onClick={() => goto(row.link)}>{t('cloud.openTab') || 'Open'}</button>} />
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })()}
+
+                    {/* ── Betriebszustand ──────────────────────────────── */}
+                    {tab === 'health' && (() => {
+                        const rows = cloudGuestHealthRows({ r, isCt, cfg, guest, backupStatus: bsQ.error ? null : bsMap, recovery, ha: haList, migrate, t, onMigrateCheck: runMigrateCheck, migrateChecking: migrChecking });
+                        const cnt = (s) => rows.filter(x => x.state === s).length;
+                        return (
+                            <>
+                                <div className="cloud-hc-summary">
+                                    <div className="cloud-hc-band" aria-hidden="true">
+                                        {['critical', 'warning', 'healthy', 'unknown', 'na'].map(st => cnt(st) > 0 && (
+                                            <div key={st} className={'seg-' + st} style={{ width: (cnt(st) / rows.length * 100) + '%' }} />
+                                        ))}
+                                    </div>
+                                    <span className="cloud-hc-badge is-critical">{cnt('critical')} CRITICAL</span>
+                                    <span className="cloud-hc-badge is-warning">{cnt('warning')} WARNING</span>
+                                    <span className="cloud-hc-badge is-healthy">{cnt('healthy')} HEALTHY</span>
+                                    <span className="cloud-hc-badge is-unknown">{cnt('unknown')} UNKNOWN</span>
+                                    <span className="cloud-hc-badge is-na">{cnt('na')} N/A</span>
+                                </div>
+                                <div className="cloud-hc-list">{rows.map(row => (
+                                    <CloudHcRow key={row.id} title={row.title} state={row.state} desc={row.desc} checked={row.checked} impact={row.impact} meaning={cloudHcMeaning(row.id, t)}
+                                        action={
+                                            <span className="cloud-hc-actions">
+                                                {row.action}
+                                                {row.link && <button type="button" className="cloud-link-btn" onClick={() => goto(row.link)}>{t('cloud.openTab') || 'Open'}</button>}
+                                            </span>
+                                        } />
+                                ))}</div>
+                                <div className="cloud-card cloud-hc-legend cloud-cell-muted">
+                                    HEALTHY {t('cloud.hcL1') || '= proof present and passing'} · WARNING {t('cloud.hcL2') || '= deviation, not immediately critical'} · CRITICAL {t('cloud.hcL3') || '= failed or missing where required'} · UNKNOWN {t('cloud.hcL4') || '= no (current) data'} · N/A {t('cloud.hcL5') || '= not relevant for this guest'}
+                                </div>
+                            </>
+                        );
+                    })()}
+
+                    {/* ── Monitoring ───────────────────────────────────── */}
+                    {tab === 'monitor' && (
+                        <>
+                            <div className="cloud-toolbar">
+                                <div className="cloud-toolbar-left">
+                                    <div className="cloud-segment">
+                                        {[['hour', '1h'], ['day', '24h'], ['week', '7d'], ['month', '30d']].map(([id, lb]) => (
+                                            <button type="button" key={id} className={'cloud-segment-btn' + (tf === id ? ' is-active' : '')} onClick={() => setTf(id)}>{lb}</button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="cloud-toolbar-right">
+                                    <button type="button" className="cloud-btn cloud-btn-sm" onClick={rrdQ.reload}><Icons.RotateCw /> {t('refresh') || 'Refresh'}</button>
+                                    {act.has('openMetrics') && <button type="button" className="cloud-btn cloud-btn-sm" onClick={() => act.openMetrics(r)}><Icons.BarChart /> {t('cloud.openMetrics') || 'Detailed metrics'}</button>}
+                                </div>
+                            </div>
+                            {rrdQ.loading ? <div className="cloud-card cloud-table-note">{t('cloud.loading') || 'Loading…'}</div>
+                                : rrdQ.error ? <div className="cloud-card cloud-table-note">{rrdQ.error}</div>
+                                    : (() => {
+                                        const m = (rrdQ.data && rrdQ.data.metrics) || {};
+                                        const ts = (rrdQ.data && rrdQ.data.timestamps) || [];
+                                        const pctF = v => Math.round(v) + '%';
+                                        return (
+                                            <div className="cloud-chart-grid">
+                                                <CloudMetricChart title={t('cloud.colCpu') || 'CPU'} data={m.cpu} timestamps={ts} fmt={pctF} color="#22d3ee" />
+                                                <CloudMetricChart title={t('cloud.ram') || 'Memory'} data={m.memory} timestamps={ts} fmt={pctF} color="#a855f7"
+                                                    sub={(memUse && memMax) ? `${cloudFmtBytes(memUse)} / ${cloudFmtBytes(memMax)}` : null} />
+                                                <CloudMetricChart title={t('cloud.diskRead') || 'Disk read'} data={m.disk_read} timestamps={ts} fmt={cloudFmtRate} color="#38bdf8" />
+                                                <CloudMetricChart title={t('cloud.diskWrite') || 'Disk write'} data={m.disk_write} timestamps={ts} fmt={cloudFmtRate} color="#818cf8" />
+                                                <CloudMetricChart title={t('cloud.netIn') || 'Network in'} data={m.net_in} timestamps={ts} fmt={cloudFmtRate} color="#2dd4bf" />
+                                                <CloudMetricChart title={t('cloud.netOut') || 'Network out'} data={m.net_out} timestamps={ts} fmt={cloudFmtRate} color="#a3e635" />
+                                            </div>
+                                        );
+                                    })()}
+                        </>
+                    )}
+
+                    {/* ── Hardware (VM) / Configuration (CT) ────────────── */}
+                    {(tab === 'hardware' || tab === 'config') && (cfgQ.loading ? <div className="cloud-card cloud-table-note">{t('cloud.loading') || 'Loading…'}</div>
+                        : cfgQ.error ? <div className="cloud-card cloud-table-note">{cfgQ.error}</div>
+                            : !isCt ? (
+                                <div className="cloud-kv-grid">
+                                    {(pendQ.data && Array.isArray(pendQ.data.pending) ? pendQ.data.pending.filter(p => p && p.pending) : []).length > 0 && (
+                                        <div className="cloud-card cloud-hc-note cloud-hc-note-warn cloud-hw-wide">
+                                            <Icons.AlertTriangle />
+                                            <span>
+                                                <b>{t('cloud.pendingChanges') || 'Pending configuration changes'}:</b>{' '}
+                                                {(pendQ.data.pending || []).filter(p => p && p.pending).map(p => p.key).join(', ')}
+                                                {' '}{t('cloud.pendingHint') || '(applied on next reboot)'}
+                                            </span>
+                                        </div>
+                                    )}
+                                    <CloudKVPanel title={t('cloud.hwGeneral') || 'General'}>
+                                        <CloudKVRow label={t('cloud.colName') || 'Name'} value={(cfg && cfg.general && (cfg.general.name || cfg.general.hostname)) || r.name || ' - '} />
+                                        <CloudKVRow label={t('cloud.description') || 'Description'} value={(cfg && cfg.general && cfg.general.description) || ' - '} />
+                                        {tags.length > 0 && <CloudKVRow label={t('cloud.tags') || 'Tags'} value={<span className="cloud-table-tags">{tags.map(tg => <span className="cloud-chip cloud-chip-tag" key={tg}>{tg}</span>)}</span>} />}
+                                        <CloudKVRow label={t('cloud.colStatus') || 'Status'} value={<CloudStatusChip status={r.status} />} />
+                                    </CloudKVPanel>
+                                    <CloudKVPanel title={t('cloud.hwCpu') || 'CPU'}>
+                                        <CloudKVRow label={t('cloud.vcpu') || 'vCPUs'} value={hw.cores != null ? hw.cores : ' - '} />
+                                        <CloudKVRow label="Sockets" value={hw.sockets != null ? hw.sockets : ' - '} />
+                                        <CloudKVRow label={t('cloud.cpuType') || 'CPU type'} value={hw.cpu || ' - '} />
+                                        {hw.numa != null && <CloudKVRow label="NUMA" value={hw.numa ? 'on' : 'off'} />}
+                                    </CloudKVPanel>
+                                    <CloudKVPanel title={t('cloud.ram') || 'Memory'}>
+                                        <CloudKVRow label={t('cloud.allocated') || 'Allocated'} value={hw.memory != null ? hw.memory + ' MiB' : ' - '} />
+                                        <CloudKVRow label="Ballooning" value={hw.balloon != null ? (hw.balloon > 0 ? hw.balloon + ' MiB' : 'off') : ' - '} />
+                                    </CloudKVPanel>
+                                    <CloudKVPanel title={t('cloud.firmware') || 'Firmware'}>
+                                        <CloudKVRow label="BIOS / EFI" value={hw.bios || 'seabios (default)'} />
+                                        {hw.machine && <CloudKVRow label={t('cloud.machine') || 'Machine'} value={hw.machine} />}
+                                        {hw.vga && <CloudKVRow label="Display" value={hw.vga} />}
+                                        {raw.efidisk0 && <CloudKVRow label="EFI disk" value={<span className="cloud-table-mono">{raw.efidisk0}</span>} />}
+                                        {raw.tpmstate0 && <CloudKVRow label="TPM" value={<span className="cloud-table-mono">{raw.tpmstate0}</span>} />}
+                                    </CloudKVPanel>
+                                    <CloudKVPanel title={t('cloud.hwVirtio') || 'Virtualization'}>
+                                        {hw.scsihw && <CloudKVRow label="SCSI controller" value={hw.scsihw} />}
+                                        <CloudKVRow label={t('cloud.hcAgent') || 'Guest agent'} value={opts.agent ? 'enabled' : 'disabled'} />
+                                        {Object.keys(raw).some(k => /^ciuser|cipassword|sshkeys|cloud-init/.test(k)) && <CloudKVRow label="Cloud-Init" value={<span className="cloud-cell-muted">{t('cloud.cloudInitCfg') || 'configured'}</span>} />}
+                                    </CloudKVPanel>
+                                    <CloudKVPanel title={t('cloud.hwOptions') || 'Options'}>
+                                        <CloudKVRow label={t('cloud.bootOrder') || 'Boot order'} value={opts.boot || ' - '} />
+                                        {opts.bootdisk && <CloudKVRow label="Boot disk" value={opts.bootdisk} />}
+                                        <CloudKVRow label={t('cloud.startOnBoot') || 'Start on boot'} value={opts.onboot ? 'yes' : 'no'} />
+                                        <CloudKVRow label={t('cloud.hcAgent') || 'Guest agent'} value={opts.agent ? 'enabled' : 'disabled'} />
+                                        {opts.protection != null && <CloudKVRow label={t('cloud.protection') || 'Protection'} value={opts.protection ? 'on' : 'off'} />}
+                                    </CloudKVPanel>
+                                    {Object.keys(raw).some(k => /^(hostpci|usb)/.test(k)) && (
+                                        <CloudKVPanel title={t('cloud.hwPassthrough') || 'Passthrough'}>
+                                            {Object.keys(raw).filter(k => /^(hostpci|usb)/.test(k)).map(k => <CloudKVRow key={k} label={k} value={<span className="cloud-table-mono">{String(raw[k])}</span>} />)}
+                                        </CloudKVPanel>
+                                    )}
+                                    {act.has('openConfig') && <div className="cloud-hw-wide"><button type="button" className="cloud-btn" onClick={() => act.openConfig(r)}><Icons.Cog /> {t('cloud.editHardware') || 'Edit hardware'}</button></div>}
+                                </div>
+                            ) : (
+                                <div className="cloud-kv-grid">
+                                    {(pendQ.data && Array.isArray(pendQ.data.pending) ? pendQ.data.pending.filter(p => p && p.pending) : []).length > 0 && (
+                                        <div className="cloud-card cloud-hc-note cloud-hc-note-warn cloud-hw-wide">
+                                            <Icons.AlertTriangle />
+                                            <span>
+                                                <b>{t('cloud.pendingChanges') || 'Pending configuration changes'}:</b>{' '}
+                                                {(pendQ.data.pending || []).filter(p => p && p.pending).map(p => p.key).join(', ')}
+                                                {' '}{t('cloud.pendingHint') || '(applied on next reboot)'}
+                                            </span>
+                                        </div>
+                                    )}
+                                    <CloudKVPanel title={t('cloud.hwGeneral') || 'General'}>
+                                        <CloudKVRow label={t('cloud.colName') || 'Name'} value={(cfg && cfg.general && (cfg.general.hostname || cfg.general.name)) || r.name || ' - '} />
+                                        <CloudKVRow label={t('cloud.description') || 'Description'} value={(cfg && cfg.general && cfg.general.description) || ' - '} />
+                                        {tags.length > 0 && <CloudKVRow label={t('cloud.tags') || 'Tags'} value={<span className="cloud-table-tags">{tags.map(tg => <span className="cloud-chip cloud-chip-tag" key={tg}>{tg}</span>)}</span>} />}
+                                        <CloudKVRow label={t('cloud.colStatus') || 'Status'} value={<CloudStatusChip status={r.status} />} />
+                                    </CloudKVPanel>
+                                    <CloudKVPanel title={t('cloud.hwCpu') || 'CPU'}>
+                                        <CloudKVRow label={t('cloud.vcpu') || 'Cores'} value={hw.cores != null ? hw.cores : ' - '} />
+                                        <CloudKVRow label="CPU limit" value={hw.cpulimit || ' - '} />
+                                        <CloudKVRow label="CPU units" value={hw.cpuunits || ' - '} />
+                                    </CloudKVPanel>
+                                    <CloudKVPanel title={t('cloud.ram') || 'Memory'}>
+                                        <CloudKVRow label={t('cloud.allocated') || 'Memory'} value={hw.memory != null ? hw.memory + ' MiB' : ' - '} />
+                                        <CloudKVRow label="Swap" value={hw.swap != null ? hw.swap + ' MiB' : ' - '} />
+                                    </CloudKVPanel>
+                                    <CloudKVPanel title={t('cloud.ctMode') || 'Mode'}>
+                                        <CloudKVRow label="Unprivileged" value={opts.unprivileged ? 'yes' : 'no'} />
+                                        {opts.features && <CloudKVRow label="Features" value={<span className="cloud-table-mono">{String(opts.features)}</span>} />}
+                                        <CloudKVRow label={t('cloud.startOnBoot') || 'Start on boot'} value={opts.onboot ? 'yes' : 'no'} />
+                                        {opts.startup && <CloudKVRow label="Startup order" value={<span className="cloud-table-mono">{String(opts.startup)}</span>} />}
+                                        {opts.protection != null && <CloudKVRow label={t('cloud.protection') || 'Protection'} value={opts.protection ? 'on' : 'off'} />}
+                                    </CloudKVPanel>
+                                    <div className="cloud-card cloud-table-card cloud-hw-wide">
+                                        <div className="cloud-toolbar"><div className="cloud-toolbar-left"><span className="cloud-toolbar-title">{t('cloud.ctMounts') || 'Root filesystem & mount points'}</span></div></div>
+                                        <div className="cloud-table-scroll"><table className="cloud-table">
+                                            <thead><tr><th>{t('cloud.hwDevice') || 'Device'}</th><th>{t('cloud.datastores') || 'Datastore'}</th><th>{t('cloud.colSize') || 'Size'}</th><th>Content</th></tr></thead>
+                                            <tbody>{disks.map(d => (
+                                                <tr className="cloud-table-row" key={d.id}>
+                                                    <td className="cloud-table-mono">{d.id}</td>
+                                                    <td>{d.storage || ' - '}</td>
+                                                    <td>{d.size || ' - '}</td>
+                                                    <td className="cloud-table-mono cloud-cell-muted">{d.volume || d.value || ''}</td>
+                                                </tr>
+                                            ))}</tbody>
+                                        </table></div>
+                                        {disks.length === 0 && <div className="cloud-empty">{t('cloud.noDisks') || 'No mount points reported.'}</div>}
+                                    </div>
+                                    <div className="cloud-card cloud-table-card cloud-hw-wide">
+                                        <div className="cloud-toolbar"><div className="cloud-toolbar-left"><span className="cloud-toolbar-title">{t('cloud.hwNics') || 'Network'}</span></div></div>
+                                        <div className="cloud-table-scroll"><table className="cloud-table">
+                                            <thead><tr><th>{t('cloud.hwDevice') || 'Device'}</th><th>Bridge</th><th>VLAN</th><th>MAC</th><th>Firewall</th></tr></thead>
+                                            <tbody>{nets.map(n => (
+                                                <tr className="cloud-table-row" key={n.id}>
+                                                    <td className="cloud-table-mono">{n.id}</td>
+                                                    <td>{n.bridge || ' - '}</td>
+                                                    <td>{n.tag || ' - '}</td>
+                                                    <td className="cloud-table-mono">{n.mac || ' - '}</td>
+                                                    <td>{n.firewall ? 'on' : 'off'}</td>
+                                                </tr>
+                                            ))}</tbody>
+                                        </table></div>
+                                    </div>
+                                    {act.has('openConfig') && <div className="cloud-hw-wide"><button type="button" className="cloud-btn" onClick={() => act.openConfig(r)}><Icons.Cog /> {t('cloud.tabConfig') || 'Configure'}</button></div>}
+                                </div>
+                            ))}
+
+                    {/* ── Storage ──────────────────────────────────────── */}
+                    {tab === 'disks' && (
+                        <>
+                            <div className="cloud-card">
+                                <div className="cloud-meter-block">
+                                    <div className="cloud-meter-label">{t('cloud.disk') || 'Guest storage (root)'} · {diskPct}%</div>
+                                    <div className="cloud-meter cloud-meter-lg"><div style={{ width: diskPct + '%', background: cloudThresholdColor(diskPct) }} /></div>
+                                    <div className="cloud-meter-sub">{t('cloud.storageHint') || 'Used'}: {cloudFmtBytes(diskUse)} · {t('cloud.allocated') || 'Allocated'}: {cloudFmtBytes(diskMax)}</div>
+                                </div>
+                                <div className="cloud-table-note">{t('cloud.storageNote') || 'Used = actual usage reported for the guest root; allocated = virtual size. Per-disk usage is not reported by the cluster.'}</div>
+                            </div>
+                            <div className="cloud-card cloud-table-card">
+                                <div className="cloud-toolbar">
+                                    <div className="cloud-toolbar-left">
+                                        <span className="cloud-toolbar-title">{isCt ? (t('cloud.ctMounts') || 'Root filesystem & mount points') : (t('cloud.hwDisks') || 'Virtual disks')}</span>
+                                        {dsQ.loading && <span className="cloud-cell-muted">{t('cloud.loading') || 'Loading…'}</span>}
+                                    </div>
+                                    {act.has('openConfig') && (
+                                        <div className="cloud-toolbar-right">
+                                            <button type="button" className="cloud-btn cloud-btn-sm" onClick={() => act.openConfig(r)}><Icons.Cog /> {t('edit') || 'Edit'}</button>
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="cloud-table-scroll"><table className="cloud-table">
+                                    <thead><tr><th>{t('cloud.hwDevice') || 'Device'}</th><th>{t('cloud.bus') || 'Bus'}</th><th>{t('cloud.datastores') || 'Datastore'}</th><th>{t('cloud.dsType') || 'Type'}</th><th>{t('cloud.colSize') || 'Size'}</th><th>Format</th><th>Cache</th><th>IO thread</th><th>{t('cloud.dsHealth') || 'Datastore'}</th></tr></thead>
+                                    <tbody>{(cfg ? disks : []).map(d => {
+                                        const ds = dsFind(d.storage);
+                                        return (
+                                            <tr className="cloud-table-row" key={d.id}>
+                                                <td className="cloud-table-mono">{d.id}</td>
+                                                <td>{String(d.id || '').replace(/\d+$/, '') || ' - '}</td>
+                                                <td>{d.storage || ' - '}</td>
+                                                <td>{ds ? (ds.type || ' - ') : (dsQ.data ? ' - ' : '')}</td>
+                                                <td>{d.size || ' - '}</td>
+                                                <td>{d.format || ' - '}</td>
+                                                <td>{d.cache || 'default'}</td>
+                                                <td>{d.iothread ? 'on' : ' - '}</td>
+                                                <td>{ds ? (ds.active !== false && ds.enabled !== 0 ? <span className="cloud-hc-badge is-healthy">ACTIVE</span> : <span className="cloud-hc-badge is-critical">OFFLINE</span>) : <span className="cloud-cell-muted"> - </span>}</td>
+                                            </tr>
+                                        );
+                                    })}</tbody>
+                                </table></div>
+                                {cfgQ.loading && <div className="cloud-table-note">{t('cloud.loading') || 'Loading…'}</div>}
+                                {cfg && disks.length === 0 && <div className="cloud-empty">{t('cloud.noDisks') || 'No disks reported.'}</div>}
+                            </div>
+                            {(() => {
+                                const names = [...new Set(disks.map(d => d.storage).filter(Boolean))];
+                                const cards = names.map(n => ({ name: n, ds: dsFind(n) })).filter(x => x.ds);
+                                if (!cards.length) return null;
+                                return (
+                                    <div className="cloud-hc-list">
+                                        {cards.map(({ name, ds }) => {
+                                            const pct = ds.used_fraction != null ? Math.round(Number(ds.used_fraction) * 100) : (ds.total ? Math.round((ds.used || 0) / ds.total * 100) : null);
+                                            return (
+                                                <div className="cloud-card cloud-ds-mini" key={name}>
+                                                    <div className="cloud-chart-head">
+                                                        <span className="cloud-chart-title">{name}</span>
+                                                        <span className="cloud-cell-muted">{ds.type || ''}{ds.shared ? ' · shared' : ''}</span>
+                                                    </div>
+                                                    {pct != null && (
+                                                        <div className="cloud-meter-block">
+                                                            <div className="cloud-meter-label">{pct}%</div>
+                                                            <div className="cloud-meter"><div style={{ width: pct + '%', background: cloudThresholdColor(pct) }} /></div>
+                                                            <div className="cloud-meter-sub">{cloudFmtBytes(ds.used)} / {cloudFmtBytes(ds.total)} · {t('cloud.free') || 'free'} {cloudFmtBytes(ds.avail)}</div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                );
+                            })()}
+                        </>
+                    )}
+
+                    {/* ── Network ──────────────────────────────────────── */}
+                    {tab === 'network' && (
+                        <>
+                            <div className="cloud-card cloud-table-card">
+                                <div className="cloud-toolbar">
+                                    <div className="cloud-toolbar-left"><span className="cloud-toolbar-title">{t('cloud.hwNics') || 'Interfaces'}</span></div>
+                                    {act.has('openConfig') && <div className="cloud-toolbar-right"><button type="button" className="cloud-btn cloud-btn-sm" onClick={() => act.openConfig(r)}><Icons.Cog /> {t('cloud.editHardware') || 'Edit'}</button></div>}
+                                </div>
+                                <div className="cloud-table-scroll"><table className="cloud-table">
+                                    <thead><tr><th>{t('cloud.hwDevice') || 'Device'}</th><th>Model</th><th>Bridge</th><th>VLAN</th><th>MAC</th><th>Firewall</th></tr></thead>
+                                    <tbody>{(cfg ? nets : []).map(n => (
+                                        <tr className="cloud-table-row" key={n.id}>
+                                            <td className="cloud-table-mono">{n.id}</td>
+                                            <td>{n.model || ' - '}</td>
+                                            <td>{n.bridge || ' - '}</td>
+                                            <td>{n.tag || ' - '}</td>
+                                            <td className="cloud-table-mono">{n.mac || ' - '}</td>
+                                            <td>{n.firewall ? 'on' : 'off'}</td>
+                                        </tr>
+                                    ))}</tbody>
+                                </table></div>
+                                {cfgQ.loading && <div className="cloud-table-note">{t('cloud.loading') || 'Loading…'}</div>}
+                                {cfg && nets.length === 0 && <div className="cloud-empty">{t('cloud.noNics') || 'No network cards reported.'}</div>}
+                            </div>
+                            <div className="cloud-card">
+                                <div className="cloud-chart-head"><span className="cloud-chart-title">{t('cloud.ipAddresses') || 'IP addresses'}</span></div>
+                                {guest && Array.isArray(guest.interfaces) && guest.interfaces.length > 0 ? (
+                                    <div className="cloud-table-scroll"><table className="cloud-table">
+                                        <thead><tr><th>{t('cloud.iface') || 'Interface'}</th><th>MAC</th><th>IP</th></tr></thead>
+                                        <tbody>{guest.interfaces.map((n, i) => (
+                                            <tr className="cloud-table-row" key={i}>
+                                                <td>{n.name || ' - '}</td>
+                                                <td className="cloud-table-mono">{n.mac || ' - '}</td>
+                                                <td className="cloud-table-mono">{(n.ips || []).map(ip => ip.address).join(', ') || ' - '}</td>
+                                            </tr>
+                                        ))}</tbody>
+                                    </table></div>
+                                ) : guest && Array.isArray(guest.ip_addresses) && guest.ip_addresses.length > 0 ? (
+                                    <div className="cloud-table-mono">{guest.ip_addresses.join(', ')}</div>
+                                ) : (
+                                    <div className="cloud-empty">{isCt ? (t('cloud.noIpLxc') || 'No IPs reported by the cluster for this container.') : (t('cloud.noIp') || 'Not reported (guest agent required)')}</div>
+                                )}
+                            </div>
+                        </>
+                    )}
+
+                    {/* ── Schutz (Snapshots / Backups / Replication) ───── */}
+                    {tab === 'protection' && (
+                        <div className="cloud-toolbar" style={{ marginBottom: 'var(--space-sm)' }}>
+                            <div className="cloud-toolbar-left">
+                                <div className="cloud-segment">
+                                    {[['snapshots', t('cloud.tabSnapshots') || 'Snapshots'], ['backups', t('cloud.tabBackups') || 'Backups'], ['replication', t('cloud.tabReplication') || 'Replication']].map(([id, lb]) => (
+                                        <button type="button" key={id} className={'cloud-segment-btn' + (protSub === id ? ' is-active' : '')} onClick={() => setProtSub(id)}>{lb}</button>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    {tab === 'protection' && protSub === 'snapshots' && (
+                        <div className="cloud-card cloud-table-card">
+                            <div className="cloud-toolbar">
+                                <div className="cloud-toolbar-left">
+                                    <span className="cloud-toolbar-title">{t('cloud.tabSnapshots') || 'Snapshots'}</span>
+                                    {snapQ.data && Array.isArray(snapQ.data) && <span className="cloud-count-chip">{snapQ.data.length}</span>}
+                                </div>
+                                <div className="cloud-toolbar-right">
+                                    {act.has('snapshot') && <button type="button" className="cloud-btn cloud-btn-sm cloud-btn-primary" onClick={() => act.snapshot(r)}><Icons.Camera /> {t('cloud.snapCreate') || 'Create snapshot'}</button>}
+                                    <button type="button" className="cloud-btn cloud-btn-sm" onClick={snapQ.reload}><Icons.RotateCw /> {t('refresh') || 'Refresh'}</button>
+                                </div>
+                            </div>
+                            {snapQ.loading ? <div className="cloud-table-note">{t('cloud.loading') || 'Loading…'}</div>
+                                : snapQ.error ? <div className="cloud-table-note">{snapQ.error}</div>
+                                    : (snapQ.data || []).length === 0 ? <CloudEmpty icon="Camera" title={t('cloud.snapNone') || 'No snapshots'} text={t('cloud.snapNoneText') || 'Snapshots of this guest will appear here.'} />
+                                        : <div className="cloud-table-scroll"><table className="cloud-table">
+                                            <thead><tr><th>{t('cloud.colName') || 'Name'}</th><th>{t('cloud.description') || 'Description'}</th><th>{t('cloud.created') || 'Created'}</th><th>RAM</th><th>{t('cloud.colSize') || 'Size'}</th><th className="cloud-th-actions"></th></tr></thead>
+                                            <tbody>{(snapQ.data || []).map(sn => (
+                                                <tr className="cloud-table-row" key={sn.name}>
+                                                    <td className="cloud-table-name"><span className="cloud-table-name-text">{sn.name}</span></td>
+                                                    <td className="cloud-cell-muted">{sn.description || ' - '}</td>
+                                                    <td className="cloud-table-mono cloud-cell-muted">{cloudFmtTs(sn.snaptime) || ' - '}</td>
+                                                    <td>{sn.vmstate ? 'included' : ' - '}</td>
+                                                    <td>{sn.disk_size ? cloudFmtBytes(sn.disk_size) : ' - '}</td>
+                                                    <td className="cloud-td-actions" onClick={(e) => e.stopPropagation()}>
+                                                        {can('vm.snapshot') && (
+                                                            <CloudActionMenu items={[
+                                                                { label: t('cloud.snapRollback') || 'Rollback', icon: 'RotateCcw', onClick: () => snapAct(sn, 'rollback') },
+                                                                { label: t('cloud.snapDelete') || 'Delete', icon: 'Trash2', onClick: () => snapAct(sn, 'delete'), danger: true },
+                                                            ]} label="Snapshot actions" />
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            ))}</tbody>
+                                        </table></div>}
                         </div>
                     )}
 
-                    {tab === 'capacity' && (
-                        <div className="cloud-card">
-                            <div className="cloud-meter-block">
-                                <div className="cloud-meter-label">{t('cloud.colCpu') || 'CPU'} · {cpuP}%</div>
-                                <div className="cloud-meter cloud-meter-lg"><div style={{ width: cpuP + '%', background: 'var(--cloud-accent)' }} /></div>
-                                <div className="cloud-meter-sub">{Number(r.maxcpu) || 0} {t('cloud.cores') || 'vCPU'}</div>
-                            </div>
-                            <div className="cloud-meter-block">
-                                <div className="cloud-meter-label">{t('cloud.ram') || 'Memory'} · {memP}%</div>
-                                <div className="cloud-meter cloud-meter-lg"><div style={{ width: memP + '%', background: '#a855f7' }} /></div>
-                                <div className="cloud-meter-sub">{cloudFmtBytes(memUse)} / {cloudFmtBytes(memMax)}</div>
-                            </div>
-                            {diskMax > 0 && (
-                                <div className="cloud-meter-block">
-                                    <div className="cloud-meter-label">{t('cloud.disk') || 'Disk'} · {Math.round(diskUse / diskMax * 100)}%</div>
-                                    <div className="cloud-meter cloud-meter-lg"><div style={{ width: Math.round(diskUse / diskMax * 100) + '%', background: '#0ea5e9' }} /></div>
-                                    <div className="cloud-meter-sub">{cloudFmtBytes(diskUse)} / {cloudFmtBytes(diskMax)}</div>
+                    {/* ── Backups ──────────────────────────────────────── */}
+                    {tab === 'protection' && protSub === 'backups' && (
+                        <>
+                            {bs && (
+                                <div className="cloud-card">
+                                    <div className="cloud-chart-head"><span className="cloud-chart-title">{t('cloud.hcBackup') || 'Backup status'}</span></div>
+                                    <div className="cloud-bak-summary">
+                                        <span className={'cloud-hc-badge ' + (bs.status === 'ok' ? 'is-healthy' : bs.status === 'warn' ? 'is-warning' : 'is-critical')}>{String(bs.status || ' - ').toUpperCase()}</span>
+                                        {bs.last_backup_ts && <span>{t('cloud.hcLastBackup') || 'Last backup'}: {cloudFmtTs(bs.last_backup_ts)}</span>}
+                                        {bs.count_30d != null && <span>30d: {bs.count_30d}</span>}
+                                        {bs.encrypted && <span>{t('cloud.hcEncrypted') || 'encrypted'}</span>}
+                                        {bs.last_verify_ts && <span>{t('cloud.hcVerified') || 'verified'}: {cloudFmtTs(bs.last_verify_ts)}</span>}
+                                    </div>
                                 </div>
                             )}
-                            <button type="button" className="cloud-btn" onClick={() => act.openMetrics(r)} style={{ marginTop: 'var(--space-md)' }}><Icons.BarChart /> {t('cloud.openMetrics') || 'Open detailed metrics'}</button>
+                            {can('backup.create') && backupStorages.length > 0 && (
+                                <div className="cloud-card cloud-bak-create">
+                                    <div className="cloud-chart-head"><span className="cloud-chart-title">{t('cloud.bakCreate') || 'Create backup'}</span></div>
+                                    <div className="cloud-bak-form">
+                                        <label className="cloud-oci-label">{t('cloud.datastores') || 'Storage'}</label>
+                                        <select className="cloud-input" value={bForm.storage} onChange={e => setBForm(f => ({ ...f, storage: e.target.value }))}>
+                                            <option value=""> - </option>
+                                            {backupStorages.map(s => <option key={s} value={s}>{s}</option>)}
+                                        </select>
+                                        <label className="cloud-oci-label">{t('cloud.bakMode') || 'Mode'}</label>
+                                        <select className="cloud-input" value={bForm.mode} onChange={e => setBForm(f => ({ ...f, mode: e.target.value }))}>
+                                            <option value="snapshot">snapshot</option>
+                                            <option value="suspend">suspend</option>
+                                            <option value="stop">stop</option>
+                                        </select>
+                                        <label className="cloud-oci-label">{t('cloud.bakNotes') || 'Notes'}</label>
+                                        <input className="cloud-input" value={bForm.notes} onChange={e => setBForm(f => ({ ...f, notes: e.target.value }))} placeholder={t('cloud.bakNotesPh') || 'optional'} />
+                                        <button type="button" className="cloud-btn cloud-btn-primary" disabled={!bForm.storage || bBusy} onClick={createBackup}>
+                                            <Icons.Archive /> {bBusy ? (t('cloud.hcChecking') || 'Working…') : (t('cloud.bakStart') || 'Start backup')}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                            <div className="cloud-card cloud-table-card">
+                                <div className="cloud-toolbar">
+                                    <div className="cloud-toolbar-left">
+                                        <span className="cloud-toolbar-title">{t('cloud.bakHistory') || 'Backup history'}</span>
+                                        {bakQ.data && Array.isArray(bakQ.data) && <span className="cloud-count-chip">{bakQ.data.length}</span>}
+                                    </div>
+                                    <div className="cloud-toolbar-right">
+                                        <button type="button" className="cloud-btn cloud-btn-sm" onClick={bakQ.reload}><Icons.RotateCw /> {t('refresh') || 'Refresh'}</button>
+                                    </div>
+                                </div>
+                                {bakQ.loading ? <div className="cloud-table-note">{t('cloud.loading') || 'Loading…'}</div>
+                                    : bakQ.error ? <div className="cloud-table-note">{bakQ.error}</div>
+                                        : (bakQ.data || []).length === 0 ? <CloudEmpty icon="Archive" title={t('cloud.bakNone') || 'No backups'} text={t('cloud.bakNoneText') || 'Created backups of this guest will appear here.'} />
+                                            : <div className="cloud-table-scroll"><table className="cloud-table">
+                                                <thead><tr><th>{t('cloud.created') || 'Created'}</th><th>{t('cloud.bakTarget') || 'Target'}</th><th>{t('cloud.file') || 'File'}</th><th>{t('cloud.colSize') || 'Size'}</th><th>Format</th><th className="cloud-th-actions"></th></tr></thead>
+                                                <tbody>{(bakQ.data || []).map((b, i) => (
+                                                    <tr className="cloud-table-row" key={b.volid || i}>
+                                                        <td className="cloud-table-mono cloud-cell-muted">{cloudFmtTs(b.ctime) || ' - '}</td>
+                                                        <td>{b.storage || ' - '}</td>
+                                                        <td className="cloud-table-mono" title={b.filename}>{b.filename || b.volid}</td>
+                                                        <td>{b.size ? cloudFmtBytes(b.size) : ' - '}</td>
+                                                        <td>{b.format || ' - '}</td>
+                                                        <td className="cloud-td-actions" onClick={(e) => e.stopPropagation()}>
+                                                            <CloudActionMenu items={[
+                                                                ...(can('backup.restore') ? [{ label: t('cloud.bakRestore') || 'Restore…', icon: 'RotateCcw', onClick: () => setWiz(b) }] : []),
+                                                                ...(can('backup.delete') ? [{ label: t('cloud.bakDelete') || 'Delete', icon: 'Trash2', danger: true, onClick: () => delBackup(b) }] : []),
+                                                            ]} label="Backup actions" />
+                                                        </td>
+                                                    </tr>
+                                                ))}</tbody>
+                                            </table></div>}
+                            </div>
+                        </>
+                    )}
+
+                    {/* ── Replication ─────────────────────────────────── */}
+                    {tab === 'protection' && protSub === 'replication' && (
+                        <div className="cloud-card cloud-table-card">
+                            <div className="cloud-toolbar">
+                                <div className="cloud-toolbar-left">
+                                    <span className="cloud-toolbar-title">{t('cloud.tabReplication') || 'Replication'}</span>
+                                    {replQ.data && Array.isArray(replQ.data) && <span className="cloud-count-chip">{replQ.data.length}</span>}
+                                </div>
+                                <div className="cloud-toolbar-right">
+                                    <button type="button" className="cloud-btn cloud-btn-sm" onClick={replQ.reload}><Icons.RotateCw /> {t('refresh') || 'Refresh'}</button>
+                                </div>
+                            </div>
+                            {replQ.loading ? <div className="cloud-table-note">{t('cloud.loading') || 'Loading…'}</div>
+                                : replQ.error ? <div className="cloud-table-note">{replQ.error}</div>
+                                    : (replQ.data || []).length === 0 ? (
+                                        <CloudEmpty icon="Copy" title={t('cloud.replNone') || 'No replication jobs'}
+                                            text={t('cloud.replNoneText') || 'This guest has no storage replication jobs. They are managed in the cluster Replication area.'} />
+                                    ) : <div className="cloud-table-scroll"><table className="cloud-table">
+                                        <thead><tr><th>{t('cloud.colJob') || 'Job'}</th><th>{t('cloud.colTarget') || 'Target'}</th><th>{t('cloud.colSchedule') || 'Schedule'}</th><th>{t('cloud.lastSync') || 'Last sync'}</th><th>{t('cloud.nextSync') || 'Next sync'}</th><th>{t('cloud.colStatus') || 'Status'}</th></tr></thead>
+                                        <tbody>{(replQ.data || []).map(j => (
+                                            <tr className="cloud-table-row cloud-table-row-static" key={j.id}>
+                                                <td className="cloud-table-mono">{j.id}</td>
+                                                <td>{j.target || ' - '}</td>
+                                                <td>{j.schedule || ' - '}{j.disabled ? <span className="cloud-cell-muted"> ({t('cloud.disabled') || 'disabled'})</span> : ''}</td>
+                                                <td className="cloud-table-mono cloud-cell-muted">{cloudFmtTs(j.last_sync) || ' - '}</td>
+                                                <td className="cloud-table-mono cloud-cell-muted">{cloudFmtTs(j.next_sync) || ' - '}</td>
+                                                <td>
+                                                    {j.state === 'error' || j.last_state === 'error' ? <span className="cloud-hc-badge is-critical">ERROR</span>
+                                                        : (j.state === 'syncing' || j.last_state === 'syncing') ? <span className="cloud-hc-badge is-unknown">SYNCING</span>
+                                                        : (j.state === 'ok' || j.last_state === 'ok') ? <span className="cloud-hc-badge is-healthy">OK</span>
+                                                        : <span className="cloud-hc-badge is-unknown">{String(j.state || j.last_state || ' - ').toUpperCase()}</span>}
+                                                </td>
+                                            </tr>
+                                        ))}</tbody>
+                                    </table></div>}
+                            <div className="cloud-table-note">{t('cloud.replNote') || 'Jobs are created and managed centrally in the cluster Replication area.'}</div>
                         </div>
                     )}
 
-                    {tab === 'network' && (
-                        <div className="cloud-card">
-                            <div className="cloud-kv-panel">
-                                <CloudKVRow label={t('cloud.ip') || 'IP address'} value={r.ip || (t('cloud.noIp') || 'Not reported (guest agent required)')} />
-                                {Array.isArray(r.ip_addresses) && r.ip_addresses.length > 1 && (
-                                    <CloudKVRow label={t('cloud.allIps') || 'All IPs'} value={r.ip_addresses.join(', ')} />
-                                )}
-                                <CloudKVRow label={t('cloud.colNode') || 'Host'} value={r.node} />
+                    {/* ── Tasks & Events ───────────────────────────────── */}
+                    {tab === 'tasks' && (
+                        <div className="cloud-card cloud-table-card">
+                            <div className="cloud-toolbar">
+                                <div className="cloud-toolbar-left"><span className="cloud-toolbar-title">{t('cloud.tabTasks') || 'Tasks & Events'}</span></div>
+                                <div className="cloud-toolbar-right">
+                                    <button type="button" className="cloud-btn cloud-btn-sm" onClick={taskQ.reload}><Icons.RotateCw /> {t('refresh') || 'Refresh'}</button>
+                                </div>
                             </div>
-                            <button type="button" className="cloud-btn" onClick={() => act.openConfig(r)} style={{ marginTop: 'var(--space-md)' }}><Icons.Cog /> {t('cloud.editHardware') || 'Edit network hardware'}</button>
+                            {taskQ.loading ? <div className="cloud-table-note">{t('cloud.loading') || 'Loading…'}</div>
+                                : taskQ.error ? <div className="cloud-table-note">{taskQ.error}</div>
+                                    : (taskQ.data || []).length === 0 ? <CloudEmpty icon="Clock" title={t('cloud.noRecentTasks') || 'No recent tasks'} text={t('cloud.tasksNoneText') || 'Actions performed on this guest will appear here.'} />
+                                        : <div className="cloud-table-scroll"><table className="cloud-table">
+                                            <thead><tr><th></th><th>{t('cloud.colType') || 'Type'}</th><th>{t('cloud.colId') || 'Target'}</th><th>{t('cloud.colNode') || 'Host'}</th><th>{t('cloud.colUser') || 'User'}</th><th>{t('cloud.colWhen') || 'When'}</th><th>{t('cloud.colResult') || 'Result'}</th></tr></thead>
+                                            <tbody>{(taskQ.data || []).map((tk, i) => (
+                                                <tr className="cloud-table-row" key={tk.upid || i}>
+                                                    <td><span className={'cloud-task-dot ' + (tk.status === 'running' ? 'is-run' : tk.exitstatus === 'OK' || tk.status === 'OK' ? 'is-ok' : 'is-err')} /></td>
+                                                    <td>{tk.type || 'task'}</td>
+                                                    <td className="cloud-table-mono">{tk.id || ''}</td>
+                                                    <td>{tk.node || ''}</td>
+                                                    <td>{tk.pegaprox_user || tk.user || ''}</td>
+                                                    <td className="cloud-table-mono cloud-cell-muted">{tk.starttime ? cloudFmtTs(tk.starttime) : ''}</td>
+                                                    <td className="cloud-cell-muted">{tk.exitstatus || (tk.status === 'running' ? (t('cloud.running') || 'running') : ' - ')}</td>
+                                                </tr>
+                                            ))}</tbody>
+                                        </table></div>}
+                            <div className="cloud-table-note">{t('cloud.tasksNote') || 'Cluster task log filtered to this guest. Events beyond the retained task window live in the timeline.'}</div>
                         </div>
+                    )}
+
+                    {wiz && (
+                        <BackupRestoreWizard
+                            clusterId={cid} snapshot={wiz} datastoreName={wiz.storage}
+                            nodes={[r.node]} storages={backupStorages.map(backupAbsStorage)}
+                            authFetch={authFetch} apiUrl={API_URL}
+                            onClose={() => setWiz(null)}
+                            onStarted={() => { setWiz(null); addToast && addToast(t('cloud.taskStarted') || 'Task started', 'success'); }}
+                        />
                     )}
                 </div>
             );
         }
 
         // ── datastores ─────────────────────────────────────────────
+        // datastore detail: capacity, contents, assigned guests - everything from the
+        // real content endpoint; guests are matched by the vmid encoded in the volid.
         function CloudDatastores({ datastores, t }) {
             const ds = datastores || { shared: [], local: {} };
             const list = [];
@@ -3090,7 +4089,9 @@
 
             let body;
             if (detailRes && (section === 'vms' || section === 'containers')) {
-                body = <CloudInstanceDetail resource={stamp(detailRes)} act={act} onBack={() => setDetailRes(null)} t={T} />;
+                body = <CloudInstanceDetail resource={stamp(detailRes)} act={act} onBack={() => setDetailRes(null)} t={T}
+                    authFetch={authFetch} clusterName={selectedCluster ? (selectedCluster.display_name || selectedCluster.name) : null}
+                    holdsPerm={holdsPerm} addToast={addToast} />;
             } else {
                 switch (section) {
                     case 'overview':
