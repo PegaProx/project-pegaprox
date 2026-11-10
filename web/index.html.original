@@ -116,6 +116,47 @@
     MK: Mar 2026 - reworked for #118, Tailwind is always local now
     -->
     
+    <!-- LW Nov 2026 - English is part of the bundle, every other language is web/i18n/<lang>.json.
+         build.sh puts a hash of each file in here; the language this page opens in is asked for
+         right away, next to the libraries, and contexts.js takes it from there (same origin,
+         so air-gap is no matter). The dev build (build.sh --restore) keeps them all inline. -->
+    <script>
+        window.__pegaproxI18nFiles = {};
+        (function() {
+            var files = window.__pegaproxI18nFiles;
+            var has = function(l) { return l === 'en' || (typeof l === 'string' && Object.prototype.hasOwnProperty.call(files, l)); };
+            if (!Object.keys(files).length) return;
+            // the order of contexts.js: what the cached lock pins (nobody is signed in yet), the
+            // user's own pick, the browser's languages, German. A wrong guess only costs a file
+            var lang = '';
+            try {
+                var lock = JSON.parse(localStorage.getItem('pegaprox-ui-lock') || 'null');
+                if (lock && has(lock.language)) lang = lock.language;
+            } catch (_) {}
+            try {
+                var own = localStorage.getItem('pegaprox-language');
+                if (!lang && has(own)) lang = own;
+            } catch (_) {}
+            try {
+                var prefs = [].concat(navigator.languages || [], navigator.language || []);
+                for (var i = 0; i < prefs.length && !lang; i++) {
+                    var parts = String(prefs[i] || '').toLowerCase().split(/[-_]/);
+                    // Simplified Chinese only, as _detectBrowserLang
+                    if (parts[0] === 'zh' && ['hant', 'tw', 'hk', 'mo'].some(function(p) { return parts.indexOf(p) >= 0; })) continue;
+                    if (has(parts[0])) lang = parts[0];
+                }
+            } catch (_) {}
+            lang = lang || 'de';
+            if (lang === 'en') return;
+            var boot = { lang: lang };
+            boot.data = fetch('/i18n/' + lang + '.json?v=' + files[lang], { credentials: 'same-origin' })
+                .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+            // contexts.js says so when it fails, an unhandled rejection here would only add noise
+            boot.data.catch(function() {});
+            window.__pegaproxI18nBoot = boot;
+        })();
+    </script>
+
     <!-- Smart Script Loader - CDN first, local fallback for offline -->
     <!-- SRI Hashes for supply chain security - verify these match official releases -->
     <script>

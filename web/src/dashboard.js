@@ -33810,19 +33810,28 @@
             return <PegaProxDashboard />;
         }
 
-        ReactDOM.render(
-            <LanguageProvider>
-                <AuthProvider>
-                    <App />
-                </AuthProvider>
-            </LanguageProvider>,
-            document.getElementById('root')
-        );
-        
-        // LW: Hide loading screen after React renders
-        const loadingScreen = document.getElementById('loading-screen');
-        if (loadingScreen) {
-            loadingScreen.style.opacity = '0';
-            loadingScreen.style.transition = 'opacity 0.3s ease';
-            setTimeout(() => loadingScreen.remove(), 300);
+        function mountApp() {
+            ReactDOM.render(
+                <LanguageProvider>
+                    <AuthProvider>
+                        <App />
+                    </AuthProvider>
+                </LanguageProvider>,
+                document.getElementById('root')
+            );
+
+            // LW: Hide loading screen after React renders
+            const loadingScreen = document.getElementById('loading-screen');
+            if (loadingScreen) {
+                loadingScreen.style.opacity = '0';
+                loadingScreen.style.transition = 'opacity 0.3s ease';
+                setTimeout(() => loadingScreen.remove(), 300);
+            }
         }
+
+        // LW Nov 2026 - first the language the page opens in (contexts.js), so a German login form
+        // does not start out in English. English waits for nothing, and a file that takes longer
+        // than 4 s comes in after the page started in English.
+        const openingLoad = openingLanguageLoad(4000);
+        if (openingLoad) openingLoad.then(mountApp);
+        else mountApp();

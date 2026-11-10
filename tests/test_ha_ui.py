@@ -591,6 +591,14 @@ class _FakeServer:
                 with open(fp, 'rb') as fh:
                     return route.fulfill(status=200, body=fh.read(), headers={'Content-Type': ctype})
             return route.fulfill(status=404, body='')
+        # LW Nov 2026 - the languages besides English are files next to the bundle (web/Dev/build.sh)
+        lang_file = re.fullmatch(r'/i18n/([a-z]{2})\.json', path)
+        if lang_file:
+            fp = os.path.join(ROOT, 'web', 'i18n', f'{lang_file.group(1)}.json')
+            if os.path.isfile(fp):
+                with open(fp, 'rb') as fh:
+                    return route.fulfill(status=200, body=fh.read(), headers={'Content-Type': 'application/json'})
+            return route.fulfill(status=404, body='')
         if not path.startswith('/api/'):
             return route.fulfill(status=404, body='')
         self.calls.append((req.method, path))

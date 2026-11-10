@@ -60,6 +60,13 @@ def _bundle():
     return open(path, encoding='utf-8').read()
 
 
+def _german():
+    """LW Nov 2026 - German is no longer in the bundle, build.sh writes it to web/i18n/de.json."""
+    import os
+    with open(os.path.join(os.path.dirname(__file__), '..', 'web', 'i18n', 'de.json'), encoding='utf-8') as fh:
+        return json.load(fh)
+
+
 # --- 5. live VM changes promise no "applies now" ---------------------------------------------------
 
 @pytest.fixture(scope='module')
@@ -120,11 +127,16 @@ def test_the_live_texts_in_english_and_german():
                  'Proxmox VE can keep a limit pending instead, then the save reports the error."',
                  '"The medium of a CD/DVD drive is changed live: the change applies at once when Proxmox VE accepts it. '
                  'Proxmox VE can keep it pending instead, then the save reports the error."',
-                 'Die Änderung wirkt sofort, wenn Proxmox VE sie auf dem Node annimmt. Proxmox VE kann sie stattdessen wartend lassen',
-                 '"Bandbreiten- und IOPS-Limits gehen an die laufende Disk: Sie wirken sofort, wenn Proxmox VE sie annimmt.',
-                 'crVcWhyDiskWritten:"Disk settings such as backup or replication are written to the configuration at once',
-                 'crVcWhyDiskWritten:"Disk-Einstellungen wie Backup oder Replikation werden sofort in die Konfiguration geschrieben'):
+                 'crVcWhyDiskWritten:"Disk settings such as backup or replication are written to the configuration at once'):
         assert want in b, want
+    de = _german()
+    texts = list(de.values())
+    assert any('Die Änderung wirkt sofort, wenn Proxmox VE sie auf dem Node annimmt. Proxmox VE kann sie stattdessen '
+               'wartend lassen' in v for v in texts)
+    assert any(v.startswith('Bandbreiten- und IOPS-Limits gehen an die laufende Disk: Sie wirken sofort, wenn '
+                            'Proxmox VE sie annimmt.') for v in texts)
+    assert de['crVcWhyDiskWritten'].startswith(
+        'Disk-Einstellungen wie Backup oder Replikation werden sofort in die Konfiguration geschrieben')
 
 
 # --- 6. Apply on the management path: type the node name -------------------------------------------
@@ -219,7 +231,8 @@ def test_runtime_the_summary_badge_says_it_judged_the_data_read(opener):
     assert page.locator('[data-cr-ns]').get_attribute('data-cr-ns-overall') == 'normal'
     assert page.locator('[data-cr-ns-badge]').inner_text().strip() == 'No warning in the data read'
     b = _bundle()
-    assert 'crNsOvNormal:"No warning in the data read"' in b and 'crNsOvNormal:"Keine Warnung in den gelesenen Daten"' in b
+    assert 'crNsOvNormal:"No warning in the data read"' in b
+    assert _german()['crNsOvNormal'] == 'Keine Warnung in den gelesenen Daten'
     _no_errors(app)
 
 

@@ -47,6 +47,11 @@ class _RealBackend:
             ctype = 'text/css' if fp.endswith('.css') else 'application/javascript'
             with open(fp, 'rb') as fh:
                 return route.fulfill(status=200, body=fh.read(), headers={'Content-Type': ctype})
+        # LW Nov 2026 - the language files come from the app's own route
+        if bare.startswith('/i18n/'):
+            resp = self.client.get(path, base_url=BASE)
+            return route.fulfill(status=resp.status_code, body=resp.get_data(),
+                                 headers={'Content-Type': resp.headers.get('Content-Type', 'text/plain')})
         # a live stream never ends, and there is nothing behind it here
         if not bare.startswith('/api/') or bare.startswith('/api/sse'):
             return route.abort()

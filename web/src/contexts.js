@@ -85,20 +85,95 @@
             return !!lock && (lock.admins || role !== 'admin');
         }
 
+        // LW Nov 2026 - English is part of the bundle, the other languages are web/i18n/<lang>.json.
+        // build.sh puts a hash of each file into the page (window.__pegaproxI18nFiles, in the
+        // <head>), which already asked for the language it opens in. Any other is fetched when it
+        // is wanted, and the page keeps the language it shows until the file is in; one that
+        // cannot be had reads in English. The dev build has them all inline and no files.
+        const I18N_FILES = window.__pegaproxI18nFiles || {};
+        const _languageLoads = {};
+        const _languageFailed = new Set();
+        const _languageWarned = new Set();
+
+        function _fetchLanguage(lang) {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 15000);
+            return fetch(`/i18n/${lang}.json?v=${encodeURIComponent(I18N_FILES[lang])}`, {
+                credentials: 'same-origin', signal: ctrl.signal
+            }).then(r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+            }).finally(() => clearTimeout(timer));
+        }
+
+        // true once translations[lang] is there, false when it cannot be had. Never rejects;
+        // a failure is said once per language and tried again the next time it is wanted
+        function loadLanguage(lang) {
+            if (translations[lang]) return Promise.resolve(true);
+            if (!SUPPORTED_LANGS.includes(lang) || !Object.prototype.hasOwnProperty.call(I18N_FILES, lang)) {
+                return Promise.resolve(false);
+            }
+            if (_languageLoads[lang]) return _languageLoads[lang];
+            let data;
+            const early = window.__pegaproxI18nBoot;
+            if (early && early.lang === lang && early.data) {
+                window.__pegaproxI18nBoot = null;
+                data = early.data;
+            } else {
+                data = _fetchLanguage(lang);
+            }
+            const load = Promise.resolve(data).then(got => {
+                if (!got || typeof got !== 'object' || Array.isArray(got)) throw new Error('not a language file');
+                translations[lang] = got;
+                _languageFailed.delete(lang);
+                return true;
+            }).catch(e => {
+                _languageFailed.add(lang);
+                if (!_languageWarned.has(lang)) {
+                    _languageWarned.add(lang);
+                    console.warn(`[i18n] the ${lang} language file did not load, English stands in:`, (e && e.message) || e);
+                }
+                return false;
+            }).then(ok => {
+                delete _languageLoads[lang];
+                return ok;
+            });
+            _languageLoads[lang] = load;
+            return load;
+        }
+
+        // the user's own language: the stored one, the browser's, German (LanguageProvider)
+        function _ownLanguage() {
+            try {
+                const saved = localStorage.getItem('pegaprox-language');
+                if (saved && SUPPORTED_LANGS.includes(saved)) return saved;
+            } catch (_) {}
+            const detected = _detectBrowserLang();
+            if (detected) return detected;
+            return 'de';
+        }
+
+        // the language the page opens in, as LanguageProvider starts out: the one the cached lock
+        // pins (nobody is signed in yet, so it holds), else the user's own
+        function openingLanguage() {
+            const lock = cachedUiLock();
+            return (lock.language && uiLockBinds(lock, null)) ? lock.language : _ownLanguage();
+        }
+
+        // dashboard.js mounts once this settles: the opening language is in, or ms went by (then
+        // the page starts in English and switches when the file comes). null: nothing to wait for
+        function openingLanguageLoad(ms) {
+            const lang = openingLanguage();
+            if (translations[lang]) return null;
+            return Promise.race([loadLanguage(lang), new Promise(resolve => setTimeout(resolve, ms))]);
+        }
+
         function LanguageProvider({ children }) {
             // Persist language preference in localStorage.
             // NS May 2026 (#389): validate stored value against allowlist
             // (defence in depth — protects against tampered localStorage), and
             // when no valid value is stored, fall back to browser language.
-            const [language, setLanguage] = useState(() => {
-                try {
-                    const saved = localStorage.getItem('pegaprox-language');
-                    if (saved && SUPPORTED_LANGS.includes(saved)) return saved;
-                } catch (_) {}
-                const detected = _detectBrowserLang();
-                if (detected) return detected;
-                return 'de';
-            });
+            const [language, setLanguage] = useState(_ownLanguage);
 
             // `language` above stays the user's own choice. A lock only covers it, so lifting
             // the lock brings that choice back. lockRole is the signed-in account's role as
@@ -142,12 +217,29 @@
             useEffect(() => { loadUiLock(); }, [loadUiLock]);
 
             const lockedLanguage = (uiLock.language && uiLockBinds(uiLock, lockRole)) ? uiLock.language : '';
-            const shown = lockedLanguage || language;
+            const wanted = lockedLanguage || language;
+            // LW Nov 2026 - while its file is on the way the page stays in the language it shows
+            // (English at first), one that failed shows in English through t() below
+            const [languagesIn, setLanguagesIn] = useState(0);
+            const shownBefore = useRef('en');
+            const pending = !translations[wanted] && !_languageFailed.has(wanted)
+                && Object.prototype.hasOwnProperty.call(I18N_FILES, wanted);
+            const shown = pending ? shownBefore.current : wanted;
+            shownBefore.current = shown;
+            // a file that failed is asked for again when its language is picked again, not by
+            // the first render after the <head> failed to get it
+            const wantedBefore = useRef(null);
+            useEffect(() => {
+                const again = wantedBefore.current !== null;
+                wantedBefore.current = wanted;
+                if (translations[wanted] || (_languageFailed.has(wanted) && !again)) return;
+                loadLanguage(wanted).then(() => setLanguagesIn(n => n + 1));
+            }, [wanted]);
 
             // Translation function with English fallback
             const t = useCallback((key) => {
                 return translations[shown]?.[key] || translations['en']?.[key] || key;
-            }, [shown]);
+            }, [shown, languagesIn]);
 
             // Internal: validate + persist locally. Used by both code paths.
             const _setAndPersist = useCallback((lang) => {
@@ -467,7 +559,8 @@
                                 setRequires2FASetup(false);
                             }
                             // NS: Mar 2026 - apply user's saved language (server overrides local)
-                            if (d.user?.language && translations[d.user.language]) {
+                            // LW Nov 2026 - its language file may still be to come (loadLanguage)
+                            if (d.user?.language && SUPPORTED_LANGS.includes(d.user.language)) {
                                 applyLanguage(d.user.language);
                             }
                             // NS: Apply user's theme or default
@@ -586,7 +679,7 @@
                             setRequires2FASetup(true);
                         }
                         // NS: Mar 2026 - apply user's saved language on login
-                        if (data.user?.language && translations[data.user.language]) {
+                        if (data.user?.language && SUPPORTED_LANGS.includes(data.user.language)) {
                             applyLanguage(data.user.language);
                         }
                         // NS: Apply user's theme (with fallback to default)
