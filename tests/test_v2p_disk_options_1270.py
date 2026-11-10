@@ -20,11 +20,12 @@ from test_sec_migrations_paths import V2P, _v2p_body, v2p_route  # noqa: F401
 
 
 def _run(monkeypatch, extra, **kw):
-    """One migration whose dialog sent `extra` on top of the harness config."""
+    """One migration whose dialog sent `extra` on top of the harness config. Discard is
+    switched off unless `extra` says otherwise, its own tests are in the #1246 file."""
     orig = v2p.V2PMigrationTask
 
     def task(*a, config=None, **k):
-        return orig(*a, config={**config, **extra}, **k)
+        return orig(*a, config={**config, 'disk_discard': 'ignore', **extra}, **k)
     monkeypatch.setattr(v2p, 'V2PMigrationTask', task)
     if kw.get('mode') == 'snapshot_zero':
         monkeypatch.setattr(v2p, '_snapshot_zero_v2p_delta_loop', lambda *a, **k: (True, 1, []))
@@ -79,7 +80,8 @@ def test_no_io_thread_elsewhere(monkeypatch, extra, bus):
 
 def _opts(**cfg):
     return v2p.V2PMigrationTask('t1', 'vw1', 'vm-42', 'pve-cl', 'pve1', 'local-lvm',
-                                config={'disk_iothread': False, **cfg})._disk_attach_opts()
+                                config={'disk_iothread': False, 'disk_discard': 'ignore',
+                                        **cfg})._disk_attach_opts()
 
 
 @pytest.mark.parametrize('cache,want', [
