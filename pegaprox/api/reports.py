@@ -24,7 +24,7 @@ from pegaprox.models.permissions import *
 
 from pegaprox.utils.auth import require_auth, load_users
 from pegaprox.utils.rbac import get_user_clusters
-from pegaprox.api.helpers import check_cluster_access, load_server_settings, scope_vm_rows, require_unconfined
+from pegaprox.api.helpers import bounded_limit, check_cluster_access, load_server_settings, scope_vm_rows, require_unconfined
 from pegaprox.background.metrics import (load_metrics_history, start_metrics_collector,
                                          history_range, load_metrics_range)
 from pegaprox.background.syslog_server import DB_FILE, SEVERITY_MAP
@@ -661,7 +661,8 @@ def get_top_vms():
     pass for the whole one. The header is absent when every cluster was read.
     """
     metric = request.args.get('metric', 'cpu')
-    limit = int(request.args.get('limit', 10))
+    # JB Nov 2026 - the cap is the guest count of a whole fleet, so no ranking comes back cut
+    limit = bounded_limit(request.args.get('limit'), 10, 10000)
 
     # NS: Feb 2026 - tenant filtering for multi-tenant security
     # sec (audit): was the raw stored record, so an admin-owned viewer-scoped token inherited the

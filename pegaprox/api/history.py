@@ -17,7 +17,7 @@ from pegaprox.models.tasks import balancer_cooldown
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.background.scheduler import load_scheduled_tasks, save_scheduled_tasks, execute_scheduled_task
-from pegaprox.api.helpers import get_connected_manager, check_cluster_access
+from pegaprox.api.helpers import bounded_limit, get_connected_manager, check_cluster_access
 
 bp = Blueprint('history', __name__)
 
@@ -251,7 +251,8 @@ def get_migration_history():
     # Optional filters
     cluster_id = request.args.get('cluster_id')
     vmid = request.args.get('vmid')
-    limit = int(request.args.get('limit', 100))
+    # JB Nov 2026 - load_migration_history reads 1000 rows at most
+    limit = bounded_limit(request.args.get('limit'), 100, 1000)
     
     migrations = config.get('migrations', [])
     
