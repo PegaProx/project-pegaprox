@@ -18249,6 +18249,14 @@ echo "AGENT_INSTALLED_OK"
             if vm_type == 'qemu':
                 url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/qemu/{vmid}/config"
 
+                # JB Nov 2026 - the ID is free text in the dialog. PVE takes a PUT on a used slot as a
+                # swap: the old disk is unplugged (live on a running guest) and parked as unusedN
+                current = self._api_get(url)
+                if current.status_code != 200:
+                    return {'success': False, 'error': f'Could not read the config of VM {vmid}'}
+                if disk_id in (current.json().get('data') or {}):
+                    return {'success': False, 'error': f'{disk_id} is already in use, pick a free slot'}
+
                 # Build disk string - format is storage:size (size in GB without unit)
                 disk_str = f"{storage}:{size}"
 
