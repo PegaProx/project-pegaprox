@@ -766,6 +766,175 @@ def _rollup_status(per_cluster):
 # ---------------------------------------------------------------------------
 # routes
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# MK Nov 2026 (#1154) - guided EVPN setup: per-node prerequisite checks over SSH.
+# Read-only: one batched SSH command per node, no state changes, no installs.
+# ---------------------------------------------------------------------------
+
+# All checks in ONE shell command per node (label=value pairs separated by
+# newlines). This avoids 8+ sequential SSH round-trips per node and parses
+# the labeled output client-side.
+_PREREQ_SCRIPT = r"""
+echo "pve=$(pveversion 2>/dev/null | head -1)"
+echo "frr_pkg=$(dpkg -l frr 2>/dev/null | grep -c '^ii')"
+echo "frr_py=$(dpkg -l frr-pythontools 2>/dev/null | grep -c '^ii')"
+echo "frr_srv=$(systemctl is-active frr 2>/dev/null || echo unknown)"
+echo "ifup2=$(dpkg -l ifupdown2 2>/dev/null | grep -c '^ii')"
+echo "src_d=$(grep -cE '^[[:space:]]*source[[:space:]]+/etc/network/interfaces\.d/' /etc/network/interfaces 2>/dev/null || true)"
+echo "fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)"
+echo "ntp=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || echo unknown)"
+""".strip()
+
+
+def _ssh_read(mgr, node, cmd, timeout=20):
+    """(stdout, err) - one read-only SSH command via the existing helper."""
+    from pegaprox.utils.ssh import _pve_node_exec
+    try:
+        code, out, err = _pve_node_exec(mgr, node, cmd, timeout=timeout)
+        if code == 0:
+            return out.strip(), None
+        return '', (err or f'exit {code}')[:200]
+    except Exception as exc:
+        return '', str(exc)[:200]
+
+
+def _parse_prereq_output(raw):
+    """Parse labeled key=value lines from the batched SSH output."""
+    vals = {}
+    for line in (raw or '').splitlines():
+        if '=' in line:
+            k, _, v = line.partition('=')
+            vals[k.strip()] = v.strip()
+    return vals
+
+
+_PREREQ_LABELS = [
+    ('pve',       'PVE version (EVPN needs >= 8.0)', 'fail', ''),
+    ('frr_pkg',   'FRR (BGP daemon) installed',       'fail', 'apt install frr'),
+    ('frr_py',    'FRR python tools (frr-reload)',    'fail', 'apt install frr-pythontools'),
+    ('frr_srv',   'FRR service running',              'warn', 'systemctl enable --now frr'),
+    ('ifup2',     'ifupdown2 in use',                 'fail', 'apt install ifupdown2'),
+    ('src_d',     'interfaces.d sourced',              'fail', 'echo "source /etc/network/interfaces.d/*" >> /etc/network/interfaces'),
+    ('fwd',       'IP forwarding enabled',            'warn', "echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-evpn.conf && sysctl --system"),
+    ('ntp',       'Time sync (NTP)',                  'warn', 'timedatectl set-ntp true'),
+]
+
+
+def _unknown_check(node_name, reason):
+    """A node we did not or could not probe: every item unknown, one reason."""
+    items = [{'id': key, 'label': label, 'status': 'unknown', 'detail': reason, 'fix_hint': fix}
+             for key, label, _level, fix in _PREREQ_LABELS]
+    return {'node': node_name, 'items': items, 'mgmt_ip': None, 'ip_error': reason}
+
+
+def _check_node_prereqs(mgr, node_name):
+    """One node's prerequisite checklist from a single batched SSH call."""
+    out, err = _ssh_read(mgr, node_name, _PREREQ_SCRIPT)
+    if err:
+        # Node unreachable / circuit breaker / SSH timeout
+        return _unknown_check(node_name, err)
+
+    vals = _parse_prereq_output(out)
+    items = []
+    for key, label, fail_level, fix_hint in _PREREQ_LABELS:
+        raw = vals.get(key, '')
+        if key == 'pve':
+            # EVPN needs PVE >= 8; a version we cannot read is unknown, not bad
+            m = re.match(r'pve-manager/(\d+)\.', raw)
+            status = 'ok' if (m and int(m.group(1)) >= 8) else ('fail' if m else 'unknown')
+        else:
+            ok = (raw == 'active' if key == 'frr_srv'
+                  else raw == '1' if key == 'fwd'
+                  else raw == 'yes' if key == 'ntp'
+                  else raw not in ('0', '', 'unknown'))
+            status = 'ok' if ok else fail_level
+        items.append({'id': key, 'label': label, 'status': status,
+                      'detail': raw[:60] if raw else 'no data',
+                      'fix_hint': fix_hint})
+
+    # What PegaProx reaches the node on; the UI labels it as the management
+    # address so nobody mistakes it for the EVPN underlay address. _get_node_ip
+    # also refreshes the stored address; nodes without a per-node credential
+    # row have no stored address at all, so a stored-only read would answer
+    # nothing on cluster-wide-credential installs.
+    try:
+        mgmt_ip = mgr._get_node_ip(node_name)
+    except Exception:
+        mgmt_ip = None
+
+    return {'node': node_name, 'items': items, 'mgmt_ip': mgmt_ip,
+            'ip_error': None if mgmt_ip else 'IP not discovered'}
+
+
+@bp.route('/api/multi-sdn/prerequisites', methods=['POST'])
+@require_auth(perms=['sdn.manage', 'admin.settings'])
+def check_prerequisites():
+    """Per-node EVPN prerequisite checks for #1154.
+
+    Read-only SSH reads. The caller must reach every member cluster
+    unconfined - these probes expose host-level state and IPs, which a
+    VM-scoped caller has no business seeing (#1154 review).
+    """
+    data = request.get_json(silent=True) or {}
+    raw_ids = data.get('cluster_ids') or []
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return jsonify({'error': 'cluster_ids must be a non-empty list'}), 400
+    if not all(isinstance(cid, str) and cid.strip() for cid in raw_ids):
+        return jsonify({'error': 'cluster_ids must be a list of cluster ids'}), 400
+    # dedupe, keep the caller's order; cap the fan-out
+    seen = set()
+    cluster_ids = [cid for cid in raw_ids if not (cid in seen or seen.add(cid))]
+    if len(cluster_ids) > 50:
+        return jsonify({'error': 'cluster_ids is limited to 50 clusters'}), 400
+
+    # the probes are read-only, but the gate is mutating=True on purpose:
+    # host-level SSH output and node IPs are not for VM-ACL-scoped callers
+    deny = _require_members_access(cluster_ids, mutating=True)
+    if deny:
+        return deny
+
+    from pegaprox.utils.concurrent import run_concurrent_dict
+    results, node_ips, errors = [], {}, []
+    for cid in cluster_ids:
+        mgr, reason = _resolve_member(cid)
+        if reason:
+            errors.append({'cluster_id': cid, 'reason': reason})
+            continue
+
+        cluster_name = getattr(getattr(mgr, 'config', None), 'name', None) or str(cid)
+        # mgr.nodes is a cached property: {node_name: info_dict}; only online
+        # nodes get an SSH round-trip, offline ones are answered from here
+        node_map = getattr(mgr, 'nodes', None) or {}
+        online = [name for name, d in node_map.items()
+                  if isinstance(d, dict) and d.get('status') == 'online']
+        tasks = {n: (lambda nn=n: _check_node_prereqs(mgr, nn)) for n in online}
+        probed = run_concurrent_dict(tasks, timeout=30) if tasks else {}
+        for node_name in node_map:
+            info = node_map.get(node_name) or {}
+            if probed.get(node_name) is not None:
+                check = probed[node_name]
+            else:
+                why = 'node offline' if info.get('status') != 'online' else 'timeout'
+                check = _unknown_check(node_name, why)
+            check['cluster_id'] = cid
+            check['cluster_name'] = cluster_name
+            results.append(check)
+            if check.get('mgmt_ip'):
+                # key by cluster id: two clusters can carry the same name
+                node_ips[f'{cid}:{node_name}'] = check['mgmt_ip']
+
+    ok_count = sum(1 for r in results if all(i['status'] in ('ok', 'warn') for i in r['items']))
+    return jsonify({
+        'checks': results,
+        'node_ips': node_ips,
+        'errors': errors,
+        'summary': {'nodes_checked': len(results), 'nodes_ok': ok_count,
+                    'nodes_with_issues': len(results) - ok_count},
+    })
+
+
 @bp.route('/api/multi-sdn/vnets', methods=['GET'])
 @require_auth(perms=['node.view'])
 def list_multi_vnets():
