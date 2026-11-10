@@ -14897,7 +14897,8 @@ echo "AGENT_INSTALLED_OK"
                 disk_options.append("discard=on")
             if vm_config.get('disk_iothread') and disk_type == 'scsi':
                 disk_options.append("iothread=1")
-            if vm_config.get('disk_ssd'):
+            # JB Nov 2026 - VirtIO Block has no ssd option, PVE refuses the whole create with it
+            if vm_config.get('disk_ssd') and disk_type in ('scsi', 'sata', 'ide'):
                 disk_options.append("ssd=1")
             
             if disk_options:
@@ -14944,8 +14945,8 @@ echo "AGENT_INSTALLED_OK"
                 if add_disk.get('iothread', True) and add_type == 'scsi':
                     add_opts.append("iothread=1")
                 
-                # SSD emulation: per-disk
-                if add_disk.get('ssd', False):
+                # SSD emulation: per-disk, on the buses that have it
+                if add_disk.get('ssd', False) and add_type in ('scsi', 'sata', 'ide'):
                     add_opts.append("ssd=1")
                 
                 if add_opts:
