@@ -47150,6 +47150,53 @@
         ]
       }
     },
+    "/api/multi-sdn/prerequisites": {
+      "post": {
+        "operationId": "multi_sdn.check_prerequisites_post",
+        "tags": [
+          "multi_sdn"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Per-node EVPN prerequisite checks for #1154.",
+        "description": "Read-only SSH reads. The caller must reach every member cluster\nunconfined - these probes expose host-level state and IPs, which a\nVM-scoped caller has no business seeing (#1154 review).",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "sdn.manage",
+          "admin.settings"
+        ]
+      }
+    },
     "/api/multi-sdn/vnets": {
       "get": {
         "operationId": "multi_sdn.list_multi_vnets_get",
