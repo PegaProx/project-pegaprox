@@ -10877,6 +10877,8 @@
                 cloudCfgTipReassign: 'Festplatte anderer VM zuordnen',
                 cloudCfgTipResize: 'Festplattengröße ändern',
                 cloudCfgUnsavedSec: 'Ungespeicherte Änderungen (lokal)',
+                deepScan: 'Tiefenscan',
+                syncAllMissing: 'Alle fehlenden synchronisieren',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Zurzeit kein Leader - Änderungen und Automatisierung pausieren. Konsolen funktionieren weiter.',
                 haTakeover: 'Leader {leader} übernimmt - Änderungen gehen in {n} s weiter.',
@@ -22286,6 +22288,8 @@
                 cloudCfgTipReassign: 'Assign the disk to a different VM',
                 cloudCfgTipResize: 'Resize the disk',
                 cloudCfgUnsavedSec: 'Unsaved changes (local)',
+                deepScan: 'Deep scan',
+                syncAllMissing: 'Sync all missing',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'No leader at the moment - changes and automation are paused. Consoles keep working.',
                 haTakeover: 'Leader {leader} is taking over - changes resume in {n} s.',
@@ -33480,6 +33484,8 @@
                 cloudCfgTipReassign: '将磁盘分配给其他虚拟机',
                 cloudCfgTipResize: '调整磁盘大小',
                 cloudCfgUnsavedSec: '未保存的更改（本地）',
+                deepScan: '深度扫描',
+                syncAllMissing: '同步所有缺失项',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: '当前没有主实例 - 更改和自动化已暂停。控制台仍可继续使用。',
                 haTakeover: '主实例 {leader} 正在接管 - 更改将在 {n} 秒后恢复。',
@@ -44671,6 +44677,8 @@
                 cloudCfgTipReassign: 'Przypisz dysk innej maszynie',
                 cloudCfgTipResize: 'Zmień rozmiar dysku',
                 cloudCfgUnsavedSec: 'Niezapisane zmiany (lokalnie)',
+                deepScan: 'Skanowanie głębokie',
+                syncAllMissing: 'Synchronizuj wszystkie brakujące',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Obecnie brak lidera - zmiany i automatyzacja są wstrzymane. Konsole działają dalej.',
                 haTakeover: 'Lider {leader} przejmuje - zmiany wrócą za {n} s.',
@@ -56059,6 +56067,8 @@
                 cloudCfgTipReassign: 'Assigner le disque à une autre VM',
                 cloudCfgTipResize: 'Redimensionner le disque',
                 cloudCfgUnsavedSec: 'Changements non enregistrés (locaux)',
+                deepScan: 'Analyse approfondie',
+                syncAllMissing: 'Synchroniser les manquants',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Aucun leader pour le moment - les modifications et l\'automatisation sont en pause. Les consoles continuent de fonctionner.',
                 haTakeover: 'Le leader {leader} prend le relais - les modifications reprennent dans {n} s.',
@@ -67473,6 +67483,8 @@
                 cloudCfgTipReassign: 'Asignar el disco a otra VM',
                 cloudCfgTipResize: 'Cambiar el tamaño del disco',
                 cloudCfgUnsavedSec: 'Cambios sin guardar (local)',
+                deepScan: 'Análisis profundo',
+                syncAllMissing: 'Sincronizar los que faltan',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Ahora mismo no hay líder - los cambios y la automatización están en pausa. Las consolas siguen funcionando.',
                 haTakeover: 'El líder {leader} está tomando el relevo - los cambios se reanudan en {n} s.',
@@ -78866,6 +78878,8 @@
                 cloudCfgTipReassign: 'Atribuir o disco a outra VM',
                 cloudCfgTipResize: 'Redimensionar o disco',
                 cloudCfgUnsavedSec: 'Alterações não salvas (local)',
+                deepScan: 'Varredura profunda',
+                syncAllMissing: 'Sincronizar os ausentes',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Sem líder no momento - alterações e automação estão pausadas. Os consoles continuam funcionando.',
                 haTakeover: 'O líder {leader} está assumindo - as alterações voltam em {n} s.',
@@ -90245,6 +90259,8 @@
                 cloudCfgTipReassign: '디스크를 다른 VM에 할당',
                 cloudCfgTipResize: '디스크 크기 변경',
                 cloudCfgUnsavedSec: '저장되지 않은 변경 (로컬)',
+                deepScan: '심층 검사',
+                syncAllMissing: '누락 항목 모두 동기화',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: '현재 리더 없음 - 변경과 자동화가 일시 중지됨. 콘솔은 계속 작동합니다.',
                 haTakeover: '리더 {leader}이(가) 넘겨받는 중 - {n}초 후 변경이 재개됩니다.',
@@ -101614,6 +101630,8 @@
                 cloudCfgTipReassign: "Assegna il disco a un'altra VM",
                 cloudCfgTipResize: 'Ridimensiona il disco',
                 cloudCfgUnsavedSec: 'Modifiche non salvate (locali)',
+                deepScan: 'Scansione approfondita',
+                syncAllMissing: 'Sincronizza i mancanti',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Al momento nessun leader - modifiche e automazione sono in pausa. Le console continuano a funzionare.',
                 haTakeover: 'Il leader {leader} sta subentrando - le modifiche riprendono tra {n} s.',

@@ -422,6 +422,9 @@
                 ] },
                 { label: t('storage'), items: [
                     { id: 'datastores', label: t('datastores'), icon: 'Database' },
+                    { id: 'swexplorer', label: t('cloud.swExplorer') || 'Storage Explorer', icon: 'FolderOpen' },
+                    { id: 'swiso', label: t('cloud.swIso') || 'ISO & Templates', icon: 'Disc' },
+                    { id: 'swsla', label: t('cloud.swSla') || 'Backup-SLA', icon: 'ShieldCheck' },
                     { id: 'storage', label: t('cloudNavStorageConfig'), icon: 'HardDrive' },
                     { id: 'pools', label: t('cloudNavResourcePools'), icon: 'Layers' },
                     { id: 'ceph', label: t('ceph'), icon: 'Database' },
@@ -1150,6 +1153,564 @@
         }
 
         // ── instances list (VMs / Containers) ──────────────────────
+
+        function cloudDsFlatten(ds) {
+            const out = [];
+            if (!ds) return out;
+            (Array.isArray(ds.shared) ? ds.shared : Object.values(ds.shared || {})).forEach(d => { if (d) out.push({ ...d, scope: 'shared' }); });
+            const local = ds.local && typeof ds.local === 'object' ? ds.local : {};
+            Object.keys(local).forEach(node => (Array.isArray(local[node]) ? local[node] : []).forEach(d => { if (d) out.push({ ...d, scope: 'local', _node: node }); }));
+            return out;
+        }
+
+        function cloudDsState(d) {
+            if (d.active === 0 || d.active === false || d.enabled === 0) return 'unreachable';
+            if (!Number(d.total)) return 'rawblock';
+            if (Array.isArray(d.active_on) && Array.isArray(d.inactive_on) && d.inactive_on.length > 0) return 'partial';
+            return 'ok';
+        }
+
+        // ── Explorer ────────────────────────────────────────────────
+
+        function CloudSwDialog({ title, onClose, children, wide }) {
+            return (
+                <div className="cloud-oci-overlay" onClick={onClose}>
+                    <div className={'cloud-oci-dialog' + (wide ? ' cloud-sw-wide' : '')} onClick={(e) => e.stopPropagation()}>
+                        <div className="cloud-cfg-head" style={{ gridArea: 'auto' }}>
+                            <div className="cloud-cfg-head-left"><div className="cloud-cfg-head-title"><h2>{title}</h2></div></div>
+                            <div className="cloud-cfg-head-actions">
+                                <button type="button" className="cloud-icon-btn" onClick={onClose}><Icons.X /></button>
+                            </div>
+                        </div>
+                        <div className="cloud-sw-dialog-body">{children}</div>
+                    </div>
+                </div>
+            );
+        }
+
+        // flatten the datastores response into one list with scope/node
+
+        function CloudSwRescan({ clusterId, sel, authFetch, addToast, t, onClose, onDone }) {
+            const [deep, setDeep] = React.useState(false);
+            const [pvresize, setPvresize] = React.useState(false);
+            const [busy, setBusy] = React.useState(false);
+            const run = async () => {
+                setBusy(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/storage/${encodeURIComponent(sel.name)}/rescan`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ deep_scan: deep, pvresize }),
+                    });
+                    const j = r ? await r.json().catch(() => ({})) : {};
+                    if (r && r.ok) { addToast(t('cloud.taskStarted') || 'Task started', 'success'); onDone(); onClose(); }
+                    else addToast(j.error || (t('cloud.actionFailed') || 'Action failed'), 'error');
+                } finally { setBusy(false); }
+            };
+            return (
+                <CloudSwDialog title={(t('rescan') || 'Rescan') + ' · ' + sel.name} onClose={onClose}>
+                    <div className="cloud-sw-form">
+                        <label className="cloud-cell-muted" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <input type="checkbox" checked={deep} onChange={(e) => setDeep(e.target.checked)} /> {t('deepScan') || 'Deep scan'}
+                        </label>
+                        <label className="cloud-cell-muted" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <input type="checkbox" checked={pvresize} onChange={(e) => setPvresize(e.target.checked)} /> pvresize
+                        </label>
+                        <div className="cloud-sw-form-actions">
+                            <button type="button" className="cloud-btn" onClick={onClose} disabled={busy}>{t('cancel')}</button>
+                            <button type="button" className="cloud-btn cloud-btn-primary" disabled={busy} onClick={run}>{t('rescan') || 'Rescan'}</button>
+                        </div>
+                    </div>
+                </CloudSwDialog>
+            );
+        }
+
+
+        // ── Storage Balancing ─────────────────────────────────────
+
+        function CloudStorageExplorer({ clusterId, authFetch, addToast, isAdmin, holdsPerm, t, sharedDatastores }) {
+            const listQ = useCloudData(clusterId != null ? `${API_URL}/clusters/${clusterId}/datastores` : null);
+            const datastores = listQ.data || sharedDatastores || null;
+            const list = React.useMemo(() => cloudDsFlatten(datastores), [datastores]);
+
+            const [query, setQuery] = React.useState('');
+            const [typeF, setTypeF] = React.useState('all');
+            const [scopeF, setScopeF] = React.useState('all');
+            const [selKey, setSelKey] = React.useState(null);     // {storage, scope, node}
+            const [nodeView, setNodeView] = React.useState('');   // shared: content node switcher
+            const [detTab, setDetTab] = React.useState('overview'); // overview | content | details
+            const [contentFilter, setContentFilter] = React.useState('');
+
+            const q = query.trim().toLowerCase();
+            const types = React.useMemo(() => [...new Set(list.map(d => d.type).filter(Boolean))].sort(), [list]);
+            const view = list.filter(d =>
+                (typeF === 'all' || d.type === typeF) &&
+                (scopeF === 'all' || d.scope === scopeF) &&
+                (!q || (d.storage || '').toLowerCase().includes(q) || (d.type || '').toLowerCase().includes(q)));
+
+            const sel = selKey ? (() => {
+                const s = list.find(d => d.storage === selKey.storage && d.scope === selKey.scope && (d.scope === 'shared' || d._node === selKey.node));
+                return s || null;
+            })() : null;
+            const selNode = sel ? (sel.scope === 'shared' ? (nodeView || (Array.isArray(sel.active_on) && sel.active_on[0]) || '') : (sel._node || '')) : '';
+            React.useEffect(() => { setNodeView(''); }, [selKey && selKey.storage]);
+
+            const contentUrl = (sel && clusterId != null)
+                ? `${API_URL}/clusters/${clusterId}/datastores/${encodeURIComponent(sel.storage)}/content${selNode ? '?node=' + encodeURIComponent(selNode) : ''}`
+                : null;
+            const contentQ = useCloudData(contentUrl);
+            const content = Array.isArray(contentQ.data) ? contentQ.data : [];
+            const filteredContent = contentFilter ? content.filter(c => c.content === contentFilter) : content;
+            const can = (p) => isAdmin || (holdsPerm && holdsPerm(p));
+
+            // dialogs
+            const [dlg, setDlg] = React.useState(null);           // 'upload' | 'url' | 'templates' | 'rescan'
+            const [batchRestore, setBatchRestore] = React.useState(null);
+
+            
+
+            // overview (no selection): honest cluster-wide storage summary
+            const overview = React.useMemo(() => {
+                if (!list.length) return null;
+                const withCap = list.filter(d => Number(d.total) > 0);
+                const total = withCap.reduce((a, d) => a + Number(d.total) || 0, 0);
+                const used = withCap.reduce((a, d) => a + Number(d.used) || 0, 0);
+                const nodes = new Set(); list.forEach(d => d.scope === 'local' && d._node && nodes.add(d._node));
+                (Array.isArray(datastores && datastores.nodes) ? datastores.nodes : []).forEach(n => nodes.add(n));
+                const byType = {}; list.forEach(d => { if (d.type) byType[d.type] = (byType[d.type] || 0) + 1; });
+                const top = withCap.map(d => ({ name: d.storage, scope: d.scope, pct: Math.round((Number(d.used) || 0) / Number(d.total) * 100) }))
+                    .sort((a, b) => b.pct - a.pct).slice(0, 6);
+                return { count: list.length, shared: list.filter(d => d.scope === 'shared').length, local: list.filter(d => d.scope === 'local').length, nodes: nodes.size, total, used, avail: total - used, byType, top };
+            }, [list, datastores]);
+
+            const Row = ({ d }) => {
+                const st = cloudDsState(d);
+                const pct = Number(d.total) ? Math.round((Number(d.used) || 0) / Number(d.total) * 100) : null;
+                const active = sel && sel.storage === d.storage && sel.scope === d.scope && (d.scope === 'shared' || sel._node === d._node);
+                return (
+                    <button type="button" className={'cloud-sw-row' + (active ? ' is-active' : '')} onClick={() => setSelKey({ storage: d.storage, scope: d.scope, node: d._node || '' })}>
+                        <span className="cloud-sw-row-top">
+                            <span className="cloud-sw-row-name" title={d.storage}>{d.storage}</span>
+                            <span className="cloud-chip cloud-chip-soft">{d.scope === 'shared' ? 'shared' : (d._node || 'local')}</span>
+                        </span>
+                        <span className="cloud-sw-row-sub">
+                            <span className="cloud-cell-muted">{d.type || ' - '}</span>
+                            {Number(d.total) > 0 && <span className="cloud-cell-muted" style={{ fontSize: '0.64rem' }}>{cloudFmtBytes(d.used)} / {cloudFmtBytes(d.total)}</span>}
+                            {pct != null && <span className="cloud-sw-row-bar"><span style={{ width: pct + '%', background: cloudThresholdColor(pct) }} /></span>}
+                            {st === 'unreachable' && <span className="cloud-hc-badge is-critical">OFFLINE</span>}
+                            {st === 'rawblock' && <span className="cloud-hc-badge is-na">RAW</span>}
+                            {st === 'partial' && <span className="cloud-hc-badge is-warning">{(d.active_on || []).length}/{(d.active_on || []).length + (d.inactive_on || []).length}</span>}
+                        </span>
+                    </button>
+                );
+            };
+
+            return (
+                <div className="cloud-sw-layout">
+                    <div className="cloud-sw-list">
+                        <CloudSearch value={query} onChange={(v) => setQuery(v)} placeholder={t('cloud.searchStorage') || 'Search storage…'} />
+                        <div className="cloud-segment" style={{ marginTop: 8 }}>
+                            {['all', 'shared', 'local'].map(s => (
+                                <button type="button" key={s} className={'cloud-segment-btn' + (scopeF === s ? ' is-active' : '')} onClick={() => setScopeF(s)}>{s === 'all' ? (t('cloud.all') || 'All') : s}</button>
+                            ))}
+                        </div>
+                        {types.length > 1 && (
+                            <select className="cloud-input cloud-sw-typef" value={typeF} onChange={(e) => setTypeF(e.target.value)}>
+                                <option value="all">{t('cloud.allTypes') || 'All types'}</option>
+                                {types.map(ty => <option key={ty} value={ty}>{ty}</option>)}
+                            </select>
+                        )}
+                        <CloudSectionState loading={listQ.loading && !datastores} err={listQ.err && !datastores ? listQ.err : null} empty={!view.length} t={t}
+                            emptyIcon="Database" emptyTitle={t('cloud.noDatastores') || 'No datastores'} emptyText={q || typeF !== 'all' ? (t('cloud.noMatch') || 'No matches') : null}>
+                            <div className="cloud-sw-groups">
+                                {['shared', 'local'].map(scope => {
+                                    const rows = view.filter(d => d.scope === scope);
+                                    if (!rows.length) return null;
+                                    return (
+                                        <div className="cloud-sw-group" key={scope}>
+                                            <div className="cloud-sw-group-label">{scope === 'shared' ? (t('cloud.sharedStorage') || 'Shared storage') : (t('cloud.localStorage') || 'Local storage')}</div>
+                                            {rows.map((d, i) => <Row d={d} key={(d.storage || '') + '-' + (d._node || '') + '-' + i} />)}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </CloudSectionState>
+                    </div>
+                    <div className="cloud-sw-main">
+                        {!sel ? (
+                            overview && (
+                                <>
+                                    <div className="cloud-stat-grid">
+                                        <div className="cloud-stat"><span className="cloud-stat-ico"><Icons.Database /></span><div><div className="cloud-stat-num">{overview.count}</div><div className="cloud-stat-lb">{t('cloud.datastores') || 'datastores'} · {overview.shared} shared / {overview.local} local</div></div></div>
+                                        <div className="cloud-stat"><span className="cloud-stat-ico"><Icons.Cpu /></span><div><div className="cloud-stat-num">{overview.nodes}</div><div className="cloud-stat-lb">{t('cloud.hosts') || 'Hosts'}</div></div></div>
+                                        <div className="cloud-stat"><span className="cloud-stat-ico"><Icons.HardDrive /></span><div><div className="cloud-stat-num">{cloudFmtBytes(overview.total)}</div><div className="cloud-stat-lb">{t('cloud.total') || 'Total capacity'}</div></div></div>
+                                        <div className="cloud-stat"><span className="cloud-stat-ico"><Icons.Activity /></span><div><div className="cloud-stat-num">{cloudFmtBytes(overview.used)}</div><div className="cloud-stat-lb">{t('cloud.used') || 'Used'} · {overview.total ? Math.round(overview.used / overview.total * 100) : 0}% · {t('cloud.free') || 'free'} {cloudFmtBytes(overview.avail)}</div></div></div>
+                                    </div>
+                                    <div className="cloud-sw-cols">
+                                        <div className="cloud-card">
+                                            {cloudHead({ icon: <Icons.BarChart />, title: t('cloud.topUsage') || 'Highest utilization' })}
+                                            <div className="cloud-card-pad">
+                                                {overview.top.map(x => (
+                                                    <div className="cloud-topcons-row" key={x.name}>
+                                                        <span className="cloud-topcons-name">{x.name}</span>
+                                                        <div className="cloud-topcons-track"><div style={{ width: x.pct + '%', background: cloudThresholdColor(x.pct) }} /></div>
+                                                        <span className="cloud-topcons-val">{x.pct}%</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                        <div className="cloud-card">
+                                            {cloudHead({ icon: <Icons.Layers />, title: t('cloud.byType') || 'By type' })}
+                                            <div className="cloud-card-pad cloud-sw-types">
+                                                {Object.entries(overview.byType).sort((a, b) => b[1] - a[1]).map(([ty, n]) => (
+                                                    <span key={ty} className="cloud-chip cloud-chip-soft">{ty} · {n}</span>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </>
+                            )
+                        ) : (
+                            <>
+                                <div className="cloud-card">
+                                    <div className="cloud-sw-detail-head">
+                                        <div>
+                                            <div className="cloud-sw-detail-name">{sel.storage}</div>
+                                            <div className="cloud-detail-meta">
+                                                <span className="cloud-chip cloud-chip-soft">{sel.type || ' - '}</span>
+                                                <span className="cloud-detail-id">{sel.scope === 'shared' ? (t('cloud.sharedStorage') || 'Shared') : (t('cloud.localStorage') || 'Local') + (sel._node ? ' · ' + sel._node : '')}{selNode ? ' · ' + (t('cloud.viewNode') || 'view') + ': ' + selNode : ''}</span>
+                                                {sel.content && String(sel.content).split(',').filter(Boolean).slice(0, 5).map(c => <span key={c} className="cloud-chip cloud-chip-tag" style={{ fontSize: '0.58rem' }}>{c.trim()}</span>)}
+                                            </div>
+                                        </div>
+                                        <div className="cloud-sw-detail-actions">
+                                            {can('cluster.config') && <button type="button" className="cloud-btn cloud-btn-sm" onClick={() => setDlg('rescan')} title={t('rescanStorageTooltip') || 'Rescan storage'}><Icons.RefreshCw /> {t('rescan') || 'Rescan'}</button>}
+                                            {can('vm.backup') && content.some(i => i.content === 'backup' && i.vmid) && (
+                                                <button type="button" className="cloud-btn cloud-btn-sm cloud-btn-primary" data-br-open onClick={() => setBatchRestore('pick')}><Icons.RotateCcw /> {t('batchRestoreButton') || 'Batch restore'}</button>
+                                            )}
+                                            <button type="button" className="cloud-btn cloud-btn-sm" onClick={() => { listQ.reload(); contentQ.reload(); }}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                                        </div>
+                                    </div>
+                                    {Number(sel.total) > 0 ? (
+                                        <div className="cloud-sw-cap">
+                                            <CloudUsageBar pct={Math.round((Number(sel.used) || 0) / Number(sel.total) * 100)}
+                                                leftLabel={`${t('cloud.used') || 'Used'} ${cloudFmtBytes(sel.used)}`} rightLabel={`${cloudFmtBytes(sel.avail)} ${t('cloud.free') || 'free'} · ${cloudFmtBytes(sel.total)}`} />
+                                        </div>
+                                    ) : (
+                                        <div className="cloud-table-note">{cloudDsState(sel) === 'rawblock' ? (t('cloud.rawBlockNote') || 'Raw block storage - capacity is managed by the VM disks on it.') : (t('cloud.noCapacityData') || 'No capacity reported.')}</div>
+                                    )}
+                                    {sel.scope === 'shared' && Array.isArray(sel.active_on) && sel.active_on.length > 1 && (
+                                        <div className="cloud-sw-nodeview">
+                                            <span className="cloud-cell-muted">{t('cloud.viewNode') || 'View'}:</span>
+                                            <div className="cloud-segment">
+                                                {sel.active_on.map(n => (
+                                                    <button type="button" key={n} className={'cloud-segment-btn' + ((nodeView || sel.active_on[0]) === n ? ' is-active' : '')} onClick={() => setNodeView(n)}>{n}</button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                    <div className="cloud-segment" style={{ marginTop: 10, padding: '0 var(--space-md) var(--space-sm)' }}>
+                                        {[['overview', t('cloud.detOverview') || 'Overview'], ['content', t('cloud.detContent') || 'Content'], ['details', t('cloud.detDetails') || 'Details']].map(([id, lb]) => (
+                                            <button type="button" key={id} className={'cloud-segment-btn' + (detTab === id ? ' is-active' : '')} onClick={() => setDetTab(id)}>{lb}</button>
+                                        ))}
+                                    </div>
+                                </div>
+                                {detTab === 'overview' && Number(sel.total) > 0 && (
+                                    <div className="cloud-card">
+                                        {cloudHead({ icon: <Icons.BarChart />, title: t('cloud.utilization') || 'Utilization' })}
+                                        <div className="cloud-card-pad">
+                                            <CloudMeterRow label={t('cloud.used') || 'Used'} sub={cloudFmtBytes(sel.used)} pct={Math.round((Number(sel.used) || 0) / Number(sel.total) * 100)} />
+                                            <CloudMeterRow label={t('cloud.free') || 'Free'} sub={cloudFmtBytes(sel.avail)} pct={100 - Math.round((Number(sel.used) || 0) / Number(sel.total) * 100)} />
+                                        </div>
+                                    </div>
+                                )}
+                                {detTab === 'details' && (
+                                    <div className="cloud-card">
+                                        {cloudHead({ icon: <Icons.Settings />, title: t('cloud.detDetails') || 'Details' })}
+                                        <div className="cloud-card-pad">
+                                            <CloudKVRow label={t('cloud.dsType') || 'Type'} value={sel.type} />
+                                            <CloudKVRow label={t('cloud.colContent') || 'Content types'} value={<span className="cloud-sw-types">{String(sel.content || '').split(',').filter(Boolean).map(c => <span key={c} className="cloud-chip cloud-chip-soft">{c.trim()}</span>)}</span>} />
+                                            <CloudKVRow label={t('cloud.dsScope') || 'Scope'} value={sel.scope === 'shared' ? 'shared' : 'local' + (sel._node ? ' · ' + sel._node : '')} />
+                                            {sel.scope === 'shared' && Array.isArray(sel.active_on) && sel.active_on.length > 0 && <CloudKVRow label={t('cloud.activeOn') || 'Active on'} value={sel.active_on.join(', ')} />}
+                                            {Array.isArray(sel.inactive_on) && sel.inactive_on.length > 0 && <CloudKVRow label={t('cloud.inactiveOn') || 'Inactive on'} value={<span className="cloud-ch-warn">{sel.inactive_on.join(', ')}</span>} />}
+                                            {sel.path && <CloudKVRow label="Path" value={<span className="cloud-table-mono">{sel.path}</span>} />}
+                                        </div>
+                                    </div>
+                                )}
+                                {detTab === 'content' && (
+                                <div className="cloud-card cloud-table-card">
+                                    {cloudHead({ icon: <Icons.FolderOpen />, title: t('cloud.contentBrowser') || 'Content', count: filteredContent.length, right: contentQ.loading ? <span className="cloud-cell-muted">{t('cloud.loading') || 'Loading…'}</span> : null })}
+                                        {(() => {
+                                            const kinds = [...new Set(content.map(c => c.content).filter(Boolean))];
+                                            if (kinds.length < 2) return null;
+                                            return (
+                                                <div className="cloud-filterchips" style={{ padding: '8px var(--space-md)' }}>
+                                                    {kinds.map(k => (
+                                                        <span key={k} className={'cloud-filterchip' + (contentFilter === k ? ' is-active' : '')} style={{ cursor: 'pointer' }} onClick={() => setContentFilter(contentFilter === k ? '' : k)}>
+                                                            {k} · {content.filter(c => c.content === k).length}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            );
+                                        })()}
+                                    <CloudSectionState loading={contentQ.loading} err={contentQ.err} empty={!filteredContent.length} t={t}
+                                        emptyIcon="FolderOpen" emptyTitle={t('cloud.dsEmpty') || 'Empty'} emptyText={t('cloud.dsEmptyText') || 'No content reported on this datastore.'}>
+                                        <div className="cloud-table-scroll">
+                                            <table className="cloud-table">
+                                                <thead><tr><th>{t('cloud.file') || 'Volume'}</th><th>{t('cloud.kind') || 'Kind'}</th><th>{t('cloud.colSize') || 'Size'}</th><th>Format</th><th>{t('cloud.colId') || 'Guest'}</th><th className="cloud-th-actions"></th></tr></thead>
+                                                <tbody>
+                                                    {filteredContent.map((it, i) => (
+                                                        <tr className="cloud-table-row cloud-table-row-static" key={it.volid || i}>
+                                                            <td className="cloud-table-mono" title={it.volid}>{String(it.volid || '').split(':').pop() || it.volid}</td>
+                                                            <td><span className="cloud-chip cloud-chip-soft">{it.content || ' - '}</span></td>
+                                                            <td>{it.size_human || (it.size ? (it.size_is_approx ? '~' : '') + cloudFmtBytes(it.size) : ' - ')}</td>
+                                                            <td>{it.format || ' - '}</td>
+                                                            <td>{it.vmid != null ? ('#' + it.vmid) : ' - '}</td>
+                                                            <td className="cloud-td-actions" onClick={(e) => e.stopPropagation()}>
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </CloudSectionState>
+                                </div>
+                                )}
+                            </>
+                        )}
+                    </div>
+
+                    {dlg === 'rescan' && sel && <CloudSwRescan clusterId={clusterId} sel={{ name: sel.storage }} authFetch={authFetch} addToast={addToast} t={t} onClose={() => setDlg(null)} onDone={() => setTimeout(() => { listQ.reload(); contentQ.reload(); }, 2000)} />}
+                    {batchRestore && sel && (
+                        <BatchRestoreModal clusterId={clusterId} storage={sel.storage}
+                            items={batchRestore === 'pick' ? content.filter(i => i.content === 'backup') : null}
+                            nodes={(datastores && datastores.nodes) || []} datastores={datastores}
+                            defaultNode={selNode || ((content.find(i => i.content === 'backup') || {}).node)}
+                            onClose={() => setBatchRestore(null)} />
+                    )}
+                </div>
+            );
+        }
+
+        // upload with real XHR progress (same endpoint as the classic tab)
+
+        function CloudIsoSync({ clusterId, authFetch, addToast, t }) {
+            const [ct, setCt] = React.useState('iso');   // iso | vztmpl
+            const statusQ = useCloudData(`${API_URL}/clusters/${clusterId}/iso-sync/status?content=${ct}`);
+            const st = statusQ.data && !statusQ.err ? statusQ.data : null;
+            const [busyFile, setBusyFile] = React.useState('');
+            const [busyAll, setBusyAll] = React.useState(false);
+            const [last, setLast] = React.useState(null);
+            const pollRef = React.useRef(null);
+            React.useEffect(() => () => clearInterval(pollRef.current), []);
+            const pollLast = () => {
+                clearInterval(pollRef.current);
+                pollRef.current = setInterval(async () => {
+                    try {
+                        const r = await authFetch(`${API_URL}/clusters/${clusterId}/iso-sync/last-result`);
+                        if (r && r.ok) {
+                            const d = await r.json();
+                            setLast(d);
+                            if (d && (d.done || d.status === 'done' || d.status === 'completed' || d.status === 'error')) { clearInterval(pollRef.current); statusQ.reload(); }
+                        }
+                    } catch (e) { /* keep */ }
+                }, 2500);
+            };
+            const syncOne = async (f) => {
+                const src = (st.nodes || []).find(n => st.matrix && st.matrix[(f.storage || '') + ':' + f.name] && st.matrix[(f.storage || '') + ':' + f.name][n]);
+                setBusyFile(f.name);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/iso-sync`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ source_node: src || (st.nodes || [])[0], storage: f.storage, filename: f.name, content_type: ct }),
+                    });
+                    const j = r ? await r.json().catch(() => ({})) : {};
+                    if (r && r.ok) { addToast(t('cloud.taskStarted') || 'Sync started', 'success'); pollLast(); }
+                    else addToast(j.error || (t('cloud.actionFailed') || 'Action failed'), 'error');
+                } finally { setBusyFile(''); }
+            };
+            const syncAll = async () => {
+                setBusyAll(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/iso-sync/all`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content_type: ct }),
+                    });
+                    const j = r ? await r.json().catch(() => ({})) : {};
+                    if (r && r.ok) { addToast(t('cloud.taskStarted') || 'Sync started', 'success'); pollLast(); }
+                    else addToast(j.error || (t('cloud.actionFailed') || 'Action failed'), 'error');
+                } finally { setBusyAll(false); }
+            };
+            const files = (st && Array.isArray(st.files)) ? st.files : [];
+            const nodes = (st && Array.isArray(st.nodes)) ? st.nodes : [];
+            const unread = (st && st.unread) || {};
+            const missing = files.reduce((a, f) => a + nodes.filter(n => !(st.matrix && st.matrix[(f.storage || '') + ':' + f.name] && st.matrix[(f.storage || '') + ':' + f.name][n])).length, 0);
+            return (
+                <>
+                    <div className="cloud-toolbar">
+                        <div className="cloud-toolbar-left">
+                            <div className="cloud-segment">
+                                {[['iso', 'ISO'], ['vztmpl', t('cloud.templates') || 'Templates']].map(([id, lb]) => (
+                                    <button type="button" key={id} className={'cloud-segment-btn' + (ct === id ? ' is-active' : '')} onClick={() => setCt(id)}>{lb}</button>
+                                ))}
+                            </div>
+                        </div>
+                        <div className="cloud-toolbar-right">
+                            <button type="button" className="cloud-btn cloud-btn-sm cloud-btn-primary" disabled={busyAll || !missing} onClick={syncAll}><Icons.RefreshCw /> {t('syncAllMissing') || 'Sync all missing'}</button>
+                            <button type="button" className="cloud-btn cloud-btn-sm" onClick={statusQ.reload}><Icons.RotateCw /> {t('refresh') || 'Refresh'}</button>
+                        </div>
+                    </div>
+                    {last && last.results && (
+                        <div className="cloud-card cloud-sw-lastsync">
+                            <div className="cloud-chart-head">
+                                <span className="cloud-chart-title">{t('cloud.lastSync') || 'Last sync'}</span>
+                                <span className="cloud-cell-muted">{String(last.timestamp || '').replace('T', ' ').slice(0, 16)} · {last.filename || ''}</span>
+                                <span className="cloud-hc-badge is-healthy">{last.ok}✓</span>
+                                {last.failed > 0 && <span className="cloud-hc-badge is-critical">{last.failed}✗</span>}
+                            </div>
+                            <div className="cloud-sw-syncnodes">
+                                {(last.results || []).map((r, i) => (
+                                    <span key={i} className="cloud-sw-syncnode" title={r.error || r.method || ''}>
+                                        <span className={'cloud-sync-dot ' + (r.success ? (r.skipped ? 'is-ok' : 'is-ok') : 'is-miss')}>{r.success ? (r.skipped ? '∘' : '✓') : '✗'}</span>
+                                        {r.node}
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                    <div className="cloud-stat-grid">
+                        <div className="cloud-stat"><span className="cloud-stat-ico"><Icons.File /></span><div><div className="cloud-stat-num">{files.length}</div><div className="cloud-stat-lb">{t('cloud.files') || 'files'}</div></div></div>
+                        <div className="cloud-stat"><span className="cloud-stat-ico"><Icons.CheckCircle /></span><div><div className="cloud-stat-num">{files.filter(f => nodes.every(n => st.matrix && st.matrix[(f.storage || '') + ':' + f.name] && st.matrix[(f.storage || '') + ':' + f.name][n])).length}</div><div className="cloud-stat-lb">{t('cloud.syncComplete') || 'fully synced'}</div></div></div>
+                        <div className="cloud-stat"><span className="cloud-stat-ico"><Icons.Copy /></span><div><div className="cloud-stat-num">{missing}</div><div className="cloud-stat-lb">{t('cloud.missingCopies') || 'missing copies'}</div></div></div>
+                        <div className="cloud-stat"><span className="cloud-stat-ico"><Icons.Cpu /></span><div><div className="cloud-stat-num">{nodes.length}</div><div className="cloud-stat-lb">{t('cloud.hostsUnit') || 'nodes'}</div></div></div>
+                        <div className="cloud-stat"><span className="cloud-stat-ico"><Icons.Eye /></span><div><div className="cloud-stat-num">{Object.keys(unread).length}</div><div className="cloud-stat-lb">{t('cloud.unreadNodes') || 'unreadable nodes'}</div></div></div>
+                    </div>
+                    {Object.keys(unread).length > 0 && (
+                        <div className="cloud-card cloud-hc-note cloud-hc-note-warn"><Icons.Eye />
+                            <span>{Object.entries(unread).map(([n, why]) => n + ': ' + why).join(' · ')}</span>
+                        </div>
+                    )}
+                    <div className="cloud-card cloud-table-card">
+                        {cloudHead({ icon: <Icons.File />, title: t('cloud.availability') || 'Availability', count: files.length })}
+                        <CloudSectionState loading={statusQ.loading} err={statusQ.err} empty={!files.length} t={t}
+                            emptyIcon="File" emptyTitle={t('noFilesFound') || 'No files found'}>
+                            <div className="cloud-table-scroll"><table className="cloud-table cloud-sync-matrix">
+                                <thead><tr><th>{t('cloud.colName') || 'File'}</th><th>{t('cloud.datastores') || 'Storage'}</th><th>{t('cloud.colSize') || 'Size'}</th>
+                                    {nodes.map(n => <th key={n} className="cloud-sync-node">{n}</th>)}<th className="cloud-th-actions"></th></tr></thead>
+                                <tbody>{files.map((f, i) => {
+                                    const key = (f.storage || '') + ':' + f.name;
+                                    return (
+                                        <tr className="cloud-table-row cloud-table-row-static" key={key || i}>
+                                            <td className="cloud-table-mono" title={f.name}>{f.name}</td>
+                                            <td>{f.storage || ' - '}</td>
+                                            <td>{f.size ? cloudFmtBytes(f.size) : ' - '}</td>
+                                            {nodes.map(n => {
+                                                const ok = st.matrix && st.matrix[key] && st.matrix[key][n];
+                                                return <td key={n} className="cloud-sync-cell"><span className={'cloud-sync-dot ' + (ok ? 'is-ok' : 'is-miss')} title={n + ': ' + (ok ? 'available' : 'missing')}>{ok ? '✓' : '✗'}</span></td>;
+                                            })}
+                                            <td className="cloud-td-actions" onClick={(e) => e.stopPropagation()}>
+                                                <button type="button" className="cloud-btn cloud-btn-sm" disabled={busyFile === f.name || nodes.every(n => st.matrix && st.matrix[key] && st.matrix[key][n])} onClick={() => syncOne(f)}>
+                                                    <Icons.RefreshCw /> {t('cloud.syncOne') || 'Sync'}
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}</tbody>
+                            </table></div>
+                        </CloudSectionState>
+                    </div>
+                </>
+            );
+        }
+
+        // ── Backup SLA ────────────────────────────────────────────
+
+        function CloudBackupSla({ clusterId, authFetch, addToast, t }) {
+            const slaQ = useCloudData(`${API_URL}/clusters/${clusterId}/backup-sla`);
+            const sla = slaQ.data && !slaQ.err ? slaQ.data : null;
+            const [filter, setFilter] = React.useState('all');
+            const [cfgH, setCfgH] = React.useState('');
+            const [busy, setBusy] = React.useState(false);
+            const vms = (sla && Array.isArray(sla.vms)) ? sla.vms : [];
+            const sum = (sla && sla.summary) || {};
+            const view = filter === 'all' ? vms : vms.filter(v => v.sla_status === filter);
+            const save = async () => {
+                setBusy(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/backup-sla/config`, {
+                        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ max_age_hours: Number(cfgH) }),
+                    });
+                    if (r && r.ok) { addToast(t('cloud.saved') || 'Saved', 'success'); slaQ.reload(); }
+                    else { const j = await r.json().catch(() => ({})); addToast(j.error || (t('cloud.actionFailed') || 'Action failed'), 'error'); }
+                } finally { setBusy(false); }
+            };
+            const Tile = ({ id, label, tone }) => (
+                <button type="button" className={'cloud-sla-tile' + (filter === id ? ' is-active' : '')} onClick={() => setFilter(filter === id ? 'all' : id)}>
+                    <div className={'cloud-hc-badge ' + tone}>{sum[id] != null ? sum[id] : (id === 'compliance' ? ' - ' : 0)}</div>
+                    <span>{label}</span>
+                </button>
+            );
+            return (
+                <>
+                    <div className="cloud-toolbar">
+                        <div className="cloud-toolbar-left">
+                            {sla && (
+                                <span style={{ display: 'inline-flex', gap: 10, alignItems: 'center' }}>
+                                    <span className={'cloud-hc-badge ' + (sla.enabled ? 'is-healthy' : 'is-na')}>{sla.enabled ? (t('cloud.slaOn') || 'SLA active') : (t('cloud.slaOff') || 'SLA disabled')}</span>
+                                    <span className="cloud-input" style={{ display: 'inline-flex', gap: 6, alignItems: 'center', width: 'auto', padding: '4px 8px' }}>
+                                        {t('cloud.slaMaxAge') || 'Backup age limit'}
+                                        <input type="number" min="0" style={{ width: 64, background: 'transparent', border: 'none', outline: 'none', color: 'inherit' }}
+                                            value={cfgH !== '' ? cfgH : (sla.max_age_hours != null ? sla.max_age_hours : '')}
+                                            onChange={(e) => setCfgH(e.target.value)} /> h
+                                    </span>
+                                    <button type="button" className="cloud-btn cloud-btn-sm" disabled={busy || cfgH === ''} onClick={save}><Icons.Save /> {t('save') || 'Save'}</button>
+                                </span>
+                            )}
+                        </div>
+                        <div className="cloud-toolbar-right">
+                            <button type="button" className="cloud-btn cloud-btn-sm" onClick={slaQ.reload}><Icons.RotateCw /> {t('refresh') || 'Refresh'}</button>
+                        </div>
+                    </div>
+                    <div className="cloud-stat-grid cloud-sla-tiles">
+                        <Tile id="ok" label={t('cloud.slaOk') || 'OK'} tone="is-healthy" />
+                        <Tile id="warning" label={t('cloud.slaWarn') || 'Warning'} tone="is-warning" />
+                        <Tile id="breached" label={t('cloud.slaBreached') || 'Breached'} tone="is-critical" />
+                        <Tile id="no_backup" label={t('cloud.slaNoBackup') || 'No backup'} tone="is-critical" />
+                        <Tile id="disabled" label={t('cloud.slaDisabled') || 'Disabled'} tone="is-na" />
+                        <div className="cloud-stat"><span className="cloud-stat-ico"><Icons.CheckCircle /></span>
+                            <div>
+                                <div className="cloud-stat-num">{sum.compliance_pct != null ? Math.round(sum.compliance_pct) + '%' : <span className="cloud-hc-badge is-na">{t('cloud.slaNotEvaluated') || 'NOT EVALUATED'}</span>}</div>
+                                <div className="cloud-stat-lb">{t('cloud.slaCompliance') || 'compliance'}</div>
+                            </div></div>
+                    </div>
+                    {sla && sla.enabled === false && (
+                        <div className="cloud-card cloud-hc-note cloud-hc-note-warn"><Icons.Eye />
+                            <span>{t('cloud.slaOffNote') || 'SLA checks are disabled - guests are not evaluated. Nothing is counted as compliant or breached.'}</span>
+                        </div>
+                    )}
+                    <div className="cloud-card cloud-table-card">
+                        {cloudHead({ icon: <Icons.Archive />, title: t('cloud.slaGuests') || 'Guests', count: view.length, right: filter !== 'all' && <button type="button" className="cloud-link-btn" onClick={() => setFilter('all')}>{t('cloud.clear') || 'Clear filter'}</button> })}
+                        <CloudSectionState loading={slaQ.loading} err={slaQ.err} empty={!view.length} t={t}
+                            emptyIcon="Archive" emptyTitle={t('cloud.noData') || 'No data'} emptyText={sla && sla.enabled === false ? (t('cloud.slaOffNote') || 'SLA checks are disabled - nothing is counted as compliant.') : null}>
+                            <div className="cloud-table-scroll"><table className="cloud-table">
+                                <thead><tr><th>{t('cloud.colId') || 'VMID'}</th><th>{t('cloud.colName') || 'Name'}</th><th>{t('cloud.colNode') || 'Host'}</th><th>{t('cloud.hcLastBackup') || 'Last backup'}</th><th>{t('cloud.age') || 'Age'}</th><th>{t('cloud.source') || 'Source'}</th><th>{t('cloud.colStatus') || 'Status'}</th></tr></thead>
+                                <tbody>{view.map((v, i) => (
+                                    <tr className="cloud-table-row cloud-table-row-static" key={(v.vmid != null ? v.vmid : i)}>
+                                        <td className="cloud-table-mono">{v.vmid}</td>
+                                        <td className="cloud-table-name"><span className="cloud-table-name-text">{v.name || ' - '}</span></td>
+                                        <td>{v.node || ' - '}</td>
+                                        <td className="cloud-table-mono cloud-cell-muted">{v.last_backup_ts ? cloudFmtTs(v.last_backup_ts) : ' - '}</td>
+                                        <td>{v.age_hours != null ? (v.age_hours < 48 ? Math.round(v.age_hours) + ' h' : Math.round(v.age_hours / 24) + ' d') : ' - '}</td>
+                                        <td>{v.backup_source || ' - '}</td>
+                                        <td><span className={'cloud-hc-badge ' + (v.sla_status === 'ok' ? 'is-healthy' : v.sla_status === 'warning' ? 'is-warning' : v.sla_status === 'disabled' ? 'is-na' : 'is-critical')}>{v.sla_status === 'disabled' ? (t('cloud.slaNotEvaluated') || 'NOT EVALUATED') : String(v.sla_status || ' - ').toUpperCase()}</span></td>
+                                    </tr>
+                                ))}</tbody>
+                            </table></div>
+                        </CloudSectionState>
+                    </div>
+                </>
+            );
+        }
+
+        // translate technical gap kinds into administrator-readable messages;
+        // group by kind so 'no_backup × 4' reads as one finding, not four rows of noise
 
         function CloudInstanceList({ rows, kind, clusterId, act, onOpen, onCreate, onBlueprints, t }) {
             const safe = Array.isArray(rows) ? rows : [];
@@ -4109,6 +4670,15 @@
                         break;
                     case 'datastores':
                         body = <CloudDatastores datastores={clusterDatastores} t={T} />;
+                        break;
+                    case 'swexplorer':
+                        body = <CloudStorageExplorer clusterId={cid} authFetch={authFetch} addToast={addToast} isAdmin={isAdmin} holdsPerm={holdsPerm} t={T} sharedDatastores={clusterDatastores} />;
+                        break;
+                    case 'swiso':
+                        body = <CloudIsoSync clusterId={cid} authFetch={authFetch} addToast={addToast} t={T} />;
+                        break;
+                    case 'swsla':
+                        body = <CloudBackupSla clusterId={cid} authFetch={authFetch} addToast={addToast} t={T} />;
                         break;
                     case 'pools':
                         body = <CloudPools pools={clusterPools} t={T} />;
