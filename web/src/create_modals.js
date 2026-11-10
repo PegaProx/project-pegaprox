@@ -9,7 +9,7 @@
             { label: 'Ubuntu 24.04 LTS', icon: '🐧', config: { ostype: 'l26', cores: 2, sockets: 1, memory: 2048, disk_size: '32', cpu: 'host', agent: true, bios: 'seabios', machine: 'i440fx', scsihw: 'virtio-scsi-single', net_model: 'virtio', disk_type: 'scsi', disk_discard: true, disk_iothread: true } },
             { label: 'Windows Server 2022', icon: '🖥️', config: { ostype: 'win11', cores: 4, sockets: 1, memory: 4096, disk_size: '64', cpu: 'host', agent: true, bios: 'ovmf', machine: 'q35', scsihw: 'virtio-scsi-single', net_model: 'virtio', disk_type: 'scsi', disk_discard: true } },
             { label: 'Windows 11', icon: '💻', config: { ostype: 'win11', cores: 4, sockets: 1, memory: 8192, disk_size: '64', cpu: 'host', agent: true, bios: 'ovmf', machine: 'q35', scsihw: 'virtio-scsi-single', net_model: 'virtio', disk_type: 'scsi', tpm_version: 'v2.0' } },
-            { label: 'Minimal Linux', icon: '⚡', config: { ostype: 'l26', cores: 1, sockets: 1, memory: 512, disk_size: '8', cpu: 'host', agent: false, bios: 'seabios', net_model: 'virtio', disk_type: 'virtio' } },
+            { label: 'Minimal Linux', icon: '⚡', config: { ostype: 'l26', cores: 1, sockets: 1, memory: 512, disk_size: '8', cpu: 'host', agent: false, bios: 'seabios', net_model: 'virtio', disk_type: 'virtio', disk_ssd: false } },
         ];
 
         function CreateVmModal({ vmType, clusterId, clusterType, nodes: initialNodes, onCreate, onClose }) {
@@ -799,7 +799,7 @@
                                         <div className="grid grid-cols-4 gap-3 mb-3">
                                             <div>
                                                 <label className="block text-xs text-gray-400 mb-1">{t('busType')}</label>
-                                                <select value={config.disk_type} onChange={e => setConfig({...config, disk_type: e.target.value})}
+                                                <select value={config.disk_type} onChange={e => setConfig({...config, disk_type: e.target.value, disk_ssd: e.target.value === 'virtio' ? false : config.disk_ssd})}
                                                     className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
                                                     <option value="scsi">SCSI</option>
                                                     <option value="virtio">VirtIO Block</option>
@@ -868,10 +868,13 @@
                                                     {t('ioThread')}
                                                 </label>
                                             )}
-                                            <label className="flex items-center gap-2 text-xs text-gray-300">
-                                                <input type="checkbox" checked={config.disk_ssd} onChange={e => setConfig({...config, disk_ssd: e.target.checked})} className="rounded" />
-                                                {t('ssdEmulation')}
-                                            </label>
+                                            {/* LW Nov 2026 - VirtIO Block has no SSD emulation, PVE refuses the create with it */}
+                                            {config.disk_type !== 'virtio' && (
+                                                <label className="flex items-center gap-2 text-xs text-gray-300">
+                                                    <input type="checkbox" checked={config.disk_ssd} onChange={e => setConfig({...config, disk_ssd: e.target.checked})} className="rounded" />
+                                                    {t('ssdEmulation')}
+                                                </label>
+                                            )}
                                         </div>
                                             </>
                                         )}
@@ -892,7 +895,7 @@
                                                     <label className="block text-xs text-gray-400 mb-1">{t('busType')}</label>
                                                     <select value={disk.type} onChange={e => {
                                                         const newDisks = [...config.additional_disks];
-                                                        newDisks[idx] = {...disk, type: e.target.value};
+                                                        newDisks[idx] = {...disk, type: e.target.value, ssd: e.target.value === 'virtio' ? false : disk.ssd};
                                                         setConfig({...config, additional_disks: newDisks});
                                                     }}
                                                         className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
@@ -989,14 +992,16 @@
                                                         {t('ioThread')}
                                                     </label>
                                                 )}
-                                                <label className="flex items-center gap-2 text-xs text-gray-300">
-                                                    <input type="checkbox" checked={disk.ssd || false} onChange={e => {
-                                                        const newDisks = [...config.additional_disks];
-                                                        newDisks[idx] = {...disk, ssd: e.target.checked};
-                                                        setConfig({...config, additional_disks: newDisks});
-                                                    }} className="rounded" />
-                                                    {t('ssdEmulation')}
-                                                </label>
+                                                {disk.type !== 'virtio' && (
+                                                    <label className="flex items-center gap-2 text-xs text-gray-300">
+                                                        <input type="checkbox" checked={disk.ssd || false} onChange={e => {
+                                                            const newDisks = [...config.additional_disks];
+                                                            newDisks[idx] = {...disk, ssd: e.target.checked};
+                                                            setConfig({...config, additional_disks: newDisks});
+                                                        }} className="rounded" />
+                                                        {t('ssdEmulation')}
+                                                    </label>
+                                                )}
                                             </div>
                                         </div>
                                     ))}

@@ -29259,7 +29259,7 @@
                                                                     </div>
                                                                     <div>
                                                                         <label className="text-xs text-gray-500 mb-1 block">Disk Bus</label>
-                                                                        <select value={vmwareMigrateForm.disk_bus} onChange={e => setVmwareMigrateForm(f => ({...f, disk_bus: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white">
+                                                                        <select value={vmwareMigrateForm.disk_bus} onChange={e => setVmwareMigrateForm(f => ({...f, disk_bus: e.target.value, disk_ssd: e.target.value === 'virtio' ? false : f.disk_ssd}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white">
                                                                             <option value="auto">Auto ({vmwareMigrationPlan.source?.hardware?.disk_bus || 'scsi'})</option>
                                                                             <option value="scsi">SCSI</option>
                                                                             <option value="sata">SATA</option>
@@ -29369,10 +29369,13 @@
                                                                             <input type="checkbox" checked={vmwareMigrateForm.disk_iothread} onChange={e => setVmwareMigrateForm(f => ({...f, disk_iothread: e.target.checked}))} className="rounded" />
                                                                             IO Thread (per-disk)
                                                                         </label>
-                                                                        <label className="flex items-center gap-2 text-xs text-gray-400">
-                                                                            <input type="checkbox" checked={vmwareMigrateForm.disk_ssd} onChange={e => setVmwareMigrateForm(f => ({...f, disk_ssd: e.target.checked}))} className="rounded" />
-                                                                            {t('ssdEmulation')}
-                                                                        </label>
+                                                                        {/* LW Nov 2026 - VirtIO Block has no SSD emulation, the disks attach without it */}
+                                                                        {vmwareMigrateForm.disk_bus !== 'virtio' && (
+                                                                            <label className="flex items-center gap-2 text-xs text-gray-400">
+                                                                                <input type="checkbox" checked={vmwareMigrateForm.disk_ssd} onChange={e => setVmwareMigrateForm(f => ({...f, disk_ssd: e.target.checked}))} className="rounded" />
+                                                                                {t('ssdEmulation')}
+                                                                            </label>
+                                                                        )}
                                                                         <div>
                                                                             <label className="text-xs text-gray-500 mb-1 block">Discard (TRIM)</label>
                                                                             <select value={vmwareMigrateForm.disk_discard} onChange={e => setVmwareMigrateForm(f => ({...f, disk_discard: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-2 py-1.5 text-xs text-white">

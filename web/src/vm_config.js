@@ -6658,8 +6658,8 @@
                                     if (!['scsi', 'virtio'].includes(newBusType)) {
                                         currentValue = currentValue.replace(/,iothread=\d+/g, '');
                                     }
-                                    // ssd only supported on scsi/virtio/sata (not ide)
-                                    if (!['scsi', 'virtio', 'sata'].includes(newBusType)) {
+                                    // ssd only supported on scsi/sata (not ide, and VirtIO Block has none)
+                                    if (!['scsi', 'sata'].includes(newBusType)) {
                                         currentValue = currentValue.replace(/,ssd=\d+/g, '');
                                     }
                                     
@@ -7459,7 +7459,8 @@
             // LW: iothread needs virtio-scsi-pci controller, won't work with IDE/SATA
             const supportsIothread = ['scsi', 'virtio'].includes(currentBus);
             // MK: ssd emulation for TRIM support - IDE doesn't support it at all
-            const supportsSsd = ['scsi', 'virtio', 'sata'].includes(currentBus);
+            // LW Nov 2026 - VirtIO Block has no ssd option, PVE refuses the whole drive with it
+            const supportsSsd = ['scsi', 'sata'].includes(currentBus);
 
             // Available formats for the currently-selected storage
             const selectedStorageEntry = storageList.find(s => s.storage === diskConfig.storage);
@@ -7485,7 +7486,7 @@
             const handleBusChange = (newBus) => {
                 const newId = getNextDiskId ? getNextDiskId(newBus) : newBus + '0';
                 const busSupportsIothread = ['scsi', 'virtio'].includes(newBus);
-                const busSupportsSsd = ['scsi', 'virtio', 'sata'].includes(newBus);
+                const busSupportsSsd = ['scsi', 'sata'].includes(newBus);
                 setDiskConfig({
                     ...diskConfig, 
                     disk_id: newId,
@@ -7528,7 +7529,7 @@
                 if (supportsIothread && diskConfig.iothread) {
                     configToSend.iothread = true;
                 }
-                // Only add ssd for scsi/virtio/sata
+                // Only add ssd for scsi/sata
                 if (supportsSsd && diskConfig.ssd) {
                     configToSend.ssd = true;
                 }
@@ -7699,7 +7700,7 @@
                                                 IO Thread
                                             </label>
                                         )}
-                                        {/* MK: SSD Emulation for SCSI, VirtIO, SATA (not IDE) */}
+                                        {/* MK: SSD Emulation for SCSI, SATA (not IDE, not VirtIO Block) */}
                                         {supportsSsd && (
                                             <label className="flex items-center gap-2 text-sm text-gray-300">
                                                 <input type="checkbox" checked={diskConfig.ssd} onChange={(e) => setDiskConfig({...diskConfig, ssd: e.target.checked})} className="rounded" />
@@ -7768,14 +7769,14 @@
                 if (!['scsi', 'virtio'].includes(newBus)) {
                     setIothread(false);
                 }
-                if (!['scsi', 'virtio', 'sata'].includes(newBus)) {
+                if (!['scsi', 'sata'].includes(newBus)) {
                     setSsd(false);
                 }
             };
             
             // LW: Check which options are supported
             const supportsIothread = ['scsi', 'virtio'].includes(busType);
-            const supportsSsd = ['scsi', 'virtio', 'sata'].includes(busType);
+            const supportsSsd = ['scsi', 'sata'].includes(busType);
             
             const busTypes = [
                 { value: 'scsi', label: 'SCSI', desc: t('scsiDesc') || 'Best performance with VirtIO SCSI controller' },
@@ -7984,7 +7985,7 @@
             const hasIothread = Boolean(disk.iothread && disk.iothread > 0);
             const hasSsd = Boolean(disk.ssd && disk.ssd > 0);
             const willStripIothread = hasIothread && !['scsi', 'virtio'].includes(newBus);
-            const willStripSsd = hasSsd && !['scsi', 'virtio', 'sata'].includes(newBus);
+            const willStripSsd = hasSsd && !['scsi', 'sata'].includes(newBus);
             
             const handleSave = async () => {
                 if (loading || isVmRunning) return; // Prevent double-click and running VM
