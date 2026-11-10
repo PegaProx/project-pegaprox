@@ -171,11 +171,16 @@ ADD = {'it': 'Aggiungi cluster', 'fr': 'Ajouter un Cluster'}
 
 class _Page:
     """The bundle against _FakeServer, with what localStorage holds before the first script and a
-    hand on the language files: held back (hold) or answered with a status of their own (status)."""
+    hand on the language files: held back (hold) or answered with a status of their own (status),
+    for the first status_times of them when that is set. clock installs Playwright's clock, time
+    runs as usual until a test moves it on."""
 
-    def __init__(self, browser, server, storage=None, status=None, hold=False, locale='en-US'):
+    def __init__(self, browser, server, storage=None, status=None, hold=False, locale='en-US',
+                 status_times=None, clock=False):
         self.server = server
         self.ctx = browser.new_context(viewport={'width': 1400, 'height': 900}, locale=locale)
+        if clock:
+            self.ctx.clock.install()
         seed = {'pegaprox-shortcuts-hint-shown': '1'}
         seed.update(storage or {})
         self.ctx.add_init_script("""(() => { try {
@@ -184,7 +189,7 @@ class _Page:
             for (const k of Object.keys(seed)) localStorage.setItem(k, seed[k]);
         } catch (e) {} })();""" % json.dumps(seed))
         self.ctx.add_init_script(WATCH_ROOT)
-        self.status, self.hold = status, hold
+        self.status, self.hold, self.status_times = status, hold, status_times
         self.held, self.files = [], []
         self.errors, self.warnings = [], []
         self.page = self.ctx.new_page()
@@ -206,7 +211,9 @@ class _Page:
             if self.hold:
                 self.held.append(route)
                 return None
-            if self.status:
+            if self.status and self.status_times != 0:
+                if self.status_times:
+                    self.status_times -= 1
                 return route.fulfill(status=self.status, body='{"error": "nope"}',
                                      headers={'Content-Type': 'application/json'})
         return self.server.handle(route)
@@ -231,11 +238,13 @@ class _Page:
 def open_page(browser):
     pages = []
 
-    def _open(storage=None, status=None, hold=False, locale='en-US', logged_out=True, **server_kw):
+    def _open(storage=None, status=None, hold=False, locale='en-US', logged_out=True, status_times=None,
+              clock=False, **server_kw):
         server_kw.setdefault('role', 'standalone')
         server = _FakeServer(**server_kw)
         server.logged_out = logged_out
-        p = _Page(browser, server, storage=storage, status=status, hold=hold, locale=locale)
+        p = _Page(browser, server, storage=storage, status=status, hold=hold, locale=locale,
+                  status_times=status_times, clock=clock)
         pages.append(p)
         return p
     yield _open
@@ -295,6 +304,49 @@ def test_runtime_a_language_file_that_fails_leaves_the_page_in_english(open_page
     assert len(p.warnings) == 1 and 'de' in p.warnings[0], p.warnings
     # the form works
     p.page.locator('input').first.fill('admin')
+
+
+def test_runtime_picking_the_language_again_asks_again_for_a_file_that_failed(open_page):
+    # the <head> got a 503 (a restart, a failover), the server is fine by the time the user clicks
+    p = open_page(storage={'pegaprox-language': 'de'}, status=503, status_times=1)
+    _form(p)
+    p.page.wait_for_timeout(300)
+    assert p.files == [_url('de')] and _shows(p, 'en'), (p.files, p.texts())
+    # DE is the language the page has, so the click changes nothing but the file is asked for again
+    p.page.locator('button[title="Deutsch"]').click()
+    p.see(TITLE['de'])
+    assert p.files == [_url('de'), _url('de')], p.files
+    assert p.page.get_by_text(TITLE['en'], exact=True).count() == 0
+    assert not p.errors and len(p.warnings) == 1, (p.errors, p.warnings)
+
+
+def test_runtime_the_session_restore_asks_again_for_the_language_of_the_account(open_page):
+    # signed in, German for the account and in the browser; the early request failed
+    p = open_page(storage={'pegaprox-language': 'de'}, status=503, status_times=1,
+                  logged_out=False, language='de')
+    p.see('Cluster hinzufügen', timeout=12000)
+    assert p.page.get_by_text('Add Cluster', exact=True).count() == 0
+    assert p.files == [_url('de'), _url('de')], p.files
+    assert not p.errors and len(p.warnings) == 1, (p.errors, p.warnings)
+
+
+def test_runtime_an_early_request_that_stalls_lets_go_of_its_language(open_page):
+    # the request of the <head> never gets an answer; the page starts in English after 4 s
+    p = open_page(storage={'pegaprox-language': 'de'}, hold=True, clock=True)
+    _form(p)
+    assert p.files == [_url('de')] and len(p.held) == 1 and _shows(p, 'en')
+    # past the 15 s every language request gets, counted from the <head>
+    p.ctx.clock.fast_forward('00:12')
+    p.page.wait_for_timeout(300)
+    # that request is gone for good; the next ones get their answer
+    p.hold, p.held = False, []
+    p.page.locator('button[title="English"]').click()
+    p.page.locator('button[title="Deutsch"]').click()
+    p.see(TITLE['de'])
+    assert p.files == [_url('de'), _url('de')], p.files
+    # the stall was said once, as any other file that did not come
+    assert len(p.warnings) == 1 and 'de' in p.warnings[0], p.warnings
+    assert not p.errors, p.errors
 
 
 def test_runtime_a_slow_file_lets_the_page_start_in_english_and_switch_when_it_comes(open_page):

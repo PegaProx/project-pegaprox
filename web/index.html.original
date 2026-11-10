@@ -149,10 +149,15 @@
             lang = lang || 'de';
             if (lang === 'en') return;
             var boot = { lang: lang };
-            boot.data = fetch('/i18n/' + lang + '.json?v=' + files[lang], { credentials: 'same-origin' })
+            // 15 s for the request and its body, as for every later load in contexts.js. That one
+            // takes this request over, and one that stalled would hold its language for good
+            var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+            var timer = ctrl && setTimeout(function() { ctrl.abort(); }, 15000);
+            var done = function() { if (timer) clearTimeout(timer); };
+            boot.data = fetch('/i18n/' + lang + '.json?v=' + files[lang], { credentials: 'same-origin', signal: ctrl ? ctrl.signal : undefined })
                 .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
             // contexts.js says so when it fails, an unhandled rejection here would only add noise
-            boot.data.catch(function() {});
+            boot.data.then(done, done);
             window.__pegaproxI18nBoot = boot;
         })();
     </script>

@@ -149,10 +149,15 @@
             lang = lang || 'de';
             if (lang === 'en') return;
             var boot = { lang: lang };
-            boot.data = fetch('/i18n/' + lang + '.json?v=' + files[lang], { credentials: 'same-origin' })
+            // 15 s for the request and its body, as for every later load in contexts.js. That one
+            // takes this request over, and one that stalled would hold its language for good
+            var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+            var timer = ctrl && setTimeout(function() { ctrl.abort(); }, 15000);
+            var done = function() { if (timer) clearTimeout(timer); };
+            boot.data = fetch('/i18n/' + lang + '.json?v=' + files[lang], { credentials: 'same-origin', signal: ctrl ? ctrl.signal : undefined })
                 .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
             // contexts.js says so when it fails, an unhandled rejection here would only add noise
-            boot.data.catch(function() {});
+            boot.data.then(done, done);
             window.__pegaproxI18nBoot = boot;
         })();
     </script>
@@ -6629,11 +6634,13 @@ const takeUiLock=useCallback(got=>{const l=cleanUiLock(got);if(!l)return uiLockN
 const loadUiLock=useCallback(fresh=>{if(fresh||!uiLockLoad.current){const read=UI_LOCK_FROM_CACHE&&!fresh?Promise.resolve(cachedUiLock()):fetchUiLock();const p=read.then(got=>got&&uiLockLoad.current===p?takeUiLock(got):uiLockNow.current);uiLockLoad.current=p;}return uiLockLoad.current;},[takeUiLock]);// the refusal of a save carries the lock, so there is no second read to fail
 const takeRefusedLock=useCallback(body=>{if(body&&body.lock){uiLockLoad.current=Promise.resolve(takeUiLock(body.lock));}else{loadUiLock(true);}},[takeUiLock,loadUiLock]);useEffect(()=>{loadUiLock();},[loadUiLock]);const lockedLanguage=uiLock.language&&uiLockBinds(uiLock,lockRole)?uiLock.language:'';const wanted=lockedLanguage||language;// LW Nov 2026 - while its file is on the way the page stays in the language it shows
 // (English at first), one that failed shows in English through t() below
-const[languagesIn,setLanguagesIn]=useState(0);const shownBefore=useRef('en');const pending=!translations[wanted]&&!_languageFailed.has(wanted)&&Object.prototype.hasOwnProperty.call(I18N_FILES,wanted);const shown=pending?shownBefore.current:wanted;shownBefore.current=shown;// a file that failed is asked for again when its language is picked again, not by
-// the first render after the <head> failed to get it
-const wantedBefore=useRef(null);useEffect(()=>{const again=wantedBefore.current!==null;wantedBefore.current=wanted;if(translations[wanted]||_languageFailed.has(wanted)&&!again)return;loadLanguage(wanted).then(()=>setLanguagesIn(n=>n+1));},[wanted]);// Translation function with English fallback
+const[languagesIn,setLanguagesIn]=useState(0);const shownBefore=useRef('en');const pending=!translations[wanted]&&!_languageFailed.has(wanted)&&Object.prototype.hasOwnProperty.call(I18N_FILES,wanted);const shown=pending?shownBefore.current:wanted;shownBefore.current=shown;// a file that failed is asked for again when a language is picked again, not by the
+// first render after the <head> failed to get it. Picking the language the page
+// already has (the switcher, sign-in, session restore) changes no state, so a pick
+// after a failure counts in picks as well
+const wantedBefore=useRef(null);const[picks,setPicks]=useState(0);useEffect(()=>{const again=wantedBefore.current!==null;wantedBefore.current=wanted;if(translations[wanted]||_languageFailed.has(wanted)&&!again)return;loadLanguage(wanted).then(()=>setLanguagesIn(n=>n+1));},[wanted,picks]);// Translation function with English fallback
 const t=useCallback(key=>{return translations[shown]?.[key]||translations['en']?.[key]||key;},[shown,languagesIn]);// Internal: validate + persist locally. Used by both code paths.
-const _setAndPersist=useCallback(lang=>{if(!SUPPORTED_LANGS.includes(lang))return false;setLanguage(lang);try{localStorage.setItem('pegaprox-language',lang);}catch(_){}return true;},[]);// changeLanguage = user-initiated switch from an authenticated context.
+const _setAndPersist=useCallback(lang=>{if(!SUPPORTED_LANGS.includes(lang))return false;setLanguage(lang);if(_languageFailed.size)setPicks(n=>n+1);try{localStorage.setItem('pegaprox-language',lang);}catch(_){}return true;},[]);// changeLanguage = user-initiated switch from an authenticated context.
 // Persists locally AND syncs to the server so other devices pick it up.
 // NS May 2026 (#389) — caller is responsible for only invoking this when
 // authenticated; the switcher uses applyLanguage on the login page.

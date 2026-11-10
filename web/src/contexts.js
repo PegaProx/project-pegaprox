@@ -226,15 +226,18 @@
                 && Object.prototype.hasOwnProperty.call(I18N_FILES, wanted);
             const shown = pending ? shownBefore.current : wanted;
             shownBefore.current = shown;
-            // a file that failed is asked for again when its language is picked again, not by
-            // the first render after the <head> failed to get it
+            // a file that failed is asked for again when a language is picked again, not by the
+            // first render after the <head> failed to get it. Picking the language the page
+            // already has (the switcher, sign-in, session restore) changes no state, so a pick
+            // after a failure counts in picks as well
             const wantedBefore = useRef(null);
+            const [picks, setPicks] = useState(0);
             useEffect(() => {
                 const again = wantedBefore.current !== null;
                 wantedBefore.current = wanted;
                 if (translations[wanted] || (_languageFailed.has(wanted) && !again)) return;
                 loadLanguage(wanted).then(() => setLanguagesIn(n => n + 1));
-            }, [wanted]);
+            }, [wanted, picks]);
 
             // Translation function with English fallback
             const t = useCallback((key) => {
@@ -245,6 +248,7 @@
             const _setAndPersist = useCallback((lang) => {
                 if (!SUPPORTED_LANGS.includes(lang)) return false;
                 setLanguage(lang);
+                if (_languageFailed.size) setPicks(n => n + 1);
                 try { localStorage.setItem('pegaprox-language', lang); } catch (_) {}
                 return true;
             }, []);
