@@ -194,8 +194,12 @@ class V2PMigrationTask:
         self.disk_cache = _cache if _cache in DISK_CACHE_MODES else ''
         _iot = self.config.get('disk_iothread', True)
         self.disk_iothread = _iot if isinstance(_iot, bool) else str(_iot).strip().lower() in ('1', 'true', 'on')
-        self.disk_discard = self.config.get('disk_discard', 'on')
-        self.disk_ssd = self.config.get('disk_ssd', False)
+        # the same for discard and SSD emulation (#1246)
+        _discard = self.config.get('disk_discard', 'on')
+        _discard = _discard.strip().lower() if isinstance(_discard, str) else ''
+        self.disk_discard = _discard if _discard in ('on', 'ignore') else ''
+        _ssd = self.config.get('disk_ssd', False)
+        self.disk_ssd = _ssd if isinstance(_ssd, bool) else str(_ssd).strip().lower() in ('1', 'true', 'on')
         # #598 — optional per-VM QEMU aio backend for the FINAL target disk(s).
         # Whitelist STRICTLY to the three literal qemu tokens; the value is
         # interpolated into a root `qm set` / conf line, so never emit raw input
@@ -244,10 +248,10 @@ class V2PMigrationTask:
 
     def _disk_attach_opts(self):
         # #598 — extra drive options appended to a FINAL target-disk attach only.
-        # aio_mode and disk_cache are whitelisted in __init__ to literal tokens and
-        # disk_iothread is a bool, so the returned suffix can never carry shell/config
-        # metacharacters. Returns '' when none of them applies (PVE default: no IO
-        # thread, cache=none, aio=io_uring).
+        # aio_mode, disk_cache and disk_discard are whitelisted in __init__ to literal
+        # tokens and disk_iothread and disk_ssd are bools, so the returned suffix can
+        # never carry shell/config metacharacters. Returns '' when none of them applies
+        # (PVE default: no IO thread, cache=none, discard=ignore, no SSD, aio=io_uring).
         opts = ''
         # JB Nov 2026 (#1270) - PVE runs a disk in its own IO thread only on VirtIO Block or on
         # SCSI behind virtio-scsi-single; elsewhere the flag is ignored or refused
@@ -257,6 +261,11 @@ class V2PMigrationTask:
         # none is what PVE does without the option
         if getattr(self, 'disk_cache', '') in DISK_CACHE_MODES and self.disk_cache != 'none':
             opts += f',cache={self.disk_cache}'
+        # ignore is PVE's default, and VirtIO Block has no ssd option (#1246)
+        if getattr(self, 'disk_discard', '') == 'on':
+            opts += ',discard=on'
+        if getattr(self, 'disk_ssd', False) is True and bus in ('scsi', 'sata', 'ide'):
+            opts += ',ssd=1'
         if getattr(self, 'aio_mode', ''):
             opts += f',aio={self.aio_mode}'
         return opts
