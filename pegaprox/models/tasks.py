@@ -157,6 +157,8 @@ class PegaProxConfig:
         # MK Sep 2026 (#941) — hard off switch. Everything that reaches a node over SSH
         # goes through PegaProxManager._ssh_connect, so this turns the lot off for this
         # cluster: node shell, VNC tunnel, the LVM snapshot probe, the hardening checks.
+        # MK Nov 2026 - the node shell does not (its login is the operator's), it asks
+        # api/helpers.node_shell_refusal
         self.ssh_disabled = bool(cluster_data.get('ssh_disabled', False))
         # MK May 2026 — Proxmox API port. Default :8006 covers ~all installs,
         # but ops running PVE on a non-standard port (firewall constraint,

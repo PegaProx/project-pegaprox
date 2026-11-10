@@ -1110,6 +1110,26 @@ def node_shell_address(mgr, node):
         return None
 
 
+NODE_SHELL_SSH_OFF = ('SSH is switched off for this cluster in its settings, so the node '
+                      'shell stays closed')
+
+
+def node_shell_refusal(mgr):
+    """Why the node shell of this cluster stays closed - a sentence, or None.
+
+    MK Nov 2026 - neither shell asked the cluster's SSH switch: both log in with what the
+    operator types into the dialog and never went through _ssh_connect, so with SSH
+    switched off a node shell still opened. Only the switch counts here. A cluster
+    without SSH credentials of its own still has a shell, the login is the operator's.
+    Asked by the main port shell and by the two answers the SSH server on port+2 opens
+    its shell with (ws token validate, cluster-creds), so that server cannot get round it.
+    """
+    from pegaprox.utils.ssh import ssh_blocked_for
+    if mgr is not None and ssh_blocked_for(mgr) == 'SSH_DISABLED':
+        return NODE_SHELL_SSH_OFF
+    return None
+
+
 # NS Oct 2026 - an XCP-ng pool asks for its own xapi.vm.* permission next to the vm.* one,
 # as its power, config and migrate routes already did (#1110)
 XAPI_TWINS = {'vm.config': 'xapi.vm.config', 'vm.snapshot': 'xapi.vm.snapshot',

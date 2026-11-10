@@ -51,7 +51,7 @@ def _xapi_refusal(cluster_id, user, perm):
 from pegaprox.utils.realtime import broadcast_sse, broadcast_action, push_immediate_update, hold_websocket
 from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined, caller_is_scoped
-from pegaprox.api.helpers import node_shell_address
+from pegaprox.api.helpers import node_shell_address, node_shell_refusal
 from pegaprox.api.helpers import xapi_permission_missing, upstream_failure, tenant_quota_gate, guest_size, quota_hold_alive
 from pegaprox.api.helpers import UPSTREAM_AUTH, UPSTREAM_AUTH_STATUSES
 from pegaprox.api.helpers import pve_read_failed, pve_unreachable, _checkbox
@@ -12753,6 +12753,22 @@ async def _refused_as_standby(ws, resp):
     return True
 
 
+async def _refused_ssh_off(ws, resp):
+    """The main app answers 409 SSH_DISABLED for the node shell of a cluster with SSH
+    switched off. Its sentence goes to the browser; True when the socket is closed."""
+    if resp is None or resp.status_code != 409:
+        return False
+    try:
+        body = resp.json() or {}
+    except Exception:
+        return False
+    if body.get('code') != 'SSH_DISABLED':
+        return False
+    await ws.send(json.dumps({'status': 'error', 'message': body.get('error') or 'SSH is switched off for this cluster'}))
+    await ws.close(1008, "ssh disabled")
+    return True
+
+
 async def ssh_handler(websocket):
     """SSH WebSocket handler with user credential prompt and SSH key support
     
@@ -12838,7 +12854,7 @@ async def ssh_handler(websocket):
         # can probe the node: more time than a bare check needs.
         r = requests.get(validate_url, cookies=cookies, headers=headers, timeout=30, verify=False)
 
-        if await _refused_as_standby(websocket, r):
+        if await _refused_as_standby(websocket, r) or await _refused_ssh_off(websocket, r):
             return
         if r.status_code == 403:
             print(f"Auth failed: 403 (no access to cluster {cluster_id})")
@@ -12877,7 +12893,7 @@ async def ssh_handler(websocket):
                 # nosec B501 — same-host PegaProx self-signed cert, see MK 2026-06-04 audit
                 rc = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}",
                                   cookies={'session': session_id}, timeout=10, verify=False)
-                if await _refused_as_standby(websocket, rc):
+                if await _refused_as_standby(websocket, rc) or await _refused_ssh_off(websocket, rc):
                     return
                 if rc.status_code == 200:
                     creds = rc.json()
@@ -13219,7 +13235,8 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
         pve_api_port = 8006
     if not allowed_hosts and session_id:
         try:
-            cr = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}",
+            # console=term: a PVE API console, which a cluster with SSH switched off keeps
+            cr = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}?console=term",
                               cookies={'session': session_id}, timeout=10, verify=False)  # nosec B501 — localhost-to-PegaProx self-signed cert; same-host trust boundary, see MK 2026-06-04 audit
             if await _refused_as_standby(client_ws, cr):
                 return
@@ -13662,7 +13679,16 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
         return
     
     manager = cluster_managers[cluster_id]
-    
+    # MK Nov 2026 - SSH switched off for the cluster closes this shell too
+    why = node_shell_refusal(manager)
+    if why:
+        logging.info(f"SHELL WS: SSH is switched off for cluster {cluster_id}, no shell")
+        try:
+            ws.send(json.dumps({'status': 'error', 'message': why}))
+        except Exception:
+            pass
+        return
+
     # Get node IP address from cluster status
     logging.info(f"Step 1: Getting IP for node {node}...")
     
