@@ -52,7 +52,7 @@ def _xapi_refusal(cluster_id, user, perm):
 from pegaprox.utils.realtime import broadcast_sse, broadcast_action, push_immediate_update, hold_websocket
 from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined, caller_is_scoped
-from pegaprox.api.helpers import node_shell_address
+from pegaprox.api.helpers import node_shell_address, node_shell_refusal
 from pegaprox.api.helpers import xapi_permission_missing, upstream_failure, tenant_quota_gate, guest_size, quota_hold_alive
 from pegaprox.api.helpers import UPSTREAM_AUTH, UPSTREAM_AUTH_STATUSES
 from pegaprox.api.helpers import pve_read_failed, pve_unreachable, _checkbox
@@ -4061,6 +4061,8 @@ def remove_node_from_cluster(cluster_id, node_name):
         cluster_config = mgr.config
         ssh_user = node_login(cluster_config)
         ssh_key_content = getattr(cluster_config, 'ssh_key', '') or ''
+        # JB Nov 2026 - both logins below went to 22 whatever the cluster had set
+        ssh_port = getattr(cluster_config, 'ssh_port', 22) or 22
         
         # Find an online node to execute the removal from
         host, port = mgr.host, mgr.api_port
@@ -4112,13 +4114,13 @@ def remove_node_from_cluster(cluster_id, node_name):
                     except:
                         continue
                 if pkey:
-                    ssh.connect(online_node_ip, port=22, username=ssh_user, pkey=pkey, timeout=30)
+                    ssh.connect(online_node_ip, port=ssh_port, username=ssh_user, pkey=pkey, timeout=30)
                     connected = True
             except Exception as key_err:
                 logging.debug(f"[RemoveNode] SSH key auth failed: {key_err}")
         
         if not connected and ssh_password:
-            ssh.connect(online_node_ip, port=22, username=ssh_user, password=ssh_password, timeout=30)
+            ssh.connect(online_node_ip, port=ssh_port, username=ssh_user, password=ssh_password, timeout=30)
             connected = True
         
         if not connected:
@@ -4174,13 +4176,13 @@ def remove_node_from_cluster(cluster_id, node_name):
                             # no persist here: this connects to a node being REMOVED —
                             # pinning its key would wrongly reject-on-change if the node
                             # is later reinstalled and re-added.
-                            ssh_cleanup.connect(removed_node_ip, port=22, username=ssh_user, pkey=pkey, timeout=15)
+                            ssh_cleanup.connect(removed_node_ip, port=ssh_port, username=ssh_user, pkey=pkey, timeout=15)
                             cleanup_connected = True
                     except:
                         pass
                 if not cleanup_connected and ssh_password:
                     try:
-                        ssh_cleanup.connect(removed_node_ip, port=22, username=ssh_user, password=ssh_password, timeout=15)
+                        ssh_cleanup.connect(removed_node_ip, port=ssh_port, username=ssh_user, password=ssh_password, timeout=15)
                         cleanup_connected = True
                     except:
                         pass
@@ -5138,22 +5140,37 @@ def clone_vm_api(cluster_id, node, vm_type, vmid):
     
     if result['success']:
         # #194: apply Cloud-Init config to cloned QEMU VM (before first boot)
+        _ci_warn = ''
         if vm_type == 'qemu':
             ci_params = {}
             for ci_key in ('ciuser', 'cipassword', 'sshkeys', 'ipconfig0', 'ipconfig1', 'nameserver', 'searchdomain'):
                 if data.get(ci_key):
                     ci_params[ci_key] = data[ci_key]
-            if ci_params:
+            if ci_params and getattr(manager, 'cluster_type', 'proxmox') != 'proxmox':
+                # NS Nov 2026 - an XCP-ng clone has no task id and no config endpoint to put these on
+                _ci_warn = 'The clone was started, but Cloud-Init settings are applied on Proxmox clusters only.'
+            elif ci_params:
+                _ci_why = ''
                 try:
                     upid = result.get('data')
-                    if upid:
-                        manager._wait_for_task(node, upid, timeout=600)
-                    clone_node = data.get('target_node') or node
-                    ci_url = f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{clone_node}/qemu/{newid}/config"
-                    manager._api_post(ci_url, data=ci_params)
-                    logging.info(f"[CLONE] Applied Cloud-Init config to VM {newid}: {list(ci_params.keys())}")
+                    if upid and not manager._wait_for_task(node, upid, timeout=600):
+                        _ci_why = 'the clone task did not finish'
+                    else:
+                        clone_node = data.get('target_node') or node
+                        ci_url = f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{clone_node}/qemu/{newid}/config"
+                        # JB Nov 2026 - all of it goes in this one request, so a refusal loses user, password, keys and
+                        # address together, and the guest comes up without them while the clone reads as a success
+                        ci_resp = manager._api_post(ci_url, data=ci_params)
+                        if ci_resp.status_code != 200:
+                            _ci_why = parse_pve_error(ci_resp.text, f'HTTP {ci_resp.status_code}')
+                        else:
+                            logging.info(f"[CLONE] Applied Cloud-Init config to VM {newid}: {list(ci_params.keys())}")
                 except Exception as e:
-                    logging.warning(f"[CLONE] Cloud-Init config failed for {newid}: {e}")
+                    # an exception names hosts and ports: the log gets it, the caller a fixed text
+                    _ci_why = safe_error(e, 'an internal error occurred')
+                if _ci_why:
+                    logging.warning(f"[CLONE] Cloud-Init config failed for {newid}: {_ci_why}")
+                    _ci_warn = f"The clone was started, but its Cloud-Init settings were not applied: {_ci_why}"
 
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'system')
@@ -5172,6 +5189,7 @@ def clone_vm_api(cluster_id, node, vm_type, vmid):
             'newid': newid,
             'data': result.get('data'),
             **({'quota_warning': _qwarn} if _qwarn else {}),
+            **({'cloudinit_warning': _ci_warn} if _ci_warn else {}),
         })
     else:
         return jsonify({'error': result['error']}), 500
@@ -12739,6 +12757,22 @@ async def _refused_as_standby(ws, resp):
     return True
 
 
+async def _refused_ssh_off(ws, resp):
+    """The main app answers 409 SSH_DISABLED for the node shell of a cluster with SSH
+    switched off. Its sentence goes to the browser; True when the socket is closed."""
+    if resp is None or resp.status_code != 409:
+        return False
+    try:
+        body = resp.json() or {}
+    except Exception:
+        return False
+    if body.get('code') != 'SSH_DISABLED':
+        return False
+    await ws.send(json.dumps({'status': 'error', 'message': body.get('error') or 'SSH is switched off for this cluster'}))
+    await ws.close(1008, "ssh disabled")
+    return True
+
+
 async def ssh_handler(websocket):
     """SSH WebSocket handler with user credential prompt and SSH key support
     
@@ -12792,6 +12826,15 @@ async def ssh_handler(websocket):
     node_ports = {}
     ssh_port = 22
     known_only = False
+
+    def _ssh_port_of(v):
+        # JB Nov 2026 - both answers carry the cluster's ssh_port for this login; a number
+        # in range or 22, the way the app reads it
+        try:
+            p = int(v)
+        except (TypeError, ValueError):
+            return 22
+        return p if 0 < p < 65536 else 22
     try:
         if ws_token:
             # NS Aug 2026 (Aikido pentest) — shell=node makes /validate enforce the node.shell
@@ -12816,7 +12859,7 @@ async def ssh_handler(websocket):
         # can probe the node: more time than a bare check needs.
         r = requests.get(validate_url, cookies=cookies, headers=headers, timeout=30, verify=False)
 
-        if await _refused_as_standby(websocket, r):
+        if await _refused_as_standby(websocket, r) or await _refused_ssh_off(websocket, r):
             return
         if r.status_code == 403:
             print(f"Auth failed: 403 (no access to cluster {cluster_id})")
@@ -12844,7 +12887,7 @@ async def ssh_handler(websocket):
                 cluster_host = ctx.get('host')
                 node_ips = ctx.get('node_ips') or {}
                 node_ports = ctx.get('node_ports') or {}
-                ssh_port = int(ctx.get('ssh_port') or 22)
+                ssh_port = _ssh_port_of(ctx.get('ssh_port'))
                 print(f"validate→ host={cluster_host} node_ips={node_ips}")
             except Exception as e:
                 print(f"Could not parse validate payload: {e}")
@@ -12856,14 +12899,14 @@ async def ssh_handler(websocket):
                 # nosec B501 — same-host PegaProx self-signed cert, see MK 2026-06-04 audit
                 rc = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}",
                                   cookies={'session': session_id}, timeout=10, verify=False)
-                if await _refused_as_standby(websocket, rc):
+                if await _refused_as_standby(websocket, rc) or await _refused_ssh_off(websocket, rc):
                     return
                 if rc.status_code == 200:
                     creds = rc.json()
                     cluster_host = creds.get('host')
                     node_ips = creds.get('node_ips', {})
                     node_ports = creds.get('node_ports') or {}
-                    ssh_port = int(creds.get('ssh_port') or 22)
+                    ssh_port = _ssh_port_of(creds.get('ssh_port'))
             except Exception as e:
                 print(f"Could not get node IP from API: {e}")
 
@@ -12894,7 +12937,7 @@ async def ssh_handler(websocket):
         await websocket.send(json.dumps({'status': 'error', 'message': f'Could not find the address of node {node}'}))
         await websocket.close(1008, "node address unknown")
         return
-    node_ssh_port = int(node_ports.get(node) or node_ports.get(node.lower()) or ssh_port or 22)
+    node_ssh_port = _ssh_port_of(node_ports.get(node) or node_ports.get(node.lower()) or ssh_port)
     print(f"Final node IP for {node}: {node_ip}:{node_ssh_port}")
 
     # Send need_credentials status - frontend will show login dialog
@@ -13200,7 +13243,8 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
         pve_api_port = 8006
     if not allowed_hosts and session_id:
         try:
-            cr = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}",
+            # console=term: a PVE API console, which a cluster with SSH switched off keeps
+            cr = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}?console=term",
                               cookies={'session': session_id}, timeout=10, verify=False)  # nosec B501 — localhost-to-PegaProx self-signed cert; same-host trust boundary, see MK 2026-06-04 audit
             if await _refused_as_standby(client_ws, cr):
                 return
@@ -13643,7 +13687,16 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
         return
     
     manager = cluster_managers[cluster_id]
-    
+    # MK Nov 2026 - SSH switched off for the cluster closes this shell too
+    why = node_shell_refusal(manager)
+    if why:
+        logging.info(f"SHELL WS: SSH is switched off for cluster {cluster_id}, no shell")
+        try:
+            ws.send(json.dumps({'status': 'error', 'message': why}))
+        except Exception:
+            pass
+        return
+
     # Get node IP address from cluster status
     logging.info(f"Step 1: Getting IP for node {node}...")
     
@@ -13719,7 +13772,7 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
         # Connect
         ssh.connect(
             hostname=_ssh_host,
-            port=22,
+            port=getattr(manager.config, 'ssh_port', 22) or 22,
             username=ssh_user,
             password=ssh_pass,
             timeout=30,
@@ -15216,6 +15269,20 @@ def get_xcp_os_types(cluster_id):
     return jsonify(mgr.get_os_types())
 
 
+def _start_after_create_refused(config, manager):
+    """403 when the new guest is to be started by someone who may create but not start.
+    The permission is the one the power route asks for: xapi.vm.power on XCP-ng, vm.start
+    elsewhere. NS Nov 2026"""
+    if not isinstance(config, dict) or not config.get('start'):
+        return None
+    needed = 'xapi.vm.power' if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng' else 'vm.start'
+    from pegaprox.utils.rbac import has_permission
+    if has_permission(build_authz_user(request.session.get('user', ''), request.session), needed):
+        return None
+    return jsonify({'error': f'Starting the guest after creation needs the {needed} permission',
+                    'code': 'MISSING_PERMISSION', 'required': needed}), 403
+
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/qemu', methods=['POST'])
 @require_auth(perms=["vm.create"])
 def create_vm_api(cluster_id, node):
@@ -15241,6 +15308,11 @@ def create_vm_api(cluster_id, node):
             return jsonify({'error': 'Permission denied: xapi.vm.create'}), 403
 
     vm_config = request.json or {}
+    if not isinstance(vm_config, dict):
+        return jsonify({'error': 'Expected a JSON object'}), 400
+    _serr = _start_after_create_refused(vm_config, manager)
+    if _serr:
+        return _serr
 
     # NS #502 — tenant quota pre-flight (fail-open: a quota bug must never block a create)
     # MK Oct 2026 - under the tenant's lock, with a hold on the new guest until it shows, so
@@ -15333,6 +15405,9 @@ def create_container_api(cluster_id, node):
     ct_config = request.json or {}
     if not isinstance(ct_config, dict):
         return jsonify({'error': 'Expected a JSON object'}), 400
+    _serr = _start_after_create_refused(ct_config, manager)
+    if _serr:
+        return _serr
 
     # like the PVE wizard: a root password or an SSH key, else nobody gets in as root.
     # An empty password counts as none, one PVE would not set as given is refused.

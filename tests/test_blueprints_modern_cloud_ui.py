@@ -760,10 +760,16 @@ def test_runtime_cloud_names_the_page_after_both(open_app):
 
 
 def _nav_names():
-    """bpNavTab of each language as the bundle under test has it (de, en, zh, pl, fr, es, pt, ko, it)."""
+    """bpNavTab of each language as the build under test has it (de, en, zh, pl, fr, es, pt, ko, it). LW Nov 2026 -
+    the bundle carries English and build.sh writes the others to web/i18n/<lang>.json; an older bundle has all nine."""
+    langs = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
     names = re.findall(r'bpNavTab:\s*"([^"]+)"', BUNDLE or _read('web', 'index.html'))
-    assert len(names) == 9
-    return dict(zip(['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it'], names))
+    if len(names) == 9:
+        return dict(zip(langs, names))
+    assert len(names) == 1
+    out = {lang: json.loads(_read('web', 'i18n', f'{lang}.json'))['bpNavTab'] for lang in langs if lang != 'en'}
+    out['en'] = names[0]
+    return out
 
 
 @pytest.mark.parametrize('lang', ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it'])

@@ -2193,7 +2193,7 @@
                                         {/* Card Actions */}
                                         <div className="flex items-center justify-between p-3 border-t border-proxmox-border bg-proxmox-dark/30">
                                             {/* Primary Actions - Always visible */}
-                                            <div className="flex items-center gap-1">
+                                            <div className="flex pp-wrap-narrow items-center gap-1">
                                                 {getProxmoxObjectUrl(getVmProxmoxTarget(resource)) && (
                                                     <button
                                                         onClick={() => openProxmoxObject(getVmProxmoxTarget(resource))}

@@ -10,6 +10,7 @@ Source checks read web/src/translations.js; the runtime tests drive the built bu
 headless Chromium against the fake server of tests/test_ha_ui.py and skip where Playwright
 is not installed. LW Oct 2026
 """
+import json
 import os
 import re
 
@@ -131,9 +132,12 @@ def test_the_tenant_hint_speaks_of_the_role():
 
 def test_the_bundle_was_rebuilt():
     built = _read('web', 'index.html')
-    for needle in ('ESXi-Server bearbeiten', 'PBS-Verschlüsselungsschlüssel', '작업 및 이벤트',
-                   'Set automatically when you pick a tenant role'):
-        assert needle in built, needle
+    assert 'Set automatically when you pick a tenant role' in built
+    # LW Nov 2026 - the other languages are the files build.sh writes next to the bundle
+    for lang, needles in (('de', ('ESXi-Server bearbeiten', 'PBS-Verschlüsselungsschlüssel')), ('ko', ('작업 및 이벤트',))):
+        texts = json.loads(_read('web', 'i18n', f'{lang}.json')).values()
+        for needle in needles:
+            assert any(needle in v for v in texts), (lang, needle)
 
 
 # --- runtime -------------------------------------------------------------------------------

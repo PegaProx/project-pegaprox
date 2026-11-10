@@ -20417,7 +20417,12 @@
                                 full: cloneConfig.full,
                                 target_node: cloneConfig.target_node,
                                 target_storage: cloneConfig.target_storage,
-                                description: cloneConfig.description
+                                description: cloneConfig.description,
+                                // JB Nov 2026 - the dialog asks for these and the route applies them, and they stopped here
+                                // NS Nov 2026 - Proxmox takes sshkeys urlencoded, one key a line with a closing newline
+                                ...Object.fromEntries(['ciuser', 'cipassword', 'sshkeys', 'ipconfig0', 'nameserver', 'searchdomain']
+                                    .filter(k => String(cloneConfig[k] || '').trim())
+                                    .map(k => [k, k === 'sshkeys' ? encodeURIComponent(cloneConfig[k].trim() + '\n') : cloneConfig[k]]))
                             })
                         }
                     );
@@ -20425,6 +20430,7 @@
                     if (response && response.ok) {
                         const result = await response.json();
                         addToast(result.message || `${t('cloneStarted') || 'Clone started'}: ${vm.vmid} ↑ ${cloneConfig.newid}`);
+                        if (result.cloudinit_warning) addToast(result.cloudinit_warning, 'error');
                         setDashCloneVm(null);
                         setTimeout(() => fetchClusterResources(selectedCluster.id), 3000);
                         return true;   // #702 — signal success so the table-view modal can self-close
@@ -23325,7 +23331,7 @@
                                                     />
                                                 ) : (<>
                                                 {/* Sub-Tab Navigation */}
-                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex items-center gap-1 border-b border-proxmox-border pb-2'}>
+                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex pp-wrap-narrow items-center gap-1 border-b border-proxmox-border pb-2'}>
                                                     <button
                                                         onClick={() => setResourcesSubTab('management')}
                                                         className={isCorporate
@@ -23999,7 +24005,7 @@
                                                 {/* LW: Feb 2026 - sub-tab nav, corporate underline style */}
                                                 <div className={isCorporate
                                                     ? 'corp-tab-strip'
-                                                    : 'flex items-center gap-1 border-b border-proxmox-border pb-2'
+                                                    : 'flex pp-wrap-narrow items-center gap-1 border-b border-proxmox-border pb-2'
                                                 }>
                                                     {[
                                                         { id: 'schedules', label: t('scheduledActions') || 'Schedules', icon: Icons.Clock },
@@ -24939,7 +24945,7 @@
                                                             return (
                                                             <>
                                                                 {/* summary bar */}
-                                                                <div className="flex items-center gap-4 bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                                                                <div className="flex pp-wrap-narrow items-center gap-4 bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                     <div className="flex-1">
                                                                         <div className="flex items-center gap-2 mb-2">
                                                                             <span className="text-sm font-medium">{hardenNode}</span>
@@ -25151,7 +25157,7 @@
                                         {activeTab === 'reports' && (
                                             <div className="space-y-6">
                                                 {/* LW: use the same corp tab-strip as Automation/the other sections (was a one-off blue underline) */}
-                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex gap-2 border-b border-proxmox-border pb-2'}>
+                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex pp-wrap-narrow gap-2 border-b border-proxmox-border pb-2'}>
                                                     {[
                                                         { id: 'summary', label: t('summary') || 'Summary', icon: Icons.BarChart },
                                                         { id: 'cve', label: t('cveScanner') || 'CVE Scanner', icon: Icons.Shield },
@@ -26017,7 +26023,7 @@
                                             <div className="space-y-4">
                                                 <div className={isCorporate
                                                     ? 'corp-tab-strip'
-                                                    : 'flex items-center gap-1 border-b border-proxmox-border pb-2'
+                                                    : 'flex pp-wrap-narrow items-center gap-1 border-b border-proxmox-border pb-2'
                                                 }>
                                                     {complianceSubs.map(sub => (
                                                         <button
@@ -29443,7 +29449,7 @@
                                                                     </div>
                                                                     <div>
                                                                         <label className="text-xs text-gray-500 mb-1 block">Disk Bus</label>
-                                                                        <select value={vmwareMigrateForm.disk_bus} onChange={e => setVmwareMigrateForm(f => ({...f, disk_bus: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white">
+                                                                        <select value={vmwareMigrateForm.disk_bus} onChange={e => setVmwareMigrateForm(f => ({...f, disk_bus: e.target.value, disk_ssd: e.target.value === 'virtio' ? false : f.disk_ssd}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white">
                                                                             <option value="auto">Auto ({vmwareMigrationPlan.source?.hardware?.disk_bus || 'scsi'})</option>
                                                                             <option value="scsi">SCSI</option>
                                                                             <option value="sata">SATA</option>
@@ -29553,10 +29559,13 @@
                                                                             <input type="checkbox" checked={vmwareMigrateForm.disk_iothread} onChange={e => setVmwareMigrateForm(f => ({...f, disk_iothread: e.target.checked}))} className="rounded" />
                                                                             IO Thread (per-disk)
                                                                         </label>
-                                                                        <label className="flex items-center gap-2 text-xs text-gray-400">
-                                                                            <input type="checkbox" checked={vmwareMigrateForm.disk_ssd} onChange={e => setVmwareMigrateForm(f => ({...f, disk_ssd: e.target.checked}))} className="rounded" />
-                                                                            {t('ssdEmulation')}
-                                                                        </label>
+                                                                        {/* LW Nov 2026 - VirtIO Block has no SSD emulation, the disks attach without it */}
+                                                                        {vmwareMigrateForm.disk_bus !== 'virtio' && (
+                                                                            <label className="flex items-center gap-2 text-xs text-gray-400">
+                                                                                <input type="checkbox" checked={vmwareMigrateForm.disk_ssd} onChange={e => setVmwareMigrateForm(f => ({...f, disk_ssd: e.target.checked}))} className="rounded" />
+                                                                                {t('ssdEmulation')}
+                                                                            </label>
+                                                                        )}
                                                                         <div>
                                                                             <label className="text-xs text-gray-500 mb-1 block">Discard (TRIM)</label>
                                                                             <select value={vmwareMigrateForm.disk_discard} onChange={e => setVmwareMigrateForm(f => ({...f, disk_discard: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-2 py-1.5 text-xs text-white">
@@ -33994,19 +34003,28 @@
             return <PegaProxDashboard />;
         }
 
-        ReactDOM.render(
-            <LanguageProvider>
-                <AuthProvider>
-                    <App />
-                </AuthProvider>
-            </LanguageProvider>,
-            document.getElementById('root')
-        );
-        
-        // LW: Hide loading screen after React renders
-        const loadingScreen = document.getElementById('loading-screen');
-        if (loadingScreen) {
-            loadingScreen.style.opacity = '0';
-            loadingScreen.style.transition = 'opacity 0.3s ease';
-            setTimeout(() => loadingScreen.remove(), 300);
+        function mountApp() {
+            ReactDOM.render(
+                <LanguageProvider>
+                    <AuthProvider>
+                        <App />
+                    </AuthProvider>
+                </LanguageProvider>,
+                document.getElementById('root')
+            );
+
+            // LW: Hide loading screen after React renders
+            const loadingScreen = document.getElementById('loading-screen');
+            if (loadingScreen) {
+                loadingScreen.style.opacity = '0';
+                loadingScreen.style.transition = 'opacity 0.3s ease';
+                setTimeout(() => loadingScreen.remove(), 300);
+            }
         }
+
+        // LW Nov 2026 - first the language the page opens in (contexts.js), so a German login form
+        // does not start out in English. English waits for nothing, and a file that takes longer
+        // than 4 s comes in after the page started in English.
+        const openingLoad = openingLanguageLoad(4000);
+        if (openingLoad) openingLoad.then(mountApp);
+        else mountApp();

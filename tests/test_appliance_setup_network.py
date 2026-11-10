@@ -10,10 +10,17 @@ the netplan file cloud-init wrote for the smoke boot's NIC.
 The scripts run here as the workflow ships them, with /etc moved into a temp dir and the
 system tools stubbed.
 MK Nov 2026
+
+Further down: each image gets the python3-sqlcipher3 of its own architecture, and its smoke
+test fails unless PegaProx reports SQLCipher (#1226). NS Nov 2026
 """
+import importlib.util
+import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -262,3 +269,535 @@ def test_the_cleanup_refuses_an_image_with_a_master_key(sandbox):
     r = _run(sandbox, f'R={root}\n' + keep + '[ "$FAIL" -eq 0 ] || exit 1\n', move_etc=False)
     assert r.returncode == 1
     assert 'the master key of the smoke boot is in the image' in r.stdout
+
+
+# --- NS Nov 2026: python3-sqlcipher3 of the image's own architecture (#1226) --------------------
+# The images took python3-sqlcipher3_0.6.4_all.deb from gyptazy's CDN. It holds the x86_64 module
+# only: on arm64 it installed, the import failed and PegaProx ran on plain SQLite, and the smoke
+# tests only waited for port 5000. Each leg now builds the package of its own arch from the pins
+# of apt.pegaprox.com (packaging/apt/build-sqlcipher3-deb.sh), and every smoke test has PegaProx
+# say which database backend it runs on (packaging/apt/smoke_backend.py).
+
+HELPER = os.path.join(ROOT, 'packaging', 'apt', 'build-sqlcipher3-deb.sh')
+REQS = os.path.join(ROOT, 'packaging', 'apt', 'python-debs', 'requirements.txt')
+SMOKE_BACKEND = os.path.join(ROOT, 'packaging', 'apt', 'smoke_backend.py')
+IMAGE_DEB = '/var/cache/pegaprox-image/python3-sqlcipher3.deb'
+BUILD = 'bash packaging/apt/build-sqlcipher3-deb.sh "${{ matrix.arch }}" "$RUNNER_TEMP/sqlcipher3-deb"'
+CHECK = 'python3 -I packaging/apt/smoke_backend.py "$RUNNER_TEMP/keystore-status.json"'
+
+
+def _flat(text):
+    return ' '.join(text.replace('\\\n', ' ').split())
+
+
+def _job(name):
+    m = re.search(rf'^  {re.escape(name)}:\n(.*?)(?=^  [a-z][\w-]*:$|\Z)', _read(WF), re.M | re.S)
+    assert m, f'release-images.yml has no job {name}'
+    return m.group(1)
+
+
+def _step(job, name):
+    text = _job(job)
+    start = text.index(f'      - name: {name}\n')
+    nxt = re.search(r'^      - (name|uses):', text[start + 1:], re.M)
+    return text[start:start + 1 + nxt.start()] if nxt else text[start:]
+
+
+def _from_line(step, first):
+    """The run block of a step from the line holding `first` on, as the runner sees it."""
+    at = step.rindex('\n', 0, step.index(first)) + 1
+    return _dedent(step[at:], ' ' * 10)
+
+
+def _definition():
+    """The distrobuilder definition of build-lxc (an unquoted heredoc, the runner expands it)."""
+    m = re.search(r'^( *)cat > packaging/lxc/pegaprox-lxc\.yaml <<YAML\n(.*?)^\1YAML$', _read(WF), re.M | re.S)
+    assert m, 'build-lxc no longer writes its distrobuilder definition'
+    return _dedent(m.group(2), m.group(1))
+
+
+def test_no_image_takes_python3_sqlcipher3_from_the_cdn():
+    wf = _read(WF)
+    assert 'cdn.gyptazy.com/debian/python3-sqlcipher3' not in wf
+    assert not re.search(r'python3-sqlcipher3_\S*_all\.deb', wf)
+    assert '6f6c099beecc54f53808d94ed43c43d41e872a572ba3aff3b83c7a035f5e06c2' not in wf
+    # the pins of the other two CDN packages stay as they were, in both jobs
+    for pin in ('125ec5a4e2bbc10c57b7b9e3ab05aecda5edf1b8f6646aff4131cab441b53c24  python3-flask-sock_0.7.1_all.deb',
+                'db36397c5db4448459dee349fc2a0b6f147ddf4b346dc8480687903c38fc822e  python3-xenapi_26.8.1_all.deb'):
+        assert wf.count(pin) == 2, pin
+
+
+@pytest.mark.parametrize('job,image_step', [('build-lxc', 'distrobuilder-Definition schreiben'),
+                                            ('build-vm', 'Dateien per qemu-nbd einhängen')])
+def test_both_image_jobs_build_it_for_the_arch_of_their_leg(job, image_step):
+    text = _job(job)
+    assert re.search(r'^      matrix:\n        arch: \[amd64, arm64\]$', text, re.M)
+    assert BUILD in _step(job, 'python3-sqlcipher3 bauen')
+    assert text.index('- name: python3-sqlcipher3 bauen') < text.index(f'- name: {image_step}')
+    assert 'python3-pip' in _step(job, 'Tools installieren')
+
+
+def test_the_build_step_takes_the_pins_of_the_apt_repo_and_keeps_no_copy_of_them():
+    helper = _read(HELPER)
+    flat = _flat(helper)
+    for part in ('--require-hashes', '--no-deps', '--only-binary=:all:', '--platform "manylinux_2_28_$machine"',
+                 '--python-version 3.13', '--implementation cp', '--abi cp313',
+                 '-r "$here/python-debs/requirements.txt"',
+                 'python3 -I "$here/build-python-debs.py" --arch "$arch" "$work/wheels" "$work/debs"'):
+        assert part in flat, part
+    spec = importlib.util.spec_from_file_location('build_python_debs_img', os.path.join(ROOT, 'packaging', 'apt',
+                                                                                         'build-python-debs.py'))
+    debs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(debs)
+    assert dict(re.findall(r'^  (\w+)\) machine=(\w+) ;;$', helper, re.M)) == {a: m for m, a in debs.ARCHES.items()}
+    pins = re.findall(r'--hash=sha256:([0-9a-f]{64})', _read(REQS))
+    assert len(pins) == 4
+    for text in (_read(WF), helper):
+        assert not [p for p in pins if p in text]
+
+
+def test_the_lxc_rootfs_gets_it_before_pegaprox():
+    d = _definition()
+    files = re.search(r'^files:\n(.*?)^\S', d, re.M | re.S)
+    assert files, 'the definition has no files section'
+    assert re.search(r'^  - generator: copy\n    source: \$\{RUNNER_TEMP\}/sqlcipher3-deb/python3-sqlcipher3\.deb\n'
+                     rf'    path: {re.escape(IMAGE_DEB)}\n', files.group(1), re.M)
+    # distrobuilder copies files in after post-packages: the install is a post-files action
+    assert re.findall(r'^  - trigger: (\S+)$', d, re.M) == ['post-files']
+    action = d[d.index('  - trigger: post-files'):]
+    assert action.index(f'dpkg -i {IMAGE_DEB}\n') < action.index('rm -rf /var/cache/pegaprox-image\n') \
+        < action.index('apt-get -y install pegaprox sshpass')
+
+
+def _installer_stubs(sandbox):
+    log = sandbox / 'calls.log'
+    for cmd in ('apt-get', 'wget', 'dpkg', 'sha256sum', 'useradd', 'usermod', 'chpasswd', 'systemctl'):
+        p = sandbox / 'bin' / cmd
+        p.write_text(f'#!/bin/sh\necho "{cmd} $*" >> "{log}"\nexit 0\n')
+        p.chmod(0o755)
+    (sandbox / 'bin' / 'id').write_text('#!/bin/sh\nexit 1\n')
+    (sandbox / 'bin' / 'id').chmod(0o755)
+    (sandbox / 'bin' / 'runuser').write_text(
+        f'#!/bin/sh\necho "$PWD runuser $*" >> "{log}"\nprintf \'{{\\n  "db": {{"backend": "sqlcipher"}}\\n}}\\n\'\n')
+    (sandbox / 'bin' / 'runuser').chmod(0o755)
+    return log
+
+
+def test_the_vm_installer_installs_it_before_pegaprox_and_has_pegaprox_report_its_backend(sandbox):
+    root = sandbox / 'root'
+    for d in ('tmp', 'var/lib/pegaprox', 'var/cache/pegaprox-image'):
+        (root / d).mkdir(parents=True)
+    (root / IMAGE_DEB.lstrip('/')).write_bytes(b'the deb')
+    log = _installer_stubs(sandbox)
+    # /var and /tmp into the sandbox as well, in one pass
+    script = re.sub(r'(?<![\w/])/(var|tmp)/', lambda m: f'{root}/{m.group(1)}/', _heredoc('install-pegaprox.sh'))
+    r = _run(sandbox, script)
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = log.read_text().splitlines()
+    assert calls.index(f'dpkg -i {root}{IMAGE_DEB}') < calls.index('apt-get -y install pegaprox sshpass')
+    assert f'{root}/var/lib/pegaprox runuser -u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper --keystore-status' \
+        in calls
+    assert sorted(os.listdir(root / 'var/cache/pegaprox-image')) == ['keystore-status.json']
+    assert json.loads((root / 'var/cache/pegaprox-image/keystore-status.json').read_text()) \
+        == {'db': {'backend': 'sqlcipher'}}
+
+
+def test_the_vm_job_puts_the_package_into_the_image():
+    flat = _flat(_step('build-vm', 'Dateien per qemu-nbd einhängen'))
+    assert (f'sudo install -D -m 0644 "$RUNNER_TEMP/sqlcipher3-deb/python3-sqlcipher3.deb" /mnt/img{IMAGE_DEB}'
+            in flat)
+    assert flat.index('sudo mount "$ROOT" /mnt/img') < flat.index(f'/mnt/img{IMAGE_DEB}') \
+        < flat.index('sudo umount /mnt/img')
+
+
+def test_the_cleanup_drops_what_the_build_brought_into_the_image(sandbox):
+    root = sandbox / 'root'
+    _smoke_boot_root(root)
+    (root / 'var/cache/pegaprox-image').mkdir(parents=True)
+    (root / 'var/cache/pegaprox-image/keystore-status.json').write_text('{}')
+    r = _run(sandbox, f'R={root}\n' + _cleanup_scrub() + '[ "$FAIL" -eq 0 ] || exit 1\n', move_etc=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (root / 'var/cache/pegaprox-image').exists()
+    assert (root / 'var/cache').is_dir()
+
+
+def test_the_lxc_smoke_test_asks_pegaprox_on_both_archs():
+    step = _step('build-lxc', 'Smoke-Test (Container starten + HTTP-Check)')
+    flat = _flat(step)
+    amd64 = ('timeout 120 sudo nsenter --target "$LEADER" --mount --uts --ipc --pid -- sh -c '
+             "'cd /var/lib/pegaprox && exec runuser -u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper "
+             "--keystore-status' > \"$RUNNER_TEMP/keystore-status.json\"")
+    arm64 = ('sudo docker exec -u pegaprox -w /var/lib/pegaprox pegaprox-test /usr/bin/pegaprox/pegaprox-wrapper '
+             '--keystore-status > "$RUNNER_TEMP/keystore-status.json"')
+    # both in the running container, before it goes down: no wait on its shutdown, no second
+    # nspawn on the tree
+    assert flat.index(amd64) < flat.index('sudo machinectl poweroff pegaprox-test')
+    assert flat.index(arm64) < flat.index('sudo docker rm -f pegaprox-test')
+    assert flat.count('systemd-nspawn') == 1 and 'NSPAWN_PID' not in flat
+    # not systemd-run -M: that talks to a D-Bus in the container, and the rootfs has none
+    assert 'sudo systemd-run' not in flat
+    # and the check fails the step, after the port check
+    assert step.startswith('      - name: Smoke-Test') and '          set -e\n' in step
+    assert f'          {CHECK}\n' in step
+    assert step.index('PegaProx kam im LXC nicht hoch') < step.index(CHECK) < step.index('LXC Smoke-Test erfolgreich')
+
+
+def _amd64_tail(sandbox, leader):
+    """The amd64 end of the LXC smoke step from the port wait on, with the host tools stubbed:
+    machinectl knows the container with `leader` as its Leader PID (none for ''), nsenter
+    answers as PegaProx in there would."""
+    log = sandbox / 'calls.log'
+    stubs = {
+        'curl': '#!/bin/sh\nexit 0\n',
+        'ss': '#!/bin/sh\nexit 0\n',
+        'tail': '#!/bin/sh\nexit 0\n',
+        'timeout': '#!/bin/sh\nshift\nexec "$@"\n',
+        'machinectl': f'#!/bin/sh\necho "machinectl $*" >> "{log}"\n'
+                      f'[ "$1" = show ] && [ -n "{leader}" ] && echo "{leader}"\nexit 0\n',
+        'nsenter': f'#!/bin/sh\necho "nsenter $*" >> "{log}"\n'
+                   'printf \'{\\n  "db": {"backend": "sqlcipher", "files": {"/var/lib/pegaprox/config/pegaprox.db": '
+                   '"encrypted"}}\\n}\\n\'\n',
+    }
+    for name, body in stubs.items():
+        (sandbox / 'bin' / name).write_text(body)
+        (sandbox / 'bin' / name).chmod(0o755)
+    (sandbox / 'bin' / 'python3').write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    (sandbox / 'bin' / 'python3').chmod(0o755)
+    step = _step('build-lxc', 'Smoke-Test (Container starten + HTTP-Check)')
+    script = _from_line(step, 'echo "Warte auf PegaProx auf Port ${PVE_PORT}..."').replace(
+        '${{ matrix.arch }}', 'amd64')
+    out = sandbox / 'out'
+    out.mkdir()
+    r = subprocess.run(['bash', '-c', 'set -e\n' + script], cwd=ROOT, capture_output=True, text=True, timeout=60,
+                       env={'PATH': f"{sandbox / 'bin'}:/usr/bin:/bin", 'RUNNER_TEMP': str(out), 'PVE_PORT': '5000'})
+    return r, (log.read_text().splitlines() if log.exists() else [])
+
+
+def test_the_amd64_status_comes_from_the_running_container(sandbox):
+    r, calls = _amd64_tail(sandbox, '4242')
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert 'smoke: PegaProx in the image runs its database on SQLCipher' in r.stdout
+    assert 'LXC Smoke-Test erfolgreich.' in r.stdout
+    ask = ("nsenter --target 4242 --mount --uts --ipc --pid -- sh -c cd /var/lib/pegaprox && exec runuser "
+           "-u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper --keystore-status")
+    assert calls == ['machinectl show pegaprox-test --property=Leader --value', ask,
+                     'machinectl poweroff pegaprox-test', 'machinectl terminate pegaprox-test']
+
+
+def test_a_container_that_is_gone_says_so_and_fails_the_step(sandbox):
+    r, calls = _amd64_tail(sandbox, '')
+    assert r.returncode == 1
+    assert '::error::the container pegaprox-test is not running any more' in r.stdout
+    assert '::error::no --keystore-status of PegaProx in the image' in r.stdout
+    assert not [c for c in calls if c.startswith('nsenter')]
+
+
+def test_the_vm_cleanup_checks_what_the_smoke_boot_said():
+    step = _step('build-vm', 'Zustand des Testboots aus dem Image entfernen')
+    read = ('sudo cat /mnt/img/var/cache/pegaprox-image/keystore-status.json > "$RUNNER_TEMP/keystore-status.json"'
+            ' || true')
+    assert step.index('sudo mount "$ROOT" /mnt/img') < step.index(read) < step.index('R=/mnt/img')
+    assert step.index('sudo qemu-nbd --disconnect /dev/nbd0') < step.index(f'{CHECK} || FAIL=1\n') \
+        < step.index('[ "$FAIL" -eq 0 ] || exit 1')
+
+
+@pytest.mark.parametrize('job', ['build-lxc', 'build-vm'])
+def test_the_check_comes_before_the_upload(job):
+    text = _job(job)
+    assert text.count(CHECK) == 1
+    assert text.index(CHECK) < text.index('- name: Artefakt sichern')
+
+
+def _status_file(tmp_path, monkeypatch, backend, files=None):
+    """--keystore-status as PegaProx prints it, with `backend` as the driver it found and a
+    config directory of its own: no database in it, or `files`, name to 'plain', 'encrypted'
+    or 'empty'."""
+    import pegaprox.constants
+    from pegaprox.core import dbcrypto
+    cfg = tmp_path / 'config'
+    cfg.mkdir()
+    heads = {'plain': b'SQLite format 3\x00' + bytes(84), 'encrypted': os.urandom(100), 'empty': b''}
+    for name, state in (files or {}).items():
+        (cfg / name).write_bytes(heads[state])
+    monkeypatch.setattr(pegaprox.constants, 'CONFIG_DIR', str(cfg))
+    monkeypatch.setattr(dbcrypto, 'BACKEND', backend)
+    out = ('Gevent monkey-patching applied\n'
+           + json.dumps({'keystore': {'ok': False, 'source': 'none'}, 'db': dbcrypto.backend_status()}, indent=2)
+           + '\n')
+    path = tmp_path / 'keystore-status.json'
+    path.write_text(out)
+    return path
+
+
+def _tail_env(sandbox, tmp_path):
+    for cmd in ('umount', 'qemu-nbd', 'sync'):
+        p = sandbox / 'bin' / cmd
+        p.write_text('#!/bin/sh\nexit 0\n')
+        p.chmod(0o755)
+    (sandbox / 'bin' / 'python3').write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    (sandbox / 'bin' / 'python3').chmod(0o755)
+    return {'PATH': f"{sandbox / 'bin'}:/usr/bin:/bin", 'RUNNER_TEMP': str(tmp_path)}
+
+
+@pytest.mark.parametrize('backend,ok', [('sqlcipher', True), ('sqlite-plain', False)])
+def test_the_smoke_steps_fail_on_plain_sqlite(sandbox, tmp_path, monkeypatch, backend, ok):
+    """Both ends of the steps as the runner has them, on what a good and a broken image say."""
+    _status_file(tmp_path, monkeypatch, backend)
+    env = _tail_env(sandbox, tmp_path)
+    lxc = _from_line(_step('build-lxc', 'Smoke-Test (Container starten + HTTP-Check)'),
+                     'echo "----- --keystore-status -----"')
+    vm = _from_line(_step('build-vm', 'Zustand des Testboots aus dem Image entfernen'), 'sudo umount /mnt/img')
+    for script, done in (('OK=1\n' + lxc, 'LXC Smoke-Test erfolgreich.'), ('FAIL=0\n' + vm, 'Image bereinigt.')):
+        r = subprocess.run(['bash', '-c', 'set -e\n' + script], cwd=ROOT, capture_output=True, text=True,
+                           env=env, timeout=60)
+        assert (r.returncode == 0) == ok, r.stdout + r.stderr
+        assert (done in r.stdout) == ok
+        if not ok:
+            assert ('::error::PegaProx in the image runs its database on sqlite-plain: '
+                    'python3-sqlcipher3 does not import there') in r.stdout
+
+
+def _smoke_backend(path):
+    return subprocess.run([sys.executable, '-I', SMOKE_BACKEND, str(path)], capture_output=True, text=True,
+                          timeout=30)
+
+
+def test_the_backend_check_passes_sqlcipher(tmp_path, monkeypatch):
+    r = _smoke_backend(_status_file(tmp_path, monkeypatch, 'sqlcipher'))
+    assert r.returncode == 0, r.stdout
+    assert r.stdout == 'smoke: PegaProx in the image runs its database on SQLCipher\n'
+
+
+def test_the_backend_check_fails_plain_sqlite(tmp_path, monkeypatch):
+    """What PegaProx on an arm64 image with the CDN package said: the module did not import."""
+    r = _smoke_backend(_status_file(tmp_path, monkeypatch, 'sqlite-plain'))
+    assert r.returncode == 1
+    assert r.stdout == ('::error::PegaProx in the image runs its database on sqlite-plain: '
+                        'python3-sqlcipher3 does not import there\n')
+
+
+@pytest.mark.parametrize('text', [
+    '',                                                                   # docker exec or nsenter failed
+    'Gevent monkey-patching applied\nTraceback (most recent call last):\n  ...\n',
+    '{\n  "db": {"backend": "sqlcipher"\n',                               # cut off
+    '{\n  "keystore": {"ok": true}\n}\n',
+])
+def test_no_answer_is_no_pass(tmp_path, text):
+    path = tmp_path / 'keystore-status.json'
+    path.write_text(text)
+    r = _smoke_backend(path)
+    assert r.returncode == 1
+    assert r.stdout.startswith('::error::no --keystore-status JSON from PegaProx in the image')
+
+
+def test_a_missing_status_file_is_no_pass(tmp_path):
+    r = _smoke_backend(tmp_path / 'nothing.json')
+    assert r.returncode == 1 and r.stdout.startswith('::error::no --keystore-status of PegaProx in the image')
+
+
+def test_a_brace_in_a_log_line_ahead_of_the_status_is_not_taken_for_it(tmp_path, monkeypatch):
+    path = _status_file(tmp_path, monkeypatch, 'sqlite-plain')
+    path.write_text('[KEYSTORE] {"backend": "sqlcipher"} said someone\n' + path.read_text())
+    r = _smoke_backend(path)
+    assert r.returncode == 1 and 'runs its database on sqlite-plain' in r.stdout
+
+
+@pytest.mark.parametrize('files', [{}, {'pegaprox.db': 'encrypted'}, {'pegaprox.db': 'encrypted', 'syslog.db': 'empty'}])
+def test_the_backend_check_passes_a_database_that_is_encrypted_or_not_there_yet(tmp_path, monkeypatch, files):
+    r = _smoke_backend(_status_file(tmp_path, monkeypatch, 'sqlcipher', files))
+    assert r.returncode == 0, r.stdout
+    assert r.stdout == 'smoke: PegaProx in the image runs its database on SQLCipher\n'
+
+
+def test_the_backend_check_fails_a_plain_database_next_to_sqlcipher(tmp_path, monkeypatch):
+    """The driver loads, the database stayed plain (PEGAPROX_DISABLE_AUTO_ENCRYPT in the image,
+    an auto-encrypt that did not run): the driver alone passed that."""
+    path = _status_file(tmp_path, monkeypatch, 'sqlcipher', {'pegaprox.db': 'plain', 'syslog.db': 'encrypted'})
+    r = _smoke_backend(path)
+    assert r.returncode == 1
+    db = tmp_path / 'config' / 'pegaprox.db'
+    assert r.stdout == f'::error::PegaProx in the image runs SQLCipher, but its database {db} is plain\n'
+
+
+def test_a_database_it_cannot_read_is_no_pass(tmp_path):
+    path = tmp_path / 'keystore-status.json'
+    path.write_text(json.dumps({'db': {'backend': 'sqlcipher', 'files': {
+        '/var/lib/pegaprox/config/pegaprox.db': 'unreadable (PermissionError)',
+        '/var/lib/pegaprox/config/syslog.db': 'missing'}}}, indent=2) + '\n')
+    r = _smoke_backend(path)
+    assert r.returncode == 1
+    assert r.stdout == ('::error::PegaProx in the image runs SQLCipher, but its database '
+                        '/var/lib/pegaprox/config/pegaprox.db is unreadable (PermissionError)\n')
+
+
+def test_a_release_without_the_file_list_is_checked_by_its_driver(tmp_path):
+    """--keystore-status of 1.4.1 and before, which a dispatch build without a tag installs."""
+    path = tmp_path / 'keystore-status.json'
+    path.write_text(json.dumps({'keystore': {}, 'db': {'backend': 'sqlcipher', 'encrypted_at_rest': True}},
+                               indent=2) + '\n')
+    assert _smoke_backend(path).returncode == 0
+
+
+# --- the third-party python3-sqlcipher3 stays out of the images ------------------------------------
+# Both images keep that repo for pegaprox. Its python3-sqlcipher3 is 0.6.4, Architecture all with
+# the x86_64 module, and sorts under ours (0.6.4-0pegaprox1); a later upload there would not, and an
+# apt upgrade on arm64 would swap the module that does not load back in. Each image pins it away.
+
+PIN = '/etc/apt/preferences.d/pegaprox-sqlcipher3'
+OURS = '0.6.4-0pegaprox1'
+LATER = ('Package: python3-sqlcipher3\nVersion: 0.6.5\nArchitecture: all\nMaintainer: upstream\n'
+         'Filename: pool/trixie/main/python3-sqlcipher3_0.6.5_all.deb\nSize: 1\n'
+         'Description: Sqlite with encryption\n\n')
+
+
+def _candidate(tmp_path, source, pref):
+    """apt's candidate for python3-sqlcipher3 on arm64 with ours installed, the deb line `source`
+    offering 0.6.5 as Architecture all, and `pref` in preferences.d (None: none). Offline: the
+    index of that source is written in by hand, apt-cache reads it as if fetched."""
+    if not shutil.which('apt-cache'):
+        pytest.skip('needs apt-cache')
+    m = re.fullmatch(r'deb (?:\[[^\]]*\] )?https?://(\S+?)/? (\S+) (\S+)', source.strip())
+    assert m, source
+    site, suite, comp = m.groups()
+    root = tmp_path / 'apt'
+    for d in ('etc/apt/preferences.d', 'etc/apt/apt.conf.d', 'lists/partial', 'cache/archives/partial', 'dpkg'):
+        (root / d).mkdir(parents=True)
+    (root / 'etc/apt/sources.list').write_text(source.strip() + '\n')
+    if pref is not None:
+        (root / 'etc/apt/preferences.d/pegaprox-sqlcipher3').write_text(pref)
+    lists = str(root / 'lists' / site.replace('/', '_')) + f'_dists_{suite}'
+    with open(f'{lists}_Release', 'w') as fh:
+        fh.write(f'Origin: upstream\nSuite: {suite}\nCodename: {suite}\nComponents: {comp}\n'
+                 'Architectures: all amd64\n')
+    with open(f'{lists}_{comp}_binary-all_Packages', 'w') as fh:
+        fh.write(LATER)
+    (root / 'dpkg/status').write_text(f'Package: python3-sqlcipher3\nStatus: install ok installed\n'
+                                      f'Maintainer: PegaProx\nArchitecture: arm64\nVersion: {OURS}\n'
+                                      'Description: sqlcipher3\n\n')
+    conf = root / 'apt.conf'
+    conf.write_text(f'Dir::Etc "{root}/etc/apt/";\nDir::State::lists "{root}/lists/";\n'
+                    f'Dir::State::status "{root}/dpkg/status";\nDir::Cache "{root}/cache/";\n'
+                    'Dir::Cache::pkgcache "";\nDir::Cache::srcpkgcache "";\n'
+                    'APT::Architecture "arm64";\nAPT::Architectures { "arm64"; };\n')
+    r = subprocess.run(['apt-cache', 'policy', 'python3-sqlcipher3'], capture_output=True, text=True,
+                       timeout=60, env={'APT_CONFIG': str(conf), 'LC_ALL': 'C', 'PATH': '/usr/bin:/bin'})
+    assert r.returncode == 0, r.stderr
+    m = re.search(r'^\s*Candidate: (\S+)$', r.stdout, re.M)
+    assert m, r.stdout
+    return m.group(1)
+
+
+def _lxc_action():
+    """The post-files action as distrobuilder gets it: the definition heredoc expanded by bash,
+    as on the runner, then the action's YAML block."""
+    m = re.search(r'^( *)cat > packaging/lxc/pegaprox-lxc\.yaml <<YAML\n.*?^\1YAML$', _read(WF), re.M | re.S)
+    assert m, 'build-lxc no longer writes its distrobuilder definition'
+    heredoc = re.sub(r'\$\{\{.*?\}\}', 'arm64', _dedent(m.group(0), m.group(1)))
+    r = subprocess.run(['bash', '-c', heredoc.replace('cat > packaging/lxc/pegaprox-lxc.yaml', 'cat', 1)],
+                       capture_output=True, text=True, timeout=10,
+                       env={'PATH': '/usr/bin:/bin', 'DEBIAN_RELEASE': 'trixie', 'RUNNER_TEMP': '/runner-temp'})
+    assert r.returncode == 0, r.stderr
+    a = re.search(r'^  - trigger: post-files\n    action: \|-\n(.*?)^\S', r.stdout, re.M | re.S)
+    assert a, r.stdout
+    return _dedent(a.group(1), ' ' * 6)
+
+
+def test_the_lxc_rootfs_pins_it_before_it_has_the_repo(sandbox):
+    root = sandbox / 'root'
+    for d in ('etc/apt/preferences.d', 'etc/apt/sources.list.d', 'var/cache/pegaprox-image', 'tmp'):
+        (root / d).mkdir(parents=True)
+    pin, repo = root / PIN.lstrip('/'), root / 'etc/apt/sources.list.d/gyptazy.list'
+    log = sandbox / 'calls.log'
+    (sandbox / 'bin' / 'apt-get').write_text(
+        f'#!/bin/sh\necho "apt-get $* pin=$([ -f {pin} ] && echo y || echo n) '
+        f'repo=$([ -f {repo} ] && echo y || echo n)" >> "{log}"\n')
+    for cmd in ('wget', 'sha256sum', 'dpkg', 'curl', 'chpasswd', 'systemctl'):
+        (sandbox / 'bin' / cmd).write_text(f'#!/bin/sh\necho "{cmd} $*" >> "{log}"\nexit 0\n')
+    for p in (sandbox / 'bin').iterdir():
+        p.chmod(0o755)
+    script = re.sub(r'(?<![\w/])/(var|tmp)/', lambda m: f'{root}/{m.group(1)}/', _lxc_action())
+    r = _run(sandbox, script)
+    assert r.returncode == 0, r.stdout + r.stderr
+    # every apt run that has the repo has the pin too
+    assert [c for c in log.read_text().splitlines() if c.startswith('apt-get') and 'repo=y' in c] \
+        == ['apt-get update pin=y repo=y', 'apt-get -y install pegaprox sshpass pin=y repo=y']
+    # the same pin as the VM image's, and apt keeps ours with it
+    assert pin.read_text() == _heredoc('gyptazy.pref')
+    assert _candidate(sandbox, repo.read_text(), pin.read_text()) == OURS
+
+
+def test_the_vm_image_has_the_pin_next_to_the_repo(tmp_path):
+    m = re.search(r'^( *)cat > gyptazy\.list <<GYPTLIST\n(.*?)^\1GYPTLIST$', _read(WF), re.M | re.S)
+    assert m, 'build-vm no longer writes gyptazy.list'
+    source = _dedent(m.group(2), m.group(1)).replace('${DEBIAN_RELEASE}', 'trixie')
+    # what an apt upgrade would take from that repo once it uploads above ours, without and with it
+    assert _candidate(tmp_path / 'without', source, None) == '0.6.5'
+    assert _candidate(tmp_path / 'with', source, _heredoc('gyptazy.pref')) == OURS
+    flat = _flat(_step('build-vm', 'Dateien per qemu-nbd einhängen'))
+    copy = f'sudo install -D -m 0644 gyptazy.pref /mnt/img{PIN}'
+    assert flat.index('sudo cp gyptazy.list /mnt/img/etc/apt/sources.list.d/gyptazy.list') < flat.index(copy) \
+        < flat.index('sudo umount /mnt/img')
+    # and the cleanup after the smoke boot leaves it there
+    assert 'preferences.d' not in _step('build-vm', 'Zustand des Testboots aus dem Image entfernen')
+
+
+# --- publish names the images that did not come ----------------------------------------------------
+# A failed arm64 leg reads as success for publish (continue-on-error) and the upload takes what its
+# globs find, so an arm64 image could go missing from a release without a word.
+
+VERSION = 'v1.4.2'
+
+
+def _images(arch):
+    return [f'pegaprox-{VERSION}-lxc-{arch}.tar.xz', f'pegaprox-latest-lxc-{arch}.tar.xz',
+            f'pegaprox-{VERSION}-vm-{arch}.qcow2', f'pegaprox-vm-{arch}.qcow2',
+            f'pegaprox-{VERSION}-vm-{arch}.ova', f'pegaprox-latest-vm-{arch}.ova']
+
+
+def _publish_check(tmp_path, present):
+    """The check step on a dist/ as download-artifact lays it out, with `present` in it."""
+    for name in present:
+        arch = 'arm64' if '-arm64.' in name else 'amd64'
+        d = tmp_path / 'dist' / (('lxc-template-' if '-lxc-' in name else 'vm-image-') + arch)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_bytes(b'image')
+    summary = tmp_path / 'summary.md'
+    script = _from_line(_step('publish', 'Images vollständig?'), 'FAIL=0')
+    r = subprocess.run(['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', script], cwd=tmp_path,
+                       capture_output=True, text=True, timeout=30,
+                       env={'PATH': '/usr/bin:/bin', 'VERSION': VERSION, 'GITHUB_STEP_SUMMARY': str(summary)})
+    return r, (summary.read_text() if summary.exists() else '')
+
+
+def test_a_full_release_passes_without_a_word(tmp_path):
+    r, summary = _publish_check(tmp_path, _images('amd64') + _images('arm64'))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout == '' and summary == ''
+
+
+@pytest.mark.parametrize('gone', [_images('arm64')[:2], _images('arm64')[2:], _images('arm64')])
+def test_a_missing_arm64_image_is_a_warning_and_in_the_summary(tmp_path, gone):
+    r, summary = _publish_check(tmp_path, [n for n in _images('amd64') + _images('arm64') if n not in gone])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.splitlines() == [f'::warning::{n} is missing: its arm64 build failed, the release goes out '
+                                     'without it' for n in gone]
+    assert summary.splitlines() == [f'- `{n}` is missing from this release' for n in gone]
+
+
+def test_a_missing_amd64_image_stops_the_release(tmp_path):
+    gone = f'pegaprox-{VERSION}-vm-amd64.qcow2'
+    r, summary = _publish_check(tmp_path, [n for n in _images('amd64') + _images('arm64') if n != gone])
+    assert r.returncode == 1
+    assert r.stdout == f'::error::{gone} is missing, no release without the amd64 images\n'
+    assert summary == f'- `{gone}` is missing from this release\n'
+
+
+def test_the_check_runs_before_anything_is_signed_or_uploaded():
+    text = _job('publish')
+    assert text.index('actions/download-artifact@') < text.index('- name: Images vollständig?') \
+        < text.index('- name: Checksums erzeugen') < text.index('- name: Herkunft der Images signieren') \
+        < text.index('- name: An Release anhängen')
+    # the version comes in through the environment, not into the script
+    step = _step('publish', 'Images vollständig?')
+    assert '          VERSION: ${{ needs.prepare.outputs.version }}\n' in step
+    assert step.count('${{') == 1

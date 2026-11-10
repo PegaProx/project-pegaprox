@@ -91,13 +91,35 @@ def create_app():
     # else: no CORS init = browser same-origin policy applies (safest default)
 
     # Gzip compression
+    # MK Nov 2026 - text/javascript is what Python 3.12+ guesses for .js, Flask's /static
+    # sends that, and react, chart, jspdf and noVNC went out uncompressed
     app.config['COMPRESS_MIMETYPES'] = [
-        'text/html', 'text/css', 'text/xml', 'text/plain',
+        'text/html', 'text/css', 'text/xml', 'text/plain', 'text/javascript',
         'application/json', 'application/javascript', 'application/xml'
     ]
     app.config['COMPRESS_LEVEL'] = 6
     app.config['COMPRESS_MIN_SIZE'] = 500
-    Compress(app)
+    # MK Nov 2026 - a file response is a stream, and flask-compress leaves gzip out for
+    # streams by default: a client that only offers gzip got /static/css as it is
+    app.config['COMPRESS_ALGORITHM_STREAMING'] = ['zstd', 'br', 'gzip', 'deflate']
+    # The page (utils/index_page.py) brings its own codings and ETags and is marked for it.
+    # flask-compress must not touch it, it would even gzip the plain one for "gzip;q=0".
+    app.config['COMPRESS_REGISTER'] = False
+    _compress = Compress(app)
+
+    @app.after_request
+    def compress_response(response):
+        if getattr(response, 'pp_encoded', False):
+            return response
+        coded = 'Content-Encoding' in response.headers
+        response = _compress.after_request(response)
+        # send_file compared If-None-Match with the file's plain ETag before flask-compress put
+        # ":gzip" (":zstd", ...) behind it, and for a stream flask-compress only looks again on
+        # /static. So /portal, /status and /sw.js never got their 304 once they were compressed.
+        if (response.is_streamed and not coded and 'Content-Encoding' in response.headers
+                and request.method in ('GET', 'HEAD')):
+            response.make_conditional(request)
+        return response
 
     # Max request size - NS: Feb 2026 - separate limit for file uploads (#82)
     _default_max = int(os.environ.get('PEGAPROX_MAX_REQUEST_SIZE', 10 * 1024 * 1024))  # 10 MB default for API
@@ -772,7 +794,7 @@ _LENGTH_RE = re.compile(r'[0-9]{1,9}')
 _STOOD_IN_FOR = {
     'before': ('validate_request', 'check_ip_whitelist', 'hold_portal_only_accounts',
                'refuse_writes_on_standby', 'count_around_a_read'),
-    'after': ('after_request', 'add_security_headers', 'tell_the_members_about_a_write',
+    'after': ('compress_response', 'add_security_headers', 'tell_the_members_about_a_write',
               'say_no_lease_after_a_refused_write', '_say_we_hold_the_key'),
 }
 
@@ -1629,6 +1651,10 @@ def main(debug_mode=False):
             if _r.get('action') == 'migrated':
                 print(f"  ✓ {_db_name} auto-encrypted ({_r['rows_copied']} rows, {_r['duration_s']}s)")
                 print(f"    backup: {_r['backup_path']}")
+            elif _r.get('action') == 'no-backend' and _dbcrypto.SQLCIPHER_ERROR:
+                print(f"  ⚠ sqlcipher3 is installed but does not load here ({_dbcrypto.SQLCIPHER_ERROR}) - "
+                      f"{_db_name} stays plain until a package built for this machine and this Python "
+                      f"version is installed")
             elif _r.get('action') == 'no-backend':
                 print(f"  ⚠ sqlcipher3 not installed - {_db_name} stays plain (field-level encryption still active)")
     except RuntimeError as _e:

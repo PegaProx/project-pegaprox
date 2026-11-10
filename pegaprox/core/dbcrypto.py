@@ -26,12 +26,61 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import threading
 from pathlib import Path
 from typing import Optional
 
 
 _LOG = logging.getLogger(__name__)
+
+
+# MK Nov 2026 (#1226) - a sqlcipher3 built for another machine or another Python installs
+# fine and then does not import (an x86_64 build in a deb that apt takes on arm64), and
+# that fell back to plain SQLite with the INFO line meant for "not installed". Nobody sees
+# that one: logging is not set up yet when this module loads. Installed but not loading
+# is a WARNING now, and the reason stays here for the status output.
+SQLCIPHER_ERROR: Optional[str] = None
+_SQLCIPHER_AT: Optional[str] = None
+
+
+def _load_failure(exc: BaseException) -> Optional[str]:
+    """Why an installed sqlcipher3 did not import, None when there is none to import."""
+    if isinstance(exc, ModuleNotFoundError) and exc.name == 'sqlcipher3':
+        return None
+    return f"{type(exc).__name__}: {' '.join(str(exc).split())}"
+
+
+def _package_dir() -> Optional[str]:
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec('sqlcipher3')
+        if spec is None:
+            return None
+        if spec.origin:
+            return os.path.dirname(spec.origin)
+        # a directory without __init__.py has no origin, only the places it was found
+        found = list(spec.submodule_search_locations or ())
+        return found[0] if found else None
+    except Exception:
+        return None
+
+
+def sqlcipher_problem(encrypted: Optional[str] = None) -> Optional[str]:
+    """What to tell an admin when sqlcipher3 is installed but does not load, else None.
+    With `encrypted`, the path of a database encrypted before, it is about that one."""
+    if not SQLCIPHER_ERROR:
+        return None
+    at = f' at {_SQLCIPHER_AT}' if _SQLCIPHER_AT else ''
+    # the same CPU with another Python is this case too, so it names both
+    fits = 'a package built for this machine and this Python version'
+    said = (f"The SQLCipher package (sqlcipher3{at}) is installed but does not load on this "
+            f"machine ({platform.machine() or 'unknown machine'}, Python "
+            f"{platform.python_version()}): {SQLCIPHER_ERROR}.")
+    if encrypted:
+        return f"{said} {encrypted} is encrypted and does not open until {fits} is installed."
+    return (f"{said} The database stays plain SQLite until {fits} is installed, and one "
+            f"encrypted before does not open until then.")
 
 
 # ─── Backend detection ──────────────────────────────────────────────────────
@@ -41,15 +90,25 @@ _LOG = logging.getLogger(__name__)
 
 try:
     import sqlcipher3 as _sqlite_module  # type: ignore
+    # MK Nov 2026 - an empty sqlcipher3/ directory (left when one of the two packages that
+    # share it goes) imports as a namespace package with nothing in it
+    if not hasattr(_sqlite_module, 'connect'):
+        raise ImportError('the sqlcipher3 found has no driver in it')
     BACKEND = 'sqlcipher'
 except Exception as _e:
     import sqlite3 as _sqlite_module  # type: ignore
     BACKEND = 'sqlite-plain'
-    _LOG.info("[DBCRYPTO] sqlcipher3 not available (%s) - DB will be plain "
-              "SQLite. Field-level encryption (AES-256-GCM) still applies. To "
-              "enable full-DB encryption, install the SQLCipher package of "
-              "requirements.txt (sqlcipher3-binary on Linux x86_64, sqlcipher3 "
-              "on aarch64, macOS and Windows).", _e)
+    SQLCIPHER_ERROR = _load_failure(_e)
+    if SQLCIPHER_ERROR is None:
+        _LOG.info("[DBCRYPTO] sqlcipher3 not available (%s) - DB will be plain "
+                  "SQLite. Field-level encryption (AES-256-GCM) still applies. To "
+                  "enable full-DB encryption, install the SQLCipher package of "
+                  "requirements.txt (sqlcipher3-binary on Linux x86_64, sqlcipher3 "
+                  "on aarch64, macOS and Windows).", _e)
+    else:
+        _SQLCIPHER_AT = _package_dir()
+        _LOG.warning("[DBCRYPTO] %s Field-level encryption (AES-256-GCM) still applies.",
+                     sqlcipher_problem())
 
 
 # Re-export Row, IntegrityError etc. so callers can `from .dbcrypto import Row`
@@ -163,8 +222,8 @@ def backend_status() -> dict:
     present = [s for s in files.values() if s not in ('missing', 'empty')]
     encrypted = BACKEND == 'sqlcipher' and bool(present) and all(s == 'encrypted' for s in present)
     if BACKEND != 'sqlcipher':
-        note = ("Full DB encryption unavailable on this platform. "
-                "Sensitive fields are still encrypted individually with AES-256-GCM.")
+        note = ((sqlcipher_problem() or "Full DB encryption unavailable on this platform.")
+                + " Sensitive fields are still encrypted individually with AES-256-GCM.")
     elif not present:
         note = "SQLCipher is available. No database found in this config directory."
     elif encrypted:
@@ -178,6 +237,7 @@ def backend_status() -> dict:
         'cipher': 'AES-256-CBC + HMAC-SHA512 (SQLCipher 4)' if BACKEND == 'sqlcipher' else None,
         'files': files,
         'note': note,
+        'sqlcipher_error': SQLCIPHER_ERROR,
     }
 
 
@@ -689,13 +749,25 @@ def ensure_db_encrypted(db_path: str) -> dict:
 
     Returns a dict with: action, state_before, state_after, [backup_path,
     duration_s, rows_copied].  Does NOT raise on routine cases; raises only
-    for unrecoverable situations (corrupt DB, unknown-key encrypted DB).
+    for unrecoverable situations (corrupt DB, unknown-key encrypted DB, an
+    encrypted DB without SQLCipher).
 
     Opt-out: set PEGAPROX_DISABLE_AUTO_ENCRYPT=1 to keep a plain DB.
     """
     db_path = os.path.abspath(db_path)
     if db_path in _AUTO_MIG_DONE:
         return {'action': 'already-checked'}
+    # MK Nov 2026 (#1226) - a database encrypted before (a config directory moved to arm64,
+    # a pip install swapped for the deb) does not open on plain SQLite, opt-out or not.
+    # Saying "stays plain" and failing at the first query with "file is not a database"
+    # helps nobody, so the start refuses here with the reason.
+    if BACKEND != 'sqlcipher' and file_state(db_path) == 'encrypted':
+        raise RuntimeError(
+            "[DBCRYPTO] " + (sqlcipher_problem(encrypted=db_path)
+                             or f"{db_path} is encrypted and sqlcipher3 is not installed, so it does "
+                                "not open. Install the SQLCipher package of requirements.txt "
+                                "(python3-sqlcipher3 for the Debian package).")
+            + " Refusing to start.")
     if os.environ.get('PEGAPROX_DISABLE_AUTO_ENCRYPT', '').lower() in ('1', 'true', 'yes'):
         _LOG.info("[DBCRYPTO] PEGAPROX_DISABLE_AUTO_ENCRYPT set — skipping auto-encrypt check")
         _AUTO_MIG_DONE.add(db_path)
@@ -703,7 +775,8 @@ def ensure_db_encrypted(db_path: str) -> dict:
     if BACKEND != 'sqlcipher':
         # No sqlcipher3 → can't encrypt anyway. Field-level encryption still applies.
         _AUTO_MIG_DONE.add(db_path)
-        return {'action': 'no-backend', 'reason': 'sqlcipher3 not installed'}
+        return {'action': 'no-backend',
+                'reason': 'sqlcipher3 does not load' if SQLCIPHER_ERROR else 'sqlcipher3 not installed'}
 
     with _AUTO_MIG_LOCK:
         if db_path in _AUTO_MIG_DONE:

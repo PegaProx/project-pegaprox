@@ -11,6 +11,7 @@ Runtime tests drive the built bundle in headless Chromium against the fake serve
 tests/test_ha_ui.py; they skip where Playwright is not installed.
 LW Nov 2026
 """
+import json
 import os
 import re
 
@@ -70,8 +71,9 @@ def test_the_markup_uses_classes_the_static_build_has():
 
 def test_the_bundle_carries_it():
     bundle = _read('web', 'index.html')
-    for lang_value in ("migrationWarnings:'Warnings'", "migrationWarnings:'Warnungen'"):
-        assert lang_value in bundle
+    assert "migrationWarnings:'Warnings'" in bundle
+    # LW Nov 2026 - German is web/i18n/de.json now, written by build.sh next to the bundle
+    assert json.loads(_read('web', 'i18n', 'de.json'))['migrationWarnings'] == 'Warnungen'
     assert 'vmwareMigrationDetail.warnings' in bundle
 
 

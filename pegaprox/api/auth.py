@@ -1656,7 +1656,15 @@ def get_cluster_creds_internal(cluster_id):
     if 'node.shell' not in user_perms:
         logging.warning(f"[CLUSTER-CREDS] User {session['user']} lacks node.shell permission")
         return jsonify({'error': 'Permission denied'}), 403
-    
+    # MK Nov 2026 - the legacy session login of the node shell gets its node addresses
+    # here: none on a cluster with SSH switched off. The guest terminal reads the same
+    # answer for its PVE allow-list and says so (console=term); it goes over the PVE API.
+    if request.args.get('console') != 'term':
+        from pegaprox.api.helpers import node_shell_refusal
+        why = node_shell_refusal(mgr)
+        if why:
+            return jsonify({'code': 'SSH_DISABLED', 'error': why}), 409
+
     # Get node IPs - the cluster_host is our reliable fallback
     node_ips = {}
     cluster_host, cluster_port = mgr.host, mgr.api_port

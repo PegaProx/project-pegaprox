@@ -482,6 +482,13 @@ def validate_ws_token_api():
                 if caller_is_scoped({**user, 'username': data['user']}, requested_cluster):
                     logging.warning(f"[WS-TOKEN] user '{_sl(data['user'])}' is confined on '{_sl(requested_cluster)}', no node shell")
                     return jsonify({'error': 'Access denied: this action affects the whole cluster'}), 403
+                # MK Nov 2026 - and none on a cluster with SSH switched off. Answered here,
+                # not by the SSH server: without this answer it gets no node address
+                from pegaprox.api.helpers import node_shell_refusal
+                from pegaprox.globals import cluster_managers
+                why = node_shell_refusal(cluster_managers.get(requested_cluster))
+                if why:
+                    return jsonify({'code': 'SSH_DISABLED', 'error': why}), 409
 
             # MK May 2026 - lightweight cluster context for the SSH/VNC proxy.
             # We intentionally do NOT call mgr._get_node_ip() here: that has a

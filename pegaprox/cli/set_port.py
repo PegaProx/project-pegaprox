@@ -45,7 +45,9 @@ def main(argv) -> int:
             print('no master key found (--keystore-status says where it looked)', file=sys.stderr)
             return 4
     elif state != 'plain':
-        print(f'{db_path} is encrypted, and sqlcipher3 does not import here', file=sys.stderr)
+        # MK Nov 2026 (#1226) - a package there that does not load says why
+        print(dbcrypto.sqlcipher_problem(encrypted=db_path)
+              or f'{db_path} is encrypted, and sqlcipher3 does not import here', file=sys.stderr)
         return 4
 
     try:

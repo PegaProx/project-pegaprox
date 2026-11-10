@@ -14,6 +14,7 @@
 PEGAPROX_CR_BUNDLE=<file> serves another bundle (the counterproof). Skips without Playwright.
 LW Nov 2026
 """
+import json
 import os
 
 import pytest
@@ -272,7 +273,11 @@ def test_the_cd_reason_says_a_failure_stays_pending(rules_page):
     assert (got['cls'], got['why']) == ('maybe', 'crVcWhyCdrom'), got
     bundle = BUNDLE or open(os.path.join(ROOT, 'web', 'index.html'), encoding='utf-8').read()
     assert 'the change applies at once when Proxmox VE accepts it. Proxmox VE can keep it pending instead, then the save reports the error."' in bundle
-    assert '"Das Medium eines CD/DVD-Laufwerks wird im Betrieb gewechselt: Der Wechsel wirkt sofort, wenn Proxmox VE ihn annimmt.' in bundle
+    # LW Nov 2026 - German is web/i18n/de.json now, build.sh writes it next to the bundle
+    with open(os.path.join(ROOT, 'web', 'i18n', 'de.json'), encoding='utf-8') as fh:
+        german = json.load(fh)
+    assert german['crVcWhyCdrom'].startswith(
+        'Das Medium eines CD/DVD-Laufwerks wird im Betrieb gewechselt: Der Wechsel wirkt sofort, wenn Proxmox VE ihn annimmt.')
 
 
 # --- what already waits, told on open ----------------------------------------------------------------

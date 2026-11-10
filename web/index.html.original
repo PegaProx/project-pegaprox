@@ -116,6 +116,52 @@
     MK: Mar 2026 - reworked for #118, Tailwind is always local now
     -->
     
+    <!-- LW Nov 2026 - English is part of the bundle, every other language is web/i18n/<lang>.json.
+         build.sh puts a hash of each file in here; the language this page opens in is asked for
+         right away, next to the libraries, and contexts.js takes it from there (same origin,
+         so air-gap is no matter). The dev build (build.sh --restore) keeps them all inline. -->
+    <script>
+        window.__pegaproxI18nFiles = {};
+        (function() {
+            var files = window.__pegaproxI18nFiles;
+            var has = function(l) { return l === 'en' || (typeof l === 'string' && Object.prototype.hasOwnProperty.call(files, l)); };
+            if (!Object.keys(files).length) return;
+            // the order of contexts.js: what the cached lock pins (nobody is signed in yet), the
+            // user's own pick, the browser's languages, German. A wrong guess only costs a file
+            var lang = '';
+            try {
+                var lock = JSON.parse(localStorage.getItem('pegaprox-ui-lock') || 'null');
+                if (lock && has(lock.language)) lang = lock.language;
+            } catch (_) {}
+            try {
+                var own = localStorage.getItem('pegaprox-language');
+                if (!lang && has(own)) lang = own;
+            } catch (_) {}
+            try {
+                var prefs = [].concat(navigator.languages || [], navigator.language || []);
+                for (var i = 0; i < prefs.length && !lang; i++) {
+                    var parts = String(prefs[i] || '').toLowerCase().split(/[-_]/);
+                    // Simplified Chinese only, as _detectBrowserLang
+                    if (parts[0] === 'zh' && ['hant', 'tw', 'hk', 'mo'].some(function(p) { return parts.indexOf(p) >= 0; })) continue;
+                    if (has(parts[0])) lang = parts[0];
+                }
+            } catch (_) {}
+            lang = lang || 'de';
+            if (lang === 'en') return;
+            var boot = { lang: lang };
+            // 15 s for the request and its body, as for every later load in contexts.js. That one
+            // takes this request over, and one that stalled would hold its language for good
+            var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+            var timer = ctrl && setTimeout(function() { ctrl.abort(); }, 15000);
+            var done = function() { if (timer) clearTimeout(timer); };
+            boot.data = fetch('/i18n/' + lang + '.json?v=' + files[lang], { credentials: 'same-origin', signal: ctrl ? ctrl.signal : undefined })
+                .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+            // contexts.js says so when it fails, an unhandled rejection here would only add noise
+            boot.data.then(done, done);
+            window.__pegaproxI18nBoot = boot;
+        })();
+    </script>
+
     <!-- Smart Script Loader - CDN first, local fallback for offline -->
     <!-- SRI Hashes for supply chain security - verify these match official releases -->
     <script>
@@ -1921,6 +1967,9 @@
            NS 2026-05-10: tighter padding (8/14), focus-visible ring, light-mode
            hover that doesn't tint the bg cyan. */
         .corp-tab-strip { border-bottom: 1px solid var(--corp-border-medium, #344955); display: flex; gap: 0; padding: 0 8px; background: transparent; }
+        /* JB Nov 2026 - the shell clips sideways (#727), so a tab or a button that does not fit is gone. From 1600 on these
+           stay on one line as they were. */
+        @media (max-width: 1599px) { .corp-tab-strip, .pp-wrap-narrow { flex-wrap: wrap; min-width: 0; } }
         .corp-tab-strip button { padding: 8px 14px; font-size: 12.5px; color: var(--corp-text-secondary, #adbbc4); border: none; background: none;
             cursor: pointer; margin-bottom: -1px; border-bottom: 2px solid transparent; white-space: nowrap; display: flex; align-items: center; gap: 6px;
             font-family: inherit; transition: color .12s, border-color .12s, background .12s; }
@@ -2616,6 +2665,12 @@
 
         /* LW: Feb 2026 - Corporate data-grid (dense table) */
         body[data-layout="corporate"] .corp-datagrid { border-collapse: collapse; width: 100%; }
+        /* JB Nov 2026 - the shell clips sideways (#727), so a data grid wider than its pane needs a scrollbar. NS Nov 2026 -
+           on the pane of the node tabs and not on every grid: a grid that is a scroll box of its own loses its sticky head
+           and stops filling its pane. Above 1200 the pane has the room; the redesign does not get the class. */
+        @media (max-width: 1200px) {
+            body[data-layout="corporate"] .corp-node-pane { overflow-x: auto; }
+        }
         body[data-layout="corporate"] .corp-datagrid th { background: var(--corp-surface-0, #0e161b); color: #adbbc4; font-size: 11px; text-transform: uppercase;
             letter-spacing: 0.05em; font-weight: 600; padding: 6px 12px; border-bottom: 2px solid var(--corp-border-medium, #344955); position: sticky; top: 0; z-index: 2; }
         body[data-layout="corporate"] .corp-datagrid th:hover { color: #c8d8e4; cursor: pointer; }
@@ -3203,13 +3258,13 @@
         .cloud-nav-item-icon { display:inline-flex; }
         .cloud-nav-item-icon svg { width:18px; height:18px; }
         .cloud-nav-item-active { background:var(--cloud-surface-2); color:var(--cloud-accent); border-left-color:var(--cloud-accent); font-weight:600; }
-        .cloud-topbar { display:flex; align-items:center; justify-content:space-between; padding:var(--space-md) var(--space-lg); border-bottom:1px solid var(--cloud-border-subtle); background:var(--cloud-surface-1); flex:0 0 auto; }
+        .cloud-topbar { display:flex; align-items:center; justify-content:space-between; padding:var(--space-md) var(--space-lg); border-bottom:1px solid var(--cloud-border-subtle); background:var(--cloud-surface-1); flex:0 0 auto; flex-wrap:wrap; row-gap:var(--space-sm); }
         .cloud-breadcrumb { display:flex; align-items:center; gap:var(--space-xs); font-size:0.85rem; color:var(--cloud-text-secondary); }
         .cloud-breadcrumb svg { width:16px; height:16px; }
         .cloud-breadcrumb-root { color:var(--cloud-text-muted); }
         .cloud-breadcrumb-sep { display:inline-flex; color:var(--cloud-text-muted); }
         .cloud-breadcrumb-leaf { color:var(--color-text); font-weight:600; }
-        .cloud-topbar-actions { display:flex; align-items:center; gap:var(--space-sm); }
+        .cloud-topbar-actions { display:flex; align-items:center; gap:var(--space-sm); flex-wrap:wrap; justify-content:flex-end; }
         .cloud-cluster-select { background:var(--cloud-surface-2); color:var(--color-text); border:1px solid var(--cloud-border-medium); border-radius:var(--radius-md); padding:var(--space-xs) var(--space-sm); font-size:0.85rem; }
         .cloud-btn { display:inline-flex; align-items:center; justify-content:center; gap:var(--space-xs); background:var(--cloud-surface-2); color:var(--color-text); border:1px solid var(--cloud-border-medium); border-radius:var(--radius-md); padding:var(--space-xs) var(--space-sm); font-size:0.85rem; cursor:pointer; }
         .cloud-btn:hover { background:var(--cloud-surface-3); }
@@ -3596,6 +3651,8 @@
         .cloud-user-name { font-size:0.84rem; font-weight:500; max-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .cloud-user-btn svg { width:14px; height:14px; }
         .cloud-lang { display:inline-flex; align-items:center; font-size:0.8rem; }
+        /* with nine flags this bar alone is wider than a phone */
+        @media (max-width: 820px) { .cloud-topbar-actions, .cloud-lang, .cloud-lang > div { min-width:0; max-width:100%; } .cloud-lang > div { flex-wrap:wrap; } }
         .cloud-lang select { background:var(--cloud-surface-2); color:var(--color-text); border:1px solid var(--cloud-border-medium); border-radius:var(--radius-md); padding:5px 6px; font-size:0.8rem; }
         .cloud-lang button { color:var(--cloud-text-muted); }
 
@@ -3614,6 +3671,14 @@
            hidden until the viewport drops to phone size.
            ============================================================ */
         .pp-drawer-toggle, .pp-drawer-backdrop, .pp-drawer-close { display: none; }
+
+        /* JB Nov 2026 - the shell clips sideways (#727), so what does not fit into the header is gone and not a
+           scroll away, the user menu with its logout first. NS Nov 2026 - from 821, the phone layout below has its
+           own rule, to 1645: the box of the header stops at 1600 and its row, 1552 wide, is 47 px short, which the
+           margin beside the box hides only from 1646 on. Above that wrapping would make two lines of one. */
+        @media (min-width: 821px) and (max-width: 1645px) {
+            .pp-header-actions { flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; }
+        }
 
         @media (max-width: 820px) {
             /* The sidebar took 288px of a 412px screen. Make it slide over instead. */
@@ -3680,6 +3745,26 @@
                sits underneath it because the header wraps */
             .pp-header-search { flex: 1 1 100%; position: relative; z-index: 60; }
             .pp-header-search input { width: 100% !important; }
+
+            /* JB Nov 2026 - the shell clips sideways (#727), so the buttons at the end of a row of a page are gone on a
+               phone. There are hundreds of these rows, so this goes by their shape. */
+            /* NS Nov 2026 - Cloud goes by the scroll box of the page, not .cloud-content: the topbar sits in that, and its
+               nine flags wrapped it to 350 px. A column or a button is no row and keeps the width of its content (the
+               Summary columns of a guest in Corporate overlapped, the labels of the buttons in Hardening ran into each other). */
+            .pp-main-row .flex-1, .cloud-content-scroll .flex-1 { min-width: 0; }
+            .pp-main-row .flex.items-center.justify-between:not(.flex-col):not(button),
+            .pp-main-row .flex.items-center.gap-1:not(.flex-col):not(button), .pp-main-row .flex.items-center.gap-2:not(.flex-col):not(button),
+            .pp-main-row .flex.items-center.gap-3:not(.flex-col):not(button), .pp-main-row .flex.items-center.gap-4:not(.flex-col):not(button),
+            .pp-main-row .flex.gap-1:not(.flex-col):not(button), .pp-main-row .flex.gap-2:not(.flex-col):not(button),
+            .cloud-content-scroll .flex.items-center.justify-between:not(.flex-col):not(button),
+            .cloud-content-scroll .flex.items-center.gap-1:not(.flex-col):not(button),
+            .cloud-content-scroll .flex.items-center.gap-2:not(.flex-col):not(button),
+            .cloud-content-scroll .flex.items-center.gap-3:not(.flex-col):not(button),
+            .cloud-content-scroll .flex.items-center.gap-4:not(.flex-col):not(button), .cloud-content-scroll .flex.gap-1:not(.flex-col):not(button),
+            .cloud-content-scroll .flex.gap-2:not(.flex-col):not(button),
+            .pp-main-row .corp-toolbar, .pp-main-row .cr-seg {
+                flex-wrap: wrap; row-gap: 6px; min-width: 0;
+            }
 
             /* Wide tables scroll sideways instead of being crushed. `display: block` is
                what gives a table its own scroll box - without it `overflow-x` is ignored.

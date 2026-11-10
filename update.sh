@@ -172,6 +172,9 @@ mkdir -p "$BACKUP_DIR"
 [ -d "pegaprox" ] && cp -r pegaprox "$BACKUP_DIR/"
 [ -f "web/index.html" ] && mkdir -p "$BACKUP_DIR/web" && cp web/index.html "$BACKUP_DIR/web/"
 [ -f "web/index.html.original" ] && cp web/index.html.original "$BACKUP_DIR/web/"
+# NS Nov 2026 - the languages besides English are files next to the page and go with it:
+# a page restored without them would ask for files of the build that failed
+[ -d "web/i18n" ] && mkdir -p "$BACKUP_DIR/web" && cp -r web/i18n "$BACKUP_DIR/web/"
 [ -f "version.json" ] && cp version.json "$BACKUP_DIR/"
 [ -f "requirements.txt" ] && cp requirements.txt "$BACKUP_DIR/"
 
@@ -290,6 +293,7 @@ except:
         [ -f "$BACKUP_DIR/pegaprox_multi_cluster.py" ] && cp "$BACKUP_DIR/pegaprox_multi_cluster.py" . 2>/dev/null || true
         [ -d "$BACKUP_DIR/pegaprox" ] && { rm -rf pegaprox && cp -r "$BACKUP_DIR/pegaprox" . 2>/dev/null; } || true
         [ -d "$BACKUP_DIR/web" ] && { mkdir -p web && cp "$BACKUP_DIR/web/"* web/ 2>/dev/null; } || true
+        [ -d "$BACKUP_DIR/web/i18n" ] && { rm -rf web/i18n && cp -r "$BACKUP_DIR/web/i18n" web/; } || true
         [ -f "$BACKUP_DIR/version.json" ] && cp "$BACKUP_DIR/version.json" . 2>/dev/null || true
         [ -f "$BACKUP_DIR/requirements.txt" ] && cp "$BACKUP_DIR/requirements.txt" . 2>/dev/null || true
         rm -rf "$TMPDIR"

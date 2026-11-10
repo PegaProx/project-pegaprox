@@ -56,6 +56,13 @@ OPTIONAL = {
              'bytes, so register/begin fails in jsonify; requirements.txt asks for 2.2.1.',
     'apprise': 'Extra senders of the bundled notifications plugin, which loads without it. '
                'Not packaged in trixie.',
+    # the codings of the page (pegaprox/utils/index_page.py) besides gzip, the modules
+    # flask-compress takes for them; without one the page goes out in the others
+    'brotli': 'The br variant of the page, offered only when the module imports.',
+    'brotlicffi': 'Taken instead of brotli where it is installed, as flask-compress does.',
+    'backports': 'backports.zstd, the zstd variant of the page before Python 3.14.',
+    'compression': 'compression.zstd, the zstd variant of the page from Python 3.14 on '
+                   '(standard library there).',
 }
 
 

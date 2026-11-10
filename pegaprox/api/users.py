@@ -778,6 +778,9 @@ def get_security_audit(cluster_id):
     try:
         host, port = manager.host, manager.api_port
         session = manager._create_session()
+        # MK Nov 2026 - the port PegaProx dials the nodes on, not a fixed '22'
+        from pegaprox.utils.ssh import node_ssh_port
+        ssh_port = str(node_ssh_port(manager.config))
         
         # Get nodes
         nodes_url = f"https://{host}:{port}/api2/json/nodes"
@@ -861,7 +864,7 @@ def get_security_audit(cluster_id):
             result['ssh']['nodes'][node] = {
                 'permit_root_login': 'unknown',
                 'password_auth': 'unknown',
-                'port': '22',
+                'port': ssh_port,
                 'pubkey_auth': 'unknown'
             }
             

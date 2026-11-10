@@ -9,7 +9,7 @@
             { label: 'Ubuntu 24.04 LTS', icon: '🐧', config: { ostype: 'l26', cores: 2, sockets: 1, memory: 2048, disk_size: '32', cpu: 'host', agent: true, bios: 'seabios', machine: 'i440fx', scsihw: 'virtio-scsi-single', net_model: 'virtio', disk_type: 'scsi', disk_discard: true, disk_iothread: true } },
             { label: 'Windows Server 2022', icon: '🖥️', config: { ostype: 'win11', cores: 4, sockets: 1, memory: 4096, disk_size: '64', cpu: 'host', agent: true, bios: 'ovmf', machine: 'q35', scsihw: 'virtio-scsi-single', net_model: 'virtio', disk_type: 'scsi', disk_discard: true } },
             { label: 'Windows 11', icon: '💻', config: { ostype: 'win11', cores: 4, sockets: 1, memory: 8192, disk_size: '64', cpu: 'host', agent: true, bios: 'ovmf', machine: 'q35', scsihw: 'virtio-scsi-single', net_model: 'virtio', disk_type: 'scsi', tpm_version: 'v2.0' } },
-            { label: 'Minimal Linux', icon: '⚡', config: { ostype: 'l26', cores: 1, sockets: 1, memory: 512, disk_size: '8', cpu: 'host', agent: false, bios: 'seabios', net_model: 'virtio', disk_type: 'virtio' } },
+            { label: 'Minimal Linux', icon: '⚡', config: { ostype: 'l26', cores: 1, sockets: 1, memory: 512, disk_size: '8', cpu: 'host', agent: false, bios: 'seabios', net_model: 'virtio', disk_type: 'virtio', disk_ssd: false } },
         ];
 
         function CreateVmModal({ vmType, clusterId, clusterType, nodes: initialNodes, onCreate, onClose }) {
@@ -799,7 +799,7 @@
                                         <div className="grid grid-cols-4 gap-3 mb-3">
                                             <div>
                                                 <label className="block text-xs text-gray-400 mb-1">{t('busType')}</label>
-                                                <select value={config.disk_type} onChange={e => setConfig({...config, disk_type: e.target.value})}
+                                                <select value={config.disk_type} onChange={e => setConfig({...config, disk_type: e.target.value, disk_ssd: e.target.value === 'virtio' ? false : config.disk_ssd})}
                                                     className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
                                                     <option value="scsi">SCSI</option>
                                                     <option value="virtio">VirtIO Block</option>
@@ -868,10 +868,13 @@
                                                     {t('ioThread')}
                                                 </label>
                                             )}
-                                            <label className="flex items-center gap-2 text-xs text-gray-300">
-                                                <input type="checkbox" checked={config.disk_ssd} onChange={e => setConfig({...config, disk_ssd: e.target.checked})} className="rounded" />
-                                                {t('ssdEmulation')}
-                                            </label>
+                                            {/* LW Nov 2026 - VirtIO Block has no SSD emulation, PVE refuses the create with it */}
+                                            {config.disk_type !== 'virtio' && (
+                                                <label className="flex items-center gap-2 text-xs text-gray-300">
+                                                    <input type="checkbox" checked={config.disk_ssd} onChange={e => setConfig({...config, disk_ssd: e.target.checked})} className="rounded" />
+                                                    {t('ssdEmulation')}
+                                                </label>
+                                            )}
                                         </div>
                                             </>
                                         )}
@@ -892,7 +895,7 @@
                                                     <label className="block text-xs text-gray-400 mb-1">{t('busType')}</label>
                                                     <select value={disk.type} onChange={e => {
                                                         const newDisks = [...config.additional_disks];
-                                                        newDisks[idx] = {...disk, type: e.target.value};
+                                                        newDisks[idx] = {...disk, type: e.target.value, ssd: e.target.value === 'virtio' ? false : disk.ssd};
                                                         setConfig({...config, additional_disks: newDisks});
                                                     }}
                                                         className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
@@ -989,14 +992,16 @@
                                                         {t('ioThread')}
                                                     </label>
                                                 )}
-                                                <label className="flex items-center gap-2 text-xs text-gray-300">
-                                                    <input type="checkbox" checked={disk.ssd || false} onChange={e => {
-                                                        const newDisks = [...config.additional_disks];
-                                                        newDisks[idx] = {...disk, ssd: e.target.checked};
-                                                        setConfig({...config, additional_disks: newDisks});
-                                                    }} className="rounded" />
-                                                    {t('ssdEmulation')}
-                                                </label>
+                                                {disk.type !== 'virtio' && (
+                                                    <label className="flex items-center gap-2 text-xs text-gray-300">
+                                                        <input type="checkbox" checked={disk.ssd || false} onChange={e => {
+                                                            const newDisks = [...config.additional_disks];
+                                                            newDisks[idx] = {...disk, ssd: e.target.checked};
+                                                            setConfig({...config, additional_disks: newDisks});
+                                                        }} className="rounded" />
+                                                        {t('ssdEmulation')}
+                                                    </label>
+                                                )}
                                             </div>
                                         </div>
                                     ))}
@@ -1981,7 +1986,7 @@
             name: '', host: '', api_port: 8006, node_ui_suffix: '', user: 'root@pam', pass: '',
             ssl_verification: false, migration_threshold: 20, migration_tolerance: 10, check_interval: 300,
             auto_migrate: false, balance_containers: false, balance_local_disks: false,
-            dry_run: false, ssh_user: '', ssh_key: '', ssh_disabled: false, ha_enabled: false, proxlb_tags_enabled: false,
+            dry_run: false, ssh_user: '', ssh_key: '', ssh_key_remove: false, ssh_disabled: false, ha_enabled: false, proxlb_tags_enabled: false,
             proxlb_pins_auto_migrate: false, proxlb_pins_strict: false,
             predictive_balancing: false, predictive_threshold: 75,
             balance_cpu_weight: 1.0, balance_mem_weight: 1.0, balance_io_weight: 0.0,
@@ -2471,7 +2476,7 @@
                         // just this subset. The omitted toggles (HA, ProxLB tags, predictive balancing +
                         // its weights/baseline) started at their defaults, so hitting Re-configure quietly
                         // switched them back off. The list GET already returns all of these.
-                        setConfig(prev => ({ ...prev, name: rc.name || '', host: rc.host || '', api_port: rc.api_port || 8006, node_ui_suffix: rc.node_ui_suffix || '', user: rc.user || '', pass: '', ssl_verification: rc.ssl_verification || false, migration_threshold: rc.migration_threshold || 20, migration_tolerance: rc.migration_tolerance || 10, check_interval: rc.check_interval || 300, auto_migrate: rc.auto_migrate || false, balance_containers: rc.balance_containers || false, balance_local_disks: rc.balance_local_disks || false, dry_run: rc.dry_run || false, ssh_user: rc.ssh_user || '', ssh_key: '', ssh_disabled: rc.ssh_disabled || false, ha_enabled: rc.ha_enabled || false, proxlb_tags_enabled: rc.proxlb_tags_enabled || false, proxlb_pins_auto_migrate: rc.proxlb_pins_auto_migrate === true, proxlb_pins_strict: rc.proxlb_pins_strict === true, predictive_balancing: rc.predictive_balancing || false, predictive_threshold: rc.predictive_threshold || 75, balance_cpu_weight: rc.balance_cpu_weight || 1.0, balance_mem_weight: rc.balance_mem_weight || 1.0, balance_io_weight: rc.balance_io_weight || 0.0, cpu_baseline: rc.cpu_baseline || null }));
+                        setConfig(prev => ({ ...prev, name: rc.name || '', host: rc.host || '', api_port: rc.api_port || 8006, node_ui_suffix: rc.node_ui_suffix || '', user: rc.user || '', pass: '', ssl_verification: rc.ssl_verification || false, migration_threshold: rc.migration_threshold || 20, migration_tolerance: rc.migration_tolerance || 10, check_interval: rc.check_interval || 300, auto_migrate: rc.auto_migrate || false, balance_containers: rc.balance_containers || false, balance_local_disks: rc.balance_local_disks || false, dry_run: rc.dry_run || false, ssh_user: rc.ssh_user || '', ssh_key: '', ssh_key_remove: false, ssh_disabled: rc.ssh_disabled || false, ha_enabled: rc.ha_enabled || false, proxlb_tags_enabled: rc.proxlb_tags_enabled || false, proxlb_pins_auto_migrate: rc.proxlb_pins_auto_migrate === true, proxlb_pins_strict: rc.proxlb_pins_strict === true, predictive_balancing: rc.predictive_balancing || false, predictive_threshold: rc.predictive_threshold || 75, balance_cpu_weight: rc.balance_cpu_weight || 1.0, balance_mem_weight: rc.balance_mem_weight || 1.0, balance_io_weight: rc.balance_io_weight || 0.0, cpu_baseline: rc.cpu_baseline || null }));
                         // a login other than root is easy to miss behind a closed section
                         if (rc.ssh_user) setShowSshSettings(true);
                     }
@@ -2650,6 +2655,13 @@
                                         <textarea value={config.ssh_key} onChange={e => setConfig({...config, ssh_key: e.target.value})}
                                             className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors font-mono text-xs"
                                             placeholder={reconfigureConfig?.has_ssh_key ? t('sshKeyStoredKeep') : '-----BEGIN OPENSSH PRIVATE KEY-----'} rows={4} />
+                                        {reconfigureConfig?.has_ssh_key && (
+                                            <label className="flex items-center gap-2 text-xs text-gray-400">
+                                                <input type="checkbox" data-ssh-key-remove checked={!!config.ssh_key_remove} disabled={!!(config.ssh_key || '').trim()}
+                                                    onChange={e => setConfig({...config, ssh_key_remove: e.target.checked})} />
+                                                {t('sshKeyRemove')}
+                                            </label>
+                                        )}
                                         <div className="pt-2 border-t border-proxmox-border">
                                             <Toggle checked={config.ssh_disabled} onChange={v => setConfig({...config, ssh_disabled: v})} label={t('sshDisabled') || 'No SSH to this cluster'} />
                                             <p className="text-xs text-gray-400 mt-2">{t('sshDisabledDesc') || 'Blocks every SSH connection to this cluster\'s nodes, including the node shell and the VNC tunnel. Features that need a shell will say so.'}</p>

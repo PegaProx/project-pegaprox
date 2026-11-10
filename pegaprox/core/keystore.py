@@ -125,6 +125,19 @@ def health_status() -> dict:
     <cwd>/config, and run before the first start it made the service's own key, owned by
     root and unreadable for the service. Paths are absolute, so a status taken in the
     wrong directory shows where it looked."""
+    st = _key_status()
+    # MK Nov 2026 (#1226) - a key in place says little when the SQLCipher package does not
+    # load and the database it is for stays plain
+    from pegaprox.core import dbcrypto
+    st['sqlcipher_error'] = dbcrypto.SQLCIPHER_ERROR
+    problem = dbcrypto.sqlcipher_problem()
+    if problem:
+        field = 'recommendation' if st['ok'] else 'message'
+        st[field] = f'{st[field]} {problem}' if st.get(field) else problem
+    return st
+
+
+def _key_status() -> dict:
     config_dir = os.path.abspath(os.path.dirname(str(_legacy_key_path())) or '.')
     try:
         mk = peek_master_key()

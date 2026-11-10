@@ -49,7 +49,7 @@ from urllib.parse import quote
 # the key store reads key files with its own decoder, so does this
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from pegaprox.core.keystore import _decode_key_string  # noqa: E402
-from pegaprox.core.dbcrypto import file_state  # noqa: E402
+from pegaprox.core.dbcrypto import file_state, sqlcipher_problem  # noqa: E402
 
 DATABASES = ('pegaprox.db', 'syslog.db')
 LEGACY_KEY = '.pegaprox.key'            # pegaprox.constants.KEY_FILE
@@ -177,9 +177,10 @@ def as_service(svc, fn):
 
 def opens(db_path, raw, svc):
     """True when `raw` unlocks the SQLCipher database, False when SQLCipher says it is not
-    a database with it, None when that cannot be told (no sqlcipher3, locked, unreadable).
-    Opened as the service user, read-only, the way dbcrypto.connect keys it: a root-owned
-    -shm next to it would lock the service out of its own database."""
+    a database with it, None when that cannot be told (no sqlcipher3, one that is installed
+    but does not load here, locked, unreadable). Opened as the service user, read-only, the
+    way dbcrypto.connect keys it: a root-owned -shm next to it would lock the service out of
+    its own database."""
     try:
         import sqlcipher3
     except Exception:
@@ -409,8 +410,12 @@ def place_key(a):
         for db in encrypted:
             ok = opens(db, raw, svc)
             if ok is None:
-                raise Refused(f'cannot check whether {current} opens {db} (is python3-sqlcipher3 '
-                              'installed?). Not copying a key that may be the wrong one')
+                # NS Nov 2026 - a package built for another machine or Python is there and
+                # does not load, which asking whether it is installed does not help with
+                problem = sqlcipher_problem()
+                raise Refused(f'cannot check whether {current} opens {db}'
+                              + (f': {problem} ' if problem else ' (is python3-sqlcipher3 installed?). ')
+                              + 'Not copying a key that may be the wrong one')
             if not ok:
                 other = _who_opens(db, keys, svc)
                 raise Refused(f'{db} is encrypted, and {current} does not open it. Not making a key: '

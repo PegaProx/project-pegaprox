@@ -186,6 +186,15 @@ def ssh_login_args(user, host):
     return ['-l', user, '--', str(host)]
 
 
+def _port_or_22(value):
+    """An SSH port as a number, 22 for none and for anything that is not a port."""
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 22
+    return value if 0 < value < 65536 else 22
+
+
 def _feed_stdin(stdin, data):
     """Hand `data` to a remote command's stdin and close it, so a read there sees the end.
     A channel that went away is the command's problem: it reads nothing and says so."""
@@ -208,8 +217,12 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
     stdin_data: text for the command's stdin, for a secret that must not be part of
     `cmd` (a command line is readable by every local account while it runs).
 
-    port: the SSH port. A node behind a per-node forward (node_endpoints) answers on its
-    own, and its address then belongs to the forward, whose port 22 is not the node.
+    port: where sshd listens. MK Nov 2026 - all four ways in below dialled 22, so a PVE
+    cluster whose nodes listen elsewhere got no node command from this path. For any
+    other port the pin is looked up and stored as [host]:port, the name paramiko and
+    OpenSSH give it.
+    A node behind a per-node forward (node_endpoints) answers on a port of its own,
+    and its address then belongs to the forward, whose port 22 is not the node.
 
     ESXi SSH quirks:
     - Only allows keyboard-interactive and publickey auth (NOT password)
@@ -237,6 +250,7 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
     # one spelling from here on: the guard, the host-key pin, the TCP connect and the ssh
     # argv all see the address that is dialled, never '[addr]' (#1158)
     host = bare_host(host)
+    port = _port_or_22(port)
     last_err = ''
     errors = []
     try:
@@ -434,7 +448,7 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         # standby upgrade to `yes` (reject unknown too). Keeps the system-ssh fallback's
         # host-key behaviour in lock-step with the paramiko paths.
         _hkc = cli_hostkey_opts()[0]
-        ssh_args = ['sshpass', '-e', 'ssh', '-p', str(int(port or 22)),
+        ssh_args = ['sshpass', '-e', 'ssh',
              '-o', f'StrictHostKeyChecking={_hkc}',
              '-o', f'UserKnownHostsFile={_known_hosts}',
              '-o', 'LogLevel=ERROR',
@@ -442,6 +456,8 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
              '-o', 'HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256',
              '-o', 'PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519',
              '-o', 'KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256']
+        if port != 22:
+            ssh_args.extend(['-p', str(port)])
         # NS Apr 2026 — ControlMaster opt-in. Adds connection-sharing args.
         # If the helper can't create the socket dir, returns []  → no-op.
         if use_controlmaster:
@@ -482,6 +498,12 @@ def node_login(config):
     """
     user = getattr(config, 'ssh_user', '') or ''
     return (user.strip() if isinstance(user, str) else '') or 'root'
+
+
+def node_ssh_port(config):
+    """The port every SSH path dials this cluster's nodes on: the cluster's ssh_port, 22
+    when none is set (the save route only takes 1..65535)."""
+    return _port_or_22(getattr(config, 'ssh_port', 22))
 
 
 def ssh_password_for(config):

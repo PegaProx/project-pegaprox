@@ -22,7 +22,7 @@ from pegaprox.api.helpers import (check_cluster_access, check_vmware_access, cal
                                   acting_user, vmware_server_reach, upstream_failure,
                                   UPSTREAM_AUTH_STATUSES, caller_acts_as_admin)
 from pegaprox.core.vmware import VMwareManager, load_vmware_servers, save_vmware_server, esxi_target_refusal
-from pegaprox.core.v2p import V2PMigrationTask, _run_v2p_migration
+from pegaprox.core.v2p import V2PMigrationTask, _run_v2p_migration, DISK_CACHE_MODES, DIRECT_CACHE_MODES
 from pegaprox.background.broadcast import broadcast_resources_loop
 
 bp = Blueprint('vmware', __name__)
@@ -1281,6 +1281,13 @@ def start_vmware_migration(vmware_id, vm_id):
     _aio = (data.get('aio_mode') or '').strip().lower()
     if _aio and _aio not in ('threads', 'native', 'io_uring'):
         return jsonify({'error': 'Invalid aio_mode: must be threads, native or io_uring.'}), 400
+    # JB Nov 2026 (#1270) - the cache mode reaches the same line. A guest whose disk has native
+    # AIO without O_DIRECT does not start, so that pair is refused here and not found out later
+    _cache = str(data.get('disk_cache') or '').strip().lower()
+    if _cache and _cache not in DISK_CACHE_MODES:
+        return jsonify({'error': f"Invalid disk_cache: must be one of {', '.join(DISK_CACHE_MODES)}."}), 400
+    if _aio == 'native' and _cache not in ('',) + DIRECT_CACHE_MODES:
+        return jsonify({'error': 'aio_mode native needs the cache mode none or directsync.'}), 400
 
     # NS Oct 2026 (#1090) - root loop-mounts this on the node; empty = the default places
     from pegaprox.utils.sanitization import validate_node_iso_path
