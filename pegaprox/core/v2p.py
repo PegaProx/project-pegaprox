@@ -196,6 +196,9 @@ class V2PMigrationTask:
         self.disk_iothread = _iot if isinstance(_iot, bool) else str(_iot).strip().lower() in ('1', 'true', 'on')
         # the same for discard and SSD emulation (#1246)
         _discard = self.config.get('disk_discard', 'on')
+        # MK Nov 2026 - a bool is what the create dialog sends for its Discard box
+        if isinstance(_discard, bool):
+            _discard = 'on' if _discard else 'ignore'
         _discard = _discard.strip().lower() if isinstance(_discard, str) else ''
         self.disk_discard = _discard if _discard in ('on', 'ignore') else ''
         _ssd = self.config.get('disk_ssd', False)
@@ -999,6 +1002,8 @@ def _run_v2p_migration(task):
         disk_bus = task.disk_bus if task.disk_bus in ('scsi', 'sata', 'ide', 'virtio') else detected_bus
         # every attach of a final disk reads these for its drive options (#1270)
         task._attach_bus, task._attach_scsihw = disk_bus, scsihw
+        if getattr(task, 'disk_ssd', False) is True and disk_bus == 'virtio':
+            task.log("SSD emulation left out: VirtIO Block has no SSD option")
         
         # Network: match VMware (vmxnet3, E1000, E1000e)
         detected_nic = hw.get('nic_type_pve', 'e1000')

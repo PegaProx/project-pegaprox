@@ -51,7 +51,7 @@ def _opts(**cfg):
 
 @pytest.mark.parametrize('discard,want', [
     ('on', ',discard=on'), ('ON ', ',discard=on'), ('ignore', ''), ('', ''), (None, ''),
-    ('on;reboot', ''), ('on,ssd=1', ''), (['on'], ''), (True, ''),
+    ('on;reboot', ''), ('on,ssd=1', ''), (['on'], ''), (True, ',discard=on'), (False, ''),
 ], ids=repr)
 def test_discard_is_a_pve_token_or_nothing(discard, want):
     assert _opts(disk_discard=discard) == want

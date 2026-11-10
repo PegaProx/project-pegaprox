@@ -18256,8 +18256,9 @@ echo "AGENT_INSTALLED_OK"
             bus_type = ''.join(c for c in disk_id if c.isalpha())
             # LW: iothread only works with virtio-scsi controller
             supports_iothread = bus_type in ['scsi', 'virtio']
-            # MK: ssd emulation supported for scsi, virtio, sata (NOT ide - tried it, breaks)
-            supports_ssd = bus_type in ['scsi', 'virtio', 'sata']
+            # MK: ssd emulation supported for scsi, sata (NOT ide - tried it, breaks)
+            # MK Nov 2026 - and not virtio either, VirtIO Block has no ssd and PVE refuses the drive
+            supports_ssd = bus_type in ['scsi', 'sata']
             
             if vm_type == 'qemu':
                 url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/qemu/{vmid}/config"
@@ -18280,7 +18281,7 @@ echo "AGENT_INSTALLED_OK"
                 # MK: Only add iothread for scsi/virtio
                 if disk_config.get('iothread') and supports_iothread:
                     disk_str += ",iothread=1"
-                # MK: Only add ssd for scsi/virtio/sata (not ide)
+                # MK: Only add ssd for scsi/sata (not ide)
                 if disk_config.get('ssd') and supports_ssd:
                     disk_str += ",ssd=1"
                 if disk_config.get('discard'):
