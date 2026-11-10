@@ -14,8 +14,11 @@ The file is read once per generation (path, mtime_ns, size, air-gap flag) with t
 air-gap prelude already in. Each coding is compressed once, off the hub, the first time
 a client asks for it, and every variant has its own strong ETag (a hash of the page
 plus the coding), so a 304 never waits for a compression. Only the current generation
-is kept. The response carries Content-Encoding and Vary itself and is marked
+of a file is kept. The response carries Content-Encoding and Vary itself and is marked
 so the app's flask-compress hook leaves it alone (app.py).
+
+The language files of the page (web/i18n/<lang>.json, 0.6 to 0.7 MB each) go out the same
+way through serve_file, each with its own generation.
 
 MK Nov 2026
 """
@@ -145,29 +148,32 @@ def _off_hub(fn, *args):
     return get_hub().threadpool.apply(fn, args)
 
 
-def _read(path, air_gap):
-    """(key, bytes, tag) of the file. The key comes from the open file before the read; a
-    read that got another length than that stat said (a write in progress) is not kept."""
+def _read(path, prelude):
+    """(key, bytes, sha256 hex) of the file. The key comes from the open file before the
+    read; a read that got another length than that stat said (a write in progress) is not
+    kept."""
     with open(path, 'rb') as fh:
         st = os.fstat(fh.fileno())
         raw = fh.read()
     if len(raw) != st.st_size:
         raise OSError(f'{path} changed while it was read')
-    if air_gap:
+    if prelude:
         if b'<head>' in raw:
-            raw = raw.replace(b'<head>', b'<head>' + AIR_GAP_PRELUDE, 1)
+            raw = raw.replace(b'<head>', b'<head>' + prelude, 1)
         else:
-            raw = AIR_GAP_PRELUDE + raw
-    return (path, st.st_mtime_ns, st.st_size, air_gap), raw, hashlib.sha256(raw).hexdigest()[:32]
+            raw = prelude + raw
+    return (path, st.st_mtime_ns, st.st_size, prelude), raw, hashlib.sha256(raw).hexdigest()
 
 
 class _Generation:
     """One read of the file: the bytes, its tag and the codings made of it so far."""
 
-    def __init__(self, key, raw, tag):
+    def __init__(self, key, raw, digest):
         self.key = key
         self.raw = raw
-        self.tag = tag
+        # the whole hash, for a route that compares a version the client names with it
+        self.digest = digest
+        self.tag = digest[:32]
         self.coded = {}
         self.failed = set()
         self.locks = {name: threading.Lock() for name, _ in CODINGS}
@@ -193,29 +199,31 @@ class _Generation:
                 try:
                     data = _off_hub(dict(CODINGS)[coding], self.raw)
                 except Exception:
-                    logging.exception(f"[index] {coding} of the page failed, it goes out as it is")
+                    logging.exception(f"[index] {coding} of {os.path.basename(self.key[0])} failed, "
+                                      f"it goes out as it is")
                     self.failed.add(coding)
                     return None
                 self.coded[coding] = data
         return data
 
 
-_current = None
+# the latest generation of each file served, by path. The callers name their files from
+# fixed lists, so this holds the page and the language files and nothing else.
+_current = {}
 _load_lock = threading.Lock()
 
 
-def _generation(path, st, air_gap):
-    global _current
-    key = (path, st.st_mtime_ns, st.st_size, air_gap)
-    gen = _current
+def _generation(path, st, prelude):
+    key = (path, st.st_mtime_ns, st.st_size, prelude)
+    gen = _current.get(path)
     if gen is not None and gen.key == key:
         return gen
     with _load_lock:
-        gen = _current
+        gen = _current.get(path)
         if gen is None or gen.key != key:
-            gen = _Generation(*_off_hub(_read, path, air_gap))
+            gen = _Generation(*_off_hub(_read, path, prelude))
             # the previous generation goes with this, requests still on it keep their own
-            _current = gen
+            _current[path] = gen
     return gen
 
 
@@ -223,17 +231,25 @@ def serve_index(directory, air_gap=False):
     """The response for a route that sends index.html out of `directory` (relative to the
     app root like send_from_directory). A file that is missing or cannot be read goes
     through send_from_directory, which answers it the way the routes always did."""
-    path = os.path.join(current_app.root_path, directory, INDEX_FILE)
+    return serve_file(directory, INDEX_FILE, 'text/html', CACHE_CONTROL,
+                      AIR_GAP_PRELUDE if air_gap else None)
+
+
+def serve_file(directory, filename, mimetype, cache_control, prelude=None):
+    """serve_index for any file the caller names (never a name taken from the request as
+    it is). cache_control is the header, or a function of the file's sha256 hex that
+    returns it. A prelude goes in after the first <head>."""
+    path = os.path.join(current_app.root_path, directory, filename)
     try:
         st = os.stat(path)
         if not stat.S_ISREG(st.st_mode):
-            return send_from_directory(directory, INDEX_FILE)
-        gen = _generation(path, st, bool(air_gap))
+            return send_from_directory(directory, filename)
+        gen = _generation(path, st, prelude or None)
     except FileNotFoundError:
-        return send_from_directory(directory, INDEX_FILE)
+        return send_from_directory(directory, filename)
     except OSError as e:
         logging.warning(f"[index] could not read {path}: {e}")
-        return send_from_directory(directory, INDEX_FILE)
+        return send_from_directory(directory, filename)
 
     coding = negotiate(request.headers.get('Accept-Encoding', ''), gen.offered())
     if request.if_none_match.contains_weak(gen.etag(coding)):
@@ -242,12 +258,12 @@ def serve_index(directory, air_gap=False):
         body = gen.body(coding)
         if body is None:
             coding, body = None, gen.raw
-        resp = Response(body, mimetype='text/html')
+        resp = Response(body, mimetype=mimetype)
         if coding:
             resp.headers['Content-Encoding'] = coding
     resp.set_etag(gen.etag(coding))
     resp.headers['Vary'] = 'Accept-Encoding'
-    resp.headers['Cache-Control'] = CACHE_CONTROL
+    resp.headers['Cache-Control'] = cache_control(gen.digest) if callable(cache_control) else cache_control
     # app.py: flask-compress leaves a response alone that carries its own coding
     resp.pp_encoded = True
     return resp

@@ -26,14 +26,14 @@ from pegaprox.utils.sanitization import sanitize_identifier, sanitize_int, sanit
 from pegaprox.utils.ssh import get_ssh_connection_stats
 from pegaprox.utils.concurrent import GEVENT_AVAILABLE
 from pegaprox.utils.audit import log_audit, get_client_ip
-from pegaprox.utils.index_page import serve_index
+from pegaprox.utils.index_page import serve_file, serve_index
 from pegaprox.api.helpers import (
     load_server_settings, save_server_settings, check_cluster_access,
     get_login_settings, get_session_timeout, safe_error,
     acme_dns_config_from_settings, require_unconfined, apply_ui_lock, ui_lock,
     evacuation_options, evacuation_options_said, rolling_options_intro, rolling_node_templates,
     rolling_moved_templates, rolling_rules_give_way, rolling_rules_back_on, rolling_in_maintenance,
-    rolling_moved_guests, rolling_wind_down, rolling_guests_left_moved,
+    rolling_moved_guests, rolling_wind_down, rolling_guests_left_moved, UI_LANGUAGE_LOCKS,
 )
 from pegaprox.app import get_allowed_origins, add_allowed_origin
 from pegaprox.globals import _cors_origins_env, _auto_allowed_origins
@@ -3978,6 +3978,32 @@ def index():
 
 def _send_page():
     return serve_index(WEB_DIR, bool(load_server_settings().get('air_gap_mode', False)))
+
+
+# MK Nov 2026 - the languages of the page besides English, which the bundle carries itself:
+# web/Dev/build.sh writes them to web/i18n/<lang>.json and puts the first 16 hex of each
+# file's sha256 into the page, which asks for /i18n/<lang>.json?v=<that>. Only these names
+# reach the disk.
+I18N_DIR = 'i18n'
+I18N_LANGS = frozenset(UI_LANGUAGE_LOCKS) - {'en'}
+I18N_HASH_LEN = 16
+I18N_IMMUTABLE = 'public, max-age=31536000, immutable'
+
+
+@bp.route('/i18n/<lang>.json')
+def serve_language_file(lang):
+    """A language file of the web interface
+
+    Public like the page itself, the login form shows in the language too. Kept for good
+    when ?v= names the file as it is now, revalidated by its ETag otherwise.
+    """
+    if lang not in I18N_LANGS:
+        return Response('', status=404, mimetype='application/json')
+    v = request.args.get('v', '')
+
+    def cache_control(digest):
+        return I18N_IMMUTABLE if v == digest[:I18N_HASH_LEN] else 'no-cache'
+    return serve_file(os.path.join(WEB_DIR, I18N_DIR), f'{lang}.json', 'application/json', cache_control)
 
 
 def _plugin_page_here(plugin_id):
