@@ -204,8 +204,9 @@ def test_both_places_that_describe_a_cluster_to_the_subprocess_carry_the_port():
 
 def test_cluster_creds_reports_the_port_the_cluster_is_actually_on(api, seed):
     # this endpoint authenticates off the session COOKIE (it is called by the
-    # subprocess, which has no header to send), so it is driven directly here
-    # instead of through the header-based client the other tests use
+    # subprocess, which sends no X-Session-ID), so it is driven directly here
+    # instead of through the header-based client the other tests use; the
+    # subprocess proves itself with the console server header
     seed.user('root', role='admin')
     mgr = api.make_fake_manager()
     mgr.host = '10.77.10.55'
@@ -220,7 +221,9 @@ def test_cluster_creds_reports_the_port_the_cluster_is_actually_on(api, seed):
         sid = create_session('root', 'admin')
     client = api.app.test_client()
     client.set_cookie('session', sid, domain='localhost')
-    r = client.get('/api/internal/cluster-creds/cluster_1')
+    from pegaprox.api.realtime import CONSOLE_SERVER_HEADER, console_server_secret
+    r = client.get('/api/internal/cluster-creds/cluster_1',
+                   headers={CONSOLE_SERVER_HEADER: console_server_secret()})
     assert r.status_code == 200, r.data
     assert r.get_json().get('api_port') == 18006
 

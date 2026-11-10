@@ -1591,6 +1591,13 @@ def get_cluster_creds_internal(cluster_id):
     if refused:
         return refused
 
+    # MK Nov 2026 - the SSH console server this process started is the only caller, and
+    # it proves that like it does on /api/ws/token/validate (realtime.CONSOLE_SERVER_HEADER).
+    # A browser session alone gets neither the node addresses nor the PVE ticket.
+    from pegaprox.api.realtime import from_console_server
+    if not from_console_server():
+        return jsonify({'error': 'Only the console server asks here', 'code': 'CONSOLE_SERVER_ONLY'}), 403
+
     # Check session from cookie
     session_id = request.cookies.get('session') or request.cookies.get('session_id')
     

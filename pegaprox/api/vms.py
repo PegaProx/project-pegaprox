@@ -12716,7 +12716,8 @@ SSL_CERT = os.environ.get('SSH_WS_SSL_CERT', '')
 SSL_KEY = os.environ.get('SSH_WS_SSL_KEY', '')
 PEGAPROX_URL = os.environ.get('PEGAPROX_URL', 'http://127.0.0.1:5000')
 # shows the main app it is talking to the console server it started (api/realtime.py
-# CONSOLE_SERVER_HEADER); only then does /validate hand back the cluster context
+# CONSOLE_SERVER_HEADER); only then do /validate and cluster-creds hand back the cluster
+# context
 CONSOLE_HEADERS = {'X-PegaProx-Console-Server': os.environ.get('PEGAPROX_CONSOLE_SECRET', '')}
 
 try:
@@ -12892,7 +12893,8 @@ async def ssh_handler(websocket):
                 print(f"Fetching cluster creds from: {PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}")
                 # nosec B501 — same-host PegaProx self-signed cert, see MK 2026-06-04 audit
                 rc = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}",
-                                  cookies={'session': session_id}, timeout=10, verify=False)
+                                  cookies={'session': session_id}, headers=CONSOLE_HEADERS,
+                                  timeout=10, verify=False)
                 if await _refused_as_standby(websocket, rc) or await _refused_ssh_off(websocket, rc):
                     return
                 if rc.status_code == 200:
@@ -13237,6 +13239,7 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
         try:
             # console=term: a PVE API console, which a cluster with SSH switched off keeps
             cr = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}?console=term",
+                              headers=CONSOLE_HEADERS,
                               cookies={'session': session_id}, timeout=10, verify=False)  # nosec B501 — localhost-to-PegaProx self-signed cert; same-host trust boundary, see MK 2026-06-04 audit
             if await _refused_as_standby(client_ws, cr):
                 return

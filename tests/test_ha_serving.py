@@ -909,7 +909,9 @@ def test_the_ssh_servers_calls_answer_on_a_serving_standby(fwd, seed, monkeypatc
                           base_url='http://localhost')
 
     def creds():
-        return client.get(f'/api/internal/cluster-creds/{CID}', base_url='http://localhost')
+        from pegaprox.api.realtime import CONSOLE_SERVER_HEADER, console_server_secret
+        return client.get(f'/api/internal/cluster-creds/{CID}', base_url='http://localhost',
+                          headers={CONSOLE_SERVER_HEADER: console_server_secret()})
 
     def session_check():
         return client.get('/api/auth/validate', base_url='http://localhost')

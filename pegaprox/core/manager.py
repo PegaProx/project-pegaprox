@@ -16651,7 +16651,8 @@ echo "AGENT_INSTALLED_OK"
                     'user': user,
                     'host': self.config.host,
                     'node': node,
-                    'pve_auth_cookie': self._ticket
+                    # MK Nov 2026 - no PVEAuthCookie in here either, like the VNC and
+                    # term tickets: the session of the cluster account stays server-side
                 }
             else:
                 error_msg = response.text

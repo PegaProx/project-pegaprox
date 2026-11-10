@@ -166,7 +166,8 @@ def test_the_two_answers_say_why_and_look_nothing_up(api, seed, monkeypatch):
                        headers={CONSOLE_SERVER_HEADER: console_server_secret()})
     client = api.app.test_client()
     client.set_cookie('session', api.as_user(user).session_id, domain='localhost')
-    c = client.get('/api/internal/cluster-creds/cluster_1', base_url='http://localhost')
+    c = client.get('/api/internal/cluster-creds/cluster_1', base_url='http://localhost',
+                   headers={CONSOLE_SERVER_HEADER: console_server_secret()})
     for answer in (r, c):
         assert answer.status_code == 409, answer.data
         body = answer.get_json()

@@ -255,11 +255,12 @@ def narrow_stream_scope(previous, fresh_allowed):
 
 
 # The SSH console server this process starts (api/vms.py start_ssh_websocket_server) gets
-# this in its environment and sends it back with every validate call. Only that caller is
-# handed the cluster context, and the PVE session ticket in it is one of the cluster's own
-# account - root@pam unless an admin set another, so root on every node. Any other holder
-# of a ws token learns whether the token is good and nothing else. New with every start:
-# the console server is restarted with the app.
+# this in its environment and sends it back with every validate and cluster-creds call.
+# Only that caller is handed the cluster context, and the PVE session ticket in it is one
+# of the cluster's own account - root@pam unless an admin set another, so root on every
+# node. Any other holder of a ws token learns whether the token is good and nothing else;
+# cluster-creds (api/auth.py) answers nobody else at all. New with every start: the
+# console server is restarted with the app.
 CONSOLE_SERVER_HEADER = 'X-PegaProx-Console-Server'
 _CONSOLE_SERVER_SECRET = secrets.token_urlsafe(32)
 
@@ -268,8 +269,11 @@ def console_server_secret():
     return _CONSOLE_SERVER_SECRET
 
 
-def _from_console_server():
+def from_console_server():
+    """True for a request of the console server this process started."""
     sent = request.headers.get(CONSOLE_SERVER_HEADER) or ''
+    if not sent or not _CONSOLE_SERVER_SECRET:
+        return False
     return hmac.compare_digest(sent.encode(), _CONSOLE_SERVER_SECRET.encode())
 
 
@@ -504,7 +508,7 @@ def validate_ws_token_api():
                 from pegaprox.globals import cluster_managers
                 mgr = cluster_managers.get(requested_cluster)
                 # only for our own console server, see CONSOLE_SERVER_HEADER
-                if mgr is not None and _from_console_server():
+                if mgr is not None and from_console_server():
                     cluster_host = getattr(mgr, 'host', None)
                     cfg = getattr(mgr, 'config', None)
                     node_ips = {}
