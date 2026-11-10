@@ -315,8 +315,8 @@ def test_the_classic_charts_keep_their_defaults_and_the_preview_branches_are_gat
     assert "{isCorpRedesigned && activeDetailTab === 'monitor' && (" in vm and '<CrGuestPerf ' in vm
     dash = _read('web', 'src', 'dashboard.js')
     assert dash.count("crKind={isCorpRedesigned ? (") == 2
-    # the reads of a standby, the blueprints of the template sub tab (#1220) among them
-    assert dash.count('holds(') == 11
+    # the reads of a standby, the blueprints of the template sub tab in the redesign and in Modern (#1220) among them
+    assert dash.count('holds(') == 12
     src = _read('web', 'src', 'cr_perf.js')
     for bad in ('\u2014', '\u2013', 'window.confirm', 'setInterval(() => read', 'localStorage'):
         assert bad not in src, bad

@@ -13,6 +13,8 @@
 #   - Compiles JSX with Babel (once, not every page load)
 #   - Wraps it so it waits for React to load first
 #   - Result: 2-3 seconds instead of 15+ seconds!
+#   - LW Nov 2026: keeps English in the bundle and writes every other language
+#     to web/i18n/<lang>.json, with a hash of each in the page (?v= of its URL)
 #
 # Requirements: Node.js 16+ (for Babel)
 #
@@ -90,6 +92,8 @@ SRC_FILES=(
     cr_nodemisc.js
     cr_modules.js
     cr_blueprints.js
+    cr_images.js
+    blueprints.js
     dashboard.js
 )
 
@@ -214,12 +218,74 @@ fi
 echo ""
 echo -e "${YELLOW}Building production version...${NC}"
 
-# Step 1: Concatenate source files
+export PEGAPROX_BUILD_DIR="$BUILD_DIR"
+export PEGAPROX_PROJECT_ROOT="$PROJECT_ROOT"
+
+# Step 1: Split the translations
+# LW Nov 2026 - translations.js was more than half of the bundle, and a browser shows one
+# language. English stays in (the fallback of t(), so a language file that does not come
+# never leaves the page without text), the others become web/i18n/<lang>.json. The values
+# come from the file evaluated as it is, the English block goes in as written.
+echo -e "${BLUE}→ Writing the language files...${NC}"
+
+node - << 'NODE_SCRIPT'
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const vm = require('vm');
+
+const buildDir = process.env.PEGAPROX_BUILD_DIR;
+const root = process.env.PEGAPROX_PROJECT_ROOT;
+const srcFile = path.join(root, 'web', 'src', 'translations.js');
+const src = fs.readFileSync(srcFile, 'utf8');
+const fail = (msg) => { console.error(`ERROR: web/src/translations.js: ${msg}`); process.exit(1); };
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// the values as the browser gets them: the file evaluated as it is
+const all = vm.runInNewContext(src + '\n;translations;', {}, { filename: srcFile });
+const langs = Object.keys(all);
+const lines = src.split('\n');
+const opened = lines.filter(l => /^            [a-z]{2}: \{$/.test(l)).map(l => l.trim().slice(0, 2));
+if (!all.en || !same(opened, langs)) fail(`expected one "<lang>: {" block per language, found ${opened}`);
+
+// the English block as written, cut from its line to the one that closes it, and only
+// taken when it evaluates to exactly what the whole file gives for English
+const first = lines.indexOf('            en: {');
+let last = first + 1;
+while (last < lines.length && !/^            \}/.test(lines[last])) last++;
+const english = lines.slice(first, last).join('\n') + '\n            }';
+if (!same(vm.runInNewContext(`({\n${english}\n})`, {}).en, all.en)) fail('the en block could not be cut out as written');
+
+const outDir = path.join(root, 'web', 'i18n');
+fs.mkdirSync(outDir, { recursive: true });
+const hashes = {};
+for (const lang of langs) {
+    if (lang === 'en') continue;
+    const text = JSON.stringify(all[lang]) + '\n';
+    fs.writeFileSync(path.join(outDir, `${lang}.json`), text);
+    hashes[lang] = crypto.createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16);
+    console.log(`  ${lang}.json: ${Buffer.byteLength(text).toLocaleString('en')} bytes (${hashes[lang]})`);
+}
+// a language that left the source leaves web/i18n as well
+for (const f of fs.readdirSync(outDir)) {
+    if (f.endsWith('.json') && !Object.prototype.hasOwnProperty.call(hashes, f.slice(0, -5))) {
+        fs.unlinkSync(path.join(outDir, f));
+    }
+}
+fs.writeFileSync(path.join(buildDir, 'translations.en.js'), `const translations = {\n${english},\n        };\n`);
+fs.writeFileSync(path.join(buildDir, 'i18n.json'), JSON.stringify(hashes));
+NODE_SCRIPT
+
+# Step 2: Concatenate source files
 echo -e "${BLUE}→ Concatenating ${#SRC_FILES[@]} source files...${NC}"
 
 cat /dev/null > "$BUILD_DIR/app.jsx"
 for f in "${SRC_FILES[@]}"; do
-    cat "web/src/$f" >> "$BUILD_DIR/app.jsx"
+    if [ "$f" == "translations.js" ]; then
+        cat "$BUILD_DIR/translations.en.js" >> "$BUILD_DIR/app.jsx"
+    else
+        cat "web/src/$f" >> "$BUILD_DIR/app.jsx"
+    fi
     echo "" >> "$BUILD_DIR/app.jsx"
 done
 
@@ -227,7 +293,7 @@ JSX_SIZE=$(wc -c < "$BUILD_DIR/app.jsx")
 JSX_LINES=$(wc -l < "$BUILD_DIR/app.jsx")
 echo "  Concatenated: ${JSX_LINES} lines, ${JSX_SIZE} bytes"
 
-# Step 2: Compile JSX with Babel
+# Step 3: Compile JSX with Babel
 echo -e "${BLUE}→ Compiling JSX with Babel...${NC}"
 
 BABEL_CMD="$BUILD_DIR/node_modules/.bin/babel"
@@ -237,11 +303,8 @@ BABEL_CMD="$BUILD_DIR/node_modules/.bin/babel"
 JS_SIZE=$(wc -c < "$BUILD_DIR/app.js")
 echo "  Compiled JS: ${JS_SIZE} bytes"
 
-# Step 3: Build final HTML
+# Step 4: Build final HTML
 echo -e "${BLUE}→ Assembling final HTML...${NC}"
-
-export PEGAPROX_BUILD_DIR="$BUILD_DIR"
-export PEGAPROX_PROJECT_ROOT="$PROJECT_ROOT"
 
 python3 << 'PYTHON_SCRIPT'
 import os
@@ -266,6 +329,15 @@ if idx == -1:
     exit(1)
 
 html_before = shell[:idx]
+
+# LW Nov 2026 - the head asks for the language file the page opens in, by these hashes
+with open(os.path.join(build_dir, 'i18n.json'), 'r', encoding='utf-8') as f:
+    i18n_files = f.read().strip()
+i18n_marker = 'window.__pegaproxI18nFiles = {};'
+if html_before.count(i18n_marker) != 1:
+    print("ERROR: the language file marker is not in the <head> of index.html.original once!")
+    exit(1)
+html_before = html_before.replace(i18n_marker, 'window.__pegaproxI18nFiles = ' + i18n_files + ';')
 
 # Wrap compiled JS in waitForReact IIFE
 wrapper_start = '''(function waitForReact() {
@@ -341,6 +413,7 @@ echo -e "${GREEN}╚════════════════════
 echo ""
 echo -e "  ${BLUE}Source:${NC}  web/src/ (${#SRC_FILES[@]} files)"
 echo -e "  ${BLUE}Output:${NC}  web/index.html (pre-compiled)"
+echo -e "           web/i18n/<lang>.json (every language but English)"
 echo ""
 echo -e "  For development: ${YELLOW}./build.sh --restore${NC}"
 echo -e "  After changes:   ${YELLOW}./build.sh${NC}"

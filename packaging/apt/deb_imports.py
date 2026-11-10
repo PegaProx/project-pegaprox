@@ -45,6 +45,8 @@ DEPENDS = {
     'pyVmomi': 'python3-pyvmomi',
     'pyVim': 'python3-pyvmomi',
     'XenAPI': 'python3-xenapi',
+    # NS Nov 2026 (#1226): built by the repo from the manylinux wheels, amd64 and arm64
+    'sqlcipher3': 'python3-sqlcipher3',
 }
 
 # import name -> why the package does not depend on it
@@ -52,10 +54,15 @@ OPTIONAL = {
     'fido2': 'WebAuthn hardware keys. api/webauthn.py switches the feature off when the '
              'import fails. trixie has python3-fido2 1.2, and with 1.x dict(options) keeps '
              'bytes, so register/begin fails in jsonify; requirements.txt asks for 2.2.1.',
-    'sqlcipher3': 'Full database encryption. Not packaged in Debian; core/dbcrypto.py falls '
-                  'back to sqlite3 and the Fernet field encryption still applies.',
     'apprise': 'Extra senders of the bundled notifications plugin, which loads without it. '
                'Not packaged in trixie.',
+    # the codings of the page (pegaprox/utils/index_page.py) besides gzip, the modules
+    # flask-compress takes for them; without one the page goes out in the others
+    'brotli': 'The br variant of the page, offered only when the module imports.',
+    'brotlicffi': 'Taken instead of brotli where it is installed, as flask-compress does.',
+    'backports': 'backports.zstd, the zstd variant of the page before Python 3.14.',
+    'compression': 'compression.zstd, the zstd variant of the page from Python 3.14 on '
+                   '(standard library there).',
 }
 
 

@@ -343,8 +343,9 @@ SYNC_TABLES = (
     'recovery_confirmations',
     # the custom node hardening profiles, picks of the built-in controls
     'hardening_profiles',
-    # VM blueprints: a library image plus hardware and Cloud-Init (#1220)
-    'vm_blueprints',
+    # VM blueprints: a library image or a PVE template plus hardware and Cloud-Init, and
+    # the template each cluster deploys one from (#1220)
+    'vm_blueprints', 'blueprint_templates',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
@@ -4066,6 +4067,19 @@ def apply_snapshot(snap):
         raise
 
     # the rows are in; nothing below raises, so a caller that got here can count them
+    # MK Nov 2026 - on disk before the state file says this cv is held here (the
+    # connections run synchronous=NORMAL): a power cut that kept the record and took
+    # the rows would leave this member naming a cv it lacks the content of, also once
+    # it leads. A sync that fails takes nothing back, the rows are committed: what
+    # follows from them still happens, only the cv is not recorded, and the next sync
+    # compares row by row
+    from pegaprox.core import dbcrypto
+    unsynced = ''
+    try:
+        dbcrypto.sync_wal(db.db_path)
+    except OSError as e:
+        unsynced = f'the rows were not synced to disk ({e})'
+        logging.error(f"[HA] sync from {snap.get('instance_id')}: {unsynced}")
     with _journal_lock:
         _journal['pending'] = []
     _orphans['not_kept'] = None
@@ -4077,8 +4091,10 @@ def apply_snapshot(snap):
     problem = _adopt_group(snap)
     if problem:
         summary['file_errors'].append(problem)
+    if unsynced:
+        summary['file_errors'].append(unsynced)
     summary['tombstones_owed'] = _tombstones_owed(snap)
-    rec = _note_applied(snap, lineage, their_epoch, held, mark)
+    rec = None if unsynced else _note_applied(snap, lineage, their_epoch, held, mark)
     _after_apply()
     if rec and rec.get('mark'):
         # last: it gives the hub away once more, and everything else is in place
@@ -4639,6 +4655,12 @@ def note_config_etag(raw, upto=None, data=None, held=None):
         rec['hist'] = hist[-LINEAGE_KEEP:]
         if rec != old:
             try:
+                # MK Nov 2026 - the content this cv names on disk before the record: the
+                # members get it under that cv, and a power cut that took it here
+                # (synchronous=NORMAL) would have them wipe it with the next step
+                from pegaprox.core import dbcrypto
+                from pegaprox.core.db import get_db
+                dbcrypto.sync_wal(get_db().db_path)
                 _commit_locked(dict(st, cv=rec))
             except Exception as e:
                 raise HaError(f'The config version could not be saved: {e}')
@@ -8026,6 +8048,12 @@ def set_group_timezone(name):
             try:
                 if st['role'] != ROLE_ACTIVE or group_timezone() != before:
                     raise HaError("The group's time zone changed meanwhile - try again")
+                # MK Nov 2026 - the stamps on disk before the zone: under synchronous=NORMAL a
+                # power cut could keep the state file and take them, and after a first change
+                # nothing in the database would say which zone they are in (stamps_settle)
+                from pegaprox.core import dbcrypto
+                from pegaprox.core.db import get_db
+                dbcrypto.sync_wal(get_db().db_path)
                 _commit_locked(dict(st, timezone=name))
                 return True
             except Exception as e:
@@ -12994,13 +13022,19 @@ def _recovery_table(cur):
 
 def _recovery_write(sql, args):
     try:
+        from pegaprox.core import dbcrypto
         from pegaprox.core.db import get_db
-        conn = get_db().conn
+        db = get_db()
+        conn = db.conn
         with _recovery_lock:
             cur = conn.cursor()
             _recovery_table(cur)
             cur.execute(sql, args)
             conn.commit()
+            # MK Nov 2026 - a step is written down before it is taken, and some cannot be
+            # taken back (a fence, a config moved off the node): on disk first, also under
+            # synchronous=NORMAL
+            dbcrypto.sync_wal(db.db_path)
         return True
     except Exception as e:
         logging.error(f"[HA] could not write the recovery journal: {e}")

@@ -50,8 +50,10 @@ def _mgr(resources=(), shared=(), nodes=('pve1', 'pve2'), cluster_type='proxmox'
     m.nodes = {n: {'node': n, 'status': 'online'} for n in nodes}
     m.get_vm_resources.return_value = list(resources)
     m.get_next_vmid.return_value = {'success': True, 'vmid': 100}
-    m._api_get.return_value = _Resp(data=[{'storage': s, 'shared': 1} for s in shared]
-                                    + [{'storage': 'local-lvm', 'shared': 0}])
+    storages = _Resp(data=[{'storage': s, 'shared': 1} for s in shared] + [{'storage': 'local-lvm', 'shared': 0}])
+    # the bridges the deploy looks for before it starts (GOOD names vmbr0 and vmbr1)
+    network = _Resp(data=[{'iface': 'vmbr0', 'type': 'bridge'}, {'iface': 'vmbr1', 'type': 'OVSBridge'}])
+    m._api_get.side_effect = lambda url, **kw: network if url.endswith('/network') else storages
     return m
 
 
@@ -126,6 +128,7 @@ def test_a_blueprint_is_saved_and_listed_as_sent(admin):
     ({'searchdomain': 'bad_domain!'}, 'searchdomain'),
     ({'tags': ['Web Server']}, 'tags'),
     ({'start': 'yes'}, 'start'),
+    ({'cores': '\u00b2'}, 'cores'),       # a superscript two: isdigit() says yes, int() says no
 ])
 def test_a_blueprint_the_server_would_send_wrong_is_refused_at_the_field(admin, over, field):
     r = _create(admin, **over)
@@ -163,6 +166,68 @@ def test_without_vm_create_there_are_no_blueprints(api, seed):
     viewer = api.as_user(seed.user('val', permissions=['vm.view']))
     assert viewer.get('/api/blueprints').status_code == 403
     assert _create(viewer).status_code == 403
+
+
+# --- who sees a blueprint ---------------------------------------------------------------
+
+PERMS = ['vm.create', 'cluster.view']
+
+
+@pytest.fixture
+def tenants(seed):
+    import pegaprox.utils.rbac as rbac
+    seed.tenant('t_a', ['c1'])
+    seed.tenant('t_b', ['c1'])
+    rbac.invalidate_tenants_cache()
+    yield
+    rbac.invalidate_tenants_cache()
+
+
+def _ids(client):
+    return sorted(b['id'] for b in client.get('/api/blueprints').get_json()['blueprints'])
+
+
+def test_a_blueprint_stays_in_the_tenant_of_the_account_that_saved_it(api, seed, admin, tenants, no_thread):
+    # its Cloud-Init user and keys go into every VM deployed from it: a deploy from
+    # another tenant would let the one who saved it into that tenant's VM
+    api.set_manager('c1', _mgr())
+    tim = api.as_user(seed.user('tim', tenant_id='t_a', permissions=PERMS))
+    tess = api.as_user(seed.user('tess', tenant_id='t_a', permissions=PERMS))
+    uma = api.as_user(seed.user('uma', tenant_id='t_b', permissions=PERMS))
+    ann = api.as_user(seed.user('ann', permissions=PERMS))
+    bid = _create(tim).get_json()['blueprint']['id']
+    assert _ids(tim) == _ids(tess) == _ids(admin) == [bid]
+    assert _ids(uma) == _ids(ann) == []
+    for other in (uma, ann):
+        assert other.get(f'/api/clusters/c1/blueprints/{bid}/template?node=pve1').status_code == 404
+        assert _deploy(other, bid, vmid=150).status_code == 404
+        assert other.put(f'/api/blueprints/{bid}', json=GOOD).status_code == 404
+        assert other.delete(f'/api/blueprints/{bid}').status_code == 404
+    assert no_thread == []
+    assert _deploy(tess, bid, vmid=150).status_code == 202
+
+
+def test_an_admins_blueprint_is_seen_in_every_tenant(api, seed, admin, tenants):
+    bid = _create(admin).get_json()['blueprint']['id']
+    for name, extra in (('tim', {'tenant_id': 't_a'}), ('uma', {'tenant_id': 't_b'}), ('ann', {})):
+        assert _ids(api.as_user(seed.user(name, permissions=PERMS, **extra))) == [bid], name
+
+
+def test_a_blueprint_whose_account_is_gone_stays_with_the_admins(api, seed, admin, monkeypatch):
+    # the default tenant: an account nobody can find must not read as one of it
+    tim = api.as_user(seed.user('tim', permissions=PERMS))
+    tess = api.as_user(seed.user('tess', permissions=PERMS))
+    bid = _create(tim).get_json()['blueprint']['id']
+    mine = _create(tess).get_json()['blueprint']['id']
+    seed.db.delete_user('tim')
+    assert _ids(tess) == [mine]
+    assert _ids(admin) == sorted([bid, mine])
+    # a user table that does not answer names nobody's tenant either
+    seed.user('tim', permissions=PERMS)
+    assert _ids(tess) == sorted([bid, mine])
+    with monkeypatch.context() as m:
+        m.setattr(bpmod, 'load_users', lambda *a, **kw: {})
+        assert _ids(tess) == [mine]
 
 
 def test_a_blueprint_whose_image_left_the_library_says_so(admin, seed):
@@ -291,6 +356,20 @@ def test_a_deploy_without_a_template_builds_one_through_the_library(lab, db, no_
     lib = dict(db.conn.execute('SELECT * FROM cloud_init_deployments WHERE id = ?', (build['dep_id'],)).fetchone())
     # the library lists the build like its own
     assert (lib['node'], lib['template_id'], lib['vmid'], lib['status']) == ('pve1', 'debian-12', build['vmid'], 'queued')
+
+
+def test_a_shared_template_elsewhere_serves_a_shared_target_storage_only(api, admin, db, no_thread):
+    # PVE clones onto another node into shared storage only; into the node's own storage
+    # the node gets a template of its own first
+    _built(db, 9001, 'pve2', 'ceph')
+    api.set_manager('c1', _mgr([_template(9001, 'pve2')], shared=['ceph']))
+    bid = _create(admin).get_json()['blueprint']['id']
+    r = _deploy(admin, bid, vmid=150, storage='ceph')
+    assert r.status_code == 202 and r.get_json()['build_needed'] is False, r.get_json()
+    assert no_thread[0][7]['vmid'] == 9001 and no_thread[0][8] is None
+    r = _deploy(admin, bid, vmid=151, name='web-02')
+    assert r.status_code == 202 and r.get_json()['build_needed'] is True, r.get_json()
+    assert no_thread[1][7] is None and no_thread[1][8]['vmid'] not in (151, 9001)
 
 
 @pytest.mark.parametrize('over,code,field', [
@@ -489,8 +568,8 @@ def test_deployments_are_read_per_cluster_the_caller_sees(api, seed, lab, db, no
 def test_the_template_probe_answers_per_node(lab, db):
     _built(db, 9002, 'pve1', 'local-lvm')
     r = lab.admin.get(f'/api/clusters/c1/blueprints/{lab.bid}/template?node=pve1').get_json()
-    assert r == {'template': {'vmid': 9002, 'node': 'pve1', 'storage': 'local-lvm', 'shared': False},
-                 'build_needed': False}
+    assert r == {'source_kind': 'library', 'build_needed': False,
+                 'template': {'vmid': 9002, 'node': 'pve1', 'storage': 'local-lvm', 'shared': False}}
     r = lab.admin.get(f'/api/clusters/c1/blueprints/{lab.bid}/template?node=pve2').get_json()
-    assert r == {'template': None, 'build_needed': True}
+    assert r == {'source_kind': 'library', 'template': None, 'build_needed': True}
     assert lab.admin.get(f'/api/clusters/c1/blueprints/{lab.bid}/template?node=pve9').status_code == 400

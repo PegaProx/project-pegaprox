@@ -25,7 +25,6 @@ SAMPLE = [
     'cloud.updConfirmHint', 'cloud.updCephStrict', 'cloud.updNoDataHint', 'cloud.updUpToDate',
     'cloudCfgApplied', 'cloudCfgPendingHint', 'cloudCfgSecConfigHint', 'cloudCfgTipResize',
     'cloudCfgExtern', 'cloudCfgUnsavedSec',
-    'cloudNavAlerts', 'cloudNavTimeline', 'cloudNavPower',
 ]
 KEY_LINE = re.compile(r"^ {16}'?([A-Za-z0-9_.]+)'?:")
 

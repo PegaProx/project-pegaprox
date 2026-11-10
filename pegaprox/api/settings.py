@@ -26,13 +26,14 @@ from pegaprox.utils.sanitization import sanitize_identifier, sanitize_int, sanit
 from pegaprox.utils.ssh import get_ssh_connection_stats
 from pegaprox.utils.concurrent import GEVENT_AVAILABLE
 from pegaprox.utils.audit import log_audit, get_client_ip
+from pegaprox.utils.index_page import serve_file, serve_index
 from pegaprox.api.helpers import (
     load_server_settings, save_server_settings, check_cluster_access,
     get_login_settings, get_session_timeout, safe_error,
     acme_dns_config_from_settings, require_unconfined, apply_ui_lock, ui_lock,
     evacuation_options, evacuation_options_said, rolling_options_intro, rolling_node_templates,
     rolling_moved_templates, rolling_rules_give_way, rolling_rules_back_on, rolling_in_maintenance,
-    rolling_moved_guests, rolling_wind_down, rolling_guests_left_moved,
+    rolling_moved_guests, rolling_wind_down, rolling_guests_left_moved, UI_LANGUAGE_LOCKS,
 )
 from pegaprox.app import get_allowed_origins, add_allowed_origin
 from pegaprox.globals import _cors_origins_env, _auto_allowed_origins
@@ -3851,6 +3852,8 @@ def get_compliance_status():
         score = round(passed / len(checked) * 100, 1) if checked else None
         st = {c['id']: c['status'] for c in controls}
         default_pw = _check_default_password_in_use()
+        # names an installed SQLCipher package that does not load here
+        from pegaprox.core import dbcrypto
 
         return jsonify({
             'compliance_score': score,
@@ -3865,7 +3868,8 @@ def get_compliance_status():
                 'key_exists': key_info.get('exists', False),
                 'key_created': key_info.get('created'),
                 'last_rotation': key_info.get('last_modified'),
-                'backups_count': len(key_info.get('backups', []))
+                'backups_count': len(key_info.get('backups', [])),
+                'sqlcipher_error': dbcrypto.SQLCIPHER_ERROR,
             },
             'session': {
                 'timeout_seconds': settings.get('session_timeout', SESSION_TIMEOUT),
@@ -3884,6 +3888,7 @@ def get_compliance_status():
                 r for r in [
                     'Enable HTTPS with valid certificates (or enable reverse proxy mode if using nginx/Traefik)'
                     if st.get('https_enabled') == 'failed' else None,
+                    dbcrypto.sqlcipher_problem(),
                     'Reduce session timeout to 8 hours or less'
                     if st.get('session_timeout_compliant') == 'failed'
                     and int(settings.get('session_timeout', SESSION_TIMEOUT) or 0) > 28800 else None,
@@ -3964,35 +3969,41 @@ def index():
     a fresh browser (no localStorage yet) hits cdn.jsdelivr while waiting
     for /auth/check to come back. We rewrite a tiny prelude into <head>
     so the loader sees the flag synchronously on its first read.
+
+    MK Nov 2026 - read once, each coding compressed once, a reload gets its 304 and the
+    flag changes the ETag (utils/index_page.py). Every route that sends the page goes there.
     """
-    import os as _os
-    air_gap = bool(load_server_settings().get('air_gap_mode', False))
-    index_path = _os.path.join(WEB_DIR, 'index.html')
-    if not air_gap:
-        return send_from_directory(WEB_DIR, 'index.html')
-    try:
-        with open(index_path, 'r', encoding='utf-8') as f:
-            html = f.read()
-        prelude = (
-            "<script>"
-            "try{localStorage.setItem('pegaprox-air-gap','1');}catch(_){}"
-            "window.__pegaproxAirGap=true;"
-            "</script>"
-        )
-        # inject right after <head> open tag so it precedes everything
-        if '<head>' in html:
-            html = html.replace('<head>', '<head>' + prelude, 1)
-        else:
-            html = prelude + html
-        resp = make_response(html)
-        resp.headers['Content-Type'] = 'text/html; charset=utf-8'
-        # don't let proxies cache an air-gapped response — toggling the flag
-        # off must take effect on the next reload, not whenever the cache decides
-        resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-        return resp
-    except Exception:
-        logging.exception("[index] air-gap prelude injection failed; falling back to plain index.html")
-        return send_from_directory(WEB_DIR, 'index.html')
+    return _send_page()
+
+
+def _send_page():
+    return serve_index(WEB_DIR, bool(load_server_settings().get('air_gap_mode', False)))
+
+
+# MK Nov 2026 - the languages of the page besides English, which the bundle carries itself:
+# web/Dev/build.sh writes them to web/i18n/<lang>.json and puts the first 16 hex of each
+# file's sha256 into the page, which asks for /i18n/<lang>.json?v=<that>. Only these names
+# reach the disk.
+I18N_DIR = 'i18n'
+I18N_LANGS = frozenset(UI_LANGUAGE_LOCKS) - {'en'}
+I18N_HASH_LEN = 16
+I18N_IMMUTABLE = 'public, max-age=31536000, immutable'
+
+
+@bp.route('/i18n/<lang>.json')
+def serve_language_file(lang):
+    """A language file of the web interface
+
+    Public like the page itself, the login form shows in the language too. Kept for good
+    when ?v= names the file as it is now, revalidated by its ETag otherwise.
+    """
+    if lang not in I18N_LANGS:
+        return Response('', status=404, mimetype='application/json')
+    v = request.args.get('v', '')
+
+    def cache_control(digest):
+        return I18N_IMMUTABLE if v == digest[:I18N_HASH_LEN] else 'no-cache'
+    return serve_file(os.path.join(WEB_DIR, I18N_DIR), f'{lang}.json', 'application/json', cache_control)
 
 
 def _plugin_page_here(plugin_id):
@@ -4054,7 +4065,7 @@ def oidc_callback_page():
     Identity providers redirect here with ?code=xxx&state=yyy
     The frontend JS picks up the params and calls the API callback endpoint
     """
-    return send_from_directory(WEB_DIR, 'index.html')
+    return _send_page()
 
 @bp.route('/api/status', methods=['GET'])
 def get_status():

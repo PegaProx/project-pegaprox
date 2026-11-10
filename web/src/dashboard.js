@@ -835,7 +835,7 @@
         // Indexes: clusters, VMs, storage (from resources), and a curated action list.
         // Keyboard-first: ↑/↓ to move, enter to pick, esc to close.
         function CommandPalette({ t, clusters, clusterResources, clusterMetrics, selectedCluster,
-                                   onClose, onPickCluster, onPickVm, onAction, authFetch, onPickHit }) {
+                                   onClose, onPickCluster, onPickVm, onAction, authFetch, onPickHit, extraActions }) {
             const [query, setQuery] = useState('');
             const [highlight, setHighlight] = useState(0);
             const inputRef = useRef(null);
@@ -922,6 +922,8 @@
                     ['goto-automation', t('automation') || 'Automation', 'Zap'],
                     ['goto-reports', t('reports') || 'Reports', 'FileText'],
                     ['goto-plugins', t('plugins') || 'Plugins', 'Package'],
+                    // LW Nov 2026 - [id, title, icon] of a layout's own (Corporate Redesigned: the blueprints, #1220)
+                    ...(extraActions || []),
                     ['settings',      t('settings') || 'Settings', 'Settings'],
                     ['profile',       t('userProfile') || 'Profile', 'User'],
                     ['logout',        t('logout') || 'Log out', 'Power'],
@@ -933,7 +935,7 @@
                     });
                 });
                 return out;
-            }, [clusters, clusterResources, clusterMetrics, selectedCluster, onPickCluster, onPickVm, onAction, t]);
+            }, [clusters, clusterResources, clusterMetrics, selectedCluster, onPickCluster, onPickVm, onAction, extraActions, t]);
 
             // Fuzzy-ish scoring: substring > prefix > word boundary. Simple but fast.
             const results = React.useMemo(() => {
@@ -8396,7 +8398,7 @@
         // storage and creates a container from it (a technology preview there, so here too).
         // The server checks each node's version, the storages and the caller; this only
         // offers what it said yes to (api/oci_catalog.py).
-        function OciCatalogTab({ clusters, clusterId, authFetch, addToast, t, variant = 'default' }) {
+        function OciCatalogTab({ clusters, clusterId, authFetch, addToast, t }) {
             const { haReadOnly } = useAuth();
             const pveClusters = (clusters || []).filter(c => c && (c.cluster_type || 'proxmox') === 'proxmox');
             const [cid, setCid] = React.useState(clusterId || (pveClusters[0] && pveClusters[0].id) || '');
@@ -20246,7 +20248,12 @@
                                 full: cloneConfig.full,
                                 target_node: cloneConfig.target_node,
                                 target_storage: cloneConfig.target_storage,
-                                description: cloneConfig.description
+                                description: cloneConfig.description,
+                                // JB Nov 2026 - the dialog asks for these and the route applies them, and they stopped here
+                                // NS Nov 2026 - Proxmox takes sshkeys urlencoded, one key a line with a closing newline
+                                ...Object.fromEntries(['ciuser', 'cipassword', 'sshkeys', 'ipconfig0', 'nameserver', 'searchdomain']
+                                    .filter(k => String(cloneConfig[k] || '').trim())
+                                    .map(k => [k, k === 'sshkeys' ? encodeURIComponent(cloneConfig[k].trim() + '\n') : cloneConfig[k]]))
                             })
                         }
                     );
@@ -20254,6 +20261,7 @@
                     if (response && response.ok) {
                         const result = await response.json();
                         addToast(result.message || `${t('cloneStarted') || 'Clone started'}: ${vm.vmid} ↑ ${cloneConfig.newid}`);
+                        if (result.cloudinit_warning) addToast(result.cloudinit_warning, 'error');
                         setDashCloneVm(null);
                         setTimeout(() => fetchClusterResources(selectedCluster.id), 3000);
                         return true;   // #702 — signal success so the table-view modal can self-close
@@ -20509,6 +20517,10 @@
                             setSelectedCluster(cluster);
                             setPendingCreateVm({ type: 'lxc', clusterId: cluster.id });
                         }},
+                        // LW Nov 2026 (#1220) - Corporate Redesigned: the blueprints of the Blueprints & Images sub tab
+                        ...(isCorpRedesigned && (!cluster.cluster_type || cluster.cluster_type === 'proxmox') ? [
+                            { perm: 'vm.create', label: t('crBpNavDeploy'), icon: <Icons.Template className="w-3.5 h-3.5" />, onClick: () => crTaskNav.openBlueprints(cluster.id) },
+                        ] : []),
                         { separator: true },
                         { perm: 'cluster.config', label: t('renameCluster') || 'Rename', icon: <Icons.Edit className="w-3.5 h-3.5" />, onClick: () => { setRenamingCluster(cluster); setRenameValue(cluster.display_name || cluster.name || ''); } },
                         { perm: 'cluster.config', label: t('assignToGroup') || 'Assign to Group', icon: <Icons.FolderPlus className="w-3.5 h-3.5" />, onClick: () => setShowAssignGroup(cluster) },
@@ -20871,7 +20883,7 @@
                             they surface over the cloud shell. The classic copies live in the main
                             return; the skins are mutually exclusive so only one set ever mounts. */}
                         {configVm && (configVm._clusterId || selectedCluster) && (
-                            <ConfigModal vm={configVm} clusterId={configVm._clusterId || selectedCluster.id} allClusters={clusters} dashboardAuthFetch={authFetch} onClose={handleCloseConfig} addToast={addToast} isCorporate={false} variant="cloud" />
+                            <ConfigModal vm={configVm} clusterId={configVm._clusterId || selectedCluster.id} allClusters={clusters} dashboardAuthFetch={authFetch} onClose={handleCloseConfig} addToast={addToast} isCorporate={false} />
                         )}
                         {cloudBulk && (
                             <GuestBulkActionModal action={cloudBulk.action} guests={cloudBulk.guests} authFetch={authFetch}
@@ -21407,11 +21419,28 @@
                 openQdevice: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setSelectedSidebarQdevice(cid); setActiveTab('overview'); } },
                 // LW Nov 2026 - the alert strip: Automation > Alerts of a cluster, and its Timeline with a kind and a severity picked
                 openAlerts: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('alerts'); } },
+                // LW Nov 2026 (#1220) - Automation > Blueprints & Images of a cluster (the Resources button, the cluster menu, Ctrl+K)
+                openBlueprints: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('templates'); } },
                 openTimeline: (cid, pick) => {
                     if (!crIntoCluster(cid)) return;
                     crClearPick();
                     setCrTimelinePick(p => ({ cid, kind: (pick && pick.kind) || '', severity: (pick && pick.severity) || '', seq: ((p && p.seq) || 0) + 1 }));
                     setActiveTab('timeline');
+                },
+            } : undefined;
+            // LW Nov 2026 (#1220) - where the blueprints of Modern lead (blueprints.js): Automation > Blueprints &
+            // Templates of a cluster, and the guest list of its cluster for a guest a deploy made
+            const mdBpNav = !isCorporate ? {
+                nodesOf: (cid) => (selectedCluster && selectedCluster.id === cid ? clusterMetrics : (sidebarClusterData[cid]?.metrics || null)),
+                // from the top of the page, where the tab bar and the section start
+                openBlueprints: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('templates'); window.scrollTo(0, 0); } },
+                openGuest: (cid, guest) => {
+                    const cl = clusters.find(c => c.id === cid);
+                    if (!cl || !guest) return;
+                    askGuestDetail(cl, guest);
+                    crIntoCluster(cid);
+                    setSelectedSidebarVm({...guest, _clusterId: cl.id}); setSelectedSidebarNode(null);
+                    setActiveTab('resources'); setResourcesSubTab('management');
                 },
             } : undefined;
             const crGlobalView = sidebarTopology ? (t('topologyView') || 'Topology')
@@ -23129,7 +23158,7 @@
                                                     />
                                                 ) : (<>
                                                 {/* Sub-Tab Navigation */}
-                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex items-center gap-1 border-b border-proxmox-border pb-2'}>
+                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex pp-wrap-narrow items-center gap-1 border-b border-proxmox-border pb-2'}>
                                                     <button
                                                         onClick={() => setResourcesSubTab('management')}
                                                         className={isCorporate
@@ -23231,14 +23260,15 @@
                                                             } : undefined}
                                                         />
                                                         
-                                                        {/* Create VM/CT Buttons - not on a standby (#625), the export stays */}
-                                                        <div className={`flex gap-3 ${isCorporate ? 'mt-2' : 'mt-4'}`}>
+                                                        {/* Create VM/CT Buttons - not on a standby (#625), the export stays.
+                                                            LW Nov 2026 (#1220) - Modern wraps whole buttons when the row runs out of width */}
+                                                        <div className={`flex gap-3 ${isCorporate ? 'mt-2' : 'mt-4 flex-wrap'}`}>
                                                             {!haReadOnly && (<>
                                                             <button
                                                                 onClick={() => setShowCreateVm('qemu')}
                                                                 className={isCorporate
                                                                     ? 'flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-[13px] text-white hover:bg-blue-700 border border-blue-700'
-                                                                    : 'flex items-center gap-2 px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 transition-colors'
+                                                                    : 'flex items-center gap-2 px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 transition-colors whitespace-nowrap'
                                                                 }
                                                             >
                                                                 <Icons.Plus className={isCorporate ? 'w-3 h-3' : ''} />
@@ -23248,12 +23278,28 @@
                                                                 onClick={() => setShowCreateVm('lxc')}
                                                                 className={isCorporate
                                                                     ? 'flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 text-[13px] text-white hover:bg-purple-700 border border-purple-700'
-                                                                    : 'flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-lg text-white hover:bg-purple-700 transition-colors'
+                                                                    : 'flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-lg text-white hover:bg-purple-700 transition-colors whitespace-nowrap'
                                                                 }
                                                             >
                                                                 <Icons.Plus className={isCorporate ? 'w-3 h-3' : ''} />
                                                                 {t('createContainer')}
                                                             </button>
+                                                            {/* LW Nov 2026 (#1220) - Corporate Redesigned: a guest from a blueprint, picked on Automation > Blueprints & Images */}
+                                                            {isCorpRedesigned && can('vm.create') && (
+                                                                <button type="button" onClick={() => crTaskNav.openBlueprints(selectedCluster.id)}
+                                                                    className="corp-vm-btn corp-vm-btn-ghost" data-cr-bp-nav="resources">
+                                                                    <Icons.Template className="w-3 h-3" />
+                                                                    {t('crBpNavDeploy')}
+                                                                </button>
+                                                            )}
+                                                            {/* LW Nov 2026 (#1220) - Modern: the same way to Automation > Blueprints & Templates */}
+                                                            {!isCorporate && can('vm.create') && (!selectedCluster.cluster_type || selectedCluster.cluster_type === 'proxmox') && (
+                                                                <button type="button" onClick={() => mdBpNav.openBlueprints(selectedCluster.id)} data-bp-nav="resources"
+                                                                    className="flex items-center gap-2 px-4 py-2 bg-proxmox-darker rounded-lg bp-fg hover:bg-proxmox-hover border border-proxmox-border transition-colors whitespace-nowrap">
+                                                                    <Icons.Template className="w-4 h-4" />
+                                                                    {t('crBpNavDeploy')}
+                                                                </button>
+                                                            )}
                                                             </>)}
                                                             {/* LW Oct 2026 - quick CSV export of the current VM list, with the inventory of each guest (ui.js) */}
                                                             <InventoryCsvButton
@@ -23263,7 +23309,7 @@
                                                                 addToast={addToast}
                                                                 className={isCorporate
                                                                     ? 'corp-vm-btn corp-vm-btn-ghost disabled:opacity-50'
-                                                                    : 'flex items-center gap-2 px-4 py-2 bg-proxmox-darker rounded-lg text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors'
+                                                                    : 'flex items-center gap-2 px-4 py-2 bg-proxmox-darker rounded-lg text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors whitespace-nowrap'
                                                                 }
                                                                 label={t('exportCsv') || 'Export CSV'}
                                                             />
@@ -23786,7 +23832,7 @@
                                                 {/* LW: Feb 2026 - sub-tab nav, corporate underline style */}
                                                 <div className={isCorporate
                                                     ? 'corp-tab-strip'
-                                                    : 'flex items-center gap-1 border-b border-proxmox-border pb-2'
+                                                    : 'flex pp-wrap-narrow items-center gap-1 border-b border-proxmox-border pb-2'
                                                 }>
                                                     {[
                                                         { id: 'schedules', label: t('scheduledActions') || 'Schedules', icon: Icons.Clock },
@@ -23796,7 +23842,7 @@
                                                         { id: 'scripts', label: t('customScripts') || 'Scripts', icon: Icons.Terminal },
                                                         { id: 'snapshots', label: t('snapPoliciesTitle') || 'Snapshots', icon: Icons.Camera },
                                                         { id: 'replication', label: t('replicationOverview') || 'Replication', icon: Icons.RefreshCw },
-                                                        { id: 'templates', label: t('templateLibrary') || 'Templates', icon: Icons.Package },
+                                                        { id: 'templates', label: isCorpRedesigned ? t('crBpNavTab') : isCorporate ? (t('templateLibrary') || 'Templates') : t('bpNavTab'), icon: Icons.Package },
                                                         { id: 'apps', label: t('ociTabLabel'), icon: Icons.Container },
                                                         { id: 'hardening', label: t('hardenNode') || 'Harden PVE Node', icon: Icons.Shield },
                                                     ].map(sub => (
@@ -24353,15 +24399,21 @@
                                                     />
                                                 )}
 
-                                                {/* LW Nov 2026 (#1220) - Corporate Redesigned: blueprints above the library, deployed to any cluster */}
+                                                {/* LW Nov 2026 (#1220) - Corporate Redesigned: Blueprints & Images, the blueprints deployed to any cluster,
+                                                    the images of the library and what was deployed or built (cr_images.js) in place of the library cards */}
                                                 {automationSubTab === 'templates' && isCorpRedesigned && selectedCluster?.id && (
                                                     <CrBoundary key={selectedCluster.id} id="blueprints">
-                                                        <CrBlueprints cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
-                                                            canRead={holds('vm.create')} canWrite={can('vm.create')} nav={crTaskNav} />
+                                                        <CrBlueprintsTab cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
+                                                            canRead={holds('vm.create')} canWrite={can('vm.create')} isAdmin={isAdmin} nav={crTaskNav} />
                                                     </CrBoundary>
                                                 )}
+                                                {/* LW Nov 2026 (#1220) - Modern: the blueprints above the library cards (blueprints.js) */}
+                                                {automationSubTab === 'templates' && !isCorporate && selectedCluster?.id && (
+                                                    <Blueprints key={selectedCluster.id} cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
+                                                        canRead={holds('vm.create')} canWrite={can('vm.create')} nav={mdBpNav} />
+                                                )}
                                                 {/* NS May 2026 — Cloud-Init Template Library sub-tab */}
-                                                {automationSubTab === 'templates' && (
+                                                {automationSubTab === 'templates' && !isCorpRedesigned && (
                                                     <TemplatesLibraryTab
                                                         clusterId={selectedCluster?.id}
                                                         clusterName={selectedCluster?.name}
@@ -24720,7 +24772,7 @@
                                                             return (
                                                             <>
                                                                 {/* summary bar */}
-                                                                <div className="flex items-center gap-4 bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                                                                <div className="flex pp-wrap-narrow items-center gap-4 bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                     <div className="flex-1">
                                                                         <div className="flex items-center gap-2 mb-2">
                                                                             <span className="text-sm font-medium">{hardenNode}</span>
@@ -24932,7 +24984,7 @@
                                         {activeTab === 'reports' && (
                                             <div className="space-y-6">
                                                 {/* LW: use the same corp tab-strip as Automation/the other sections (was a one-off blue underline) */}
-                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex gap-2 border-b border-proxmox-border pb-2'}>
+                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex pp-wrap-narrow gap-2 border-b border-proxmox-border pb-2'}>
                                                     {[
                                                         { id: 'summary', label: t('summary') || 'Summary', icon: Icons.BarChart },
                                                         { id: 'cve', label: t('cveScanner') || 'CVE Scanner', icon: Icons.Shield },
@@ -25798,7 +25850,7 @@
                                             <div className="space-y-4">
                                                 <div className={isCorporate
                                                     ? 'corp-tab-strip'
-                                                    : 'flex items-center gap-1 border-b border-proxmox-border pb-2'
+                                                    : 'flex pp-wrap-narrow items-center gap-1 border-b border-proxmox-border pb-2'
                                                 }>
                                                     {complianceSubs.map(sub => (
                                                         <button
@@ -32625,6 +32677,8 @@
                             onClose={() => setShowCommandPalette(false)}
                             authFetch={authFetch}
                             onPickHit={(hit) => { setShowCommandPalette(false); navigateToResult(hit); }}
+                            extraActions={(isCorpRedesigned || !isCorporate) && can('vm.create') && clusters.some(c => !c.cluster_type || c.cluster_type === 'proxmox')
+                                ? [['cr-blueprints', t('crBpNavDeploy'), 'Template']] : undefined}
                             onPickCluster={(c) => { setSelectedCluster(c); setActiveTab('overview'); setShowCommandPalette(false); }}
                             onPickVm={(vm) => {
                                 const c = clusters.find(cl => cl.id === vm._clusterId);
@@ -32646,6 +32700,12 @@
                                 else if (id === 'goto-reports') setActiveTab('reports');
                                 else if (id === 'goto-plugins') setActiveTab('plugins');
                                 else if (id === 'goto-settings') setActiveTab('settings');
+                                else if (id === 'cr-blueprints' && (crTaskNav || mdBpNav)) {
+                                    // the open cluster, else the first Proxmox VE one (Modern too, #1220)
+                                    const pve = (c) => !!c && (!c.cluster_type || c.cluster_type === 'proxmox');
+                                    const c = pve(selectedCluster) ? selectedCluster : clusters.find(pve);
+                                    if (c) (crTaskNav || mdBpNav).openBlueprints(c.id);
+                                }
                             }}
                         />
                     )}
@@ -33750,19 +33810,28 @@
             return <PegaProxDashboard />;
         }
 
-        ReactDOM.render(
-            <LanguageProvider>
-                <AuthProvider>
-                    <App />
-                </AuthProvider>
-            </LanguageProvider>,
-            document.getElementById('root')
-        );
-        
-        // LW: Hide loading screen after React renders
-        const loadingScreen = document.getElementById('loading-screen');
-        if (loadingScreen) {
-            loadingScreen.style.opacity = '0';
-            loadingScreen.style.transition = 'opacity 0.3s ease';
-            setTimeout(() => loadingScreen.remove(), 300);
+        function mountApp() {
+            ReactDOM.render(
+                <LanguageProvider>
+                    <AuthProvider>
+                        <App />
+                    </AuthProvider>
+                </LanguageProvider>,
+                document.getElementById('root')
+            );
+
+            // LW: Hide loading screen after React renders
+            const loadingScreen = document.getElementById('loading-screen');
+            if (loadingScreen) {
+                loadingScreen.style.opacity = '0';
+                loadingScreen.style.transition = 'opacity 0.3s ease';
+                setTimeout(() => loadingScreen.remove(), 300);
+            }
         }
+
+        // LW Nov 2026 - first the language the page opens in (contexts.js), so a German login form
+        // does not start out in English. English waits for nothing, and a file that takes longer
+        // than 4 s comes in after the page started in English.
+        const openingLoad = openingLanguageLoad(4000);
+        if (openingLoad) openingLoad.then(mountApp);
+        else mountApp();

@@ -80,6 +80,8 @@ def main(argv: List[str]) -> int:
     from pegaprox.core import dbcrypto
     if dbcrypto.BACKEND != 'sqlcipher':
         print(f"\n[BLOCKED] sqlcipher3 not importable on this platform.")
+        if dbcrypto.SQLCIPHER_ERROR:
+            print(f"          {dbcrypto.sqlcipher_problem()}")
         print(f"          DB encryption cannot be enabled.  Install:")
         print(f"            pip install 'sqlcipher3-binary>=0.6.0'   (Linux x86_64)")
         print(f"            pip install 'sqlcipher3>=0.6.4'          (aarch64, macOS, Windows)")

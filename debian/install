@@ -7,6 +7,7 @@ web                           usr/lib/pegaprox
 images                        usr/lib/pegaprox
 plugins                       usr/share/pegaprox
 packaging/plugins/sync_plugins.py usr/lib/pegaprox/packaging/plugins
+packaging/debian/master_key.py usr/lib/pegaprox/packaging/debian
 debian/pegaprox-wrapper       usr/bin/pegaprox
 systemd/pegaprox.service      lib/systemd/system/
 packaging/witness/install.sh  usr/lib/pegaprox/packaging/witness

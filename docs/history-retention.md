@@ -76,3 +76,16 @@ The pruning runs when PegaProx starts and then once a day, in small chunks, and 
 to the log when it removed something. As with the metrics, the freed space is reused and the
 file does not shrink on its own. The first start after the update adds an index for it to the
 drift events before PegaProx serves: about a second for a few hundred thousand events, once.
+
+## The database and a power cut
+
+The database runs in WAL mode with `synchronous=NORMAL`: a commit is written to the
+write-ahead log without waiting for the disk, and the log is synced at each checkpoint. That
+saves an fsync on every commit, several milliseconds each that held up the rest of PegaProx.
+A crashed or killed PegaProx loses no commit, and a power cut leaves the database consistent,
+but it can take the commits made since the log was last synced: metrics, alert and task
+state, a sign-out made just before. What something else relies on is synced right away,
+together with everything committed before it: every audit log entry and checkpoint, a key
+rotation, the failover marks of a recovery plan, and in an HA group the configuration version
+an instance records, the steps of a node recovery and the last-run stamps a change of the
+group's time zone moves.

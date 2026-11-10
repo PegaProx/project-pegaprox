@@ -14897,7 +14897,8 @@ echo "AGENT_INSTALLED_OK"
                 disk_options.append("discard=on")
             if vm_config.get('disk_iothread') and disk_type == 'scsi':
                 disk_options.append("iothread=1")
-            if vm_config.get('disk_ssd'):
+            # JB Nov 2026 - VirtIO Block has no ssd option, PVE refuses the whole create with it
+            if vm_config.get('disk_ssd') and disk_type in ('scsi', 'sata', 'ide'):
                 disk_options.append("ssd=1")
             
             if disk_options:
@@ -14944,8 +14945,8 @@ echo "AGENT_INSTALLED_OK"
                 if add_disk.get('iothread', True) and add_type == 'scsi':
                     add_opts.append("iothread=1")
                 
-                # SSD emulation: per-disk
-                if add_disk.get('ssd', False):
+                # SSD emulation: per-disk, on the buses that have it
+                if add_disk.get('ssd', False) and add_type in ('scsi', 'sata', 'ide'):
                     add_opts.append("ssd=1")
                 
                 if add_opts:
@@ -15048,8 +15049,9 @@ echo "AGENT_INSTALLED_OK"
             if vm_config.get('onboot'):
                 data['onboot'] = '1'
             
-            # Start after creation
-            start_after = vm_config.get('start', False)
+            # JB Nov 2026 - the checkbox was read and then dropped; PVE starts it at the end of the create task
+            if vm_config.get('start'):
+                data['start'] = '1'
             
             # MK: HA config (will be applied after VM creation)
             ha_enabled = vm_config.get('ha_enabled', False)
@@ -15245,6 +15247,9 @@ echo "AGENT_INSTALLED_OK"
                 features.append(f"mount={mount}")
             if features:
                 data['features'] = ','.join(features)
+            
+            if ct_config.get('start'):
+                data['start'] = '1'
             
             # MK: HA config (will be applied after CT creation)
             ha_enabled = ct_config.get('ha_enabled', False)

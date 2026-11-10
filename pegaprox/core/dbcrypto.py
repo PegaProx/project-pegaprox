@@ -14,7 +14,7 @@ importable (a pip wheel on Linux x86_64 and aarch64, macOS and Windows), every P
 is automatically AES-256-CBC + HMAC-SHA512 encrypted at rest using the
 master key resolved by `pegaprox.core.keystore`.
 
-When sqlcipher3 is NOT importable (32-bit ARM, the Debian package), we fall back to plain sqlite3.  In that case the existing
+When sqlcipher3 is NOT importable (32-bit ARM, no SQLCipher package), we fall back to plain sqlite3.  In that case the existing
 field-level encryption + the new Multi-Tier key-location protection still
 apply — graceful degradation.
 
@@ -26,12 +26,61 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import threading
 from pathlib import Path
 from typing import Optional
 
 
 _LOG = logging.getLogger(__name__)
+
+
+# MK Nov 2026 (#1226) - a sqlcipher3 built for another machine or another Python installs
+# fine and then does not import (an x86_64 build in a deb that apt takes on arm64), and
+# that fell back to plain SQLite with the INFO line meant for "not installed". Nobody sees
+# that one: logging is not set up yet when this module loads. Installed but not loading
+# is a WARNING now, and the reason stays here for the status output.
+SQLCIPHER_ERROR: Optional[str] = None
+_SQLCIPHER_AT: Optional[str] = None
+
+
+def _load_failure(exc: BaseException) -> Optional[str]:
+    """Why an installed sqlcipher3 did not import, None when there is none to import."""
+    if isinstance(exc, ModuleNotFoundError) and exc.name == 'sqlcipher3':
+        return None
+    return f"{type(exc).__name__}: {' '.join(str(exc).split())}"
+
+
+def _package_dir() -> Optional[str]:
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec('sqlcipher3')
+        if spec is None:
+            return None
+        if spec.origin:
+            return os.path.dirname(spec.origin)
+        # a directory without __init__.py has no origin, only the places it was found
+        found = list(spec.submodule_search_locations or ())
+        return found[0] if found else None
+    except Exception:
+        return None
+
+
+def sqlcipher_problem(encrypted: Optional[str] = None) -> Optional[str]:
+    """What to tell an admin when sqlcipher3 is installed but does not load, else None.
+    With `encrypted`, the path of a database encrypted before, it is about that one."""
+    if not SQLCIPHER_ERROR:
+        return None
+    at = f' at {_SQLCIPHER_AT}' if _SQLCIPHER_AT else ''
+    # the same CPU with another Python is this case too, so it names both
+    fits = 'a package built for this machine and this Python version'
+    said = (f"The SQLCipher package (sqlcipher3{at}) is installed but does not load on this "
+            f"machine ({platform.machine() or 'unknown machine'}, Python "
+            f"{platform.python_version()}): {SQLCIPHER_ERROR}.")
+    if encrypted:
+        return f"{said} {encrypted} is encrypted and does not open until {fits} is installed."
+    return (f"{said} The database stays plain SQLite until {fits} is installed, and one "
+            f"encrypted before does not open until then.")
 
 
 # ─── Backend detection ──────────────────────────────────────────────────────
@@ -41,15 +90,25 @@ _LOG = logging.getLogger(__name__)
 
 try:
     import sqlcipher3 as _sqlite_module  # type: ignore
+    # MK Nov 2026 - an empty sqlcipher3/ directory (left when one of the two packages that
+    # share it goes) imports as a namespace package with nothing in it
+    if not hasattr(_sqlite_module, 'connect'):
+        raise ImportError('the sqlcipher3 found has no driver in it')
     BACKEND = 'sqlcipher'
 except Exception as _e:
     import sqlite3 as _sqlite_module  # type: ignore
     BACKEND = 'sqlite-plain'
-    _LOG.info("[DBCRYPTO] sqlcipher3 not available (%s) - DB will be plain "
-              "SQLite. Field-level encryption (AES-256-GCM) still applies. To "
-              "enable full-DB encryption, install the SQLCipher package of "
-              "requirements.txt (sqlcipher3-binary on Linux x86_64, sqlcipher3 "
-              "on aarch64, macOS and Windows).", _e)
+    SQLCIPHER_ERROR = _load_failure(_e)
+    if SQLCIPHER_ERROR is None:
+        _LOG.info("[DBCRYPTO] sqlcipher3 not available (%s) - DB will be plain "
+                  "SQLite. Field-level encryption (AES-256-GCM) still applies. To "
+                  "enable full-DB encryption, install the SQLCipher package of "
+                  "requirements.txt (sqlcipher3-binary on Linux x86_64, sqlcipher3 "
+                  "on aarch64, macOS and Windows).", _e)
+    else:
+        _SQLCIPHER_AT = _package_dir()
+        _LOG.warning("[DBCRYPTO] %s Field-level encryption (AES-256-GCM) still applies.",
+                     sqlcipher_problem())
 
 
 # Re-export Row, IntegrityError etc. so callers can `from .dbcrypto import Row`
@@ -163,8 +222,8 @@ def backend_status() -> dict:
     present = [s for s in files.values() if s not in ('missing', 'empty')]
     encrypted = BACKEND == 'sqlcipher' and bool(present) and all(s == 'encrypted' for s in present)
     if BACKEND != 'sqlcipher':
-        note = ("Full DB encryption unavailable on this platform. "
-                "Sensitive fields are still encrypted individually with AES-256-GCM.")
+        note = ((sqlcipher_problem() or "Full DB encryption unavailable on this platform.")
+                + " Sensitive fields are still encrypted individually with AES-256-GCM.")
     elif not present:
         note = "SQLCipher is available. No database found in this config directory."
     elif encrypted:
@@ -178,6 +237,7 @@ def backend_status() -> dict:
         'cipher': 'AES-256-CBC + HMAC-SHA512 (SQLCipher 4)' if BACKEND == 'sqlcipher' else None,
         'files': files,
         'note': note,
+        'sqlcipher_error': SQLCIPHER_ERROR,
     }
 
 
@@ -194,13 +254,80 @@ def connect(db_path: str, *, timeout: float = 30.0, **kwargs):
 
     When the plain SQLite backend is active, the key step is a no-op.
 
+    A database in WAL mode gets synchronous=NORMAL on the connection (wal_normal).
+
     All standard sqlite3 kwargs (check_same_thread, isolation_level, etc.)
     are forwarded.
     """
     conn = _sqlite_module.connect(db_path, timeout=timeout, **kwargs)
     if BACKEND == 'sqlcipher':
         _apply_sqlcipher_pragmas(conn, db_path)
+    wal_normal(conn)
     return conn
+
+
+# MK Nov 2026 - SQLite's default synchronous=FULL syncs the WAL at every commit, 8 to 9 ms
+# against 0.12 ms here, and a commit on the hub holds every greenlet for that long. In WAL
+# mode NORMAL keeps the database consistent through a power cut and syncs at each
+# checkpoint; what a power cut (not a crashed process) can take is the last commits before
+# it. The setting is per connection, so every connection gets it here. Not in rollback-
+# journal mode, where NORMAL is not safe against a power cut. A commit that something
+# outside the database relies on is followed by sync_wal.
+def wal_normal(conn) -> bool:
+    """synchronous=NORMAL on `conn` when its database is in WAL mode. True when it set it;
+    a connection it cannot ask keeps what SQLite gave it (FULL)."""
+    try:
+        mode = conn.execute('PRAGMA journal_mode').fetchone()[0]
+        if str(mode).lower() != 'wal':
+            return False
+        conn.execute('PRAGMA synchronous = NORMAL')
+        return True
+    except Exception:
+        return False
+
+
+def sync_wal(db_path) -> bool:
+    """fsync the WAL of `db_path`: for a commit made under NORMAL, what FULL does in the
+    commit. Called after one that something outside the database relies on (a file
+    written next, a peer or a SIEM target told, a key file already on disk), before that
+    happens. The connections to a file share one WAL, so the commits of all of them up to
+    now land. Without a WAL file nothing waits (the last connection checkpointed it into
+    the database, with a sync), and it returns False. Raises OSError when the sync fails:
+    what was to follow must not happen then."""
+    try:
+        # SQLite keeps the WAL beside the file a symlinked database points at
+        fd = os.open(os.path.realpath(db_path) + '-wal', os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return True
+
+
+def sync_file(path) -> None:
+    """fsync the file `path` and the directory it is in, for a file just written that the
+    database depends on (a key, the plain copy before the encryption): whole, and there by
+    its name, after a power cut. Raises OSError when the file cannot be synced; a directory
+    that cannot be is logged, some filesystems never sync one."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    parent = os.path.dirname(os.path.abspath(path))
+    try:
+        dfd = os.open(parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    except OSError as e:
+        _LOG.warning("[DBCRYPTO] could not open %s to sync it: %s", parent, e)
+        return
+    try:
+        os.fsync(dfd)
+    except OSError as e:
+        _LOG.warning("[DBCRYPTO] could not sync the directory %s: %s", parent, e)
+    finally:
+        os.close(dfd)
 
 
 def _apply_sqlcipher_pragmas(conn, db_path: str) -> None:
@@ -521,11 +648,12 @@ def run_heavy_write(statements=None, build=None):
         return _work()
 
 
-def run_off_hub(work, db_path, commit=False):
+def run_off_hub(work, db_path, commit=False, durable=False):
     """work(conn) on a fresh connection to db_path inside gevent's threadpool, inline
     without a hub. MK Oct 2026 - for jobs that read and write in one transaction (the
     audit prune and the chain walk); commit=True commits what work did, an exception
-    rolls it back."""
+    rolls it back. durable=True syncs the commit to disk before it returns (sync_wal),
+    in the worker as well."""
     def _run():
         conn = connect(db_path, timeout=30, check_same_thread=False)
         try:
@@ -533,6 +661,8 @@ def run_off_hub(work, db_path, commit=False):
             out = work(conn)
             if commit:
                 conn.commit()
+                if durable:
+                    sync_wal(db_path)
             return out
         except Exception:
             try:
@@ -619,13 +749,25 @@ def ensure_db_encrypted(db_path: str) -> dict:
 
     Returns a dict with: action, state_before, state_after, [backup_path,
     duration_s, rows_copied].  Does NOT raise on routine cases; raises only
-    for unrecoverable situations (corrupt DB, unknown-key encrypted DB).
+    for unrecoverable situations (corrupt DB, unknown-key encrypted DB, an
+    encrypted DB without SQLCipher).
 
     Opt-out: set PEGAPROX_DISABLE_AUTO_ENCRYPT=1 to keep a plain DB.
     """
     db_path = os.path.abspath(db_path)
     if db_path in _AUTO_MIG_DONE:
         return {'action': 'already-checked'}
+    # MK Nov 2026 (#1226) - a database encrypted before (a config directory moved to arm64,
+    # a pip install swapped for the deb) does not open on plain SQLite, opt-out or not.
+    # Saying "stays plain" and failing at the first query with "file is not a database"
+    # helps nobody, so the start refuses here with the reason.
+    if BACKEND != 'sqlcipher' and file_state(db_path) == 'encrypted':
+        raise RuntimeError(
+            "[DBCRYPTO] " + (sqlcipher_problem(encrypted=db_path)
+                             or f"{db_path} is encrypted and sqlcipher3 is not installed, so it does "
+                                "not open. Install the SQLCipher package of requirements.txt "
+                                "(python3-sqlcipher3 for the Debian package).")
+            + " Refusing to start.")
     if os.environ.get('PEGAPROX_DISABLE_AUTO_ENCRYPT', '').lower() in ('1', 'true', 'yes'):
         _LOG.info("[DBCRYPTO] PEGAPROX_DISABLE_AUTO_ENCRYPT set — skipping auto-encrypt check")
         _AUTO_MIG_DONE.add(db_path)
@@ -633,7 +775,8 @@ def ensure_db_encrypted(db_path: str) -> dict:
     if BACKEND != 'sqlcipher':
         # No sqlcipher3 → can't encrypt anyway. Field-level encryption still applies.
         _AUTO_MIG_DONE.add(db_path)
-        return {'action': 'no-backend', 'reason': 'sqlcipher3 not installed'}
+        return {'action': 'no-backend',
+                'reason': 'sqlcipher3 does not load' if SQLCIPHER_ERROR else 'sqlcipher3 not installed'}
 
     with _AUTO_MIG_LOCK:
         if db_path in _AUTO_MIG_DONE:
@@ -719,6 +862,9 @@ def _run_inline_migration(db_path: str) -> dict:
         # 1. backup
         shutil.copy2(db_path, backup_path)
         os.chmod(backup_path, 0o600)
+        # MK Nov 2026 - on disk before the swap takes the plain file away: it is the one
+        # copy that opens without the key
+        sync_file(backup_path)
         _LOG.info("[DBCRYPTO] backup → %s", backup_path)
 
         # 2. encrypt

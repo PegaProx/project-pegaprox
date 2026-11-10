@@ -93,6 +93,10 @@ def folder_copy_refusal(transfer_mode, why):
 
 _BASIC_AUTH_HEADER = re.compile(r'(authorization:[ \t]*basic[ \t]+)[^\s]+', re.I)
 
+# the cache modes of a PVE drive; native AIO opens the disk with O_DIRECT, which only these two keep
+DISK_CACHE_MODES = ('none', 'writethrough', 'writeback', 'directsync', 'unsafe')
+DIRECT_CACHE_MODES = ('none', 'directsync')
+
 
 class V2PMigrationTask:
     """Tracks VMware -> Proxmox migration through all phases.
@@ -184,10 +188,18 @@ class V2PMigrationTask:
         self.memory = self.config.get('memory', 0)
         self.scsihw_override = self.config.get('scsihw', '')
         self.disk_format = self.config.get('disk_format', 'raw')
-        self.disk_cache = self.config.get('disk_cache', 'none')
-        self.disk_iothread = self.config.get('disk_iothread', True)
-        self.disk_discard = self.config.get('disk_discard', 'on')
-        self.disk_ssd = self.config.get('disk_ssd', False)
+        # JB Nov 2026 (#1270) - both end up in the root `qm set` / conf line of the disk:
+        # literal PVE tokens only, anything else counts as unset
+        _cache = str(self.config.get('disk_cache', '') or '').strip().lower()
+        self.disk_cache = _cache if _cache in DISK_CACHE_MODES else ''
+        _iot = self.config.get('disk_iothread', True)
+        self.disk_iothread = _iot if isinstance(_iot, bool) else str(_iot).strip().lower() in ('1', 'true', 'on')
+        # the same for discard and SSD emulation (#1246)
+        _discard = self.config.get('disk_discard', 'on')
+        _discard = _discard.strip().lower() if isinstance(_discard, str) else ''
+        self.disk_discard = _discard if _discard in ('on', 'ignore') else ''
+        _ssd = self.config.get('disk_ssd', False)
+        self.disk_ssd = _ssd if isinstance(_ssd, bool) else str(_ssd).strip().lower() in ('1', 'true', 'on')
         # #598 — optional per-VM QEMU aio backend for the FINAL target disk(s).
         # Whitelist STRICTLY to the three literal qemu tokens; the value is
         # interpolated into a root `qm set` / conf line, so never emit raw input
@@ -236,10 +248,27 @@ class V2PMigrationTask:
 
     def _disk_attach_opts(self):
         # #598 — extra drive options appended to a FINAL target-disk attach only.
-        # aio_mode is whitelisted in __init__ to one of three literal tokens, so
-        # the returned suffix can never carry shell/config metacharacters. Returns
-        # '' by default (no behaviour change; PVE default aio=io_uring).
-        return f',aio={self.aio_mode}' if getattr(self, 'aio_mode', '') else ''
+        # aio_mode, disk_cache and disk_discard are whitelisted in __init__ to literal
+        # tokens and disk_iothread and disk_ssd are bools, so the returned suffix can
+        # never carry shell/config metacharacters. Returns '' when none of them applies
+        # (PVE default: no IO thread, cache=none, discard=ignore, no SSD, aio=io_uring).
+        opts = ''
+        # JB Nov 2026 (#1270) - PVE runs a disk in its own IO thread only on VirtIO Block or on
+        # SCSI behind virtio-scsi-single; elsewhere the flag is ignored or refused
+        bus, hw = getattr(self, '_attach_bus', ''), getattr(self, '_attach_scsihw', '')
+        if getattr(self, 'disk_iothread', False) and (bus == 'virtio' or (bus == 'scsi' and hw == 'virtio-scsi-single')):
+            opts += ',iothread=1'
+        # none is what PVE does without the option
+        if getattr(self, 'disk_cache', '') in DISK_CACHE_MODES and self.disk_cache != 'none':
+            opts += f',cache={self.disk_cache}'
+        # ignore is PVE's default, and VirtIO Block has no ssd option (#1246)
+        if getattr(self, 'disk_discard', '') == 'on':
+            opts += ',discard=on'
+        if getattr(self, 'disk_ssd', False) is True and bus in ('scsi', 'sata', 'ide'):
+            opts += ',ssd=1'
+        if getattr(self, 'aio_mode', ''):
+            opts += f',aio={self.aio_mode}'
+        return opts
 
     def _redact(self, text):
         # NS Oct 2026 (#1098) - tool output (qemu-img, ssh) can echo the ESXi password,
@@ -968,6 +997,8 @@ def _run_v2p_migration(task):
         # boots fine via the generic --{disk_bus} path below.
         detected_bus = hw.get('disk_bus', 'scsi')
         disk_bus = task.disk_bus if task.disk_bus in ('scsi', 'sata', 'ide', 'virtio') else detected_bus
+        # every attach of a final disk reads these for its drive options (#1270)
+        task._attach_bus, task._attach_scsihw = disk_bus, scsihw
         
         # Network: match VMware (vmxnet3, E1000, E1000e)
         detected_nic = hw.get('nic_type_pve', 'e1000')
@@ -1009,7 +1040,6 @@ def _run_v2p_migration(task):
             'vga': vga_type,
         }
         # optional fields — only set if user configured them
-        disk_cache = getattr(task, 'disk_cache', '') or ''
         if getattr(task, 'numa', False):
             pve_config['numa'] = 1
         if getattr(task, 'agent', True):
@@ -2481,7 +2511,9 @@ def _run_v2p_migration(task):
 # \EFI\Microsoft\Boot\bootmgfw.efi. Result: PXE/HTTP-boot loop and no usable disk
 # entry in the Boot Manager. Workaround: copy bootmgfw.efi to the removable-media
 # default path so OVMF auto-discovers it.
-def _register_uefi_fallback_loader(pve_mgr, task):
+def _register_uefi_fallback_loader(pve_mgr, task, guest_running=False):
+    # JB Nov 2026 (#1268) - guest_running: the guest has this disk open, so only look. A vfat mounted on both
+    # sides ends up damaged, for the same reason the live pivot leaves the VirtIO injection out
     try:
         vol_id = task.boot_volume()
         if not vol_id:
@@ -2496,6 +2528,10 @@ def _register_uefi_fallback_loader(pve_mgr, task):
         # #722 follow-up — a non-krbd RBD storage resolves to a librbd URI, not a block device, so the
         # loopback below would bail with 'volume not a block device'. Map it to /dev/rbdN (tracked so
         # the migration teardown unmaps it) and use that.
+        if vol_path.startswith('rbd:') and guest_running:
+            task.log("EFI fallback: not checked while the VM runs on this RBD volume. "
+                     "A Windows guest without EFI/BOOT/BOOTX64.EFI may need a boot entry after a restart")
+            return
         if vol_path.startswith('rbd:'):
             _mapped_efi = _map_rbd_uri_to_device(pve_mgr, task.target_node, vol_id, vol_path)
             if not _mapped_efi:
@@ -2503,7 +2539,7 @@ def _register_uefi_fallback_loader(pve_mgr, task):
                 return
             _rbd_map_sink(task).append(_mapped_efi)
             vol_path = _mapped_efi
-        task.log(f"EFI fallback: registering BOOTX64.EFI on {vol_path}")
+        task.log(f"EFI fallback: {'checking' if guest_running else 'registering'} BOOTX64.EFI on {vol_path}")
         # Combined script — losetup with 512b sector override, partprobe, identify ESP,
         # mount RW, copy loader, cleanup. Idempotent: if BOOTX64.EFI already exists with
         # same content, no-op. Read-only check first; write only if needed.
@@ -2522,7 +2558,7 @@ def _register_uefi_fallback_loader(pve_mgr, task):
             "[ -n \"$LOOP\" ] && losetup -d \"$LOOP\" 2>/dev/null||true; "
             "rm -rf \"$TMPDIR\"; }\n"
             "trap cleanup EXIT\n"
-            "LOOP=$(losetup -b 512 -fP --show \"$VOL\" 2>&1)\n"
+            f"LOOP=$(losetup {'-r ' if guest_running else ''}-b 512 -fP --show \"$VOL\" 2>&1)\n"
             "[ -b \"$LOOP\" ] || { echo \"losetup failed: $LOOP\"; exit 1; }\n"
             "# Wait briefly for partition nodes to materialize\n"
             "for i in 1 2 3 4 5; do ls -1 ${LOOP}p* 2>/dev/null | head -1 >/dev/null && break; sleep 1; done\n"
@@ -2534,15 +2570,21 @@ def _register_uefi_fallback_loader(pve_mgr, task):
             "if [ \"$PT\" = c12a7328-f81f-11d2-ba4b-00a0c93ec93b ]; then ESP=$p; break; fi; "
             "[ -z \"$ESP\" ] && ESP=$p; done\n"
             "[ -n \"$ESP\" ] || { echo 'no ESP partition found'; exit 1; }\n"
-            "mount -t vfat -o rw \"$ESP\" \"$MNT\" || { echo 'mount failed'; exit 1; }\n"
+            f"mount -t vfat -o {'ro' if guest_running else 'rw'} \"$ESP\" \"$MNT\" || {{ echo 'mount failed'; exit 1; }}\n"
             "MGR=\"$MNT/EFI/Microsoft/Boot/bootmgfw.efi\"\n"
             "[ -f \"$MGR\" ] || { echo 'bootmgfw.efi not present (not a Windows ESP?)'; exit 0; }\n"
             "DST=\"$MNT/EFI/BOOT/BOOTX64.EFI\"\n"
             "if [ -f \"$DST\" ] && cmp -s \"$MGR\" \"$DST\"; then "
             "echo 'fallback loader already in place'; exit 0; fi\n"
-            "mkdir -p \"$MNT/EFI/BOOT\"\n"
-            "cp -f \"$MGR\" \"$DST\" && sync && echo 'fallback loader installed'\n"
         )
+        if guest_running:
+            # NS Nov 2026 (#1268) - a loader that differs from bootmgfw.efi is normal after Windows updates
+            # and boots, only a missing one is worth a warning
+            script += ("if [ -f \"$DST\" ]; then echo 'a different fallback loader is there, left as it is "
+                       "while the VM runs'; else echo 'no BOOTX64.EFI, nothing written while the VM runs'; fi\n")
+        else:
+            script += ("mkdir -p \"$MNT/EFI/BOOT\"\n"
+                       "cp -f \"$MGR\" \"$DST\" && sync && echo 'fallback loader installed'\n")
         sf = _write_node_script(pve_mgr, task.target_node, script,
                                 f"efi-fallback-{task.proxmox_vmid}")
         if not sf:
@@ -2553,6 +2595,11 @@ def _register_uefi_fallback_loader(pve_mgr, task):
         out_str = str(out or '').strip()
         if rc == 0 and ('installed' in out_str or 'already in place' in out_str):
             task.log(f"EFI fallback loader: {out_str.splitlines()[-1] if out_str else 'OK'}")
+        elif rc == 0 and guest_running and 'no BOOTX64.EFI' in out_str:
+            _result_warning(task, "EFI fallback loader: the VM runs on this disk, so BOOTX64.EFI was not written to "
+                                  "its EFI partition. If this Windows guest does not boot after a full stop and "
+                                  "start, copy EFI\\Microsoft\\Boot\\bootmgfw.efi to EFI\\Boot\\bootx64.efi there "
+                                  "(mountvol S: /S inside the guest, create the folder if it is missing).")
         else:
             task.log(f"EFI fallback loader skipped (non-fatal): rc={rc} {out_str[-300:]}")
     except Exception as e:
@@ -3193,10 +3240,12 @@ def _inject_virtio_drivers(pve_mgr, task):
     # Surface the interesting lines — keep the log compact.
     # Most markers are once-per-run; COPIED/SKIP/COPY_FAILED are per-driver
     # so we log all of them (otherwise we'd hide which drivers actually staged).
-    _multi = ('COPIED ', 'SKIP ', 'COPY_FAILED ')
-    for marker in ['WIN_PART=', 'WDIR=', 'VER_NAME=', 'VER_BUILD=', 'SUBDIR_PRIMARY=', 'SUBDIR_FALLBACKS=', 'SUBDIR=', 'COPIED ', 'SKIP ', 'COPY_FAILED ', 'MSI_STAGED ', 'MSI_MISSING', 'SVC_REGISTERED', 'SVC_FAILED', 'INJECTION_OK']:
+    # JB Nov 2026 (#1247) - MSI_STAGED comes once per package, and every marker starts
+    # its line: as a substring, MSI_MISSING also took the guest agent's line.
+    _multi = ('COPIED ', 'SKIP ', 'COPY_FAILED ', 'MSI_STAGED ')
+    for marker in ['WIN_PART=', 'WDIR=', 'VER_NAME=', 'VER_BUILD=', 'SUBDIR_PRIMARY=', 'SUBDIR_FALLBACKS=', 'SUBDIR=', 'COPIED ', 'SKIP ', 'COPY_FAILED ', 'MSI_STAGED ', 'MSI_MISSING', 'GUEST_AGENT_MSI_MISSING', 'SVC_REGISTERED', 'SVC_FAILED', 'INJECTION_OK']:
         for line in out_str.splitlines():
-            if marker in line:
+            if line.strip().startswith(marker):
                 task.log(f"[VirtIO] {line.strip()}")
                 if marker not in _multi:
                     break
@@ -3993,7 +4042,7 @@ def _drive_mirror_to_local(pve_mgr, task, node, vmid, drive_id, target_path, dis
 
 
 def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
-    """poll drive-mirror jobs until ready, then pivot. for FUSE/SSHFS uses pause-pivot-resume (~1-2s downtime)"""
+    """poll drive-mirror jobs until ready, then pivot. for FUSE/SSHFS uses pause-pivot-resume (the guest pauses until QEMU takes the pivot)"""
     import time, re
     
     drive_ids = {m[0] for m in mirrors}
@@ -4002,11 +4051,16 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
     ready_drives = set()
     at_100_since = {}  # drive_id -> timestamp when first reached ~100%
     PAUSE_PIVOT_AFTER = 60  # seconds at 100% before trying pause-pivot
+    PIVOT_WAIT = 10  # seconds the paused guest waits for QEMU to take the pivot
     
     for poll in range(timeout // 2):
         time.sleep(2)
         ok, jobs = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
         if not ok:
+            continue
+        # NS Nov 2026 - qm monitor prints its own errors as text and exits 0. Only the reply of
+        # info block-jobs itself may say that a job is gone, an error text is no news.
+        if 'No active jobs' not in jobs and 'device ' not in jobs:
             continue
         
         # Check each mirror
@@ -4020,15 +4074,16 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
                 if elapsed < 10:
                     all_near_100 = False
                     continue
+                # JB Nov 2026 - nothing completed this job yet, so it ended by a cancel or an
+                # error and its copy is not the disk. Counting it ready let a one-disk mirror
+                # report the pivot as done and the config point at the unfinished copy.
                 rc_log, out_log, _ = _pve_node_exec(pve_mgr, node,
                     f"tail -5 /var/log/pve/qemu-server/{vmid}.log 2>/dev/null | "
                     f"grep -i 'mirror\\|error\\|block\\|job' | tail -2", timeout=5)
                 qlog = str(out_log or '').strip()
-                if qlog and 'error' in qlog.lower():
-                    task.log(f"  {drive_id}: mirror job failed - {qlog[:150]}")
-                    return False
-                ready_drives.add(drive_id)
-                continue
+                task.log(f"  {drive_id}: the mirror job ended without a pivot"
+                         + (f" - {qlog[:150]}" if qlog else ''))
+                return False
             
             # Check if this specific drive is ready
             for job_line in jobs.split('\n'):
@@ -4058,61 +4113,70 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
             oldest_100 = min(at_100_since.values()) if at_100_since else time.time()
             if time.time() - oldest_100 > PAUSE_PIVOT_AFTER:
                 task.log(f"  All disks at 100% but not 'ready' - using pause-pivot-resume...")
-                task.log(f"  Pausing VM for atomic pivot (~1-2s)...")
-                
+                # a mirror job ends only by complete, cancel or an error, and nothing completed
+                # one yet: a disk whose job is gone has no copy to pivot to (#1250)
+                gone = [d for d, _, _ in mirrors if not re.search(rf'device {re.escape(d)}:', jobs)]
+                if gone:
+                    task.log(f"  {', '.join(gone)}: the mirror job ended without a pivot - not pausing")
+                    return False
+                task.log(f"  Pausing VM for atomic pivot...")
+
                 # Step 1: Pause VM (HMP "stop" = freeze CPUs, NOT qm stop!)
                 _qm_monitor_cmd(pve_mgr, node, vmid, "stop", timeout=10)
-                time.sleep(1)
-                
-                # Step 2: Wait for mirrors to catch up (should be instant, no new I/O)
-                ready_after_pause = set(ready_drives)
-                for _wait in range(10):
-                    time.sleep(1)
-                    ok2, jobs2 = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
-                    if ok2:
-                        for drive_id, _, _ in mirrors:
-                            if drive_id in ready_after_pause:
-                                continue
-                            if drive_id not in jobs2:
-                                ready_after_pause.add(drive_id)
-                            else:
-                                for jl in jobs2.split('\n'):
-                                    if drive_id in jl and 'ready' in jl.lower():
-                                        ready_after_pause.add(drive_id)
-                                        break
-                    if ready_after_pause >= drive_ids:
-                        break
-                
-                # Step 3: Pivot all drives
+                paused_at = time.monotonic()
+
+                # Step 2+3: pivot every drive.
+                # JB Nov 2026 (#1250) - HMP `info block-jobs` never says whether a job is ready, so
+                # waiting for that word kept the guest stopped for the whole 10 s window, and the
+                # refusal QEMU gives is not worded "not ready". QEMU refuses complete until the job
+                # is ready, so ask it again until it takes it; it answers nothing when it does.
+                pending = [d for d, _, _ in mirrors]
+                taken = []
                 pivot_ok = True
-                for drive_id, disk_total, di in mirrors:
-                    ok_p, out_p = _qm_block_job(pve_mgr, node, vmid,
-                        'complete', drive_id, timeout=30)
-                    if not ok_p and 'not ready' in str(out_p).lower():
-                        # Force cancel + resume if pivot fails
-                        task.log(f"  {drive_id}: pivot failed (not ready) - cancelling")
-                        _qm_block_job(pve_mgr, node, vmid, 'cancel', drive_id)
-                        pivot_ok = False
-                    elif not ok_p:
-                        task.log(f"  {drive_id}: pivot issue: {str(out_p)[:100]}")
+                last_out = {}
+                while pending:
+                    for drive_id in list(pending):
+                        ok_p, out_p = _qm_block_job(pve_mgr, node, vmid,
+                            'complete', drive_id, timeout=30)
+                        low = str(out_p or '').lower()
+                        if ok_p and 'error' not in low and 'unknown command' not in low:
+                            pending.remove(drive_id)
+                            taken.append(drive_id)
+                        elif ok_p and 'not found' in low:
+                            # a mirror job ends only by complete, cancel or an error: this one
+                            # is gone without its pivot, so its copy is not the disk
+                            pending.remove(drive_id)
+                            task.log(f"  {drive_id}: the mirror job ended without a pivot")
+                            pivot_ok = False
+                        else:
+                            last_out[drive_id] = str(out_p or '')
+                    if not pending or not pivot_ok or time.monotonic() - paused_at >= PIVOT_WAIT:
+                        break
+                    time.sleep(0.5)
+                for drive_id in pending:
+                    task.log(f"  {drive_id}: QEMU did not take the pivot: {last_out.get(drive_id, '')[:150]}")
+                    pivot_ok = False
                 
-                # Step 4: Wait for pivots to complete
-                time.sleep(2)
-                ok3, jobs3 = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
-                remaining = [d for d in drive_ids if d in str(jobs3 or '')]
-                if remaining:
-                    time.sleep(3)
+                # Step 4: Wait for the taken pivots to complete, also when another disk failed:
+                # the caller cancels every job after a failure, a pivot in flight included
+                remaining = list(taken)
+                while remaining:
                     ok3, jobs3 = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
-                    remaining = [d for d in drive_ids if d in str(jobs3 or '')]
+                    if ok3:
+                        remaining = [d for d in taken if re.search(rf'device {re.escape(d)}:', jobs3 or '')]
+                    if not remaining or time.monotonic() - paused_at >= PIVOT_WAIT + 5:
+                        break
+                    time.sleep(0.5)
                 
                 # Step 5: Resume VM
                 _qm_monitor_cmd(pve_mgr, node, vmid, "cont", timeout=10)
+                paused_for = time.monotonic() - paused_at
                 
                 if not remaining and pivot_ok:
                     elapsed = time.time() - start_t
                     total_gb = sum(m[1] for m in mirrors) / (1024**3)
                     task.log(f"  Pause-pivot-resume complete! "
-                             f"({total_gb:.1f} GB in {elapsed:.0f}s) - VM resumed on local storage ✓")
+                             f"({total_gb:.1f} GB in {elapsed:.0f}s, guest paused {paused_for:.1f}s) - VM resumed on local storage ✓")
                     for drive_id, disk_total, di in mirrors:
                         task.update_progress(f'disk{di}', disk_total, disk_total)
                     return True
@@ -4919,6 +4983,14 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
     return key_path
 
 
+def _qemu_open_reason(output):
+    # JB Nov 2026 (#1269) - qemu-img repeats the whole json spec before it says why, which used up any cut-off.
+    # NS Nov 2026 - callers hand it redacted output: cut first and a password at the cut would keep a piece of itself
+    _, sep, reason = output.rpartition("}': ")
+    reason = reason.strip()
+    return reason[:300] if sep and reason else output[-300:]
+
+
 def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
     """Remove temporary SSH key from Proxmox and ESXi."""
     if not key_path:
@@ -5394,6 +5466,32 @@ fi
     return True
 
 
+def _resolved_bios(task):
+    # JB Nov 2026 (#1268) - 'auto' is a value of its own here: it means take what was detected
+    override = getattr(task, 'bios_override', None)
+    if override and override != 'auto':
+        return override
+    return getattr(task, '_detected_bios', 'seabios')
+
+
+def _efidisk_pre_keys(task):
+    # JB Nov 2026 - what the config step worked out from Secure Boot and the guest counts here too: the live
+    # pivot only looked at Windows, so Secure Boot ticked on a Linux guest came up without the keys
+    decided = (getattr(task, '_pending_efidisk', None) or {}).get('pre_enrolled_keys')
+    if decided:
+        return decided
+    is_win = str(getattr(task, 'ostype_resolved', '') or '').lower().startswith('win') \
+        or str(getattr(task, 'ostype', '') or '').lower().startswith('win')
+    return '1' if is_win else '0'
+
+
+def _log_efidisk_result(task, rc, out, pre_keys):
+    if rc == 0:
+        task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
+    else:
+        _result_warning(task, f"EFI disk could not be allocated, boot entries will not persist: {str(out or '').strip()[-200:]}")
+
+
 def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, esxi_pass,
                               datastore, vm_dir, descriptor_files, disk_bus, mnt_path,
                               v2p_tmpdir='/var/tmp'):
@@ -5426,7 +5524,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     # NS Apr 2026 — resolve bios at function entry. The live-pivot post-mirror block
     # references `bios` (line ~4055) which previously was only defined later in the
     # post-stop-and-restart fallback path. Live pivot returns before that.
-    bios = getattr(task, 'bios_override', None) or getattr(task, '_detected_bios', 'seabios')
+    bios = _resolved_bios(task)
 
     # #562 — sshfs-boot requires the source already stopped (see docstring), so a
     # confirmation hold here would only add downtime: log-and-commit, never block.
@@ -5602,7 +5700,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         qemu_ssh_works = True
         task.log("QEMU SSH driver: connection OK")
     else:
-        task.log(f"QEMU SSH driver test failed: {qtest_out[:200]}")
+        task.log(f"QEMU SSH driver test failed: {_qemu_open_reason(task._redact(qtest_out))}")
         # Try alternative: qemu-img with simpler SSH URL syntax
         import urllib.parse
         qt2_url = f"ssh://{esxi_user}@{esxi_host}{urllib.parse.quote(esxi_test_path, safe='/')}"
@@ -5707,7 +5805,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             
             task.log("HTTPS boot config written")
         else:
-            task.log(f"QEMU HTTPS test failed: {ht_out[:200]}")
+            task.log(f"QEMU HTTPS test failed: {_qemu_open_reason(task._redact(ht_out))}")
     
     # ----------------------------------------------------------------
     # Method 3: SSHFS-backed boot (OpenSSH handles ESXi algorithms)
@@ -6830,19 +6928,17 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             rc_ef, _, _ = _pve_node_exec(pve_mgr, task.target_node,
                 f"grep -q '^efidisk0:' {conf_path}", timeout=5)
             if rc_ef != 0:
-                _is_win = str(getattr(task, 'ostype_resolved', '') or '').lower().startswith('win') \
-                          or str(getattr(task, 'ostype', '') or '').lower().startswith('win')
-                pre_keys = '1' if _is_win else '0'
-                _pve_node_exec(pve_mgr, task.target_node,
+                pre_keys = _efidisk_pre_keys(task)
+                rc_alloc, out_alloc, _ = _pve_node_exec(pve_mgr, task.target_node,
                     f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                     timeout=15)
-                task.log(f"  EFI disk allocated (pre-enrolled-keys={pre_keys})")
+                _log_efidisk_result(task, rc_alloc, out_alloc, pre_keys)
             try:
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
             except Exception as _se:
                 task.log(f"  sector-size emulation skipped: {_se}")
             try:
-                _register_uefi_fallback_loader(pve_mgr, task)
+                _register_uefi_fallback_loader(pve_mgr, task, guest_running=True)
             except Exception as _fe:
                 task.log(f"  EFI fallback loader skipped: {_fe}")
             # VirtIO injection intentionally NOT called here — VM is live (sshfs_boot
@@ -6994,7 +7090,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 unused_vol = um.group(2)
                 di = unused_idx  # map unused0 → disk0, etc.
                 rc_rescue, out_rescue, _ = _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {unused_vol} 2>&1", timeout=15)
+                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {unused_vol}{task._disk_attach_opts()} 2>&1", timeout=15)
                 if rc_rescue == 0:
                     task.log(f"  Rescued unused{unused_idx} → {disk_bus}{di}: {unused_vol} ✓")
                     attached_count += 1
@@ -7043,10 +7139,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 efi_line = ''
 
             if not efi_line:
-                _pve_node_exec(pve_mgr, task.target_node,
+                rc_alloc, out_alloc, _ = _pve_node_exec(pve_mgr, task.target_node,
                     f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                     timeout=15)
-                task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
+                _log_efidisk_result(task, rc_alloc, out_alloc, pre_keys)
             task.log(f"  BIOS: ovmf, Machine: q35 ✓")
 
         # NS Apr 2026 — apply 4K-LUN sector emulation + UEFI fallback loader on the
@@ -7211,7 +7307,7 @@ def _do_offline_qemuimg_copy(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     # NS Apr 2026: OVMF/EFI post-copy fix — same logic as NZD path.
     # Previously the offline copy path never reset bios/machine/efidisk after disk import,
     # so the corrupted initial efidisk0 from qm create stayed and the VM couldn't boot.
-    bios = getattr(task, 'bios_override', None) or getattr(task, '_detected_bios', 'seabios')
+    bios = _resolved_bios(task)
     if bios == 'ovmf':
         _pve_node_exec(pve_mgr, task.target_node,
             f"qm set {task.proxmox_vmid} --bios ovmf --machine q35 2>&1", timeout=10)
@@ -7242,10 +7338,10 @@ def _do_offline_qemuimg_copy(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
             efi_line = ''
 
         if not efi_line:
-            _pve_node_exec(pve_mgr, task.target_node,
+            rc_alloc, out_alloc, _ = _pve_node_exec(pve_mgr, task.target_node,
                 f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                 timeout=15)
-            task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
+            _log_efidisk_result(task, rc_alloc, out_alloc, pre_keys)
         task.log(f"  BIOS: ovmf, Machine: q35 ✓")
 
     # honour qcow2 selection while the VM is still stopped (disks at rest)

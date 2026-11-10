@@ -163,7 +163,7 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
 - 🛡️ **VM-Level ACLs** - Fine-grained permissions per VM
 - 🏢 **Multi-Tenancy** - Isolate clusters for different customers
 - 🚫 **IP Whitelisting / Blacklisting** - Restrict access by IP or CIDR range
-- 🔒 **Full-DB Encryption** - SQLCipher (AES-256-CBC + HMAC-SHA512, format v4) wraps the entire database at rest wherever the `sqlcipher3` module is installed: pip and `deploy.sh` installs on Linux x86_64 and aarch64, macOS and Windows, and the amd64 and arm64 Docker images. The Debian package, the appliances and 32-bit ARM stay on plain SQLite; sensitive fields are encrypted individually with AES-256-GCM on every install. Multi-tier master-key loader resolves from env / systemd LoadCredentialEncrypted / `/etc/pegaprox/secret.key`; `deploy.sh` puts the key there, Docker and the Debian package keep their keys in the config directory unless you move them. Auto-migrates plain DBs on first boot post-update.
+- 🔒 **Full-DB Encryption** - SQLCipher (AES-256-CBC + HMAC-SHA512, format v4) wraps the entire database at rest wherever the `sqlcipher3` module is installed: pip and `deploy.sh` installs on Linux x86_64 and aarch64, macOS and Windows, the amd64 and arm64 Docker images and appliances, and the Debian package on amd64 (`python3-sqlcipher3`). 32-bit ARM stays on plain SQLite, and so does the Debian package on arm64: the `python3-sqlcipher3` of the Debian repository below holds the x86_64 module only. Sensitive fields are encrypted individually with AES-256-GCM on every install. Multi-tier master-key loader resolves from env / systemd LoadCredentialEncrypted / `/etc/pegaprox/secret.key`; `deploy.sh` and the Debian package put the key there, Docker keeps its key in the config directory unless you move it. Auto-migrates plain DBs on first boot post-update.
 - 🔍 **CVE Scanner** - Per-node package vulnerability scanning via debsecan
 - 🛡️ **CIS Hardening** - One-click security audit and hardening against CIS benchmarks
 - 🧾 **HMAC-Signed Audit Log** - Tamper-evident integrity verification on every entry
@@ -307,8 +307,9 @@ git clone https://github.com/PegaProx/project-pegaprox.git
 cd project-pegaprox
 
 dpkg-buildpackage -us -uc
-sudo dpkg -i ../pegaprox_*.deb
+sudo apt-get install ../pegaprox_*.deb
 ```
+The package depends on `python3-sqlcipher3`, which Debian does not carry: add the Debian repository above first, apt takes it from there.
 
 ## 🔄 Updating
 
@@ -364,7 +365,7 @@ A fresh install has no default credentials:
 
 ## 🔒 Security
 
-- **Database at rest** → SQLCipher (AES-256-CBC + HMAC-SHA512, SQLCipher format v4) wherever `sqlcipher3` is installed (pip on Linux x86_64 and aarch64, macOS, Windows; the amd64 and arm64 Docker images). Plain SQLite + per-field AES-256-GCM on the Debian package, the appliances and 32-bit ARM. See [`docs/SECURITY.md`](docs/SECURITY.md) for the threat model and recovery story.
+- **Database at rest** → SQLCipher (AES-256-CBC + HMAC-SHA512, SQLCipher format v4) wherever `sqlcipher3` is installed (pip on Linux x86_64 and aarch64, macOS, Windows; the amd64 and arm64 Docker images and appliances; the Debian package on amd64). Plain SQLite + per-field AES-256-GCM on 32-bit ARM, and on arm64 for the Debian package. See [`docs/SECURITY.md`](docs/SECURITY.md) for the threat model and recovery story.
 - **Master key custody** → Multi-tier loader: `PEGAPROX_DB_KEY` env / systemd `LoadCredentialEncrypted` (TPM2-bound) / `/etc/pegaprox/secret.key` / `~/.config/pegaprox/secret.key` / legacy `config/`. Default chmod 0600, files with loose permissions are skipped rather than used silently.
 - **Sensitive fields** (Cluster PW, SSH keys, TOTP secrets, OIDC client secrets, LDAP bind) → AES-256-GCM with their own key file, works even when full-DB encryption isn't available.
 - **API Tokens** → SHA-256 hash (constant-time compare).

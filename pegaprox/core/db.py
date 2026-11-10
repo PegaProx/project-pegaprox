@@ -275,6 +275,9 @@ class PegaProxDB:
             except Exception as e:
                 logging.error(f"SECURITY: Could not set key file permissions: {e}")
                 raise RuntimeError(f"Cannot secure encryption key file: {e}")
+            # MK Nov 2026 - on disk before a field is sealed with it: a power cut soon after
+            # the first start left an empty key file, and the start after it refuses one
+            dbcrypto.sync_file(aes_key_file)
             logging.info("Generated new AES-256-GCM encryption key")
         
         self.aesgcm = AESGCM(aes_key)
@@ -298,6 +301,8 @@ class PegaProxDB:
                 os.chmod(KEY_FILE, 0o600)
             except Exception as e:
                 logging.warning(f"Could not set Fernet key file permissions: {e}")
+            # the keystore's legacy tier reads the same file as the SQLCipher master key
+            dbcrypto.sync_file(KEY_FILE)
             self.fernet = Fernet(fernet_key)
             logging.info("Generated legacy Fernet key (for compatibility)")
 
@@ -328,6 +333,9 @@ class PegaProxDB:
             # Note: with SQLCipher, WAL is still supported but the WAL/SHM
             # auxiliary files are also encrypted — backups must include them.
             self._local.conn.execute("PRAGMA journal_mode = WAL")
+            # MK Nov 2026 - and synchronous=NORMAL with it. connect() set it already where the
+            # file was in WAL; a new file is only now (dbcrypto.wal_normal, sync_wal)
+            dbcrypto.wal_normal(self._local.conn)
         return self._local.conn
     
     @property
@@ -2230,6 +2238,23 @@ class PegaProxDB:
                 )
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_bp_dep_cluster ON blueprint_deployments(cluster_id, started_at DESC)')
+            # a blueprint can also start from an existing PVE template, Windows ones among
+            # them; which template that is gets remembered per cluster
+            cols = [r[1] for r in cursor.execute("PRAGMA table_info(vm_blueprints)").fetchall()]
+            if 'source_kind' not in cols:
+                cursor.execute("ALTER TABLE vm_blueprints ADD COLUMN source_kind TEXT DEFAULT 'library'")
+            if 'os' not in cols:
+                cursor.execute("ALTER TABLE vm_blueprints ADD COLUMN os TEXT DEFAULT 'linux'")
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS blueprint_templates (
+                    blueprint_id TEXT NOT NULL,
+                    cluster_id TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    updated_by TEXT DEFAULT '',
+                    updated_at TEXT,
+                    PRIMARY KEY (blueprint_id, cluster_id)
+                )
+            ''')
         except Exception as e:
             logging.error(f"Error creating blueprint tables: {e}")
 
@@ -3189,6 +3214,10 @@ class PegaProxDB:
             return
         retired = USERS_FILE_ENCRYPTED + '.migrated'
         try:
+            # MK Nov 2026 - the accounts in the table on disk first: a power cut right after an
+            # import (synchronous=NORMAL) would leave the table without them and the file
+            # moved aside, where nothing reads it
+            dbcrypto.sync_wal(self.db_path)
             os.replace(USERS_FILE_ENCRYPTED, retired)
             logging.info(f"Legacy user file moved to {retired}, the database holds the accounts")
         except OSError as e:
@@ -4336,7 +4365,7 @@ class PegaProxDB:
         cursor = self.conn.cursor()
         # MK Oct 2026 (#940) - every column but directory_groups. This read runs on every
         # authorized request, and a directory user's nested memberships run to hundreds of
-        # DNs; the pool lookups read them by username (get_user_directory_groups, cloud_dashboard).
+        # DNs; the pool lookups read them by username (get_user_directory_groups).
         cursor.execute('PRAGMA table_info(users)')
         _cols = ', '.join('"%s"' % r[1] for r in cursor.fetchall() if r[1] != 'directory_groups')
         cursor.execute(f'SELECT {_cols or "*"} FROM users')
@@ -4401,9 +4430,9 @@ class PegaProxDB:
                 'layout_chosen': bool(row_dict.get('layout_chosen', 0)),
                 'portal_only': bool(row_dict.get('portal_only', 0)),
                 'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
-                'user_folder': row_dict.get('user_folder', ''),
                 'cloud_dashboard': (json.loads(row_dict['cloud_dashboard'])
                                     if row_dict.get('cloud_dashboard') else None),
+                'user_folder': row_dict.get('user_folder', ''),
             }
 
         return users
@@ -4471,9 +4500,9 @@ class PegaProxDB:
             'layout_chosen': bool(row_dict.get('layout_chosen', 0)),
             'portal_only': bool(row_dict.get('portal_only', 0)),
             'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
-            'user_folder': row_dict.get('user_folder', ''),
             'cloud_dashboard': (json.loads(row_dict['cloud_dashboard'])
                                 if row_dict.get('cloud_dashboard') else None),
+            'user_folder': row_dict.get('user_folder', ''),
         }
 
     def save_user(self, username: str, data: dict):
@@ -5071,11 +5100,17 @@ class PegaProxDB:
         try:
             out = work(conn.cursor())
             conn.commit()
-            return out
         except Exception:
             if began:
                 conn.rollback()
             raise
+        # MK Nov 2026 - on disk before anything acts on it. The connections run
+        # synchronous=NORMAL, and a power cut takes the last commits: a checkpoint lost
+        # under the anchor beside the key reads as cut away, and rows the SIEM targets and
+        # the evidence bundles already hold would be numbered again. What was committed
+        # before (the action an entry is about) lands with it.
+        dbcrypto.sync_wal(self.db_path)
+        return out
 
     def _ensure_audit_genesis(self):
         try:
@@ -5587,7 +5622,8 @@ class PegaProxDB:
                 'created_at': datetime.now().isoformat(), 'pruned_rows': gone,
                 'legacy_count': count, 'legacy_digest': digest, 'legacy_changed': changed,
                 'cutoff': cutoff_iso})
-        cp = dbcrypto.run_off_hub(_work, self.db_path, commit=True)
+        # durable: the anchor and the SIEM targets get the checkpoint next (_audit_chain_txn)
+        cp = dbcrypto.run_off_hub(_work, self.db_path, commit=True, durable=True)
         if cp:
             self._after_checkpoint(cp)
         return cp
@@ -6230,6 +6266,10 @@ class PegaProxDB:
                     f.flush()
                     os.fsync(f.fileno())
                 os.chmod(backup_file, 0o600)
+                # MK Nov 2026 - and its name, before the key file is written over in place: a
+                # power cut in that write leaves a short key, and the start refuses it and
+                # points at this copy
+                dbcrypto.sync_file(backup_file)
 
                 with open(aes_key_file, 'wb') as f:
                     f.write(new_key)
@@ -6259,6 +6299,16 @@ class PegaProxDB:
                 stats['errors'].append(f"Commit failed, rotation rolled back: {e}")
                 stats['success'] = False
                 return stats
+            # MK Nov 2026 - the new key is on disk since step 4, so the rows it opens have to be
+            # too before anything goes on: under synchronous=NORMAL a power cut could leave
+            # them on the old key under the new key file. They are committed, so a failed sync
+            # keeps the new key and names the copy of the old one.
+            try:
+                dbcrypto.sync_wal(self.db_path)
+            except OSError as e:
+                logging.error(f"Key rotation: the re-encrypted rows could not be synced to disk ({e}); "
+                              f"after a power cut they may need the old key from {backup_file}")
+                stats['errors'].append(f"The re-encrypted rows could not be synced to disk: {e}")
 
             # 5. Update in-memory key
             self.aes_key = new_key
@@ -6640,6 +6690,10 @@ class PegaProxDB:
             cursor = self.conn.cursor()
             marked = _replay_sr_failover_state(cursor)
             self.conn.commit()
+            # MK Nov 2026 - the columns came with an earlier commit and are all that says the
+            # replay ran: a power cut (synchronous=NORMAL) that kept them and took the replay
+            # would leave the marks unset for good
+            dbcrypto.sync_wal(self.db_path)
             self._sr_replay_owed = False
         logging.info(f"site_recovery_vms: {marked} guest(s) failed over, replayed from the failover events")
         return marked
