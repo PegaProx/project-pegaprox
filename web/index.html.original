@@ -6351,7 +6351,64 @@
             from { opacity: 0; transform: scale(0.85) translateY(20px); }
             to   { opacity: 1; transform: scale(1) translateY(0); }
         }
-    </style>
+    /* cloud widget dashboard (personal overview) */
+/* KPI tiles - Nov 2026: flat, uniform, single accent. The per-card rainbow
+           gradients are gone; one quiet cyan tint keeps the row scannable. */
+        .cloud-kpi-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(176px, 1fr)); gap:var(--space-md); }
+
+.cloud-kpi { position:relative; display:flex; align-items:center; gap:var(--space-md); padding:var(--space-md) var(--space-lg); border-radius:var(--radius-lg); border:1px solid var(--cloud-border-subtle); background:var(--cloud-surface-3); box-shadow:none; transition:border-color .12s, background .12s; }
+
+.cloud-kpi-click { cursor:pointer; }
+
+.cloud-kpi-click:hover { border-color:var(--cloud-border-strong); background:var(--cloud-surface-2); }
+
+.cloud-kpi-icon { width:32px; height:32px; border-radius:var(--radius-md); display:flex; align-items:center; justify-content:center; background:var(--cloud-accent-soft); color:var(--cloud-accent); flex:0 0 auto; }
+
+.cloud-kpi-icon svg { width:16px; height:16px; }
+
+.cloud-kpi-value { font-size:1.3rem; font-weight:650; line-height:1.1; color:var(--color-text); letter-spacing:-0.01em; font-variant-numeric:tabular-nums; }
+
+.cloud-kpi-label { font-size:0.7rem; color:var(--cloud-text-secondary); margin-top:2px; text-transform:uppercase; letter-spacing:0.05em; }
+
+.cloud-kpi-sub { font-size:0.72rem; color:var(--cloud-text-muted); margin-top:2px; }
+
+body[data-layout="cloud"][data-cloud-theme="light"] .cloud-detail-icon,
+        body[data-layout="cloud"][data-cloud-theme="light"] .cloud-stat-icon,
+        body[data-layout="cloud"][data-cloud-theme="light"] .cloud-kpi-icon { background:rgba(0,135,173,0.10); }
+
+/* ── Nov 2026 (PHASE 3/4) - widget engine: grid, spans, drag states, customize bar ── */
+        .cloud-widget-grid { display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); gap:var(--space-md); align-items:start; }
+
+.cloud-widget-cell { display:flex; min-width:0; }
+
+.cloud-widget-cell > .cloud-widget { flex:1 1 auto; min-width:0; }
+
+.cloud-widget-span-sm { grid-column:span 2; }
+
+.cloud-widget-span-md { grid-column:span 3; }
+
+.cloud-widget-span-lg { grid-column:span 4; }
+
+.cloud-widget-span-full { grid-column:1 / -1; }
+
+.cloud-widget-grid { grid-template-columns:1fr; }
+
+.cloud-widget-span-sm, .cloud-widget-span-md, .cloud-widget-span-lg, .cloud-widget-span-full { grid-column:auto; }
+
+.cloud-widget-head { display:flex; align-items:center; justify-content:space-between; gap:var(--space-sm); margin-bottom:10px; min-width:0; }
+
+.cloud-widget-title { display:inline-flex; align-items:center; gap:8px; font-size:0.875rem; font-weight:600; color:var(--color-text); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+.cloud-widget-title-icon { color:var(--cloud-accent); display:inline-flex; flex:0 0 auto; }
+
+.cloud-widget-title-icon svg { width:15px; height:15px; }
+
+.cloud-widget-actions { display:inline-flex; align-items:center; gap:4px; flex:0 0 auto; }
+
+.cloud-widget-dragging { opacity:0.45; }
+
+.cloud-widget-drop-target { outline:2px dashed var(--cloud-accent-line); outline-offset:3px; }
+</style>
     
     <div id="root"></div>
 

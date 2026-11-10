@@ -601,7 +601,378 @@
         }
 
         // ── overview / dashboard ───────────────────────────────────
-        function CloudDashboard({ clusters, resources, metrics, dcStatus, tasks, onNav, t }) {
+        function cloudThresholdColor(pct) {
+            const p = Number(pct) || 0;
+            return p >= 90 ? 'var(--cloud-error)' : p >= 75 ? 'var(--cloud-warning)' : 'var(--cloud-accent)';
+        }
+
+        function cloudWidgetTitle(id, t) {
+            const map = {
+                kpi: [t('cloud.wKpi'), 'Infrastructure'],
+                utilization: [t('cloud.utilization'), 'Cluster utilization'],
+                consumers: [t('cloud.topConsumers'), 'Top resource consumers'],
+                activity: [t('cloud.recentTasks'), 'Recent activity'],
+                clusterhealth: [t('cloud.wClusterHealth'), 'Cluster health'],
+                gueststatus: [t('cloud.wGuestStatus'), 'Guest status'],
+                datastores: [t('cloud.wDatastores'), 'Datastore usage'],
+            };
+            const e = map[id] || [null, id];
+            return e[0] || e[1];
+        }
+
+        // stacked status bar + legend (guest counts straight from the resource list)
+
+        function CloudMeterRow({ label, sub, val, pct }) {
+            const p = Math.min(100, Math.max(0, Number(pct) || 0));
+            const c = cloudThresholdColor(p);
+            return (
+                <div className="cloud-meter-row">
+                    <div className="cloud-meter-row-top">
+                        <span className="cloud-meter-row-label">
+                            {label}
+                            {sub && <span className="cloud-meter-row-sub">{sub}</span>}
+                        </span>
+                        <span className="cloud-meter-row-val">{val ? <strong>{val}</strong> : null}{val ? ' · ' : ''}{Math.round(p)}%</span>
+                    </div>
+                    <div className="cloud-meter"><div style={{ width: p + '%', background: c }} /></div>
+                </div>
+            );
+        }
+
+        // top resource consumers with a RAM / CPU / Disk metric switch - all values
+        // straight from the cluster resource list (mem, cpu, disk), nothing invented.
+        // `metric` seeds the switch (widget config); internal state keeps the last click.
+
+        function CloudWidgetCard({ title, icon, actions, custom, children }) {
+            const Ico = icon ? (Icons[icon] || Icons.Box) : null;
+            return (
+                <div className={'cloud-card cloud-widget' + (custom && custom.dragging ? ' cloud-widget-dragging' : '') + (custom && custom.dropTarget ? ' cloud-widget-drop-target' : '')}
+                    ref={custom && custom.cardRef} data-widget={custom && custom.id}>
+                    <div
+                        className="cloud-widget-head"
+                        draggable={!!(custom && custom.onDragStart)}
+                        onDragStart={custom && custom.onDragStart}
+                        onDragEnd={custom && custom.onDragEnd}
+                        onDragOver={custom && custom.onDragOver}
+                        onDrop={custom && custom.onDrop}
+                        onDragLeave={custom && custom.onDragLeave}
+                    >
+                        <div className="cloud-widget-title">
+                            {Ico && <span className="cloud-widget-title-icon"><Ico /></span>}
+                            <span>{title}</span>
+                            {custom && custom.badge != null && <span className="cloud-chip cloud-chip-soft">{custom.badge}</span>}
+                        </div>
+                        <div className="cloud-widget-actions">
+                            {actions}
+                            {custom && custom.onCycleSize && (
+                                <CloudIconBtn icon={custom.size === 'sm' ? 'Minimize' : 'Maximize'} title={custom.sizeTitle} onClick={custom.onCycleSize} />
+                            )}
+                            {custom && custom.onRemove && (
+                                <CloudIconBtn icon="X" danger title={custom.removeTitle} onClick={custom.onRemove} />
+                            )}
+                        </div>
+                    </div>
+                    <div className="cloud-widget-body">{children}</div>
+                </div>
+            );
+        }
+
+        // simple horizontal bar chart (top consumers)
+
+        function CloudTopConsumers({ rows, t, metric }) {
+            const [sel, setSel] = React.useState(metric || 'mem');
+            const m = sel; const setMetric = setSel;
+            const guests = (Array.isArray(rows) ? rows : []).filter(r => r && r.status === 'running');
+            const pick = (r) => {
+                if (metric === 'cpu') return { v: cloudCpuPct(r), display: cloudCpuPct(r) + '%', pct: cloudCpuPct(r) };
+                if (metric === 'disk') return { v: Number(r.disk) || 0, display: cloudFmtBytes(Number(r.disk) || 0), pct: 0 };
+                return { v: Number(r.mem) || 0, display: cloudFmtBytes(Number(r.mem) || 0), pct: 0 };
+            };
+            const scored = guests.map(r => ({ r, ...pick(r) })).sort((a, b) => b.v - a.v).slice(0, 6);
+            const max = Math.max(1, ...scored.map(s => s.v));
+            const segs = [
+                { id: 'mem', label: t('cloud.metricRam') || 'RAM' },
+                { id: 'cpu', label: t('cloud.metricCpu') || 'CPU' },
+                { id: 'disk', label: t('cloud.metricDisk') || 'Disk' },
+            ];
+            return (
+                <div>
+                    <div className="cloud-segment" style={{ margin: '2px 0 4px' }}>
+                        {segs.map(s => (
+                            <button key={s.id} type="button" className={'cloud-segment-btn' + (metric === s.id ? ' is-active' : '')} onClick={() => setMetric(s.id)}>{s.label}</button>
+                        ))}
+                    </div>
+                    <div className="cloud-topcons">
+                        {scored.length === 0 ? (
+                            <div className="cloud-topcons-note">{t('cloud.noRunning') || 'No running guests.'}</div>
+                        ) : metric === 'disk' && scored.every(s => !s.v) ? (
+                            <div className="cloud-topcons-note">{t('cloud.noDiskData') || 'No disk usage reported - only containers and guests with the QEMU guest agent report it.'}</div>
+                        ) : scored.map(s => (
+                            <div className="cloud-topcons-row" key={(s.r.vmid != null ? s.r.vmid : '') + '-' + (s.r.name || '')}>
+                                <span className="cloud-topcons-name" title={s.r.name || ('guest-' + s.r.vmid)}>
+                                    {s.r.name || ('guest-' + s.r.vmid)}
+                                    <span>{s.r.type === 'lxc' ? 'CT' : 'VM'}</span>
+                                </span>
+                                <div className="cloud-topcons-track"><div style={{ width: (s.v / max * 100) + '%', background: metric === 'cpu' ? cloudThresholdColor(s.v) : 'var(--cloud-accent)' }} /></div>
+                                <span className="cloud-topcons-val">{s.display}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        // activity timeline: status icon + type + target + node + relative time.
+        // status classes follow the task rows: running → info, OK → success, else error
+
+        function CloudActivityList({ tasks, t, max }) {
+            const limit = Math.max(1, Math.min(20, Number(max) || 8));
+            const list = (Array.isArray(tasks) ? tasks : []).slice(0, limit);
+            const meta = (s) => s === 'running' ? { cls: 'is-run', icon: 'Loader', label: t('cloud.taskRunning') || 'RUNNING' }
+                : s === 'OK' ? { cls: 'is-ok', icon: 'Check', label: t('cloud.taskOk') || 'OK' }
+                : { cls: 'is-err', icon: 'X', label: t('cloud.taskErr') || 'FAILED' };
+            return (
+                <div className="cloud-act">
+                    {list.length === 0 && <div className="cloud-empty">{t('cloud.noRecentTasks') || 'No recent tasks.'}</div>}
+                    {list.map((tk, i) => {
+                        const m = meta(tk && tk.status);
+                        const Ico = Icons[m.icon] || Icons.Clock;
+                        return (
+                            <div className="cloud-act-row" key={tk && (tk.upid || i)}>
+                                <span className={'cloud-act-icon ' + m.cls} title={m.label}><Ico /></span>
+                                <span className="cloud-act-type">{(tk && tk.type) || 'task'}</span>
+                                {(tk && tk.id) && <span className="cloud-act-target" title={tk.id}>{tk.id}</span>}
+                                {(tk && tk.node) && <span className="cloud-act-node">{tk.node}</span>}
+                                <span className="cloud-act-time">{cloudRelTime(tk && tk.starttime)}</span>
+                            </div>
+                        );
+                    })}
+                </div>
+            );
+        }
+
+        // ── build VM/CT action menu items (shared by list kebab + detail bar) ──
+
+        function CloudKpiRow({ ctx, t }) {
+            const { vms, cts, running, connected, safeClusters, nodeNames, vcpu, ramAllocB, dcMem, safeRes } = ctx;
+            const kpis = [
+                { icon: 'Server', value: vms.length, label: t('cloud.vms') || 'Virtual Machines', sub: `${vms.filter(v => v.status === 'running').length} ${t('cloud.runningUnit') || 'running'}`, nav: 'vms' },
+                { icon: 'Box', value: cts.length, label: t('cloud.containers') || 'Containers', sub: `${cts.filter(v => v.status === 'running').length} ${t('cloud.runningUnit') || 'running'}`, nav: 'containers' },
+                { icon: 'Cpu', value: nodeNames.length, label: t('cloud.hosts') || 'Hosts', sub: `${connected}/${safeClusters.length} ${t('cloud.clustersUnit') || 'clusters'}`, nav: 'nodes' },
+                { icon: 'Activity', value: running.length, label: t('cloud.runningGuests') || 'Running guests', sub: `${safeRes.length} ${t('cloud.totalUnit') || 'total'}`, nav: null },
+                { icon: 'Cpu', value: vcpu, label: t('cloud.vcpuAllocated') || 'vCPU allocated', sub: `${safeRes.length} ${t('cloud.guestsUnit') || 'guests'}`, nav: null },
+                { icon: 'MemoryStick', value: cloudBytesToGiB(ramAllocB).toFixed(1) + ' GiB', label: t('cloud.ramAllocated') || 'RAM allocated', sub: (dcMem && Number(dcMem.total)) ? `${t('cloud.of') || 'of'} ${cloudBytesToGiB(dcMem.total).toFixed(0)} GiB ${t('cloud.hostsUnit') || 'hosts'}` : null, nav: null },
+            ];
+            return (
+                <div className="cloud-kpi-grid">
+                    {kpis.map((k, i) => (
+                        <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} sub={k.sub}
+                            onClick={k.nav ? () => ctx.onNav(k.nav) : undefined} />
+                    ))}
+                </div>
+            );
+        }
+
+        function CloudUtilizationBody({ ctx, t }) {
+            const dcRes = ctx.dcStatus && ctx.dcStatus.resources;
+            const dcStore = dcRes && dcRes.storage;
+            const dcMem = dcRes && dcRes.memory;
+            const dcCpu = dcRes && dcRes.cpu;
+            // the cluster-wide percents the server already computed win; the
+            // node-map average is the fallback while that answer is in flight
+            const cpuPct = (dcCpu && dcCpu.percent != null && isFinite(Number(dcCpu.percent))) ? Number(dcCpu.percent) : ctx.cpuAvg;
+            const memPct = (dcMem && dcMem.percent != null && isFinite(Number(dcMem.percent))) ? Number(dcMem.percent) : ctx.memAvg;
+            const storePct = (dcStore && Number(dcStore.total)) ? (Number(dcStore.used) || 0) / Number(dcStore.total) * 100 : null;
+            return (
+                <div className="cloud-util-body">
+                    <div className="cloud-meter-rows">
+                        <CloudMeterRow label={t('cloud.avgCpu') || 'Avg CPU'} sub={`${ctx.nodeNames.length} ${t('cloud.hostsUnit') || 'hosts'}`} pct={cpuPct} />
+                        <CloudMeterRow
+                            label={t('cloud.avgRam') || 'Avg RAM'}
+                            sub={(dcMem && Number(dcMem.total)) ? `${cloudFmtBytes(dcMem.used)} / ${cloudFmtBytes(dcMem.total)}` : null}
+                            pct={memPct} />
+                        {storePct != null && (
+                            <CloudMeterRow
+                                label={t('cloud.storage') || 'Storage'}
+                                sub={`${cloudFmtBytes(dcStore.used)} / ${cloudFmtBytes(dcStore.total)}`}
+                                pct={storePct} />
+                        )}
+                    </div>
+                    <div className="cloud-util-breakdown">
+                        <div className="cloud-util-row"><span>{t('cloud.running') || 'Running'}</span><span>{ctx.running.length} / {ctx.safeRes.length}</span></div>
+                        <div className="cloud-util-row"><span>{t('cloud.vcpuAllocated') || 'vCPU allocated'}</span><span>{ctx.vcpu}</span></div>
+                        <div className="cloud-util-row"><span>{t('cloud.ramAllocated') || 'RAM allocated'}</span><span>{cloudBytesToGiB(ctx.ramAllocB).toFixed(1)} GiB</span></div>
+                        <div className="cloud-util-row"><span>{t('cloud.hosts') || 'Hosts'}</span><span>{ctx.nodeNames.length}</span></div>
+                    </div>
+                </div>
+            );
+        }
+
+        function CloudGuestStatusWidget({ ctx, t }) {
+            const rows = ctx.resources;
+            const counts = { running: 0, stopped: 0, paused: 0, other: 0 };
+            rows.forEach(r => {
+                if (!r) return;
+                if (r.status === 'running') counts.running++;
+                else if (r.status === 'stopped') counts.stopped++;
+                else if (r.status === 'paused' || r.status === 'suspended') counts.paused++;
+                else counts.other++;
+            });
+            const total = Math.max(1, rows.length);
+            const segs = [
+                { k: 'running', label: t('cloud.wsRunning') || 'Running', color: 'var(--cloud-success)' },
+                { k: 'stopped', label: t('cloud.wsStopped') || 'Stopped', color: 'var(--cloud-text-muted)' },
+                { k: 'paused', label: t('cloud.wsPaused') || 'Paused', color: 'var(--cloud-warning)' },
+                { k: 'other', label: t('cloud.wsOther') || 'Other', color: 'var(--cloud-info)' },
+            ].filter(s => counts[s.k] > 0);
+            return (
+                <div>
+                    <div className="cloud-gs-bar" role="img" aria-label={t('cloud.wGuestStatus') || 'Guest status'}>
+                        {segs.map(s => <div key={s.k} className="cloud-gs-seg" style={{ width: (counts[s.k] / total * 100) + '%', background: s.color }} />)}
+                    </div>
+                    <div className="cloud-gs-legend">
+                        {segs.map(s => (
+                            <span key={s.k} className="cloud-gs-item">
+                                <span className="cloud-gs-dot" style={{ background: s.color }} />
+                                {s.label} <strong>{counts[s.k]}</strong>
+                            </span>
+                        ))}
+                        <span className="cloud-gs-item cloud-cell-muted">{rows.length} {t('cloud.guestsUnit') || 'guests'}</span>
+                    </div>
+                </div>
+            );
+        }
+
+        // one tile per cluster: connection, node quorum and cpu/mem/storage meters
+        // from the datacenter status each cluster already reports
+
+        function CloudClusterHealthWidget({ ctx, t }) {
+            const clusters = ctx.clusters || [];
+            if (clusters.length === 0) return <div className="cloud-empty">{t('cloud.noClusters') || 'No clusters configured.'}</div>;
+            return (
+                <div className="cloud-ch-grid">
+                    {clusters.map(c => {
+                        const cid = c && (c.id != null ? c.id : c.name);
+                        const st = (ctx.allData && ctx.allData[cid] && ctx.allData[cid].data) || null;
+                        const res = (st && st.resources) || null;
+                        const nodes = (st && st.nodes) || null;
+                        const cpuP = res && res.cpu ? Number(res.cpu.percent) || 0 : null;
+                        const memP = res && res.memory ? Number(res.memory.percent) || 0 : null;
+                        const storeP = res && res.storage ? Number(res.storage.percent) || 0 : null;
+                        return (
+                            <div className={'cloud-ch-tile' + (c.connected ? '' : ' is-off')} key={String(cid)}>
+                                <div className="cloud-ch-name">
+                                    <span className={'cloud-cluster-dot ' + (c.connected ? 'is-on' : 'is-off')} />
+                                    <span className="cloud-table-name-text">{(c && (c.display_name || c.name)) || 'cluster'}</span>
+                                    <span className="cloud-ch-type">{cloudClusterTypeLabel(c && c.type)}</span>
+                                </div>
+                                <div className="cloud-ch-meta">
+                                    {nodes ? `${nodes.online}/${nodes.total} ${t('cloud.hostsUnit') || 'hosts'}` : (t('cloud.noData') || 'No data')}
+                                    {st && st.cluster && st.cluster.standalone === false && st.cluster.quorate === false
+                                        ? <span className="cloud-ch-warn">{t('cloud.noQuorum') || 'no quorum'}</span> : null}
+                                </div>
+                                {cpuP != null && <div className="cloud-meter cloud-ch-meter"><div style={{ width: cpuP + '%', background: cloudThresholdColor(cpuP) }} /></div>}
+                                {cpuP == null && <div className="cloud-cell-muted">{t('cloud.offline') || 'offline'}</div>}
+                            </div>
+                        );
+                    })}
+                </div>
+            );
+        }
+
+        // top datastores by usage - shared + local lists flattened, same fields
+        // the Datastores page table reads (storage, used, total)
+
+        function CloudDatastoresWidget({ ctx, t }) {
+            const ds = ctx.datastores || { shared: [], local: {} };
+            const list = [];
+            (Array.isArray(ds.shared) ? ds.shared : []).forEach(d => list.push({ ...d, scope: 'shared' }));
+            const local = ds.local && typeof ds.local === 'object' ? ds.local : {};
+            Object.keys(local).forEach(node => (Array.isArray(local[node]) ? local[node] : []).forEach(d => list.push({ ...d, scope: 'local', _node: node })));
+            const rows = list
+                .filter(d => Number(d.total) > 0)
+                .map(d => ({ name: d.storage || d._node || 'store', pct: Math.min(100, (Number(d.used) || 0) / Number(d.total) * 100), right: `${cloudBytesToGiB(d.used).toFixed(1)} / ${cloudBytesToGiB(d.total).toFixed(1)} GiB`, scope: d.scope }))
+                .sort((a, b) => b.pct - a.pct).slice(0, 6);
+            if (rows.length === 0) return <div className="cloud-empty">{t('cloud.noDatastores') || 'No datastores reported.'}</div>;
+            return (
+                <div className="cloud-topcons">
+                    {rows.map(r => (
+                        <div className="cloud-topcons-row" key={r.name + r.scope}>
+                            <span className="cloud-topcons-name" title={r.name}>{r.name}</span>
+                            <div className="cloud-topcons-track"><div style={{ width: r.pct + '%', background: cloudThresholdColor(r.pct) }} /></div>
+                            <span className="cloud-topcons-val">{Math.round(r.pct)}%</span>
+                        </div>
+                    ))}
+                </div>
+            );
+        }
+
+        const CLOUD_WIDGETS = {
+            kpi: { icon: 'Grid', sizes: ['full'], render: (ctx, cfg, t) => <CloudKpiRow ctx={ctx} t={t} /> },
+            utilization: { icon: 'Cpu', sizes: ['lg', 'full'], render: (ctx, cfg, t) => <CloudUtilizationBody ctx={ctx} t={t} /> },
+            consumers: { icon: 'Layers', sizes: ['md', 'lg', 'full'], cfg: { metric: 'mem' }, render: (ctx, cfg, t) => <CloudTopConsumers rows={ctx.resources} t={t} metric={cfg.metric} /> },
+            activity: { icon: 'Clock', sizes: ['md', 'lg', 'full'], cfg: { max: 8 }, render: (ctx, cfg, t) => <CloudActivityList tasks={ctx.tasks} t={t} max={cfg.max} /> },
+            clusterhealth: { icon: 'Cloud', sizes: ['md', 'lg', 'full'], render: (ctx, cfg, t) => <CloudClusterHealthWidget ctx={ctx} t={t} /> },
+            gueststatus: { icon: 'Activity', sizes: ['sm', 'md', 'lg', 'full'], render: (ctx, cfg, t) => <CloudGuestStatusWidget ctx={ctx} t={t} /> },
+            datastores: { icon: 'Database', sizes: ['md', 'lg', 'full'], render: (ctx, cfg, t) => <CloudDatastoresWidget ctx={ctx} t={t} /> },
+        };
+
+        const CLOUD_DASHBOARD_DEFAULT = { v: 1, widgets: [
+            { id: 'kpi', size: 'full' },
+            { id: 'utilization', size: 'lg' },
+            { id: 'gueststatus', size: 'sm' },
+            { id: 'consumers', size: 'md' },
+            { id: 'activity', size: 'md' },
+            { id: 'clusterhealth', size: 'full' },
+        ] };
+
+        // stored layout → renderable layout: unknown ids dropped, sizes coerced to
+        // the widget's allowed set, missing cfg filled from the registry defaults
+
+        function cloudWidgetLayoutNormalize(saved) {
+            const out = { v: 1, widgets: [] };
+            if (saved && saved.v === 1 && Array.isArray(saved.widgets)) {
+                saved.widgets.forEach(w => {
+                    const reg = w && CLOUD_WIDGETS[w.id];
+                    if (!reg) return;
+                    const size = reg.sizes.includes(w.size) ? w.size : reg.sizes[0];
+                    out.widgets.push({ id: w.id, size, cfg: Object.assign({}, reg.cfg || {}, (w.cfg && typeof w.cfg === 'object') ? w.cfg : {}) });
+                });
+            }
+            if (out.widgets.length === 0) return JSON.parse(JSON.stringify(CLOUD_DASHBOARD_DEFAULT));
+            return out;
+        }
+
+        function useCloudApi(authFetch, url, deps) {
+            const [state, setState] = React.useState({ loading: !!url, data: null, error: null });
+            const [tick, setTick] = React.useState(0);
+            React.useEffect(() => {
+                let alive = true;
+                if (!authFetch || !url) { setState({ loading: false, data: null, error: null }); return () => { alive = false; }; }
+                setState(s => ({ ...s, loading: true, error: null }));
+                authFetch(url)
+                    .then(async r => {
+                        if (!alive) return;
+                        if (r && r.ok) {
+                            const j = await r.json().catch(() => null);
+                            if (alive) setState({ loading: false, data: j, error: null });
+                        } else {
+                            const j = r ? await r.json().catch(() => ({})) : {};
+                            const code = r ? r.status : 0;
+                            if (alive) setState({ loading: false, data: null, error: (j && j.error) || (code === 403 ? 'Permission denied' : 'HTTP ' + code) });
+                        }
+                    })
+                    .catch(e => { if (alive) setState({ loading: false, data: null, error: String((e && e.message) || e) }); });
+                return () => { alive = false; };
+            }, deps.concat([url, tick]));
+            const reload = React.useCallback(() => setTick(x => x + 1), []);
+            return { ...state, reload };
+        }
+
+        // unified operational state model. A missing proof is never a pass:
+        // no data → unknown, not relevant → na.
+
+        function CloudDashboard({ clusters, resources, metrics, dcStatus, tasks, datastores, allData, onNav, t, authFetch }) {
             const safeClusters = Array.isArray(clusters) ? clusters : [];
             const safeRes = Array.isArray(resources) ? resources : [];
             const vms = safeRes.filter(r => r && r.type === 'qemu');
@@ -625,86 +996,161 @@
             });
             if (n) { cpuAvg /= n; memAvg /= n; }
 
-            // top RAM consumers among running guests
-            const topMem = running
-                .map(r => ({ label: r.name || ('guest-' + r.vmid), value: Number(r.mem) || 0 }))
-                .sort((a, b) => b.value - a.value).slice(0, 6)
-                .map(r => ({ ...r, display: cloudFmtBytes(r.value) }));
+            const dcRes = dcStatus && dcStatus.resources;
+            const dcMem = dcRes && dcRes.memory;
 
-            const recentTasks = (Array.isArray(tasks) ? tasks : []).slice(0, 6);
+            // everything a widget may read, in one bag - no prop drilling per widget
+            const ctx = {
+                safeClusters, safeRes, vms, cts, running, connected, nodeNames, nodeMap,
+                vcpu, ramAllocB, cpuAvg, memAvg, dcStatus, dcMem,
+                clusters: safeClusters, resources: safeRes, metrics: nodeMap,
+                tasks, datastores, allData, onNav,
+            };
 
-            const kpis = [
-                { icon: 'Server', value: vms.length, label: t('cloud.vms') || 'Virtual Machines', accent: '#6366f1', sub: `${vms.filter(v => v.status === 'running').length} ${t('cloud.runningUnit') || 'running'}`, nav: 'vms' },
-                { icon: 'Box', value: cts.length, label: t('cloud.containers') || 'Containers', accent: '#14b8a6', sub: `${cts.filter(v => v.status === 'running').length} ${t('cloud.runningUnit') || 'running'}`, nav: 'containers' },
-                { icon: 'Cpu', value: nodeNames.length, label: t('cloud.hosts') || 'Hosts', accent: '#a855f7', sub: `${connected}/${safeClusters.length} ${t('cloud.clustersUnit') || 'clusters'}`, nav: 'nodes' },
-                { icon: 'Activity', value: running.length, label: t('cloud.runningGuests') || 'Running guests', accent: '#22c55e', sub: `${safeRes.length} ${t('cloud.totalUnit') || 'total'}`, nav: null },
-                { icon: 'Cpu', value: vcpu, label: t('cloud.vcpuAllocated') || 'vCPU allocated', accent: '#0ea5e9', sub: null, nav: null },
-                { icon: 'MemoryStick', value: cloudBytesToGiB(ramAllocB).toFixed(1) + ' GiB', label: t('cloud.ramAllocated') || 'RAM allocated', accent: '#f59e0b', sub: null, nav: null },
-            ];
+            // ── personal layout: load once, save debounced ──
+            const [layout, setLayout] = React.useState(null);
+            const [customizing, setCustomizing] = React.useState(false);
+            const [drag, setDrag] = React.useState(null);
+            const saveTimer = React.useRef(null);
+
+            React.useEffect(() => {
+                let alive = true;
+                (async () => {
+                    let saved = null;
+                    try {
+                        const r = await authFetch(`${API_URL}/user/preferences`);
+                        if (r && r.ok) saved = (await r.json()).cloud_dashboard || null;
+                    } catch (e) { /* offline → localStorage */ }
+                    if (!saved) { try { const ls = localStorage.getItem('pegaprox-cloud-dashboard'); if (ls) saved = JSON.parse(ls); } catch (e) {} }
+                    if (alive) setLayout(cloudWidgetLayoutNormalize(saved));
+                })();
+                return () => { alive = false; };
+            }, []);
+
+            const persist = React.useCallback((next) => {
+                if (saveTimer.current) clearTimeout(saveTimer.current);
+                saveTimer.current = setTimeout(() => {
+                    if (!authFetch) return;
+                    authFetch(`${API_URL}/user/preferences`, {
+                        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ cloud_dashboard: next }),
+                    }).then(r => { if (!r || !r.ok) throw new Error('save failed'); })
+                      .catch(() => { try { localStorage.setItem('pegaprox-cloud-dashboard', JSON.stringify(next)); } catch (e) {} });
+                }, 600);
+            }, [authFetch]);
+
+            const mutate = (fn) => setLayout(prev => { const next = fn(prev); persist(next); return next; });
+
+            const addWidget = (id) => mutate(p => ({ v: 1, widgets: p.widgets.concat([{ id, size: CLOUD_WIDGETS[id].sizes[0], cfg: Object.assign({}, CLOUD_WIDGETS[id].cfg || {}) }]) }));
+            const removeWidget = (id) => mutate(p => ({ v: 1, widgets: p.widgets.filter(w => w.id !== id) }));
+            const cycleSize = (id) => mutate(p => ({
+                v: 1,
+                widgets: p.widgets.map(w => {
+                    if (w.id !== id) return w;
+                    const sizes = CLOUD_WIDGETS[w.id].sizes;
+                    return { ...w, size: sizes[(sizes.indexOf(w.size) + 1) % sizes.length] };
+                }),
+            }));
+            const setCfg = (id, patch) => mutate(p => ({
+                v: 1,
+                widgets: p.widgets.map(w => w.id !== id ? w : { ...w, cfg: Object.assign({}, w.cfg, patch) }),
+            }));
+            const restoreDefaults = () => mutate(() => JSON.parse(JSON.stringify(CLOUD_DASHBOARD_DEFAULT)));
+            const reorder = (dragId, targetId) => mutate(p => {
+                const from = p.widgets.findIndex(w => w.id === dragId);
+                const to = p.widgets.findIndex(w => w.id === targetId);
+                if (from < 0 || to < 0 || from === to) return p;
+                const copy = p.widgets.slice();
+                const [it] = copy.splice(from, 1);
+                copy.splice(to, 0, it);
+                return { v: 1, widgets: copy };
+            });
+
+            const mounted = new Set((layout && layout.widgets || []).map(w => w.id));
+            const addable = Object.keys(CLOUD_WIDGETS)
+                .filter(id => !mounted.has(id))
+                .map(id => ({ label: cloudWidgetTitle(id, t), icon: CLOUD_WIDGETS[id].icon, onClick: () => addWidget(id) }));
+            if (addable.length === 0) addable.push({ label: t('cloud.allMounted') || 'All widgets are on the dashboard', icon: 'Check', disabled: true });
+
+            const body = layout == null ? null : (
+                <div className="cloud-widget-grid">
+                    {layout.widgets.map(w => {
+                        const reg = CLOUD_WIDGETS[w.id];
+                        if (!reg) return null;
+                        const custom = customizing ? {
+                            id: w.id,
+                            size: w.size,
+                            sizeTitle: t('cloud.wResize') || 'Change size',
+                            removeTitle: t('cloud.wRemove') || 'Remove widget',
+                            onCycleSize: reg.sizes.length > 1 ? () => cycleSize(w.id) : undefined,
+                            onRemove: w.id === 'kpi' ? undefined : () => removeWidget(w.id),
+                            dragging: drag && drag.id === w.id,
+                            dropTarget: drag && drag.over === w.id && drag.id !== w.id,
+                            onDragStart: (e) => { e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', w.id); } catch (er) {} setDrag({ id: w.id, over: null }); },
+                            onDragEnd: () => setDrag(null),
+                            onDragOver: (e) => { if (drag && drag.id !== w.id) { e.preventDefault(); if (drag.over !== w.id) setDrag({ ...drag, over: w.id }); } },
+                            onDragLeave: () => setDrag(d => (d && d.over === w.id ? { ...d, over: null } : d)),
+                            onDrop: (e) => { e.preventDefault(); const from = drag && drag.id; setDrag(null); if (from && from !== w.id) reorder(from, w.id); },
+                        } : null;
+                        const cfgUi = customizing && w.id === 'consumers' ? (
+                            <select className="cloud-cust-select" value={(w.cfg && w.cfg.metric) || 'mem'} onChange={(e) => setCfg(w.id, { metric: e.target.value })}>
+                                <option value="mem">{t('cloud.metricRam') || 'RAM'}</option>
+                                <option value="cpu">{t('cloud.metricCpu') || 'CPU'}</option>
+                                <option value="disk">{t('cloud.metricDisk') || 'Disk'}</option>
+                            </select>
+                        ) : customizing && w.id === 'activity' ? (
+                            <select className="cloud-cust-select" value={(w.cfg && w.cfg.max) || 8} onChange={(e) => setCfg(w.id, { max: Number(e.target.value) })}>
+                                {[4, 8, 12].map(v => <option key={v} value={v}>{v}</option>)}
+                            </select>
+                        ) : null;
+                        return (
+                            <div key={w.id} className={'cloud-widget-cell cloud-widget-span-' + w.size}>
+                                <CloudWidgetCard title={cloudWidgetTitle(w.id, t)} icon={reg.icon} custom={custom} actions={cfgUi}>
+                                    {reg.render(ctx, w.cfg || {}, t)}
+                                </CloudWidgetCard>
+                            </div>
+                        );
+                    })}
+                </div>
+            );
 
             return (
                 <div className="cloud-body">
                     <CloudPageHeader
                         title={t('cloud.overview') || 'Overview'}
                         sub={`${connected} / ${safeClusters.length} ${t('cloud.clustersConnected') || 'clusters connected'} · ${safeRes.length} ${t('cloud.guestsUnit') || 'guests'}`}
-                    />
-                    <div className="cloud-kpi-grid">
-                        {kpis.map((k, i) => (
-                            <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} sub={k.sub}
-                                onClick={k.nav ? () => onNav(k.nav) : undefined} />
-                        ))}
-                    </div>
+                    >
+                        <button type="button" className={customizing ? 'cloud-btn cloud-btn-primary' : 'cloud-btn'} onClick={() => setCustomizing(v => !v)}>
+                            {customizing ? (t('cloud.done') || 'Done') : (t('cloud.customize') || 'Customize')}
+                        </button>
+                    </CloudPageHeader>
 
-                    <div className="cloud-dash-grid">
-                        <div className="cloud-card cloud-util-card">
-                            <CloudSectionTitle>{t('cloud.utilization') || 'Cluster utilization'}</CloudSectionTitle>
-                            <div className="cloud-util-body">
-                                <div className="cloud-util-gauges">
-                                    <CloudGauge pct={cpuAvg} color="var(--cloud-accent)" label={t('cloud.avgCpu') || 'Avg CPU'} sub={`${nodeNames.length} ${t('cloud.hostsUnit') || 'hosts'}`} />
-                                    <CloudGauge pct={memAvg} color="#a855f7" label={t('cloud.avgRam') || 'Avg RAM'} sub={dcStatus?.resources?.memory ? cloudFmtBytes(dcStatus.resources.memory.used) : null} />
-                                </div>
-                                <div className="cloud-util-breakdown">
-                                    <div className="cloud-util-row"><span>{t('cloud.running') || 'Running'}</span><span>{running.length} / {safeRes.length}</span></div>
-                                    <div className="cloud-util-row"><span>{t('cloud.vcpuAllocated') || 'vCPU allocated'}</span><span>{vcpu}</span></div>
-                                    <div className="cloud-util-row"><span>{t('cloud.ramAllocated') || 'RAM allocated'}</span><span>{cloudBytesToGiB(ramAllocB).toFixed(1)} GiB</span></div>
-                                    {dcStatus?.resources?.storage && (
-                                        <div className="cloud-util-row"><span>{t('cloud.storageUsed') || 'Storage used'}</span><span>{cloudFmtBytes(dcStatus.resources.storage.used)} / {cloudFmtBytes(dcStatus.resources.storage.total)}</span></div>
-                                    )}
-                                </div>
-                            </div>
+                    {customizing && (
+                        <div className="cloud-customize-bar">
+                            <span className="cloud-cust-hint">{t('cloud.custHint') || 'Drag a widget onto another to reorder. Resize or remove with the icons in a widget header. Your layout is saved to your account.'}</span>
+                            <CloudActionMenu items={addable} label={t('cloud.addWidget') || 'Add widget'} />
+                            <button type="button" className="cloud-btn" onClick={restoreDefaults}>
+                                <Icons.RotateCcw /> {t('cloud.restoreDefaults') || 'Restore defaults'}
+                            </button>
                         </div>
+                    )}
 
-                        <div className="cloud-card">
-                            <CloudSectionTitle>{t('cloud.topMem') || 'Top memory consumers'}</CloudSectionTitle>
-                            <CloudBarChart rows={topMem} color="#6366f1" t={t} />
-                        </div>
-                    </div>
-
-                    <div className="cloud-card">
-                        <CloudSectionTitle right={<button type="button" className="cloud-link-btn" onClick={() => onNav('tasks')}>{t('cloud.viewAll') || 'View all'}</button>}>
-                            {t('cloud.recentTasks') || 'Recent activity'}
-                        </CloudSectionTitle>
-                        {recentTasks.length === 0 ? (
-                            <div className="cloud-empty">{t('cloud.noRecentTasks') || 'No recent tasks.'}</div>
-                        ) : (
-                            <div className="cloud-tasklist">
-                                {recentTasks.map((tk, i) => (
-                                    <div className="cloud-task-row" key={tk.upid || i}>
-                                        <span className={'cloud-task-dot ' + (tk.status === 'running' ? 'is-run' : tk.status === 'OK' ? 'is-ok' : 'is-err')} />
-                                        <span className="cloud-task-type">{tk.type || 'task'}</span>
-                                        <span className="cloud-task-target">{tk.id || ''}</span>
-                                        <span className="cloud-task-node">{tk.node || ''}</span>
-                                        <span className="cloud-task-time">{cloudRelTime(tk.starttime)}</span>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
+                    {layout == null ? (
+                        <div className="cloud-empty">{t('cloud.loading') || 'Loading…'}</div>
+                    ) : layout.widgets.length === 0 ? (
+                        <CloudEmpty
+                            icon="Grid"
+                            title={t('cloud.noWidgets') || 'No widgets'}
+                            text={t('cloud.noWidgetsText') || 'Your dashboard is empty. Add widgets or restore the default layout.'}
+                            action={<button type="button" className="cloud-btn cloud-btn-primary" onClick={restoreDefaults}>{t('cloud.restoreDefaults') || 'Restore defaults'}</button>}
+                        />
+                    ) : body}
                 </div>
             );
         }
 
         // ── instances list (VMs / Containers) ──────────────────────
+
         function CloudInstanceList({ rows, kind, clusterId, act, onOpen, onCreate, onBlueprints, t }) {
             const safe = Array.isArray(rows) ? rows : [];
             const [query, setQuery] = React.useState('');
@@ -2648,7 +3094,7 @@
             } else {
                 switch (section) {
                     case 'overview':
-                        body = <CloudDashboard clusters={safeClusters} resources={safeResources} metrics={clusterMetrics} dcStatus={dcStatus} tasks={tasks} onNav={selectSection} t={T} />;
+                        body = <CloudDashboard clusters={safeClusters} resources={safeResources} metrics={clusterMetrics} dcStatus={dcStatus} tasks={tasks} datastores={clusterDatastores} allData={allClusterMetrics} onNav={selectSection} t={T} authFetch={authFetch} />;
                         break;
                     case 'vms':
                         body = <CloudInstanceList rows={vms} kind="qemu" clusterId={cid} act={act} onOpen={openDetail} onCreate={act.createVm} onBlueprints={toBlueprints} t={T} />;
@@ -2812,7 +3258,7 @@
                         body = <CloudClassicLauncher title={T('cloud.settings') || 'Settings'} icon="Settings" text={T('cloud.settingsClassic') || 'Full settings (auth, backups, monitoring, integrations) live in the classic PegaProx layout.'} onExit={onExitCloud} t={T} />;
                         break;
                     default:
-                        body = <CloudDashboard clusters={safeClusters} resources={safeResources} metrics={clusterMetrics} dcStatus={dcStatus} tasks={tasks} onNav={selectSection} t={T} />;
+                        body = <CloudDashboard clusters={safeClusters} resources={safeResources} metrics={clusterMetrics} dcStatus={dcStatus} tasks={tasks} datastores={clusterDatastores} allData={allClusterMetrics} onNav={selectSection} t={T} authFetch={authFetch} />;
                 }
             }
 
