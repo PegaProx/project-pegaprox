@@ -1310,9 +1310,13 @@ def get_node_tasks_api(cluster_id, node):
                 _scoped.append(t)
         tasks = _scoped
 
-    # Filter by vmid if specified
+    # Filter by vmid if specified. The guest is field 6 of the UPID, as the log route below
+    # reads it; the number anywhere in the UPID also matched a pid, a start time or the
+    # longer id of another guest
     if vmid and tasks:
-        filtered = [t for t in tasks if t.get('id') == str(vmid) or str(vmid) in str(t.get('upid', ''))]
+        want = str(vmid)
+        filtered = [t for t in tasks
+                    if t.get('id') == want or str(t.get('upid', '')).split(':')[6:7] == [want]]
         return jsonify(filtered[:limit])
     
     return jsonify(tasks)
