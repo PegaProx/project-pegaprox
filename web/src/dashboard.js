@@ -1642,11 +1642,12 @@
         // into it dial its nodes in (core/transfer_net.py). Each node's address comes from the
         // server's cache, nodes it still reads come back pending and are asked for again.
         const XFER_NET_V4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/;
-        // The port a node's own web UI answers on: its entry, else the cluster's, else
-        // the Proxmox default. Only the "Open in Proxmox" links use this.
-        function nodeApiPortOf(cluster, node) {
+        // Where a node's own web UI answers: the address of its entry (empty: its own) and
+        // its port, else the cluster's, else the Proxmox default. Only the "Open in Proxmox"
+        // links use this.
+        function nodeUiEndpointOf(cluster, node) {
             const entry = ((cluster && cluster.node_endpoints) || {})[node] || {};
-            return entry.api_port || (cluster && cluster.api_port) || 8006;
+            return { host: entry.host || '', port: entry.api_port || (cluster && cluster.api_port) || 8006 };
         }
 
         function xferNetValid(value) {
@@ -8058,7 +8059,7 @@
                                 </div>
 
                                 {/* Inbox */}
-                                <div className="max-h-80 overflow-y-auto">
+                                <div className="max-h-72 overflow-y-auto">
                                     {leaderAway && (
                                         <div data-ha-leader-away="inbox" className="px-3 py-6 text-center text-xs text-gray-400">
                                             {t('pgHaLeaderAwayView')}
@@ -21060,14 +21061,14 @@
                                 onClose={() => setCloudBulk(null)} />
                         )}
                         {cloudBulkMigrate && selectedCluster && (
-                            <BulkMigrateModal vms={cloudBulkMigrate} nodes={Array.from(new Set([...Object.keys(clusterMetrics || {}), ...((selectedCluster && selectedCluster.nodes) || []), ...Object.keys((selectedCluster && selectedCluster.node_endpoints) || {})])).sort()} clusterId={selectedCluster.id}
+                            <BulkMigrateModal vms={cloudBulkMigrate} nodes={Object.keys(clusterMetrics)} clusterId={selectedCluster.id}
                                 onMigrate={handleBulkMigrate} onClose={() => setCloudBulkMigrate(null)} />
                         )}
                         {configNode && selectedCluster && (
                             <NodeModal node={configNode} clusterId={selectedCluster.id} clusterType={selectedCluster.cluster_type || 'proxmox'} onClose={() => setConfigNode(null)} addToast={addToast} />
                         )}
                         {dashMigrateVm && (
-                            <MigrateModal vm={dashMigrateVm} nodes={Array.from(new Set([...Object.keys(clusterMetrics || {}), ...((selectedCluster && selectedCluster.nodes) || []), ...Object.keys((selectedCluster && selectedCluster.node_endpoints) || {})])).sort()} clusterId={dashMigrateVm._clusterId || selectedCluster?.id} onMigrate={handleMigrate} onClose={() => setDashMigrateVm(null)} />
+                            <MigrateModal vm={dashMigrateVm} nodes={Object.keys(clusterMetrics)} clusterId={dashMigrateVm._clusterId || selectedCluster?.id} onMigrate={handleMigrate} onClose={() => setDashMigrateVm(null)} />
                         )}
                         {dashCloneVm && (
                             <CloneVmModal vm={dashCloneVm} nodes={Object.keys(clusterMetrics)} clusterId={dashCloneVm._clusterId || selectedCluster?.id} storages={clusterDatastores} onClone={handleCloneVm} onClose={() => setDashCloneVm(null)} />
@@ -22991,7 +22992,7 @@
                                                                     metrics={metrics}
                                                                     clusterId={selectedCluster.id}
                                                                     nodeUiSuffix={selectedCluster.node_ui_suffix || ''}
-                                                                    nodeApiPort={nodeApiPortOf(selectedCluster, node)}
+                                                                    nodeEndpoint={nodeUiEndpointOf(selectedCluster, node)}
                                                                     onOpenNodeConfig={(nodeName) => setConfigNode(nodeName)}
                                                                     onMaintenanceToggle={handleMaintenanceToggle}
                                                                     onStartUpdate={handleStartUpdate}
@@ -23005,13 +23006,13 @@
                                                                 .filter(([nodeName, nodeData]) => nodeData.status === 'offline' && !clusterMetrics[nodeName])
                                                                 .map(([nodeName]) => (
                                                                 <NodeCompactRow key={`offline-${nodeName}`} name={nodeName} metrics={null} clusterId={selectedCluster.id} nodeUiSuffix={selectedCluster.node_ui_suffix || ''}
-                                                                    nodeApiPort={nodeApiPortOf(selectedCluster, nodeName)} />
+                                                                    nodeEndpoint={nodeUiEndpointOf(selectedCluster, nodeName)} />
                                                             ))}
                                                             {Object.entries(nodeAlerts)
                                                                 .filter(([nodeName, alert]) => alert.cluster_id === selectedCluster.id && !clusterMetrics[nodeName] && !knownNodes[nodeName]?.status)
                                                                 .map(([nodeName]) => (
                                                                 <NodeCompactRow key={`alert-${nodeName}`} name={nodeName} metrics={null} clusterId={selectedCluster.id} nodeUiSuffix={selectedCluster.node_ui_suffix || ''}
-                                                                    nodeApiPort={nodeApiPortOf(selectedCluster, nodeName)} />
+                                                                    nodeEndpoint={nodeUiEndpointOf(selectedCluster, nodeName)} />
                                                             ))}
                                                         </div>
                                                         ) : (
@@ -23027,7 +23028,7 @@
                                                                     index={idx}
                                                                     clusterId={selectedCluster.id}
                                                                     nodeUiSuffix={selectedCluster.node_ui_suffix || ''}
-                                                                    nodeApiPort={nodeApiPortOf(selectedCluster, node)}
+                                                                    nodeEndpoint={nodeUiEndpointOf(selectedCluster, node)}
                                                                     onMaintenanceToggle={handleMaintenanceToggle}
                                                                     onStartUpdate={handleStartUpdate}
                                                                     onOpenNodeConfig={(nodeName) => setConfigNode(nodeName)}

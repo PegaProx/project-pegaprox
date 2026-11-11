@@ -110,9 +110,16 @@ def node_endpoint_of(config, node_name) -> dict:
     return entry if isinstance(entry, dict) else {}
 
 
-def ssh_port_of(config, node_name=None) -> int:
-    """The SSH port to dial one node at, its own or the cluster's."""
-    port = node_endpoint_of(config, node_name).get('ssh_port')
+def ssh_port_of(config, node_name=None, host=None) -> int:
+    """The SSH port to dial one node at, its own or the cluster's.
+
+    `host` is the address about to be dialled. A node whose entry names a host has its
+    own port only there: at another address of it (the one it reports, a transfer
+    address) it answers on the cluster's port."""
+    entry = node_endpoint_of(config, node_name)
+    port = entry.get('ssh_port')
+    if port and host and entry.get('host') and str(host).strip('[]').lower() != entry['host'].lower():
+        port = None
     if port:
         return int(port)
     return getattr(config, 'ssh_port', 22) or 22

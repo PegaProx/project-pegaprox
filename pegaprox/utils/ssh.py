@@ -500,10 +500,11 @@ def node_login(config):
     return (user.strip() if isinstance(user, str) else '') or 'root'
 
 
-def node_ssh_port(config):
-    """The port every SSH path dials this cluster's nodes on: the cluster's ssh_port, 22
-    when none is set (the save route only takes 1..65535)."""
-    return _port_or_22(getattr(config, 'ssh_port', 22))
+def node_ssh_port(config, node=None, host=None):
+    """The port every SSH path dials this cluster's nodes on: the node's own where it has
+    one (node_endpoints, see ssh_port_of), else the cluster's ssh_port, 22 when none is
+    set (the save route only takes 1..65535)."""
+    return _port_or_22(ssh_port_of(config, node, host))
 
 
 def ssh_password_for(config):
@@ -875,7 +876,7 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
             return 1, '', f"cannot run node commands on '{node}': {_why}"
         rc, out, err = _ssh_exec(node_host, _ssh_user, _ssh_pass, cmd,
                                   timeout=timeout, use_controlmaster=use_controlmaster,
-                                  stdin_data=stdin_data, port=ssh_port_of(pve_mgr.config, node))
+                                  stdin_data=stdin_data, port=node_ssh_port(pve_mgr.config, node, node_host))
         # SSH error patterns that indicate the node itself is dead, not the cmd
         looks_like_node_down = (
             rc != 0 and any(s in str(err).lower() for s in (

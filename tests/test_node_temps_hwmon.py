@@ -154,7 +154,7 @@ def _wire_ssh(m, calls, answer):
     """Route the manager's SSH reads to answer(command) and record them. The whole
     key / own keys / password ladder is replaced, so a None here never goes on to a real
     password login (test_node_reads_cluster_key_601 covers the ladder)."""
-    def run(ip, user, command, timeout=30):
+    def run(ip, user, command, timeout=30, node=None):
         calls.append(('ssh', command))
         return answer(command)
     m._ssh_read_output = run

@@ -125,7 +125,8 @@ def _get_any_online_node(manager):
 
 def _resolve_node_ip(manager, node_name):
     """MK: resolve node name to IP via cluster/status API
-    We need the actual IP for SSH, not the node name."""
+    We need the actual IP for SSH, not the node name. None when there is none: _rbd_cmd
+    then goes to the cluster host, on the cluster's SSH port."""
     # An address configured for the node wins over the one it reports for itself,
     # the same way manager._get_node_ip treats it.
     configured = node_endpoint_of(getattr(manager, 'config', None), node_name).get('host')
@@ -137,11 +138,10 @@ def _resolve_node_ip(manager, node_name):
         if resp.status_code == 200:
             for item in resp.json().get('data', []):
                 if item.get('type') == 'node' and item.get('name') == node_name:
-                    return item.get('ip', manager.raw_host)
+                    return item.get('ip')
     except:
         pass
-    # fallback — raw IP for SSH, not bracketed
-    return manager.raw_host
+    return None
 
 
 def _rbd_cmd(manager, node_ip, args, timeout=30, expect_json=True, node=None):
@@ -152,6 +152,10 @@ def _rbd_cmd(manager, node_ip, args, timeout=30, expect_json=True, node=None):
     rate limiting, retries etc. We just need the IP.
     """
     ssh = None
+    if not node_ip:
+        # fallback — raw IP for SSH, not bracketed, on the cluster's port: the node's own
+        # port is not the cluster host's
+        node_ip, node = manager.raw_host, None
     try:
         ssh = manager._ssh_connect(node_ip, node=node)
         if not ssh:
@@ -210,6 +214,8 @@ def _rbd_batch(manager, node_ip, arg_list, timeout=30, expect_json=True, node=No
     (data, err) tuples in the same order as arg_list.
     """
     ssh = None
+    if not node_ip:
+        node_ip, node = manager.raw_host, None   # as in _rbd_cmd
     try:
         ssh = manager._ssh_connect(node_ip, node=node)
         if not ssh:

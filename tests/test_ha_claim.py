@@ -725,7 +725,7 @@ def _on(env):
     m.stop = lambda: None
     m.get_ha_status = lambda: {'cluster_claim': m._ha_claim_status()}
     m._ha_node_ip_map = lambda: {'pve1': '10.9.0.1', 'pve2': '10.9.0.2'}
-    m._ha_agent_ssh = lambda ip, cmd, timeout=30: 'AGENT_UNINSTALLED\nNODE_AGENT_REMOVED\n'
+    m._ha_agent_ssh = lambda ip, cmd, timeout=30, node=None: 'AGENT_UNINSTALLED\nNODE_AGENT_REMOVED\n'
     m._ha_cleanup_storage_heartbeat = lambda: {'attempted': False}
     m.is_connected = False
     m.sent.clear()
@@ -1011,7 +1011,7 @@ def test_with_the_claim_off_nothing_in_etc_pve_is_looked_at_or_touched(claimed, 
     m.stop_ha_monitor = m.stop = lambda: None
     m.get_ha_status = lambda: {}
     m._ha_node_ip_map = lambda: {'pve1': '10.9.0.1'}
-    m._ha_agent_ssh = lambda ip, cmd, timeout=30: 'AGENT_UNINSTALLED\nNODE_AGENT_REMOVED\n'
+    m._ha_agent_ssh = lambda ip, cmd, timeout=30, node=None: 'AGENT_UNINSTALLED\nNODE_AGENT_REMOVED\n'
     m._ha_cleanup_storage_heartbeat = lambda: {'attempted': False}
     m.is_connected = False
     _plant(claimed.pve, f'3 {A} - 1700000000 0\n')

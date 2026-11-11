@@ -528,7 +528,7 @@ def validate_ws_token_api():
                         # Per-node SSH ports, for the nodes that have their own. Both
                         # context sources have to carry it or a shell works on one flow
                         # and not the other.
-                        'node_ports': {n: ssh_port_of(cfg, n) for n in node_ips
+                        'node_ports': {n: ssh_port_of(cfg, n, ip) for n, ip in node_ips.items()
                                        if not n.startswith('_')},
                         # MK Sep 2026 (#956) - the termproxy's PVE upgrade port. Both context
                         # sources have to carry it or the bug survives on one of the two flows.

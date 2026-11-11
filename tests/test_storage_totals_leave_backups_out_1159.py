@@ -125,9 +125,6 @@ class _Pve:
     def _mark_host_failure(self, host):
         raise AssertionError('both reads answered')
 
-    def _connected_cooldown_key(self):
-        return 'pve.example'
-
 
 class _Xen:
     cluster_type = 'xcpng'

@@ -153,29 +153,45 @@ def test_a_saved_map_is_put_back_on_the_selected_cluster():
 def test_the_link_no_longer_pins_8006():
     tables = _read('web', 'src', 'tables.js')
     assert ':8006/#v1' not in tables
-    assert "const port = target.node_api_port || target.api_port || 8006;" in tables
+    assert "const port = ep.port || target.api_port || 8006;" in tables
+
+
+def test_a_node_with_an_address_of_its_own_is_linked_there():
+    """The port of an entry goes with the address of that entry, never with the node name."""
+    tables = _read('web', 'src', 'tables.js')
+    fn = tables[tables.index('function getProxmoxObjectUrl('):]
+    assert "const ep = target.node_endpoint || {};" in fn
+    assert "const host = ep.host || (" in fn
 
 
 @pytest.mark.parametrize('component', ['NodeCard', 'NodeCompactRow'])
-def test_both_node_rows_carry_the_port(component):
+def test_both_node_rows_carry_the_endpoint(component):
     tables = _read('web', 'src', 'tables.js')
     sig = tables[tables.index('function %s({' % component):]
-    assert 'nodeApiPort' in sig[:sig.index('}')]
+    assert 'nodeEndpoint' in sig[:sig.index('}')]
+    assert 'node_endpoint: nodeEndpoint' in tables
 
 
-def test_the_port_helper_falls_back_to_the_cluster_and_then_to_the_default():
+def test_the_endpoint_helper_pairs_the_address_with_its_port():
     src = _read('web', 'src', 'dashboard.js')
-    fn = src[src.index('function nodeApiPortOf('):]
+    fn = src[src.index('function nodeUiEndpointOf('):]
     fn = fn[:fn.index('\n        }')]
-    assert "entry.api_port || (cluster && cluster.api_port) || 8006" in fn
+    assert "host: entry.host || ''" in fn
+    assert "port: entry.api_port || (cluster && cluster.api_port) || 8006" in fn
 
 
-def test_every_node_row_is_given_the_port_of_its_own_node():
+def test_every_node_row_is_given_the_endpoint_of_its_own_node():
     src = _read('web', 'src', 'dashboard.js')
-    calls = re.findall(r'nodeApiPort=\{nodeApiPortOf\(selectedCluster, (\w+)\)\}', src)
+    calls = re.findall(r'nodeEndpoint=\{nodeUiEndpointOf\(selectedCluster, (\w+)\)\}', src)
     assert len(calls) == 4
     # the name of the node being rendered, never a handler argument of the same name
     assert set(calls) == {'node', 'nodeName'}
+
+
+def test_the_migrate_targets_are_the_clusters_nodes_not_the_endpoint_map():
+    src = _read('web', 'src', 'dashboard.js')
+    assert '<BulkMigrateModal vms={cloudBulkMigrate} nodes={Object.keys(clusterMetrics)}' in src
+    assert '<MigrateModal vm={dashMigrateVm} nodes={Object.keys(clusterMetrics)}' in src
 
 
 def test_the_credential_goes_in_the_field_the_server_names():

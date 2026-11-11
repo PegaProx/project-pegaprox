@@ -84,9 +84,6 @@ class _Pve:
     def _mark_host_failure(self, host):
         self.cold.append(host)
 
-    def _connected_cooldown_key(self):
-        return self.host
-
     def connect_to_proxmox(self):
         self.reconnects += 1
 

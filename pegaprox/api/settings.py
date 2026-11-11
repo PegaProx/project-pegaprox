@@ -2984,6 +2984,15 @@ def restore_config():
                             results['errors'].append(f"Cluster {cluster_id}: node_ui_suffix is not a "
                                                      f"domain name, the node links go without one")
                         cluster['node_ui_suffix'] = _sfx
+                    # where the cluster's credential goes per node: checked as on the cluster routes
+                    if 'node_endpoints' in cluster:
+                        from pegaprox.api.clusters import node_endpoints_problem
+                        from pegaprox.models.tasks import normalize_node_endpoints
+                        _nep = node_endpoints_problem(cluster['node_endpoints'])
+                        if _nep:
+                            results['errors'].append(f"Cluster {cluster_id}: {_nep}, the nodes go "
+                                                     f"without addresses and ports of their own")
+                        cluster['node_endpoints'] = {} if _nep else normalize_node_endpoints(cluster['node_endpoints'])
 
                     if not dry_run:
                         database.save_cluster(cluster_id, cluster)

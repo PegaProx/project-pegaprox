@@ -4136,7 +4136,6 @@ class PegaProxDB:
         'name', 'host', 'port', 'user', 'password_encrypted', 'cluster_type',
         'auto_balance', 'balance_threshold', 'balance_local_disks', 'migration_tolerance',
         'ha_enabled', 'ha_check_interval', 'smbios_autoconfig', 'max_migrations_per_cycle',
-        'node_endpoints',
         # MK May 2026 — worldmap (per-cluster location).
         'latitude', 'longitude', 'location_label',
     })

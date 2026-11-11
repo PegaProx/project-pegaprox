@@ -1767,7 +1767,7 @@ def get_cluster_creds_internal(cluster_id):
     # its own SSH port is named here, the rest of the map is the cluster's port, and a
     # consumer that does not know the key falls back to `ssh_port` as before.
     _cfg = getattr(mgr, 'config', None)
-    node_ports = {n: ssh_port_of(_cfg, n) for n in node_ips if not n.startswith('_')}
+    node_ports = {n: ssh_port_of(_cfg, n, ip) for n, ip in node_ips.items() if not n.startswith('_')}
     resp = {
         'host': cluster_host,
         'node_ips': node_ips,

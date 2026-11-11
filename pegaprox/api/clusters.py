@@ -555,16 +555,36 @@ _KEPT_BY_RECONFIGURE = (
 )
 
 
-def _endpoints_moved(current, new, known):
-    """Whether a replacement node_endpoints map moves where a credential is offered: a
-    host that is none of the cluster's known addresses, or any port that changes, a
-    removed override included (that node falls back to the cluster's port, another
-    listener). Taking a host away is no move, the node goes back to its own address."""
+def _listeners(cfg):
+    """(address, port) of every listener the cluster's credential already goes to: its host
+    and fallback hosts on its SSH and API ports, each node endpoint's host on that node's."""
+    ssh, api = int(getattr(cfg, 'ssh_port', 22) or 22), int(getattr(cfg, 'api_port', 8006) or 8006)
+    hosts = [cfg.host] + list(getattr(cfg, 'fallback_hosts', None) or [])
+    pairs = {(_host_key(h), p) for h in hosts if h for p in (ssh, api)}
+    for e in (getattr(cfg, 'node_endpoints', None) or {}).values():
+        if e.get('host'):
+            pairs.add((_host_key(e['host']), e.get('ssh_port') or ssh))
+            pairs.add((_host_key(e['host']), e.get('api_port') or api))
+    return pairs
+
+
+def _endpoints_moved(old_cfg, new, ssh, api):
+    """Whether a replacement node_endpoints map moves where a credential is offered: an
+    entry that changed and names an (address, port) the cluster does not use yet, or a
+    changed port on a node at its own address (another listener there, a removed
+    override included). Taking a host away is no move, the node goes back to its own
+    address. `ssh` and `api` are the cluster's ports after the change."""
+    known = _listeners(old_cfg)
+    current = getattr(old_cfg, 'node_endpoints', None) or {}
     for node in set(current) | set(new):
         old_e, new_e = current.get(node) or {}, new.get(node) or {}
-        if new_e.get('host') and _host_key(new_e['host']) not in known:
-            return True
-        if any(new_e.get(k) != old_e.get(k) for k in ('ssh_port', 'api_port')):
+        if new_e == old_e:
+            continue
+        if new_e.get('host'):
+            host = _host_key(new_e['host'])
+            if not {(host, new_e.get('ssh_port') or ssh), (host, new_e.get('api_port') or api)} <= known:
+                return True
+        elif any(new_e.get(k) != old_e.get(k) for k in ('ssh_port', 'api_port')):
             return True
     return False
 
@@ -592,11 +612,9 @@ def _moved_by_reconfigure(old, new, data):
     if getattr(old, 'ssl_verification', False) and not getattr(new, 'ssl_verification', False):
         moved.append('ssl_verification')
     # a map the body leaves out is the old one (_KEPT_BY_RECONFIGURE), no move
-    if 'node_endpoints' in data:
-        old_eps = getattr(old, 'node_endpoints', None) or {}
-        known |= {_host_key(e.get('host')) for e in old_eps.values() if e.get('host')}
-        if _endpoints_moved(old_eps, getattr(new, 'node_endpoints', None) or {}, known):
-            moved.append('node_endpoints')
+    if 'node_endpoints' in data and _endpoints_moved(old, getattr(new, 'node_endpoints', None) or {},
+                                                     port(new), int(getattr(new, 'api_port', 8006) or 8006)):
+        moved.append('node_endpoints')
     return moved
 
 
@@ -2193,9 +2211,42 @@ def _node_ui_suffix_error(data):
     return None
 
 
+NODE_ENDPOINTS_MAX = 512   # as many nodes as excluded_nodes takes
+
+
+def node_endpoints_problem(raw):
+    """What is wrong with a node_endpoints map, None when it is {node: {host?, ssh_port?,
+    api_port?}} with node names, host names or addresses and ports. The cluster routes and
+    the backup restore ask the same."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return 'node_endpoints must be an object keyed by node name'
+    if len(raw) > NODE_ENDPOINTS_MAX:
+        return f'node_endpoints takes at most {NODE_ENDPOINTS_MAX} nodes'
+    from pegaprox.core import node_creds
+    for node, spec in raw.items():
+        if not node_creds.node_name_ok(node):
+            return 'node_endpoints keys must be node names'
+        if not isinstance(spec, dict):
+            return f"node_endpoints[{node}] must be an object"
+        unknown = set(spec) - {'host', 'ssh_port', 'api_port'}
+        if unknown:
+            return f"node_endpoints[{node}]: unknown field {sorted(unknown)[0]!r}"
+        host = spec.get('host')
+        if host not in (None, '') and not (endpoint_host(host) and validate_host_address(host.strip())):
+            return (f"node_endpoints[{node}]: host must be a bare host name or address, "
+                    f"without scheme, path or port")
+        for key in ('ssh_port', 'api_port'):
+            port = spec.get(key)
+            if port not in (None, '') and endpoint_port(port) is None:
+                return f"node_endpoints[{node}]: {key} must be a port between 1 and 65535"
+    return None
+
+
 def _node_endpoints_error(data):
-    """A 400 when the body sets node_endpoints to anything but {node: {host?, ssh_port?,
-    api_port?}}. Normalises it in place.
+    """A 400 when the body sets node_endpoints to anything node_endpoints_problem refuses.
+    Normalises it in place.
 
     Rejected rather than quietly dropped: an operator who mistypes a port here would
     otherwise be told the cluster saved fine and find PegaProx still dialling the old
@@ -2203,31 +2254,10 @@ def _node_endpoints_error(data):
     """
     if 'node_endpoints' not in data:
         return None
-    raw = data['node_endpoints']
-    if raw is None:
-        data['node_endpoints'] = {}
-        return None
-    if not isinstance(raw, dict):
-        return jsonify({'error': 'node_endpoints must be an object keyed by node name'}), 400
-    for node, spec in raw.items():
-        if not isinstance(node, str) or not node.strip():
-            return jsonify({'error': 'node_endpoints keys must be node names'}), 400
-        if not isinstance(spec, dict):
-            return jsonify({'error': f"node_endpoints[{node}] must be an object"}), 400
-        unknown = set(spec) - {'host', 'ssh_port', 'api_port'}
-        if unknown:
-            return jsonify({'error': f"node_endpoints[{node}]: unknown field "
-                                     f"{sorted(unknown)[0]!r}"}), 400
-        host = spec.get('host')
-        if host not in (None, '') and not endpoint_host(host):
-            return jsonify({'error': f"node_endpoints[{node}]: host must be a bare host name "
-                                     f"or address, without scheme, path or port"}), 400
-        for key in ('ssh_port', 'api_port'):
-            port = spec.get(key)
-            if port not in (None, '') and endpoint_port(port) is None:
-                return jsonify({'error': f"node_endpoints[{node}]: {key} must be a port "
-                                         f"between 1 and 65535"}), 400
-    data['node_endpoints'] = normalize_node_endpoints(raw)
+    problem = node_endpoints_problem(data['node_endpoints'])
+    if problem:
+        return jsonify({'error': problem}), 400
+    data['node_endpoints'] = normalize_node_endpoints(data['node_endpoints'])
     return None
 
 
@@ -2268,10 +2298,8 @@ def _config_edit_checks(mgr, data):
         return (jsonify({'error': msg}), 400), None
 
     known = set()
-    if 'host' in data or 'fallback_hosts' in data or 'node_endpoints' in data:
+    if 'host' in data or 'fallback_hosts' in data:
         known = {_host_key(cfg.host)} | {_host_key(h) for h in (getattr(cfg, 'fallback_hosts', None) or [])}
-        known |= {_host_key(e.get('host')) for e in (getattr(cfg, 'node_endpoints', None) or {}).values()
-                  if e.get('host')}
     moved = []
     if 'host' in data:
         host = data.get('host')
@@ -2309,16 +2337,12 @@ def _config_edit_checks(mgr, data):
             moved.append('ssh_port')
     # An endpoint map moves the credential exactly as host and ssh_port do: the cluster
     # password or token secret is offered at every address PegaProx dials a node at, and
-    # the port decides which listener receives it. New address or changed port, so the
-    # same rule -- type the credential again. _node_endpoints_error has already
-    # normalised the map by the time this runs.
+    # the port decides which listener receives it. A listener the cluster does not use
+    # yet, so the same rule -- type the credential again. _node_endpoints_error has
+    # already checked and normalised the map by the time this runs.
     if 'node_endpoints' in data:
-        for node, spec in (data.get('node_endpoints') or {}).items():
-            host = spec.get('host')
-            if host and _host_key(host) not in known and not validate_host_address(host):
-                return bad(f"node_endpoints[{node}]: host must be a host name or an IP address")
-        if _endpoints_moved(getattr(cfg, 'node_endpoints', None) or {}, data.get('node_endpoints') or {},
-                            known):
+        ssh = data.get('ssh_port') or int(getattr(cfg, 'ssh_port', 22) or 22)
+        if _endpoints_moved(cfg, data.get('node_endpoints') or {}, ssh, int(getattr(cfg, 'api_port', 8006) or 8006)):
             moved.append('node_endpoints')
     if 'ssl_verification' in data and getattr(cfg, 'ssl_verification', False) \
             and not data.get('ssl_verification'):

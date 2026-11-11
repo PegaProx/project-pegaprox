@@ -1,4 +1,3 @@
-from pegaprox.models.tasks import ssh_port_of
 # -*- coding: utf-8 -*-
 """VM operations, snapshots, backups, replication & console routes - split from monolith dec 2025, NS/MK"""
 
@@ -22,6 +21,7 @@ from flask import Blueprint, jsonify, request, g, current_app, Response
 from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
+from pegaprox.models.tasks import ssh_port_of, node_endpoint_of
 from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import (require_auth, load_users, validate_session, build_authz_user,
@@ -221,7 +221,7 @@ def get_datacenter_status(cluster_id):
             # a walk timed out / errored — mark the primary cold AND force an
             # immediate reconnect so manager.host pivots to a warm fallback for the
             # next request (otherwise the host pointer still points at the dead one).
-            manager._mark_host_failure(manager._connected_cooldown_key())
+            manager._mark_host_failure(host)
             try:
                 manager.is_connected = False
                 manager.connect_to_proxmox()
@@ -689,7 +689,7 @@ def set_datacenter_options(cluster_id):
         try:
             response = manager._create_session().put(url, data=data, timeout=30)
         except requests.exceptions.Timeout:
-            manager._mark_host_failure(manager._connected_cooldown_key())
+            manager._mark_host_failure(host)
             try:
                 manager.is_connected = False
                 manager.connect_to_proxmox()
@@ -4076,8 +4076,11 @@ def remove_node_from_cluster(cluster_id, node_name):
         for node in nodes:
             if node.get('node') != node_name and node.get('status') == 'online':
                 online_node = node.get('node')
+                online_node_ip = mgr._get_node_ip(online_node)
+                # its own SSH port goes with its own address, not with the cluster host
+                online_port = ssh_port_of(cluster_config, online_node, online_node_ip) if online_node_ip else ssh_port
                 # plain address for paramiko and the pin, an IPv6 one may come bracketed
-                online_node_ip = bare_host(mgr._get_node_ip(online_node) or cluster_config.host)
+                online_node_ip = bare_host(online_node_ip or cluster_config.host)
                 break
         
         if not online_node:
@@ -4088,6 +4091,7 @@ def remove_node_from_cluster(cluster_id, node_name):
         # would return wrong/stale data, potentially wiping another node's config!
         removed_node_ip = mgr._get_node_ip(node_name) if hasattr(mgr, '_get_node_ip') else None
         removed_node_ip = bare_host(removed_node_ip) or None
+        removed_port = ssh_port_of(cluster_config, node_name, removed_node_ip)
         logging.info(f"[RemoveNode] Pre-resolved IP for {node_name}: {removed_node_ip}")
         # its password too, while it is still a member (#1136)
         removed_node_password = ssh_password_to(mgr, removed_node_ip) if removed_node_ip else ''
@@ -4114,13 +4118,13 @@ def remove_node_from_cluster(cluster_id, node_name):
                     except:
                         continue
                 if pkey:
-                    ssh.connect(online_node_ip, port=ssh_port, username=ssh_user, pkey=pkey, timeout=30)
+                    ssh.connect(online_node_ip, port=online_port, username=ssh_user, pkey=pkey, timeout=30)
                     connected = True
             except Exception as key_err:
                 logging.debug(f"[RemoveNode] SSH key auth failed: {key_err}")
         
         if not connected and ssh_password:
-            ssh.connect(online_node_ip, port=ssh_port, username=ssh_user, password=ssh_password, timeout=30)
+            ssh.connect(online_node_ip, port=online_port, username=ssh_user, password=ssh_password, timeout=30)
             connected = True
         
         if not connected:
@@ -4176,13 +4180,13 @@ def remove_node_from_cluster(cluster_id, node_name):
                             # no persist here: this connects to a node being REMOVED —
                             # pinning its key would wrongly reject-on-change if the node
                             # is later reinstalled and re-added.
-                            ssh_cleanup.connect(removed_node_ip, port=ssh_port, username=ssh_user, pkey=pkey, timeout=15)
+                            ssh_cleanup.connect(removed_node_ip, port=removed_port, username=ssh_user, pkey=pkey, timeout=15)
                             cleanup_connected = True
                     except:
                         pass
                 if not cleanup_connected and ssh_password:
                     try:
-                        ssh_cleanup.connect(removed_node_ip, port=ssh_port, username=ssh_user, password=ssh_password, timeout=15)
+                        ssh_cleanup.connect(removed_node_ip, port=removed_port, username=ssh_user, password=ssh_password, timeout=15)
                         cleanup_connected = True
                     except:
                         pass
@@ -5452,7 +5456,7 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
                 ssh_user=_ssh_user, ssh_port=_ssh_port,
                 ssh_key_content=getattr(mgr.config, 'ssh_key', '') or '',
                 ssh_password=ssh_password_to(mgr, host),
-                target_host='127.0.0.1', target_port=getattr(mgr, 'cluster_api_port', 8006) or 8006,
+                target_host='127.0.0.1', target_port=_api_port,
             )
             target_host, target_port = '127.0.0.1', tunnel_endpoint.local_port
     except Exception as te:
@@ -5695,7 +5699,7 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
                     ssh_user=_ssh_user, ssh_port=_ssh_port,
                     ssh_key_content=getattr(mgr.config, 'ssh_key', '') or '',
                     ssh_password=ssh_password_to(mgr, host),
-                    target_host='127.0.0.1', target_port=getattr(mgr, 'cluster_api_port', 8006) or 8006,
+                    target_host='127.0.0.1', target_port=port,
                 )
                 target_host = '127.0.0.1'
                 target_port = tunnel_endpoint.local_port
@@ -9646,7 +9650,10 @@ def _xcincr_ssh(mgr, node, job_id):
         logging.warning(f"[XCINCR] Job {job_id}: transfer address {via} of {node} not used "
                         f"({failure.get('kind') or 'error'}: {failure.get('detail') or 'no connection'}) - "
                         f"relaying over its management address {mgmt_ip}")
-    return mgr._ssh_connect(mgmt_ip, node=node)
+    # an address configured for the node goes with its own port; the reported one with
+    # the cluster's (ssh_port_of), the forward in front of it is not the node
+    own = node_endpoint_of(getattr(mgr, 'config', None), node).get('host')
+    return mgr._ssh_connect(own or mgmt_ip, node=node)
 
 
 def _xcincr_rbd_pool(ssh, storage):
@@ -11820,7 +11827,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                 try:
                     from pegaprox.utils import vnc_tunnel as _vt
                     _ssh_user = node_login(manager.config)
-                    _ssh_port = ssh_port_of(manager.config, node) if (node and "node" in locals()) else (getattr(manager.config, "ssh_port", 22) or 22)
+                    _ssh_port = getattr(manager.config, 'ssh_port', 22) or 22
                     _ssh_key = getattr(manager.config, 'ssh_key', '') or ''
                     _ssh_pass = ssh_password_to(manager, host)
                     # MK Apr 2026 — _vt.acquire() is sync. On the *first* call for a
@@ -11840,7 +11847,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                         ssh_key_content=_ssh_key,
                         ssh_password=_ssh_pass,
                         target_host='127.0.0.1',
-                        target_port=getattr(manager, 'cluster_api_port', 8006) or 8006,
+                        target_port=port,
                     )
                     # Reroute the WSS through the local listener
                     tunnel_target_host = '127.0.0.1'
@@ -13772,7 +13779,7 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
         # Connect
         ssh.connect(
             hostname=_ssh_host,
-            port=getattr(manager.config, 'ssh_port', 22) or 22,
+            port=ssh_port_of(manager.config, node, _ssh_host),
             username=ssh_user,
             password=ssh_pass,
             timeout=30,

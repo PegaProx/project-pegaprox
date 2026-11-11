@@ -2185,7 +2185,6 @@ def rescan_storage(cluster_id, storage_id):
                             
                             # Get SSH config from cluster
                             ssh_user = node_login(manager.config)
-                            ssh_port = ssh_port_of(manager.config, node)
                             ssh_key = getattr(manager.config, 'ssh_key', '')
 
                             # Determine node hostname. MK Oct 2026 (#1136): the node's own
@@ -2194,6 +2193,8 @@ def rescan_storage(cluster_id, storage_id):
                             # The '<node>.<domain>' guess only means something for a name: from
                             # an IP literal it made 'pve2.0.0.5', or 'pve2.[2001:db8::10]'
                             node_host = bare_host(manager.member_node_ip(node))
+                            # the node's own SSH port goes with its own address, not with a guess
+                            ssh_port = ssh_port_of(manager.config, node if node_host else None, node_host)
                             if not node_host:
                                 _cluster_host = bare_host(host)
                                 if node == nodes[0]:
