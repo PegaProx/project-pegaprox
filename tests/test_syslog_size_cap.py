@@ -106,6 +106,116 @@ def test_time_based_retention_still_works(syslog_db, monkeypatch):
     assert _count() == 100
 
 
+# --- the schema the receiver really creates: six indexes and FTS5 ---------------
+#
+# The cap measured the file, which never shrinks without a VACUUM. Once the file had been
+# over the cap, every hourly run deleted about 70% of the table again and the history was
+# down to a few hundred rows within hours. On the bare table above a delete gives its pages
+# back at once; with the FTS5 index a delete is a marker in a new segment and the space only
+# comes back after a merge, so these run on what _init_db builds.
+
+_CAP_MB = 5
+
+
+def _words(n, seed):
+    import random
+    rnd = random.Random(seed)
+    letters = 'abcdefghijklmnopqrstuvwxyz'
+    return [''.join(rnd.choice(letters) for _ in range(rnd.randint(3, 10))) for _ in range(n)]
+
+
+_VOCAB = _words(4000, 7)
+
+
+def _lines(rows, seed):
+    """Rows as the listeners queue them, with words for the FTS5 index to hold."""
+    import random
+    rnd = random.Random(seed)
+    now = datetime.datetime.now().isoformat()
+    return [(now, '192.0.2.%d' % (i % 200), 'pve%d' % (i % 200), 1, 6, 'info',
+             ' '.join(rnd.choices(_VOCAB, k=20)), 'UDP') for i in range(rows)]
+
+
+def _in_use():
+    """The pages that hold data; the free ones in the file get reused."""
+    conn = sl._open_db()
+    try:
+        pages, free, size = (int(conn.execute(f'PRAGMA {p}').fetchone()[0])
+                             for p in ('page_count', 'freelist_count', 'page_size'))
+        return (pages - free) * size
+    finally:
+        conn.close()
+
+
+@pytest.fixture(scope='module')
+def _over_the_cap(tmp_path_factory):
+    """One syslog.db about four times the cap, built once and copied for each test."""
+    path = str(tmp_path_factory.mktemp('syslog') / 'syslog.db')
+    saved = sl.DB_FILE
+    sl.DB_FILE = path
+    try:
+        sl._init_db()
+        for k in range(24):
+            sl._flush_batch(_lines(1000, k))
+    finally:
+        sl.DB_FILE = saved
+    return path
+
+
+@pytest.fixture
+def full_db(_over_the_cap, tmp_path, monkeypatch):
+    import shutil
+    path = str(tmp_path / 'syslog.db')
+    for suffix in ('', '-wal', '-shm'):
+        if os.path.exists(_over_the_cap + suffix):
+            shutil.copy(_over_the_cap + suffix, path + suffix)
+    monkeypatch.setattr(sl, 'DB_FILE', path)
+    conn = sl._open_db()
+    try:
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+    finally:
+        conn.close()
+    assert {'logs_fts', 'logs_ad', 'idx_logs_timestamp_id'} <= names
+    assert _in_use() > 3 * _CAP_MB * 1024 * 1024
+    _settings(monkeypatch, syslog_max_db_mb=_CAP_MB)
+    return path
+
+
+def test_after_a_prune_the_data_fits_in_the_cap(full_db):
+    """And it keeps about what fits, rather than whatever the deletes happen to leave."""
+    fits = _CAP_MB * 1024 * 1024 / (_in_use() / _count())
+
+    sl._prune_old_logs()
+
+    assert _in_use() <= _CAP_MB * 1024 * 1024, \
+        f'{_in_use() // 1024} KB in use after the prune, the cap is {_CAP_MB} MB'
+    assert _count() >= 0.7 * fits, f'{_count()} rows kept, about {int(fits)} fit in the cap'
+
+
+def test_a_second_prune_with_nothing_new_deletes_nothing(full_db):
+    """The file is still over the cap, and it will stay there."""
+    sl._prune_old_logs()
+    kept = _count()
+    assert os.path.getsize(full_db) > _CAP_MB * 1024 * 1024
+
+    sl._prune_old_logs()
+
+    assert _count() == kept, f'the second prune dropped {kept - _count()} of {kept} rows'
+
+
+def test_quiet_hours_after_a_flood_keep_the_history(full_db):
+    """One flood over the cap, then ordinary traffic far below it, an hour at a time."""
+    sl._prune_old_logs()
+    kept = _count()
+
+    for hour in range(6):
+        sl._flush_batch(_lines(150, 100 + hour))
+        sl._prune_old_logs()
+        assert _count() >= 0.8 * kept, \
+            f'{_count()} rows left after hour {hour}, {kept} after the flood'
+        assert _in_use() <= _CAP_MB * 1024 * 1024
+
+
 # --- memory: the count cap was a cap on the wrong thing ----------------------
 
 def _row(message):

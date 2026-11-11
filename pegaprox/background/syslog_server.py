@@ -118,6 +118,32 @@ def _flush_batch(batch):
             pass
 
 
+def _bytes_in_use(cur):
+    """The pages that hold data. The free ones are part of the file but get reused, so
+    they do not count against the cap."""
+    pages = int(cur.execute("PRAGMA page_count").fetchone()[0])
+    free = int(cur.execute("PRAGMA freelist_count").fetchone()[0])
+    return (pages - free) * int(cur.execute("PRAGMA page_size").fetchone()[0])
+
+
+def _fold_fts_deletes(conn):
+    """Merge the FTS5 index until nothing is left to merge, so the entries of deleted rows
+    give their pages back. Each step is its own transaction and a waiting flush gets in
+    between. False when it could not finish."""
+    # a step writes about 2000 pages, so this is twice what the whole file could need
+    steps = _bytes_in_use(conn.cursor()) // (4 * 1024 * 1024) + 8
+    try:
+        for _ in range(steps):
+            before = conn.total_changes
+            conn.execute("INSERT INTO logs_fts(logs_fts, rank) VALUES('merge', -2000)")
+            conn.commit()
+            if conn.total_changes - before < 2:     # FTS5: fewer than 2 means no work left
+                return True
+    except dbcrypto.OperationalError as e:
+        logging.warning(f"[Syslog] FTS merge after the size cap failed: {e}")
+    return False
+
+
 def _prune_old_logs():
     """S1: delete syslog rows older than the retention window (off-hub). The
     receiver only ever INSERTs, so without this syslog.db grows unbounded on the
@@ -152,6 +178,12 @@ def _prune_old_logs():
             # on a server that is by then short of disk, which is the worst possible
             # moment. The freed pages are reused, so the file stops GROWING, which is
             # what actually matters here.
+            #
+            # MK Nov 2026 - which is also why the file size cannot be the measure: once
+            # the file has been over the cap it stays there, and every hourly run deleted
+            # another 70% of the table for nothing. Measure the pages in use instead. With
+            # FTS5 those only come back after a merge (a delete is a marker in a new index
+            # segment), so fold the deletes into the index before measuring again.
             try:
                 from pegaprox.api.helpers import load_server_settings as _lss
                 _max_mb = int(_lss().get('syslog_max_db_mb', 2048) or 2048)
@@ -159,28 +191,38 @@ def _prune_old_logs():
                 _max_mb = 2048
             if _max_mb > 0:
                 _limit = _max_mb * 1024 * 1024
-                for _round in range(12):
-                    try:
-                        _size = os.path.getsize(DB_FILE)
-                    except OSError:
+                _fts = cur.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                                   "AND name = 'logs_fts'").fetchone() is not None
+                for _round in range(3):
+                    _used = _bytes_in_use(cur)
+                    if _used <= _limit:
                         break
-                    if _size <= _limit:
-                        break
-                    # oldest 10% by id, which is insertion order
                     cur.execute("SELECT COUNT(*) FROM logs")
                     _total = cur.fetchone()[0] or 0
-                    if _total < 1000:
+                    if _total <= 1000:
                         break          # nothing left worth deleting; the file is bloat
-                    cur.execute("DELETE FROM logs WHERE id IN "
-                                "(SELECT id FROM logs ORDER BY id LIMIT ?)",
-                                (max(1000, _total // 10),))
-                    _gone = cur.rowcount
-                    conn.commit()
+                    # the oldest rows (by id, which is insertion order) that hold the excess
+                    # at the average row size, down to 90% of the cap so the next hours fit
+                    # without another round. In steps of a tenth of the table, which keeps
+                    # each transaction (and the WAL) as small as before.
+                    _drop = min(_total - 1000, int(_total * (1 - _limit * 0.9 / _used)) + 1)
+                    _step = max(1000, _total // 10)
+                    _gone = 0
+                    while _gone < _drop:
+                        cur.execute("DELETE FROM logs WHERE id IN "
+                                    "(SELECT id FROM logs ORDER BY id LIMIT ?)",
+                                    (min(_step, _drop - _gone),))
+                        if cur.rowcount <= 0:
+                            break
+                        _gone += cur.rowcount
+                        conn.commit()
                     logging.warning(
-                        f"[Syslog] size cap: {_size // (1024*1024)}MB exceeds "
+                        f"[Syslog] size cap: {_used // (1024*1024)}MB in use exceeds "
                         f"{_max_mb}MB, dropped the {_gone} oldest rows")
                     if not _gone:
                         break
+                    if _fts and not _fold_fts_deletes(conn):
+                        break          # the measure would still count the deleted rows
         finally:
             try:
                 conn.close()
