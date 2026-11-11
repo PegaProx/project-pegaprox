@@ -26,11 +26,13 @@
                     const resp = await authFetch(`${API_URL}/clusters/${clusterId}/networks`);
                     if (resp && resp.ok) {
                         const data = await resp.json();
-                        setNetworks(data.networks || []);
+                        // LW Nov 2026 - an XCP-ng pool used to answer the bare list, take either
+                        const list = Array.isArray(data) ? data : (data?.networks || []);
+                        setNetworks(list);
                         // auto-select from sidebar click or pick first
-                        if (data.networks?.length > 0) {
-                            const pick = initialNetwork && data.networks.find(n => n.name === initialNetwork)
-                                ? initialNetwork : (selectedNetwork || data.networks[0].name);
+                        if (list.length > 0) {
+                            const pick = initialNetwork && list.find(n => n.name === initialNetwork)
+                                ? initialNetwork : (selectedNetwork || list[0].name);
                             setSelectedNetwork(pick);
                         }
                     } else {
