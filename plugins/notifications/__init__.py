@@ -143,6 +143,10 @@ def _keep_stored_urls(new_urls, stored, key):
     return kept, unknown
 
 
+def _ntfy_base(u):
+    return str(u if u is not None else 'https://ntfy.sh').strip().rstrip('/').lower()
+
+
 def _require_admin():
     # sec (audit): the STORED role, so an admin-owned but viewer-scoped API token passed this
     # admin check with its owner's rights. build_authz_user carries the token-floored
@@ -297,6 +301,12 @@ def _update_config():
     cfg = _load_config()
     if data.get('ntfy_token') == _MASK:
         data.pop('ntfy_token')
+    # MK Nov 2026 - the stored token went along to whatever server the same save set, and
+    # the next alert posted it there. It is for the server it was typed for.
+    if cfg.get('ntfy_token') and 'ntfy_token' not in data and 'ntfy_url' in data \
+            and _ntfy_base(data['ntfy_url']) != _ntfy_base(cfg.get('ntfy_url')):
+        return {'error': 'Re-enter the ntfy token to change the ntfy server.',
+                'code': 'CREDENTIAL_REQUIRED', 'fields': ['ntfy_token']}, 400
     if 'apprise_urls' in data:
         urls, unknown = _keep_stored_urls(data['apprise_urls'], _url_list(cfg.get('apprise_urls')), _entry_key())
         if unknown:

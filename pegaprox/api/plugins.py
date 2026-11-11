@@ -638,14 +638,20 @@ _CONFIG_SECRET_HINTS = ('token', 'key', 'secret', 'password', 'passwd', 'pwd', '
 _CONFIG_LOGIN_HINTS = ('pass', 'authent', 'authoriz')
 _CONFIG_LOGIN_WORDS = re.compile(r'(?<![a-z0-9])(?:pw|auth)(?![a-z0-9])')
 # a name with one of these after its last secret word is an address (smtp_host, auth_server),
-# unless the url carries the login itself (webhook_url, a dsn, apprise urls)
+# unless the url carries the login itself (webhook_url, a dsn, apprise urls).
+# A stored secret goes to the address it was typed for: a save that keeps one masked while
+# it changes an address in the same object or in one below it, a port too, or puts a new
+# one into a list there, has to name the secret again. A list entry that is a url itself
+# (an apprise url) carries its address along, as does a secret under an address name.
 _CONFIG_ADDRESS_HINTS = ('url', 'host', 'server', 'endpoint', 'addr', 'domain', 'proxy', 'broker',
                          'gateway', 'relay')
 _CONFIG_ADDRESS_WORDS = re.compile(r'(?<![a-z0-9])(?:uris?|ports?|ip|ipv4|ipv6)(?![a-z0-9])|(?<![a-z0-9])base$')
+_CONFIG_PORT_WORD = re.compile(r'(?<![a-z0-9])ports?(?![a-z0-9])')
 _CONFIG_LOGIN_URLS = ('hook', 'dsn', 'apprise_url')
 # a list entry is found by these, and shows them in clear below a secret name too
 _CONFIG_ID_KEYS = ('id', 'name', 'label')
 _CONFIG_SCHEME = re.compile(r'^[A-Za-z][A-Za-z0-9+.-]*$')
+_CONFIG_URL = re.compile(r'^[A-Za-z][A-Za-z0-9+.-]*://[^/?#\s]')
 _CONFIG_HANDLE = re.compile(r'#([0-9a-f]{16})([0-9a-f]{16})$')
 # without the database key a handle holds for this process only
 _CONFIG_PROCESS_KEY = secrets.token_bytes(32)
@@ -655,9 +661,10 @@ _CONFIG_GENERATION = {}
 
 
 class _CredentialRequired(ValueError):
-    def __init__(self, fields):
+    def __init__(self, fields, moved=()):
         super().__init__(', '.join(fields))
         self.fields = list(fields)
+        self.moved = list(moved)
 
 
 def _config_name(name):
@@ -805,6 +812,58 @@ def _shown_as_is(obj, secret=False, entry=False):
         yield obj
 
 
+def _is_address(k, v, secret=False):
+    """Whether the value v of k is an address: one under an address name, but a flag never
+    and a number only as a port (show_ip_addresses, url_timeout), and a url with a host
+    under any plain name (issuer, target, instance)."""
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, (int, float)):
+        return bool(_CONFIG_PORT_WORD.search(_config_name(k)))
+    if _is_address_name(k):
+        return True
+    return isinstance(v, str) and not secret and not _is_secret_name(k) and bool(_CONFIG_URL.match(v))
+
+
+def _address_values(obj, path=''):
+    """The addresses in obj and in the objects below it, by path. A list entry is held to
+    its own, the lists are left to _list_addresses."""
+    out = {}
+    for k, v in obj.items():
+        here = _key_path(path, k)
+        if _is_address(k, v):
+            out[here] = json.dumps(v, sort_keys=True)
+        elif isinstance(v, dict):
+            out.update(_address_values(v, here))
+    return out
+
+
+def _list_addresses(obj, path='', inside=False, secret=False):
+    """The addresses the lists in obj hold, as sets by their path without places: a value
+    under an address name in a list entry, or an entry that is a url with a host."""
+    out = {}
+
+    def add(found):
+        for p, vals in found.items():
+            out.setdefault(p, set()).update(vals)
+
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            here = _key_path(path, k)
+            if inside and _is_address(k, v, secret):
+                add({here: {json.dumps(v, sort_keys=True)}})
+            elif isinstance(v, (dict, list)):
+                add(_list_addresses(v, here, inside, secret or _is_secret_name(k)))
+    elif isinstance(obj, list):
+        for x in obj:
+            # an apprise url under a secret name is the secret itself
+            if not secret and isinstance(x, str) and _CONFIG_URL.match(x):
+                add({f'{path}[]': {json.dumps(x)}})
+            elif isinstance(x, (dict, list)):
+                add(_list_addresses(x, f'{path}[]', True, secret))
+    return out
+
+
 def _stored_entry(x, i, new, items):
     """(stored path, value) of the stored dict or list that a dict or list inside a list
     stands for, the entries of every stored list for a list among lists, or None."""
@@ -840,23 +899,45 @@ def _unmasked_config(new, stored, plugin='', key=None):
     Raises _CredentialRequired with the places of masks that stand for nothing stored:
     a handle no entry of the stored list it was read from has, a mask from an editor
     opened before the value changed, or masked values in a list entry that matches no
-    stored one."""
+    stored one. And with the secrets kept masked in an object whose addresses the same
+    save changed."""
     key = _entry_key() if key is None else key
     literal = {s for s in _shown_as_is(stored) if _CONFIG_MASK in s}
-    left = []
+    # kept: (place, how many lists deep its object sits) of each secret kept masked, where
+    # a list entry belongs to the object that holds the list
+    left, kept = [], []
     tables = {}    # the prints of each stored list by its path, each list gone through once
 
-    def walk(new, old, spath, secret, path, entry=False):
+    def walk(new, old, spath, secret, path, entry=False, depth=0, addr=False, owner=None):
         # spath is where old sits in the stored file, path where new sits in the save
         if isinstance(new, dict):
             old = old if isinstance(old, dict) else {}
-            return {k: walk(v, old.get(k), _key_path(spath, k), _key_secret(k, v, secret, entry), _key_path(path, k))
-                    for k, v in new.items()}
+            start = len(kept)
+            out = {k: walk(v, old.get(k), _key_path(spath, k), _key_secret(k, v, secret, entry), _key_path(path, k),
+                           depth=depth, addr=_is_address_name(k))
+                   for k, v in new.items()}
+            if len(kept) > start:
+                now, before = _address_values(out), _address_values(old)
+                moved = sorted(p for p in set(now) | set(before) if now.get(p) != before.get(p))
+                fields = [p for p, _ in kept[start:]] if moved else []
+                # a secret of this object outside its lists goes to the addresses in them too:
+                # one that is new there moves it
+                outside = [p for p, n in kept[start:] if n == depth]
+                if outside:
+                    held, had = _list_addresses(out), _list_addresses(old)
+                    added = sorted(p for p, vals in held.items() if vals - had.get(p, set()))
+                    moved, fields = moved + added, fields or (outside if added else [])
+                if moved:
+                    raise _CredentialRequired(fields, [_key_path(path, p) for p in moved])
+            return out
         if isinstance(new, list):
             items = [(spath, j, o) for j, o in enumerate(old)] if isinstance(old, list) else []
-            return walk_list(new, items, secret, path)
+            return walk_list(new, items, secret, path, depth + 1, addr, depth if owner is None else owner)
         if isinstance(new, str) and _CONFIG_MASK in new:
             if secret and _masked_form(old) == new:
+                # one under an address name is an address itself, the check above compares it
+                if not addr:
+                    kept.append((path or '(top level)', depth))
                 return old
             # a string the editor shows as it is stored may hold the mask itself
             if secret or new not in literal:
@@ -873,7 +954,7 @@ def _unmasked_config(new, stored, plugin='', key=None):
                     tables[lp][_entry_fp(plugin, lp, y, key)] = y
         return next((tables[lp][fp] for lp in lists if fp in tables[lp]), None)
 
-    def walk_list(new, items, secret, path):
+    def walk_list(new, items, secret, path, depth, addr, owner):
         # items holds (path of the stored list, place, value) for each stored entry new may stand for
         lists, out = None, []
         for i, x in enumerate(new):
@@ -888,16 +969,19 @@ def _unmasked_config(new, stored, plugin='', key=None):
                     lists = lists if lists is not None else list(dict.fromkeys(lp for lp, _, _ in items))
                     o = stored_by_print(fp, items, lists)
                 if o is None or _masked_form(o) != x[:at]:
-                    out.append(walk(x, None, '', secret, here))
-                else:
-                    out.append(o)
+                    out.append(walk(x, None, '', secret, here, depth=depth))
+                    continue
+                # a url carries its own address, as does any entry of a list under an address name
+                if not addr and _masked_form(o) == _CONFIG_MASK:
+                    kept.append((here, owner))
+                out.append(o)
             else:
                 hit = _stored_entry(x, i, new, items)
                 if isinstance(hit, list):
-                    out.append(walk_list(x, hit, secret, here))
+                    out.append(walk_list(x, hit, secret, here, depth + 1, addr, owner))
                 else:
                     spath, o = hit or ('', None)
-                    out.append(walk(x, o, spath, secret, here, True))
+                    out.append(walk(x, o, spath, secret, here, True, depth, addr, owner))
         return out
 
     out = walk(new, stored, '', False, '')
@@ -965,10 +1049,13 @@ def save_plugin_config(plugin_id):
         except RecursionError:
             return jsonify({'error': 'The config is nested too deeply'}), 400
         except _CredentialRequired as e:
-            # whatever stands for no stored value is never written as one, nor dropped
-            return jsonify({'error': f"Type the value of {', '.join(e.fields)} instead of {_CONFIG_MASK}, "
-                                     "or reload the editor: the masked value stands for nothing stored.",
-                            'code': 'CREDENTIAL_REQUIRED', 'fields': e.fields}), 400
+            if e.moved:
+                msg = f"Re-enter {', '.join(e.fields)} to change {', '.join(e.moved)}."
+            else:
+                # whatever stands for no stored value is never written as one, nor dropped
+                msg = (f"Type the value of {', '.join(e.fields)} instead of {_CONFIG_MASK}, or reload "
+                       "the editor: the masked value stands for nothing stored.")
+            return jsonify({'error': msg, 'code': 'CREDENTIAL_REQUIRED', 'fields': e.fields}), 400
         raw = json.dumps(new_cfg, indent=4)
 
     try:
