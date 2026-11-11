@@ -823,10 +823,14 @@ def update_policy(cluster_id, pid):
             fields.append(f'{k}=?')
             params.append(str(body[k])[:300])
     if 'schedule_day' in body:
+        # no day number: the stored one stays. The placeholder went in before int() threw,
+        # one more than there were values, and the whole edit ended in a 500
         try:
-            fields.append('schedule_day=?'); params.append(max(1, min(31, int(body['schedule_day']))))
+            day = max(1, min(31, int(body['schedule_day'])))
         except (TypeError, ValueError):
-            pass
+            day = None
+        if day is not None:
+            fields.append('schedule_day=?'); params.append(day)
     if 'prune_only' in body:
         fields.append('prune_only=?'); params.append(1 if body['prune_only'] else 0)
     for k, v in keep:
