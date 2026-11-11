@@ -13,7 +13,7 @@ from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.models.tasks import (PegaProxConfig, balancer_cooldown, BALANCER_COOLDOWN_MIN,
-                                   BALANCER_COOLDOWN_MAX)
+                                   BALANCER_COOLDOWN_MAX, PREDICTIVE_THRESHOLD_DEFAULT)
 from pegaprox.core.db import get_db
 from pegaprox.core import ha
 from pegaprox.core.cache import StorageDataCache
@@ -146,7 +146,7 @@ def get_clusters():
                 'proxlb_pins_strict': bool(getattr(mgr.config, 'proxlb_pins_strict', False)),
                 'dry_run': mgr.config.dry_run,
                 'predictive_balancing': getattr(mgr.config, 'predictive_balancing', False),
-                'predictive_threshold': getattr(mgr.config, 'predictive_threshold', 75),
+                'predictive_threshold': getattr(mgr.config, 'predictive_threshold', PREDICTIVE_THRESHOLD_DEFAULT),
                 'balance_cpu_weight': getattr(mgr.config, 'balance_cpu_weight', 1.0),
                 'balance_mem_weight': getattr(mgr.config, 'balance_mem_weight', 1.0),
                 'balance_io_weight': getattr(mgr.config, 'balance_io_weight', 0.0),
@@ -304,7 +304,7 @@ def export_cluster_config(cluster_id):
         'node_ui_suffix': getattr(c, 'node_ui_suffix', '') or '',
         'ha_enabled': bool(getattr(c, 'ha_enabled', False)),
         'predictive_balancing': bool(getattr(c, 'predictive_balancing', False)),
-        'predictive_threshold': getattr(c, 'predictive_threshold', 0.0),
+        'predictive_threshold': getattr(c, 'predictive_threshold', PREDICTIVE_THRESHOLD_DEFAULT),
         'balance_cpu_weight': getattr(c, 'balance_cpu_weight', 1.0),
         'balance_mem_weight': getattr(c, 'balance_mem_weight', 1.0),
         'balance_io_weight': getattr(c, 'balance_io_weight', 1.0),
@@ -2450,7 +2450,7 @@ def get_predictive_analysis(cluster_id):
     return jsonify({
         'nodes': result,
         'enabled': getattr(mgr.config, 'predictive_balancing', False),
-        'threshold': getattr(mgr.config, 'predictive_threshold', 75),
+        'threshold': getattr(mgr.config, 'predictive_threshold', PREDICTIVE_THRESHOLD_DEFAULT),
     })
 
 

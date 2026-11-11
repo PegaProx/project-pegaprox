@@ -1599,6 +1599,7 @@ def _refresh_managers():
     PVE manager otherwise only reads at its start. Returns how many values changed."""
     from pegaprox import globals as g
     from pegaprox.core.db import get_db
+    from pegaprox.models.tasks import predictive_threshold
     db = get_db()
     changed = 0
     for cid, data in (db.get_all_clusters() or {}).items():
@@ -1608,8 +1609,14 @@ def _refresh_managers():
             continue
         ha_changed = False
         for key in _REFRESH_CLUSTER_FIELDS:
-            if key in data and hasattr(cfg, key) and getattr(cfg, key) != data[key]:
-                setattr(cfg, key, data[key])
+            if key not in data or not hasattr(cfg, key):
+                continue
+            value = data[key]
+            if key == 'predictive_threshold':
+                # the row of an older cluster holds 0.0 or NULL, its manager runs the default
+                value = predictive_threshold(value)
+            if getattr(cfg, key) != value:
+                setattr(cfg, key, value)
                 changed += 1
                 ha_changed = ha_changed or key in ('ha_enabled', 'ha_settings')
         if is_active():

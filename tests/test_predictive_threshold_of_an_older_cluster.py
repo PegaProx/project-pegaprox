@@ -4,6 +4,7 @@ Its stored threshold read as 0.0 (or NULL, or no key at all), so the balancer co
 node's score with 0 and called each node above 0 critical. The UI showed 75 the whole time.
 """
 import threading
+import types
 
 import pytest
 
@@ -60,3 +61,29 @@ def test_a_node_at_40_is_not_critical_for_an_older_cluster(db, stored, drop_key)
     ps = m._compute_predictive_score('pve1')
     assert ps['score'] == 40.0
     assert ps['trend'] == 'stable'
+
+
+@pytest.mark.parametrize('value, runs', [(-5, 75), ('abc', 75), (True, 75), (float('nan'), 75),
+                                         (float('inf'), 75), ('60', 60.0)],
+                         ids=['negative', 'text', 'bool', 'nan', 'inf', 'number_as_text'])
+def test_a_threshold_that_is_no_number_above_0_loads_as_75(value, runs):
+    """What cannot be compared with a score runs as 75, a number sent as text as that number."""
+    assert PegaProxConfig(dict(BASE, predictive_threshold=value)).predictive_threshold == runs
+
+
+@pytest.mark.parametrize('stored', [0.0, None, ''], ids=['column_0', 'column_null', 'column_empty'])
+def test_a_synced_older_row_leaves_the_75_the_manager_runs(db, monkeypatch, stored):
+    """A standby hands the synced row to its managers field by field: the 0.0 or
+    NULL of an older row does not replace the 75 the manager was built with."""
+    from pegaprox.core import ha
+    import pegaprox.globals as g
+    db.save_cluster(CID, dict(BASE))
+    db.execute("UPDATE clusters SET predictive_threshold = ? WHERE id = ?", (stored, CID))
+    cfg = PegaProxConfig(dict(BASE))
+    monkeypatch.setitem(g.cluster_managers, CID, types.SimpleNamespace(config=cfg))
+    ha._refresh_managers()
+    assert cfg.predictive_threshold == 75
+    # a threshold the admin set still reaches it
+    db.execute("UPDATE clusters SET predictive_threshold = 60 WHERE id = ?", (CID,))
+    ha._refresh_managers()
+    assert cfg.predictive_threshold == 60

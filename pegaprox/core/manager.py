@@ -98,7 +98,7 @@ from pegaprox.globals import (
     _ssh_connection_lock, task_pegaprox_users_cache, task_pegaprox_users_lock,
 )
 from pegaprox.models.tasks import (MaintenanceTask, PegaProxConfig, balancer_cooldown,
-                                   BALANCER_COOLDOWN_DEFAULT)
+                                   BALANCER_COOLDOWN_DEFAULT, PREDICTIVE_THRESHOLD_DEFAULT)
 from pegaprox.core.config import save_config
 from pegaprox.utils.realtime import broadcast_sse, is_cluster_watched
 from pegaprox.utils.ssh import get_ssh_connection_stats, _ssh_track_connection, ssh_password_for, node_login
@@ -4493,7 +4493,7 @@ class PegaProxManager:
             confidence = min(len(metrics) / window, 1.0)
 
             # NS: threshold from config, fallback 75
-            threshold = getattr(self.config, 'predictive_threshold', 75)
+            threshold = getattr(self.config, 'predictive_threshold', PREDICTIVE_THRESHOLD_DEFAULT)
             if score > threshold:
                 trend = 'critical'
             elif score > threshold * 0.7:
@@ -20648,7 +20648,7 @@ echo "AGENT_INSTALLED_OK"
             predictive_on = getattr(self.config, 'predictive_balancing', False)
             if predictive_on and migrations_done == 0 and self.config.auto_migrate and not self.config.dry_run:
                 try:
-                    pred_threshold = getattr(self.config, 'predictive_threshold', 75)
+                    pred_threshold = getattr(self.config, 'predictive_threshold', PREDICTIVE_THRESHOLD_DEFAULT)
                     for nname, ndata in (node_status or {}).items():
                         if ndata.get('status') != 'online' or ndata.get('maintenance_mode'):
                             continue
