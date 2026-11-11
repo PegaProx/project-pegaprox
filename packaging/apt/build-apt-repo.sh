@@ -37,6 +37,10 @@ for tool in apt-ftparchive dpkg-deb gpg gzip; do
   command -v "$tool" >/dev/null || { echo "build-apt-repo: $tool is missing" >&2; exit 1; }
 done
 [[ $KEY =~ ^[0-9A-F]{40}$ ]] || { echo "build-apt-repo: give the full fingerprint, not '$KEY'" >&2; exit 1; }
+# the publish job passes the keyring relative to the checkout, and it is read after the cd into $OUT
+if [ -n "$KEYRING" ]; then
+  KEYRING=$(realpath -e -- "$KEYRING" 2>/dev/null) || { echo "build-apt-repo: no keyring at '$4'" >&2; exit 1; }
+fi
 
 shopt -s nullglob
 debs=("$DEB_DIR"/*.deb)
