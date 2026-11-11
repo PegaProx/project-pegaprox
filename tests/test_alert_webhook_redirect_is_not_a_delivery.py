@@ -1,9 +1,10 @@
-"""An alert webhook that answers with a redirect has not received the alert.
+"""An alert webhook that answers with a redirect is not counted as a delivery.
 
 The senders post with allow_redirects=False, so nothing ever goes to the Location of a
-3xx. The Slack, Discord, Teams and generic channels still counted every status below 400
-as delivered: the test button said "Delivered" and the log line was the one of a success,
-for an alert nobody got. The ntfy channel already stopped at 300.
+3xx. The redirect is not followed, so we cannot tell whether the alert was received. The
+Slack, Discord, Teams and generic channels still counted every status below 400 as
+delivered: the test button said "Delivered" and the log line was the one of a success.
+The ntfy channel already stopped at 300.
 
 Real requests: an HTTP endpoint on loopback answers the status each test asks for, and a
 second one stands for the place a redirect points at. It must never see a request.

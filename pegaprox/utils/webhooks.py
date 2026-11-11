@@ -172,8 +172,9 @@ def _build_teams(alert):
 def _delivered(r):
     """(success, detail) for the answer of a webhook endpoint.
 
-    The senders follow no redirect, so a 3xx means the alert went nowhere: only a 2xx
-    is a delivery, and the detail says why a 3xx is not one.
+    The senders post with allow_redirects=False. A 3xx is not followed, so we cannot tell
+    whether the alert was received: only a 2xx is a delivery, and the detail says why a
+    3xx is not one.
     """
     code = r.status_code
     if 300 <= code < 400:
