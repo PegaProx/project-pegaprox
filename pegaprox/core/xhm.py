@@ -327,7 +327,8 @@ def plan_xcpng_to_pve(source_cluster_id, source_vmid, target_cluster_id):
         return {'error': 'Source XCP-ng cluster not found'}
 
     tgt = cluster_managers.get(target_cluster_id)
-    if not tgt or getattr(tgt, 'cluster_type', 'proxmox') == 'xcpng':
+    # an ESXi host is not XCP-ng either, and it has no nodes to plan on
+    if not tgt or getattr(tgt, 'cluster_type', 'proxmox') != 'proxmox':
         return {'error': 'Target must be a Proxmox cluster'}
 
     if not src.is_connected:

@@ -121,7 +121,7 @@ def xhm_plan():
         result = plan_esxi_to_pve(source_cluster, source_vmid, target_cluster)
     elif src_type == 'esxi' and tgt_type == 'xcpng':
         result = plan_esxi_to_xcpng(source_cluster, source_vmid, target_cluster)
-    elif src_type == 'xcpng':
+    elif src_type == 'xcpng' and tgt_type == 'proxmox':
         result = plan_xcpng_to_pve(source_cluster, source_vmid, target_cluster)
     elif tgt_type == 'xcpng':
         source_node = request.args.get('source_node', '')
@@ -204,7 +204,7 @@ def xhm_start():
         direction = 'esxi_to_pve'
     elif src_type == 'esxi' and tgt_type == 'xcpng':
         direction = 'esxi_to_xcpng'
-    elif src_type == 'xcpng' and tgt_type != 'xcpng':
+    elif src_type == 'xcpng' and tgt_type == 'proxmox':
         direction = 'xcpng_to_pve'
     elif src_type != 'xcpng' and tgt_type == 'xcpng':
         direction = 'pve_to_xcpng'
