@@ -26608,10 +26608,8 @@
                                                 
                                                 {/* SMBIOS Auto-Configurator Section */}
                                                 <div className={`lg:col-span-2 ${isCorporate ? 'border border-proxmox-border p-4' : 'bg-proxmox-card border border-proxmox-border rounded-xl p-6'}`}>
-                                                    <SmbiosAutoConfigSection 
-                                                        clusterId={selectedCluster?.id} 
-                                                        selectedCluster={selectedCluster}
-                                                        updateConfig={updateConfig}
+                                                    <SmbiosAutoConfigSection
+                                                        clusterId={selectedCluster?.id}
                                                         addToast={addToast}
                                                     />
                                                 </div>

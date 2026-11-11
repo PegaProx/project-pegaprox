@@ -4554,13 +4554,23 @@
 
         // SMBIOS Auto-Config Section Component
         // LW: this whole feature started because Windows kept complaining about hardware changes after migrations
-        function SmbiosAutoConfigSection({ clusterId, selectedCluster, updateConfig, addToast }) {
+        // LW Nov 2026 - the inputs edit the saved SMBIOS settings of the cluster (GET/PUT .../smbios-autoconfig).
+        // They were bound to selectedCluster.smbios_* and saved with updateConfig, but those are no cluster
+        // fields: the PATCH changed nothing, said saved, and the next refresh showed the defaults again
+        function SmbiosAutoConfigSection({ clusterId, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
             const { isCorporate } = useLayout();
             const [smbiosStatus, setSmbiosStatus] = useState({});
             const [smbiosLoading, setSmbiosLoading] = useState(false);
             const [smbiosActionLoading, setSmbiosActionLoading] = useState({});  // per-node loading state
+            const [smbiosForm, setSmbiosForm] = useState(null);    // what the inputs show, null until loaded
+            const [smbiosSaved, setSmbiosSaved] = useState(null);  // what the server holds
+            const [smbiosLoadError, setSmbiosLoadError] = useState('');
+            const [smbiosSaving, setSmbiosSaving] = useState(false);
+            // an answer that comes back after a switch to another cluster is dropped
+            const smbiosCluster = useRef(clusterId);
+            smbiosCluster.current = clusterId;
             
             // Local authFetch for this component - NS Jan 2026
             const authFetch = (url, opts = {}) => fetch(url, { ...opts, credentials: 'include', headers: { ...opts.headers, ...getAuthHeaders() } });
@@ -4581,9 +4591,70 @@
                 setSmbiosLoading(false);
             };
             
-            // Load status on mount
+            const loadSmbiosSettings = async () => {
+                const cid = clusterId;
+                if (!cid) return;
+                setSmbiosLoadError('');
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${cid}/smbios-autoconfig`);
+                    const data = await res.json().catch(() => ({}));
+                    if (smbiosCluster.current !== cid) return;
+                    if (!res.ok) {
+                        setSmbiosLoadError(data.error || `${t('failedToLoad') || 'Failed to load'} (HTTP ${res.status})`);
+                        return;
+                    }
+                    setSmbiosForm(data);
+                    setSmbiosSaved(data);
+                } catch (e) {
+                    if (smbiosCluster.current === cid) setSmbiosLoadError(e.message);
+                }
+            };
+            
+            // one PUT with every field, true only when the server took it
+            const saveSmbiosSettings = async (values) => {
+                const cid = clusterId;
+                setSmbiosSaving(true);
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${cid}/smbios-autoconfig`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            enabled: !!values.enabled,
+                            manufacturer: values.manufacturer,
+                            product: values.product,
+                            version: values.version,
+                            family: values.family
+                        })
+                    });
+                    const result = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        addToast(result.error || `${t('saveFailed') || 'Save failed'} (HTTP ${res.status})`, 'error');
+                        return false;
+                    }
+                    if (smbiosCluster.current === cid) setSmbiosSaved(result.settings || values);
+                    return true;
+                } catch (e) {
+                    addToast('Error: ' + e.message, 'error');
+                    return false;
+                } finally {
+                    setSmbiosSaving(false);
+                }
+            };
+            
+            const saveSmbiosForm = async () => {
+                if (!smbiosForm) return;
+                if (await saveSmbiosSettings(smbiosForm)) addToast(t('settingsSaved') || 'Settings saved', 'success');
+            };
+            
+            const smbiosDirty = !!(smbiosForm && smbiosSaved) &&
+                ['enabled', 'manufacturer', 'product', 'version', 'family'].some(k => smbiosForm[k] !== smbiosSaved[k]);
+            
+            // Load settings and status on mount and for each cluster
             useEffect(() => {
+                setSmbiosForm(null);
+                setSmbiosSaved(null);
                 if (clusterId) {
+                    loadSmbiosSettings();
                     loadSmbiosStatus();
                 }
             }, [clusterId]);
@@ -4633,37 +4704,33 @@
             
             // Deploy to all nodes
             const deployToAll = async () => {
+                if (!smbiosForm) return;
                 if (!confirm(t('deploySmbiosConfirm') || 'Deploy SMBIOS Auto-Config to all nodes?')) return;
                 setSmbiosLoading(true);
                 try {
-                    // Save config first
-                    await authFetch(`${API_URL}/clusters/${clusterId}/smbios-autoconfig`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            manufacturer: selectedCluster?.smbios_manufacturer || 'Proxmox',
-                            product: selectedCluster?.smbios_product || 'PegaProxManagment',
-                            version: selectedCluster?.smbios_version || 'v1',
-                            family: selectedCluster?.smbios_family || 'ProxmoxVE'
-                        })
-                    });
+                    // the nodes get the saved settings, so save what the form shows first
+                    if (!(await saveSmbiosSettings(smbiosForm))) return;
                     
                     // Deploy
                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/smbios-autoconfig/deploy-all`, {
                         method: 'POST'
                     });
-                    const result = await res.json();
-                    if (result.success) {
+                    const result = await res.json().catch(() => ({}));
+                    if (res.ok && result.success) {
                         addToast(result.message, 'success');
-                        if (updateConfig) updateConfig('smbios_enabled', true);
+                        // deployed means enabled; kept with the other settings now
+                        if (!smbiosForm.enabled && await saveSmbiosSettings({ ...smbiosForm, enabled: true })) {
+                            setSmbiosForm(f => f && { ...f, enabled: true });
+                        }
                         await loadSmbiosStatus();
                     } else {
-                        addToast(result.error || 'Deploy failed', 'error');
+                        addToast(result.error || result.message || 'Deploy failed', 'error');
                     }
                 } catch (e) {
                     addToast('Error: ' + e.message, 'error');
+                } finally {
+                    setSmbiosLoading(false);
                 }
-                setSmbiosLoading(false);
             };
             
             // Count running nodes
@@ -4713,50 +4780,73 @@
                             <label className="block text-xs text-gray-400 mb-1">Manufacturer</label>
                             <input 
                                 type="text" 
-                                value={selectedCluster?.smbios_manufacturer || 'Proxmox'} 
-                                onChange={(e) => updateConfig && updateConfig('smbios_manufacturer', e.target.value)}
-                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                value={smbiosForm?.manufacturer ?? ''}
+                                onChange={(e) => { const v = e.target.value; setSmbiosForm(f => ({ ...f, manufacturer: v })); }}
+                                disabled={!smbiosForm}
+                                maxLength={64}
+                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm disabled:opacity-50"
                             />
                         </div>
                         <div>
                             <label className="block text-xs text-gray-400 mb-1">Product</label>
                             <input 
                                 type="text" 
-                                value={selectedCluster?.smbios_product || 'PegaProxManagment'} 
-                                onChange={(e) => updateConfig && updateConfig('smbios_product', e.target.value)}
-                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                value={smbiosForm?.product ?? ''}
+                                onChange={(e) => { const v = e.target.value; setSmbiosForm(f => ({ ...f, product: v })); }}
+                                disabled={!smbiosForm}
+                                maxLength={64}
+                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm disabled:opacity-50"
                             />
                         </div>
                         <div>
                             <label className="block text-xs text-gray-400 mb-1">Version</label>
                             <input 
                                 type="text" 
-                                value={selectedCluster?.smbios_version || 'v1'} 
-                                onChange={(e) => updateConfig && updateConfig('smbios_version', e.target.value)}
-                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                value={smbiosForm?.version ?? ''}
+                                onChange={(e) => { const v = e.target.value; setSmbiosForm(f => ({ ...f, version: v })); }}
+                                disabled={!smbiosForm}
+                                maxLength={64}
+                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm disabled:opacity-50"
                             />
                         </div>
                         <div>
                             <label className="block text-xs text-gray-400 mb-1">Family</label>
                             <input 
                                 type="text" 
-                                value={selectedCluster?.smbios_family || 'ProxmoxVE'} 
-                                onChange={(e) => updateConfig && updateConfig('smbios_family', e.target.value)}
-                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                value={smbiosForm?.family ?? ''}
+                                onChange={(e) => { const v = e.target.value; setSmbiosForm(f => ({ ...f, family: v })); }}
+                                disabled={!smbiosForm}
+                                maxLength={64}
+                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm disabled:opacity-50"
                             />
                         </div>
                     </div>
                     
-                    {/* Deploy Button */}
-                    <div className="flex gap-3 mb-4">
+                    {smbiosLoadError && (
+                        <p className="text-xs text-red-400 mb-4">{smbiosLoadError}</p>
+                    )}
+                    
+                    {/* Save + Deploy */}
+                    <div className="flex flex-wrap items-center gap-3 mb-4">
+                        <button
+                            onClick={saveSmbiosForm}
+                            disabled={!smbiosDirty || smbiosSaving}
+                            className="flex items-center gap-2 px-4 py-2 bg-proxmox-orange rounded-lg text-white text-sm font-medium hover:bg-orange-600 transition-colors disabled:opacity-50"
+                        >
+                            {smbiosSaving ? <Icons.RotateCw className="w-4 h-4 animate-spin" /> : <Icons.Save className="w-4 h-4" />}
+                            {t('save') || 'Save'}
+                        </button>
                         <button
                             onClick={deployToAll}
-                            disabled={smbiosLoading}
+                            disabled={smbiosLoading || smbiosSaving || !smbiosForm}
                             className="flex items-center gap-2 px-4 py-2 bg-green-600 rounded-lg text-white text-sm font-medium hover:bg-green-500 transition-colors disabled:opacity-50"
                         >
                             {smbiosLoading ? <Icons.RotateCw className="w-4 h-4 animate-spin" /> : <Icons.Download className="w-4 h-4" />}
                             {installedCount > 0 ? (t('updateAllNodes') || 'Update All Nodes') : (t('deployToAllNodes') || 'Deploy to All Nodes')}
                         </button>
+                        {smbiosDirty && (
+                            <span className="text-xs text-yellow-400">{t('unsavedChanges') || 'Unsaved changes'}</span>
+                        )}
                     </div>
                     
                     {/* Per-Node Status */}
