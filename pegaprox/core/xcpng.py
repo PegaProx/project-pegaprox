@@ -2639,6 +2639,15 @@ class XcpngManager:
         api = self._api()
         if not api:
             return {'success': False, 'error': 'Not connected'}
+        # MK Nov 2026 - the import url takes the session ref itself, as _rrd_fetch reads it.
+        # It used to be api.xenapi._session, but api is the xenapi proxy already and that
+        # is one more method name on it (<XenAPI._Dispatcher for xenapi._session>), so the
+        # PUT never carried a session
+        with self._session_lock:
+            session_ref = self._session._session if self._session else None
+        if not session_ref:
+            return {'success': False, 'error': 'Not connected'}
+        vdi_ref = None
         try:
             # find the ISO SR
             sr_refs = api.SR.get_by_name_label(storage)
@@ -2653,7 +2662,6 @@ class XcpngManager:
             sr_type = api.SR.get_type(sr_ref)
 
             # for ISO SRs, we use HTTP PUT to the host
-            session_ref = api.xenapi._session
             host_url = f"https://{self.host}"
 
             if sr_type == 'iso' or content_type == 'iso':
@@ -2693,6 +2701,12 @@ class XcpngManager:
             # session. The route sends this error to the browser as it is.
             err = scrub_session_id(e)
             self.logger.error(f"upload_to_storage: {err}")
+            # the VDI made for this upload goes too, as on an answer that is no 2xx
+            if vdi_ref:
+                try:
+                    api.VDI.destroy(vdi_ref)
+                except Exception:
+                    pass
             return {'success': False, 'error': err}
 
     # ──────────────────────────────────────────
