@@ -130,6 +130,26 @@ def test_a_removal_whose_commit_fails_is_not_committed_by_a_later_request(admin,
     assert _restart() == {GONE}
 
 
+def test_a_repeat_removal_pve_answers_with_does_not_exist_still_removes_the_host(admin):
+    """The state of a second click after a removal that failed on the database: PVE has no
+    such storage any more and answers 500 "does not exist". The host and its row go all the same."""
+    from pegaprox.globals import cluster_managers
+    gone_id = _connect(admin, GONE)
+    storage = storagemod.esxi_storages[CLUSTER][gone_id]['storage_name']
+    mgr = cluster_managers[CLUSTER]
+    # what pve-storage dies with for an unknown id, sent as HTTP 500
+    mgr._api_delete.return_value = types.SimpleNamespace(status_code=500, text=json.dumps(
+        {'data': None, 'message': f"delete storage failed: storage '{storage}' does not exist"}))
+
+    r = _remove(admin, gone_id)
+
+    assert r.status_code == 200, r.data
+    assert mgr._api_delete.call_args[0][0].endswith(f'/storage/{storage}')
+    assert gone_id not in storagemod.esxi_storages.get(CLUSTER, {})
+    assert _row(gone_id) is None, 'the row stayed after PVE answered that the storage is gone'
+    assert _restart() == set()
+
+
 def test_removing_an_unknown_host_answers_404_and_deletes_nothing(admin):
     """Removing a host the list does not show gets the same 404 as before and touches no row."""
     keep_id = _connect(admin, KEEP)
