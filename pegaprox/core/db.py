@@ -5234,10 +5234,27 @@ class PegaProxDB:
             # silently swallow — SIEM is optional and shouldn't break audit writes
             pass
 
+    @staticmethod
+    def _audit_scope_cond(scope, params) -> str:
+        """WHERE part for scope=(cluster_ids, username): the rows of those clusters plus the
+        user's own, no row at all when both are empty. Appends its values to params."""
+        cids, own = list(scope[0] or []), scope[1] or ''
+        parts = []
+        if cids:
+            parts.append(f"cluster_id IN ({','.join('?' * len(cids))})")
+            params.extend(cids)
+        if own:
+            parts.append('user = ?')
+            params.append(own)
+        return f"({' OR '.join(parts)})" if parts else '1 = 0'
+
     def search_audit_log(self, q='', user='', action='', cluster='', severity='',
-                         ip='', date_from='', date_to='', offset=0, limit=100):
+                         ip='', date_from='', date_to='', offset=0, limit=100, scope=None):
         """Search audit log with rich filters + pagination.
-        Returns (entries, total) where total is the un-paginated row count."""
+        Returns (entries, total) where total is the un-paginated row count.
+
+        scope as in get_audit_log, part of the WHERE so total and the page only count
+        the rows the caller may read."""
         cursor = self.conn.cursor()
         conds = []
         params = []
@@ -5267,6 +5284,8 @@ class PegaProxDB:
         if date_to:
             conds.append('timestamp <= ?')
             params.append(date_to)
+        if scope is not None:
+            conds.append(self._audit_scope_cond(scope, params))
         where = (' WHERE ' + ' AND '.join(conds)) if conds else ''
 
         # total
@@ -5281,17 +5300,21 @@ class PegaProxDB:
         rows = [dict(r) for r in cursor.fetchall()]
         return rows, total
 
-    def audit_facets(self, days=7):
-        """Return top users/actions for the audit search UI dropdowns."""
+    def audit_facets(self, days=7, scope=None):
+        """Return top users/actions for the audit search UI dropdowns.
+        scope as in get_audit_log: only the rows the caller may read are counted."""
         cursor = self.conn.cursor()
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         out = {'users': [], 'actions': [], 'clusters': []}
+        since, params = 'timestamp >= ?', [cutoff]
+        if scope is not None:
+            since += ' AND ' + self._audit_scope_cond(scope, params)
         try:
-            cursor.execute('SELECT user, COUNT(*) AS n FROM audit_log WHERE timestamp >= ? AND user != "" GROUP BY user ORDER BY n DESC LIMIT 30', (cutoff,))
+            cursor.execute(f'SELECT user, COUNT(*) AS n FROM audit_log WHERE {since} AND user != "" GROUP BY user ORDER BY n DESC LIMIT 30', params)
             out['users'] = [{'user': r['user'], 'count': r['n']} for r in cursor.fetchall()]
-            cursor.execute('SELECT action, COUNT(*) AS n FROM audit_log WHERE timestamp >= ? GROUP BY action ORDER BY n DESC LIMIT 50', (cutoff,))
+            cursor.execute(f'SELECT action, COUNT(*) AS n FROM audit_log WHERE {since} GROUP BY action ORDER BY n DESC LIMIT 50', params)
             out['actions'] = [{'action': r['action'], 'count': r['n']} for r in cursor.fetchall()]
-            cursor.execute('SELECT cluster, COUNT(*) AS n FROM audit_log WHERE timestamp >= ? AND cluster != "" GROUP BY cluster ORDER BY n DESC LIMIT 30', (cutoff,))
+            cursor.execute(f'SELECT cluster, COUNT(*) AS n FROM audit_log WHERE {since} AND cluster != "" GROUP BY cluster ORDER BY n DESC LIMIT 30', params)
             out['clusters'] = [{'cluster': r['cluster'], 'count': r['n']} for r in cursor.fetchall()]
         except Exception as e:
             logging.warning(f"audit_facets failed: {e}")
@@ -5316,15 +5339,7 @@ class PegaProxDB:
             conditions.append('action LIKE ?')
             params.append(f'%{action}%')
         if scope is not None:
-            cids, own = list(scope[0] or []), scope[1] or ''
-            parts = []
-            if cids:
-                parts.append(f"cluster_id IN ({','.join('?' * len(cids))})")
-                params.extend(cids)
-            if own:
-                parts.append('user = ?')
-                params.append(own)
-            conditions.append(f"({' OR '.join(parts)})" if parts else '1 = 0')
+            conditions.append(self._audit_scope_cond(scope, params))
 
         if conditions:
             query += ' WHERE ' + ' AND '.join(conditions)

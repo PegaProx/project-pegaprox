@@ -15,7 +15,6 @@ from flask import Blueprint, jsonify, request
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.core.db import get_db
-from pegaprox.models.permissions import ROLE_ADMIN
 
 bp = Blueprint('audit_search', __name__)
 
@@ -30,8 +29,22 @@ def _safe_int(v, default, lo=None, hi=None):
     return n
 
 
+def _caller_scope():
+    # MK Nov 2026 - same gate and scope as /api/audit: admin.audit is in the auditor and
+    # monitoring templates, and a caller confined to some clusters reads the rows of the
+    # clusters they see whole, plus their own. None = every row.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.api.helpers import caller_is_scoped
+    au = build_authz_user(request.session.get('user', ''), request.session)
+    theirs = get_user_clusters(au, include_pools=False)
+    if theirs is None:
+        return None
+    return ([c for c in theirs if not caller_is_scoped(au, c)], au.get('username', ''))
+
+
 @bp.route('/api/audit/search', methods=['GET'])
-@require_auth(roles=[ROLE_ADMIN])
+@require_auth(perms=['admin.audit'])
 def search():
     args = request.args
     q = (args.get('q') or '').strip()[:200]
@@ -52,7 +65,7 @@ def search():
         rows, total = get_db().search_audit_log(
             q=q, user=user, action=action, cluster=cluster, severity=severity,
             ip=ip, date_from=date_from, date_to=date_to,
-            offset=offset, limit=limit,
+            offset=offset, limit=limit, scope=_caller_scope(),
         )
         return jsonify({
             'entries': rows,
@@ -67,10 +80,10 @@ def search():
 
 
 @bp.route('/api/audit/facets', methods=['GET'])
-@require_auth(roles=[ROLE_ADMIN])
+@require_auth(perms=['admin.audit'])
 def facets():
     days = _safe_int(request.args.get('days', 7), 7, 1, 365)
     try:
-        return jsonify(get_db().audit_facets(days=days))
+        return jsonify(get_db().audit_facets(days=days, scope=_caller_scope()))
     except Exception as e:
         logging.exception('handler error in audit_search.py'); return jsonify({'error': 'internal error'}), 500

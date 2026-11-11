@@ -45935,8 +45935,8 @@
             "sessionId": []
           }
         ],
-        "x-pegaprox-roles": [
-          "admin"
+        "x-pegaprox-permissions": [
+          "admin.audit"
         ]
       }
     },
@@ -45969,8 +45969,8 @@
             "sessionId": []
           }
         ],
-        "x-pegaprox-roles": [
-          "admin"
+        "x-pegaprox-permissions": [
+          "admin.audit"
         ]
       }
     },
