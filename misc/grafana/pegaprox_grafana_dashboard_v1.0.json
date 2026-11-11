@@ -14,7 +14,7 @@
       "title": "Connected Clusters",
       "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
       "targets": [
-        { "expr": "sum(pegaprox_cluster_connected)", "refId": "A" }
+        { "expr": "sum(pegaprox_cluster_connected{cluster=~\"$cluster\"})", "refId": "A" }
       ]
     },
     {
@@ -22,7 +22,7 @@
       "title": "Quorum OK",
       "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
       "targets": [
-        { "expr": "min(pegaprox_cluster_quorum_held)", "refId": "A" }
+        { "expr": "min(pegaprox_cluster_quorum_held{cluster=~\"$cluster\"})", "refId": "A" }
       ],
       "fieldConfig": {
         "defaults": {
@@ -46,7 +46,7 @@
       "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
       "targets": [
         {
-          "expr": "sum(pegaprox_cluster_vms_running) / sum(pegaprox_cluster_vms_total)",
+          "expr": "sum(pegaprox_cluster_vms_running{cluster=~\"$cluster\"}) / sum(pegaprox_cluster_vms_total{cluster=~\"$cluster\"})",
           "refId": "A"
         }
       ],
@@ -63,7 +63,7 @@
       "gridPos": { "x": 0, "y": 4, "w": 12, "h": 6 },
       "targets": [
         {
-          "expr": "pegaprox_cluster_nodes_online",
+          "expr": "pegaprox_cluster_nodes_online{cluster=~\"$cluster\"}",
           "legendFormat": "{{cluster}}",
           "refId": "A"
         }
@@ -75,7 +75,7 @@
       "gridPos": { "x": 12, "y": 4, "w": 12, "h": 6 },
       "targets": [
         {
-          "expr": "pegaprox_cluster_vms_total",
+          "expr": "pegaprox_cluster_vms_total{cluster=~\"$cluster\"}",
           "legendFormat": "{{cluster}}",
           "refId": "A"
         }
@@ -88,7 +88,7 @@
       "gridPos": { "x": 0, "y": 10, "w": 12, "h": 8 },
       "targets": [
         {
-          "expr": "pegaprox_node_cpu_percent",
+          "expr": "pegaprox_node_cpu_percent{cluster=~\"$cluster\", node=~\"$node\"}",
           "legendFormat": "{{cluster}} / {{node}}",
           "refId": "A"
         }
@@ -113,7 +113,7 @@
       "gridPos": { "x": 12, "y": 10, "w": 12, "h": 8 },
       "targets": [
         {
-          "expr": "pegaprox_node_mem_percent",
+          "expr": "pegaprox_node_mem_percent{cluster=~\"$cluster\", node=~\"$node\"}",
           "legendFormat": "{{cluster}} / {{node}}",
           "refId": "A"
         }
@@ -131,7 +131,7 @@
       "gridPos": { "x": 0, "y": 18, "w": 24, "h": 6 },
       "targets": [
         {
-          "expr": "pegaprox_node_online",
+          "expr": "pegaprox_node_online{cluster=~\"$cluster\", node=~\"$node\"}",
           "legendFormat": "{{cluster}} / {{node}}",
           "refId": "A"
         }
@@ -144,12 +144,12 @@
       "gridPos": { "x": 0, "y": 24, "w": 24, "h": 8 },
       "targets": [
         {
-          "expr": "sum(pegaprox_cluster_vms_running)",
+          "expr": "sum(pegaprox_cluster_vms_running{cluster=~\"$cluster\"})",
           "legendFormat": "Running",
           "refId": "A"
         },
         {
-          "expr": "sum(pegaprox_cluster_vms_total)",
+          "expr": "sum(pegaprox_cluster_vms_total{cluster=~\"$cluster\"})",
           "legendFormat": "Total",
           "refId": "B"
         }
@@ -183,17 +183,29 @@
     "list": [
       {
         "name": "cluster",
+        "label": "Cluster",
         "type": "query",
         "datasource": "Prometheus",
         "query": "label_values(pegaprox_cluster_connected, cluster)",
-        "refresh": 1
+        "definition": "label_values(pegaprox_cluster_connected, cluster)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
       },
       {
         "name": "node",
+        "label": "Node",
         "type": "query",
         "datasource": "Prometheus",
-        "query": "label_values(pegaprox_node_cpu_percent, node)",
-        "refresh": 1
+        "query": "label_values(pegaprox_node_online{cluster=~\"$cluster\"}, node)",
+        "definition": "label_values(pegaprox_node_online{cluster=~\"$cluster\"}, node)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
       }
     ]
   }
