@@ -16,10 +16,10 @@ from test_corp_redesigned_guard_ui import _GuardApp, _GuardServer
 
 ENGINES = ['chromium', 'firefox']
 LAYOUTS = ['modern', 'corporate', 'corporate-redesigned', 'cloud']
-# 820 and below is the phone layout of (#189), which has its own tests. 1700 is the one line header the
-# others are counted against, 1600 to 1645 is where the box of the header is narrower than its row
-WIDTHS = [1700, 1645, 1620, 1600, 1599, 1500, 1440, 1366, 1280, 1100, 1024, 900, 821]
-WIDE = 1700
+# 820 and below is the phone layout of (#189), which has its own tests. 1800 is the one line header the
+# others are counted against, 1600 to 1765 is where the box of the header is narrower than its row
+WIDTHS = [1800, 1765, 1700, 1645, 1620, 1600, 1599, 1500, 1440, 1366, 1280, 1100, 1024, 900, 821]
+WIDE = 1800
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BUNDLE = ROOT / 'web' / 'index.html'
 SOURCE = ROOT / 'web' / 'index.html.original'
@@ -176,7 +176,8 @@ def test_the_wrap_rules_are_in_the_source():
         return found.group(1).replace(' ', '')
     media = re.search(r'@media \(min-width: 821px\) and \(max-width: (\d+)px\) \{\s*\.pp-header-actions \{([^}]*)\}', css)
     assert media and 'flex-wrap:wrap' in media.group(2).replace(' ', ''), 'the header actions of Modern wrap'
-    # the box of the header ends at 1600 and its row is 47 px short of the actions: wrapping has to reach 1645
-    assert int(media.group(1)) >= 1645
+    # the box of the header ends at 1600 and, with ten language buttons, its row is about 105 px short of the
+    # actions: wrapping has to reach 1761
+    assert int(media.group(1)) >= 1761
     assert 'flex-wrap:wrap' in body('.cloud-topbar')
     assert 'flex-wrap:wrap' in body('.cloud-topbar-actions')

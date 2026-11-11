@@ -3674,9 +3674,12 @@
 
         /* JB Nov 2026 - the shell clips sideways (#727), so what does not fit into the header is gone and not a
            scroll away, the user menu with its logout first. NS Nov 2026 - from 821, the phone layout below has its
-           own rule, to 1645: the box of the header stops at 1600 and its row, 1552 wide, is 47 px short, which the
-           margin beside the box hides only from 1646 on. Above that wrapping would make two lines of one. */
-        @media (min-width: 821px) and (max-width: 1645px) {
+           own rule, up to where the row fits: the box of the header stops at 1600 and its row, 1552 wide, was 47 px
+           short with nine language buttons. LW Nov 2026 - the tenth (RU) adds about 57 px (gap and padding 16, flag
+           20, gap 4, label 17), so the row is about 105 px short, which the margin beside the box hides only from
+           about 1762 on: the rule reaches 1765, a few px more for a wider font. Above that wrapping would make two
+           lines of one. */
+        @media (min-width: 821px) and (max-width: 1765px) {
             .pp-header-actions { flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; }
         }
 
