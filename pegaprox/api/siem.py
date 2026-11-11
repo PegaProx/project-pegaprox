@@ -120,7 +120,27 @@ def _current_user():
         return ''
 
 
-def _row_to_target(row):
+_SECRET_KEYS = ('token', 'password', 'api_key', 'apikey', 'secret', 'auth', 'authorization')
+_MASK = '********'
+
+
+def _is_secret(key):
+    return any(s in str(key).lower() for s in _SECRET_KEYS)
+
+
+def _mask(d):
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out[k] = _mask(v)
+        elif v and _is_secret(k):
+            out[k] = _MASK
+        else:
+            out[k] = v
+    return out
+
+
+def _row_to_target(row, masked=True):
     try:
         settings = json.loads(row['settings'] or '{}')
     except Exception:
@@ -128,18 +148,9 @@ def _row_to_target(row):
     # NS Jul 2026 (CodeAnt data-exposure) — SIEM target settings can hold auth secrets
     # (token/password/api_key/secret/Authorization header); mask them before returning to the
     # UI so a siem.view holder can't read the raw credential back out.
-    if isinstance(settings, dict):
-        _SECRET_KEYS = ('token', 'password', 'api_key', 'apikey', 'secret', 'auth', 'authorization')
-        def _mask(d):
-            out = {}
-            for k, v in d.items():
-                if isinstance(v, dict):
-                    out[k] = _mask(v)
-                elif v and any(s in str(k).lower() for s in _SECRET_KEYS):
-                    out[k] = '********'
-                else:
-                    out[k] = v
-            return out
+    # MK Nov 2026 - only on the way out. The sender read its targets through here as well
+    # and sent the mask as the HEC token, the password and the Authorization header.
+    if masked and isinstance(settings, dict):
         settings = _mask(settings)
     return {
         'id': row['id'],
@@ -164,7 +175,7 @@ def _list_enabled():
     try:
         c = get_db().conn.cursor()
         c.execute('SELECT * FROM siem_targets WHERE enabled = 1')
-        return [_row_to_target(r) for r in c.fetchall()]
+        return [_row_to_target(r, masked=False) for r in c.fetchall()]
     except Exception as e:
         logging.debug(f"[siem] list_enabled failed: {e}")
         return []
@@ -576,7 +587,7 @@ def test_target(tid):
         row = c.fetchone()
         if not row:
             return jsonify({'error': 'not found'}), 404
-        target = _row_to_target(row)
+        target = _row_to_target(row, masked=False)
         evt = {
             'id': 0,
             'timestamp': datetime.now().isoformat(),
