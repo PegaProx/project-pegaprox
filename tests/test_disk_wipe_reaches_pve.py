@@ -7,6 +7,7 @@ button sends /dev/<name>, which the XCP-ng wipe has to take as well.
 """
 import os
 import re
+import types
 from unittest.mock import MagicMock
 
 from pegaprox.core.manager import PegaProxManager
@@ -26,6 +27,7 @@ def test_the_manager_wipes_with_put():
     mgr = MagicMock()
     mgr.is_connected = True
     mgr.host, mgr.api_port = 'h', 8006
+    mgr._api_token = None  # connected with root@pam's own ticket
     mgr._api_put.return_value = _resp(200, 'UPID:pve1:00001234:0:0:wipedisk:sdb:root@pam:')
     res = PegaProxManager.wipe_disk(mgr, 'pve1', '/dev/sdb')
     assert res == {'success': True, 'task': 'UPID:pve1:00001234:0:0:wipedisk:sdb:root@pam:'}
@@ -38,11 +40,49 @@ def test_a_refused_wipe_is_reported():
     mgr = MagicMock()
     mgr.is_connected = True
     mgr.host, mgr.api_port = 'h', 8006
+    mgr._api_token = None
     mgr._api_put.return_value = _resp(500)
     mgr._api_put.return_value.text = 'disk /dev/sdb is used by LVM'
     assert PegaProxManager.wipe_disk(mgr, 'pve1', '/dev/sdb') == {
         'success': False, 'error': 'disk /dev/sdb is used by LVM'}
 
+
+def test_a_token_cluster_wipes_on_a_fresh_root_ticket_and_closes_it():
+    """PVE lets only root@pam run wipedisk and answers an API token 403 (user != root@pam)."""
+    mgr = MagicMock()
+    mgr.is_connected = True
+    mgr.host, mgr.api_port, mgr.api_timeout = 'h', 8006, 10
+    mgr._api_token = 'root@pam!pegaprox=secret'
+    priv = MagicMock()
+    priv.put.return_value = _resp(200, 'UPID:pve1:00001234:0:0:wipedisk:sdb:root@pam:')
+    mgr.create_privileged_session.return_value = (priv, None)
+    res = PegaProxManager.wipe_disk(mgr, 'pve1', '/dev/sdb')
+    assert res == {'success': True, 'task': 'UPID:pve1:00001234:0:0:wipedisk:sdb:root@pam:'}
+    mgr.create_privileged_session.assert_called_once_with('a disk wipe')
+    priv.put.assert_called_once_with('https://h:8006/api2/json/nodes/pve1/disks/wipedisk',
+                                     data={'disk': '/dev/sdb'}, timeout=10)
+    assert not mgr._api_put.called and not mgr._api_post.called
+    assert priv.close.called
+
+    # the session is closed whatever the PUT does
+    priv.reset_mock()
+    priv.put.side_effect = OSError('connection reset')
+    assert PegaProxManager.wipe_disk(mgr, 'pve1', '/dev/sdb') == {'success': False, 'error': 'connection reset'}
+    assert priv.close.called
+
+
+def test_a_token_only_cluster_is_told_why_nothing_was_wiped():
+    """With no root@pam password stored the wipe sends nothing and says what it needs."""
+    mgr = MagicMock()
+    mgr.is_connected = True
+    mgr.host, mgr.api_port = 'h', 8006
+    mgr.config.user = 'root@pam!pegaprox'
+    mgr._api_token = 'root@pam!pegaprox=secret'
+    mgr.create_privileged_session = types.MethodType(PegaProxManager.create_privileged_session, mgr)
+    res = PegaProxManager.wipe_disk(mgr, 'pve1', '/dev/sdb')
+    assert res['success'] is False, res
+    assert 'Proxmox forbids a disk wipe over an API token' in res['error'], res
+    assert not mgr._api_put.called and not mgr._api_post.called
 
 def _wipe_handler():
     with open(os.path.join(ROOT, 'web', 'src', 'node_modals.js'), encoding='utf-8') as f:

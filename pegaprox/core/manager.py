@@ -20292,16 +20292,29 @@ echo "AGENT_INSTALLED_OK"
             if not self.connect_to_proxmox():
                 return {'success': False, 'error': 'Could not connect'}
         
+        priv = None
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/disks/wipedisk"
-            # PVE has wipedisk as PUT only, a POST gets 501
-            response = self._api_put(url, data={'disk': disk})
+            # PVE has wipedisk as PUT only, a POST gets 501. It names no permission either, so
+            # only root@pam itself may run it and the API token we connect with gets a 403:
+            # the wipe goes through a fresh root@pam ticket then, as Ceph OSD create does
+            if getattr(self, '_api_token', None):
+                priv, priv_err = self.create_privileged_session('a disk wipe')
+                if priv_err:
+                    return {'success': False, 'error': priv_err}
+                response = priv.put(url, data={'disk': disk}, timeout=self.api_timeout)
+            else:
+                response = self._api_put(url, data={'disk': disk})
             
             if response.status_code == 200:
                 return {'success': True, 'task': response.json().get('data')}
             return {'success': False, 'error': response.text}
         except Exception as e:
             return {'success': False, 'error': str(e)}
+        finally:
+            if priv is not None:
+                try: priv.close()
+                except Exception: pass
     
     def get_node_replication(self, node: str) -> List[Dict]:
         """Get replication jobs for node"""
