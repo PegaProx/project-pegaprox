@@ -116,11 +116,15 @@ its own at the first login and keeps the password for what a token cannot do.
   holds what the account holds, so the target's role needs `Sys.Incoming` as well
   (`remoteMigration`). The token of a migration started by hand or by the cross-cluster
   balancer stays on the target for as long as its task runs, and PegaProx deletes it 30
-  seconds after the task has ended. Two limits delete it earlier, each with a warning in
-  the log: a task whose status cannot be read for two hours in a row, and a task that
-  still reports running after seven days. A PegaProx restart during the migration leaves
-  it on the target: `pveum user token list <user>` shows it as `pegaprox-migrate-<epoch>`
-  or `xclb-<group>-<vmid>`.
+  seconds after the task has ended, trying twice more a few minutes apart when the target
+  does not take the delete. Two limits delete it earlier, each with a warning in the log:
+  a task whose status cannot be read for two hours in a row, and a task that still reports
+  running after seven days. Every migration gets a token of its own,
+  `pegaprox-migrate-<epoch>-<hex>` or `xclb-<group>-<vmid>-<hex>` in
+  `pveum user token list <user>`, created with an expiry eight days ahead. A token PegaProx
+  did not get to delete, after a restart or a lost lease during the migration, stays
+  listed there until it is deleted by hand, and Proxmox refuses it once its expiry has
+  passed.
 
 ## What works with a connection
 
