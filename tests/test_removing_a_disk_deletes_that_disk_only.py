@@ -249,3 +249,62 @@ def test_a_linked_clone_volume_belongs_to_the_guest_named_last():
         else:
             assert m._api_delete.call_args_list == [], (volid, vmid)
             assert res['message'] == f'Disk scsi1 detached (volume kept: {volid} does not belong to guest {vmid})', res
+
+
+# On a running guest PVE unplugs a drive at once only where it can (scsi or virtio with disk
+# hotplug). Otherwise the delete waits in the pending section until the next start, the volume
+# stays in use, and the config read after the detach shows the key gone with no unusedN for it.
+
+def _remove_running(before, disk_id, pending, vmid=100, vm_type='qemu'):
+    """remove_disk on a running guest: the config before and after the detach, then the pending read."""
+    m = _mgr()
+    m.remove_disk = types.MethodType(PegaProxManager.remove_disk, m)
+    m.get_vm_config = types.MethodType(PegaProxManager.get_vm_config, m)
+    m._parse_vm_config = lambda config, vm_type: {}
+    m._create_session.return_value.get.return_value = _Resp(200, data={'status': 'running'})
+    m._api_get.side_effect = [_Resp(200, data=before), _Resp(200, data={}), pending]
+    m._api_put.return_value = _Resp(200, text='')
+    m._api_delete.return_value = _Resp(200, text='')
+    with patch('time.sleep'):
+        res = m.remove_disk('pve1', vmid, vm_type, disk_id, True)
+    return res, m
+
+
+def test_a_detach_that_waits_for_the_next_start_keeps_the_volume_the_guest_still_uses():
+    """sata1 of a running VM is only marked for removal: nothing is freed, and the answer says when it goes."""
+    before = {'sata1': 'local:100/vm-100-disk-1.qcow2,size=4G'}
+    pending = _Resp(200, data=[{'key': 'sata1', 'value': 'local:100/vm-100-disk-1.qcow2,size=4G', 'delete': 1},
+                               {'key': 'memory', 'value': '2048'}])
+    res, m = _remove_running(before, 'sata1', pending)
+    assert res == {'success': True,
+                   'message': 'Disk sata1 is detached at the next start of guest 100 (volume kept)'}, res
+    assert m._api_get.call_args_list[-1] == call(f'{BASE}/qemu/100/pending')
+    assert m._api_put.call_args_list == [call(_url(), data={'delete': 'sata1'})]
+    assert m._api_delete.call_args_list == []
+
+    # the same guest with no delete waiting for sata1: the storage delete goes out as before
+    res, m = _remove_running(before, 'sata1', _Resp(200, data=[{'key': 'memory', 'value': '2048'}]))
+    assert res == {'success': True, 'message': 'Disk sata1 removed and deleted'}, res
+    assert m._api_delete.call_args_list == [
+        call(f'{BASE}/storage/local/content/local%3A100%2Fvm-100-disk-1.qcow2'),
+    ]
+
+
+def test_a_mount_point_of_a_running_container_is_kept_until_its_next_start():
+    """mp0 of running CT 105 is only marked for removal, so its subvolume stays on the storage."""
+    before = {'mp0': 'local-zfs:subvol-105-disk-1,mp=/srv,size=8G'}
+    pending = _Resp(200, data=[{'key': 'mp0', 'value': 'local-zfs:subvol-105-disk-1,mp=/srv,size=8G', 'delete': 1}])
+    res, m = _remove_running(before, 'mp0', pending, vmid=105, vm_type='lxc')
+    assert res == {'success': True,
+                   'message': 'Disk mp0 is detached at the next start of guest 105 (volume kept)'}, res
+    assert m._api_get.call_args_list[-1] == call(f'{BASE}/lxc/105/pending')
+    assert m._api_delete.call_args_list == []
+
+
+def test_a_running_guest_whose_pending_changes_cannot_be_read_keeps_the_volume():
+    """Without the pending list there is no telling whether the guest still uses the disk, so it stays."""
+    before = {'sata1': 'local-lvm:vm-100-disk-1,size=4G'}
+    res, m = _remove_running(before, 'sata1', _Resp(403, text='{"data":null}'))
+    assert res == {'success': True, 'message': 'Disk sata1 detach sent (volume kept: the pending changes of '
+                                               'guest 100 could not be read)'}, res
+    assert m._api_delete.call_args_list == []

@@ -18474,6 +18474,18 @@ echo "AGENT_INSTALLED_OK"
                                 if _volume_owner(volume_path) != int(vmid):
                                     self.logger.warning(f"[WARN] {volume_path} does not belong to {vm_type}/{vmid}: nothing deleted")
                                     return {'success': True, 'message': f'Disk {disk_id} detached (volume kept: {volume_path} does not belong to guest {vmid})'}
+                                # On a running guest PVE only marks a drive it cannot unplug live for
+                                # removal (sata, ide, no disk hotplug, a container mount point). It stays
+                                # in use until the next start, and freeing it now pulls it from the guest
+                                if (parsed_config.get('status') or {}).get('status') == 'running':
+                                    pending_response = self._api_get(url.rsplit('/', 1)[0] + '/pending')
+                                    if pending_response.status_code != 200:
+                                        self.logger.warning(f"[WARN] Could not read the pending changes of {vm_type}/{vmid}: {volume_path} kept")
+                                        return {'success': True, 'message': f'Disk {disk_id} detach sent (volume kept: the pending changes of guest {vmid} could not be read)'}
+                                    if any(isinstance(p, dict) and p.get('key') == disk_id and p.get('delete')
+                                           for p in (pending_response.json().get('data') or [])):
+                                        self.logger.info(f"[DISK] {disk_id} of running {vm_type}/{vmid} goes at its next start: {volume_path} kept")
+                                        return {'success': True, 'message': f'Disk {disk_id} is detached at the next start of guest {vmid} (volume kept)'}
                                 # Volume not found in unused - try direct storage API delete
                                 storage_name = volume_path.split(':')[0] if ':' in volume_path else None
                                 if storage_name:
