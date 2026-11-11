@@ -1885,7 +1885,7 @@ class PegaProxManager:
             import random, string
             suffix = ''.join(random.choices(string.digits, k=6))
             token_id = f'pegaprox_{suffix}'
-            url = f"https://{host}:{self.api_port}/api2/json/access/users/{user}/token/{token_id}"
+            url = f"https://{self._bracket_ipv6(host)}:{self.api_port}/api2/json/access/users/{user}/token/{token_id}"
             # NS: need to set ticket cookie on login session, it only has it in the response not as a cookie
             session.cookies.set('PVEAuthCookie', self._ticket)
             headers = {'CSRFPreventionToken': self._csrf_token}
