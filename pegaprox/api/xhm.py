@@ -238,7 +238,8 @@ def xhm_start():
         # the id the gates above checked, not the raw one (it reaches qm destroy)
         source_vmid=str(vmid_int),
         target_cluster=data['target_cluster'],
-        target_node=data['target_node'],
+        # only a Proxmox target needs one (checked above), an XCP-ng pool places the VM itself
+        target_node=data.get('target_node') or '',
         target_storage=data['target_storage'],
         vm_name=data.get('vm_name', ''),
         config=data,
@@ -268,7 +269,7 @@ def xhm_start():
     user = request.session.get('user', 'admin') if hasattr(request, 'session') else 'admin'
     log_audit(user, 'xhm.migration.started',
               f"XHM {direction}: {data.get('vm_name', data['source_vmid'])} -> "
-              f"{data['target_cluster']}/{data['target_node']}")
+              f"{data['target_cluster']}/{task.target_node}")
 
     return jsonify({
         'migration_id': mid,
