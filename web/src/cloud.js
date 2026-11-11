@@ -1809,14 +1809,13 @@
                 if (!vForm.vnet.trim() || !vForm.zone) return;
                 mut.run('addvnet', 'POST', `${base}/vnets`, { vnet: vForm.vnet.trim(), zone: vForm.zone }); setModal(null); setVForm({ vnet: '', zone: '' });
             };
-            const [sForm, setSForm] = React.useState({ vnet: '', subnet: '', gateway: '', dhcp: 'none', snat: false });
+            const [sForm, setSForm] = React.useState({ vnet: '', subnet: '', gateway: '', snat: false });
             const submitSubnet = () => {
                 if (!clusterId) { window.alert(t('cloud.noClusterSel') || 'No cluster selected.'); return; }
                 if (!sForm.vnet || !sForm.subnet.trim()) return;
                 const body = { subnet: sForm.subnet.trim(), snat: sForm.snat ? 1 : 0 };
                 if (sForm.gateway.trim()) body.gateway = sForm.gateway.trim();
-                if (sForm.dhcp && sForm.dhcp !== 'none') body.dhcp = sForm.dhcp;
-                mut.run('addsubnet', 'POST', `${base}/vnets/${sForm.vnet}/subnets`, body); setModal(null); setSForm({ vnet: '', subnet: '', gateway: '', dhcp: 'none', snat: false });
+                mut.run('addsubnet', 'POST', `${base}/vnets/${sForm.vnet}/subnets`, body); setModal(null); setSForm({ vnet: '', subnet: '', gateway: '', snat: false });
             };
             const kpis = [
                 { icon: 'Globe', value: zones.length, label: t('cloud.sdnZones') || 'Zones', accent: '#6366f1' },
@@ -1895,10 +1894,9 @@
                         <CloudModal title={t('cloud.addSubnet') || 'Add subnet'} onClose={() => setModal(null)} onSubmit={submitSubnet} submitLabel={t('create') || 'Create'} t={t}>
                             <CloudField label={t('cloud.sdnVnet') || 'VNet'}><select className="cloud-input" value={sForm.vnet} onChange={e => setSForm({ ...sForm, vnet: e.target.value })}><option value="">—</option>{vnets.map(v => <option key={v.vnet} value={v.vnet}>{v.vnet}</option>)}</select></CloudField>
                             <CloudField label={'CIDR'}><input className="cloud-input" value={sForm.subnet} onChange={e => setSForm({ ...sForm, subnet: e.target.value })} placeholder="10.0.10.0/24" /></CloudField>
-                            <div style={{ display: 'flex', gap: 10 }}>
-                                <CloudField label={t('cloud.colGateway') || 'Gateway'}><input className="cloud-input" value={sForm.gateway} onChange={e => setSForm({ ...sForm, gateway: e.target.value })} placeholder="10.0.10.1" /></CloudField>
-                                <CloudField label={'DHCP'}><select className="cloud-input" value={sForm.dhcp} onChange={e => setSForm({ ...sForm, dhcp: e.target.value })}>{['none', 'dnsmasq'].map(x => <option key={x} value={x}>{x}</option>)}</select></CloudField>
-                            </div>
+                            {/* JB Nov 2026 - no DHCP pick here: a PVE subnet has no dhcp property (dhcp=dnsmasq is the
+                                zone's) and refused the create with it; its range is dhcp-range */}
+                            <CloudField label={t('cloud.colGateway') || 'Gateway'}><input className="cloud-input" value={sForm.gateway} onChange={e => setSForm({ ...sForm, gateway: e.target.value })} placeholder="10.0.10.1" /></CloudField>
                             <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '.85rem', color: 'var(--cloud-text-secondary)' }}><input type="checkbox" checked={sForm.snat} onChange={e => setSForm({ ...sForm, snat: e.target.checked })} /> SNAT</label>
                         </CloudModal>
                     )}
