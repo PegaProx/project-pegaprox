@@ -1125,7 +1125,7 @@ def test_alert_channel(cid):
     if _serr:
         return _serr
     from pegaprox.api.helpers import load_server_settings
-    from pegaprox.utils.webhooks import send_to_channel
+    from pegaprox.utils.webhooks import send_to_channel, _redact_webhook_url
     channels = (load_server_settings() or {}).get('alert_webhooks') or []
     ch = next((c for c in channels if isinstance(c, dict) and c.get('id') == cid), None)
     if not ch:
@@ -1143,7 +1143,10 @@ def test_alert_channel(cid):
         'message': 'This is a test alert triggered from PegaProx settings.',
         'timestamp': datetime.now().isoformat(),
     }
-    ok, _detail = send_to_channel(ch, alert)
+    ok, why = send_to_channel(ch, alert)
+    if not ok:
+        # the answer below stays coarse, the log is where an admin reads why the test failed
+        logging.warning(f"[webhooks] test -> {ch.get('name', ch.get('id'))}: FAILED ({_redact_webhook_url(why)})")
     # M-7: don't echo the precise upstream HTTP status / connect-vs-refuse — that
     # turned this admin endpoint into an SSRF port-scan oracle. Coarse pass/fail
     # still lets an admin validate a real Slack/Discord/ntfy URL.

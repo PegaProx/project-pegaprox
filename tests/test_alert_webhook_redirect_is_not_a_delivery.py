@@ -6,6 +6,9 @@ Slack, Discord, Teams and generic channels still counted every status below 400 
 delivered: the test button said "Delivered" and the log line was the one of a success.
 The ntfy channel already stopped at 300.
 
+A failed press of the test button answers as coarsely as before and writes the reason to
+the log, with the secret part of a hook url cut out.
+
 Real requests: an HTTP endpoint on loopback answers the status each test asks for, and a
 second one stands for the place a redirect points at. It must never see a request.
 """
@@ -144,3 +147,68 @@ def test_a_redirected_alert_is_logged_as_a_failure(net, monkeypatch, caplog):
     lines = [r for r in caplog.records if '[webhooks]' in r.getMessage()]
     assert len(lines) == 1
     assert lines[0].levelno == logging.WARNING and 'FAILED' in lines[0].getMessage()
+
+
+# --- the test button ---------------------------------------------------------------------
+
+# the answer of a failed test names no status, so the button cannot be used to probe ports
+COARSE = 'Delivery failed \u2014 check the channel URL and that the endpoint is reachable'
+
+
+def _press_test(api, seed):
+    return api.as_user(seed.user('root', role='admin')).post('/api/alert-channels/ch1/test')
+
+
+def _webhook_lines(caplog):
+    return [r for r in caplog.records if '[webhooks]' in r.getMessage()]
+
+
+def test_a_failed_test_keeps_its_answer_and_logs_the_reason(api, seed, net, monkeypatch, caplog):
+    """The button still says only that the delivery failed; the log names the channel and the 308."""
+    hook = net(308, location='http://127.0.0.1:9/moved')
+    monkeypatch.setattr('pegaprox.api.helpers.load_server_settings',
+                        lambda: {'alert_webhook_allow_private': True,
+                                 'alert_webhooks': [_channel('slack', _url(hook))]}, raising=False)
+    caplog.set_level(logging.INFO)
+
+    r = _press_test(api, seed)
+
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert r.get_json() == {'success': False, 'detail': COARSE}
+    lines = _webhook_lines(caplog)
+    assert len(lines) == 1, [l.getMessage() for l in lines]
+    assert lines[0].levelno == logging.WARNING
+    assert 'ops' in lines[0].getMessage()
+    assert 'HTTP 308, redirect not followed' in lines[0].getMessage()
+
+
+def test_the_logged_reason_of_a_failed_test_carries_no_hook_secret(api, seed, monkeypatch, caplog):
+    """A reason that holds the webhook url is logged with the secret part of the url cut out."""
+    hook = 'https://hooks.example/services/T0/B0/q7Lr2VwX9tKe4NbZ'
+    monkeypatch.setattr('pegaprox.api.helpers.load_server_settings',
+                        lambda: {'alert_webhooks': [_channel('slack', hook)]}, raising=False)
+    monkeypatch.setattr(wh, 'send_to_channel',
+                        lambda ch, alert: (False, f'Max retries exceeded with url: {hook}'))
+    caplog.set_level(logging.INFO)
+
+    r = _press_test(api, seed)
+
+    assert r.get_json() == {'success': False, 'detail': COARSE}
+    lines = _webhook_lines(caplog)
+    assert len(lines) == 1 and lines[0].levelno == logging.WARNING
+    assert 'q7Lr2VwX9tKe4NbZ' not in caplog.text
+    assert 'q7Lr2VwX9tKe4NbZ' not in lines[0].getMessage()
+
+
+def test_a_test_that_is_delivered_logs_no_warning(api, seed, monkeypatch, caplog):
+    """A delivered test answers as before and writes no warning."""
+    monkeypatch.setattr('pegaprox.api.helpers.load_server_settings',
+                        lambda: {'alert_webhooks': [_channel('slack', 'https://hooks.example/x')]},
+                        raising=False)
+    monkeypatch.setattr(wh, 'send_to_channel', lambda ch, alert: (True, 'HTTP 200'))
+    caplog.set_level(logging.INFO)
+
+    r = _press_test(api, seed)
+
+    assert r.get_json() == {'success': True, 'detail': 'Delivered'}
+    assert [l for l in _webhook_lines(caplog) if l.levelno >= logging.WARNING] == []
