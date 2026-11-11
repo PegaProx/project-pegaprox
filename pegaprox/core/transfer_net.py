@@ -347,11 +347,16 @@ def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
     and so does a task still running after TOKEN_MAX_SECONDS. A delete the target does
     not take (a short outage, the lease between two leaders) is tried TOKEN_DELETE_TRIES
     times before the warning.
-    Used by the migration by hand (api/vms.py) and by the cross-cluster balancer.
+
+    Returns how the task ended, ('ok' or 'failed', its exit status) as
+    bulk_migrate.task_state reads it, or None when it was given up on. The migration by
+    hand (api/vms.py) and the cross-cluster balancer run it in a thread of its own; a
+    Site Recovery run follows its migration with it and takes its verdict from it.
     """
     logger = getattr(source_mgr, 'logger', None) or log
     logger.info(f"[TOKEN-CLEANUP] Following {task_upid} of {what}, token {token_name}")
     waited = blind = 0
+    end = None
     while True:
         try:
             state = bulk_migrate.task_state(source_mgr, task_upid)
@@ -364,6 +369,7 @@ def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
             (logger.info if clean else logger.warning)(
                 f"[TOKEN-CLEANUP] Migration of {what} ended: {state[0]} {state[1]}".rstrip())
             time.sleep(TOKEN_SETTLE_SECONDS)
+            end = state
             break
         if state:
             blind = 0
@@ -388,10 +394,11 @@ def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
             res = {'success': False, 'error': str(e)}
         if isinstance(res, dict) and res.get('success'):
             logger.info(f"[TOKEN-CLEANUP] Deleted migration token {token_name}")
-            return
+            return end
     why = res.get('error') if isinstance(res, dict) else res
     logger.warning(f"[TOKEN-CLEANUP] Migration token {token_name} of {what} is still on the "
                    f"target cluster after {TOKEN_DELETE_TRIES} tries, delete it there: {why}")
+    return end
 
 
 # --- SSH relay -------------------------------------------------------------------------

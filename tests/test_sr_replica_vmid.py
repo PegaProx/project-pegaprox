@@ -318,7 +318,6 @@ def test_a_plan_row_with_a_replica_vmid_that_is_none_refuses_that_guest_only(api
 
 def test_a_migration_takes_the_guest_from_one_vmid_to_another(monkeypatch):
     import gevent
-    import pegaprox.api.vms as vms_api
     from pegaprox.core import transfer_net
     src, tgt = MagicMock(name='src'), MagicMock(name='tgt')
     src.get_node_status.return_value = {'n1': {}}
@@ -328,7 +327,8 @@ def test_a_migration_takes_the_guest_from_one_vmid_to_another(monkeypatch):
     tgt.create_api_token.return_value = {'success': True, 'token_id': 'root@pam!t', 'token_value': 's'}
     tgt.get_cluster_fingerprint.return_value = {'success': True, 'fingerprint': 'AA:BB'}
     monkeypatch.setattr(transfer_net, 'migration_route', lambda mgr, node=None: None)
-    monkeypatch.setattr(vms_api, '_wait_for_task', lambda *a, **kw: (True, 'OK'))
+    # the run follows its task to the end and drops the token then: here it ended OK
+    monkeypatch.setattr(transfer_net, 'drop_token_when_done', lambda *a, **kw: ('ok', 'OK'))
     monkeypatch.setattr(gevent, 'spawn', lambda *a, **kw: None)
     ok, err = srw._migrate_vm_cross_cluster(src, tgt, 9100, 'qemu', {}, {}, 100)
     assert ok, err

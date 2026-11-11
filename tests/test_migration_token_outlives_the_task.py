@@ -31,6 +31,7 @@ import pytest
 
 import pegaprox.api.vms as vms
 import pegaprox.background.cross_cluster_lb as xclb
+import pegaprox.background.site_recovery as sr
 from pegaprox.core import transfer_net
 from test_transfer_network import CID, TGT, _fresh_caches, _source, _target  # noqa: F401
 
@@ -75,7 +76,7 @@ class _Migration:
         self.src, self.tgt, self.job, self.token, self.expire = src, tgt, job, token, expire
         self.again, self.kept = again, kept
         self.clock, self.deleted, self.delete_answer = _Clock(), [], {'success': True}
-        self.script, self.waiting = [(EVER, 'running')], False
+        self.script, self.waiting, self.result = [(EVER, 'running')], False, None
         src.cluster_type = 'proxmox'
         src.get_tasks = self._tasks
         src.get_task_status = self._status
@@ -117,7 +118,7 @@ class _Migration:
         token was deleted, and `waiting` says whether the thread was still at it."""
         self.script, self.clock.end = script, hours * HOUR
         try:
-            self.job['target'](*self.job.get('args', ()), **self.job.get('kwargs', {}))
+            self.result = self.job['target'](*self.job.get('args', ()), **self.job.get('kwargs', {}))
         except _Horizon:
             self.waiting = True
         assert [name for name, _t in self.deleted] == [self.token] * len(self.deleted)
@@ -190,6 +191,32 @@ def balancer(monkeypatch):
 @pytest.fixture(params=['by_hand', 'balancer'])
 def migration(request):
     return request.getfixturevalue(request.param)
+
+
+@pytest.fixture
+def failover(monkeypatch):
+    """A Site Recovery migration of VM 105. The run waits for its migration itself, so
+    the run is what goes on the clock here, and its result is the failover's verdict."""
+    src, tgt = MagicMock(), MagicMock()
+    src.logger = logging.getLogger('test.migration_token.source')
+    src.get_node_status.return_value = {'pve1': {}}
+    src.get_vms.return_value = [{'vmid': 105}]
+    src.remote_migrate_vm.return_value = {'success': True, 'task': UPID}
+    tgt.host = '10.0.0.11'
+    tgt.create_api_token.side_effect = lambda name, **kw: {'success': True, 'token_id': 'root@pam!' + name,
+                                                           'token_value': 'secret'}
+    tgt.get_cluster_fingerprint.return_value = {'success': True, 'fingerprint': 'AB:CD'}
+    monkeypatch.setattr(sr.transfer_net, 'migration_route', lambda mgr, node=None: None)
+    monkeypatch.setattr(sr, 'uuid', types.SimpleNamespace(uuid4=lambda: types.SimpleNamespace(hex='5a5a5a5a0000')))
+    job = {'target': sr._migrate_vm_cross_cluster, 'args': (src, tgt, 105, 'qemu', {}, {})}
+    migration = _Migration(src, tgt, job, 'pegaprox-sr-5a5a5a5a', monkeypatch)
+    # what the run leaves to the background runs in place, and every wait of it, wherever
+    # it sleeps, goes by the same clock
+    import gevent
+    monkeypatch.setattr(gevent, 'spawn', lambda fn, *a, **kw: fn(*a, **kw))
+    for module in (sr, vms):
+        monkeypatch.setattr(module, 'time', types.SimpleNamespace(**{**vars(time), 'sleep': migration.clock.sleep}))
+    return migration
 
 
 def _warned(caplog, about):
@@ -329,6 +356,44 @@ def test_a_delete_the_target_did_not_take_is_tried_again(migration, caplog):
     assert len(tried) == 2 and tried[0] == SETTLE < tried[1], tried
     assert not _warned(caplog, migration.token)
     assert [r for r in caplog.records if 'Deleted migration token ' + migration.token in r.getMessage()]
+
+
+# --- Site Recovery: the run follows its migration ----------------------------------------
+
+def test_a_failover_of_hours_keeps_its_token_and_moves_the_guest(failover):
+    """The token went an hour after the start, and the run gave up on the task at the same
+    hour: a guest that copied on was reported failed, and its failover mark taken back."""
+    end = 3 * HOUR
+    assert failover.follow([(end, 'running'), (EVER, 'OK')], hours=4) == [end + SETTLE]
+    assert failover.result == (True, '')
+    assert failover.tgt.create_api_token.call_args.kwargs['expire'] > time.time() + 7 * 24 * HOUR
+
+
+@pytest.mark.parametrize('exit_status', ['migration aborted', "VM 105 already exists on node 'pve2'"])
+def test_a_failover_says_how_its_task_ended_and_its_token_goes_then(failover, exit_status):
+    """A short one left its token on the target for the rest of the hour."""
+    assert failover.follow([(600, 'running'), (EVER, exit_status)], hours=2) == [600 + SETTLE]
+    ok, err = failover.result
+    assert not ok and err.startswith(f'Migration task aborted on PVE: {exit_status}'), err
+
+
+def test_a_failover_that_did_not_start_drops_its_token_at_once(failover):
+    failover.src.remote_migrate_vm.return_value = {'success': False, 'error': 'VM is locked (backup)'}
+    assert failover.follow([(EVER, 'running')]) == [0]
+    assert failover.result == (False, 'VM is locked (backup)')
+
+
+def test_a_failover_whose_task_cannot_be_read_gives_up_on_it(failover):
+    assert failover.follow([(EVER, 'blind')]) == [2 * HOUR]
+    ok, err = failover.result
+    assert not ok and 'could not be read' in err, err
+
+
+def test_a_failover_without_a_task_id_leaves_the_token_to_the_cleanup(failover):
+    """Nothing to follow: the token stays the two hours of a task nobody can read."""
+    failover.src.remote_migrate_vm.return_value = {'success': True, 'task': None}
+    assert failover.follow([(EVER, 'running')]) == [2 * HOUR]
+    assert failover.result == (True, '')
 
 @pytest.mark.parametrize('expire, sent', [(None, 0), (1893456000, 1893456000)])
 def test_the_token_is_created_with_the_expire_it_is_given(expire, sent):

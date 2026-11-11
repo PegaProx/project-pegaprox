@@ -368,7 +368,7 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
         # token the second migration was still authenticating with. The xclb path already mints
         # per-job names for the same reason; do the same here.
         _sr_token_name = f"pegaprox-sr-{uuid.uuid4().hex[:8]}"
-        token_result = tgt_mgr.create_api_token(_sr_token_name)
+        token_result = tgt_mgr.create_api_token(_sr_token_name, expire=transfer_net.token_expiry())
         if not token_result.get('success'):
             return False, f"Failed to create API token on target: {token_result.get('error', 'unknown')}"
 
@@ -406,19 +406,9 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
             online=True, delete_source=True
         )
 
-        # cleanup token after a delay (migration is async)
-        def _delayed_cleanup():
-            time.sleep(3600)  # 1h grace - large disks (1TB+) need time
-            try:
-                tgt_mgr.delete_api_token(_sr_token_name)
-            except Exception:
-                pass
-
-        import gevent
-        # an hour later: the delete asks for the lease at its exit then (#625)
-        gevent.spawn(ha.as_job(_delayed_cleanup, f'token cleanup for {vmid}'))
-
+        what = f'{vm_type}/{vmid}'
         if not result.get('success'):
+            tgt_mgr.delete_api_token(_sr_token_name)
             return False, result.get('error', 'Migration failed')
 
         # MK May 2026 (#413 layer 4) — remote_migrate_vm returns success the
@@ -433,15 +423,22 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
         if not task_upid:
             # successful submit without a UPID — extremely unusual but treat as
             # opaque success (don't make this stricter than before for paths
-            # we don't fully understand)
+            # we don't fully understand). Nothing to follow: the token stays as long
+            # as for a task nobody can read, and its delete asks for the lease (#625)
+            import gevent
+            gevent.spawn(ha.as_job(transfer_net.drop_token_when_done, f'token cleanup for {vmid}'),
+                         tgt_mgr, src_mgr, _sr_token_name, None, what)
             return True, ''
-        try:
-            from pegaprox.api.vms import _wait_for_task
-        except Exception as _imp_err:
-            logger.warning(f"[SR] _wait_for_task import failed, falling back to submit-only success: {_imp_err}")
-            return True, ''
-        ok, detail = _wait_for_task(src_mgr, task_upid, timeout=3600, poll=5)
-        if not ok:
+        # the task's own status by its UPID until it ends, however long the copy takes, and
+        # the token goes then. A fixed hour took it away under a large guest, and the wait
+        # here gave up at the same hour and reported a guest failed that was still moving
+        end = transfer_net.drop_token_when_done(tgt_mgr, src_mgr, _sr_token_name, task_upid, what)
+        if not end:
+            err = "The end of the migration task could not be read, see the log of the source cluster"
+            logger.error(f"[SR] {err} (vmid {vmid}, task {task_upid})")
+            return False, err
+        if end[0] != 'ok':
+            detail = end[1]
             err = f"Migration task aborted on PVE: {detail}"
             # hint for the most common cause we can identify from the detail string
             if detail and 'already exists' in detail.lower():

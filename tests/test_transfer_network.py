@@ -452,16 +452,16 @@ def test_without_the_setting_nothing_changes(xc):
 
 def test_a_site_recovery_migration_goes_over_the_transfer_network(monkeypatch):
     import pegaprox.background.site_recovery as sr
-    import pegaprox.api.vms as vms
     src = _source()
     src.get_node_status.return_value = {'pve1': {}}
     src.get_vms.return_value = [{'vmid': 100}]
     src.remote_migrate_vm.return_value = {'success': True, 'task': 'UPID:x'}
-    monkeypatch.setattr(vms, '_wait_for_task', lambda *a, **k: (True, 'OK'))
+    # the run follows its task to the end and drops the token then: here it ended OK
+    monkeypatch.setattr(xn, 'drop_token_when_done', lambda *a, **k: ('ok', 'OK'))
     import gevent
     monkeypatch.setattr(gevent, 'spawn', lambda *a, **k: None)
     tgt = _manager(TGT, host='10.0.0.12')
-    tgt.create_api_token = lambda name: {'success': True, 'token_id': 'root@pam!' + name, 'token_value': 'secret'}
+    tgt.create_api_token = lambda name, **kw: {'success': True, 'token_id': 'root@pam!' + name, 'token_value': 'secret'}
     tgt.get_cluster_fingerprint = lambda: pytest.fail('the management host is not asked')
     ok, err = sr._migrate_vm_cross_cluster(src, tgt, 100, 'qemu', {}, {})
     assert ok, err
