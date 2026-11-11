@@ -63,11 +63,25 @@ def _num(v):
         return None
 
 
+# A BMC can send null or a bare value where the schema has an object, inside an array too.
+# The parsers read through these, so one odd entry costs that entry and not the whole read.
+def _obj(v):
+    return v if isinstance(v, dict) else {}
+
+
+def _objs(v):
+    return [m for m in v if isinstance(m, dict)] if isinstance(v, list) else []
+
+
+# the links the reader follows out of a resource; one that is no object is no link
+_LINKS = ('Thermal', 'Power', 'LogServices', 'Entries')
+
+
 def parse_thermal(doc):
     """Redfish Thermal resource -> [temp/fan sensor dicts] (bmc.py sensor shape)."""
     out = []
-    doc = doc or {}
-    for t in (doc.get('Temperatures') or []):
+    doc = _obj(doc)
+    for t in _objs(doc.get('Temperatures')):
         name = t.get('Name') or t.get('MemberId') or 'Temperature'
         val = _num(t.get('ReadingCelsius'))
         if val is None and t.get('Reading') is not None:
@@ -75,16 +89,16 @@ def parse_thermal(doc):
         out.append({
             'name': name, 'kind': 'temp', 'value': val, 'unit': '°C',
             'reading': (f"{val} degrees C" if val is not None else ''),
-            'status': _health((t.get('Status') or {}).get('Health')),
+            'status': _health(_obj(t.get('Status')).get('Health')),
         })
-    for f in (doc.get('Fans') or []):
+    for f in _objs(doc.get('Fans')):
         name = f.get('Name') or f.get('FanName') or f.get('MemberId') or 'Fan'
         val = _num(f.get('Reading'))
         units = f.get('ReadingUnits') or 'RPM'
         out.append({
             'name': name, 'kind': 'fan', 'value': val, 'unit': ('RPM' if 'rpm' in str(units).lower() else units),
             'reading': (f"{val} {units}" if val is not None else ''),
-            'status': _health((f.get('Status') or {}).get('Health')),
+            'status': _health(_obj(f.get('Status')).get('Health')),
         })
     return out
 
@@ -92,23 +106,23 @@ def parse_thermal(doc):
 def parse_power(doc):
     """Redfish Power resource -> ([volt/PSU sensor dicts], power_w float|None)."""
     out = []
-    doc = doc or {}
+    doc = _obj(doc)
     power_w = None
-    for pc in (doc.get('PowerControl') or []):
+    for pc in _objs(doc.get('PowerControl')):
         w = _num(pc.get('PowerConsumedWatts'))
         if w is not None:
             power_w = w if power_w is None else power_w + w
-    for v in (doc.get('Voltages') or []):
+    for v in _objs(doc.get('Voltages')):
         name = v.get('Name') or v.get('MemberId') or 'Voltage'
         val = _num(v.get('ReadingVolts'))
         out.append({
             'name': name, 'kind': 'volt', 'value': val, 'unit': 'V',
             'reading': (f"{val} Volts" if val is not None else ''),
-            'status': _health((v.get('Status') or {}).get('Health')),
+            'status': _health(_obj(v.get('Status')).get('Health')),
         })
-    for ps in (doc.get('PowerSupplies') or []):
+    for ps in _objs(doc.get('PowerSupplies')):
         name = ps.get('Name') or ps.get('MemberId') or 'Power Supply'
-        st = ps.get('Status') or {}
+        st = _obj(ps.get('Status'))
         # a PSU is a discrete presence/health item; surface its output watts as the reading
         w = _num(ps.get('PowerOutputWatts')) or _num(ps.get('LastPowerOutputWatts'))
         out.append({
@@ -122,8 +136,8 @@ def parse_power(doc):
 
 def parse_system(doc):
     """Redfish ComputerSystem resource -> (health_str, fru dict, chassis dict)."""
-    doc = doc or {}
-    st = doc.get('Status') or {}
+    doc = _obj(doc)
+    st = _obj(doc.get('Status'))
     # HealthRollup covers subsystems; fall back to Health
     health = _health(st.get('HealthRollup') or st.get('Health'))
     fru = {
@@ -139,14 +153,14 @@ def parse_system(doc):
 def parse_sel(members, limit=25):
     """Redfish LogEntry members -> [event dicts] (bmc.py event shape), newest first."""
     events = []
-    for m in (members or []):
+    for m in _objs(members):
         sev_raw = str(m.get('Severity') or '').strip().lower()
         sev = 'critical' if sev_raw == 'critical' else 'warning' if sev_raw == 'warning' else 'info'
         events.append({
             'id': str(m.get('Id') or m.get('MemberId') or ''),
             'time': m.get('Created') or '',
             'sensor': m.get('SensorType') or m.get('EntryType') or '',
-            'description': (m.get('Message') or '').strip(),
+            'description': str(m.get('Message') or '').strip(),
             'severity': sev,
         })
     # Redfish typically returns oldest->newest; show newest first, bounded.
@@ -378,7 +392,14 @@ def read_node_bmc_redfish(host, user, password, verify_ssl=False, timeout=10):
                 buf.extend(chunk)
                 if len(buf) > _MAX_REDFISH_BYTES:
                     return None, 'Redfish response too large'
-            return _json.loads(buf.decode('utf-8', errors='replace')), None
+            doc = _json.loads(buf.decode('utf-8', errors='replace'))
+            # every resource and collection we read is a JSON object
+            if not isinstance(doc, dict):
+                return None, 'unexpected Redfish document'
+            for k in _LINKS:
+                if k in doc and not isinstance(doc[k], dict):
+                    del doc[k]
+            return doc, None
         except Exception as e:  # noqa: BLE001 — surface as unavailable
             # a pinned address reads as the name it stands for, as before (no resolver oracle)
             msg = str(e) if ip is None else str(e).replace(str(ip), bu.hostname or '')
@@ -394,7 +415,7 @@ def read_node_bmc_redfish(host, user, password, verify_ssl=False, timeout=10):
     systems, err = _get('/redfish/v1/Systems')
     if systems is None:
         return {'available': False, 'reason': f'Redfish unreachable: {err}'}
-    members = systems.get('Members') or []
+    members = _objs(systems.get('Members'))
     if not members:
         return {'available': False, 'reason': 'no Redfish Systems found'}
     sys_path = (members[0] or {}).get('@odata.id')
@@ -407,10 +428,10 @@ def read_node_bmc_redfish(host, user, password, verify_ssl=False, timeout=10):
     # 2) discover a Chassis for Thermal/Power (best-effort)
     thermal_doc = power_doc = None
     chassis_col, _ = _get('/redfish/v1/Chassis')
-    cmembers = (chassis_col or {}).get('Members') or []
+    cmembers = _objs((chassis_col or {}).get('Members'))
     if cmembers:
         chassis_path = (cmembers[0] or {}).get('@odata.id')
-        if chassis_path:
+        if chassis_path and isinstance(chassis_path, str):
             chassis_doc, _ = _get(chassis_path)
             cd = chassis_doc or {}
             tref = (cd.get('Thermal') or {}).get('@odata.id') or (chassis_path.rstrip('/') + '/Thermal')
@@ -423,14 +444,14 @@ def read_node_bmc_redfish(host, user, password, verify_ssl=False, timeout=10):
     logs_ref = (system_doc.get('LogServices') or {}).get('@odata.id')
     if logs_ref:
         logs, _ = _get(logs_ref)
-        lmembers = (logs or {}).get('Members') or []
+        lmembers = _objs((logs or {}).get('Members'))
         if lmembers:
             first_log = (lmembers[0] or {}).get('@odata.id')
-            if first_log:
+            if first_log and isinstance(first_log, str):
                 svc, _ = _get(first_log)
                 entries_ref = ((svc or {}).get('Entries') or {}).get('@odata.id') or (first_log.rstrip('/') + '/Entries')
                 entries, _ = _get(entries_ref)
-                sel_members = (entries or {}).get('Members') or []
+                sel_members = _objs((entries or {}).get('Members'))
 
     return parse_redfish(system_doc, thermal_doc, power_doc, sel_members)
 
