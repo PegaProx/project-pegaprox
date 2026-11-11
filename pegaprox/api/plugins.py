@@ -1055,10 +1055,12 @@ def save_plugin_config(plugin_id):
     except RecursionError:
         return jsonify({'error': 'The config is nested too deeply'}), 400
 
+    stored, have_stored = {}, False
     try:
-        stored = json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+        if config_path.exists():
+            stored, have_stored = json.loads(config_path.read_text(encoding='utf-8')), True
     except (OSError, ValueError):
-        stored = {}
+        pass    # a file that does not parse is written anew
     if _CONFIG_MASK in json.dumps(new_cfg):
         try:
             new_cfg = _unmasked_config(new_cfg, stored, plugin_id)
@@ -1074,11 +1076,20 @@ def save_plugin_config(plugin_id):
             return jsonify({'error': msg, 'code': 'CREDENTIAL_REQUIRED', 'fields': e.fields}), 400
         raw = json.dumps(new_cfg, indent=4)
 
-    try:
-        _write_config(config_path, raw)
-        _config_written(plugin_id)
-    except Exception as e:
-        return jsonify({'error': safe_error(e, 'Failed to write config')}), 500
+    # MK Nov 2026 - the editor shows the file masked and indented its own way, so saving
+    # what it showed rewrote the whole file although no value changed. Such a save leaves
+    # config.json as it is, and the handles read before it still hold.
+    if have_stored and json.dumps(new_cfg) == json.dumps(stored):
+        try:
+            os.chmod(config_path, 0o600)
+        except OSError:
+            pass    # a file of another owner keeps its mode, as on a write
+    else:
+        try:
+            _write_config(config_path, raw)
+            _config_written(plugin_id)
+        except Exception as e:
+            return jsonify({'error': safe_error(e, 'Failed to write config')}), 500
 
     usr = getattr(request, 'session', {}).get('user', 'system')
     log_audit(usr, 'plugins.config_saved', f"Updated config for plugin: {plugin_id}")
