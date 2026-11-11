@@ -140,6 +140,32 @@ def _mask(d):
     return out
 
 
+def _unmask(new, old):
+    """The settings of an edit with each masked secret put back to the stored value."""
+    old = old if isinstance(old, dict) else {}
+    out = {}
+    for k, v in new.items():
+        if isinstance(v, dict):
+            out[k] = _unmask(v, old.get(k))
+        elif v == _MASK and _is_secret(k):
+            if old.get(k):
+                out[k] = old[k]
+        else:
+            out[k] = v
+    return out
+
+
+def _keeps_stored_secret(new, old):
+    old = old if isinstance(old, dict) else {}
+    for k, v in new.items():
+        if isinstance(v, dict):
+            if _keeps_stored_secret(v, old.get(k)):
+                return True
+        elif v == _MASK and _is_secret(k) and old.get(k):
+            return True
+    return False
+
+
 def _row_to_target(row, masked=True):
     try:
         settings = json.loads(row['settings'] or '{}')
@@ -533,6 +559,32 @@ def create_target():
 @require_auth(roles=[ROLE_ADMIN])
 def update_target(tid):
     body = request.get_json(silent=True) or {}
+    try:
+        c = get_db().conn.cursor()
+        c.execute('SELECT endpoint, settings FROM siem_targets WHERE id = ?', (tid,))
+        row = c.fetchone()
+    except Exception:
+        logging.exception('handler error in siem.py'); return jsonify({'error': 'internal error'}), 500
+    if not row:
+        return jsonify({'error': 'not found'}), 404
+    try:
+        stored = json.loads(row['settings'] or '{}')
+    except ValueError:
+        stored = {}
+    # MK Nov 2026 - the tab sends the masked settings back with every edit, which wrote the
+    # mask over the stored token. A masked value is the stored one again, but not for a
+    # new endpoint: the token or password of a target goes to the address it was typed for,
+    # as with PBS and the clusters. Moving it means typing them again.
+    moved = 'endpoint' in body and str(body['endpoint']).strip() != (row['endpoint'] or '').strip()
+    if 'settings' in body:
+        new = body['settings'] if isinstance(body['settings'], dict) else {}
+        if moved and _keeps_stored_secret(new, stored):
+            return jsonify({'error': 'Re-enter the token or password of this target to change its endpoint.',
+                            'code': 'CREDENTIAL_REQUIRED'}), 400
+        body['settings'] = _unmask(new, stored)
+    elif moved and _mask(stored) != stored:
+        return jsonify({'error': 'Re-enter the token or password of this target to change its endpoint.',
+                        'code': 'CREDENTIAL_REQUIRED'}), 400
     fields = []
     params = []
     for key in ('name', 'endpoint', 'format'):
