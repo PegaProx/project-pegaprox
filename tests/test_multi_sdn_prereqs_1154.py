@@ -1,7 +1,7 @@
 """E2E coverage for POST /api/multi-sdn/prerequisites (#1154).
 
 The endpoint batches every per-node probe into ONE SSH round-trip and fans
-the nodes out through run_concurrent_dict, so the tests pin four things a
+the nodes out through run_per_node, 8 per cluster, so the tests pin four things a
 refactor could silently break: the authz shape (whole-cluster, unconfined -
 the same gate as the vnet writes), the label parsing incl. the PVE >= 8
 floor, the one-SSH-call-per-node property, and the parallel fan-out with
@@ -11,7 +11,6 @@ import types
 
 import pytest
 
-import pegaprox.utils.concurrent as concurrent_mod
 import pegaprox.utils.rbac as rbac
 import pegaprox.utils.ssh as sshmod
 
@@ -275,34 +274,35 @@ def test_offline_node_is_listed_without_an_ssh_call(api, db, seed, monkeypatch):
                for i in checks['pve2']['items'])
 
 
-def test_the_route_fans_out_through_run_concurrent_dict(api, db, seed, monkeypatch):
+def test_the_route_fans_out_through_run_per_node(api, db, seed, monkeypatch):
     _fake_manager(api, 'cl_f', _online('pve1'))
     seen = []
-    real = concurrent_mod.run_concurrent_dict
+    real = msdn.run_per_node
 
-    def _spy(tasks, timeout=30.0):
-        seen.append((sorted(tasks), timeout))
-        return real(tasks, timeout=timeout)
-    monkeypatch.setattr(concurrent_mod, 'run_concurrent_dict', _spy)
+    def _spy(tasks, max_concurrent=8, timeout=120, whole=False):
+        seen.append((sorted(tasks), max_concurrent, whole))
+        return real(tasks, max_concurrent=max_concurrent, timeout=timeout, whole=whole)
+    monkeypatch.setattr(msdn, 'run_per_node', _spy)
 
     monkeypatch.setattr(sshmod, '_pve_node_exec',
                         lambda *a, **k: (0, GOOD_OUTPUT, ''))
     r = _admin(api, seed).post('/api/multi-sdn/prerequisites',
                                json={'cluster_ids': ['cl_f']})
     assert r.status_code == 200
-    assert seen and seen[0][0] == ['pve1'] and seen[0][1] <= 30
+    # the nodes of a cluster 8 at a time, with the request's deadline
+    assert (['pve1'], 8, True) in seen
 
 
 def test_a_timed_out_node_is_unknown_not_a_crash(api, db, seed, monkeypatch):
     _fake_manager(api, 'cl_g', _online('pve1', 'pve2'), node_ip='10.0.0.9')
-    real = concurrent_mod.run_concurrent_dict
+    real = msdn.run_per_node
 
-    def _one_times_out(tasks, timeout=30.0):
-        out = real(tasks, timeout=timeout)
+    def _one_times_out(tasks, **kw):
+        out = real(tasks, **kw)
         if 'pve1' in out:
-            out['pve1'] = None   # run_concurrent_dict answers None on timeout
+            out['pve1'] = None   # run_per_node answers None past its deadline
         return out
-    monkeypatch.setattr(concurrent_mod, 'run_concurrent_dict', _one_times_out)
+    monkeypatch.setattr(msdn, 'run_per_node', _one_times_out)
     monkeypatch.setattr(sshmod, '_pve_node_exec',
                         lambda *a, **k: (0, GOOD_OUTPUT, ''))
 

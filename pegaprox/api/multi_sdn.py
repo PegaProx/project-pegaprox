@@ -829,8 +829,57 @@ def _unknown_check(node_name, reason):
     return {'node': node_name, 'items': items, 'mgmt_ip': None, 'ip_error': reason}
 
 
+# MK Nov 2026 - the check went cluster by cluster and put one probe per online node into the
+# shared request pool at once, where SSH fan-outs go through run_per_node, 8 per cluster. Each
+# probe also looked the node address up inside its SSH budget and again after it, so a slow
+# lookup ran past the 30 s cap and the node showed as a timeout. Now 8 probes per cluster, the
+# clusters side by side, one deadline for the whole request, the address looked up once
+# before the SSH read.
+_PREREQ_PARALLEL = 8        # SSH probes per cluster at once
+_PREREQ_CLUSTERS = 8        # clusters probed side by side
+_PREREQ_NODE_TIMEOUT = 40   # one node: the address lookup and the 20 s SSH read
+_PREREQ_DEADLINE = 90       # the whole check, all clusters
+
+
+def _node_address(mgr, node_name):
+    """The address the SSH read of a node goes to. _pve_node_exec's own cache while it is
+    fresh (its 5 minutes), else one lookup, which goes into that cache so the read takes
+    it from there and does not look it up again."""
+    from pegaprox.utils.ssh import _node_ip_cache
+    key = (getattr(mgr, 'id', None), node_name)
+    hit = _node_ip_cache.get(key)
+    if hit and hit[0] and time.time() - hit[1] < 300:
+        return hit[0]
+    # _get_node_ip also refreshes the stored address. Nodes without a per-node
+    # credential row have no stored address at all, so a stored-only read would
+    # answer nothing on cluster-wide-credential installs.
+    ip = mgr._get_node_ip(node_name)
+    if ip:
+        _node_ip_cache[key] = (ip, time.time())
+    return ip
+
+
 def _check_node_prereqs(mgr, node_name):
     """One node's prerequisite checklist from a single batched SSH call."""
+    # _get_node_ip answers None for a node in backoff, which would read as an address
+    # problem. Say what the SSH read would have said.
+    try:
+        blocked, remaining = mgr._is_node_blocked(node_name)
+    except Exception:
+        blocked = False
+    if blocked:
+        return _unknown_check(node_name, f"node '{node_name}' in circuit-breaker backoff ({remaining}s remaining)")
+
+    # What PegaProx reaches the node on; the UI labels it as the management
+    # address so nobody mistakes it for the EVPN underlay address.
+    try:
+        mgmt_ip = _node_address(mgr, node_name)
+    except Exception:
+        mgmt_ip = None
+    if not mgmt_ip:
+        # the SSH read would only look for it again and fail the same way
+        return _unknown_check(node_name, f"cannot resolve reachable IP for node '{node_name}'")
+
     out, err = _ssh_read(mgr, node_name, _PREREQ_SCRIPT)
     if err:
         # Node unreachable / circuit breaker / SSH timeout
@@ -854,18 +903,40 @@ def _check_node_prereqs(mgr, node_name):
                       'detail': raw[:60] if raw else 'no data',
                       'fix_hint': fix_hint})
 
-    # What PegaProx reaches the node on; the UI labels it as the management
-    # address so nobody mistakes it for the EVPN underlay address. _get_node_ip
-    # also refreshes the stored address; nodes without a per-node credential
-    # row have no stored address at all, so a stored-only read would answer
-    # nothing on cluster-wide-credential installs.
-    try:
-        mgmt_ip = mgr._get_node_ip(node_name)
-    except Exception:
-        mgmt_ip = None
+    return {'node': node_name, 'items': items, 'mgmt_ip': mgmt_ip, 'ip_error': None}
 
-    return {'node': node_name, 'items': items, 'mgmt_ip': mgmt_ip,
-            'ip_error': None if mgmt_ip else 'IP not discovered'}
+
+def _probe_node(mgr, node_name):
+    """_check_node_prereqs within its own time limit, so one hanging node holds its slot
+    no longer than that. A probe that fails says so; only one that ran out of time is a
+    timeout."""
+    from gevent import Timeout
+    try:
+        with Timeout(_PREREQ_NODE_TIMEOUT, False):
+            return _check_node_prereqs(mgr, node_name)
+        return _unknown_check(node_name, 'timeout')
+    except Exception as e:
+        logging.warning(f"[MultiSDN] prerequisite check of {node_name} failed: {e}")
+        return _unknown_check(node_name, f'error: {str(e)[:160] or type(e).__name__}')
+
+
+def _probe_cluster(mgr, end):
+    """(node map, {node: check}) of one member, or why there is none. Only online nodes
+    get an SSH round-trip, _PREREQ_PARALLEL at a time; one whose turn comes after `end`
+    is not probed (None)."""
+    try:
+        # mgr.nodes is a cached property: {node_name: info_dict}
+        node_map = getattr(mgr, 'nodes', None) or {}
+        online = [name for name, d in node_map.items()
+                  if isinstance(d, dict) and d.get('status') == 'online']
+        left = end - time.monotonic()
+        if not online or left <= 0:
+            return node_map, {}
+        return node_map, run_per_node({n: (lambda nn: _probe_node(mgr, nn)) for n in online},
+                                      max_concurrent=_PREREQ_PARALLEL, timeout=left, whole=True)
+    except Exception as e:
+        logging.warning(f"[MultiSDN] prerequisite check of a cluster failed: {e}")
+        return f'error: {str(e)[:160] or type(e).__name__}'
 
 
 @bp.route('/api/multi-sdn/prerequisites', methods=['POST'])
@@ -895,22 +966,27 @@ def check_prerequisites():
     if deny:
         return deny
 
-    from pegaprox.utils.concurrent import run_concurrent_dict
     results, node_ips, errors = [], {}, []
+    members = {}
     for cid in cluster_ids:
         mgr, reason = _resolve_member(cid)
         if reason:
             errors.append({'cluster_id': cid, 'reason': reason})
-            continue
+        else:
+            members[cid] = mgr
+    # every member's probes end by `end`, the few seconds more are for handing them back
+    end = time.monotonic() + _PREREQ_DEADLINE
+    probes = run_per_node({cid: (lambda c: _probe_cluster(members[c], end)) for cid in members},
+                          max_concurrent=_PREREQ_CLUSTERS, timeout=_PREREQ_DEADLINE + 5,
+                          whole=True) if members else {}
 
+    for cid, mgr in members.items():
+        got = probes.get(cid)
+        if not isinstance(got, tuple):
+            errors.append({'cluster_id': cid, 'reason': got or 'timeout'})
+            continue
+        node_map, probed = got
         cluster_name = getattr(getattr(mgr, 'config', None), 'name', None) or str(cid)
-        # mgr.nodes is a cached property: {node_name: info_dict}; only online
-        # nodes get an SSH round-trip, offline ones are answered from here
-        node_map = getattr(mgr, 'nodes', None) or {}
-        online = [name for name, d in node_map.items()
-                  if isinstance(d, dict) and d.get('status') == 'online']
-        tasks = {n: (lambda nn=n: _check_node_prereqs(mgr, nn)) for n in online}
-        probed = run_concurrent_dict(tasks, timeout=30) if tasks else {}
         for node_name in node_map:
             info = node_map.get(node_name) or {}
             if probed.get(node_name) is not None:
