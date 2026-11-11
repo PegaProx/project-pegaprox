@@ -475,12 +475,16 @@ def _heavy_read_offload(sql: str, params: tuple, transform=None):
             return _heavy_read_now(sql, params, transform)
         finally:
             trim_heap(_time.monotonic() - start)
+    # MK Nov 2026 - only the hub lookup may fall back. The threadpool raises what the
+    # read raised, and with the apply inside the except a failed read (a locked database,
+    # a transform error) ran a second time, inline on the hub.
     try:
         from gevent import get_hub
-        return get_hub().threadpool.apply(_work)
+        hub = get_hub()
     except Exception:
         # No active hub (synchronous CLI context) — run inline.
         return _work()
+    return hub.threadpool.apply(_work)
 
 
 # ─── Tier 2: result cache + single-flight + concurrency cap ──────────────────
@@ -640,12 +644,14 @@ def run_heavy_write(statements=None, build=None):
                 conn.close()
             except Exception:
                 pass
+    # as in _heavy_read_offload: a failed transaction is not run again inline
     try:
         from gevent import get_hub
-        return get_hub().threadpool.apply(_work)
+        hub = get_hub()
     except Exception:
         # No active hub (CLI / migration) — run inline.
         return _work()
+    return hub.threadpool.apply(_work)
 
 
 def run_off_hub(work, db_path, commit=False, durable=False):
