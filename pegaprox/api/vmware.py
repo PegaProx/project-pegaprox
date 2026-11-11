@@ -52,6 +52,63 @@ def _target_refusal(host):
     """esxi_target_refusal for the caller of this request: loopback for a global admin only."""
     return esxi_target_refusal(host, allow_loopback=caller_acts_as_admin())
 
+
+def _port_refusal(data):
+    """Reads the port of a request body in place: an int afterwards, or gone when it came as
+    null or '' (the stored port, or 443, is used then). The answer when it is no port at all.
+
+    int(data.get('port', 443)) ran on whatever the client sent, so 'abc' or null was a 500."""
+    port = data.get('port')
+    if port is None or port == '':
+        data.pop('port', None)
+        return None
+    # int() takes true as 1 and 443.9 as 443
+    if isinstance(port, bool) or (isinstance(port, float) and not port.is_integer()):
+        return jsonify({'error': 'Invalid port'}), 400
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = 0
+    if not 0 < port < 65536:
+        return jsonify({'error': 'Invalid port'}), 400
+    data['port'] = port
+    return None
+
+
+def _stored_config(vmware_id):
+    """The config an update of this server starts from: its row with the password decrypted,
+    or what the live manager holds when there is no row. linked_clusters is left out when the
+    stored ones do not parse. None when there is neither."""
+    import json as _json
+    db = get_db()
+    row = db.conn.cursor().execute("SELECT * FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone()
+    if row is None:
+        mgr = vmware_managers.get(vmware_id)
+        if mgr is None:
+            return None
+        return {k: getattr(mgr, k) for k in ('name', 'host', 'port', 'username', 'password', 'server_type',
+                                              'ssl_verify', 'enabled', 'linked_clusters', 'notes')
+                if getattr(mgr, k, None) is not None}
+    row = dict(row)
+    # a column that is NULL is left to the defaults of VMwareManager and save_vmware_server
+    config = {k: row[k] for k in ('name', 'host', 'port', 'username', 'server_type', 'notes')
+              if row.get(k) is not None}
+    config['ssl_verify'] = bool(row.get('ssl_verify') or 0)
+    config['enabled'] = bool(row['enabled']) if row.get('enabled') is not None else True
+    config['password'] = ''
+    if row.get('pass_encrypted'):
+        try:
+            config['password'] = db._decrypt(row['pass_encrypted'])
+        except Exception:
+            pass
+    try:
+        linked = _json.loads(row.get('linked_clusters') or '[]')
+    except (TypeError, ValueError):
+        linked = False
+    if isinstance(linked, (list, type(None))):
+        config['linked_clusters'] = list(linked or [])
+    return config
+
 # =============================================================================
 
 @bp.route('/api/vmware', methods=['GET'])
@@ -117,6 +174,9 @@ def add_vmware_server():
         return jsonify({'error': 'Username is required'}), 400
     if not data.get('password'):
         return jsonify({'error': 'Password is required'}), 400
+    _bad_port = _port_refusal(data)
+    if _bad_port:
+        return _bad_port
     _why = _target_refusal(data.get('host'))
     if _why:
         return jsonify({'error': _why}), 400
@@ -167,6 +227,10 @@ def update_vmware_server(vmware_id):
                     return jsonify({'error': 'Access denied: cannot link this ESXi server to '
                                              + ', '.join(_beyond)}), 403
 
+    _bad_port = _port_refusal(data)
+    if _bad_port:
+        return _bad_port
+
     if vmware_id not in vmware_managers:
         db = get_db()
         row = db.conn.cursor().execute("SELECT * FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone()
@@ -203,7 +267,7 @@ def update_vmware_server(vmware_id):
         # without a row reaches this line.
         host_changed = True
     elif (data.get('host') and data.get('host') != _row['host']) or \
-         (data.get('port') and int(data.get('port', 443)) != int(_row['port'] or 443)):
+         ('port' in data and data['port'] != int(_row['port'] or 443)):
         host_changed = True
     if host_changed:
         # a new port on the old host is a new target as well
@@ -225,31 +289,36 @@ def update_vmware_server(vmware_id):
             return jsonify({
                 'error': 'Re-enter the password when changing the VMware host or port.'}), 400
         credentials_preserved = True
-        # Hand the in-memory manager the credential it is keeping. save_vmware_server
-        # falls back to the stored row either way, but VMwareManager is rebuilt from
-        # `data` a few lines down and then reconnected — without this it comes up with an
-        # empty password and the live connection stays broken until a restart, while the
-        # row it was built from still holds the secret. Pre-dates the omitted/empty arm;
-        # it only ever hydrated the ******** spelling. Host changes returned 400 above,
-        # so this can only ever re-supply a credential to the destination it already had.
-        if vmware_id in vmware_managers:
-            data['password'] = vmware_managers[vmware_id].password
 
-    save_vmware_server(vmware_id, data)
+    # MK Nov 2026 - the stored server is what this update starts from, as on the PBS twin. It
+    # was rebuilt from the body alone: the edit dialog sends no server_type or enabled, so a
+    # save gave an ESXi host the default type and switched a disabled one back on, and a body
+    # without host or username stored them empty. What the body leaves out or sends as null
+    # keeps its stored value, and so does an empty one, the notes aside.
+    config = _stored_config(vmware_id) or {}
+    for k, v in data.items():
+        if k in ('password', 'linked_clusters') or v is None or (v == '' and k != 'notes'):
+            continue
+        config[k] = v
+    if credentials_preserved:
+        # the live manager's credential first, else the stored one. Host changes returned
+        # 400 above, so this only ever re-supplies a credential to the destination it had
+        if getattr(vmware_managers.get(vmware_id), 'password', ''):
+            config['password'] = vmware_managers[vmware_id].password
+    else:
+        config['password'] = _pw
 
-    # an update that leaves linked_clusters out keeps them (the row already does); the
-    # live manager below is built from `data` and came up unlinked, open to everybody (#981)
-    if 'linked_clusters' not in data:
-        if vmware_id in vmware_managers:
-            data['linked_clusters'] = list(getattr(vmware_managers[vmware_id], 'linked_clusters', None) or [])
-        else:
-            import json as _json
-            _lr = get_db().conn.cursor().execute(
-                "SELECT linked_clusters FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone()
-            data['linked_clusters'] = _json.loads(_lr['linked_clusters'] or '[]') if _lr else []
+    # an update that leaves linked_clusters out keeps them; a manager built without them
+    # comes up unlinked, open to everybody (#981)
+    if 'linked_clusters' in data:
+        config['linked_clusters'] = list(data.get('linked_clusters') or [])
+    elif vmware_id in vmware_managers:
+        config['linked_clusters'] = list(getattr(vmware_managers[vmware_id], 'linked_clusters', None) or [])
 
-    mgr = VMwareManager(vmware_id, data)
-    if data.get('enabled', True):
+    save_vmware_server(vmware_id, config)
+
+    mgr = VMwareManager(vmware_id, config)
+    if config.get('enabled', True):
         if host_changed and credentials_preserved:
             try:
                 mgr.connected = False
@@ -292,6 +361,9 @@ def test_vmware_connection():
     data = request.json or {}
     if not data.get('host') or not data.get('username') or not data.get('password'):
         return jsonify({'error': 'Host, username and password required'}), 400
+    _bad_port = _port_refusal(data)
+    if _bad_port:
+        return _bad_port
     _why = _target_refusal(data.get('host'))
     if _why:
         return jsonify({'error': _why}), 400
