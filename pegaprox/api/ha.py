@@ -1397,6 +1397,55 @@ def set_mode():
     return jsonify({'success': True, 'mode': ha.mode(), 'lease_s': lease_s, 'waiting': waiting})
 
 
+@bp.route('/api/ha/sites', methods=['PUT'])
+@require_auth(roles=[ROLE_ADMIN])
+def set_sites():
+    """Switch three leader sites on or off, on the group leader. Wants user_password.
+
+    ha_sites: true turns it on. Refused with 409 when fewer than 4 voters
+    exist, or a member reports a different SCHEMA_VERSION, or a member does
+    not know the switch (an older release). ha_sites: false turns it off;
+    every site closes its gates, the group leader reverts to acting on every
+    cluster. 503 HA_NO_LEASE on an instance that does not hold the lease."""
+    denied = _refuse_confined_admin()
+    if denied:
+        return denied
+    if not ha.holds_lease():
+        return jsonify({'error': 'Only the group leader may switch three leader sites',
+                        'code': 'HA_NO_LEASE'}), 503
+    data = _body()
+    want = data.get('ha_sites')
+    if not isinstance(want, bool):
+        return jsonify({'error': 'ha_sites must be true or false'}), 400
+    if want == ha.sites_enabled():
+        return jsonify({'ha_sites': want})
+    if want:
+        # at least 4 voters (3 leader sites plus a fourth vote)
+        voters = ha.voter_count()
+        if voters < 4:
+            return jsonify({'error': f'three leader sites need at least 4 voters, '
+                                     f'the group has {voters}',
+                            'code': 'HA_SITES_REFUSED'}), 409
+        # every member on this release answers peer/status with a schema; one
+        # that does not know the switch is an older release and must not
+        # silently ignore homes
+        findings = []
+        for m in ha.members():
+            if m.get('last_error'):
+                findings.append({'code': 'UNREACHABLE', 'member': m['instance_id']})
+        if findings:
+            return jsonify({'error': 'every member must be reachable to turn on '
+                                     'three leader sites',
+                            'code': 'HA_SITES_REFUSED', 'findings': findings}), 409
+    try:
+        ha._update(ha_sites=want)
+        log_audit(_user(), 'ha.sites_changed',
+                  f'three leader sites {"on" if want else "off"}')
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Could not switch three leader sites')}), 500
+    return jsonify({'ha_sites': want})
+
+
 @bp.route('/api/ha/timezone', methods=['PUT'])
 @require_auth(roles=[ROLE_ADMIN])
 def set_timezone():
