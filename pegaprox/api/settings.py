@@ -366,6 +366,11 @@ def _update_target(install_dir, rel_path):
     return dst
 
 
+# MK: what the updater saves of the install before it writes, and what a rollback puts back
+UPDATE_BACKUP_DIRS = ('pegaprox', 'web', 'static')
+UPDATE_BACKUP_FILES = ('pegaprox_multi_cluster.py', 'version.json', 'requirements.txt')
+
+
 # MK Oct 2026 - the update, the rollback and the restart button hand the restart to
 # `systemctl restart pegaprox` only when this process runs in that unit. A second
 # PegaProx on the host (a test instance started by hand, one in a unit of another name)
@@ -673,7 +678,7 @@ def perform_pegaprox_update():
         os.makedirs(backup_path, exist_ok=True)
 
         # MK: backup the stuff that matters, not everything
-        for item in ['pegaprox', 'web', 'static']:
+        for item in UPDATE_BACKUP_DIRS:
             src = os.path.join(install_dir, item)
             if os.path.isdir(src):
                 try:
@@ -681,7 +686,7 @@ def perform_pegaprox_update():
                                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
                 except Exception as e:
                     logging.warning(f"Backup {item}/: {e}")
-        for f in ['pegaprox_multi_cluster.py', 'version.json', 'requirements.txt']:
+        for f in UPDATE_BACKUP_FILES:
             src = os.path.join(install_dir, f)
             if os.path.exists(src):
                 shutil.copy2(src, os.path.join(backup_path, f))
@@ -1112,6 +1117,91 @@ def perform_pegaprox_update():
         logging.error(f"Update error: {e}")
         return jsonify({'error': safe_error(e, 'Update failed')}), 500
 
+
+# every install that ran has these two, a backup without one of them is refused
+_ROLLBACK_REQUIRED = ('pegaprox_multi_cluster.py', os.path.join('pegaprox', 'api', 'settings.py'))
+
+
+def _raise(err):
+    raise err
+
+
+def _link_on_the_way(root, rel):
+    """Whether root/rel, or a directory between root and it, is a symbolic link."""
+    path = root
+    for part in rel.split(os.sep):
+        path = os.path.join(path, part)
+        if os.path.islink(path):
+            return True
+        if not os.path.lexists(path):
+            return False
+    return False
+
+
+def _rollback_plan(backup, install):
+    """([(source, target)], None) for every file of an updater backup, or (None, why).
+
+    The updater copies what a link points at, so a backup it wrote holds plain files and
+    directories only. A link in the backup, or on the way to a target in the install,
+    refuses the whole rollback, and so does a backup without the launcher or settings.py:
+    nothing is read or written through a link, and nothing outside the install."""
+    for rel in _ROLLBACK_REQUIRED:
+        src = os.path.join(backup, rel)
+        if _link_on_the_way(backup, rel) or not os.path.isfile(src):
+            return None, f"The backup has no {rel.replace(os.sep, '/')}"
+    rels = [f for f in UPDATE_BACKUP_FILES if os.path.lexists(os.path.join(backup, f))]
+    for top in UPDATE_BACKUP_DIRS:
+        src = os.path.join(backup, top)
+        if not os.path.lexists(src):
+            continue
+        if os.path.islink(src) or not os.path.isdir(src):
+            return None, f"{top} in the backup is no directory"
+        # a directory that cannot be listed stops the plan, it is not left out
+        for base, dirs, files in os.walk(src, onerror=_raise):
+            for name in dirs + files:
+                if os.path.islink(os.path.join(base, name)):
+                    rel = os.path.relpath(os.path.join(base, name), backup)
+                    return None, f"The backup holds a link: {rel.replace(os.sep, '/')}"
+            rels += [os.path.relpath(os.path.join(base, f), backup) for f in files]
+    plan = []
+    for rel in rels:
+        src, dst = os.path.join(backup, rel), os.path.join(install, rel)
+        shown = rel.replace(os.sep, '/')
+        if os.path.islink(src) or not os.path.isfile(src):
+            return None, f"The backup holds something that is no file: {shown}"
+        if os.path.commonpath([install, os.path.abspath(dst)]) != install:
+            return None, f"{shown} is outside the install"
+        if _link_on_the_way(install, rel):
+            return None, f"{shown} in the install is a link"
+        if os.path.isdir(dst):
+            return None, f"{shown} in the install is a directory"
+        plan.append((src, dst))
+    return plan, None
+
+
+def _restore_files(plan):
+    """Copy each file of the plan next to its target, and put them in place once every
+    copy is there: a copy that fails leaves the install as it was."""
+    import tempfile
+    staged = []
+    try:
+        for src, dst in plan:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix='.rollback-', dir=os.path.dirname(dst))
+            os.close(fd)
+            staged.append((tmp, dst))
+            shutil.copy2(src, tmp)
+    except Exception:
+        for tmp, _dst in staged:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise
+    for tmp, dst in staged:
+        os.replace(tmp, dst)
+
+
 @bp.route('/api/pegaprox/update/rollback', methods=['POST'])
 @require_auth(perms=['update.manage'])
 def rollback_pegaprox_update():
@@ -1165,30 +1255,17 @@ def rollback_pegaprox_update():
         if not os.path.exists(backup_path):
             return jsonify({'error': 'Backup not found'}), 404
         
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        current_backend = os.path.abspath(__file__)
-        current_frontend = os.path.join(current_dir, 'index.html')
-        
-        restored = []
-        
-        # Restore backend
-        backup_backend = None
-        for f in os.listdir(backup_path):
-            if f.endswith('.py'):
-                backup_backend = os.path.join(backup_path, f)
-                break
-        
-        if backup_backend and os.path.exists(backup_backend):
-            shutil.copy2(backup_backend, current_backend)
-            restored.append('backend')
-            logging.info(f"Restored backend from {backup_backend}")
-        
-        # Restore frontend
-        backup_frontend = os.path.join(backup_path, 'index.html')
-        if os.path.exists(backup_frontend):
-            shutil.copy2(backup_frontend, current_frontend)
-            restored.append('frontend')
-            logging.info(f"Restored frontend from {backup_frontend}")
+        # MK: the backup is the tree the updater saved, each file goes back where it came from
+        install_dir = os.path.realpath(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        plan, why = _rollback_plan(_real_backup, install_dir)
+        if plan is None:
+            logging.warning(f"Rollback to {backup_name} refused: {why}")
+            return jsonify({'error': f'{why}, nothing was restored'}), 400
+        _restore_files(plan)
+        tops = {os.path.relpath(dst, install_dir).split(os.sep)[0] for _src, dst in plan}
+        restored = ['backend'] + (['frontend'] if tops & {'web', 'static'} else [])
+        logging.info(f"Restored {len(plan)} files from {_real_backup}")
         
         user = getattr(request, 'session', {}).get('user', 'system')
         log_audit(user, 'pegaprox.rollback', f"Rolled back to backup: {backup_name}")
