@@ -23,6 +23,7 @@ from pegaprox.core import ha
 from pegaprox.core import ha_transport
 from pegaprox.utils.realtime import broadcast_sse
 from pegaprox.utils.ssh import read_capped as _read_capped
+from pegaprox.utils.sanitization import scrub_session_id
 
 # XenAPI is optional - only needed for XCP-ng clusters
 try:
@@ -2688,8 +2689,11 @@ class XcpngManager:
             else:
                 return {'success': False, 'error': 'Only ISO upload supported for XCP-ng'}
         except Exception as e:
-            self.logger.error(f"upload_to_storage: {e}")
-            return {'success': False, 'error': str(e)}
+            # MK Nov 2026 - a PUT that fails names its url, and the url carries the pool
+            # session. The route sends this error to the browser as it is.
+            err = scrub_session_id(e)
+            self.logger.error(f"upload_to_storage: {err}")
+            return {'success': False, 'error': err}
 
     # ──────────────────────────────────────────
     # RRD metrics - NS Mar 2026
@@ -2722,7 +2726,8 @@ class XcpngManager:
                 return None, None
             root = ET.fromstring(resp.text)
         except Exception as e:
-            self.logger.error(f"_rrd_fetch {path}: {e}")
+            # requests puts the url with its params in the text, session_id first
+            self.logger.error(f"_rrd_fetch {path}: {scrub_session_id(e)}")
             return None, None
 
         meta = root.find('meta')
@@ -4603,8 +4608,10 @@ echo DONE""",
             self.logger.info(f"Remote migration started: VM {vmid} -> pool {tcfg.name}")
             return {'success': True, 'task': task_id}
         except Exception as e:
-            self.logger.error(f"remote_migrate_vm {vmid}: {e}")
-            return {'success': False, 'error': str(e)}
+            # dest holds the session of the other pool, and the route sends this error on
+            err = scrub_session_id(e)
+            self.logger.error(f"remote_migrate_vm {vmid}: {err}")
+            return {'success': False, 'error': err}
 
     # ──────────────────────────────────────────
     # Additional node info stubs
