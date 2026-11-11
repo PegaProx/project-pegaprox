@@ -365,6 +365,47 @@ LOCAL_TABLES = (
     'metrics_part', 'metrics_roster',
 )
 
+# MK Nov 2026 - three leader sites (stage 1): which tables a site writes alone
+# when the ha_sites switch is on. 'cluster': only the cluster's home site writes
+# them, the other sites get row-level changes (ha_cluster_changes); the table
+# must carry a cluster_id column. 'global': the group leader writes them, the
+# snapshot carries them as today. 'local': never replicated (LOCAL_TABLES above).
+# Cross-cluster objects (site recovery plans, multi-cluster vnets, replications)
+# are global: no single home owns them.
+TABLE_CLASS = {
+    'affinity_rules': 'cluster', 'alert_mutes': 'cluster', 'alerts': 'cluster',
+    'balancing_excluded_pools': 'cluster', 'balancing_excluded_vms': 'cluster',
+    'blueprint_templates': 'cluster', 'change_plans': 'cluster',
+    'cluster_alerts': 'cluster', 'cluster_node_credentials': 'cluster',
+    'cost_rates': 'cluster', 'custom_scripts': 'cluster',
+    'drift_baselines': 'cluster', 'efficient_snapshots': 'cluster',
+    'node_bmc_endpoints': 'cluster', 'node_maintenance': 'cluster',
+    'pool_permissions': 'cluster', 'power_host_profiles': 'cluster',
+    'power_rates': 'cluster', 'recovery_confirmations': 'cluster',
+    'recovery_targets': 'cluster', 'restore_test_marks': 'cluster',
+    'rolling_update_runs': 'cluster', 'scheduled_actions': 'cluster',
+    'scheduled_tasks': 'cluster', 'snapshot_policies': 'cluster',
+    'storage_clusters': 'cluster', 'suspended_ha_rules': 'cluster',
+    'update_schedules': 'cluster', 'user_favorites': 'cluster',
+    'vm_acls': 'cluster', 'vm_tags': 'cluster',
+    'xcpng_pool_members': 'cluster', 'xcpng_pools': 'cluster',
+    'xcpng_vmid_map': 'cluster',
+    'api_tokens': 'global', 'auto_install_profiles': 'global',
+    'cluster_groups': 'global', 'clusters': 'global',
+    'cross_cluster_replications': 'global', 'custom_cloud_templates': 'global',
+    'custom_roles': 'global', 'esxi_storages': 'global',
+    'ha_recovery_journal': 'global', 'ha_schedule_marks': 'global',
+    'hardening_profiles': 'global', 'multi_cluster_vnets': 'global',
+    'pbs_servers': 'global', 'pegaprox_kv': 'global', 'plugin_state': 'global',
+    'push_subscriptions': 'global', 'server_settings': 'global',
+    'siem_targets': 'global', 'site_recovery_plans': 'global',
+    'site_recovery_vms': 'global', 'status_incidents': 'global',
+    'tenants': 'global', 'user_folders': 'global', 'users': 'global',
+    'vm_blueprints': 'global', 'vmware_servers': 'global',
+    'webauthn_credentials': 'global',
+}
+
+
 # server_settings keys that describe this host, not the deployment
 LOCAL_SETTING_KEYS = frozenset((
     'domain', 'port', 'ssl_enabled', 'http_redirect_port', 'reverse_proxy_enabled',
