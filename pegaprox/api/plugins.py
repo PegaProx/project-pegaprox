@@ -621,6 +621,65 @@ def set_plugin_clusters(plugin_id):
     return jsonify({'success': True, 'clusters': clusters})
 
 
+# MK Nov 2026 - the config editor showed every value as stored, the status page key and
+# the notification token and apprise urls among them. Values under a key that names a
+# credential go out masked, like the SMTP password in the settings, and a masked value
+# that comes back is the stored one again.
+_CONFIG_MASK = '********'
+_CONFIG_SECRET_HINTS = ('token', 'key', 'secret', 'password', 'passwd', 'apprise_urls')
+
+
+def _is_secret_name(name):
+    return any(h in str(name).lower() for h in _CONFIG_SECRET_HINTS)
+
+
+def _mask_value(v):
+    if isinstance(v, str) and v:
+        return f"{v.split('://', 1)[0]}://{_CONFIG_MASK}" if '://' in v else _CONFIG_MASK
+    if isinstance(v, list):
+        return [_mask_value(x) for x in v]
+    return v
+
+
+def _masked_config(obj):
+    if isinstance(obj, dict):
+        return {k: (_mask_value(v) if _is_secret_name(k) and not isinstance(v, dict) else _masked_config(v))
+                for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_masked_config(x) for x in obj]
+    return obj
+
+
+def _unmask_value(new, old):
+    if isinstance(new, str) and new.endswith(_CONFIG_MASK):
+        return old if _mask_value(old) == new else None
+    if isinstance(new, list):
+        old = old if isinstance(old, list) else []
+        out = []
+        for i, x in enumerate(new):
+            x = _unmask_value(x, old[i] if i < len(old) else None)
+            if x is not None:
+                out.append(x)
+        return out
+    return new
+
+
+def _unmasked_config(new, old):
+    if isinstance(new, dict):
+        old = old if isinstance(old, dict) else {}
+        out = {}
+        for k, v in new.items():
+            if _is_secret_name(k) and not isinstance(v, dict):
+                v = _unmask_value(v, old.get(k))
+                if v is None:
+                    continue
+            else:
+                v = _unmasked_config(v, old.get(k))
+            out[k] = v
+        return out
+    return new
+
+
 @bp.route('/api/plugins/<plugin_id>/config', methods=['GET'])
 @require_auth(perms=['plugins.manage'])
 def get_plugin_config(plugin_id):
@@ -633,9 +692,16 @@ def get_plugin_config(plugin_id):
     if not config_path.exists():
         return jsonify({'error': 'No config.json found for this plugin'}), 404
     try:
-        return jsonify({'config': config_path.read_text(encoding='utf-8')})
+        raw = config_path.read_text(encoding='utf-8')
     except Exception as e:
         return jsonify({'error': safe_error(e)}), 500
+    try:
+        raw = json.dumps(_masked_config(json.loads(raw)), indent=4)
+    except ValueError:
+        # a file that does not parse can hold a credential in any shape; the editor
+        # starts from an empty object and a save writes a new file
+        raw = ''
+    return jsonify({'config': raw})
 
 
 @bp.route('/api/plugins/<plugin_id>/config', methods=['PUT'])
@@ -657,12 +723,22 @@ def save_plugin_config(plugin_id):
 
     # validate JSON
     try:
-        json.loads(raw)
+        new_cfg = json.loads(raw)
     except json.JSONDecodeError as e:
         return jsonify({'error': f'Invalid JSON: {e}'}), 400
 
     try:
-        config_path.write_text(raw, encoding='utf-8')
+        stored = json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+    except (OSError, ValueError):
+        stored = {}
+    if _CONFIG_MASK in raw:
+        raw = json.dumps(_unmasked_config(new_cfg, stored), indent=4)
+
+    try:
+        fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            os.fchmod(fh.fileno(), 0o600)
+            fh.write(raw)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to write config')}), 500
 
