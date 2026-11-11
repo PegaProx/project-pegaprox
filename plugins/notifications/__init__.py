@@ -36,8 +36,38 @@ def _load_config():
         return {'ntfy_enabled': False, 'apprise_enabled': False}
 
 def _save_config(cfg):
-    with open(os.path.join(PLUGIN_DIR, 'config.json'), 'w') as f:
+    # the token and the apprise urls are credentials of their own: owner only
+    path = os.path.join(PLUGIN_DIR, 'config.json')
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        os.fchmod(f.fileno(), 0o600)    # O_CREAT's mode does nothing for a file that exists
         json.dump(cfg, f, indent=4)
+
+
+# MK Nov 2026 - the config route handed the ntfy token and every apprise url back as
+# stored, and an apprise url carries its service login (tgram://<bot token>/...,
+# discord://<webhook id>/<token>, mailto://user:pass@...). They are write-only now
+# like the SMTP password in the settings: a masked value sent back keeps what is stored.
+_MASK = '********'
+
+
+def _masked_url(u):
+    scheme = str(u).split('://', 1)[0] if '://' in str(u) else ''
+    return f'{scheme}://{_MASK}' if scheme else _MASK
+
+
+def _keep_stored_urls(new_urls, stored):
+    if not isinstance(new_urls, list):
+        return stored
+    kept = []
+    for i, u in enumerate(new_urls):
+        if isinstance(u, str) and u.endswith(_MASK):
+            # unchanged entry from the masked list: the stored url at the same place
+            if i < len(stored) and _masked_url(stored[i]) == u:
+                kept.append(stored[i])
+            continue
+        kept.append(u)
+    return kept
 
 
 def _require_admin():
@@ -164,6 +194,9 @@ def _get_config():
     err = _require_admin()
     if err: return err
     cfg = _load_config()
+    if cfg.get('ntfy_token'):
+        cfg['ntfy_token'] = _MASK
+    cfg['apprise_urls'] = [_masked_url(u) for u in cfg.get('apprise_urls') or []]
     cfg['apprise_available'] = _apprise_available
     return cfg
 
@@ -172,6 +205,10 @@ def _update_config():
     if err: return err
     data = request.get_json() or {}
     cfg = _load_config()
+    if data.get('ntfy_token') == _MASK:
+        data.pop('ntfy_token')
+    if 'apprise_urls' in data:
+        data['apprise_urls'] = _keep_stored_urls(data['apprise_urls'], cfg.get('apprise_urls') or [])
     for k in ['ntfy_enabled', 'ntfy_url', 'ntfy_topic', 'ntfy_token',
               'ntfy_priority_map', 'apprise_enabled', 'apprise_urls']:
         if k in data:
