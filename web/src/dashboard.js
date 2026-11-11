@@ -4453,7 +4453,7 @@
                                     )}
                                     <div className="grid grid-cols-2 gap-2">
                                         <div>
-                                            <label className="text-xs text-gray-400 block mb-1">{t('snapKeepCount') || 'Keep last N'}</label>
+                                            <label className="text-xs text-gray-400 block mb-1">{t('snapKeepCount') || 'Keep last N (0=off)'}</label>
                                             <input type="number" min="0" value={editing.retention_count}
                                                 onChange={e => setEditing({...editing, retention_count: e.target.value})}
                                                 className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white" />
@@ -4465,6 +4465,10 @@
                                                 className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white" />
                                         </div>
                                     </div>
+                                    {/* LW Nov 2026 - save sends a blank or 0 as 0, and 0 and 0 prune nothing */}
+                                    {!editing.prune_only && !(parseInt(editing.retention_count) > 0) && !(parseInt(editing.retention_days) > 0) && (
+                                        <p className="text-xs text-yellow-400" data-snap-keep-all="">{t('snapKeepAll') || 'Both are 0: this policy keeps every snapshot it takes and deletes none.'}</p>
+                                    )}
                                     <label className="flex items-center gap-2 text-sm text-gray-300">
                                         <input type="checkbox" checked={!!editing.include_ram}
                                             onChange={e => setEditing({...editing, include_ram: e.target.checked})} />
