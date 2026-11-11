@@ -4313,10 +4313,12 @@ def generate_support_bundle():
 
                 from pegaprox.api.alerts import _mask_channel
                 for key, value in settings.items():
-                    if key == 'alert_webhooks' and isinstance(value, list):
-                        # keep id/name/type/enabled for diagnostics, mask the bearer bits
-                        safe_settings[key] = [_mask_channel(c) if isinstance(c, dict) else c
-                                              for c in value]
+                    if key == 'alert_webhooks':
+                        # keep id/name/type/enabled for diagnostics, mask the bearer bits.
+                        # Every row goes through the mask: a row edited by hand as a bare
+                        # url string went into the bundle as it was, token and all.
+                        rows = value if isinstance(value, list) else [value] if value else []
+                        safe_settings[key] = [_mask_channel(c) for c in rows]
                     elif any(s in key.lower() for s in sensitive_keys):
                         safe_settings[key] = '[REDACTED]' if value else ''
                     else:

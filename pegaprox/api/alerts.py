@@ -26,18 +26,23 @@ bp = Blueprint('alerts', __name__)
 def _mask_channel(ch):
     """Webhook URLs and tokens are bearer capabilities — never hand them back on a read or as
     the echo of a write. Only GET ?full=1 (admin.settings) returns the raw values."""
-    c = dict(ch)
+    # a row edited by hand can be a bare url string, or no object at all
+    c = dict(ch) if isinstance(ch, dict) else {'url': ch}
     u = c.get('url') or ''
     if u:
         # MK Nov 2026 - the first 24 and the last 6 characters showed the tail of the token
         # a Slack, Teams or Discord hook carries in its path, and the channels have names to
         # tell them apart. Scheme and host only; the "…" is also what an edit skips on.
+        # A url that is no string (a settings row edited by hand) is masked whole: urlsplit
+        # raised on it, and with it the channel list and the server settings read.
         from urllib.parse import urlsplit
-        try:
-            p = urlsplit(u)
-            host = p.netloc.rpartition('@')[2]
-        except ValueError:
-            p, host = None, ''
+        p, host = None, ''
+        if isinstance(u, str):
+            try:
+                p = urlsplit(u)
+                host = p.netloc.rpartition('@')[2]
+            except ValueError:
+                p, host = None, ''
         c['url'] = f"{p.scheme}://{host}/…" if p is not None and p.scheme and host else '********'
     if c.get('token'):
         c['token'] = '********'
@@ -1029,7 +1034,8 @@ def list_alert_channels():
                               'admin.settings'):
             return jsonify({'error': 'Permission denied: admin.settings'}), 403
         return jsonify(channels)
-    return jsonify([_mask_channel(ch) for ch in channels])
+    # a row that is no object has no id to edit it by, as in the server settings read
+    return jsonify([_mask_channel(ch) for ch in channels if isinstance(ch, dict)])
 
 
 @bp.route('/api/alert-channels', methods=['POST'])
@@ -1068,7 +1074,7 @@ def update_alert_channel(cid):
     channels = list(settings.get('alert_webhooks') or [])
     data = request.get_json() or {}
     for i, ch in enumerate(channels):
-        if ch.get('id') != cid:
+        if not isinstance(ch, dict) or ch.get('id') != cid:
             continue
         # Merge the allowed fields. Skip url/token if caller sent the masked placeholder
         # (admin UI shows dots; don't wipe secret because of a round-trip).
@@ -1096,7 +1102,7 @@ def delete_alert_channel(cid):
     from pegaprox.api.helpers import load_server_settings, save_server_settings
     settings = load_server_settings()
     before = settings.get('alert_webhooks') or []
-    after = [c for c in before if c.get('id') != cid]
+    after = [c for c in before if not (isinstance(c, dict) and c.get('id') == cid)]
     if len(after) == len(before):
         return jsonify({'error': 'channel not found'}), 404
     settings['alert_webhooks'] = after
@@ -1115,7 +1121,7 @@ def test_alert_channel(cid):
     from pegaprox.api.helpers import load_server_settings
     from pegaprox.utils.webhooks import send_to_channel
     channels = (load_server_settings() or {}).get('alert_webhooks') or []
-    ch = next((c for c in channels if c.get('id') == cid), None)
+    ch = next((c for c in channels if isinstance(c, dict) and c.get('id') == cid), None)
     if not ch:
         return jsonify({'error': 'channel not found'}), 404
     alert = {
@@ -1171,7 +1177,7 @@ def alerts_diagnostics():
         'webhook_channels': [
             {'id': c.get('id'), 'name': c.get('name'), 'type': c.get('type'),
              'enabled': c.get('enabled', True)}
-            for c in (settings.get('alert_webhooks') or [])
+            for c in (settings.get('alert_webhooks') or []) if isinstance(c, dict)
         ] if _whole else None,
         'clusters_loaded': sorted([
             {'id': cid, 'connected': bool(getattr(m, 'is_connected', False))}

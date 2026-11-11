@@ -245,6 +245,9 @@ def send_to_channels(alert, channel_ids=None):
     except Exception as e:
         logging.debug(f"[webhooks] could not load channels: {_redact_webhook_url(str(e))}")
         return
+    # a row edited by hand that is no object raised in the loop, past its own except
+    # (ch.get), and the channels after it got nothing
+    channels = [c for c in channels if isinstance(c, dict)]
     if channel_ids is not None:
         wanted = {str(c) for c in channel_ids}
         channels = [c for c in channels if str(c.get('id')) in wanted]

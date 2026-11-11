@@ -68,3 +68,28 @@ def test_an_url_that_does_not_parse_is_masked_whole(api, db, seed, store):
                                     'url': 'hooks-without-scheme/abc123secret', 'enabled': True})
     rows = {ch['id']: ch for ch in api.as_user(seed.user('root', role='admin')).get('/api/alert-channels').get_json()}
     assert rows['odd']['url'] == '********'
+
+
+# a settings row edited by hand can hold a url that is no string; urlsplit raised on it,
+# and with it the channel list and the server settings read
+ODD_URLS = [8443, 2.5, True, ['https://hooks.example/a/tok-list-1'], {'href': 'https://hooks.example/b/tok-dict-2'}]
+
+
+@pytest.mark.parametrize('url', ODD_URLS, ids=lambda u: type(u).__name__)
+def test_a_channel_url_that_is_no_string_is_masked_whole(url):
+    from pegaprox.api.alerts import _mask_channel
+    assert _mask_channel({'id': 'x', 'url': url, 'token': 'tk-1'}) == {'id': 'x', 'url': '********',
+                                                                     'token': '********'}
+
+
+@pytest.mark.parametrize('path', ['/api/alert-channels', '/api/settings/server'])
+def test_the_reads_answer_with_a_url_that_is_no_string(api, db, seed, store, path):
+    for i, url in enumerate(ODD_URLS):
+        store['alert_webhooks'].append({'id': f'odd{i}', 'name': 'odd', 'type': 'generic',
+                                        'url': url, 'enabled': True})
+    r = api.as_user(seed.user('root', role='admin')).get(path)
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    body = r.get_data(as_text=True)
+    assert 'tok-list-1' not in body and 'tok-dict-2' not in body
+    rows = r.get_json() if path == '/api/alert-channels' else r.get_json()['alert_webhooks']
+    assert [c['url'] for c in rows if c['id'].startswith('odd')] == ['********'] * len(ODD_URLS)
