@@ -14585,8 +14585,8 @@ echo "AGENT_INSTALLED_OK"
 
     def create_api_token(self, token_name: str = 'pegaprox-migrate', expire: int = 0) -> Dict[str, Any]:
         # MK May 2026 (#413 layer 6, blackshocks bundle 20260530_220647):
-        # if a prior Planned/Emergency failover crashed or its _delayed_cleanup
-        # hadn't fired yet, the same token_name is still on target → PVE returns
+        # if a prior Planned/Emergency failover crashed or its token cleanup
+        # hadn't run yet, the same token_name is still on target → PVE returns
         # 400 "Token already exists" and the next failover bails before it ever
         # touches qmigrate. Pre-delete is the cleanest path — we'd issue the
         # delete on cleanup anyway, doing it up-front makes the create idempotent.

@@ -5384,7 +5384,7 @@ echo DONE""",
         return resources
 
     # API token stubs (XAPI uses sessions, not tokens)
-    def create_api_token(self, token_name=''):
+    def create_api_token(self, token_name='', **kw):
         return None
 
     def delete_api_token(self, token_name=''):

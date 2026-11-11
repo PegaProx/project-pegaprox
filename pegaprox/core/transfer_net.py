@@ -365,7 +365,7 @@ def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
             logger.warning(f"[TOKEN-CLEANUP] Status of {task_upid} of {what}: {e}")
             state = None
         if state and state[0] != 'running':
-            # the route answered when the task started: an end that is not a clean OK is a warning
+            # an end that is not a clean OK is a warning; the caller gets how it ended as well
             clean = state[0] == 'ok' and not str(state[1]).startswith('WARNINGS')
             (logger.info if clean else logger.warning)(
                 f"[TOKEN-CLEANUP] Migration of {what} ended: {state[0]} {state[1]}".rstrip())

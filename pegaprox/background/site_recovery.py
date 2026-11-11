@@ -362,9 +362,9 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
             target_bridge = ','.join(f"{s}:{t}" for s, t in net_map.items())
 
         # create temp token on target for migration auth
-        # fix (audit): the name used to be the fixed string 'pegaprox-sr', and the cleanup below
-        # deletes BY NAME after a one-hour grace. Two failovers running at once — or one
-        # starting while an earlier grace is still pending — meant the first cleanup revoked the
+        # fix (audit): the name used to be the fixed string 'pegaprox-sr', and the cleanup then
+        # deleted BY NAME after a one-hour grace. Two failovers running at once, or one
+        # starting while an earlier grace was still pending, meant the first cleanup revoked the
         # token the second migration was still authenticating with. The xclb path already mints
         # per-job names for the same reason; do the same here.
         _sr_token_name = f"pegaprox-sr-{uuid.uuid4().hex[:8]}"

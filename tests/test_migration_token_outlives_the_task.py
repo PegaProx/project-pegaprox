@@ -17,8 +17,8 @@ Now the status of the task itself is read, and only its end takes the token away
 status nobody can read for two hours in a row gives up on the task, with a warning, and
 so does a task that still reports running after a week.
 
-Both places that start such a thread are driven here up to the thread, which then runs
-in place on a clock of its own.
+Every caller that hands its token to that cleanup is driven here up to the cleanup,
+which then runs in place on a clock of its own.
 """
 import logging
 import re
@@ -385,7 +385,6 @@ def test_pve_refuses_the_token_by_itself_a_day_after_the_longest_wait(migration)
     assert time.time() + longest - 60 <= expire <= time.time() + longest
 
 
-
 def test_two_migrations_in_the_same_second_get_a_token_each(migration, monkeypatch):
     """create_api_token replaces a token of the same name. The name was the second of the
     start by hand and group plus VMID in the balancer, which picks a guest that is still
@@ -482,6 +481,7 @@ def test_a_first_full_copy_of_hours_keeps_its_token_and_the_replica_is_kept(repl
 def test_a_replication_run_says_how_its_migration_ended_and_its_token_goes_then(replication):
     assert replication.follow([(600, 'running'), (EVER, 'migration aborted')], hours=1) == [600 + SETTLE]
     assert replication.said == [('error', 'Migration task failed: migration aborted')]
+
 
 @pytest.mark.parametrize('expire, sent', [(None, 0), (1893456000, 1893456000)])
 def test_the_token_is_created_with_the_expire_it_is_given(expire, sent):
