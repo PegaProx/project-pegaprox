@@ -64,6 +64,17 @@ def test_a_task_without_an_id_is_matched_by_its_upid(admin, api):
     assert [t['upid'].split(':')[6] for t in r.get_json()] == ['10']
 
 
+def test_an_xcpng_task_is_matched_by_its_vmid(admin, api):
+    """XcpNgManager.get_tasks rows: a short task reference as `upid`, the guest in `vmid`."""
+    rows = [{'upid': '3f9a10c2', 'type': 'start_vm', 'vmid': 10, 'status': 'running'},
+            {'upid': '7b2e44d1', 'type': 'start_vm', 'vmid': 100, 'status': 'running'},
+            {'upid': '10101010', 'type': 'migrate_vm', 'vmid': 7, 'status': 'running'}]
+    api.set_manager(CID, api.make_fake_manager(CID, get_node_tasks=rows))
+    r = admin.get(URL + '?vmid=10')
+    assert r.status_code == 200, r.get_json()
+    assert [t['upid'] for t in r.get_json()] == ['3f9a10c2']
+
+
 def test_without_a_guest_the_whole_list_comes_back(admin, pve):
     r = admin.get(URL)
     assert r.status_code == 200 and len(r.get_json()) == len(TASKS)

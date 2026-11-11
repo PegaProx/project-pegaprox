@@ -1312,11 +1312,13 @@ def get_node_tasks_api(cluster_id, node):
 
     # Filter by vmid if specified. The guest is field 6 of the UPID, as the log route below
     # reads it; the number anywhere in the UPID also matched a pid, a start time or the
-    # longer id of another guest
+    # longer id of another guest. An XCP-ng row has no UPID of that shape and names its
+    # guest in `vmid`
     if vmid and tasks:
         want = str(vmid)
         filtered = [t for t in tasks
-                    if t.get('id') == want or str(t.get('upid', '')).split(':')[6:7] == [want]]
+                    if t.get('id') == want or str(t.get('vmid')) == want
+                    or str(t.get('upid', '')).split(':')[6:7] == [want]]
         return jsonify(filtered[:limit])
     
     return jsonify(tasks)
