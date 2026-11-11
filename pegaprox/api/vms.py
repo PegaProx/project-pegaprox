@@ -2748,11 +2748,20 @@ def create_vm_firewall_rule(cluster_id, node, vmtype, vmid):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'vm.firewall.rule_created', f"VM {vmid} firewall rule created", cluster=manager.config.name)
             return jsonify({'success': True})
-        # Extract Proxmox error message
+        # Extract Proxmox error message: the errors per field of a rule it refused as they
+        # are, else the message of its error body; a body that is no JSON goes out short,
+        # a page not at all
         try:
-            pve_err = r.json().get('errors', r.json().get('data', r.text))
-        except:
-            pve_err = r.text
+            body = r.json()
+        except ValueError:
+            body = None
+        errs = body.get('errors') if isinstance(body, dict) else None
+        if isinstance(errs, dict) and errs:
+            pve_err = errs
+        elif isinstance(body, dict) and not body.get('message'):
+            pve_err = ''    # {"data": null}: the status is all PVE said
+        else:
+            pve_err = parse_pve_error(r.text, f'HTTP {r.status_code}')
         logging.warning(f"VM FW rule create failed: {r.status_code} data={data} pve_response={r.text[:300]}")
         return upstream_failure(r.status_code, pve_err, pve_status=r.status_code)
     except Exception as e:
