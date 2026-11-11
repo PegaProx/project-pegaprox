@@ -18,6 +18,18 @@
             };
         }
 
+        // LW Nov 2026 - the pan of a view kept inside the map at its scale. Every setView goes
+        // through it, so the stored pan is the one on screen and a drag back from an edge moves at once
+        function _wm_clampView(v) {
+            const maxX = (1000 - 1000 / v.scale) / 2;
+            const maxY = (500 - 500 / v.scale) / 2;
+            return {
+                scale: v.scale,
+                panX: Math.max(-maxX, Math.min(maxX, v.panX)),
+                panY: Math.max(-maxY, Math.min(maxY, v.panY)),
+            };
+        }
+
         let _wm_svg_cache = null;
         let _wm_svg_inflight = null;
         function _wm_loadCountriesSvg() {
@@ -74,10 +86,7 @@
             // user can't pan into nothingness off the right/left/top/bottom.
             const vbW = 1000 / view.scale;
             const vbH = 500 / view.scale;
-            const maxPanX = (1000 - vbW) / 2;
-            const maxPanY = (500 - vbH) / 2;
-            const panX = Math.max(-maxPanX, Math.min(maxPanX, view.panX));
-            const panY = Math.max(-maxPanY, Math.min(maxPanY, view.panY));
+            const { panX, panY } = _wm_clampView(view);
             const vbX = panX + (1000 - vbW) / 2;
             const vbY = panY + (500 - vbH) / 2;
             const viewBox = `${vbX} ${vbY} ${vbW} ${vbH}`;
@@ -160,11 +169,11 @@
                     const newVbH = 500 / newScale;
                     const newVbX = cx - ((e.clientX - rect.left) / rect.width) * newVbW;
                     const newVbY = cy - ((e.clientY - rect.top) / rect.height) * newVbH;
-                    return {
+                    return _wm_clampView({
                         scale: newScale,
                         panX: newVbX - (1000 - newVbW) / 2,
                         panY: newVbY - (500 - newVbH) / 2,
-                    };
+                    });
                 });
             };
             useEffect(() => {
@@ -185,12 +194,12 @@
                 if (!rect) return;
                 const dx = ((e.clientX - dragRef.current.startX) / rect.width) * vbW;
                 const dy = ((e.clientY - dragRef.current.startY) / rect.height) * vbH;
-                setView(v => ({ ...v, panX: dragRef.current.panX - dx, panY: dragRef.current.panY - dy }));
+                setView(v => _wm_clampView({ ...v, panX: dragRef.current.panX - dx, panY: dragRef.current.panY - dy }));
             };
             const handleMouseUp = () => { dragRef.current = null; };
 
-            const zoomIn  = () => setView(v => ({ ...v, scale: Math.min(8, v.scale * 1.5) }));
-            const zoomOut = () => setView(v => ({ ...v, scale: Math.max(1, v.scale / 1.5) }));
+            const zoomIn  = () => setView(v => _wm_clampView({ ...v, scale: Math.min(8, v.scale * 1.5) }));
+            const zoomOut = () => setView(v => _wm_clampView({ ...v, scale: Math.max(1, v.scale / 1.5) }));
             const resetView = () => setView({ scale: 1, panX: 0, panY: 0 });
 
             return (
