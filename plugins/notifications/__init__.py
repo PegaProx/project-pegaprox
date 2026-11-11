@@ -19,7 +19,7 @@ import requests
 from datetime import datetime
 from flask import request
 
-from pegaprox.api.plugins import register_plugin_route, _config_generation, _config_written
+from pegaprox.api.plugins import register_plugin_route, _config_generation, _config_written, _login_masked
 from pegaprox.globals import _notification_handlers
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -154,6 +154,11 @@ def _keep_stored_urls(new_urls, stored, key):
 
 def _ntfy_base(u):
     return str(u if u is not None else 'https://ntfy.sh').strip().rstrip('/').lower()
+
+
+def _ntfy_url_shown(u):
+    # a login in ntfy_url (https://user:pass@ntfy.example) shows masked, as in the config editor
+    return _login_masked(u) or u
 
 
 def _require_admin():
@@ -296,6 +301,8 @@ def _get_config():
     cfg = _load_config()
     if cfg.get('ntfy_token'):
         cfg['ntfy_token'] = _MASK
+    if cfg.get('ntfy_url'):
+        cfg['ntfy_url'] = _ntfy_url_shown(cfg['ntfy_url'])
     key = _entry_key()
     cfg['apprise_urls'] = _masked_urls(_url_list(cfg.get('apprise_urls')), key)
     cfg['apprise_available'] = _apprise_available
@@ -310,6 +317,13 @@ def _update_config():
     cfg = _load_config()
     if data.get('ntfy_token') == _MASK:
         data.pop('ntfy_token')
+    # a masked login keeps the stored url only where the rest of it is the same
+    if isinstance(data.get('ntfy_url'), str) and _MASK in data['ntfy_url']:
+        if data['ntfy_url'] != _ntfy_url_shown(cfg.get('ntfy_url')):
+            return {'error': f"Type the login of ntfy_url instead of {_MASK}, or reload the config: "
+                             "the masked login stands for nothing stored.",
+                    'code': 'CREDENTIAL_REQUIRED', 'fields': ['ntfy_url']}, 400
+        data['ntfy_url'] = cfg.get('ntfy_url')
     # MK Nov 2026 - the stored token went along to whatever server the same save set, and
     # the next alert posted it there. It is for the server it was typed for.
     if cfg.get('ntfy_token') and 'ntfy_token' not in data and 'ntfy_url' in data \

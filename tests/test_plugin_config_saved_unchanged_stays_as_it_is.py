@@ -60,6 +60,8 @@ SHAPES = {
     'masks stored': {'banner': '*' * 20, 'note': '********', 'list': ['********', 'a ******** b'],
                      'token': '********', 'apprise_urls': ['tgram://********', URLS[0]]},
     'unicode': {'title': 'Grüße', 'password': 'pässwörd-☃', 'apprise_urls': ['mailto://ü:ß@x.example']},
+    'logins': {'database_url': 'postgres://u:pw-1@db.example/x', 'brokers': ['amqp://u:pw-2@b.example//', 'x'],
+               'conn_str': 'Server=db;Password={a;b}};', 'options': 'uid=u;pwd=pw-3'},
     'top level list': [{'name': 'ops', 'token': 'tk-1'}, {'name': 'dev', 'token': 'tk-2'}, 'plain'],
     'top level number': 42,
 }

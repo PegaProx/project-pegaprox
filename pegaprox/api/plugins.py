@@ -645,7 +645,7 @@ _CONFIG_LOGIN_WORDS = re.compile(r'(?<![a-z0-9])(?:pw|auth)(?![a-z0-9])')
 # one into a list there, has to name the secret again. A list entry that is a url itself
 # (an apprise url) carries its address along, as does a secret under an address name.
 _CONFIG_ADDRESS_HINTS = ('url', 'host', 'server', 'endpoint', 'addr', 'domain', 'proxy', 'broker',
-                         'gateway', 'relay')
+                         'gateway', 'relay', 'conn_str', 'connection_str')
 _CONFIG_ADDRESS_WORDS = re.compile(r'(?<![a-z0-9])(?:uris?|ports?|ip|ipv4|ipv6)(?![a-z0-9])|(?<![a-z0-9])base$')
 _CONFIG_PORT_WORD = re.compile(r'(?<![a-z0-9])ports?(?![a-z0-9])')
 _CONFIG_LOGIN_URLS = ('hook', 'dsn', 'apprise_url')
@@ -653,6 +653,10 @@ _CONFIG_LOGIN_URLS = ('hook', 'dsn', 'apprise_url')
 _CONFIG_ID_KEYS = ('id', 'name', 'label')
 _CONFIG_SCHEME = re.compile(r'^[A-Za-z][A-Za-z0-9+.-]*$')
 _CONFIG_URL = re.compile(r'^[A-Za-z][A-Za-z0-9+.-]*://[^/?#\s]')
+# the login a value carries under any name: postgres://user:pw@db, Password= of a connection
+# string. A password may hold a / (u:pw/1@db), and a key a : (Jet OLEDB:Database Password)
+_CONFIG_URL_LOGIN = re.compile(r'^(\s*[A-Za-z][A-Za-z0-9+.-]*://)(?:[^/]*|[^/@]*:[^@]*)@')
+_CONFIG_CONN_KEY = re.compile(r'\s*[A-Za-z][A-Za-z0-9 _.:-]*\s*$')
 _CONFIG_HANDLE = re.compile(r'#([0-9a-f]{16})([0-9a-f]{16})$')
 # without the database key a handle holds for this process only
 _CONFIG_PROCESS_KEY = secrets.token_bytes(32)
@@ -715,8 +719,59 @@ def _mask_value(v):
     return f'{scheme}://{_CONFIG_MASK}' if _CONFIG_SCHEME.match(scheme) else _CONFIG_MASK
 
 
-def _masked_form(v):
-    """What a value under a secret name shows as, None for one that shows as it is."""
+def _conn_masked(v):
+    """v with the value of each secret part masked (Password=, Pwd=, AccountKey=), None for
+    a string without one. A value in braces or quotes may hold a ; of its own."""
+    parts, hit, i = [], False, 0
+    while True:
+        eq, semi = v.find('=', i), v.find(';', i)
+        if eq < 0 or 0 <= semi < eq:
+            end = len(v) if semi < 0 else semi
+            parts.append(v[i:end])
+        else:
+            j = eq + 1
+            while j < len(v) and v[j] == ' ':
+                j += 1
+            if j < len(v) and v[j] in '{"\'':
+                close = '}' if v[j] == '{' else v[j]
+                j += 1
+                while j < len(v) and not (v[j] == close and v[j + 1:j + 2] != close):
+                    j += 2 if v[j] == close else 1
+                j += 1
+            end = v.find(';', min(j, len(v)))
+            end = len(v) if end < 0 else end
+            name = v[i:eq]
+            if _CONFIG_CONN_KEY.match(name) and _is_secret_name(name.strip()) and v[eq + 1:end].strip():
+                parts.append(f'{name}={_CONFIG_MASK}')
+                hit = True
+            else:
+                parts.append(v[i:end])
+        if end >= len(v):
+            break
+        i = end + 1
+    return ';'.join(parts) if hit else None
+
+
+def _login_masked(v):
+    """v with the login it carries masked, the user and password of a url or the secret
+    parts of a connection string, None for a value without one. Text without a ; is no
+    connection string ("set key=foo to enable").
+
+    MK Nov 2026 - database_url, a broker or redis url or an https_proxy with user:pw@
+    went out in clear, as they stand under an address name. The host stays to read."""
+    if not isinstance(v, str):
+        return None
+    m = _CONFIG_URL_LOGIN.match(v)
+    if m:
+        return f'{m.group(1)}{_CONFIG_MASK}@{v[m.end():]}'
+    return _conn_masked(v) if '=' in v and ';' in v else None
+
+
+def _masked_form(v, secret=True):
+    """What a value shows as, None for one that shows as it is: any string or number under
+    a secret name, and elsewhere the login a url or a connection string carries."""
+    if not secret:
+        return _login_masked(v)
     if isinstance(v, str):
         return _mask_value(v) if v else None
     if isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -784,10 +839,10 @@ def _masked_config(obj, plugin='', key=None):
         if isinstance(obj, list):
             out = []
             for i, x in enumerate(obj):
-                form = _masked_form(x) if secret else None
+                form = _masked_form(x, secret)
                 out.append(form + _entry_handle(plugin, path, x, key) if form else mask(x, secret, f'{path}[{i}]', True))
             return out
-        form = _masked_form(obj) if secret else None
+        form = _masked_form(obj, secret)
         return obj if form is None else form
 
     return mask(obj, False, '')
@@ -809,7 +864,7 @@ def _shown_as_is(obj, secret=False, entry=False):
     elif isinstance(obj, list):
         for x in obj:
             yield from _shown_as_is(x, secret, True)
-    elif isinstance(obj, str) and not secret:
+    elif isinstance(obj, str) and not secret and _login_masked(obj) is None:
         yield obj
 
 
@@ -935,9 +990,11 @@ def _unmasked_config(new, stored, plugin='', key=None):
             items = [(spath, j, o) for j, o in enumerate(old)] if isinstance(old, list) else []
             return walk_list(new, items, secret, path, depth + 1, addr, depth if owner is None else owner)
         if isinstance(new, str) and _CONFIG_MASK in new:
-            if secret and _masked_form(old) == new:
-                # one under an address name is an address itself, the check above compares it
-                if not addr:
+            form = _masked_form(old, secret)
+            if form is not None and form == new:
+                # one under an address name is an address itself, the check above compares it,
+                # and a url carries the host its login is for
+                if not addr and (secret or '://' not in old):
                     kept.append((path or '(top level)', depth))
                 return old
             # a string the editor shows as it is stored may hold the mask itself
@@ -945,15 +1002,15 @@ def _unmasked_config(new, stored, plugin='', key=None):
                 left.append(path or '(top level)')
         return new
 
-    def stored_by_print(fp, items, lists):
-        todo = {lp for lp in lists if lp not in tables}
+    def stored_by_print(fp, items, lists, secret):
+        todo = {lp for lp in lists if (lp, secret) not in tables}
         if todo:
             for lp in todo:
-                tables[lp] = {}
+                tables[lp, secret] = {}
             for lp, _, y in items:
-                if lp in todo and _masked_form(y) is not None:
-                    tables[lp][_entry_fp(plugin, lp, y, key)] = y
-        return next((tables[lp][fp] for lp in lists if fp in tables[lp]), None)
+                if lp in todo and _masked_form(y, secret) is not None:
+                    tables[lp, secret][_entry_fp(plugin, lp, y, key)] = y
+        return next((tables[lp, secret][fp] for lp in lists if fp in tables[lp, secret]), None)
 
     def walk_list(new, items, secret, path, depth, addr, owner):
         # items holds (path of the stored list, place, value) for each stored entry new may stand for
@@ -964,16 +1021,16 @@ def _unmasked_config(new, stored, plugin='', key=None):
                 out.append(x)
             elif isinstance(x, str):
                 # the stored entry of this list with the value of the handle, wherever it sits now
-                at, fp = _handle_fp(x, key) if secret else (None, None)
+                at, fp = _handle_fp(x, key)
                 o = None
                 if fp is not None:
                     lists = lists if lists is not None else list(dict.fromkeys(lp for lp, _, _ in items))
-                    o = stored_by_print(fp, items, lists)
-                if o is None or _masked_form(o) != x[:at]:
+                    o = stored_by_print(fp, items, lists, secret)
+                if o is None or _masked_form(o, secret) != x[:at]:
                     out.append(walk(x, None, '', secret, here, depth=depth))
                     continue
                 # a url carries its own address, as does any entry of a list under an address name
-                if not addr and _masked_form(o) == _CONFIG_MASK:
+                if not addr and '://' not in x[:at]:
                     kept.append((here, owner))
                 out.append(o)
             else:
