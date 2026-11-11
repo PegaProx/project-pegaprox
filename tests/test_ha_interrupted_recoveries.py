@@ -770,3 +770,45 @@ def test_a_leader_gone_between_the_move_and_its_look_leaves_the_guest_held(auto,
         out = m.ha_start_moved_vms()
     assert listed and listed[0]['held'] == [101] and listed[0]['moved'] == []
     assert out == {} and posts == []
+
+
+# --- the HA page while a run is on record -----------------------------------------------------
+
+def test_the_ha_page_answers_while_a_run_with_a_moved_guest_is_on_record(
+        auto, seed, db, monkeypatch, tmp_path):
+    """The listing of the interrupted runs asks the cluster for its guests and takes
+    ha_lock for its look at the failed node. get_ha_status lists them after its own
+    block under ha_lock, so the page answers and the lock is free afterwards."""
+    import threading
+    import pegaprox.core.manager as mgr_mod
+    from pegaprox.models.tasks import PegaProxConfig
+    monkeypatch.setattr(mgr_mod, 'LOG_DIR', str(tmp_path))
+    auto.form(seed)
+    m = mgr_mod.PegaProxManager('c1', PegaProxConfig({'name': 'c1', 'host': '10.0.0.1',
+                                                      'user': 'root@pam', 'pass': 'pw'}))
+    try:
+        with auto.at('a') as ha:
+            # the config of 101 left pve2, the leader was gone before the start
+            run = ha.recovery_begin('c1', 'pve2')
+            ha.recovery_step(run, 'c1', 'pve2', 'move_config', 101, done=True)
+            ha._recovery_live.clear()
+            _guests(m, (101, 'pve1', 'stopped'))
+
+            class _Sess:
+                def get(self, url, **k):
+                    return types.SimpleNamespace(status_code=200, json=lambda: {'data': [
+                        {'node': 'pve1', 'status': 'online'}, {'node': 'pve2', 'status': 'offline'}]})
+            m._create_session = lambda: _Sess()
+            out = []
+            t = threading.Thread(target=lambda: out.append(m.get_ha_status()), daemon=True)
+            t.start()
+            t.join(2)
+            assert not t.is_alive(), 'get_ha_status still waits for ha_lock after 2 s'
+        assert m.ha_lock.acquire(blocking=False)
+        m.ha_lock.release()
+        listed = out[0]['interrupted_recoveries']
+        assert [(r['run'], r['moved'], r['held']) for r in listed] == [(run, [101], [])]
+    finally:
+        for h in list(m.logger.handlers):
+            h.close()
+            m.logger.removeHandler(h)
