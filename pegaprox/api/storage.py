@@ -292,6 +292,15 @@ def disconnect_esxi_host(cluster_id, host_id):
     except Exception as e:
         logging.warning(f"[ESXI] Error removing storage: {e}")
     
+    # the row goes too: save_esxi_config only upserts, so a row left behind is loaded again at restart
+    try:
+        db = get_db()
+        db.conn.execute('DELETE FROM esxi_storages WHERE name = ?', (host_id,))
+        db.conn.commit()
+    except Exception as e:
+        logging.warning(f"[ESXI] Could not delete {host} from the database: {e}")
+        return jsonify({'error': 'Failed to remove the ESXi host from the database'}), 500
+
     # remove from our config either way
     del esxi_storages[cluster_id][host_id]
     save_esxi_config()
