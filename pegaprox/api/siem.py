@@ -134,10 +134,19 @@ def _mask(d):
         if isinstance(v, dict):
             out[k] = _mask(v)
         elif v and _is_secret(k):
-            out[k] = _MASK
+            # a stored mask is a secret that is not set (see _stored_secret). Shown as the
+            # mask it read as set, so the form shows the field empty instead
+            out[k] = _MASK if v != _MASK else ''
         else:
             out[k] = v
     return out
+
+
+def _stored_secret(old, k):
+    # MK Nov 2026 - a target edited in the tab since July may store the mask itself, the
+    # old edit route wrote the masked settings back. That is no secret but one not set.
+    v = old.get(k)
+    return v if v and v != _MASK else None
 
 
 def _unmask(new, old):
@@ -148,7 +157,7 @@ def _unmask(new, old):
         if isinstance(v, dict):
             out[k] = _unmask(v, old.get(k))
         elif v == _MASK and _is_secret(k):
-            if old.get(k):
+            if _stored_secret(old, k):
                 out[k] = old[k]
         else:
             out[k] = v
@@ -161,9 +170,17 @@ def _keeps_stored_secret(new, old):
         if isinstance(v, dict):
             if _keeps_stored_secret(v, old.get(k)):
                 return True
-        elif v == _MASK and _is_secret(k) and old.get(k):
+        elif v == _MASK and _is_secret(k) and _stored_secret(old, k):
             return True
     return False
+
+
+def _not_the_mask(value, what):
+    """A secret as stored, unless it is the mask (see _stored_secret). Sent, that only earns
+    a 401 at the collector, so the target's last error says what to type again instead."""
+    if value == _MASK:
+        raise ValueError(f'the {what} of this target is not set, enter it again')
+    return value
 
 
 def _row_to_target(row, masked=True):
@@ -400,10 +417,16 @@ def _http_post(url, body_bytes, headers, timeout=10, verify_tls=True):
         return code
 
 
+def _headers_of(settings):
+    headers = {'Content-Type': 'application/json'}
+    for name, value in dict(settings.get('headers') or {}).items():
+        headers[name] = _not_the_mask(value, f'{name} header') if _is_secret(name) else value
+    return headers
+
+
 def _send_http_json(target, event):
     settings = target.get('settings') or {}
-    headers = {'Content-Type': 'application/json'}
-    headers.update(settings.get('headers') or {})
+    headers = _headers_of(settings)
     body = json.dumps(_to_json_line(event)).encode('utf-8')
     _http_post(target['endpoint'], body, headers, verify_tls=_verify_tls_for(target))
 
@@ -413,6 +436,7 @@ def _send_splunk_hec(target, event):
     token = settings.get('token')
     if not token:
         raise ValueError('splunk_hec target needs settings.token')
+    _not_the_mask(token, 'token')
     headers = {
         'Authorization': f'Splunk {token}',
         'Content-Type': 'application/json',
@@ -437,6 +461,7 @@ def _send_elastic(target, event):
     user = settings.get('username')
     pw = settings.get('password')
     if user and pw is not None:
+        _not_the_mask(pw, 'password')
         token = base64.b64encode(f"{user}:{pw}".encode('utf-8')).decode('ascii')
         headers['Authorization'] = f"Basic {token}"
     body = json.dumps(_to_json_line(event)).encode('utf-8')
@@ -446,8 +471,7 @@ def _send_elastic(target, event):
 def _send_generic(target, event):
     """Plain webhook — POST JSON body, no auth assumptions."""
     settings = target.get('settings') or {}
-    headers = {'Content-Type': 'application/json'}
-    headers.update(settings.get('headers') or {})
+    headers = _headers_of(settings)
     _http_post(target['endpoint'], json.dumps(_to_json_line(event)).encode('utf-8'),
                headers, verify_tls=_verify_tls_for(target))
 
@@ -582,7 +606,9 @@ def update_target(tid):
             return jsonify({'error': 'Re-enter the token or password of this target to change its endpoint.',
                             'code': 'CREDENTIAL_REQUIRED'}), 400
         body['settings'] = _unmask(new, stored)
-    elif moved and _mask(stored) != stored:
+    elif moved and _keeps_stored_secret(_mask(stored), stored):
+        # the settings as the tab shows them: a stored mask reads as empty there, and only a
+        # secret that is set has to be typed again
         return jsonify({'error': 'Re-enter the token or password of this target to change its endpoint.',
                         'code': 'CREDENTIAL_REQUIRED'}), 400
     fields = []
