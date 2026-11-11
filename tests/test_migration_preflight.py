@@ -144,7 +144,7 @@ class _Pve:
         self.started.append(('remote',) + a)
         return {'success': True, 'task': 'UPID:pve1:1:qmigrate'}
 
-    def create_api_token(self, name):
+    def create_api_token(self, name, **kw):
         self.tokens.append(name)
         return {'success': True, 'token_id': 'root@pam!' + name, 'token_value': 'secret'}
 

@@ -152,7 +152,7 @@ def run_cross_cluster_balance_check(group):
 
     # 7. create temp API token on target cluster
     token_name = f"xclb-{group_id[:8]}-{vmid}"
-    token = lo_mgr.create_api_token(token_name)
+    token = lo_mgr.create_api_token(token_name, expire=transfer_net.token_expiry())
     if not token.get('success'):
         logger.error(f"[XCLB] Token creation failed on {lo_cid}: {token.get('error')}")
         return

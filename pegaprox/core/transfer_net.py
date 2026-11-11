@@ -321,8 +321,16 @@ TOKEN_SETTLE_SECONDS = 30
 # a task whose status cannot be read for this long in a row is given up on
 TOKEN_BLIND_SECONDS = 7200
 # no migration takes this long: a task that still reports running then is stuck, and the
-# token (the rights of its user, no expiry) is not left on the target for it
+# token (the rights of its user) is not left on the target for it
 TOKEN_MAX_SECONDS = 7 * 86400
+
+
+def token_expiry():
+    """The expire a migration token is created with: PVE refuses it a day after the
+    longest drop_token_when_done waits for its task, so a token PegaProx never got to
+    delete (a restart or a lost lease during the migration, a delete that failed) does
+    not keep the rights of its user on the target for good."""
+    return int(time.time()) + TOKEN_MAX_SECONDS + 86400
 
 
 def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):

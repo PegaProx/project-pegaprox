@@ -375,7 +375,7 @@ def _source(cid=CID):
 
 def _target(api, transfer=NET, pve=None):
     tgt = _manager(TGT, transfer=transfer, pve=pve)
-    tgt.create_api_token = lambda name: {'success': True, 'token_id': 'root@pam!' + name, 'token_value': 'secret'}
+    tgt.create_api_token = lambda name, **kw: {'success': True, 'token_id': 'root@pam!' + name, 'token_value': 'secret'}
     tgt.delete_api_token = lambda name: {'success': True}
     tgt.fp_asked = 0
 

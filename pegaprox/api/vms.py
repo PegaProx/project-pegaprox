@@ -14977,7 +14977,7 @@ def cross_cluster_migrate_api():
     try:
         # Step 1: Create temporary API token on TARGET cluster (without privilege separation)
         logging.info(f"Creating temporary API token on target cluster ({target_cluster_id}) for user {target_manager.config.user}...")
-        token_result = target_manager.create_api_token(token_name)
+        token_result = target_manager.create_api_token(token_name, expire=transfer_net.token_expiry())
         if not token_result.get('success'):
             return jsonify({'error': f'Could not create API token on target cluster: {token_result.get("error")}'}), 500
         

@@ -71,8 +71,8 @@ def _token_in(endpoint):
 class _Migration:
     """A started migration: its source, its target, its token and the thread that follows it."""
 
-    def __init__(self, src, tgt, job, token, monkeypatch):
-        self.src, self.tgt, self.job, self.token = src, tgt, job, token
+    def __init__(self, src, tgt, job, token, monkeypatch, expire=None):
+        self.src, self.tgt, self.job, self.token, self.expire = src, tgt, job, token, expire
         self.clock, self.deleted, self.delete_answer = _Clock(), [], {'success': True}
         self.script, self.waiting = [(EVER, 'running')], False
         src.cluster_type = 'proxmox'
@@ -130,6 +130,8 @@ def by_hand(api, seed, monkeypatch):
     src = api.set_manager(CID, _source())
     src.remote_migrate_vm.return_value = {'success': True, 'task': UPID}
     tgt = _target(api)
+    created, create = [], tgt.create_api_token
+    tgt.create_api_token = lambda name, **kw: created.append(kw) or create(name, **kw)
     admin = api.as_user(seed.user('root', role='admin'))
     r = admin.post('/api/cross-cluster-migrate', json={
         'source_cluster': CID, 'target_cluster': TGT, 'vmid': 105, 'vm_type': 'qemu', 'source_node': 'pve1',
@@ -137,7 +139,8 @@ def by_hand(api, seed, monkeypatch):
     assert r.status_code == 200, r.get_data(as_text=True)
     (job,) = kept
     assert job['daemon'] is True
-    return _Migration(src, tgt, job, _token_in(src.remote_migrate_vm.call_args[0][3]), monkeypatch)
+    return _Migration(src, tgt, job, _token_in(src.remote_migrate_vm.call_args[0][3]), monkeypatch,
+                      expire=created[0].get('expire'))
 
 
 @pytest.fixture
@@ -147,7 +150,7 @@ def balancer(monkeypatch):
     hi.logger = logging.getLogger('test.migration_token.source')
     hi.find_migration_candidate.return_value = {'vmid': 105, 'name': 'db', 'type': 'qemu'}
     hi.remote_migrate_vm.return_value = {'success': True, 'task': UPID}
-    lo.create_api_token.side_effect = lambda name: {'success': True, 'token_id': 'root@pam!' + name,
+    lo.create_api_token.side_effect = lambda name, **kw: {'success': True, 'token_id': 'root@pam!' + name,
                                                     'token_value': 'secret'}
     lo.get_cluster_fingerprint.return_value = {'success': True, 'host': '10.0.0.11', 'fingerprint': 'AB:CD'}
 
@@ -168,7 +171,8 @@ def balancer(monkeypatch):
         'cross_cluster_include_containers': 0})
     (job,) = kept
     assert job['daemon'] is True
-    return _Migration(hi, lo, job, _token_in(hi.remote_migrate_vm.call_args[1]['target_endpoint']), monkeypatch)
+    return _Migration(hi, lo, job, _token_in(hi.remote_migrate_vm.call_args[1]['target_endpoint']), monkeypatch,
+                      expire=lo.create_api_token.call_args.kwargs.get('expire'))
 
 
 @pytest.fixture(params=['by_hand', 'balancer'])
@@ -258,3 +262,28 @@ def test_a_token_that_could_not_be_deleted_is_not_reported_as_deleted(migration,
     said = [r.getMessage() for r in caplog.records if migration.token in r.getMessage()]
     assert [m for m in _warned(caplog, migration.token) if 'no lease' in m], said
     assert not [m for m in said if 'eleted migration token' in m], said
+
+
+def test_pve_refuses_the_token_by_itself_a_day_after_the_longest_wait(migration):
+    """A restart or a lost lease during the migration leaves the token on the target, with
+    the rights of its user: Proxmox ends it then, nobody has to find it."""
+    longest = transfer_net.TOKEN_MAX_SECONDS + 86400
+    expire = migration.expire or 0
+    assert time.time() + longest - 60 <= expire <= time.time() + longest
+
+
+@pytest.mark.parametrize('expire, sent', [(None, 0), (1893456000, 1893456000)])
+def test_the_token_is_created_with_the_expire_it_is_given(expire, sent):
+    from pegaprox.core.manager import PegaProxManager
+    posted = []
+    answer = types.SimpleNamespace(status_code=200, text='',
+                                   json=lambda: {'data': {'value': 'v', 'full-tokenid': 'root@pam!t'}})
+    mgr = types.SimpleNamespace(is_connected=True, host='10.0.0.11', api_port=8006,
+                                config=types.SimpleNamespace(user='root@pam'),
+                                logger=logging.getLogger('test.migration_token.target'),
+                                _api_post=lambda url, data=None, **kw: posted.append((url, data)) or answer)
+    kw = {} if expire is None else {'expire': expire}
+    assert PegaProxManager.create_api_token(mgr, 't', **kw)['success']
+    [(url, data)] = posted
+    assert url.endswith('/access/users/root@pam/token/t')
+    assert data['expire'] == sent and data['privsep'] == 0

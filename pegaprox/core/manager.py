@@ -14565,7 +14565,7 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"Error getting fingerprint: {e}")
             return {'success': False, 'error': str(e)}
 
-    def create_api_token(self, token_name: str = 'pegaprox-migrate') -> Dict[str, Any]:
+    def create_api_token(self, token_name: str = 'pegaprox-migrate', expire: int = 0) -> Dict[str, Any]:
         # MK May 2026 (#413 layer 6, blackshocks bundle 20260530_220647):
         # if a prior Planned/Emergency failover crashed or its _delayed_cleanup
         # hadn't fired yet, the same token_name is still on target → PVE returns
@@ -14583,7 +14583,9 @@ echo "AGENT_INSTALLED_OK"
         def _do_create():
             data = {
                 'privsep': 0,  # No privilege separation - token has same permissions as user
-                'expire': 0,   # No expiration (we'll delete it manually)
+                # we delete it ourselves; should that never happen, PVE refuses it after
+                # expire (seconds since the epoch, 0 never)
+                'expire': int(expire or 0),
                 'comment': 'PegaProx temporary migration token'
             }
             return self._api_post(url, data=data)
