@@ -26,7 +26,7 @@ import pytest
 from test_ha_ui import BASE, _FakeServer, browser  # noqa: F401 (browser is a fixture)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LANGS = ['de', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 MARKER = 'window.__pegaproxI18nFiles = {};'
 IMMUTABLE = 'public, max-age=31536000, immutable'
 
