@@ -535,6 +535,36 @@ def _validate_challenge(authz_url, challenge_url, account_key, nonce, kid, token
     return {'success': False, 'message': 'Challenge validation timed out (60s)'}
 
 
+def _acme_problem(resp):
+    """The CA's reason from the problem document of a refused request, else the HTTP status."""
+    try:
+        err = resp.json()
+    except ValueError:
+        err = None
+    if isinstance(err, dict) and err.get('detail'):
+        return f"{err['detail']} (HTTP {resp.status_code})"
+    return f"HTTP {resp.status_code}"
+
+
+def _leaf_certificate(chain_pem, domain_key):
+    """The end-entity certificate of a downloaded chain, or ValueError.
+
+    RFC 8555 9.1: the body holds certificates only, the end-entity one first, and that
+    one has to carry the key we put in the CSR. Anything else (an error page from a proxy,
+    a key block) is not written over the pair the listener serves."""
+    labels = re.findall(r'-----BEGIN ([^-\r\n]*)-----', chain_pem)
+    if not chain_pem.lstrip().startswith('-----BEGIN CERTIFICATE-----') or set(labels) != {'CERTIFICATE'}:
+        raise ValueError('the CA did not answer with a PEM certificate chain')
+    blocks = re.findall(r'-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----', chain_pem, re.S)
+    if len(blocks) != len(labels):
+        raise ValueError('the certificate chain is cut off')
+    chain = [x509.load_pem_x509_certificate(b.encode()) for b in blocks]
+    spki = (serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    if chain[0].public_key().public_bytes(*spki) != domain_key.public_key().public_bytes(*spki):
+        raise ValueError('the certificate is not for the key of this request')
+    return chain[0]
+
+
 def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid):
     """Generate the domain key/CSR, finalize the ACME order, and save cert files."""
     domain_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -568,26 +598,42 @@ def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid):
 
     cert_url = order_data['certificate']
     cert_resp = _signed_request(cert_url, None, account_key, nonce, kid)
-    cert_pem = cert_resp.text
+    cert_pem = cert_resp.text or ''
+
+    # A renewal writes into the dir the listener loads from. A rate limit or a proxy page
+    # here used to land in cert.pem with a fresh key next to it, and the next start had no
+    # pair to load. Nothing is replaced until the chain parses and fits our key.
+    if cert_resp.status_code != 200:
+        return {'success': False, 'message': f"Certificate download failed: {_acme_problem(cert_resp)}"}
+    try:
+        cert_obj = _leaf_certificate(cert_pem, domain_key)
+    except ValueError as e:
+        return {'success': False, 'message': f"Certificate download failed: {e}"}
+    expires = cert_obj.not_valid_after_utc.isoformat()
 
     os.makedirs(ssl_dir, exist_ok=True)
     cert_path = os.path.join(ssl_dir, 'cert.pem')
     key_path = os.path.join(ssl_dir, 'key.pem')
 
-    with open(cert_path, 'w') as f:
-        f.write(cert_pem)
-    os.chmod(cert_path, 0o644)
-
-    with open(key_path, 'wb') as f:
-        f.write(domain_key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption()
-        ))
-    os.chmod(key_path, 0o600)
-
-    cert_obj = x509.load_pem_x509_certificate(cert_pem.encode())
-    expires = cert_obj.not_valid_after_utc.isoformat()
+    from pegaprox.app import _write_atomic
+    try:
+        with open(key_path, 'rb') as f:
+            old_key = f.read()
+    except OSError:
+        old_key = None
+    # each file in one rename, the key first
+    _write_atomic(key_path, domain_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()
+    ), 0o600)
+    try:
+        _write_atomic(cert_path, cert_pem.encode(), 0o644)
+    except OSError:
+        # the disk filled up in between: the old certificate gets its key back
+        if old_key is not None:
+            _write_atomic(key_path, old_key, 0o600)
+        raise
 
     logging.info(f"[ACME] Certificate saved! Expires: {expires}")
     return {
@@ -627,7 +673,11 @@ def _create_order(domain, email, ssl_dir, staging=False, directory_url=None):
 
     reg_resp = _signed_request(directory['newAccount'], reg_payload, account_key, nonce)
     nonce = reg_resp.headers.get('Replay-Nonce', nonce)
-    kid = reg_resp.headers['Location']
+    kid = reg_resp.headers.get('Location')
+    # 201 for a new account, 200 for the one this key has already (RFC 8555 7.3). A refusal
+    # (a contact the CA does not take, a rate limit) carries no Location and says why
+    if reg_resp.status_code not in (200, 201) or not kid:
+        return {'success': False, 'message': f"Account registration failed: {_acme_problem(reg_resp)}"}
     logging.info(f"[ACME] Account registered/found: {kid}")
 
     order_payload = {'identifiers': [{'type': 'dns', 'value': domain}]}
