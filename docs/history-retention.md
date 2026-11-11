@@ -15,7 +15,7 @@ guests, the storage and the totals.
 | Variable | Default | Meaning |
 |---|---|---|
 | `PEGAPROX_METRICS_RETENTION_DAYS` | `30` | Days of snapshots kept, 7 to 365. Older ones are deleted with every new snapshot. |
-| `PEGAPROX_HEAVY_READ_TTL` | `60` | Seconds a large history read (the report windows) is kept in memory for the next request. |
+| `PEGAPROX_HEAVY_READ_TTL` | `60` | Seconds a large history read (the report windows) is kept in memory for the next request (a value that is no number, such as `60s`, means 60). |
 | `PEGAPROX_HEAVY_READ_MAX_KEYS` | `64` | How many of those reads are kept at most, at least 1 (a value that is no whole number means 64). Past it, the ones that expire first make room; expired ones are dropped on every read and after every snapshot. |
 
 ### Stored per cluster, in parts
