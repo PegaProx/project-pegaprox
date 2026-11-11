@@ -4013,7 +4013,7 @@ class PegaProxDB:
         # MK: Mar 2026 - preserve group_id/display_name/sort_order that aren't in config data (#111)
         cursor.execute('SELECT group_id, display_name, sort_order, created_at, '
                        'proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict, '
-                       'migration_cooldown, transfer_network FROM clusters WHERE id = ?', (cluster_id,))
+                       'migration_cooldown, transfer_network, smbios_autoconfig FROM clusters WHERE id = ?', (cluster_id,))
         existing = cursor.fetchone()
 
         # MK May 2026 — preserve previously-set worldmap location across save_cluster
@@ -4083,7 +4083,10 @@ class PegaProxDB:
             data.get('ssh_port', 22),
             self._encrypt(json.dumps(data.get('ha_settings', {}))),
             json.dumps(data.get('excluded_nodes', [])),
-            json.dumps(data.get('smbios_autoconfig', {})),
+            # MK Nov 2026 - only the SMBIOS route writes these (update_cluster): a save of the
+            # cluster config, which does not carry them, keeps what is stored
+            (json.dumps(data['smbios_autoconfig']) if 'smbios_autoconfig' in data
+             else (existing['smbios_autoconfig'] if existing and existing['smbios_autoconfig'] else '{}')),
             data.get('api_token_user', ''),
             self._encrypt(data.get('api_token_secret', '')) if data.get('api_token_secret') else '',
             data.get('group_id', existing['group_id'] if existing else None),

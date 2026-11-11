@@ -119,3 +119,20 @@ def test_the_nodes_get_what_the_form_showed(env, monkeypatch, route):
     assert 'MANUFACTURER = "Acme Corp."' in script
     for key in ('product', 'version', 'family'):
         assert f'{key.upper()} = "{shown[key]}"' in script, key
+
+
+def test_a_save_of_the_cluster_config_keeps_the_saved_settings(env):
+    """save_config writes every cluster without its SMBIOS settings, and a stored
+    setting must not go back to {} with it (every balancer or cluster edit saves)"""
+    assert env.client.put(URL, json=dict(SAVED)).status_code == 200
+    env.db.save_cluster(CID, {'name': CID, 'host': 'pve', 'user': 'root@pam', 'pass': 'x'})
+    assert _stored(env) == SAVED
+    # what the route keeps in memory is gone with a restart: the row is what comes back
+    env.mgr.config.smbios_autoconfig = env.db.get_cluster(CID)['smbios_autoconfig']
+    assert _get(env) == SAVED
+
+
+def test_a_save_that_carries_the_settings_still_writes_them(env):
+    env.db.save_cluster(CID, {'name': CID, 'host': 'pve', 'user': 'root@pam', 'pass': 'x',
+                              'smbios_autoconfig': {'manufacturer': 'Other'}})
+    assert _stored(env) == {'manufacturer': 'Other'}
