@@ -109,6 +109,34 @@ def _stored_config(vmware_id):
         config['linked_clusters'] = list(linked or [])
     return config
 
+
+def _stored_server_access(vmware_id):
+    """check_vmware_access for a server that is only a row, for update and delete.
+
+    load_vmware_servers loads enabled servers only, so after the next start a disabled one
+    was a 404 at the gate and could be neither switched back on nor removed. Same rule as
+    the gate, against the row's linked_clusters; a linkage that does not parse leaves the
+    row to a global admin, as in the list. No row is a 404."""
+    import json as _json
+    row = get_db().conn.cursor().execute(
+        "SELECT linked_clusters FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone()
+    if row is None:
+        return False, (jsonify({'error': 'ESXi server not found'}), 404)
+    user = acting_user()
+    if not user:
+        return False, (jsonify({'error': 'Unauthorized', 'code': 'AUTH_REQUIRED'}), 401)
+    try:
+        linked = _json.loads(row['linked_clusters'] or '[]')
+    except (TypeError, ValueError):
+        linked = False
+    if isinstance(linked, (list, type(None))):
+        allowed = vmware_server_reach(user)(linked)
+    else:
+        allowed = acts_as_admin(user)
+    if allowed:
+        return True, None
+    return False, (jsonify({'error': 'Access denied to this ESXi server'}), 403)
+
 # =============================================================================
 
 @bp.route('/api/vmware', methods=['GET'])
@@ -131,8 +159,8 @@ def list_vmware_servers():
         import json as _json
         db = get_db()
         cursor = db.conn.cursor()
-        cursor.execute("SELECT id, name, host, port, enabled, server_type, linked_clusters "
-                       "FROM vmware_servers")
+        cursor.execute("SELECT id, name, host, port, username, ssl_verify, enabled, server_type, "
+                       "linked_clusters, notes FROM vmware_servers")
         for row in cursor.fetchall():
             row_dict = dict(row)
             if row_dict['id'] not in vmware_managers:
@@ -147,14 +175,19 @@ def list_vmware_servers():
                     _linked = []
                 if not reaches(_linked):
                     continue
+                # the edit dialog is filled from this entry and saves all of it, so it
+                # carries what to_dict gives of a loaded server, the secret aside
                 result.append({
                     'id': row_dict['id'],
                     'name': row_dict['name'],
                     'host': row_dict['host'],
                     'port': row_dict['port'],
+                    'username': row_dict.get('username') or '',
                     'server_type': row_dict.get('server_type', 'vcenter'),
+                    'ssl_verify': bool(row_dict.get('ssl_verify') or 0),
                     'enabled': bool(row_dict['enabled']),
                     'connected': False,
+                    'notes': row_dict.get('notes') or '',
                 })
     except Exception:
         pass
@@ -201,6 +234,9 @@ def add_vmware_server():
 def update_vmware_server(vmware_id):
     """Update a VMware server config"""
     ok, err = check_vmware_access(vmware_id)  # NS Aug 2026 (Aikido) — object-level authz on write
+    # a disabled server is not loaded after a start, only its row says who may change it
+    if not ok and vmware_id not in vmware_managers:
+        ok, err = _stored_server_access(vmware_id)
     if not ok:
         return err
     data = request.json or {}
@@ -314,6 +350,9 @@ def update_vmware_server(vmware_id):
         config['linked_clusters'] = list(data.get('linked_clusters') or [])
     elif vmware_id in vmware_managers:
         config['linked_clusters'] = list(getattr(vmware_managers[vmware_id], 'linked_clusters', None) or [])
+    elif 'linked_clusters' not in config:
+        return jsonify({'error': 'The stored linked_clusters of this server cannot be read, '
+                                 'send linked_clusters with the update'}), 400
 
     save_vmware_server(vmware_id, config)
 
@@ -328,7 +367,10 @@ def update_vmware_server(vmware_id):
             logging.warning(f"[VMware:{_sl(getattr(mgr, 'name', vmware_id))}] Skipped auto-connect after host change with preserved credentials (cred-exfil guard)")
         else:
             mgr.connect()
-    vmware_managers[vmware_id] = mgr
+    # a server that is only a row and stays disabled stays out of the registry, as at a
+    # start: the keepalive of the broadcast loop would connect it with the stored password
+    if config.get('enabled', True) or vmware_id in vmware_managers:
+        vmware_managers[vmware_id] = mgr
     
     log_audit(request.session.get('user', 'admin'), 'vmware.updated', f"Updated VMware server: {data.get('name', vmware_id)}")
     
@@ -340,6 +382,8 @@ def update_vmware_server(vmware_id):
 def delete_vmware_server(vmware_id):
     """Delete a VMware server"""
     ok, err = check_vmware_access(vmware_id)  # NS Aug 2026 (Aikido) — object-level authz on delete
+    if not ok and vmware_id not in vmware_managers:
+        ok, err = _stored_server_access(vmware_id)
     if not ok:
         return err
     name = vmware_managers[vmware_id].name if vmware_id in vmware_managers else vmware_id
