@@ -59,6 +59,7 @@ def load_scheduled_tasks():
                 'target_type': _blob.get('target_type', 'vm') if _new_shape else 'vm',
                 'target_id': _blob.get('target_id', '') if _new_shape else '',
                 'target_node': _blob.get('target_node', '') if _new_shape else '',
+                'backup_storage': (_blob.get('backup_storage') if _new_shape else None) or 'local',
                 'config': (_blob.get('config') or {}) if _new_shape else _blob,
                 'enabled': bool(row['enabled']),
                 'last_run': row['last_run'],
@@ -118,6 +119,8 @@ def save_scheduled_tasks(config):
                     'target_type': task.get('target_type', 'vm'),
                     'target_id': task.get('target_id', ''),
                     'target_node': task.get('target_node', ''),
+                    # where a backup task writes to; it had no place here either
+                    'backup_storage': task.get('backup_storage') or 'local',
                 }),
                 1 if task.get('enabled', True) else 0,
                 task.get('last_run'),
