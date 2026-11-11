@@ -27,7 +27,7 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "options": { "0": { "text": "NO", "color": "red" }, "1": { "text": "YES", "color": "green" } } }
+            { "type": "value", "options": { "0": { "text": "NO", "color": "red" }, "1": { "text": "YES", "color": "green" } } }
           ]
         }
       }
