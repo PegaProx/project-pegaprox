@@ -125,7 +125,8 @@ def _xcrepl_loop():
                 now = time.time()
                 for job in jobs:
                     job = dict(job)
-                    interval = _parse_interval_seconds(job.get('schedule', '0 */6 * * *'))
+                    # a NULL in the column raised here and ended the tick for every job after it
+                    interval = _parse_interval_seconds(str(job.get('schedule') or '0 */6 * * *'))
                     last_run = job.get('last_run', '')
 
                     # figure out seconds since last run

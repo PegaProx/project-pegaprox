@@ -10845,6 +10845,10 @@ def create_cross_cluster_replication():
     target_node = data.get('target_node', '')
     if source_cluster == target_cluster and not target_node:
         return jsonify({'error': 'target_node is required for same-cluster replication'}), 400
+    # the scheduler reads it as text: a null stored here ended its tick for every job after this one
+    schedule = data.get('schedule', '0 */6 * * *')
+    if not isinstance(schedule, str):
+        return jsonify({'error': 'schedule must be a string, e.g. "0 */6 * * *"'}), 400
 
     job_id = str(uuid.uuid4())[:8]
     now = datetime.now().isoformat()
@@ -10925,7 +10929,7 @@ def create_cross_cluster_replication():
         target_cluster,
         int(vmid),
         data.get('vm_type', 'qemu'),
-        data.get('schedule', '0 */6 * * *'),
+        schedule,
         int(data.get('retention', 3)),
         data.get('target_storage', ''),
         target_bridge,
