@@ -61,6 +61,18 @@ def test_parse_power():
     assert byname['PSU1']['kind'] == 'power' and byname['PSU1']['value'] == 240
 
 
+def test_parse_power_keeps_a_zero_watt_reading():
+    sensors, _ = rf.parse_power({'PowerSupplies': [
+        {'Name': 'PSU2', 'PowerOutputWatts': 0, 'Status': {'Health': 'OK', 'State': 'Enabled'}},
+        {'Name': 'PSU3', 'PowerOutputWatts': 0, 'LastPowerOutputWatts': 120, 'Status': {'Health': 'OK'}},
+        {'Name': 'PSU4', 'PowerOutputWatts': None, 'LastPowerOutputWatts': 0, 'Status': {'Health': 'OK'}},
+        {'Name': 'PSU5', 'LastPowerOutputWatts': 95, 'Status': {'Health': 'OK'}},
+    ]})
+    got = {s['name']: (s['kind'], s['value'], s['reading']) for s in sensors}
+    assert got == {'PSU2': ('power', 0.0, '0.0 Watts'), 'PSU3': ('power', 0.0, '0.0 Watts'),
+                   'PSU4': ('power', 0.0, '0.0 Watts'), 'PSU5': ('power', 95.0, '95.0 Watts')}, got
+
+
 def test_parse_system():
     health, fru, chassis = rf.parse_system(SYSTEM)
     assert health == 'critical'

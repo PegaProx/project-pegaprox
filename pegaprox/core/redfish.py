@@ -124,7 +124,10 @@ def parse_power(doc):
         name = ps.get('Name') or ps.get('MemberId') or 'Power Supply'
         st = _obj(ps.get('Status'))
         # a PSU is a discrete presence/health item; surface its output watts as the reading
-        w = _num(ps.get('PowerOutputWatts')) or _num(ps.get('LastPowerOutputWatts'))
+        # (0 W is a reading too, an idle supply of a redundant pair has it)
+        w = _num(ps.get('PowerOutputWatts'))
+        if w is None:
+            w = _num(ps.get('LastPowerOutputWatts'))
         out.append({
             'name': name, 'kind': 'power' if w is not None else 'discrete',
             'value': w, 'unit': ('W' if w is not None else ''),
