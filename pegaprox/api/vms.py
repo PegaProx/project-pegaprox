@@ -2754,7 +2754,7 @@ def create_vm_firewall_rule(cluster_id, node, vmtype, vmid):
         except:
             pve_err = r.text
         logging.warning(f"VM FW rule create failed: {r.status_code} data={data} pve_response={r.text[:300]}")
-        return upstream_failure(r.status_code, pve_err, status=r.status_code)
+        return upstream_failure(r.status_code, pve_err, pve_status=r.status_code)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create VM firewall rule')}), 500
 
