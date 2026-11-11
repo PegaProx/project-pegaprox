@@ -14974,6 +14974,7 @@ def cross_cluster_migrate_api():
     import time
     token_name = f"pegaprox-migrate-{int(time.time())}-{uuid.uuid4().hex[:8]}"
     target_token = None
+    started = False
     
     try:
         # Step 1: Create temporary API token on TARGET cluster (without privilege separation)
@@ -15028,6 +15029,17 @@ def cross_cluster_migrate_api():
         )
         
         if result.get('success'):
+            task_upid = result.get('task')
+            # The token goes when the task has ended, not before: the source node presents it
+            # for as long as the migration runs (core/transfer_net.py). It is the cleanup's from
+            # here on, so a step below that fails does not take it away from the running task
+            started = True
+            cleanup_thread = threading.Thread(target=ha.as_job(transfer_net.drop_token_when_done, 'token cleanup'),
+                                              args=(target_manager, source_manager, token_name, task_upid,
+                                                    f'{vm_type}/{vmid}'),
+                                              daemon=True)
+            cleanup_thread.start()
+
             # Log to audit
             user = request.session.get('user', 'system')
             log_audit(
@@ -15038,20 +15050,11 @@ def cross_cluster_migrate_api():
             )
             
             # NS: Register PegaProx user for this task
-            task_upid = result.get('task')
             if task_upid:
                 register_task_user(task_upid, user, source_cluster_id)
             
             # NS: Push immediate update for live UI (source cluster)
             push_immediate_update(source_cluster_id, delay=0.5)
-            
-            # The token goes when the task has ended, not before: the source node presents it
-            # for as long as the migration runs (core/transfer_net.py)
-            cleanup_thread = threading.Thread(target=ha.as_job(transfer_net.drop_token_when_done, 'token cleanup'),
-                                              args=(target_manager, source_manager, token_name, task_upid,
-                                                    f'{vm_type}/{vmid}'),
-                                              daemon=True)
-            cleanup_thread.start()
             
             response = {
                 'message': f'Cross-cluster migration started: {vm_type}/{vmid} from {source_cluster_id} to {target_cluster_id}/{target_node}',
@@ -15088,8 +15091,8 @@ def cross_cluster_migrate_api():
             return jsonify({'error': error_msg}), 500
             
     except Exception as e:
-        # Cleanup token on any error
-        if target_token:
+        # Cleanup token on any error - before the migration started; a started one keeps it
+        if target_token and not started:
             target_manager.delete_api_token(token_name)
         logging.error(f"Cross-cluster migration error: {e}")
         return jsonify({'error': safe_error(e, 'Cross-cluster migration failed')}), 500

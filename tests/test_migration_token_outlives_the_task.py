@@ -71,9 +71,9 @@ def _token_in(endpoint):
 class _Migration:
     """A started migration: its source, its target, its token and the thread that follows it."""
 
-    def __init__(self, src, tgt, job, token, monkeypatch, expire=None, again=None):
+    def __init__(self, src, tgt, job, token, monkeypatch, expire=None, again=None, kept=()):
         self.src, self.tgt, self.job, self.token, self.expire = src, tgt, job, token, expire
-        self.again = again
+        self.again, self.kept = again, kept
         self.clock, self.deleted, self.delete_answer = _Clock(), [], {'success': True}
         self.script, self.waiting = [(EVER, 'running')], False
         src.cluster_type = 'proxmox'
@@ -135,16 +135,17 @@ def by_hand(api, seed, monkeypatch):
     tgt.create_api_token = lambda name, **kw: created.append(kw) or create(name, **kw)
     admin = api.as_user(seed.user('root', role='admin'))
 
-    def start():
+    def start(status=200):
         r = admin.post('/api/cross-cluster-migrate', json={
             'source_cluster': CID, 'target_cluster': TGT, 'vmid': 105, 'vm_type': 'qemu', 'source_node': 'pve1',
             'target_node': 'pve2', 'target_storage': 'local-lvm', 'delete_source': False})
-        assert r.status_code == 200, r.get_data(as_text=True)
+        assert r.status_code == status, r.get_data(as_text=True)
         return _token_in(src.remote_migrate_vm.call_args[0][3])
     token = start()
     (job,) = kept
     assert job['daemon'] is True
-    return _Migration(src, tgt, job, token, monkeypatch, expire=created[0].get('expire'), again=start)
+    return _Migration(src, tgt, job, token, monkeypatch, expire=created[0].get('expire'), again=start,
+                      kept=kept)
 
 
 @pytest.fixture
@@ -171,7 +172,8 @@ def balancer(monkeypatch):
     monkeypatch.setattr(xclb, 'log_audit', lambda *a, **kw: None)
     monkeypatch.setattr(xclb.transfer_net, 'migration_route', lambda mgr, node=None: None)
 
-    def start():
+    def start(status=None):
+        """status: what the route answers by hand; the balancer answers nobody"""
         xclb.run_cross_cluster_balance_check({
             'id': 'g1', 'name': 'group', 'cross_cluster_threshold': 5, 'cross_cluster_dry_run': 0,
             'cross_cluster_include_containers': 0})
@@ -180,7 +182,7 @@ def balancer(monkeypatch):
     (job,) = kept
     assert job['daemon'] is True
     return _Migration(hi, lo, job, token, monkeypatch,
-                      expire=lo.create_api_token.call_args.kwargs.get('expire'), again=start)
+                      expire=lo.create_api_token.call_args.kwargs.get('expire'), again=start, kept=kept)
 
 
 @pytest.fixture(params=['by_hand', 'balancer'])
@@ -293,6 +295,20 @@ def test_two_migrations_in_the_same_second_get_a_token_each(migration, monkeypat
     first, second = migration.again(), migration.again()
     assert first != second
     assert all(name.startswith(('pegaprox-migrate-', 'xclb-g1-105-')) for name in (first, second))
+
+
+def test_a_started_migration_keeps_its_token_when_a_later_step_fails(migration, monkeypatch):
+    """Once remote_migrate_vm has started the task, the audit line, the task user and the
+    live update still ran in the try whose except deleted the token: the migration copied
+    on without its access to the target."""
+    def unavailable(*a, **kw):
+        raise RuntimeError('audit log unavailable')
+    monkeypatch.setattr(vms, 'log_audit', unavailable)
+    monkeypatch.setattr(xclb, 'log_audit', unavailable)
+    migration.tgt.get_vm_resources = lambda *a, **k: []
+    token = migration.again(status=500)
+    assert migration.deleted == []
+    assert [job['args'][2] for job in migration.kept] == [migration.token, token]
 
 @pytest.mark.parametrize('expire, sent', [(None, 0), (1893456000, 1893456000)])
 def test_the_token_is_created_with_the_expire_it_is_given(expire, sent):

@@ -160,6 +160,7 @@ def run_cross_cluster_balance_check(group):
         logger.error(f"[XCLB] Token creation failed on {lo_cid}: {token.get('error')}")
         return
 
+    started = False
     try:
         # 8. get fingerprint + build endpoint
         # MK Oct 2026 - at the target node's transfer address when lo has a transfer network
@@ -189,25 +190,28 @@ def run_cross_cluster_balance_check(group):
 
         if result.get('success'):
             task_upid = result.get('task')
-            log_audit('system', 'xclb.migrate',
-                      f"Cross-cluster LB: Migrated {vm_type}/{vmid} ({vm_name}) "
-                      f"from {hi_cid} to {lo_cid} (group:{group_id})")
-            # spawn token cleanup thread (its delete comes later and asks at its exit)
+            # spawn token cleanup thread (its delete comes later and asks at its exit); the
+            # token is its own from here, the except below leaves it to the running task
+            started = True
             threading.Thread(
                 target=ha.as_job(transfer_net.drop_token_when_done, f'token cleanup for {vmid}'),
                 args=(lo_mgr, hi_mgr, token_name, task_upid, f'{vm_type}/{vmid}'),
                 daemon=True
             ).start()
+            log_audit('system', 'xclb.migrate',
+                      f"Cross-cluster LB: Migrated {vm_type}/{vmid} ({vm_name}) "
+                      f"from {hi_cid} to {lo_cid} (group:{group_id})")
         else:
             logger.error(f"[XCLB] Migration failed: {result.get('error')}")
             lo_mgr.delete_api_token(token_name)
 
     except Exception as e:
         logger.error(f"[XCLB] Error during migration: {e}")
-        try:
-            lo_mgr.delete_api_token(token_name)
-        except Exception:
-            pass
+        if not started:
+            try:
+                lo_mgr.delete_api_token(token_name)
+            except Exception:
+                pass
 
     # 10. update last run timestamp
     try:
