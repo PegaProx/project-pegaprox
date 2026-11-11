@@ -57,6 +57,15 @@ def test_a_late_response_cannot_land_after_a_selection_change():
                      comp)
 
 
+def test_the_answer_is_checked_again_once_its_body_is_read():
+    """Reading the body is a second wait: a selection change during it must drop
+    the answer as well. LW Nov 2026"""
+    comp = _component()
+    body = comp[comp.index('const runPrereqs'):comp.index('// another cluster selection')]
+    after = body[body.index('await r.json()'):]
+    assert 'if (mine !== prereqSeq.current) return;' in after[:after.index('setPrereqData(j)')]
+
+
 def test_unreachable_members_are_shown_not_swallowed():
     comp = _component()
     assert 'prereqData.errors.map' in comp

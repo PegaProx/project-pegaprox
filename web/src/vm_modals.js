@@ -5461,6 +5461,8 @@
                     });
                     if (mine !== prereqSeq.current) return;
                     const j = r?.ok ? await r.json() : null;
+                    // the body can take its time too, the selection may have changed meanwhile
+                    if (mine !== prereqSeq.current) return;
                     if (j) setPrereqData(j);
                     else setPrereqError(t('mcevpnPrereqFailed') || 'Prerequisites check failed');
                 } catch (e) { if (mine === prereqSeq.current) setPrereqError(String(e?.message || e)); }
