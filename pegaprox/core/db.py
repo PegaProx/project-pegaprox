@@ -435,6 +435,8 @@ class PegaProxDB:
                 -- stopped working.
                 ldap_permissions TEXT DEFAULT '[]',
                 ldap_tenant TEXT DEFAULT '',
+                -- and the same for the per-tenant roles a group mapping granted
+                ldap_tenant_permissions TEXT DEFAULT '{}',
                 tenant_permissions TEXT DEFAULT '{}',
                 denied_permissions TEXT DEFAULT '[]',
                 oidc_sub TEXT DEFAULT '',
@@ -1297,7 +1299,8 @@ class PegaProxDB:
                     logging.error(f"Failed to add ldap_dn column: {e}")
             
             for _col, _decl in (('ldap_permissions', "TEXT DEFAULT '[]'"),
-                                ('ldap_tenant', "TEXT DEFAULT ''")):
+                                ('ldap_tenant', "TEXT DEFAULT ''"),
+                                ('ldap_tenant_permissions', "TEXT DEFAULT '{}'")):
                 if _col not in columns:
                     try:
                         cursor.execute(f"ALTER TABLE users ADD COLUMN {_col} {_decl}")
@@ -4445,6 +4448,7 @@ class PegaProxDB:
                 'last_ldap_sync': row_dict.get('last_ldap_sync', ''),
                 'ldap_permissions': json.loads(row_dict.get('ldap_permissions') or '[]'),
                 'ldap_tenant': row_dict.get('ldap_tenant', '') or '',
+                'ldap_tenant_permissions': json.loads(row_dict.get('ldap_tenant_permissions') or '{}'),
                 # NS: Feb 2026 - OIDC and tenant permission fields
                 'tenant_permissions': json.loads(row_dict.get('tenant_permissions') or '{}'),
                 'denied_permissions': json.loads(row_dict.get('denied_permissions') or '[]'),
@@ -4514,6 +4518,7 @@ class PegaProxDB:
             'last_ldap_sync': row_dict.get('last_ldap_sync', ''),
             'ldap_permissions': json.loads(row_dict.get('ldap_permissions') or '[]'),
             'ldap_tenant': row_dict.get('ldap_tenant', '') or '',
+            'ldap_tenant_permissions': json.loads(row_dict.get('ldap_tenant_permissions') or '{}'),
             # NS: Feb 2026 - OIDC and tenant permission fields
             'tenant_permissions': json.loads(row_dict.get('tenant_permissions') or '{}'),
             'denied_permissions': json.loads(row_dict.get('denied_permissions') or '[]'),
@@ -4537,7 +4542,7 @@ class PegaProxDB:
              totp_secret_encrypted, totp_pending_secret_encrypted, totp_enabled, force_password_change,
             enabled, theme, language, ui_layout, taskbar_auto_expand,
              auth_source, display_name, email, avatar_mime, avatar_data, ldap_dn, last_ldap_sync,
-             ldap_permissions, ldap_tenant,
+             ldap_permissions, ldap_tenant, ldap_tenant_permissions,
              tenant_permissions, denied_permissions, oidc_sub, last_oidc_sync,
              layout_chosen, portal_only, sidebar_show_vmid, user_folder,
              directory_groups)
@@ -4547,7 +4552,7 @@ class PegaProxDB:
                     COALESCE(?, (SELECT password_changed_at FROM users WHERE username = ?)),
                     ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?,
+                    ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
                     COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]'))
@@ -4582,6 +4587,7 @@ class PegaProxDB:
             data.get('last_ldap_sync', ''),
             json.dumps(list(data.get('ldap_permissions') or [])),
             data.get('ldap_tenant', '') or '',
+            json.dumps(dict(data.get('ldap_tenant_permissions') or {})),
             # NS: Feb 2026 - OIDC and tenant permission fields
             json.dumps(data.get('tenant_permissions', {})),
             json.dumps(data.get('denied_permissions', [])),

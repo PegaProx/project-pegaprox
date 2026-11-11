@@ -149,3 +149,45 @@ def test_they_survive_a_reopen(db, tmp_path):
     reopened = dbmod.get_db()
 
     assert reopened.get_user('y')['ldap_permissions'] == ['vm.view']
+
+
+TENANT_ADMIN = {'acme': {'role': 'admin', 'extra': []}}
+
+
+def test_the_directorys_tenant_roles_survive_a_reopen(db):
+    db.save_user('z', {'password_salt': '', 'password_hash': '', 'role': 'viewer',
+                       'auth_source': 'ldap', 'ldap_tenant_permissions': TENANT_ADMIN})
+
+    assert _reopen().get_user('z')['ldap_tenant_permissions'] == TENANT_ADMIN
+    assert _reopen().get_all_users()['z']['ldap_tenant_permissions'] == TENANT_ADMIN
+
+
+def test_an_older_database_gets_the_tenant_roles_column(db):
+    cols = [r[1] for r in db.conn.execute('PRAGMA table_info(users)').fetchall()]
+    if 'ldap_tenant_permissions' in cols:
+        db.conn.execute('ALTER TABLE users DROP COLUMN ldap_tenant_permissions')
+        db.conn.commit()
+
+    reopened = _reopen()
+
+    cols = [r[1] for r in reopened.conn.execute('PRAGMA table_info(users)').fetchall()]
+    assert 'ldap_tenant_permissions' in cols
+
+
+def test_a_tenant_role_the_directory_withdrew_goes_with_the_next_sign_in(db):
+    """Still mapped to the tenant, only the group that gave the tenant role is gone.
+    The sign-in has to know which tenant roles were its own, and that has to come from
+    the database: a restart sits between any two sign-ins."""
+    from pegaprox.utils.rbac import get_user_permissions, get_role_permissions_for_user
+    _seed(db, 'omar', 'ldap', tenant_permissions={'beta': {'role': 'user'}})   # by hand
+
+    _provision('omar', role='viewer', tenant='acme', tenant_permissions=TENANT_ADMIN)
+    assert _reopen().get_user('omar')['tenant_permissions']['acme'] == TENANT_ADMIN['acme']
+
+    _provision('omar', role='viewer', tenant='acme', tenant_permissions={})
+
+    u = _reopen().get_user('omar')
+    assert u['tenant_id'] == 'acme'
+    assert u['tenant_permissions'] == {'beta': {'role': 'user'}}
+    assert u['ldap_tenant_permissions'] == {}
+    assert set(get_user_permissions(u)) == set(get_role_permissions_for_user({'role': 'viewer'}))
