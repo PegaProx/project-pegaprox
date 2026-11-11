@@ -606,9 +606,10 @@ def update_affinity_rule(rule_id, cluster_id=None):
 @require_auth(roles=[ROLE_ADMIN])
 def delete_affinity_rule(rule_id, cluster_id=None):
     """Delete an affinity rule"""
-    config = load_affinity_rules()
-    config['rules'] = [r for r in config['rules'] if r['id'] != rule_id]
-    save_affinity_rules(config)
+    # MK Nov 2026 - straight from the table: save_affinity_rules only writes the rules it is
+    # handed, so a load/filter/save kept the row and the rule went on being enforced
+    if not get_db().delete_affinity_rule(rule_id, cluster_id):
+        return jsonify({'error': 'Rule not found'}), 404
 
     user = request.session.get('user', 'unknown')
     log_audit(user, 'affinity_rule.deleted', f"Deleted affinity rule: {rule_id}")

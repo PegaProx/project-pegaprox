@@ -6589,11 +6589,15 @@ class PegaProxDB:
         ))
         self.conn.commit()
     
-    def delete_affinity_rule(self, rule_id: str):
-        """Delete affinity rule"""
+    def delete_affinity_rule(self, rule_id: str, cluster_id: str = None) -> bool:
+        """Delete affinity rule, of that cluster when one is given. True if a row went."""
         cursor = self.conn.cursor()
-        cursor.execute('DELETE FROM affinity_rules WHERE id = ?', (rule_id,))
+        if cluster_id:
+            cursor.execute('DELETE FROM affinity_rules WHERE id = ? AND cluster_id = ?', (rule_id, cluster_id))
+        else:
+            cursor.execute('DELETE FROM affinity_rules WHERE id = ?', (rule_id,))
         self.conn.commit()
+        return cursor.rowcount > 0
     
     def save_all_affinity_rules(self, rules: dict):
         """Save all affinity rules"""
