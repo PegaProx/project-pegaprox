@@ -199,7 +199,8 @@ class PegaProxConfig:
         # Were API-settable but never persisted before, so users saw "saved"
         # toasts that reverted within seconds.
         self.predictive_balancing = cluster_data.get('predictive_balancing', False)
-        self.predictive_threshold = cluster_data.get('predictive_threshold', 0.0)
+        # a row from before the setting reads 0.0, NULL or no key: the UI shows 75, so that is what runs
+        self.predictive_threshold = cluster_data.get('predictive_threshold') or 75
         self.balance_cpu_weight = cluster_data.get('balance_cpu_weight', 1.0)
         self.balance_mem_weight = cluster_data.get('balance_mem_weight', 1.0)
         self.balance_io_weight = cluster_data.get('balance_io_weight', 1.0)
