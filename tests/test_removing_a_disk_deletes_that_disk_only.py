@@ -25,6 +25,7 @@ def _remove(reads, disk_id, vmid=100, vm_type='qemu', delete_data=True):
     m.remove_disk = types.MethodType(PegaProxManager.remove_disk, m)
     m.get_vm_config = types.MethodType(PegaProxManager.get_vm_config, m)
     m._parse_vm_config = lambda config, vm_type: {}  # remove_disk only reads 'raw' from the parsed config
+    m._create_session.return_value.get.return_value = _Resp(200, data={'status': 'stopped'})
     m._api_get.side_effect = [_Resp(200, data=cfg) for cfg in reads]
     m._api_put.return_value = _Resp(200, text='')
     m._api_delete.return_value = _Resp(200, text='')
@@ -255,13 +256,13 @@ def test_a_linked_clone_volume_belongs_to_the_guest_named_last():
 # hotplug). Otherwise the delete waits in the pending section until the next start, the volume
 # stays in use, and the config read after the detach shows the key gone with no unusedN for it.
 
-def _remove_running(before, disk_id, pending, vmid=100, vm_type='qemu'):
+def _remove_running(before, disk_id, pending, vmid=100, vm_type='qemu', status=None):
     """remove_disk on a running guest: the config before and after the detach, then the pending read."""
     m = _mgr()
     m.remove_disk = types.MethodType(PegaProxManager.remove_disk, m)
     m.get_vm_config = types.MethodType(PegaProxManager.get_vm_config, m)
     m._parse_vm_config = lambda config, vm_type: {}
-    m._create_session.return_value.get.return_value = _Resp(200, data={'status': 'running'})
+    m._create_session.return_value.get.return_value = status or _Resp(200, data={'status': 'running'})
     m._api_get.side_effect = [_Resp(200, data=before), _Resp(200, data={}), pending]
     m._api_put.return_value = _Resp(200, text='')
     m._api_delete.return_value = _Resp(200, text='')
@@ -307,4 +308,14 @@ def test_a_running_guest_whose_pending_changes_cannot_be_read_keeps_the_volume()
     res, m = _remove_running(before, 'sata1', _Resp(403, text='{"data":null}'))
     assert res == {'success': True, 'message': 'Disk sata1 detach sent (volume kept: the pending changes of '
                                                'guest 100 could not be read)'}, res
+    assert m._api_delete.call_args_list == []
+
+
+def test_a_guest_whose_status_cannot_be_read_is_treated_as_running():
+    """status/current fails right after the config read: the pending list still decides, so the disk stays."""
+    before = {'sata1': 'local:100/vm-100-disk-1.qcow2,size=4G'}
+    pending = _Resp(200, data=[{'key': 'sata1', 'delete': 1}])
+    res, m = _remove_running(before, 'sata1', pending, status=_Resp(596, text=''))
+    assert res == {'success': True,
+                   'message': 'Disk sata1 is detached at the next start of guest 100 (volume kept)'}, res
     assert m._api_delete.call_args_list == []

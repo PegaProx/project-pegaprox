@@ -18480,8 +18480,9 @@ echo "AGENT_INSTALLED_OK"
                                     return {'success': True, 'message': f'Disk {disk_id} detached (volume kept: {volume_path} does not belong to guest {vmid})'}
                                 # On a running guest PVE only marks a drive it cannot unplug live for
                                 # removal (sata, ide, no disk hotplug, a container mount point). It stays
-                                # in use until the next start, and freeing it now pulls it from the guest
-                                if (parsed_config.get('status') or {}).get('status') == 'running':
+                                # in use until the next start, and freeing it now pulls it from the guest.
+                                # A status that could not be read counts as running
+                                if (parsed_config.get('status') or {}).get('status') != 'stopped':
                                     pending_response = self._api_get(url.rsplit('/', 1)[0] + '/pending')
                                     if pending_response.status_code != 200:
                                         self.logger.warning(f"[WARN] Could not read the pending changes of {vm_type}/{vmid}: {volume_path} kept")
