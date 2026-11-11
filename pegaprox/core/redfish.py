@@ -150,6 +150,18 @@ def parse_system(doc):
     return health, fru, chassis
 
 
+def parse_chassis(doc):
+    """Redfish Chassis resource -> the chassis fields bmc.parse_chassis has (intrusion)."""
+    out = {}
+    sensor = _obj(_obj(doc).get('PhysicalSecurity')).get('IntrusionSensor')
+    if isinstance(sensor, str) and sensor.strip():
+        # Normal | HardwareIntrusion | TamperingDetected. Normal is what ipmitool calls
+        # inactive, and the rollup and the metrics summary read it under that name
+        sensor = sensor.strip()
+        out['intrusion'] = 'inactive' if sensor.lower() == 'normal' else sensor
+    return out
+
+
 def parse_sel(members, limit=25):
     """Redfish LogEntry members -> [event dicts] (bmc.py event shape), newest first."""
     events = []
@@ -198,10 +210,11 @@ def _health_rollup(sensors, events, system_health, chassis):
     return {'status': status, 'reasons': reasons}
 
 
-def parse_redfish(system_doc, thermal_doc, power_doc, sel_members):
+def parse_redfish(system_doc, thermal_doc, power_doc, sel_members, chassis_doc=None):
     """Combine the fetched Redfish resources into the normalized hardware dict
     (same shape as bmc.parse_inband)."""
     health_sys, fru, chassis = parse_system(system_doc)
+    chassis.update(parse_chassis(chassis_doc))
     sensors = parse_thermal(thermal_doc)
     p_sensors, power_w = parse_power(power_doc)
     sensors = sensors + p_sensors
@@ -425,8 +438,8 @@ def read_node_bmc_redfish(host, user, password, verify_ssl=False, timeout=10):
     if system_doc is None:
         return {'available': False, 'reason': f'Redfish system read failed: {err}'}
 
-    # 2) discover a Chassis for Thermal/Power (best-effort)
-    thermal_doc = power_doc = None
+    # 2) discover a Chassis for its intrusion sensor and Thermal/Power (best-effort)
+    thermal_doc = power_doc = chassis_doc = None
     chassis_col, _ = _get('/redfish/v1/Chassis')
     cmembers = _objs((chassis_col or {}).get('Members'))
     if cmembers:
@@ -453,7 +466,7 @@ def read_node_bmc_redfish(host, user, password, verify_ssl=False, timeout=10):
                 entries, _ = _get(entries_ref)
                 sel_members = _objs((entries or {}).get('Members'))
 
-    return parse_redfish(system_doc, thermal_doc, power_doc, sel_members)
+    return parse_redfish(system_doc, thermal_doc, power_doc, sel_members, chassis_doc)
 
 
 def read_node_hardware(mgr, cluster_id, node, inband_ok=True, redfish_ok=False, timeout=10):

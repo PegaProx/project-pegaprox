@@ -97,6 +97,43 @@ def test_parse_redfish_empty_unavailable():
     assert rf.parse_redfish({}, {}, {}, [])['available'] is False
 
 
+# Chassis.PhysicalSecurity.IntrusionSensor is Normal, HardwareIntrusion or TamperingDetected.
+# Normal comes out as ipmitool's 'inactive', which every reader of chassis.intrusion takes as fine
+SYS_OK = dict(SYSTEM, Status={'Health': 'OK', 'HealthRollup': 'OK'})
+THERMAL_OK = {'Temperatures': [{'Name': 'CPU', 'ReadingCelsius': 45, 'Status': {'Health': 'OK'}}]}
+
+
+def test_parse_chassis_intrusion():
+    assert rf.parse_chassis({'PhysicalSecurity': {'IntrusionSensor': 'Normal'}}) == {'intrusion': 'inactive'}
+    assert rf.parse_chassis({'PhysicalSecurity': {'IntrusionSensor': 'HardwareIntrusion'}}) == {
+        'intrusion': 'HardwareIntrusion'}
+    assert rf.parse_chassis({'PhysicalSecurity': {'IntrusionSensor': None}}) == {}
+    assert rf.parse_chassis({'Status': {'Health': 'OK'}}) == {} and rf.parse_chassis(None) == {}
+
+
+def test_parse_redfish_chassis_intrusion_is_critical():
+    for sensor in ('HardwareIntrusion', 'TamperingDetected'):
+        d = rf.parse_redfish(SYS_OK, THERMAL_OK, {}, [], {'PhysicalSecurity': {'IntrusionSensor': sensor}})
+        assert d['health'] == 'critical' and d['chassis'] == {'power': 'on', 'intrusion': sensor}
+        assert d['health_reasons'] == [{'source': 'chassis', 'label': f'chassis intrusion: {sensor}',
+                                        'severity': 'critical'}]
+
+
+def test_parse_redfish_chassis_normal_and_absent_stay_ok():
+    d = rf.parse_redfish(SYS_OK, THERMAL_OK, {}, [], {'PhysicalSecurity': {'IntrusionSensor': 'Normal'}})
+    assert d['health'] == 'ok' and d['health_reasons'] == [] and d['chassis'] == {'power': 'on', 'intrusion': 'inactive'}
+    d = rf.parse_redfish(SYS_OK, THERMAL_OK, {}, [], {'Status': {'Health': 'OK'}})
+    assert d['health'] == 'ok' and d['chassis'] == {'power': 'on'}
+
+
+def test_chassis_intrusion_reaches_the_metrics_summary():
+    from pegaprox.background import metrics
+    opened = rf.parse_redfish(SYS_OK, THERMAL_OK, {}, [], {'PhysicalSecurity': {'IntrusionSensor': 'HardwareIntrusion'}})
+    closed = rf.parse_redfish(SYS_OK, THERMAL_OK, {}, [], {'PhysicalSecurity': {'IntrusionSensor': 'Normal'}})
+    assert metrics._compact_hw(opened)['bad'] == ['chassis intrusion']
+    assert metrics._compact_hw(closed)['bad'] == []
+
+
 def test_host_guard_blocks_metadata_allows_private():
     # cloud-metadata always blocked even though allow_private=True for BMCs
     base, why = rf._validate_host('169.254.169.254')
@@ -197,6 +234,27 @@ def test_ssrf_absolute_and_protocol_relative_odata_id_rejected(monkeypatch):
         res = rf.read_node_bmc_redfish('10.0.0.5', 'u', 'p')
         assert all('evil.example' not in u for u in seen), (hostile, seen)
         assert res['available'] is False
+
+
+def test_the_reader_reads_the_intrusion_sensor_of_the_chassis(monkeypatch):
+    link = '\u0040odata.id'      # the OData id key of a Redfish link ('\u0040' is the at sign)
+    docs = {
+        '/redfish/v1/Systems': {'Members': [{link: '/redfish/v1/Systems/1'}]},
+        '/redfish/v1/Systems/1': {'Status': {'Health': 'OK', 'HealthRollup': 'OK'}, 'PowerState': 'On'},
+        '/redfish/v1/Chassis': {'Members': [{link: '/redfish/v1/Chassis/1'}]},
+        '/redfish/v1/Chassis/1': {'PhysicalSecurity': {'IntrusionSensor': 'HardwareIntrusion'}},
+        '/redfish/v1/Chassis/1/Thermal': THERMAL_OK,
+    }
+
+    def fake_get(url, **kw):
+        for path, doc in docs.items():
+            if url.endswith(path):
+                return _FakeResp(doc)
+        return _FakeResp({}, status=404)
+    monkeypatch.setattr('pegaprox.core.redfish.requests.get', fake_get)
+    res = rf.read_node_bmc_redfish('10.0.0.5', 'u', 'p')
+    assert res['available'] is True and res['health'] == 'critical', res
+    assert res['chassis']['intrusion'] == 'HardwareIntrusion'
 
 
 def test_redfish_body_size_cap(monkeypatch):
