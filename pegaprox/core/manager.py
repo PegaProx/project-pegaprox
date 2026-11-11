@@ -17329,7 +17329,9 @@ echo "AGENT_INSTALLED_OK"
             if not config_result.get('success'):
                 return {'success': False, 'error': 'Could not get VM config'}
             
-            config = config_result.get('config', {})
+            # get_vm_config hands back the config parsed for the UI, the boot line and the
+            # device keys are only in the PVE config it keeps under raw (#1356)
+            config = config_result.get('config', {}).get('raw') or {}
             boot_val = config.get('boot', '')
             
             if not boot_val or 'order=' not in boot_val:
