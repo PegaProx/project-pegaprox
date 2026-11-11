@@ -128,6 +128,8 @@ def get_oidc_settings() -> dict:
         'button_text': settings.get('oidc_button_text', 'Sign in with Microsoft'),
         # NS: allow disabling JWT sig verification for broken JWKS environments
         'oidc_skip_jwt_verification': settings.get('oidc_skip_jwt_verification', False),
+        # MK Nov 2026 - the extra audiences oidc_decode_id_token accepts besides the client_id
+        'oidc_audiences': settings.get('oidc_audiences', '') or '',
         # NS Apr 2026 (#188) — let admins disable TLS verification for self-hosted
         # Authentik / Keycloak with self-signed certs. Default OFF (secure).
         'oidc_skip_ssl_verify': settings.get('oidc_skip_ssl_verify', False),
