@@ -19,8 +19,11 @@ TEMPLATE = 'local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst'
 
 @pytest.fixture
 def created(api, seed, monkeypatch):
-    """Posts a container as an admin; hands back the audit lines and the events it caused."""
-    said = {'audit': [], 'events': []}
+    """Posts a container as an admin; hands back the audit lines and the events it caused,
+    and the VMIDs a quota hold was moved to. A field given as None is left out."""
+    said = {'audit': [], 'events': [], 'holds': []}
+    import pegaprox.utils.rbac as rbac
+    monkeypatch.setattr(rbac, 'quota_hold_update', lambda held, vmids=(), **kw: said['holds'].append(list(vmids)))
     monkeypatch.setattr(vms, 'log_audit', lambda user, action, details='', **kw: said['audit'].append((action, details)))
     monkeypatch.setattr(vms, 'broadcast_action',
                         lambda action, kind, vmid, data, *a, **kw: said['events'].append((action, kind, vmid, data)))
@@ -34,7 +37,8 @@ def created(api, seed, monkeypatch):
     admin = api.as_user(seed.user('root', role='admin'))
 
     def post(**names):
-        r = admin.post(URL, json=dict({'vmid': 902, 'template': TEMPLATE, 'password': 'chosen-root-pw'}, **names))
+        body = dict({'vmid': 902, 'template': TEMPLATE, 'password': 'chosen-root-pw'}, **names)
+        r = admin.post(URL, json={k: v for k, v in body.items() if v is not None})
         assert r.status_code == 200, r.get_data(as_text=True)
         return said
     return post
@@ -64,3 +68,15 @@ def test_a_container_without_a_name_keeps_the_placeholder(created):
     details, announced = _names(created())
     assert details == 'Created CT 902 (ct-902) on n1'
     assert announced == 'ct-902'
+
+
+@pytest.mark.parametrize('name, called', [('web01', 'web01'), (None, 'ct-902')])
+def test_a_container_without_a_ct_id_is_audited_under_the_one_it_got(created, name, called):
+    """An empty CT ID field (or a failed nextid read in the form) leaves the VMID to the
+    manager, which answers it as 'vmid'. The route looked under 'data' only: the audit
+    said "Created CT unknown", and the quota hold was let go instead of moved."""
+    said = created(vmid=None, name=name)
+    details, announced = _names(said)
+    assert details == f'Created CT 902 ({called}) on n1'
+    assert announced == called
+    assert said['holds'] == [[902]]

@@ -15410,7 +15410,8 @@ def create_container_api(cluster_id, node):
     if result.get('success'):
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'unknown')
-        vmid = ct_config.get('vmid') or result.get('data', {}).get('vmid', 'unknown')
+        # without a CT ID in the request the manager took the next free one, as the VM twin reads it
+        vmid = ct_config.get('vmid') or result.get('vmid') or result.get('data', {}).get('vmid', 'unknown')
         if str(vmid).isdigit():
             quota_hold_update(_held, vmids=[vmid])
         else:
