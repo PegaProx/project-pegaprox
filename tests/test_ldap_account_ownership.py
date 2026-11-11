@@ -101,6 +101,29 @@ def test_a_mapped_tenant_is_still_applied(db):
     assert u['ldap_tenant'] == 'acme'
 
 
+def _reopen():
+    import pegaprox.core.db as dbmod
+    dbmod._db = None
+    dbmod.PegaProxDB._instance = None
+    return dbmod.get_db()
+
+
+def test_a_tenant_assigned_at_the_first_sign_in_is_withdrawn_as_well(db):
+    """The first sign-in creates the row. It set tenant_id from the mapping but not
+    ldap_tenant, so that tenant never counted as the directory's and stayed for good."""
+    from pegaprox.utils.rbac import DEFAULT_TENANT_ID
+    assert db.get_user('newbie') is None
+
+    _provision('newbie', tenant='acme')
+    assert _reopen().get_user('newbie')['ldap_tenant'] == 'acme'
+
+    _provision('newbie', tenant=None)        # the mapping names no tenant any more
+
+    u = _reopen().get_user('newbie')
+    assert u['tenant_id'] == DEFAULT_TENANT_ID
+    assert u['ldap_tenant'] == ''
+
+
 # --- the bookkeeping has to survive a restart ---------------------------------
 
 def test_the_directorys_own_grants_are_persisted(db):

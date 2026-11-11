@@ -438,6 +438,9 @@ def ldap_build_user_row(ldap_result: dict, existing: dict = None):
             'ldap_permissions': list(ldap_result.get('permissions', []) or []),
             'ldap_tenant_permissions': dict(ldap_result.get('tenant_permissions', {}) or {}),
             'tenant_id': ldap_result.get('tenant', ''),  # NS: Must be tenant_id
+            # the update path only takes back a tenant it knows LDAP assigned, and this
+            # is the sign-in that assigned it
+            'ldap_tenant': ldap_result.get('tenant') or '',
             'tenant_permissions': ldap_result.get('tenant_permissions', {}),
             'theme': '',
             'language': '',
