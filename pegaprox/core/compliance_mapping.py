@@ -56,6 +56,7 @@ FAMILY_LABELS = {
     'NET': 'Netze und Kommunikation',
     'DER': 'Detektion und Reaktion',
     'CON': 'Konzeption und Vorgehensweise',
+    'ORP': 'Organisation und Personal',
     # ANSSI-BP-028 section codes (French) — used by Diffusion Restreinte + RGS
     'materiel': 'Configuration matérielle',
     'noyau': 'Configuration du noyau Linux',
