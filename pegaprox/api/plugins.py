@@ -8,6 +8,7 @@ through a single catch-all Flask route. This avoids Flask's restriction on
 registering blueprints after the first request — plugins can be loaded at runtime.
 """
 
+import errno
 import hashlib
 import hmac
 import json
@@ -990,6 +991,21 @@ def _unmasked_config(new, stored, plugin='', key=None):
     return out
 
 
+def _write_config(path, raw):
+    # MK Nov 2026 - O_TRUNC emptied the file before fchmod, and a config.json of another
+    # owner (EPERM) was left empty. The mode is set first, then the file is rewritten.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        try:
+            os.fchmod(fh.fileno(), 0o600)
+        except OSError as e:
+            if e.errno != errno.EPERM:
+                raise
+            logging.warning(f"[PLUGINS] {path} belongs to another user, its mode stays as it is")
+        fh.truncate(0)
+        fh.write(raw)
+
+
 @bp.route('/api/plugins/<plugin_id>/config', methods=['GET'])
 @require_auth(perms=['plugins.manage'])
 def get_plugin_config(plugin_id):
@@ -1059,10 +1075,7 @@ def save_plugin_config(plugin_id):
         raw = json.dumps(new_cfg, indent=4)
 
     try:
-        fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
-            os.fchmod(fh.fileno(), 0o600)
-            fh.write(raw)
+        _write_config(config_path, raw)
         _config_written(plugin_id)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to write config')}), 500
