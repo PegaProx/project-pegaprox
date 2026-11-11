@@ -287,7 +287,8 @@ except:
         for _ess in pegaprox_multi_cluster.py version.json requirements.txt deploy.sh update.sh \
                     web/index.html web/index.html.original web/sw.js pegaprox/utils/index_page.py \
                     web/i18n/de.json web/i18n/es.json web/i18n/fr.json web/i18n/it.json \
-                    web/i18n/ko.json web/i18n/pl.json web/i18n/pt.json web/i18n/zh.json; do
+                    web/i18n/ko.json web/i18n/pl.json web/i18n/pt.json web/i18n/ru.json \
+                    web/i18n/zh.json; do
             if ! download_file "$_ess"; then
                 DOWNLOAD_FAILURES=$((DOWNLOAD_FAILURES + 1))
             fi
