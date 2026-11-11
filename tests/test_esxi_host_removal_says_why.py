@@ -84,6 +84,13 @@ def test_a_removal_that_went_through_drops_the_host_and_says_nothing():
     assert got['hosts'] == ['h2']
 
 
+@needs_node
+def test_a_host_removed_elsewhere_already_leaves_the_list_quietly():
+    got = _remove({'status': 404, 'body': {'error': 'ESXi storage not found'}})
+    assert got['said'] == []
+    assert got['hosts'] == ['h2']
+
+
 def test_corporate_redesigned_removes_through_the_same_handler():
     with open(os.path.join(ROOT, 'web', 'src', 'storage.js'), encoding='utf-8') as fh:
         src = fh.read()

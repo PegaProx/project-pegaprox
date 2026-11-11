@@ -1066,7 +1066,8 @@
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/esxi-hosts/${hostId}`, {
                         method: 'DELETE'
                     });
-                    if (r?.ok) {
+                    // a 404: the host is gone already (another tab or session removed it)
+                    if (r?.ok || r?.status === 404) {
                         setEsxiHosts(prev => prev.filter(h => h.id !== hostId));
                         if (selectedEsxi === hostId) {
                             setSelectedEsxi(null);
