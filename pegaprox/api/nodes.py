@@ -2340,6 +2340,8 @@ def deploy_smbios_autoconfig_all(cluster_id):
         return jsonify({'error': 'Cluster not found'}), 404
     
     mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'SMBIOS auto-config is Proxmox-only'}), 400
     settings = _smbios_settings(mgr)
 
     # Get all nodes in cluster. PR #324: we no longer pre-pin IPs from
@@ -3013,6 +3015,9 @@ def run_custom_script(cluster_id, script_id):
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    # the node list below is read from PVE's cluster/status, an XCP-ng pool has none
+    if getattr(cluster_managers[cluster_id], 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'Custom scripts run on Proxmox VE clusters only'}), 400
     
     # SECURITY: Require password confirmation before running any script
     data = request.json or {}
