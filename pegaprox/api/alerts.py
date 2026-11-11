@@ -16,7 +16,7 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import check_cluster_access, safe_error, scope_vm_rows, require_unconfined
+from pegaprox.api.helpers import bounded_limit, check_cluster_access, safe_error, scope_vm_rows, require_unconfined
 from pegaprox.background.alerts import load_alerts_config, save_alerts_config
 from pegaprox.background import alert_events
 
@@ -104,7 +104,7 @@ def get_cluster_top_vms(cluster_id):
     
     mgr = cluster_managers[cluster_id]
     metric = request.args.get('metric', 'cpu')
-    limit = int(request.args.get('limit', 10))
+    limit = bounded_limit(request.args.get('limit'), 10, 10000)
     
     # A list that was not read is no "no running VMs", so say so. The broadcast loop's
     # guest list will do (max_age): the page asks for the CPU and the memory list at once.
