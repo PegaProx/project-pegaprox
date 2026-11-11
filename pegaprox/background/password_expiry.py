@@ -13,7 +13,7 @@ from pegaprox.globals import (
     _password_expiry_running, _password_expiry_thread,
     _password_expiry_last_check,
 )
-from pegaprox.core.db import get_db
+from pegaprox.core.db import get_db, DIRECTORY_AUTH_SOURCES
 from pegaprox.core import ha
 from pegaprox.api.helpers import load_server_settings
 from pegaprox.models.permissions import ROLE_ADMIN
@@ -51,6 +51,10 @@ def check_password_expiry():
             continue
         if not user.get('enabled', True):
             continue
+        # same rule as the banner in auth_check: a directory or IdP account has no
+        # local password to rotate
+        if user.get('auth_source', 'local') in DIRECTORY_AUTH_SOURCES:
+            continue
         
         email = user.get('email')
         if not email:
@@ -64,7 +68,8 @@ def check_password_expiry():
         try:
             changed_date = datetime.fromisoformat(changed_at.replace('Z', '+00:00'))
             if changed_date.tzinfo:
-                changed_date = changed_date.replace(tzinfo=None)
+                # the database's own stamps are UTC, compared with local time below
+                changed_date = changed_date.astimezone().replace(tzinfo=None)
             days_since = (datetime.now() - changed_date).days
             days_until_expiry = expiry_days - days_since
             

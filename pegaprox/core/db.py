@@ -22,7 +22,7 @@ import uuid
 # alias is kept for the Row / IntegrityError types we use in queries below.
 import sqlite3
 from pegaprox.core import dbcrypto
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -149,6 +149,12 @@ def _directory_groups(auth_source, value):
     if not isinstance(value, (list, tuple)):
         return []
     return [g for g in value if isinstance(g, str) and g]
+
+
+def _password_stamp():
+    """Now, in UTC with its offset - what the password expiry checks read from
+    password_changed_at (they parse it with fromisoformat)."""
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
 def _replay_sr_failover_state(cursor):
@@ -404,6 +410,8 @@ class PegaProxDB:
                 created_at TEXT,
                 last_login TEXT,
                 password_expiry TEXT,
+                -- when the local password was last set; the expiry warning counts from it
+                password_changed_at TEXT,
                 totp_secret_encrypted TEXT,
                 totp_pending_secret_encrypted TEXT,
                 totp_enabled INTEGER DEFAULT 0,
@@ -1348,6 +1356,22 @@ class PegaProxDB:
                     logging.info("Added directory_groups column to users table")
                 except Exception as e:
                     logging.error(f"Failed to add directory_groups column: {e}")
+
+            # MK Nov 2026 - every password change put password_changed_at into the user
+            # dict and no column kept it, so the expiry check found no date for anybody:
+            # no warning mail ever went out and the banner said expired for everyone.
+            # The rows already there start their clock with this upgrade, so nobody is
+            # expired by it. The time is the column default rather than a value written
+            # into every row: HA takes a value other than the default for a change made
+            # here, and a standby in step kept its whole users table at the next sync.
+            if 'password_changed_at' not in columns:
+                try:
+                    # our own stamp, digits and separators only, so it can stand as a literal
+                    cursor.execute("ALTER TABLE users ADD COLUMN password_changed_at TEXT "
+                                   f"DEFAULT '{_password_stamp()}'")
+                    logging.info("Added password_changed_at column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add password_changed_at column: {e}")
 
         except Exception as e:
             logging.error(f"Error checking users schema: {e}")
@@ -3224,6 +3248,7 @@ class PegaProxDB:
 
         cursor = self.conn.cursor()
         now = datetime.now().isoformat()
+        stamp = _password_stamp()
         written = 0
 
         for username, user in data.items():
@@ -3234,9 +3259,9 @@ class PegaProxDB:
                 cursor.execute('''
                     INSERT OR IGNORE INTO users
                     (username, password_salt, password_hash, role, permissions, tenant, 
-                     created_at, last_login, password_expiry, 
+                     created_at, last_login, password_expiry, password_changed_at,
                      totp_secret_encrypted, totp_enabled, force_password_change, enabled)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     username,
                     user.get('password_salt', ''),
@@ -3247,6 +3272,8 @@ class PegaProxDB:
                     user.get('created_at', now),
                     user.get('last_login'),
                     user.get('password_expiry'),
+                    # the JSON store kept it; an account without one starts now
+                    user.get('password_changed_at') or stamp,
                     self._encrypt(user.get('totp_secret', '')),
                     1 if user.get('totp_enabled', False) else 0,
                     1 if user.get('force_password_change', False) else 0,
@@ -4396,6 +4423,7 @@ class PegaProxDB:
                 'created_at': row_dict.get('created_at'),
                 'last_login': row_dict.get('last_login'),
                 'password_expiry': row_dict.get('password_expiry'),
+                'password_changed_at': row_dict.get('password_changed_at'),
                 'totp_secret': self._decrypt(row_dict.get('totp_secret_encrypted') or ''),
                 'totp_pending_secret': self._decrypt(row_dict.get('totp_pending_secret_encrypted') or ''),  # MK: Load pending 2FA secret
                 'totp_enabled': bool(row_dict.get('totp_enabled', 0)),
@@ -4466,6 +4494,7 @@ class PegaProxDB:
             'created_at': row_dict.get('created_at'),
             'last_login': row_dict.get('last_login'),
             'password_expiry': row_dict.get('password_expiry'),
+            'password_changed_at': row_dict.get('password_changed_at'),
             'totp_secret': self._decrypt(row_dict.get('totp_secret_encrypted') or ''),
             'totp_pending_secret': self._decrypt(row_dict.get('totp_pending_secret_encrypted') or ''),  # MK: Load pending 2FA secret
             'totp_enabled': bool(row_dict.get('totp_enabled', 0)),
@@ -4504,7 +4533,7 @@ class PegaProxDB:
         cursor.execute('''
             INSERT OR REPLACE INTO users
             (username, password_salt, password_hash, role, permissions, tenant,
-             created_at, last_login, password_expiry,
+             created_at, last_login, password_expiry, password_changed_at,
              totp_secret_encrypted, totp_pending_secret_encrypted, totp_enabled, force_password_change,
             enabled, theme, language, ui_layout, taskbar_auto_expand,
              auth_source, display_name, email, avatar_mime, avatar_data, ldap_dn, last_ldap_sync,
@@ -4514,7 +4543,9 @@ class PegaProxDB:
              directory_groups)
             VALUES (?, ?, ?, ?, ?, ?,
                     COALESCE((SELECT created_at FROM users WHERE username = ?), ?),
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?,
+                    COALESCE(?, (SELECT password_changed_at FROM users WHERE username = ?)),
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?,
                     ?, ?,
                     ?, ?, ?, ?,
@@ -4530,6 +4561,9 @@ class PegaProxDB:
             username, now,
             data.get('last_login'),
             data.get('password_expiry'),
+            # a dict without it (a backup from before the column) keeps the stored one;
+            # the routes that create a local account set it themselves
+            data.get('password_changed_at') or None, username,
             self._encrypt(data.get('totp_secret', '')),
             self._encrypt(data.get('totp_pending_secret', '')),  # MK: Save pending 2FA secret
             1 if data.get('totp_enabled', False) else 0,

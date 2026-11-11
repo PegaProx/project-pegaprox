@@ -1454,9 +1454,10 @@ def auth_check():
         if changed_at:
             try:
                 changed_date = datetime.fromisoformat(changed_at.replace('Z', '+00:00'))
-                # handle naive datetime
+                # a stamp with an offset (the database's own are UTC) goes to local
+                # time first; a naive one is local already
                 if changed_date.tzinfo:
-                    changed_date = changed_date.replace(tzinfo=None)
+                    changed_date = changed_date.astimezone().replace(tzinfo=None)
                 days_since = (datetime.now() - changed_date).days
                 days_until_expiry = expiry_days - days_since
                 
