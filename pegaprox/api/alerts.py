@@ -40,7 +40,13 @@ def _mask_channel(ch):
         if isinstance(u, str):
             try:
                 p = urlsplit(u)
-                host = p.netloc.rpartition('@')[2]
+                # An unescaped '#', '?' or '/' in the password ends the netloc there, and
+                # the "host" was the user and the start of the password. Its port is no
+                # number then (p.port raises), or an '@' lies outside the netloc (a password
+                # can hold an '@' before the '#' too). Either masks the whole url; an '@' in
+                # the query of an ntfy url does too.
+                p.port
+                host = '' if u.count('@') > p.netloc.count('@') else p.netloc.rpartition('@')[2]
             except ValueError:
                 p, host = None, ''
         c['url'] = f"{p.scheme}://{host}/…" if p is not None and p.scheme and host else '********'

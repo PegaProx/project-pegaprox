@@ -93,3 +93,37 @@ def test_the_reads_answer_with_a_url_that_is_no_string(api, db, seed, store, pat
     assert 'tok-list-1' not in body and 'tok-dict-2' not in body
     rows = r.get_json() if path == '/api/alert-channels' else r.get_json()['alert_webhooks']
     assert [c['url'] for c in rows if c['id'].startswith('odd')] == ['********'] * len(ODD_URLS)
+
+
+# An unescaped '#', '?' or '/' in the password ends the netloc there, so what urlsplit gives
+# as the host was the user and the start of the password; a name where the port goes is
+# shown the same way.
+CUT_USERINFO = [
+    'https://alerts:Pa#55word@hooks.internal.example/x',
+    'https://alerts:Pa/55word@hooks.internal.example/',
+    'https://alerts:Pa?55word@hooks.internal.example/',
+    'https://tok3n-abc#def@hooks.example/',
+    'https://alerts:1234#Pa55@hooks.internal.example/',
+    'https://hooks.internal.example:SECRETPORT/x',
+    'https://alerts:p@ss#word@hooks.example/',
+    'https://alerts:Sup3r@Secret#9@hooks.example/',
+    'https://alerts:p@ss/word@hooks.example/',
+]
+
+
+@pytest.mark.parametrize('url', CUT_USERINFO)
+def test_an_url_whose_netloc_ends_inside_the_userinfo_is_masked_whole(url):
+    from pegaprox.api.alerts import _mask_channel
+    shown = _mask_channel({'id': 'x', 'url': url})['url']
+    assert shown == '********'
+    assert [s for s in ('alerts', 'Pa', 'tok3n', '1234', 'SECRETPORT', 'ss', 'Secret') if s in shown] == []
+
+
+@pytest.mark.parametrize('url, shown', [
+    ('https://alerts:s3cr3t@hooks.internal.example:8443/x', 'https://hooks.internal.example:8443/…'),
+    ('https://[2001:db8::7]:8443/hook/abc', 'https://[2001:db8::7]:8443/…'),
+    ('https://u:p@ss@hooks.internal.example/x', 'https://hooks.internal.example/…'),
+])
+def test_a_numeric_port_and_a_whole_userinfo_still_show_the_host(url, shown):
+    from pegaprox.api.alerts import _mask_channel
+    assert _mask_channel({'id': 'x', 'url': url})['url'] == shown
