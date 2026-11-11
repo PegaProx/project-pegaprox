@@ -151,3 +151,56 @@ def test_the_in_app_update_without_any_file_list_brings_the_language_files(api, 
         assert (install / 'web' / 'i18n' / f'{lang}.json').read_text() == f'new web/i18n/{lang}.json\n', lang
     assert (install / 'pegaprox' / 'utils' / 'index_page.py').read_text() == 'new pegaprox/utils/index_page.py\n'
     assert (install / 'web' / 'sw.js').read_text() == 'new web/sw.js\n'
+
+
+def _update_sh_essentials():
+    with open(os.path.join(ROOT, 'update.sh'), encoding='utf-8') as fh:
+        m = re.search(r'for _ess in ((?:[^;\n]|\\\n)*); do', fh.read())
+    assert m, 'the essentials of update.sh are not where this test reads them'
+    return m.group(1).replace('\\\n', ' ').split()
+
+
+def test_the_essentials_of_update_sh_carry_every_language_file():
+    essentials = _update_sh_essentials()
+    assert not [f for f in _repo_language_files() if f not in essentials]
+    assert {'web/index.html', 'web/sw.js', 'pegaprox/utils/index_page.py'} <= set(essentials)
+    # a name that is not in the release fails every update that comes this way
+    assert not [f for f in essentials if not os.path.isfile(os.path.join(ROOT, f))]
+    # both updaters go by the same list
+    assert sorted(essentials) == sorted(_in_app_essentials())
+
+
+def test_update_sh_without_any_file_list_brings_the_language_files(tmp_path):
+    inst = tmp_path / 'opt' / 'PegaProx'
+    (inst / 'web' / 'i18n').mkdir(parents=True)
+    shutil.copy(os.path.join(ROOT, 'update.sh'), inst)
+    (inst / 'version.json').write_text(json.dumps({'version': '9.9.9'}))
+    (inst / 'web' / 'index.html').write_text('<html>old page, de.json?v=old</html>\n')
+    for lang in LANGS:
+        (inst / 'web' / 'i18n' / f'{lang}.json').write_text('{"old": "%s"}\n' % lang)
+    # no archive, no tree, and a version.json without update_files
+    release = {f: f'new {f}\n' for f in _update_sh_essentials()}
+    release['version.json'] = json.dumps({'version': '9.9.9'})
+    release['update.sh'] = open(os.path.join(ROOT, 'update.sh'), encoding='utf-8').read()
+    srv = tmp_path / 'srv'
+    for rel, text in release.items():
+        (srv / 'raw' / rel).parent.mkdir(parents=True, exist_ok=True)
+        (srv / 'raw' / rel).write_text(text)
+    stubs = tmp_path / 'stubs'
+    stubs.mkdir()
+    (stubs / 'curl').write_text(CURL_STUB)
+    for cmd, code in (('systemctl', 3), ('dpkg', 1), ('pip3', 0)):
+        (stubs / cmd).write_text(f'#!/bin/sh\nexit {code}\n')
+    for stub in stubs.iterdir():
+        stub.chmod(0o755)
+    env = dict(os.environ, PATH=f'{stubs}:{os.environ.get("PATH", "")}', SRV=str(srv), HOME=str(tmp_path))
+    env.pop('PEGAPROX_BRANCH', None)
+    r = subprocess.run(['bash', str(inst / 'update.sh'), '--force'], env=env, stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, timeout=120)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0 and 'downloading essentials' in out and 'Restoring from backup' not in out, out[-3000:]
+    assert (inst / 'web' / 'index.html').read_text() == 'new web/index.html\n'
+    for lang in LANGS:
+        assert (inst / 'web' / 'i18n' / f'{lang}.json').read_text() == f'new web/i18n/{lang}.json\n', lang
+    assert (inst / 'pegaprox' / 'utils' / 'index_page.py').read_text() == 'new pegaprox/utils/index_page.py\n'
+    assert (inst / 'web' / 'sw.js').read_text() == 'new web/sw.js\n'
