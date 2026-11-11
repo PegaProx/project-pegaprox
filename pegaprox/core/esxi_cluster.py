@@ -21,7 +21,7 @@ class _ESXiConfig:
         self.ssh_user = 'root'  # ESXi SSH is always root
         self.ssh_key = ''
         self.ssh_port = 22
-        self.ssl_verification = not vmw.ssl_verify  # invert
+        self.ssl_verification = bool(vmw.ssl_verify)  # True verifies, as for every cluster
         # MK Sep 2026 - what the cluster list (GET /api/clusters) reads of every cluster
         # manager's config. Without them one ESXi host registered for XHM made the whole
         # list a 500. No balancing and no PegaProx HA here, so all of it stays off.
