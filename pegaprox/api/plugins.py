@@ -8,9 +8,12 @@ through a single catch-all Flask route. This avoids Flask's restriction on
 registering blueprints after the first request — plugins can be loaded at runtime.
 """
 
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sys
 import threading
 import logging
@@ -626,58 +629,281 @@ def set_plugin_clusters(plugin_id):
 # credential go out masked, like the SMTP password in the settings, and a masked value
 # that comes back is the stored one again.
 _CONFIG_MASK = '********'
-_CONFIG_SECRET_HINTS = ('token', 'key', 'secret', 'password', 'passwd', 'apprise_urls')
+# a token, key, secret or password, a pwd, credential, webhook, dsn, bearer or cookie, with
+# everything below it, whatever the name ends on (token_url, key_server)
+_CONFIG_SECRET_HINTS = ('token', 'key', 'secret', 'password', 'passwd', 'pwd', 'credential',
+                        'hook', 'dsn', 'bearer', 'cookie', 'apprise_url')
+# smtp_pass, auth, authorization or mqtt.pw name a login too, unless an address word
+# follows it in the name (auth_server, passive_port)
+_CONFIG_LOGIN_HINTS = ('pass', 'authent', 'authoriz')
+_CONFIG_LOGIN_WORDS = re.compile(r'(?<![a-z0-9])(?:pw|auth)(?![a-z0-9])')
+# a name with one of these after its last secret word is an address (smtp_host, auth_server),
+# unless the url carries the login itself (webhook_url, a dsn, apprise urls)
+_CONFIG_ADDRESS_HINTS = ('url', 'host', 'server', 'endpoint', 'addr', 'domain', 'proxy', 'broker',
+                         'gateway', 'relay')
+_CONFIG_ADDRESS_WORDS = re.compile(r'(?<![a-z0-9])(?:uris?|ports?|ip|ipv4|ipv6)(?![a-z0-9])|(?<![a-z0-9])base$')
+_CONFIG_LOGIN_URLS = ('hook', 'dsn', 'apprise_url')
+# a list entry is found by these, and shows them in clear below a secret name too
+_CONFIG_ID_KEYS = ('id', 'name', 'label')
+_CONFIG_SCHEME = re.compile(r'^[A-Za-z][A-Za-z0-9+.-]*$')
+_CONFIG_HANDLE = re.compile(r'#([0-9a-f]{16})([0-9a-f]{16})$')
+# without the database key a handle holds for this process only
+_CONFIG_PROCESS_KEY = secrets.token_bytes(32)
+# a handle holds until the next write of that config.json, so whether an old one still
+# finds its value says nothing about what a save since then held
+_CONFIG_GENERATION = {}
+
+
+class _CredentialRequired(ValueError):
+    def __init__(self, fields):
+        super().__init__(', '.join(fields))
+        self.fields = list(fields)
+
+
+def _config_name(name):
+    # ntfyToken reads as ntfy_token
+    return re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', str(name)).lower()
+
+
+def _key_path(path, k):
+    return f'{path}.{k}' if path else str(k)
+
+
+def _hint_at(n, hints, words):
+    """Where the last of the hints or words starts in n, -1 for none."""
+    at = max(n.rfind(h) for h in hints)
+    for m in words.finditer(n):
+        at = max(at, m.start())
+    return at
+
+
+def _is_address_name(name):
+    """A name with an address word after its last secret word: smtp_host, auth_server,
+    token_url, api_base."""
+    n = _config_name(name)
+    if any(h in n for h in _CONFIG_LOGIN_URLS):
+        return False
+    at = _hint_at(n, _CONFIG_ADDRESS_HINTS, _CONFIG_ADDRESS_WORDS)
+    return at >= 0 and at > _hint_at(n, _CONFIG_SECRET_HINTS + _CONFIG_LOGIN_HINTS, _CONFIG_LOGIN_WORDS)
 
 
 def _is_secret_name(name):
-    return any(h in str(name).lower() for h in _CONFIG_SECRET_HINTS)
+    n, low = _config_name(name), str(name).lower()
+    if any(h in n or h in low for h in _CONFIG_SECRET_HINTS):
+        return True
+    return _hint_at(n, _CONFIG_LOGIN_HINTS, _CONFIG_LOGIN_WORDS) >= 0 and not _is_address_name(name)
+
+
+def _key_secret(k, v, secret, entry):
+    """Whether the value of k shows masked: under a secret name or below one. The id, name
+    or label of a list entry stays in clear, so the entries can be told apart."""
+    if entry and k in _CONFIG_ID_KEYS and isinstance(v, (str, int, float)):
+        return False
+    return secret or _is_secret_name(k)
 
 
 def _mask_value(v):
-    if isinstance(v, str) and v:
-        return f"{v.split('://', 1)[0]}://{_CONFIG_MASK}" if '://' in v else _CONFIG_MASK
-    if isinstance(v, list):
-        return [_mask_value(x) for x in v]
-    return v
+    scheme = v.split('://', 1)[0] if '://' in v else ''
+    return f'{scheme}://{_CONFIG_MASK}' if _CONFIG_SCHEME.match(scheme) else _CONFIG_MASK
 
 
-def _masked_config(obj):
+def _masked_form(v):
+    """What a value under a secret name shows as, None for one that shows as it is."""
+    if isinstance(v, str):
+        return _mask_value(v) if v else None
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return _CONFIG_MASK
+    return None
+
+
+def _config_generation(plugin):
+    return _CONFIG_GENERATION.setdefault(plugin, secrets.token_hex(8))
+
+
+def _config_written(plugin):
+    _CONFIG_GENERATION[plugin] = secrets.token_hex(8)
+
+
+def _entry_fp(plugin, lpath, o, key):
+    """The keyed print of an entry of the stored list at lpath of a plugin, until its
+    config.json is written again."""
+    msg = b'\x00'.join((b'plugin-config-entry', plugin.encode(), _config_generation(plugin).encode(),
+                        lpath.encode(), json.dumps(o).encode()))
+    return hmac.new(key, msg, hashlib.sha256).digest()[:8]
+
+
+def _entry_pad(nonce, key):
+    return hmac.new(key, b'plugin-config-pad\x00' + nonce, hashlib.sha256).digest()[:8]
+
+
+def _entry_handle(plugin, lpath, o, key):
+    """'#', a random nonce and the print of o under a pad of that nonce.
+
+    MK Nov 2026 - an entry of a list was put back by its place, so deleting the first of
+    two telegram urls kept the first and lost the second. Each masked entry carries a
+    handle of its own now, and a save finds the stored entry by it wherever it sits. A
+    handle holds in the list it was read from only, until the file is written again, and
+    finds a stored entry of its value there, however many copies of it there are. Equal
+    values never show the same handle."""
+    nonce = secrets.token_bytes(8)
+    pad = _entry_pad(nonce, key)
+    return '#' + nonce.hex() + bytes(a ^ b for a, b in zip(_entry_fp(plugin, lpath, o, key), pad)).hex()
+
+
+def _handle_fp(text, key):
+    """(where the handle in text starts, the print it carries), (None, None) for none."""
+    m = _CONFIG_HANDLE.search(text)
+    if not m:
+        return None, None
+    nonce, blob = bytes.fromhex(m.group(1)), bytes.fromhex(m.group(2))
+    return m.start(), bytes(a ^ b for a, b in zip(blob, _entry_pad(nonce, key)))
+
+
+def _entry_key():
+    try:
+        return get_db().aes_key or _CONFIG_PROCESS_KEY
+    except Exception:
+        return _CONFIG_PROCESS_KEY
+
+
+def _masked_config(obj, plugin='', key=None):
+    """obj with every string and number under a secret-named key masked, at any depth."""
+    key = _entry_key() if key is None else key
+
+    def mask(obj, secret, path, entry=False):
+        if isinstance(obj, dict):
+            return {k: mask(v, _key_secret(k, v, secret, entry), _key_path(path, k)) for k, v in obj.items()}
+        if isinstance(obj, list):
+            out = []
+            for i, x in enumerate(obj):
+                form = _masked_form(x) if secret else None
+                out.append(form + _entry_handle(plugin, path, x, key) if form else mask(x, secret, f'{path}[{i}]', True))
+            return out
+        form = _masked_form(obj) if secret else None
+        return obj if form is None else form
+
+    return mask(obj, False, '')
+
+
+def _has_mask(obj):
     if isinstance(obj, dict):
-        return {k: (_mask_value(v) if _is_secret_name(k) and not isinstance(v, dict) else _masked_config(v))
-                for k, v in obj.items()}
+        return any(_has_mask(v) for v in obj.values())
     if isinstance(obj, list):
-        return [_masked_config(x) for x in obj]
-    return obj
+        return any(_has_mask(x) for x in obj)
+    return isinstance(obj, str) and _CONFIG_MASK in obj
 
 
-def _unmask_value(new, old):
-    if isinstance(new, str) and new.endswith(_CONFIG_MASK):
-        return old if _mask_value(old) == new else None
-    if isinstance(new, list):
-        old = old if isinstance(old, list) else []
-        out = []
+def _shown_as_is(obj, secret=False, entry=False):
+    """The strings of obj that the editor shows as they are stored."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _shown_as_is(v, _key_secret(k, v, secret, entry))
+    elif isinstance(obj, list):
+        for x in obj:
+            yield from _shown_as_is(x, secret, True)
+    elif isinstance(obj, str) and not secret:
+        yield obj
+
+
+def _stored_entry(x, i, new, items):
+    """(stored path, value) of the stored dict or list that a dict or list inside a list
+    stands for, the entries of every stored list for a list among lists, or None."""
+    olds = [o for _, _, o in items]
+
+    def at(n):
+        lp, j, o = items[n]
+        return f'{lp}[{j}]', o
+
+    if isinstance(x, dict):
+        for k in _CONFIG_ID_KEYS:
+            v = x.get(k)
+            if isinstance(v, (str, int)) and _CONFIG_MASK not in str(v):
+                hits = [n for n, o in enumerate(olds)
+                        if isinstance(o, dict) and type(o.get(k)) is type(v) and o.get(k) == v]
+                if len(hits) == 1:
+                    return at(hits[0])
+                # two of that name go by their place, while no entry came or went
+                if i in hits and len(new) == len(olds):
+                    return at(i)
+                return None
+    # by its place only while no entry came or went
+    if len(new) == len(olds) and type(olds[i]) is type(x):
+        return at(i)
+    if isinstance(x, list):
+        return [(f'{lp}[{j}]', n, y) for lp, j, o in items if isinstance(o, list) for n, y in enumerate(o)]
+    return None
+
+
+def _unmasked_config(new, stored, plugin='', key=None):
+    """new with each masked value put back to the stored one it stands for.
+
+    Raises _CredentialRequired with the places of masks that stand for nothing stored:
+    a handle no entry of the stored list it was read from has, a mask from an editor
+    opened before the value changed, or masked values in a list entry that matches no
+    stored one."""
+    key = _entry_key() if key is None else key
+    literal = {s for s in _shown_as_is(stored) if _CONFIG_MASK in s}
+    left = []
+    tables = {}    # the prints of each stored list by its path, each list gone through once
+
+    def walk(new, old, spath, secret, path, entry=False):
+        # spath is where old sits in the stored file, path where new sits in the save
+        if isinstance(new, dict):
+            old = old if isinstance(old, dict) else {}
+            return {k: walk(v, old.get(k), _key_path(spath, k), _key_secret(k, v, secret, entry), _key_path(path, k))
+                    for k, v in new.items()}
+        if isinstance(new, list):
+            items = [(spath, j, o) for j, o in enumerate(old)] if isinstance(old, list) else []
+            return walk_list(new, items, secret, path)
+        if isinstance(new, str) and _CONFIG_MASK in new:
+            if secret and _masked_form(old) == new:
+                return old
+            # a string the editor shows as it is stored may hold the mask itself
+            if secret or new not in literal:
+                left.append(path or '(top level)')
+        return new
+
+    def stored_by_print(fp, items, lists):
+        todo = {lp for lp in lists if lp not in tables}
+        if todo:
+            for lp in todo:
+                tables[lp] = {}
+            for lp, _, y in items:
+                if lp in todo and _masked_form(y) is not None:
+                    tables[lp][_entry_fp(plugin, lp, y, key)] = y
+        return next((tables[lp][fp] for lp in lists if fp in tables[lp]), None)
+
+    def walk_list(new, items, secret, path):
+        # items holds (path of the stored list, place, value) for each stored entry new may stand for
+        lists, out = None, []
         for i, x in enumerate(new):
-            x = _unmask_value(x, old[i] if i < len(old) else None)
-            if x is not None:
+            here = f'{path}[{i}]'
+            if not _has_mask(x):
                 out.append(x)
-        return out
-    return new
-
-
-def _unmasked_config(new, old):
-    if isinstance(new, dict):
-        old = old if isinstance(old, dict) else {}
-        out = {}
-        for k, v in new.items():
-            if _is_secret_name(k) and not isinstance(v, dict):
-                v = _unmask_value(v, old.get(k))
-                if v is None:
-                    continue
+            elif isinstance(x, str):
+                # the stored entry of this list with the value of the handle, wherever it sits now
+                at, fp = _handle_fp(x, key) if secret else (None, None)
+                o = None
+                if fp is not None:
+                    lists = lists if lists is not None else list(dict.fromkeys(lp for lp, _, _ in items))
+                    o = stored_by_print(fp, items, lists)
+                if o is None or _masked_form(o) != x[:at]:
+                    out.append(walk(x, None, '', secret, here))
+                else:
+                    out.append(o)
             else:
-                v = _unmasked_config(v, old.get(k))
-            out[k] = v
+                hit = _stored_entry(x, i, new, items)
+                if isinstance(hit, list):
+                    out.append(walk_list(x, hit, secret, here))
+                else:
+                    spath, o = hit or ('', None)
+                    out.append(walk(x, o, spath, secret, here, True))
         return out
-    return new
+
+    out = walk(new, stored, '', False, '')
+    if left:
+        raise _CredentialRequired(left)
+    return out
 
 
 @bp.route('/api/plugins/<plugin_id>/config', methods=['GET'])
@@ -696,7 +922,7 @@ def get_plugin_config(plugin_id):
     except Exception as e:
         return jsonify({'error': safe_error(e)}), 500
     try:
-        raw = json.dumps(_masked_config(json.loads(raw)), indent=4)
+        raw = json.dumps(_masked_config(json.loads(raw), plugin_id), indent=4)
     except ValueError:
         # a file that does not parse can hold a credential in any shape; the editor
         # starts from an empty object and a save writes a new file
@@ -726,19 +952,31 @@ def save_plugin_config(plugin_id):
         new_cfg = json.loads(raw)
     except json.JSONDecodeError as e:
         return jsonify({'error': f'Invalid JSON: {e}'}), 400
+    except RecursionError:
+        return jsonify({'error': 'The config is nested too deeply'}), 400
 
     try:
         stored = json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
     except (OSError, ValueError):
         stored = {}
-    if _CONFIG_MASK in raw:
-        raw = json.dumps(_unmasked_config(new_cfg, stored), indent=4)
+    if _CONFIG_MASK in json.dumps(new_cfg):
+        try:
+            new_cfg = _unmasked_config(new_cfg, stored, plugin_id)
+        except RecursionError:
+            return jsonify({'error': 'The config is nested too deeply'}), 400
+        except _CredentialRequired as e:
+            # whatever stands for no stored value is never written as one, nor dropped
+            return jsonify({'error': f"Type the value of {', '.join(e.fields)} instead of {_CONFIG_MASK}, "
+                                     "or reload the editor: the masked value stands for nothing stored.",
+                            'code': 'CREDENTIAL_REQUIRED', 'fields': e.fields}), 400
+        raw = json.dumps(new_cfg, indent=4)
 
     try:
         fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, 'w', encoding='utf-8') as fh:
             os.fchmod(fh.fileno(), 0o600)
             fh.write(raw)
+        _config_written(plugin_id)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to write config')}), 500
 

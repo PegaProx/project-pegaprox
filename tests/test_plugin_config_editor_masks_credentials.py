@@ -8,6 +8,7 @@ owner only. MK Nov 2026
 """
 import json
 import os
+import re
 import stat
 
 import pytest
@@ -46,7 +47,8 @@ def test_the_editor_shows_no_credential(admin):
                                             'refresh_interval': 30}
     shown = _shown(admin, 'notifications')
     assert shown['ntfy_token'] == '********'
-    assert shown['apprise_urls'] == ['tgram://********', 'discord://********']
+    tg, dc = shown['apprise_urls']
+    assert re.fullmatch(r'tgram://\*{8}#[0-9a-f]{32}', tg) and re.fullmatch(r'discord://\*{8}#[0-9a-f]{32}', dc)
     assert shown['ntfy_topic'] == 'ops' and shown['ntfy_priority_map'] == {'critical': 'max'}
 
 
@@ -63,15 +65,21 @@ def test_saving_what_the_editor_showed_keeps_the_credentials(admin):
     assert _stored(admin, 'status_page') == dict(STATUS, refresh_interval=60)
 
 
-def test_a_new_value_is_saved_and_a_masked_one_that_names_nothing_is_dropped(admin):
+def test_a_new_value_is_saved_and_a_masked_one_that_names_nothing_is_refused(admin):
     shown = _shown(admin, 'notifications')
     shown['ntfy_token'] = 'tk_new'
     shown['apprise_urls'] = ['mailto://********', 'tgram://********', 'gotify://host/tok']
+    r = admin.put('/api/plugins/notifications/config', json={'config': json.dumps(shown)})
+    # a mask without the handle the editor gave its entry names no stored url: the save
+    # neither writes it nor drops what is stored
+    assert r.status_code == 400 and r.get_json()['code'] == 'CREDENTIAL_REQUIRED'
+    assert r.get_json()['fields'] == ['apprise_urls[0]', 'apprise_urls[1]']
+    assert _stored(admin, 'notifications') == NOTIFY
+
+    shown['apprise_urls'] = ['gotify://host/tok']
     admin.put('/api/plugins/notifications/config', json={'config': json.dumps(shown)})
     stored = _stored(admin, 'notifications')
-    assert stored['ntfy_token'] == 'tk_new'
-    # the second place held the discord url, so the tgram mask there names nothing either
-    assert stored['apprise_urls'] == ['gotify://host/tok']
+    assert stored['ntfy_token'] == 'tk_new' and stored['apprise_urls'] == ['gotify://host/tok']
 
 
 def test_an_unchanged_file_without_a_mask_is_written_as_sent(admin):
