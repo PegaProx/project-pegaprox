@@ -114,7 +114,11 @@ its own at the first login and keeps the password for what a token cannot do.
   (xterm.js), and cross-cluster migration, replication and Site Recovery into this
   cluster, for which PegaProx creates a temporary API token on the target. That token
   holds what the account holds, so the target's role needs `Sys.Incoming` as well
-  (`remoteMigration`).
+  (`remoteMigration`). The token of a migration started by hand or by the cross-cluster
+  balancer stays on the target for as long as its task runs, and PegaProx deletes it 30
+  seconds after the task has ended. A PegaProx restart during the migration leaves it on
+  the target: `pveum user token list <user>` shows it as `pegaprox-migrate-<epoch>` or
+  `xclb-<group>-<vmid>`.
 
 ## What works with a connection
 
