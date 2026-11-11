@@ -402,6 +402,11 @@ def _http_post(url, body_bytes, headers, timeout=10, verify_tls=True):
     """
     import ssl
     from pegaprox.utils.url_security import resolve_and_pin_url, SsrfError
+    # MK Nov 2026 - http.client refuses a header value with a line break and quotes the value
+    # in its error, which went into the last error of the target. Named here, not quoted.
+    bad = next((n for n, v in headers.items() if isinstance(v, str) and ('\r' in v or '\n' in v)), None)
+    if bad:
+        raise ValueError(f'the {bad} header of this target holds a line break, enter it again')
     try:
         # GHSA-hmcf-9q7f-vx35 — pin the vetted IP so urllib can't re-resolve the host to an internal
         # address between the check and the connect; when the admin disabled cert verification
