@@ -103,6 +103,19 @@ print_info() { echo -e "${CYAN}ℹ${NC} $1"; }
 print_warning() { echo -e "${YELLOW}⚠${NC} $1"; }
 print_error() { echo -e "${RED}✗${NC} $1"; }
 
+# Prompts come from the terminal: under "curl ... | sudo bash" stdin is this
+# script, and a plain read hit its end and stopped the run without a word
+ask() {
+    if [ -t 0 ]; then
+        read -r -p "$1" "$2"
+    elif { : < /dev/tty; } 2>/dev/null; then
+        read -r -p "$1" "$2" < /dev/tty
+    else
+        print_error "No terminal to ask on - run it with --force (and --dir=PATH)"
+        exit 1
+    fi
+}
+
 # ============================================================================
 # Pre-flight Checks
 # ============================================================================
@@ -120,7 +133,7 @@ main() {
     # =========================================================================
     if [ "$DIR_SET" = false ] && [ "$FORCE" = false ]; then
         echo -e "${YELLOW}Installation Directory${NC}"
-        read -p "Enter path [/opt/PegaProx]: " INPUT_DIR
+        ask "Enter path [/opt/PegaProx]: " INPUT_DIR
         [ -n "$INPUT_DIR" ] && INSTALL_DIR="$INPUT_DIR"
     fi
     
@@ -163,7 +176,7 @@ main() {
 
     # Confirm
     if [ "$FORCE" = false ]; then
-        read -p "Apply patch? [Y/n]: " CONFIRM
+        ask "Apply patch? [Y/n]: " CONFIRM
         case "${CONFIRM:-y}" in
             [Yy]|[Yy][Ee][Ss]|"") ;;
             *) echo "Aborted."; exit 0 ;;
