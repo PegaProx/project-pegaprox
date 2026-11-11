@@ -434,7 +434,8 @@ class PegaProxDB:
                 layout_chosen INTEGER DEFAULT 0,
                 -- the user's directory / IdP groups as of the last sign-in, read by
                 -- username in the pool-grant lookups (#940)
-                directory_groups TEXT DEFAULT '[]'
+                directory_groups TEXT DEFAULT '[]',
+                cloud_dashboard TEXT
             )
         ''')
         
@@ -1348,6 +1349,13 @@ class PegaProxDB:
                     logging.info("Added directory_groups column to users table")
                 except Exception as e:
                     logging.error(f"Failed to add directory_groups column: {e}")
+
+            if 'cloud_dashboard' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN cloud_dashboard TEXT")
+                    logging.info("Added cloud_dashboard column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add cloud_dashboard column: {e}")
 
         except Exception as e:
             logging.error(f"Error checking users schema: {e}")
@@ -4422,6 +4430,8 @@ class PegaProxDB:
                 'layout_chosen': bool(row_dict.get('layout_chosen', 0)),
                 'portal_only': bool(row_dict.get('portal_only', 0)),
                 'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
+                'cloud_dashboard': (json.loads(row_dict['cloud_dashboard'])
+                                    if row_dict.get('cloud_dashboard') else None),
                 'user_folder': row_dict.get('user_folder', ''),
             }
 
@@ -4490,6 +4500,8 @@ class PegaProxDB:
             'layout_chosen': bool(row_dict.get('layout_chosen', 0)),
             'portal_only': bool(row_dict.get('portal_only', 0)),
             'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
+            'cloud_dashboard': (json.loads(row_dict['cloud_dashboard'])
+                                if row_dict.get('cloud_dashboard') else None),
             'user_folder': row_dict.get('user_folder', ''),
         }
 
@@ -4508,7 +4520,7 @@ class PegaProxDB:
              ldap_permissions, ldap_tenant,
              tenant_permissions, denied_permissions, oidc_sub, last_oidc_sync,
              layout_chosen, portal_only, sidebar_show_vmid, user_folder,
-             directory_groups)
+             directory_groups, cloud_dashboard)
             VALUES (?, ?, ?, ?, ?, ?,
                     COALESCE((SELECT created_at FROM users WHERE username = ?), ?),
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -4516,7 +4528,8 @@ class PegaProxDB:
                     ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
-                    COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]'))
+                    COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]'),
+                    ?)
         ''', (
             username,
             data.get('password_salt', ''),
@@ -4560,6 +4573,8 @@ class PegaProxDB:
              if 'groups' in data or data.get('auth_source', 'local') not in DIRECTORY_AUTH_SOURCES
              else None),
             username,
+            (json.dumps(data['cloud_dashboard'])
+             if isinstance(data.get('cloud_dashboard'), dict) else None),
         ))
         self.conn.commit()
     

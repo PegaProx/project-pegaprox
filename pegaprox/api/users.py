@@ -240,6 +240,7 @@ def get_user_preferences():
         'ui_layout': user.get('ui_layout', 'modern'),
         'taskbar_auto_expand': user.get('taskbar_auto_expand', True),  # NS: Default true for backward compat
         'sidebar_show_vmid': user.get('sidebar_show_vmid', False),  # NS Jul 2026 — corporate sidebar VMIDs
+        'cloud_dashboard': user.get('cloud_dashboard', None),  # cloud layout widget layout (JSON), absent = default
         'default_theme': default_theme
     })
 
@@ -374,6 +375,18 @@ def update_user_preferences():
         user['sidebar_show_vmid'] = str(data['sidebar_show_vmid']).strip().lower() in ('true', '1', 'yes', 'on')
 
     # LW: Mar 2026 - track if user has explicitly chosen a layout
+
+    # cloud layout personal dashboard
+    if 'cloud_dashboard' in data:
+        cd = data['cloud_dashboard']
+        if cd is None or cd == '':
+            user.pop('cloud_dashboard', None)
+        elif isinstance(cd, dict):
+            if len(json.dumps(cd)) > 32768:
+                return jsonify({'error': 'cloud_dashboard too large'}), 400
+            user['cloud_dashboard'] = cd
+        else:
+            return jsonify({'error': 'cloud_dashboard must be an object'}), 400
     if 'layout_chosen' in data:
         user['layout_chosen'] = bool(data['layout_chosen'])
     
