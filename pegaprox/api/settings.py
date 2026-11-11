@@ -6663,7 +6663,10 @@ def refresh_node_repos(cluster_id, node):
     # XCP-ng uses yum - use refresh_node_apt which handles both
     if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
         try:
-            mgr.refresh_node_apt(node)
+            # JB Nov 2026 - it answers a failed yum or SSH login, it does not raise
+            result = mgr.refresh_node_apt(node)
+            if not result.get('success'):
+                return jsonify({'error': result.get('error') or 'Failed to refresh package list'}), 500
             return jsonify({'success': True, 'message': 'Package list refresh started'})
         except Exception as e:
             logging.error(f"[API] Failed to refresh packages: {e}")
