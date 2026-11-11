@@ -4291,11 +4291,18 @@ echo DONE""",
 
     def init_disk_gpt(self, node, disk, uuid=None):
         """Initialize disk with GPT partition table. DESTRUCTIVE."""
+        # the Disks tab sends the devpath, /dev/<name>, as for the wipe
+        if disk.startswith('/dev/'):
+            disk = disk[len('/dev/'):]
         if not re.match(r'^(sd[a-z]+|nvme\d+n\d+|hd[a-z]+|vd[a-z]+)$', disk):
             return {'success': False, 'error': f'Invalid disk: {disk}'}
+        # sgdisk -Z erases the disk just like wipefs, so the host is resolved as strictly
+        host_ip = self.member_node_ip(node)
+        if not host_ip:
+            return {'success': False, 'error': f'{node} is not a host of this pool, nothing was changed'}
         # NS: sgdisk -Z wipes existing, -o creates fresh GPT
         rc, out, err = self._ssh_exec(node,
-            f"sgdisk -Z /dev/{disk} && sgdisk -o /dev/{disk}", timeout=30)
+            f"sgdisk -Z /dev/{disk} && sgdisk -o /dev/{disk}", timeout=30, host_ip=host_ip)
         if rc == 0:
             return {'success': True, 'message': f'GPT initialized on /dev/{disk}'}
         return {'success': False, 'error': err or 'sgdisk failed'}

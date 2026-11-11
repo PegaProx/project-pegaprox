@@ -3,7 +3,8 @@
 PVE has /nodes/{node}/disks/wipedisk as PUT only (pve-storage, PVE/API2/Disks.pm), so the
 POST the manager sent came back 501. The button before it sent the disk without the
 confirm_name the route asks for, so the route answered 400 first. On XCP-ng the same
-button sends /dev/<name>, which the XCP-ng wipe has to take as well.
+button sends /dev/<name>, which the XCP-ng wipe has to take as well, and so does
+Initialize GPT next to it.
 """
 import os
 import re
@@ -137,3 +138,30 @@ def test_xcpng_lists_the_disks_of_the_host_the_wipe_goes_to():
     mgr._ssh_exec.return_value = (0, '{"blockdevices": [{"name": "sdb", "size": 1, "type": "disk"}]}', '')
     assert [d['devpath'] for d in XcpngManager.get_node_disks(mgr, 'xcp1')] == ['/dev/sdb']
     assert mgr._ssh_exec.call_args.kwargs['host_ip'] == '192.0.2.21'
+
+
+def test_xcpng_initializes_gpt_on_the_devpath_on_the_host_it_places():
+    """Initialize GPT sends /dev/sdb like the wipe, and sgdisk -Z runs on that host's address."""
+    from pegaprox.core.xcpng import XcpngManager
+    mgr = MagicMock()
+    mgr.member_node_ip.return_value = '192.0.2.21'
+    mgr._ssh_exec.return_value = (0, '', '')
+    assert XcpngManager.init_disk_gpt(mgr, 'xcp1', '/dev/sdb') == {
+        'success': True, 'message': 'GPT initialized on /dev/sdb'}
+    assert mgr._ssh_exec.call_args.args[1] == 'sgdisk -Z /dev/sdb && sgdisk -o /dev/sdb'
+    assert mgr._ssh_exec.call_args.kwargs['host_ip'] == '192.0.2.21'
+    mgr.member_node_ip.assert_called_with('xcp1')
+    for bad in ('/dev/../etc/passwd', '/dev/sdb; reboot', '/etc/sdb'):
+        assert XcpngManager.init_disk_gpt(mgr, 'xcp1', bad)['success'] is False, bad
+
+
+def test_xcpng_initializes_nothing_on_a_host_it_cannot_place():
+    """A name XAPI cannot place never falls back to the pool address for sgdisk."""
+    from pegaprox.core.xcpng import XcpngManager
+    mgr = MagicMock()
+    mgr.member_node_ip.return_value = None
+    mgr._ssh_exec.return_value = (0, '', '')
+    for disk in ('sdb', '/dev/sdb'):
+        res = XcpngManager.init_disk_gpt(mgr, 'gone-host', disk)
+        assert res['success'] is False and 'nothing was changed' in res['error'], (disk, res)
+        assert not mgr._ssh_exec.called, disk
