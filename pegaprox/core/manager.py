@@ -18418,15 +18418,19 @@ echo "AGENT_INSTALLED_OK"
                             parsed_config = new_config.get('config', {})
                             raw_config = parsed_config.get('raw', {})
                             
-                            # Find the unused slot containing our volume
-                            unused_slot = None
-                            for key, value in raw_config.items():
-                                if key.startswith('unused') and volume_path in str(value):
-                                    unused_slot = key
-                                    self.logger.info(f"[DEBUG] Found {volume_path} in {key}={value}")
-                                    break
+                            # Find the unused slots holding exactly our volume id (the part before the first comma).
+                            # A substring test would match disk-1 inside disk-10 and delete the wrong volume.
+                            unused_slots = [key for key, value in raw_config.items()
+                                            if key.startswith('unused') and str(value).split(',')[0].strip() == volume_path]
+                            if len(unused_slots) > 1:
+                                held_by = ', '.join(unused_slots)
+                                self.logger.warning(f"[WARN] {volume_path} is held by {held_by} on {vm_type}/{vmid}: nothing deleted")
+                                # the detach is done: report it as the other partial outcomes below do
+                                return {'success': True, 'message': f'Disk {disk_id} detached (volume kept: {volume_path} is held by {held_by})'}
+                            unused_slot = unused_slots[0] if unused_slots else None
                             
                             if unused_slot:
+                                self.logger.info(f"[DEBUG] Found {volume_path} in {unused_slot}={raw_config[unused_slot]}")
                                 # Delete the unused slot - this removes the volume
                                 delete_data_req = {'delete': unused_slot}
                                 delete_response = self._api_put(url, data=delete_data_req)
