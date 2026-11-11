@@ -1,7 +1,7 @@
 """GET /i18n/<lang>.json serves the language files of the page (web/i18n, written by build.sh).
 
 English is part of the bundle, every other language is a file the page fetches with ?v=<the first
-16 hex of its sha256>. The route takes the eight names of UI_LANGUAGE_LOCKS without English and
+16 hex of its sha256>. The route takes the nine names of UI_LANGUAGE_LOCKS without English and
 nothing else to the disk. It goes out through the helper of the page (utils/index_page.py): read
 once, each coding compressed once with its own ETag, a reload gets its 304. A request whose v names
 the file as it is now may keep it for good, any other revalidates. Public like '/', since the login
@@ -33,7 +33,7 @@ except ImportError:
         zstd = None
 
 CODINGS = [c for c, mod in (('zstd', zstd), ('br', brotli), ('gzip', gzip)) if mod is not None]
-LANGS = ['de', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 IMMUTABLE = 'public, max-age=31536000, immutable'
 
 
@@ -97,7 +97,7 @@ def test_each_language_file_is_served_as_json(fetch, web):
     '/i18n/..%2findex.json', '/i18n/%2e%2e.json', '/i18n/../index.html',
     '/i18n/', '/i18n',
 ])
-def test_nothing_but_the_eight_languages_reaches_the_disk(fetch, web, path):
+def test_nothing_but_the_languages_of_the_page_reaches_the_disk(fetch, web, path):
     assert fetch('/i18n/de.json').status_code == 200
     r = fetch(path)
     assert r.status_code == 404, (path, r.status_code)
