@@ -879,8 +879,12 @@ def test_smtp():
             # NS Aug 2026 (Aikido pentest) — only reuse the saved SMTP password when the test host
             # matches the saved host; otherwise a settings admin could point the stored credential
             # at an attacker-controlled MX = credential exfil. A different host needs its own password.
-            if smtp_host != (saved_settings.get('smtp_host') or ''):
-                return jsonify({'error': 'A password is required to test a host other than the saved one'}), 400
+            # MK Nov 2026 - and its port, like the save does
+            from pegaprox.api.settings import _port_of
+            if smtp_host.strip().lower().rstrip('.') != str(saved_settings.get('smtp_host') or '').strip().lower().rstrip('.') \
+                    or _port_of(data.get('smtp_port'), 587) != _port_of(saved_settings.get('smtp_port'), 587):
+                return jsonify({'error': 'A password is required to test a host other than the saved one',
+                                'code': 'CREDENTIAL_REQUIRED'}), 400
             # Use saved password - NS: Feb 2026: now encrypted in DB, must decrypt
             raw_password = saved_settings.get('smtp_password', '')
             try:

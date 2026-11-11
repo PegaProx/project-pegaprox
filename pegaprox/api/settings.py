@@ -1534,6 +1534,42 @@ def _refuse_confined_lock():
                              'to a tenant or to specific clusters'}), 403
 
 
+def _port_of(value, default):
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _stored_password_moves(data, settings):
+    """The stored SMTP or LDAP password a save would send to another server.
+
+    MK Nov 2026 - the save kept the stored password when the form sent the mask, also when
+    the same save pointed the server somewhere else, and the next mail or login handed it
+    to the new address. It goes to the server it was typed for, as with PBS and the
+    clusters. Without a user or bind DN nothing is sent, so that save is fine."""
+    def typed(key):
+        return isinstance(data.get(key), str) and data[key] not in ('', '********')
+
+    def now(key, default=''):
+        return str((data[key] if key in data else settings.get(key)) or default).strip()
+
+    def moved(host_key, port_key, default_port):
+        host = now(host_key).lower().rstrip('.') != str(settings.get(host_key) or '').strip().lower().rstrip('.')
+        port = _port_of(data[port_key], default_port) != _port_of(settings.get(port_key), default_port) \
+            if port_key in data else False
+        return host or port
+
+    out = []
+    if settings.get('smtp_password') and not typed('smtp_password') and now('smtp_user') \
+            and moved('smtp_host', 'smtp_port', 587):
+        out.append('smtp_password')
+    if settings.get('ldap_bind_password') and not typed('ldap_bind_password') and now('ldap_bind_dn') \
+            and moved('ldap_server', 'ldap_port', 389):
+        out.append('ldap_bind_password')
+    return out
+
+
 @bp.route('/api/settings/server', methods=['POST'])
 @require_auth(perms=['admin.settings'])
 def update_server_settings():
@@ -1578,6 +1614,12 @@ def update_server_settings():
             refused = _refuse_confined_lock() if lock_note else None
             if refused:
                 return refused
+            _stale = _stored_password_moves(data, settings)
+            if _stale:
+                return jsonify({'error': 'Re-enter the ' + ' and the '.join(
+                                    'SMTP password' if k == 'smtp_password' else 'LDAP bind password'
+                                    for k in _stale) + ' to change the server or its port.',
+                                'code': 'CREDENTIAL_REQUIRED', 'fields': _stale}), 400
             
             # server config
             if 'domain' in data:
@@ -6687,7 +6729,14 @@ def test_ldap():
 
     # Use saved password if masked
     if not config['bind_password'] or config['bind_password'] == '********':
-        config['bind_password'] = get_db()._decrypt(saved.get('ldap_bind_password', ''))  # MK: Decrypt stored credential
+        # MK Nov 2026 - only for the saved server: a test against another one would hand it
+        # the stored bind password. The SMTP test draws the same line.
+        same = (config['server'].strip().lower().rstrip('.') == str(saved.get('ldap_server') or '').strip().lower().rstrip('.')
+                and config['port'] == _port_of(saved.get('ldap_port'), 389))
+        if config['bind_dn'] and saved.get('ldap_bind_password') and not same:
+            return jsonify({'error': 'A bind password is required to test a server other than the saved one',
+                            'code': 'CREDENTIAL_REQUIRED'}), 400
+        config['bind_password'] = get_db()._decrypt(saved.get('ldap_bind_password', '')) if same else ''  # MK: Decrypt stored credential
 
     if not config['server']:
         return jsonify({'error': 'LDAP server is required'}), 400
