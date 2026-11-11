@@ -202,6 +202,16 @@ def test_the_token_goes_once_the_task_has_ended(migration, exit_status):
     assert not migration.waiting
 
 
+@pytest.mark.parametrize('exit_status, warns', [('OK', False), ('WARNINGS: 1', True), ('migration aborted', True)])
+def test_a_migration_that_did_not_end_clean_is_a_warning(migration, caplog, exit_status, warns):
+    """The route answered long ago: this line is where the operator learns how it ended."""
+    caplog.set_level(logging.INFO)
+    migration.follow([(600, 'running'), (EVER, exit_status)], hours=1)
+    said = [r.getMessage() for r in caplog.records if 'ended' in r.getMessage()]
+    assert len(said) == 1 and exit_status in said[0], said
+    assert bool(_warned(caplog, 'ended')) is warns
+
+
 def test_a_task_nobody_can_read_for_two_hours_loses_its_token(migration, caplog):
     caplog.set_level(logging.INFO)
     assert migration.follow([(EVER, 'blind')]) == [2 * HOUR]

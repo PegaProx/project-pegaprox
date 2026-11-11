@@ -97,7 +97,10 @@ def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
             log.warning(f"[TOKEN-CLEANUP] Status of {task_upid} of {what}: {e}")
             state = None
         if state and state[0] != 'running':
-            log.info(f"[TOKEN-CLEANUP] Migration of {what} ended: {state[0]} {state[1]}".rstrip())
+            # the route answered when the task started: an end that is not a clean OK is a warning
+            clean = state[0] == 'ok' and not str(state[1]).startswith('WARNINGS')
+            (log.info if clean else log.warning)(
+                f"[TOKEN-CLEANUP] Migration of {what} ended: {state[0]} {state[1]}".rstrip())
             time.sleep(TOKEN_SETTLE_SECONDS)
             break
         if state:
