@@ -39,7 +39,7 @@ from pegaprox.utils.oidc import (
     oidc_exchange_code, oidc_decode_id_token, oidc_get_user_info, oidc_name_from_id_token,
     oidc_get_user_groups, oidc_get_user_groups_ex, oidc_map_groups_to_role, oidc_provision_user,
     oidc_derive_username, oidc_build_user_row, OIDC_AUTH_SOURCES, oidc_username_claim_value,
-    oidc_username_claim_refusal, oidc_id_token_verified,
+    oidc_username_claim_refusal, oidc_id_token_verified, oidc_idp_request_target,
 )
 from pegaprox.utils.rbac import get_user_permissions, DEFAULT_TENANT_ID, portal_only_holds
 from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, get_session_timeout, safe_error, effective_reverse_proxy
@@ -566,6 +566,9 @@ def oidc_test_connection():
         try:
             # MK May 2026 (CodeAnt #504) — same normalisation as Step 2 above.
             validated_jwks_url = sanitize_outbound_url(endpoints['jwks'], allow_private=allow_private_ip)
+            # MK Nov 2026 - with oidc_skip_ssl_verify the same pinned, unverified fetch the
+            # sign-in makes, so the test does not fail where the sign-in works
+            validated_jwks_url, tls_kw = oidc_idp_request_target(config, validated_jwks_url, allow_private_ip)
         except SsrfError as guard_err:
             hint = ''
             if not allow_private_ip and 'private' in str(guard_err).lower():
@@ -574,7 +577,7 @@ def oidc_test_connection():
                             'detail': f"URL rejected by SSRF guard: {guard_err}{hint}"})
             return jsonify({'success': False, 'results': results})
         # NS Oct 2026 - not followed: a redirect target is a URL the guard above never saw
-        resp = requests.get(validated_jwks_url, allow_redirects=False, timeout=10)
+        resp = requests.get(validated_jwks_url, allow_redirects=False, timeout=10, **tls_kw)
         if resp.status_code == 200:
             keys = resp.json().get('keys', [])
             results.append({'step': 'JWKS Endpoint', 'status': 'ok', 'detail': f"Found {len(keys)} signing keys"})

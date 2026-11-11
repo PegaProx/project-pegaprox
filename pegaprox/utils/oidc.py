@@ -317,6 +317,23 @@ def get_oidc_endpoints(config: dict) -> dict:
         }
 
 
+def oidc_idp_request_target(config: dict, url: str, allow_private: bool) -> tuple:
+    """(url, extra requests kwargs) for a request to an endpoint the IdP's discovery named.
+
+    MK Nov 2026 - oidc_skip_ssl_verify only ever reached the discovery GET, so a self-signed
+    IdP got through discovery and then failed the token request on its certificate. With the
+    switch on, the token, userinfo and JWKS requests go the way discovery does: unverified,
+    and pinned to the address the guard vetted, since no certificate check is left to catch
+    a rebind and the token request carries the client secret. With it off the URL comes back
+    as it is and the request is made exactly as before. Entra's endpoints are Microsoft's and
+    discovery never read the switch for them, so neither does this. Raises SsrfError like
+    resolve_and_pin_url.
+    """
+    if not config.get('oidc_skip_ssl_verify') or config.get('provider', 'entra') == 'entra':
+        return url, {}
+    return resolve_and_pin_url(url, allow_private=allow_private, tls_verified=False), {'verify': False}
+
+
 def oidc_build_auth_url(config: dict, state: str) -> tuple:
     """Build the OIDC authorization URL for redirect
 
@@ -384,6 +401,7 @@ def oidc_exchange_code(config: dict, code: str, code_verifier: str = None) -> di
             # allow_private flag into token sanitize too — discovery was fixed
             # last release but token + userinfo still tripped the strict guard
             sanitize_outbound_url(endpoints['token'], allow_private=allow_private_ip)
+            token_url, tls_kw = oidc_idp_request_target(config, endpoints['token'], allow_private_ip)
         except SsrfError as guard_err:
             logging.warning(f"[OIDC] token endpoint rejected by SSRF guard: {guard_err}")
             if not allow_private_ip and "private" in str(guard_err).lower():
@@ -393,7 +411,7 @@ def oidc_exchange_code(config: dict, code: str, code_verifier: str = None) -> di
                     "settings (covers discovery + token + userinfo)."
                 )
             return {'error': 'Token endpoint failed pre-flight URL validation'}
-        resp = requests.post(endpoints['token'], data=data, timeout=15)
+        resp = requests.post(token_url, data=data, timeout=15, **tls_kw)
         if resp.status_code != 200:
             logging.error(f"[OIDC] Token exchange failed: {resp.status_code} {resp.text[:300]}")
             return {'error': f'Token exchange failed: {resp.status_code}'}
@@ -450,13 +468,25 @@ def oidc_decode_id_token(id_token: str, expected_nonce: str = None,
                 from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError, resolve_and_pin_url
                 try:
                     sanitize_outbound_url(jwks_uri, allow_private=True)
+                    jwks_fetch, jwks_tls = oidc_idp_request_target(config, jwks_uri, True)
                 except SsrfError as _se:
                     logging.warning(f"[OIDC] jwks_uri rejected by SSRF guard: {_se}")
                     return {'error': 'OIDC JWKS endpoint rejected by SSRF guard'}
-                if jwks_uri not in _jwks_clients:
-                    _jwks_clients[jwks_uri] = PyJWKClient(jwks_uri, cache_keys=True, lifespan=3600)
+                # MK Nov 2026 - an unverified client is kept apart, so a verified fetch never
+                # reuses one after the TLS switch is turned off again
+                jwks_key = ('unverified', jwks_fetch) if jwks_tls else jwks_uri
+                if jwks_key not in _jwks_clients:
+                    if jwks_tls:
+                        import ssl
+                        ctx = ssl.create_default_context()
+                        ctx.check_hostname = False
+                        ctx.verify_mode = ssl.CERT_NONE
+                        _jwks_clients[jwks_key] = PyJWKClient(jwks_fetch, cache_keys=True, lifespan=3600,
+                                                              ssl_context=ctx)
+                    else:
+                        _jwks_clients[jwks_key] = PyJWKClient(jwks_uri, cache_keys=True, lifespan=3600)
 
-                signing_key = _jwks_clients[jwks_uri].get_signing_key_from_jwt(id_token)
+                signing_key = _jwks_clients[jwks_key].get_signing_key_from_jwt(id_token)
 
                 # NS May 2026 — audience list: client_id is always accepted,
                 # plus any additional audiences the admin configured. PVE 9.2's
@@ -572,10 +602,12 @@ def oidc_get_user_info(config: dict, access_token: str) -> dict:
             allow_private_ip = bool(config.get('oidc_allow_private_ip', False))
             try:
                 sanitize_outbound_url(endpoints['userinfo'], allow_private=allow_private_ip)
+                userinfo_url, tls_kw = oidc_idp_request_target(config, endpoints['userinfo'],
+                                                               allow_private_ip)
             except SsrfError as guard_err:
                 logging.warning(f"[OIDC] userinfo endpoint rejected by SSRF guard: {guard_err}")
                 return {'error': 'Userinfo endpoint failed pre-flight URL validation'}
-            resp = requests.get(endpoints['userinfo'], headers=headers, timeout=10)
+            resp = requests.get(userinfo_url, headers=headers, timeout=10, **tls_kw)
             if resp.status_code == 200:
                 user_info = resp.json()
     except Exception as e:
