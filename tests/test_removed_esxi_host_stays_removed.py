@@ -6,6 +6,7 @@ so the next start loaded the host again and the operator saw it back in the list
 route, same cluster: the removal now deletes the row before it answers.
 """
 import json
+import sqlite3
 import types
 
 import pytest
@@ -89,12 +90,43 @@ def test_a_removal_the_database_refuses_is_not_a_success(admin, monkeypatch):
 
     def _no_db():
         raise RuntimeError('database is locked')
-    monkeypatch.setattr(storagemod, 'get_db', _no_db)
-    r = _remove(admin, gone_id)
-    monkeypatch.undo()
+    with monkeypatch.context() as m:
+        m.setattr(storagemod, 'get_db', _no_db)
+        r = _remove(admin, gone_id)
 
     assert r.status_code == 500, r.data
     assert gone_id in storagemod.esxi_storages.get(CLUSTER, {})
+    assert _restart() == {GONE}
+
+
+class _CommitFails:
+    """The real connection, with a commit that fails."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, *args):
+        return self._conn.execute(*args)
+
+    def commit(self):
+        raise sqlite3.OperationalError('disk I/O error')
+
+    def rollback(self):
+        return self._conn.rollback()
+
+
+def test_a_removal_whose_commit_fails_is_not_committed_by_a_later_request(admin, monkeypatch):
+    """After a failed removal, the next write to the database does not remove the host after all."""
+    gone_id = _connect(admin, GONE)
+    real = get_db()
+
+    with monkeypatch.context() as m:
+        m.setattr(storagemod, 'get_db', lambda: types.SimpleNamespace(conn=_CommitFails(real.conn)))
+        r = _remove(admin, gone_id)
+
+    assert r.status_code == 500, r.data
+    real.conn.commit()   # what any later request does on this connection
+    assert _row(gone_id) is not None
     assert _restart() == {GONE}
 
 
