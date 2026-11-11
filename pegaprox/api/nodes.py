@@ -1654,6 +1654,7 @@ Deployed by PegaProx - automatically configures SMBIOS for new VMs
 Runs as a systemd service, monitors for new VMs and sets SMBIOS data.
 """
 
+import base64
 import subprocess
 import time
 import os
@@ -1669,6 +1670,8 @@ FAMILY = "{family}"
 # Paths
 LOG_FILE = "/var/log/pegaprox-smbios.log"
 PROCESSED_VMS_FILE = "/var/lib/pegaprox-smbios-processed.txt"  # keeps track of what we already did
+VMLIST_FILE = "/etc/pve/.vmlist"
+CONF_DIR = "/etc/pve/qemu-server"
 
 def log_message(message):
     """write to log file, nothing fancy"""
@@ -1686,7 +1689,7 @@ def get_all_vms():
     """read vmids from /etc/pve/.vmlist instead of spawning qm list (way cheaper)"""
     try:
         import json as _json
-        with open('/etc/pve/.vmlist', 'r') as f:
+        with open(VMLIST_FILE, 'r') as f:
             data = _json.load(f)
         return [str(vmid) for vmid, info in data.get('ids', {{}}).items() if info.get('type') == 'qemu']
     except Exception as e:
@@ -1717,7 +1720,7 @@ def get_current_smbios(vmid):
     and are ignored.
     """
     try:
-        conf_path = f"/etc/pve/qemu-server/{{vmid}}.conf"
+        conf_path = f"{{CONF_DIR}}/{{vmid}}.conf"
         if not os.path.exists(conf_path):
             return None
         main_val = None
@@ -1739,8 +1742,19 @@ def get_current_smbios(vmid):
     except:
         return None
 
+def encode_value(value):
+    return base64.b64encode(value.encode('utf-8')).decode('ascii')
+
+def decode_value(value):
+    try:
+        return base64.b64decode(value, validate=True).decode('utf-8')
+    except Exception:
+        return value  # not base64 after all, keep it as it is
+
 def parse_smbios_string(smbios_str):
-    """Parse SMBIOS string into dictionary"""
+    """Parse SMBIOS string into dictionary. With base64=1 (the PVE GUI and this daemon
+    write it so) every value but the uuid is base64 and comes back decoded; the flag
+    itself is no value"""
     params = {{}}
     if not smbios_str:
         return params
@@ -1748,6 +1762,8 @@ def parse_smbios_string(smbios_str):
         if '=' in part:
             key, value = part.split('=', 1)
             params[key.strip()] = value.strip()
+    if params.pop('base64', '').lower() in ('1', 'on', 'yes', 'true'):
+        params = {{k: (v if k == 'uuid' else decode_value(v)) for k, v in params.items()}}
     return params
 
 def needs_smbios_update(vmid):
@@ -1776,21 +1792,24 @@ def generate_unique_serial():
     return f"PVE{{timestamp}}{{random_part}}"
 
 def set_smbios(vmid):
-    """Set SMBIOS configuration"""
+    """Set SMBIOS configuration. qemu-server takes only [A-Za-z0-9+/] in a value, so
+    every value but the uuid goes in base64 with base64=1, as the PVE GUI writes it;
+    a value left empty in the settings is left out"""
     current_smbios_str = get_current_smbios(vmid)
     current_params = parse_smbios_string(current_smbios_str) if current_smbios_str else {{}}
     uuid_value = current_params.get('uuid', '')
     serial = generate_unique_serial()
     
-    smbios_parts = [
-        f"manufacturer={{MANUFACTURER}}",
-        f"product={{PRODUCT}}",
-        f"version={{VERSION}}",
-        f"serial={{serial}}",
-    ]
+    smbios_parts = []
+    for key, value in (('manufacturer', MANUFACTURER), ('product', PRODUCT),
+                       ('version', VERSION), ('serial', serial)):
+        if value:
+            smbios_parts.append(f"{{key}}={{encode_value(value)}}")
     if uuid_value:
         smbios_parts.append(f"uuid={{uuid_value}}")
-    smbios_parts.append(f"family={{FAMILY}}")
+    if FAMILY:
+        smbios_parts.append(f"family={{encode_value(FAMILY)}}")
+    smbios_parts.append("base64=1")
     
     smbios_string = ",".join(smbios_parts)
     cmd = ['qm', 'set', vmid, '-smbios1', smbios_string]
@@ -1805,7 +1824,7 @@ def set_smbios(vmid):
 
 def check_vm_exists(vmid):
     """Check if VM config exists on this node"""
-    return os.path.exists(f"/etc/pve/qemu-server/{{vmid}}.conf")
+    return os.path.exists(f"{{CONF_DIR}}/{{vmid}}.conf")
 
 def cleanup_processed_list(processed):
     """Remove VMs that no longer exist"""
