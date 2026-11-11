@@ -4,6 +4,11 @@
 `=` forms were parsed, and the space forms stopped with "Unknown option" before anything was
 built. Both forms work now, and an option given without its value says so.
 
+The check that the artifact directory is empty looked at the default /opt/pegaprox-templates
+whatever --artifact-dir said. A second run into the same custom directory went on, left two
+archives there for the final mv, stopped on it and left CT 999 behind; it now stops before
+the container is created. A directory with a space in its name works too.
+
 The script runs here with pct, vzdump and date stubbed on PATH; nothing touches a Proxmox host.
 
 NS Nov 2026
@@ -87,3 +92,35 @@ def test_an_option_without_its_value_stops_before_anything_runs(creator, option,
     assert p.returncode != 0
     assert f'{option} {says}' in p.stderr
     assert calls == []
+
+
+def test_a_second_run_into_the_same_directory_stops_before_the_container(creator):
+    run, tmp = creator
+    art = tmp / 'art'
+    p, _calls = run(f'--artifact-dir={art}')
+    assert p.returncode == 0 and _built(art), p.stdout + p.stderr
+    p, calls = run(f'--artifact-dir={art}/')
+    assert p.returncode == 1
+    assert f'Directory {art}/ is not empty!' in p.stdout
+    assert calls == []
+    assert _built(art)
+
+
+def test_an_existing_empty_directory_is_used(creator):
+    run, tmp = creator
+    art = tmp / 'art'
+    art.mkdir()
+    p, calls = run(f'--artifact-dir={art}')
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert f'Directory {art} is empty - continuing...' in p.stdout
+    assert _built(art)
+
+
+def test_a_directory_with_a_space(creator):
+    run, tmp = creator
+    art = tmp / 'my artifacts'
+    p, calls = run(f'--artifact-dir={art}')
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert f'--dumpdir {art}' in calls[-2]
+    assert _built(art)
+    assert not (tmp / 'my').exists()

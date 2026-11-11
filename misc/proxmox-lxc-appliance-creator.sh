@@ -73,7 +73,7 @@ echo "Creating PegaProx LXC template..."
 echo "Using release: $RELEASE"
 
 shopt -s nullglob dotglob
-files=(/opt/pegaprox-templates/*)
+files=("${ARTIFACT_DIR%/}"/*)
 if [ ${#files[@]} -eq 0 ]; then
   echo "Directory $ARTIFACT_DIR is empty - continuing..."
 else
@@ -111,8 +111,8 @@ pct stop $CTID
 
 echo "Creating LXC template from container $CTID ($HOSTNAME)."
 pct template $CTID
-mkdir -p $ARTIFACT_DIR
-vzdump $CTID --mode stop --compress zstd --dumpdir $ARTIFACT_DIR
+mkdir -p "$ARTIFACT_DIR"
+vzdump $CTID --mode stop --compress zstd --dumpdir "$ARTIFACT_DIR"
 echo "LXC template created and stored in $ARTIFACT_DIR."
 
 if [[ "$RELEASE" == "SNAPSHOT" ]]; then
