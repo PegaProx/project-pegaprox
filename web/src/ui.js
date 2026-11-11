@@ -1210,16 +1210,20 @@
         }
         // Gauge Component
         function Gauge({ value, max = 100, size = 120, label, color }) {
+            // LW Nov 2026 - no figure (a node entry from the HA cache) is an empty ring with '-',
+            // value.toFixed threw on it and took the node card down
+            const num = value == null || value === '' ? NaN : Number(value);
+            const known = Number.isFinite(num);
             const r = 45;
             const circ = 2 * Math.PI * r;
-            const prog = Math.min(value / max, 1);
+            const prog = known ? Math.min(num / max, 1) : 0;
             const off = circ - (prog * circ);
             
             // color thresholds
             const getColor = () => {
                 if (color) return color;
-                if (value < 50) return '#22c55e';  // green
-                if (value < 80) return '#eab308';  // yellow
+                if (num < 50) return '#22c55e';  // green
+                if (num < 80) return '#eab308';  // yellow
                 return '#ef4444';  // red
             };
 
@@ -1239,7 +1243,7 @@
                             }}
                         />
                         <text x="50" y="50" textAnchor="middle" dy="0.35em" className="gauge-text text-white text-lg">
-                            {value.toFixed(1)}%
+                            {known ? `${num.toFixed(1)}%` : '-'}
                         </text>
                     </svg>
                     <span className="text-xs text-gray-400 mt-1 font-medium">{label}</span>
