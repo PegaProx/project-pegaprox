@@ -1547,7 +1547,8 @@ def _stored_password_moves(data, settings):
     MK Nov 2026 - the save kept the stored password when the form sent the mask, also when
     the same save pointed the server somewhere else, and the next mail or login handed it
     to the new address. It goes to the server it was typed for, as with PBS and the
-    clusters. Without a user or bind DN nothing is sent, so that save is fine."""
+    clusters. A save without a user or bind DN is no different: the next save can set one
+    on the server as it is then, and the stored password goes along with it."""
     def typed(key):
         return isinstance(data.get(key), str) and data[key] not in ('', '********')
 
@@ -1561,10 +1562,9 @@ def _stored_password_moves(data, settings):
         return host or port
 
     out = []
-    if settings.get('smtp_password') and not typed('smtp_password') and now('smtp_user') \
-            and moved('smtp_host', 'smtp_port', 587):
+    if settings.get('smtp_password') and not typed('smtp_password') and moved('smtp_host', 'smtp_port', 587):
         out.append('smtp_password')
-    if settings.get('ldap_bind_password') and not typed('ldap_bind_password') and now('ldap_bind_dn') \
+    if settings.get('ldap_bind_password') and not typed('ldap_bind_password') \
             and moved('ldap_server', 'ldap_port', 389):
         out.append('ldap_bind_password')
     return out
@@ -1618,7 +1618,9 @@ def update_server_settings():
             if _stale:
                 return jsonify({'error': 'Re-enter the ' + ' and the '.join(
                                     'SMTP password' if k == 'smtp_password' else 'LDAP bind password'
-                                    for k in _stale) + ' to change the server or its port.',
+                                    for k in _stale) + ' to change the server or its port. A server '
+                                    'without a login takes any value there, the password is not sent '
+                                    'without a user or bind DN.',
                                 'code': 'CREDENTIAL_REQUIRED', 'fields': _stale}), 400
             
             # server config
@@ -1775,7 +1777,7 @@ def update_server_settings():
                 settings['smtp_enabled'] = bool(data['smtp_enabled'])
                 logging.info(f"[Settings] Setting smtp_enabled = {settings['smtp_enabled']}")
             if 'smtp_host' in data:
-                settings['smtp_host'] = str(data['smtp_host']).strip()
+                settings['smtp_host'] = str(data['smtp_host'] or '').strip()
                 logging.info(f"[Settings] Setting smtp_host = {settings['smtp_host']}")
             if 'smtp_port' in data:
                 settings['smtp_port'] = max(1, min(65535, int(data['smtp_port'] or 587)))
