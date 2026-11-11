@@ -36,12 +36,16 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', '0')
         self.end_headers()
 
+    # a followed 301, 302 or 303 arrives as a GET: it counts as a request too
+    do_GET = do_POST
+
 
 def _serve(status=200, location=None):
     srv = ThreadingHTTPServer(('127.0.0.1', 0), _Handler)
     srv.daemon_threads = True
     srv.seen, srv.status, srv.location = [], status, location
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    # a short poll: shutdown() waits for one, and each case stops its endpoints
+    threading.Thread(target=srv.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True).start()
     return srv
 
 
