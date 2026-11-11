@@ -79,7 +79,7 @@ def test_sel_threshold_severity_follows_the_ipmi_order():
     }
     sel = '\n'.join(f'{i} | 07/14/2026 | 21:30:05 | Temperature CPU1 Temp | {d} | Asserted'
                     for i, d in enumerate(want, 1))
-    got = {e['description'].split(' — ')[0]: e['severity'] for e in bmc.parse_sel(sel)}
+    got = {e['description'].split(' \u2014 ')[0]: e['severity'] for e in bmc.parse_sel(sel)}
     assert got == want
 
 
