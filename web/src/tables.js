@@ -72,6 +72,14 @@
             return isGuestTemplate(resource) ? `${typeLabel} (${getTemplateLabel(t)})` : typeLabel;
         }
 
+        // LW Nov 2026 - the score cell of a node card. An entry without a score (the HA cache
+        // answer of /metrics had none) reads '-' instead of throwing in the render
+        function nodeScoreCell(score) {
+            const n = score == null || score === '' ? NaN : Number(score);
+            if (!Number.isFinite(n)) return { text: '-', tone: 'text-gray-500' };
+            return { text: n.toFixed(0), tone: n < 100 ? 'text-green-400' : n < 150 ? 'text-yellow-400' : 'text-red-400' };
+        }
+
         // Node Card Component
         function NodeCard({ name, metrics, index, clusterId, nodeUiSuffix, onMaintenanceToggle, onStartUpdate, onOpenNodeConfig, onNodeAction, onRemoveNode, onMoveNode, isFavorite, onToggleFavorite, guestActions, onGuestsAction }) {
             const { t } = useTranslation();
@@ -155,6 +163,7 @@
             const isUpdating = metrics.is_updating;
             const updateTask = metrics.update_task;
             const isOffline = metrics.offline || metrics.status === 'offline';
+            const scoreCell = nodeScoreCell(metrics.score);
             const proxmoxTarget = { ...metrics, kind: 'node', name, node: name, node_ui_suffix: nodeUiSuffix || '' };  // #689
             const proxmoxUrl = getProxmoxObjectUrl(proxmoxTarget);
             
@@ -613,10 +622,8 @@
                             </button>
                             <div className="text-right">
                                 <div className="text-xs text-gray-500">{t('score')}</div>
-                                <div className={`font-mono font-bold text-lg ${
-                                    metrics.score < 100 ? 'text-green-400' : metrics.score < 150 ? 'text-yellow-400' : 'text-red-400'
-                                }`}>
-                                    {metrics.score.toFixed(0)}
+                                <div className={`font-mono font-bold text-lg ${scoreCell.tone}`}>
+                                    {scoreCell.text}
                                 </div>
                             </div>
                         </div>
