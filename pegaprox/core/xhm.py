@@ -23,6 +23,34 @@ from pegaprox.utils.audit import log_audit
 
 logger = logging.getLogger(__name__)
 
+# MK Nov 2026 - the raw VDI urls carry the XAPI session in the query string, and a
+# request that fails names its url in the exception text. That text went into the
+# task error, the SSE log stream every migration viewer gets and the server log, and
+# the session is the pool login itself until XCP-ng drops it.
+_XAPI_SESSION_RE = re.compile(r'(session_id=)[^&\s\'"]+', re.IGNORECASE)
+
+
+def _scrub_session(text):
+    if not text:
+        return text
+    return _XAPI_SESSION_RE.sub(r'\1***', str(text))
+
+
+class _ScrubSessionFilter(logging.Filter):
+    # logger.exception appends the traceback, and its last line is the same exception text
+    def filter(self, record):
+        try:
+            record.msg = _scrub_session(record.getMessage())
+            record.args = None
+            if record.exc_info and not record.exc_text:
+                record.exc_text = _scrub_session(logging.Formatter().formatException(record.exc_info))
+        except Exception:
+            pass    # a log line that cannot render must not stop the migration
+        return True
+
+
+logger.addFilter(_ScrubSessionFilter())
+
 # MK: Mar 2026 - hardware mapping tables for cross-hypervisor translation
 # Proxmox ostype -> XCP-ng template name
 _PVE_TO_XCP_OSTYPE = {
@@ -177,6 +205,7 @@ class XHMigrationTask:
         self._last_sse_log = 0
 
     def log(self, msg):
+        msg = _scrub_session(msg)
         ts = datetime.now().strftime('%H:%M:%S')
         entry = f"[{ts}] {msg}"
         self.log_lines.append(entry)
@@ -205,6 +234,7 @@ class XHMigrationTask:
         self.phase_times[phase] = {'start': datetime.now().isoformat(), 'end': None, 'duration': None}
 
         if error:
+            error = _scrub_session(error)
             self.error = error
             self.status = 'failed'
             self.log(f"FAILED: {error}")

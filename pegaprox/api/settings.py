@@ -4291,6 +4291,8 @@ def generate_support_bundle():
                 line = re.sub(r'(password["\']?\s*[:=]\s*["\']?)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
                 line = re.sub(r'(token["\']?\s*[:=]\s*["\']?)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
                 line = re.sub(r'(secret["\']?\s*[:=]\s*["\']?)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
+                # an XAPI session in a raw VDI url is the XCP-ng pool login
+                line = re.sub(r'(session_id=)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
                 # MK Oct 2026 - mail addresses: alice@corp.example -> ***@corp.example
                 # (a dotted name ending in letters, so root@pam and root@10.0.0.5 stay).
                 # The name before the @ is at most 64 long (RFC 5321): unbounded, every
