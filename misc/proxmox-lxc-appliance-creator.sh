@@ -42,9 +42,17 @@ while [[ $# -gt 0 ]]; do
       RELEASE="${1#*=}"
       shift
       ;;
+    --artifact-dir)
+      ARTIFACT_DIR="${2:?--artifact-dir needs a path}"
+      shift 2
+      ;;
     --artifact-dir=*)
       ARTIFACT_DIR="${1#*=}"
       shift
+      ;;
+    --TEMPLATE)
+      TEMPLATE="${2:?--TEMPLATE needs a template}"
+      shift 2
       ;;
     --TEMPLATE=*)
       TEMPLATE="${1#*=}"
