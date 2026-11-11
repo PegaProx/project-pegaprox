@@ -20,8 +20,9 @@ def _mgr(ages):
     snaps = [{'name': f'{PREFIX}{i}', 'snaptime': now - age * 86400} for i, age in enumerate(ages)]
     snaps.append({'name': 'by-hand', 'snaptime': now - 400 * 86400})
     deleted = []
+    # answers what the manager answers once PVE took the delete
     return SimpleNamespace(list_snapshots=lambda *a: snaps,
-                           delete_snapshot=lambda node, vmid, kind, name: deleted.append(name)), deleted
+                           delete_snapshot=lambda node, vmid, kind, name: deleted.append(name) or {'success': True}), deleted
 
 
 def _prune(monkeypatch, count, days, ages=(0, 1, 2, 40)):

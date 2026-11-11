@@ -330,9 +330,25 @@ def _snap_name(policy_id):
     return f"pegaprox-{safe}-{ts}"
 
 
-def _prune(mgr, node, vmid, vm_type, policy):
+def _delete_done(mgr, node, res):
+    """(gone, why not) of one prune delete. PVE answers the DELETE with a task and takes
+    the guest's lock only inside it, so a delete sent while the one before still runs is
+    accepted and then fails in its task (VM is locked). Each task is waited for, and only
+    one that ended OK counts."""
+    if not isinstance(res, dict):
+        return False, 'no answer'
+    if not res.get('success'):
+        return False, ' '.join(str(res.get('error') or 'refused').split())[:200]
+    upid = res.get('task')
+    if upid and hasattr(mgr, '_wait_for_task') and not mgr._wait_for_task(node, upid, timeout=600):
+        return False, f'the delete task did not end OK ({upid})'
+    return True, ''
+
+
+def _prune(mgr, node, vmid, vm_type, policy, errors=None):
     """Delete snapshots owned by this policy beyond retention. Owned =
-    name starts with `pegaprox-<policy_id_prefix>-`."""
+    name starts with `pegaprox-<policy_id_prefix>-`. The count of those that went;
+    `errors`, a list, gets a line for each that did not."""
     pruned = 0
     # JB Nov 2026 - both off is no rule at all, not a rule that nothing stays: the edit form can save it, and
     # the next run then took every snapshot of this policy, the one it had just made too
@@ -380,13 +396,22 @@ def _prune(mgr, node, vmid, vm_type, policy):
             break
         try:
             if hasattr(mgr, 'delete_snapshot'):
-                mgr.delete_snapshot(node, vmid, vm_type, name)
+                res = mgr.delete_snapshot(node, vmid, vm_type, name)
             else:
                 url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{vmid}/snapshot/{name}"
-                mgr._api_delete(url)
-            pruned += 1
+                resp = mgr._api_delete(url)
+                res = {'success': resp.status_code == 200, 'error': f'HTTP {resp.status_code}'}
+                if res['success']:
+                    res['task'] = (resp.json() or {}).get('data')
+            gone, why = _delete_done(mgr, node, res)
         except Exception as e:
-            logging.warning(f"[snap-sched] prune delete failed for {name}: {e}")
+            gone, why = False, str(e)
+        if gone:
+            pruned += 1
+        else:
+            logging.warning(f"[snap-sched] prune delete failed for {name}: {why}")
+            if errors is not None:
+                errors.append(f'{name}: {why}')
     return pruned
 
 
@@ -510,13 +535,15 @@ def _execute_policy(policy_id, force=False):
             continue
         # #586 — prune-only: skip create, just sweep this policy's old snapshots
         if prune_only:
+            not_pruned = []
             try:
-                pruned = _prune(mgr, node, vmid, vm_type, policy)
+                pruned = _prune(mgr, node, vmid, vm_type, policy, not_pruned)
                 if pruned:
                     pruned_total += pruned
                     log_lines.append(f"  ⌫ {vm_type}/{vmid}@{node}: pruned {pruned} old snapshot(s)")
             except Exception as e:
                 log_lines.append(f"  ✗ {vm_type}/{vmid}@{node}: prune err: {e}")
+            log_lines += [f"  ⚠ {vm_type}/{vmid}@{node}: not pruned {why}" for why in not_pruned]
             continue
         snap = _snap_name(policy['id'])
         create_ok = False
@@ -558,13 +585,15 @@ def _execute_policy(policy_id, force=False):
         # already locked from something else.
         if not create_ok:
             continue
+        not_pruned = []
         try:
-            pruned = _prune(mgr, node, vmid, vm_type, policy)
+            pruned = _prune(mgr, node, vmid, vm_type, policy, not_pruned)
             if pruned:
                 pruned_total += pruned
                 log_lines.append(f"    pruned {pruned} old snapshot(s)")
         except Exception as e:
             log_lines.append(f"    prune err: {e}")
+        log_lines += [f"    ⚠ not pruned {why}" for why in not_pruned]
 
     finished_at = datetime.now().isoformat()
     status = 'completed' if failed == 0 else ('partial' if created > 0 else 'failed')
