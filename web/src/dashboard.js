@@ -30260,8 +30260,8 @@
                                                                     : cl?.type === 'esxi' || cl?.cluster_type === 'esxi' ? 'esxi' : 'proxmox';
                                                                 const srcHv = getHvType(srcCluster);
                                                                 const tgtHv = getHvType(c);
-                                                                // must be different hypervisor type
-                                                                if (srcHv === tgtHv) return null;
+                                                                // must be different hypervisor type, and no migration lands on ESXi
+                                                                if (srcHv === tgtHv || tgtHv === 'esxi') return null;
                                                                 const label = tgtHv === 'xcpng' ? 'XCP-ng' : tgtHv === 'esxi' ? 'ESXi' : 'Proxmox';
                                                                 return <option key={c.id} value={c.id}>{c.display_name || c.name} ({label})</option>;
                                                             })}
