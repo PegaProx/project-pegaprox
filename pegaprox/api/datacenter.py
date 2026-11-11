@@ -949,6 +949,20 @@ def login_iscsi_target(cluster_id, node):
 # different formats depending on PVE version. We normalize everything here.
 # ============================================
 
+# MK Nov 2026 - PVE hands the NetBox/phpIPAM token and the PowerDNS key back on every
+# read of /cluster/sdn/ipams and /cluster/sdn/dns. We read with the cluster's own login,
+# so node.view was enough to get them. The SDN tab never shows them, and an update
+# without them keeps the stored one (PVE merges), so they do not leave the server.
+_SDN_PLUGIN_SECRETS = ('token', 'key', 'password', 'secret')
+
+
+def _without_plugin_secrets(entries):
+    if not isinstance(entries, list):
+        return []
+    return [{k: v for k, v in e.items() if k not in _SDN_PLUGIN_SECRETS} if isinstance(e, dict) else e
+            for e in entries]
+
+
 @bp.route('/api/clusters/<cluster_id>/datacenter/sdn', methods=['GET'])
 @require_auth(perms=['node.view'])
 def get_sdn_overview(cluster_id):
@@ -1076,7 +1090,7 @@ def get_sdn_overview(cluster_id):
             ipam_url = f"https://{host}:{port}/api2/json/cluster/sdn/ipams"
             ipam_resp = session.get(ipam_url, timeout=10)
             if ipam_resp.status_code == 200:
-                result['ipams'] = ipam_resp.json().get('data', [])
+                result['ipams'] = _without_plugin_secrets(ipam_resp.json().get('data', []))
         except:
             pass
         
@@ -1085,7 +1099,7 @@ def get_sdn_overview(cluster_id):
             dns_url = f"https://{host}:{port}/api2/json/cluster/sdn/dns"
             dns_resp = session.get(dns_url, timeout=10)
             if dns_resp.status_code == 200:
-                result['dns'] = dns_resp.json().get('data', [])
+                result['dns'] = _without_plugin_secrets(dns_resp.json().get('data', []))
         except:
             pass
         
@@ -1876,7 +1890,7 @@ def get_sdn_ipams(cluster_id):
         response = manager._create_session().get(url, timeout=10)
         
         if response.status_code == 200:
-            return jsonify(response.json().get('data', []))
+            return jsonify(_without_plugin_secrets(response.json().get('data', [])))
         elif response.status_code == 501:
             return jsonify([])
         return upstream_failure(response.status_code, parse_pve_error(response.text))
@@ -1998,7 +2012,7 @@ def get_sdn_dns(cluster_id):
         response = manager._create_session().get(url, timeout=10)
         
         if response.status_code == 200:
-            return jsonify(response.json().get('data', []))
+            return jsonify(_without_plugin_secrets(response.json().get('data', [])))
         elif response.status_code == 501:
             return jsonify([])
         return upstream_failure(response.status_code, parse_pve_error(response.text))
