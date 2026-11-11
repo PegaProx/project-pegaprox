@@ -83,7 +83,9 @@ class _Migration:
         # another guest of the same number lives on the target, as on two clusters that
         # each number their guests from 100
         tgt.get_vm_resources = lambda *a, **k: [{'vmid': 105, 'type': 'qemu', 'node': 'pve2'}]
-        monkeypatch.setattr(time, 'sleep', self.clock.sleep)
+        # the cleanup's own sleeps only: another thread of the process that sleeps meanwhile
+        # neither moves this clock nor runs into its end
+        monkeypatch.setattr(transfer_net, 'time', types.SimpleNamespace(**{**vars(time), 'sleep': self.clock.sleep}))
 
     def _state(self):
         for until, state in self.script:
