@@ -32,6 +32,7 @@ import pytest
 import pegaprox.api.vms as vms
 import pegaprox.background.cross_cluster_lb as xclb
 import pegaprox.background.site_recovery as sr
+import pegaprox.globals as ppglobals
 from pegaprox.core import transfer_net
 from test_transfer_network import CID, TGT, _fresh_caches, _source, _target  # noqa: F401
 
@@ -219,6 +220,77 @@ def failover(monkeypatch):
     return migration
 
 
+class _R:
+    def __init__(self, status, data=None):
+        self.status_code, self._data, self.text = status, data, ''
+
+    def json(self):
+        return {'data': self._data}
+
+
+class _Side:
+    """One cluster of a full replication run of VM 100 through its clone 9100."""
+
+    def __init__(self, node, guests):
+        self.host, self.api_port, self.is_connected = f'{node}.example', 8006, True
+        self.node, self.guests = node, guests
+        self.logger = logging.getLogger('test.migration_token.' + node)
+        self.create_api_token = MagicMock(side_effect=lambda name, **kw: {
+            'success': True, 'token_id': 'root@pam!' + name, 'token_value': 'secret'})
+
+    def _api_get(self, url, params=None, **kw):
+        path = url.split('/api2/json', 1)[1]
+        if path == '/cluster/resources':
+            return _R(200, [{'vmid': v, 'node': self.node, 'type': 'qemu', 'status': 'running'} for v in self.guests])
+        if path == '/cluster/nextid':
+            return _R(200, '9100')
+        if path == '/storage':
+            return _R(200, [{'storage': 'fast', 'type': 'lvmthin'}])
+        if path.endswith('/config'):
+            return _R(200, {'scsi0': 'fast:vm-9100-disk-0,size=8G'})
+        return _R(404)
+
+    def _api_post(self, url, data=None, **kw):
+        return _R(200, 'UPID:post')
+
+    def _get_vm_storage(self, node, vmid, vm_type):
+        return 'fast'
+
+    def get_cluster_fingerprint(self):
+        return {'success': True, 'host': self.host, 'fingerprint': 'AB:CD'}
+
+    def remote_migrate_vm(self, **kw):
+        return {'success': True, 'task': UPID}
+
+
+@pytest.fixture
+def replication(db, monkeypatch):
+    """A full cross-cluster replication run of VM 100. The run waits for the migration of
+    its clone itself, so the run goes on the clock, and what it records is its verdict."""
+    said, wait = [], vms._wait_for_task
+    # the snapshot and the clone are done at once, a wait for the migration is a real one
+    monkeypatch.setattr(vms, '_wait_for_task',
+                        lambda mgr, upid, **kw: wait(mgr, upid, **kw) if upid == UPID else (True, 'OK'))
+    for name in ('_capture_vm_identity', '_restore_vm_identity', '_cleanup_snapshot', '_enforce_retention',
+                 '_cleanup_clone_and_snap'):
+        monkeypatch.setattr(vms, name, lambda *a, **kw: None)
+    monkeypatch.setattr(vms, '_tag_as_replica', lambda *a, **kw: (True, ''))
+    monkeypatch.setattr(vms, '_update_repl_status', lambda _db, job_id, status, error='': said.append((status, error)))
+    monkeypatch.setattr(transfer_net, 'migration_route', lambda mgr, node=None: None)
+    src, tgt = _Side('s1', [100]), _Side('t1', [])
+    monkeypatch.setitem(ppglobals.cluster_managers, 'src', src)
+    monkeypatch.setitem(ppglobals.cluster_managers, 'tgt', tgt)
+    job = {'target': vms._execute_replication,
+           'args': ({'id': 'j1', 'vmid': 100, 'vm_type': 'qemu', 'source_cluster': 'src', 'target_cluster': 'tgt',
+                     'target_storage': 'far', 'target_node': 't1', 'mode': 'full'},)}
+    # the token is named by the second the run started: xcrepl-j1-0
+    migration = _Migration(src, tgt, job, 'xcrepl-j1-0', monkeypatch)
+    monkeypatch.setattr(vms, 'time', types.SimpleNamespace(**{**vars(time), 'sleep': migration.clock.sleep,
+                                                               'time': lambda: 1794400000.0}))
+    migration.said = said
+    return migration
+
+
 def _warned(caplog, about):
     return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and about in r.getMessage()]
 
@@ -394,6 +466,22 @@ def test_a_failover_without_a_task_id_leaves_the_token_to_the_cleanup(failover):
     failover.src.remote_migrate_vm.return_value = {'success': True, 'task': None}
     assert failover.follow([(EVER, 'running')]) == [2 * HOUR]
     assert failover.result == (True, '')
+
+
+# --- cross-cluster replication: the run follows the migration of its clone ------------------
+
+def test_a_first_full_copy_of_hours_keeps_its_token_and_the_replica_is_kept(replication):
+    """The run gave up on the migration after an hour, marked the job failed and deleted
+    the token in its finally, under the copy still running."""
+    end = 3 * HOUR
+    assert replication.follow([(end, 'running'), (EVER, 'OK')], hours=4) == [end + SETTLE]
+    assert replication.said == [('ok', '')]
+    assert replication.tgt.create_api_token.call_args.kwargs['expire'] > time.time() + 7 * 24 * HOUR
+
+
+def test_a_replication_run_says_how_its_migration_ended_and_its_token_goes_then(replication):
+    assert replication.follow([(600, 'running'), (EVER, 'migration aborted')], hours=1) == [600 + SETTLE]
+    assert replication.said == [('error', 'Migration task failed: migration aborted')]
 
 @pytest.mark.parametrize('expire, sent', [(None, 0), (1893456000, 1893456000)])
 def test_the_token_is_created_with_the_expire_it_is_given(expire, sent):

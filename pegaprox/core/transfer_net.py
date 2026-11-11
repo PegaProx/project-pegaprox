@@ -351,7 +351,8 @@ def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
     Returns how the task ended, ('ok' or 'failed', its exit status) as
     bulk_migrate.task_state reads it, or None when it was given up on. The migration by
     hand (api/vms.py) and the cross-cluster balancer run it in a thread of its own; a
-    Site Recovery run follows its migration with it and takes its verdict from it.
+    Site Recovery run and a cross-cluster replication run follow their migration with it
+    and take their verdict from it.
     """
     logger = getattr(source_mgr, 'logger', None) or log
     logger.info(f"[TOKEN-CLEANUP] Following {task_upid} of {what}, token {token_name}")

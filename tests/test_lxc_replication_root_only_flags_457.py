@@ -326,7 +326,7 @@ class _Cluster:
     def _get_vm_storage(self, node, vmid, vm_type):
         return 'fast'
 
-    def create_api_token(self, name):
+    def create_api_token(self, name, **kw):
         return {'success': True, 'token_id': 'root@pam!xcrepl', 'token_value': 'secret'}
 
     def delete_api_token(self, name):
@@ -347,10 +347,12 @@ _TRANSFER = [f'2026-10-25 10:00:0{i % 10} transferred {i} MiB of 4096 MiB' for i
 @pytest.fixture
 def run(db, monkeypatch):
     said = []
-    # the migration task ends 'migration aborted' (TASK ERROR), the rest went through
-    monkeypatch.setattr(vms, '_wait_for_task',
-                        lambda mgr, upid, **k: (False, 'migration aborted') if 'vzmigrate' in str(upid)
-                        else (True, 'OK'))
+    # the migration task ends 'migration aborted' (TASK ERROR), the rest went through; the
+    # run reads the end of its migration from the token cleanup
+    monkeypatch.setattr(vms, '_wait_for_task', lambda mgr, upid, **k: (True, 'OK'))
+    monkeypatch.setattr(vms.transfer_net, 'drop_token_when_done',
+                        lambda target, source, token, upid, what: ('failed', 'migration aborted')
+                        if 'vzmigrate' in str(upid) else ('ok', 'OK'))
     monkeypatch.setattr(vms, '_capture_vm_identity', lambda *a, **k: {})
     monkeypatch.setattr(vms, '_cleanup_snapshot', lambda *a, **k: None)
     monkeypatch.setattr(vms, '_enforce_retention', lambda *a, **k: None)

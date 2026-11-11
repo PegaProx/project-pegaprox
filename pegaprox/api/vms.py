@@ -10239,12 +10239,13 @@ def _execute_replication(job):
         # remote-migrate clone to target cluster
         # same token/fingerprint flow as cross_cluster_lb.py
         token_name = f"xcrepl-{job_id}-{int(time.time()) % 100000}"
-        token = target_mgr.create_api_token(token_name)
+        token = target_mgr.create_api_token(token_name, expire=transfer_net.token_expiry())
         if not token.get('success'):
             _cleanup_clone_and_snap(source_mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
             _update_repl_status(db, job_id, 'error', f'Token creation failed: {token.get("error")}')
             return
 
+        handed = False
         try:
             # the target node's transfer address when the target cluster has one (MK Oct 2026)
             xfer = transfer_net.migration_route(target_mgr, target_node or None)
@@ -10367,7 +10368,18 @@ def _execute_replication(job):
 
             if result.get('success'):
                 mig_task = result.get('task')
-                mig_ok, mig_detail = _wait_for_task(source_mgr, mig_task, timeout=3600)
+                if mig_task:
+                    # the task's own status by its UPID until it ends, however long a first full
+                    # copy takes, and the token goes then: an hour's wait gave up on it, and the
+                    # finally below took the token from the migration still copying. The job
+                    # stays in flight meanwhile, so its next run does not start beside it
+                    handed = True
+                    end = transfer_net.drop_token_when_done(target_mgr, source_mgr, token_name, mig_task,
+                                                            f'{vm_type}/{clone_vmid}')
+                    mig_ok, mig_detail = (end[0] == 'ok', end[1]) if end else (
+                        False, 'the end of the task could not be read, see the log of the source cluster')
+                else:
+                    mig_ok, mig_detail = False, 'no task UPID'
                 if mig_ok:
                     logging.info(f"[XCREPL] Job {job_id}: migration complete")
                     # MK May 2026 (#456) — restore source identity on the replica so
@@ -10402,11 +10414,12 @@ def _execute_replication(job):
             logging.error(f"[XCREPL] Job {job_id}: migration error: {e}")
             _update_repl_status(db, job_id, 'error', str(e))
         finally:
-            # always clean up token
-            try:
-                target_mgr.delete_api_token(token_name)
-            except Exception:
-                pass
+            # always clean up token - one the migration had went when its task ended
+            if not handed:
+                try:
+                    target_mgr.delete_api_token(token_name)
+                except Exception:
+                    pass
 
         # 6. cleanup snapshot on source (clone auto-deleted by delete_source=True)
         _cleanup_snapshot(source_mgr, source_node, vmid, vm_type, snap_name)
