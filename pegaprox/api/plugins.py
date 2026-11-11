@@ -648,6 +648,9 @@ _CONFIG_ADDRESS_HINTS = ('url', 'host', 'server', 'endpoint', 'addr', 'domain', 
                          'gateway', 'relay', 'conn_str', 'connection_str')
 _CONFIG_ADDRESS_WORDS = re.compile(r'(?<![a-z0-9])(?:uris?|ports?|ip|ipv4|ipv6)(?![a-z0-9])|(?<![a-z0-9])base$')
 _CONFIG_PORT_WORD = re.compile(r'(?<![a-z0-9])ports?(?![a-z0-9])')
+# what an address is shown or used as names none itself (server_label, proxy_mode)
+_CONFIG_NOT_ADDRESS = re.compile(
+    r'(?<![a-z0-9])(?:label|title|mode|type|style|display|desc|description|version)(?![a-z0-9])')
 _CONFIG_LOGIN_URLS = ('hook', 'dsn', 'apprise_url')
 # a list entry is found by these, and shows them in clear below a secret name too
 _CONFIG_ID_KEYS = ('id', 'name', 'label')
@@ -869,14 +872,18 @@ def _shown_as_is(obj, secret=False, entry=False):
 
 
 def _is_address(k, v, secret=False):
-    """Whether the value v of k is an address: one under an address name, but a flag never
-    and a number only as a port (show_ip_addresses, url_timeout), and a url with a host
-    under any plain name (issuer, target, instance)."""
+    """Whether the value v of k is an address: one under an address name, but a flag never,
+    a number only as a port (show_ip_addresses, url_timeout) and a label or a mode only as a
+    url (server_label, proxy_mode), and a url with a host under any plain name (issuer,
+    target, instance)."""
     if isinstance(v, bool):
         return False
     if isinstance(v, (int, float)):
         return bool(_CONFIG_PORT_WORD.search(_config_name(k)))
     if _is_address_name(k):
+        if isinstance(v, str) and not _CONFIG_URL.match(v):
+            n = _config_name(k)
+            return not _CONFIG_NOT_ADDRESS.search(n, _hint_at(n, _CONFIG_ADDRESS_HINTS, _CONFIG_ADDRESS_WORDS))
         return True
     return isinstance(v, str) and not secret and not _is_secret_name(k) and bool(_CONFIG_URL.match(v))
 
@@ -997,8 +1004,9 @@ def _unmasked_config(new, stored, plugin='', key=None):
                 if not addr and (secret or '://' not in old):
                     kept.append((path or '(top level)', depth))
                 return old
-            # a string the editor shows as it is stored may hold the mask itself
-            if secret or new not in literal:
+            # a string the editor shows as it is stored may hold the mask itself, and one
+            # typed into a plain field without a login stands for nothing that could be lost
+            if secret or (new not in literal and _login_masked(new) is not None):
                 left.append(path or '(top level)')
         return new
 
@@ -1034,12 +1042,17 @@ def _unmasked_config(new, stored, plugin='', key=None):
                     kept.append((here, owner))
                 out.append(o)
             else:
-                hit = _stored_entry(x, i, new, items)
+                hit, start = _stored_entry(x, i, new, items), len(kept)
                 if isinstance(hit, list):
-                    out.append(walk_list(x, hit, secret, here, depth + 1, addr, owner))
+                    v = walk_list(x, hit, secret, here, depth + 1, addr, owner)
                 else:
                     spath, o = hit or ('', None)
-                    out.append(walk(x, o, spath, secret, here, True, depth, addr, owner))
+                    v = walk(x, o, spath, secret, here, True, depth, addr, owner)
+                # an entry without an address of its own (a login, a key with a name) belongs
+                # to the object that holds the list, as a string entry does
+                if len(kept) > start and isinstance(v, dict) and not _list_addresses(v, '', True, secret):
+                    kept[start:] = [(p, owner) for p, _ in kept[start:]]
+                out.append(v)
         return out
 
     out = walk(new, stored, '', False, '')

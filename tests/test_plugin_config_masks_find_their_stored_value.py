@@ -258,17 +258,24 @@ def test_a_stored_value_that_holds_the_mask_saves_as_it_was(admin):
 
 
 @pytest.mark.parametrize('cfg', [
-    {'note': '********'},
     {'title': 'x', 'auth': {'hint': 'tgram://********#0badf00d'}},
     {'token': '********'},
     {'token': 'abc********'},
-    ['********'],
+    {'db_url': 'postgres://********@db.example/x'},
 ])
 def test_a_mask_that_stands_for_nothing_stored_is_never_written(admin, cfg):
     _store(admin, {'title': 'before'})
     r = _save(admin, cfg)
     assert r.status_code == 400 and r.get_json()['code'] == 'CREDENTIAL_REQUIRED', r.get_data(as_text=True)
     assert _stored(admin) == {'title': 'before'}
+
+
+@pytest.mark.parametrize('cfg', [{'note': '********'}, ['********'], {'list': ['x ******** y']}])
+def test_a_mask_typed_into_a_plain_field_is_saved_as_typed(admin, cfg):
+    # the editor masks no plain field without a login, so this one stands for nothing stored
+    _store(admin, {'title': 'before'})
+    assert _save(admin, cfg).status_code == 200
+    assert _stored(admin) == cfg
 
 
 def test_a_config_that_is_a_list_is_masked_and_put_back(admin):

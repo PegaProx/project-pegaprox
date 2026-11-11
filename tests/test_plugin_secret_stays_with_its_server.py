@@ -6,8 +6,9 @@ alert posted "Bearer <token>" to the new server. A save that changes a url, host
 server, endpoint or port in the object of a secret it keeps masked, or in an object
 below that one, or that puts a new one into a list there, is refused with
 CREDENTIAL_REQUIRED now and writes nothing, as the SMTP and LDAP settings do. A url
-counts under any plain name, a flag or a count under an address word does not, and a
-secret kept in a list of its own goes to the addresses next to that list. MK Nov 2026
+counts under any plain name, a flag, a count or a label under an address word does not,
+and a secret kept in a list of its own, or in an entry without an address, goes to the
+addresses next to that list. MK Nov 2026
 """
 import importlib.util
 import json
@@ -183,9 +184,16 @@ def _set(obj, path, value):
      (('targets', 0), 'https://elsewhere.example'), ['api_keys[0]'], 'targets[]'),
     ({'tokens': [['tk-list-10']], 'mirrors': [{'url': 'https://m.example'}]},
      (('mirrors', 0, 'url'), 'https://elsewhere.example'), ['tokens[0][0]'], 'mirrors[].url'),
+    ({'api_keys': [{'name': 'ci', 'secret': 'tk-list-11'}], 'targets': [{'url': 'https://a.example'}]},
+     (('targets', 0, 'url'), 'https://elsewhere.example'), ['api_keys[0].secret'], 'targets[].url'),
+    ({'logins': [{'user': 'u', 'password': 'pw-list-12'}], 'targets': ['https://a.example']},
+     (('targets', 0), 'https://elsewhere.example'), ['logins[0].password'], 'targets[]'),
+    ({'targets': [{'name': 'auth', 'token': 'tk-list-13'}, {'name': 'srv', 'url': 'https://a.example'}]},
+     (('targets', 1, 'url'), 'https://elsewhere.example'), ['targets[0].token'], 'targets[].url'),
 ], ids=['url in a list entry', 'host in a list entry', 'an entry added', 'a url entry changed',
         'a url entry added', 'deeper lists', 'a list in a list entry', 'a secret list and a url in an entry',
-        'a secret list and a url entry', 'a list of secret lists'])
+        'a secret list and a url entry', 'a list of secret lists', 'a named key and a url in an entry',
+        'a login list and a url entry', 'a token entry next to a server entry'])
 def test_the_editor_keeps_no_secret_for_a_server_inside_a_list(admin, cfg, change, fields, moved):
     admin.path.write_text(json.dumps(cfg))
     shown = _shown(admin)
@@ -273,8 +281,12 @@ def test_a_url_under_a_plain_name_is_an_address(admin, cfg, change, fields, move
     ({'token': 'k-flag-3', 'verify_host': True}, {'verify_host': False}),
     ({'api_key': 'k-flag-4', 'url_timeout': 30}, {'url_timeout': 60}),
     ({'api_key': 'k-flag-5', 'max_hosts': 3}, {'max_hosts': 4}),
-], ids=['show_ip_addresses', 'proxy_enabled', 'verify_host', 'url_timeout', 'max_hosts'])
-def test_a_flag_or_a_count_under_an_address_word_moves_freely(admin, cfg, change):
+    ({'api_key': 'k-flag-6', 'server_label': 'Main'}, {'server_label': 'Main 2'}),
+    ({'api_key': 'k-flag-7', 'proxy_mode': 'auto'}, {'proxy_mode': 'manual'}),
+    ({'api_key': 'k-flag-8', 'host_display_name': 'Prod'}, {'host_display_name': 'Prod 2'}),
+], ids=['show_ip_addresses', 'proxy_enabled', 'verify_host', 'url_timeout', 'max_hosts', 'server_label',
+        'proxy_mode', 'host_display_name'])
+def test_a_flag_a_count_or_a_label_under_an_address_word_moves_freely(admin, cfg, change):
     admin.path.write_text(json.dumps(cfg))
     shown = _shown(admin)
     shown.update(change)
