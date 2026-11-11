@@ -23,7 +23,7 @@ import types
 from test_bundled_plugins_reach_every_install_1134 import CURL_STUB
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LANGS = ['de', 'es', 'fr', 'it', 'ko', 'pl', 'pt', 'zh']
+LANGS = ['de', 'es', 'fr', 'it', 'ko', 'pl', 'pt', 'ru', 'zh']
 
 
 def _tracked():
