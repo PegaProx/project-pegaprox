@@ -12,7 +12,7 @@ import re
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 KEYS = ['mcevpnPrereqTitle', 'mcevpnPrereqReady', 'mcevpnPrereqRun', 'mcevpnPrereqChecking',
         'mcevpnPrereqPickFirst', 'mcevpnPrereqFailed', 'mcevpnPrereqChecked', 'mcevpnPrereqHint',
         'mcevpnPrereqUseIps', 'mcevpnPrereqMgmtHint',

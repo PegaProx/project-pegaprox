@@ -1217,14 +1217,14 @@ def test_windows_never_sends_what_pve_ignores():
         assert part in body, part
 
 
-def test_every_key_is_in_all_nine_languages_ahead_of_the_pinned_chain():
+def test_every_key_is_in_every_language_ahead_of_the_pinned_chain():
     used = set(re.findall(r"'(crBp[A-Za-z]+)'", _read('web', 'src', 'cr_blueprints.js')))
     assert len(used) > 140
     src = _read('web', 'src', 'translations.js')
     starts = [(m.start(), m.group(1)) for m in re.finditer(r'^            ([a-z]{2}): \{$', src, re.M)]
     ends = [s for s, _ in starts[1:]] + [len(src)]
     blocks = {lang: src[a:b] for (a, lang), b in zip(starts, ends)}
-    assert set(blocks) == {'de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it'}
+    assert set(blocks) == {'de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru'}
     for lang, block in blocks.items():
         marker = block.index('// LW Oct 2026 (#625) - the banners of a group that fails over automatically')
         for k in used:

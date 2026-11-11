@@ -11,7 +11,7 @@ import os
 import re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 KEY = re.compile(r"^ {16}('?)([A-Za-z0-9_.]+)\1\s*:\s*(.*)$")
 HANGUL = re.compile('[가-힣]')
 INSIGHTS = ['topTalkers', 'topTalkersHint', 'memoryPercent', 'diskUsagePercent', 'rollups', 'byTag',

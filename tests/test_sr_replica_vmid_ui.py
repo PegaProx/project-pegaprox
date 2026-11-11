@@ -47,20 +47,20 @@ def _added():
 @pytest.mark.parametrize('key', KEYS)
 def test_every_new_string_is_in_every_language_once(key):
     found = len(re.findall(rf'^\s*{key}:', _read('web', 'src', 'translations.js'), re.M))
-    assert found == 9, f'{key} is in {found} of 9 language blocks'
+    assert found == 10, f'{key} is in {found} of 10 language blocks'
 
 
 def test_the_new_keys_sit_with_the_site_recovery_strings():
     tr = _read('web', 'src', 'translations.js').split('\n')
     anchors = [i for i, line in enumerate(tr) if re.match(r'^\s+srSkipNotFailedOver:', line)]
-    assert len(anchors) == 9
+    assert len(anchors) == 10
     for i in anchors:
         assert [re.match(r'^\s+(\w+):', tr[i + 1 + n]).group(1) for n in range(len(KEYS))] == KEYS
 
 
 def test_the_placeholders_survive_translation():
     values = re.findall(r'^\s*srOnTargetAs: [\'"](.*)[\'"],$', _read('web', 'src', 'translations.js'), re.M)
-    assert len(values) == 9 and all('{cluster}' in v and '{vmid}' in v for v in values), values
+    assert len(values) == 10 and all('{cluster}' in v and '{vmid}' in v for v in values), values
 
 
 def test_every_new_key_is_used():

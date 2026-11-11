@@ -817,13 +817,13 @@ def _keys():
     return used
 
 
-def test_every_key_is_in_all_nine_languages_ahead_of_the_blueprint_keys():
+def test_every_key_is_in_every_language_ahead_of_the_blueprint_keys():
     used = _keys()
     assert len(used) > 90 and {'crBpNavTab', 'crBpNavDeploy'} <= used
     # one label for the three ways there
     assert not any('crBpNavNewVm' in b for b in _blocks().values())
     blocks = _blocks()
-    assert set(blocks) == {'de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it'}
+    assert set(blocks) == {'de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru'}
     en = dict(re.findall(r'^                (cr(?:Img|BpNav)[A-Za-z]+): "(.*)",$', blocks['en'], re.M))
     for lang, block in blocks.items():
         # the blueprint editor appends its keys after the crBp group: these stand before its first line

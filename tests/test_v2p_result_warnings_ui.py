@@ -20,7 +20,7 @@ import pytest
 from test_ha_ui import ESXI_READS, SSE_TOKEN, _App, _classes, _FakeServer, browser  # noqa: F401
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 SHOTS = os.environ.get('PEGAPROX_UI_SHOTS', '')
 
 

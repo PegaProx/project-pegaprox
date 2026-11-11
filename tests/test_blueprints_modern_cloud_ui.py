@@ -760,11 +760,11 @@ def test_runtime_cloud_names_the_page_after_both(open_app):
 
 
 def _nav_names():
-    """bpNavTab of each language as the build under test has it (de, en, zh, pl, fr, es, pt, ko, it). LW Nov 2026 -
-    the bundle carries English and build.sh writes the others to web/i18n/<lang>.json; an older bundle has all nine."""
-    langs = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+    """bpNavTab of each language as the build under test has it (de, en, zh, pl, fr, es, pt, ko, it, ru). LW Nov 2026 -
+    the bundle carries English and build.sh writes the others to web/i18n/<lang>.json; an older bundle has all of them."""
+    langs = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
     names = re.findall(r'bpNavTab:\s*"([^"]+)"', BUNDLE or _read('web', 'index.html'))
-    if len(names) == 9:
+    if len(names) == len(langs):
         return dict(zip(langs, names))
     assert len(names) == 1
     out = {lang: json.loads(_read('web', 'i18n', f'{lang}.json'))['bpNavTab'] for lang in langs if lang != 'en'}
@@ -772,7 +772,7 @@ def _nav_names():
     return out
 
 
-@pytest.mark.parametrize('lang', ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it'])
+@pytest.mark.parametrize('lang', ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru'])
 def test_runtime_cloud_the_name_of_the_page_stays_on_one_line_of_the_nav(open_app, lang):
     page = open_app(layout='cloud', language=lang).page
     _cloud_nav(page, _nav_names()[lang])
@@ -1187,7 +1187,7 @@ def test_the_module_is_built_shipped_and_has_no_dash():
 NEW_KEYS = ('bpNavTab', 'bpRecentDesc', 'bpRecentNone', 'bpRecentNoneAll', 'bpColBlueprint')
 
 
-def test_every_key_is_in_all_nine_languages_after_the_blueprint_keys():
+def test_every_key_is_in_every_language_after_the_blueprint_keys():
     used = set(re.findall(r"'((?:crBp|crImg|bp)[A-Za-z]+)'", _read('web', 'src', 'blueprints.js')))
     used |= set(re.findall(r"t\('(bp[A-Za-z]+)'\)", _read('web', 'src', 'dashboard.js') + _read('web', 'src', 'cloud.js')))
     assert set(NEW_KEYS) <= used and len(used) > 120
@@ -1195,7 +1195,7 @@ def test_every_key_is_in_all_nine_languages_after_the_blueprint_keys():
     starts = [(m.start(), m.group(1)) for m in re.finditer(r'^            ([a-z]{2}): \{$', src, re.M)]
     ends = [s for s, _ in starts[1:]] + [len(src)]
     blocks = {lang: src[a:b] for (a, lang), b in zip(starts, ends)}
-    assert set(blocks) == {'de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it'}
+    assert set(blocks) == {'de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru'}
     en = dict(re.findall(r'^                ((?:crBp|crImg|bp)[A-Za-z]+): "(.*)",$', blocks['en'], re.M))
     for lang, block in blocks.items():
         lines = block.split('\n')

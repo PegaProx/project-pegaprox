@@ -206,15 +206,16 @@ def test_a_ceph_read_whose_session_failed_is_a_json_error(admin, pve, route):  #
 # overview in French, a "Vorschau" alone the preview of a move or a description)
 _THIS_PREVIEW = {'en': r'\b(?:this|the) preview\b', 'de': r'\b(?:dieser|der) Vorschau\b', 'zh': '此预览',
                  'pl': r'\btym podglądzie\b', 'fr': r'\bcet aperçu\b', 'es': r'\besta vista previa\b',
-                 'pt': r'\bnesta prévia\b|\besta prévia\b', 'ko': '이 미리보기', 'it': r'\bquesta anteprima\b'}
-_PREVIEW_WORD = r'preview|Vorschau|预览|podgląd|aperçu|vista previa|prévia|미리보기|anteprima'
+                 'pt': r'\bnesta prévia\b|\besta prévia\b', 'ko': '이 미리보기', 'it': r'\bquesta anteprima\b',
+                 'ru': r'\b(?:это[мт]?|данн\w+) (?:превью|предпросмотр\w*)'}
+_PREVIEW_WORD = r'preview|Vorschau|预览|podgląd|aperçu|vista previa|prévia|미리보기|anteprima|превью|предпросмотр'
 
 
 def _blocks():
     import re
     src = open('web/src/translations.js', encoding='utf-8').read()
     starts = sorted((m.start(), m.group(1)) for m in re.finditer(r'^ {12}([a-z]{2}): \{$', src, re.M))
-    assert [lang for _, lang in starts] == ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it'], starts
+    assert [lang for _, lang in starts] == ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru'], starts
     return {lang: src[pos:(starts[i + 1][0] if i + 1 < len(starts) else len(src))] for i, (pos, lang) in enumerate(starts)}
 
 

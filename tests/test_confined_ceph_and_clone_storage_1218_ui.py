@@ -164,7 +164,7 @@ def test_the_two_strings_are_in_every_language_once():
     with open(os.path.join(ROOT, 'web', 'src', 'translations.js'), encoding='utf-8') as fh:
         tr = fh.read()
     for key in ('cephNoAccess', 'cephNoAccessDesc'):
-        assert len(re.findall(rf'^\s*{key}:', tr, re.M)) == 9, key
+        assert len(re.findall(rf'^\s*{key}:', tr, re.M)) == 10, key
 
 
 # --- runtime ---------------------------------------------------------------------------------

@@ -19,7 +19,7 @@ TRANSLATIONS = pathlib.Path(__file__).resolve().parent.parent / 'web' / 'src' / 
 
 def test_every_language_has_it_once():
     found = re.findall(r"^ +confirmTestFailover: '([^']+)',$", TRANSLATIONS.read_text(encoding='utf-8'), re.M)
-    assert len(found) == 9 and len(set(found)) == 9, found
+    assert len(found) == 10 and len(set(found)) == 10, found
 
 
 def test_every_language_names_the_sr_test_copies_and_the_nic_setting():
