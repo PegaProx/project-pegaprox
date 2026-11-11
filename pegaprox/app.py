@@ -1700,8 +1700,8 @@ def main(debug_mode=False):
 
     # Init audit log
     print("Initializing audit log...")
-    load_audit_log()
-    print(f"Loaded {len(g.audit_log)} audit entries (retention: {AUDIT_RETENTION_DAYS} days)")
+    n_audit = load_audit_log()
+    print(f"Loaded {n_audit} audit entries (retention: {AUDIT_RETENTION_DAYS} days)")
 
     # Load sessions
     print("Loading sessions...")

@@ -7,7 +7,6 @@ import os
 import json
 import time
 import logging
-from datetime import datetime
 
 from flask import request, has_request_context
 
@@ -15,32 +14,31 @@ from pegaprox.constants import (
     AUDIT_LOG_FILE, AUDIT_LOG_FILE_ENCRYPTED, AUDIT_RETENTION_DAYS,
     MAX_AUDIT_LOG_SIZE,
 )
-from pegaprox.globals import audit_log
 from pegaprox.core.db import get_db
 from pegaprox.utils.sanitization import sanitize_log_message
 
 def load_audit_log():
-    """Load audit log from SQLite database
-    
-    SQLite migration
+    """Read the recent audit entries at start and return how many there are, for the
+    startup line.
+
+    MK Nov 2026 - the entries used to be kept in a module list as well. Every reader goes
+    to SQLite, nothing read the list, and the `global` rebound audit.py's own name, so the
+    pegaprox.globals one the startup line counted stayed empty: it said 0 every time.
     """
-    global audit_log
-    
     try:
         db = get_db()
-        entries = db.get_audit_log(limit=10000)  # Load recent entries
-        audit_log = entries
-        logging.info(f"Loaded {len(audit_log)} audit log entries from SQLite")
+        n = len(db.get_audit_log(limit=10000))  # recent entries
+        logging.info(f"Loaded {n} audit log entries from SQLite")
+        return n
     except Exception as e:
         logging.error(f"Failed to load audit log from database: {e}")
         # Legacy fallback
-        _load_audit_log_legacy()
+        return _load_audit_log_legacy()
 
 
 def _load_audit_log_legacy():
-    """Legacy audit log loader"""
+    """Legacy audit log loader, the number of entries in the old file"""
     from pegaprox.core.config import get_fernet
-    global audit_log
     fernet = get_fernet()
     
     if fernet and os.path.exists(AUDIT_LOG_FILE_ENCRYPTED):
@@ -48,22 +46,22 @@ def _load_audit_log_legacy():
             with open(AUDIT_LOG_FILE_ENCRYPTED, 'rb') as f:
                 encrypted_data = f.read()
             decrypted_data = fernet.decrypt(encrypted_data)
-            audit_log = json.loads(decrypted_data.decode('utf-8'))
-            logging.info(f"Loaded {len(audit_log)} audit entries from legacy encrypted file")
-            return
+            n = len(json.loads(decrypted_data.decode('utf-8')))
+            logging.info(f"Loaded {n} audit entries from legacy encrypted file")
+            return n
         except:
             pass
     
     if os.path.exists(AUDIT_LOG_FILE):
         try:
             with open(AUDIT_LOG_FILE, 'r') as f:
-                audit_log = json.load(f)
-            logging.info(f"Loaded {len(audit_log)} audit entries from legacy JSON file")
-            return
+                n = len(json.load(f))
+            logging.info(f"Loaded {n} audit entries from legacy JSON file")
+            return n
         except:
             pass
     
-    audit_log = []
+    return 0
 
 
 def save_audit_log():
@@ -84,8 +82,6 @@ def cleanup_audit_log():
     (audit_retention_days). Falls back to AUDIT_RETENTION_DAYS constant
     if setting isn't set yet (fresh install or pre-0.9.8).
     """
-    global audit_log
-
     try:
         db = get_db()
         retention = AUDIT_RETENTION_DAYS
@@ -161,8 +157,6 @@ def log_audit(user: str, action: str, details: str = None, ip_address: str = Non
     writes to db now. cluster is the name shown with the entry, cluster_id the cluster it
     belongs to; left out, it is worked out from the name (_audit_cluster_id).
     """
-    global audit_log
-
     if cluster_id is None:
         try:
             cluster_id = _audit_cluster_id(cluster)
@@ -173,21 +167,6 @@ def log_audit(user: str, action: str, details: str = None, ip_address: str = Non
     if via:
         details = f'{details} (via standby {via})' if details else f'via standby {via}'
 
-    entry = {
-        'timestamp': datetime.now().isoformat(),
-        'user': user,
-        'action': action,
-        'details': details,
-        'ip_address': ip_address or get_client_ip(),
-        'cluster': cluster,  # Which cluster this action was performed on
-        'cluster_id': cluster_id,
-    }
-    
-    # Add to in-memory list (for backwards compatibility)
-    audit_log.insert(0, entry)
-    if len(audit_log) > 10000:
-        audit_log = audit_log[:10000]
-    
     # Save to database
     try:
         db = get_db()

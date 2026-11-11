@@ -25,7 +25,8 @@ sessions_lock = threading.Lock()  # NS: Feb 2026 - SECURITY: protect session dic
 # User database (in-memory)
 users_db = {}
 
-# Audit log (in-memory cache)
+# Audit log: the entries are in SQLite (get_db().get_audit_log) and nothing fills this list.
+# It stays for code that imports the name.
 audit_log = []
 
 # Login brute force tracking
