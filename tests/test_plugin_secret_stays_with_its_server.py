@@ -405,7 +405,7 @@ def test_after_a_refused_move_the_next_alert_takes_the_token_to_its_own_server(p
     class _Ok:
         status_code = 200
 
-    def post(url, data=None, headers=None, timeout=None):
+    def post(url, data=None, headers=None, timeout=None, allow_redirects=True):
         posts.append((url, headers.get('Authorization')))
         return _Ok()
 

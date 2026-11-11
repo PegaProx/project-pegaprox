@@ -211,9 +211,14 @@ def _send_ntfy(alert_data, cfg):
             url = resolve_and_pin_url(url, allowed_schemes=('https', 'http'))
         except SsrfError as guard_err:
             return False, f"ntfy URL rejected: {guard_err}"
-        r = requests.post(url, data=alert_data.get('message', ''), headers=headers, timeout=10)
+        # MK Nov 2026 - no redirect: its Location never went through the guard above, and
+        # a 307 posted the alert there once more. A 3xx is no delivery.
+        r = requests.post(url, data=alert_data.get('message', ''), headers=headers, timeout=10,
+                          allow_redirects=False)
         if r.status_code in (200, 201):
             return True, None
+        if 300 <= r.status_code < 400:
+            return False, f"ntfy returned {r.status_code}, redirect not followed"
         return False, f"ntfy returned {r.status_code}"
     except Exception as e:
         return False, str(e)
