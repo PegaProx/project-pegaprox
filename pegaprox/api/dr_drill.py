@@ -267,7 +267,8 @@ def _execute_drill(drill_id):
                 worst_status = 'fail'; continue
             if not r['enabled']:
                 details.append(f"vmid {vm['vmid']}: replication disabled")
-                if worst_status != 'fail': worst_status = 'warn'; continue
+                if worst_status != 'fail': worst_status = 'warn'
+                continue
             if (r['last_status'] or '') == 'error':
                 details.append(f"vmid {vm['vmid']}: last replication = error")
                 worst_status = 'fail'; continue
