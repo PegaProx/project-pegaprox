@@ -6715,7 +6715,7 @@ def test_ldap():
     
     config = {
         'enabled': True,  # Force enabled for test
-        'server': data.get('ldap_server', saved.get('ldap_server', '')),
+        'server': str(data.get('ldap_server', saved.get('ldap_server', '')) or '').strip(),
         'port': sanitize_int(data.get('ldap_port', saved.get('ldap_port', 389)), default=389, min_val=1, max_val=65535),
         'use_ssl': data.get('ldap_use_ssl', saved.get('ldap_use_ssl', False)),
         'use_starttls': data.get('ldap_use_starttls', saved.get('ldap_use_starttls', False)),
@@ -6729,6 +6729,11 @@ def test_ldap():
         'verify_tls': data.get('ldap_verify_tls', saved.get('ldap_verify_tls', False)),
     }
 
+    # MK Nov 2026 - read as text above (a null or a number had no .strip() below), and an
+    # empty or blank one is turned down before anything is done with the stored password
+    if not config['server']:
+        return jsonify({'error': 'LDAP server is required'}), 400
+
     # Use saved password if masked
     if not config['bind_password'] or config['bind_password'] == '********':
         # MK Nov 2026 - only for the saved server: a test against another one would hand it
@@ -6739,9 +6744,6 @@ def test_ldap():
             return jsonify({'error': 'A bind password is required to test a server other than the saved one',
                             'code': 'CREDENTIAL_REQUIRED'}), 400
         config['bind_password'] = get_db()._decrypt(saved.get('ldap_bind_password', '')) if same else ''  # MK: Decrypt stored credential
-
-    if not config['server']:
-        return jsonify({'error': 'LDAP server is required'}), 400
 
     try:
         import ldap3

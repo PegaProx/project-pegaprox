@@ -869,7 +869,8 @@ def test_smtp():
     saved_settings = load_server_settings()
 
     # Build SMTP settings from request or use saved
-    smtp_host = data.get('smtp_host', '')
+    # MK Nov 2026 - read as text, a null as no host (a number or a list had no .strip())
+    smtp_host = str(data.get('smtp_host') or '')
 
     if smtp_host:
         # Use provided settings for testing (before save)
