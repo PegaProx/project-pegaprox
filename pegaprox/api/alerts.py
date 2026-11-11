@@ -28,21 +28,23 @@ def _mask_channel(ch):
     the echo of a write. Only GET ?full=1 (admin.settings) returns the raw values."""
     c = dict(ch)
     u = c.get('url') or ''
-    if len(u) > 32:
-        c['url'] = u[:24] + '…' + u[-6:]
-    elif u:
-        c['url'] = '********'
+    if u:
+        # MK Nov 2026 - the first 24 and the last 6 characters showed the tail of the token
+        # a Slack, Teams or Discord hook carries in its path, and the channels have names to
+        # tell them apart. Scheme and host only; the "…" is also what an edit skips on.
+        from urllib.parse import urlsplit
+        try:
+            p = urlsplit(u)
+            host = p.netloc.rpartition('@')[2]
+        except ValueError:
+            p, host = None, ''
+        c['url'] = f"{p.scheme}://{host}/…" if p is not None and p.scheme and host else '********'
     if c.get('token'):
         c['token'] = '********'
     # NS Oct 2026 - an ntfy topic is the channel: without a token, whoever knows it reads
     # and posts the feed (#993). Same when it was typed into the url instead.
     if c.get('topic'):
         c['topic'] = '********'
-    if c.get('type') == 'ntfy' and u:
-        from urllib.parse import urlsplit
-        p = urlsplit(u)
-        if p.path.strip('/'):
-            c['url'] = f"{p.scheme}://{p.netloc.rpartition('@')[2]}/…"
     return c
 
 

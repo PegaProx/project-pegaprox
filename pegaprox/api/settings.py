@@ -1466,6 +1466,12 @@ def get_server_settings():
         settings['acme_dns_rfc2136_secret'] = '********'
     if settings.get('acme_dns_cloudflare_token'):
         settings['acme_dns_cloudflare_token'] = '********'
+    # the alert channels have routes of their own too, and their urls and tokens are
+    # masked there; the save of this form never writes them
+    if settings.get('alert_webhooks'):
+        from pegaprox.api.alerts import _mask_channel
+        settings['alert_webhooks'] = [_mask_channel(ch) for ch in settings['alert_webhooks']
+                                      if isinstance(ch, dict)]
     # MK Oct 2026 - the banners have routes of their own, which keep them from an admin
     # limited to a tenant (api/banners.py)
     from pegaprox.api.banners import BANNERS_KEY
