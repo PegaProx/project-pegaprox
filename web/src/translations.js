@@ -98845,9 +98845,8 @@
                 haNodeIrDismissed: 'Esecuzione scartata',
                 haNodeIrCloudHint: 'Avviali o scartali nelle impostazioni HA del cluster (layout Modern o Corporate)',
             },
-            // Russian translation, made with AI assistance and reviewed by a native speaker
+            // Russian
             ru: {
-                // app containers from OCI images - LW Oct 2026
                 ociTabLabel: 'Контейнеры приложений',
                 ociTitle: 'Контейнеры приложений из образов OCI',
                 ociTechPreview: 'Технологическое превью',
@@ -98895,7 +98894,6 @@
                 ociStatusCompleted: 'готово',
                 ociStatusFailed: 'ошибка',
                 ociReused: 'образ уже был в хранилище',
-                // bulk actions on guests, all guests of a node, favorites - LW Oct 2026
                 guestBulkTitle: '{action}: гостей {count}',
                 guestBulkRun: 'Выполнить для гостей: {count}',
                 guestBulkSkipped: 'Пропущено ({count})',
@@ -98936,7 +98934,6 @@
                 auditNodeGuestsStarted: 'Запущены все гости ноды',
                 auditNodeGuestsStopped: 'Выключены все гости ноды',
                 auditNodeGuestsMigrated: 'Мигрированы все гости ноды',
-                // bulk migration one guest after another (#952) - LW Oct 2026
                 migRunHow: 'Как выполняются миграции',
                 migRunOne: 'По одной',
                 migRunOneHint: 'Следующий гость начинает миграцию, когда закончилась предыдущая.',
@@ -98966,7 +98963,6 @@
                 migRunDismiss: 'Скрыть',
                 migRunAuditCancelled: 'Массовая миграция отменена',
                 migRunAuditFinished: 'Массовая миграция завершена',
-                // migration preflight: the Check step of the migrate dialogs - LW Oct 2026
                 migPfCheck: 'Проверить',
                 migPfChecking: 'Проверка...',
                 migPfHint: 'Проверьте, с чем столкнётся перенос, до его начала: для каждого гостя готовность, предупреждения или блокировка, и шаги, которые будут выполнены.',
@@ -98985,7 +98981,6 @@
                 migPfCapacity: 'Цель после переноса',
                 migPfMem: 'RAM {now}% → {after}%',
                 migPfCpu: 'CPU {after}%',
-                // tenant limits — NS Sep 2026
                 maxDiskGb: 'Макс. диск (ГБ)',
                 vmidRangeStart: 'VMID от',
                 vmidRangeEnd: 'VMID до',
@@ -98996,10 +98991,8 @@
                 sshNodeBackoffHint: 'Проверьте, что она работает и доступна с PegaProx.',
                 sshFailed: 'Учётные данные заданы, но подключиться не удалось.',
                 sshFailedHint: 'Проверьте доступность порта 22, сохранённое имя пользователя и не изменился ли ключ хоста.',
-                // #717 — compliance without SSH access
                 unavailable: 'недоступно',
                 complianceUnavailable: 'Проверки соответствия не могут выполняться на этом кластере',
-                // #767 — VM console in its own browser window
                 openInOwnWindow: 'Открыть в отдельном окне',
                 popupBlocked: 'Браузер заблокировал окно консоли. Разрешите всплывающие окна для PegaProx и попробуйте снова.',
                 openingConsole: 'Открытие консоли…',
@@ -99016,7 +99009,6 @@
                 availableMemory: 'Доступно: {value}',
                 languageSimplifiedChinese: 'Упрощённый китайский',
                 setupFailedHttp: 'Ошибка настройки (HTTP {status})',
-                // #612 Phase 3 — Multi-Cluster EVPN member add/remove
                 mcevpnMemberAdded: 'Кластер добавлен в охват',
                 mcevpnMemberRemoved: 'Кластер удалён из охвата',
                 mcevpnRemoveConfirm: 'Удалить этот кластер из охвата? (vNet останется на кластере)',
@@ -99025,7 +99017,6 @@
                 mcevpnRemovePurge: 'Удалить из охвата и удалить vNet с этого кластера',
                 mcevpnAddMember: 'Добавить кластер в охват',
                 mcevpnPickCluster: '- выберите кластер -',
-                // #612 Phase 2 — Multi-Cluster EVPN edit/drift
                 mcevpnScanned: 'Проверка расхождений завершена',
                 mcevpnReconcileConfirm: 'Заново применить нужное определение EVPN ко всем участникам (исправляет расхождения, выполняет применение SDN на весь кластер)?',
                 mcevpnReconciled: 'Синхронизировано',
@@ -99042,7 +99033,6 @@
                 mcevpnAddSubnet: 'Добавить подсеть (CIDR)',
                 mcevpnDelSubnet: 'Удалить подсеть (CIDR)',
                 mcevpnCurrentSubnets: 'Текущие подсети',
-                // #612 Phase 1 — Multi-Cluster EVPN
                 mcevpnTitle: 'Мультикластерный EVPN',
                 mcevpnReadOnly: 'Только просмотр: для управления межкластерным EVPN нужны права на SDN и настройки.',
                 mcevpnPrereqTitle: 'Требования EVPN',
@@ -99082,7 +99072,6 @@
                 mcevpnPreview: 'Проверить / предпросмотр',
                 mcevpnPreviewOk: 'Предварительная проверка пройдена: все участники доступны и без конфликтов.',
                 mcevpnPreviewIssues: 'Предварительная проверка нашла проблемы:',
-                // #562 — V2P cutover confirmation gate (ajoergensen)
                 waitForConfirmation: 'Ждать моего подтверждения перед переключением',
                 waitForConfirmationDesc: 'Миграция останавливается прямо перед финальным переключением, пока исходная VM ещё работает, и ждёт, когда вы подтвердите переключение. Так вы сами выбираете момент для секунд простоя (отключить мониторинг, переключить DNS, затем подтвердить). Эффективнее всего в режимах с почти нулевым простоем (vmkfstools-clone / auto / snapshot-zero).',
                 cutoverConfirmed: 'Переключение подтверждено',
@@ -99095,20 +99084,15 @@
                 awaitingCutoverShort: 'Готово к переключению, исходная VM ещё работает.',
                 commitSwitchover: 'Переключить сейчас',
                 cancelMigration: 'Отменить миграцию',
-                // #611 — maintenance capacity pre-warning
                 maintPreviewProceed: 'Продолжить всё равно можно: это лишь предварительная проверка ресурсов, а не жёсткая блокировка.',
                 maintPreviewNoTargets: 'Внимание: нет другой ноды в сети, на которую можно эвакуировать гостей этой ноды. Они продолжат работать (перезагрузка их остановит).',
                 maintPreviewNoHeadroom: 'Внимание: у оставшихся нод в сети может не хватить свободной RAM для всех гостей с этой ноды. Часть миграций может не удаться.',
                 maintPreviewOverThreshold: 'Внимание: эвакуация этой ноды превысит порог RAM на нодах: ',
-                // LW: StarWind SAN plugin install (starlvm)
                 installStarwindPlugin: 'Установить плагин на все ноды',
                 installStarwindPluginHint: 'Устанавливает starwind-proxmox-plugin из подписанного apt-репозитория StarWind на каждую ноду.',
                 starwindInstallFailed: 'Не удалось установить плагин',
                 alreadyInstalled: 'уже установлен',
                 starwindThirdPartyNote: 'StarWind LVM - сторонний продукт StarWind Software, не входящий в PegaProx. PegaProx не даёт по нему поддержки и гарантий; с проблемами обращайтесь напрямую в StarWind:',
-                // MK 2026-06-11 — i18n backfill (Nico): keys referenced via t('x')||'fallback'
-                // that were never defined, so t() echoed the raw key. Values = the JSX fallback
-                // text. en map only; other languages fall back here via t() (German = later pass).
                 acmeDirectoryUrl: 'URL каталога ACME',
                 acmeDirectoryUrlHint: 'Адрес каталога ACME вашего УЦ (должен быть HTTPS)',
                 acmeAllowPrivateCa: 'Разрешить частный или внутренний ACME-УЦ',
@@ -99334,7 +99318,6 @@
                 packageListRefreshStarted: 'Обновление списка пакетов запущено',
                 passwordRequired: 'Требуется пароль',
                 pasteClipboard: 'Вставить из буфера обмена',
-                // LW Sep 2026 - automated installations
                 autoInstall: 'Автоматическая установка',
                 autoInstallIntro: 'Храните здесь файлы ответов и подготовьте ISO Proxmox VE, который скачивает один из них при загрузке. У каждого профиля свой токен, а машины сообщают о завершении установки.',
                 autoInstallNewProfile: 'Новый профиль',
@@ -99373,7 +99356,6 @@
                 autoInstallLoadFailed: 'Не удалось загрузить профили установки',
                 autoInstallView: 'Просмотр',
                 autoInstallOldIsoHint: 'Для старых инструментов ISO без --answer-auth-token добавьте ?token=<token> к URL. Тогда он также попадёт в журналы доступа.',
-                // guided setup
                 autoInstallGuided: 'Пошаговая настройка',
                 autoInstallEditor: 'Редактор файла ответов',
                 autoInstallChoiceGuided: 'Ответить на несколько вопросов',
@@ -99467,7 +99449,6 @@
                 autoInstallNextStep3: 'Они появятся в разделе «Установки» на этой странице.',
                 autoInstallTokenNotCopied: 'Токен больше не будет показан. Вы скопировали команду?',
                 autoInstallDiscard: 'Отменить эту настройку?',
-                // wizard field checks
                 autoInstallErrTooLong: 'Слишком длинно (не более {n} символов)',
                 autoInstallErrControl: 'Содержит управляющие символы',
                 autoInstallErrServers: 'Целое число от 2 до 10000',
@@ -99728,7 +99709,6 @@
                 vnet: 'VNet',
                 willBeInstalled: 'будет установлено через SSH + apt dist-upgrade.',
                 zone: 'Зона',
-                // MK May 2026 — PVE 9.2 CRS + token rotate + OIDC audiences strings
                 crsHeader: 'Планирование ресурсов кластера (CRS)',
                 crsHaRebalanceOnStart: 'Перебалансировка HA при запуске',
                 crsHaRebalanceOnStartHint: 'Автоматически перебалансировать ресурсы HA, когда нода появляется в сети',
@@ -99774,7 +99754,6 @@
                 certPresentPlaceholder: '(сертификат загружен)',
                 keyPresentPlaceholder: '(закрытый ключ загружен)',
 
-                // MK Apr 2026 — issue #352 follow-up: audit-report translations completed
                 cmAideAuditProtect: 'AIDE защищает /var/log/audit',
                 cmApparmor: 'AppArmor включён и в режиме enforce',
                 cmAptShowVersions: 'apt-show-versions установлен',
@@ -99832,7 +99811,6 @@
                 syslogClusterFilter: 'Просмотр syslog по кластеру',
                 syslogClusterFilterDesc: 'Если включено, раздел Syslog показывает только строки, имя хоста которых относится к выбранному кластеру или одной из его нод.',
 
-                // General
                 loading: 'Загрузка...',
                 pbsSyslogForbidden: 'PBS отказал в доступе к системному журналу. API-токену нужна привилегия Sys.Audit на /system/log.',
                 pbsSyslogFailed: 'Не удалось прочитать системный журнал PBS.',
@@ -99843,7 +99821,6 @@
                 pbsNotificationsReadFailed: 'Не удалось прочитать настройки уведомлений PBS.',
                 pbsNoNotificationTargets: 'На этом PBS не настроены цели уведомлений.',
                 pbsNoNotificationMatchers: 'На этом PBS не настроены сопоставители уведомлений.',
-                // broadcast banners - LW Oct 2026
                 bcastTab: 'Баннеры',
                 bcastTitle: 'Баннеры-объявления',
                 bcastDesc: 'Сообщение вверху страницы для каждого вошедшего пользователя, которому оно адресовано, во всех макетах. Простой текст. Каждый пользователь может его закрыть; оно появится снова, если текст изменится.',
@@ -99927,7 +99904,6 @@
                 guestAgentNotInstalled: 'QEMU Guest Agent не установлен',
                 guestAgentInstallHint: 'Установите qemu-guest-agent, чтобы видеть имя хоста, ОС и ядро',
 
-                // LW: Feb 2026 - Corporate VM Detail View
                 vmSummary: 'Сводка VM',
                 generalInfo: 'Общее',
                 hardwareInfo: 'Оборудование',
@@ -99953,7 +99929,6 @@
                 installGuestAgent: 'Установить QEMU Guest Agent...',
                 vmHardware: 'Оборудование VM',
                 relatedObjects: 'Связанные объекты',
-                // LW: Feb 2026 - Corporate Node Detail View
                 hostDetails: 'Сведения о хосте',
                 capacityUsage: 'Ёмкость и использование',
                 logicalProcessors: 'Логические процессоры',
@@ -99981,7 +99956,6 @@
                 lvmThinStorage: 'LVM-Thin',
                 zfsStorage: 'ZFS',
 
-                // Auth
                 login: 'Вход',
                 logout: 'Выйти',
                 loginTitle: 'Вход в PegaProx',
@@ -100042,7 +100016,6 @@
                 languagePreference: 'Язык',
                 languagePreferenceDesc: 'Язык интерфейса и меню',
 
-                // PegaProx Settings
                 pegaproxSettings: 'Настройки PegaProx',
                 serverSettings: 'Сервер',
                 networkSettings: 'Сетевые настройки',
@@ -100167,8 +100140,6 @@
                 restartInitiated: 'Перезапуск сервера начат',
                 restartFailed: 'Не удалось перезапустить сервер',
 
-                // Tenants & Permissions
-                // Reddit feature request - MSPs needed this for customer isolation
                 tenants: 'Тенанты',
                 tenant: 'Тенант',
                 addTenant: 'Добавить тенанта',
@@ -100183,7 +100154,6 @@
                 tenantClusters: 'Кластеры этого тенанта',
                 allTags: 'Все теги',
 
-                // Cluster Groups - NS Jan 2026
                 clusterGroups: 'Группы кластеров',
                 clusterGroup: 'Группа кластеров',
                 addGroup: 'Добавить группу',
@@ -100198,7 +100168,6 @@
                 groupDeleted: 'Группа удалена',
                 groupUpdated: 'Группа обновлена',
                 manageGroups: 'Управление группами',
-                // NS: Mar 2026 - pool view
                 treeView: 'Дерево',
                 poolView: 'Пулы',
                 datastoreView: 'Хранилища данных',
@@ -100254,7 +100223,6 @@
                 cannotDeleteDefaultTenant: 'Нельзя удалить тенанта по умолчанию',
                 reassignUsersFirst: 'Сначала переназначьте пользователей',
 
-                // Custom Roles section
                 roles: 'Роли',
                 customRoles: 'Свои роли',
                 createRole: 'Создать роль',
@@ -100287,7 +100255,6 @@
                 vmAclDeleted: 'Права на VM удалены',
                 confirmDeleteVmAcl: 'Удалить свои права для этой VM?',
 
-                // Pool Permissions - MK Jan 2026
                 poolPermissions: 'Права на пулы',
                 poolPermissionsDesc: 'Дайте пользователям или группам доступ к пулам ресурсов Proxmox. Права действуют на все VM в пуле.',
                 managePools: 'Управление пулами',
@@ -100474,7 +100441,6 @@
                 exportAuditLog: 'Экспорт',
                 refreshAuditLog: 'Обновить',
 
-                // Header
                 addCluster: 'Добавить кластер',
                 addXcpngPool: 'Добавить пул XCP-ng (Tech Preview)',
                 xcpngConnectHint: 'Подключитесь к мастер-хосту пула. По умолчанию используется порт XAPI 443.',
@@ -100487,7 +100453,6 @@
                 connectionType: 'Тип подключения',
                 clusterManagement: 'PegaProx: управление кластерами Proxmox VE',
 
-                // Tabs
                 resources: 'Ресурсы',
                 datacenter: 'Датацентр',
                 settings: 'Настройки',
@@ -100498,7 +100463,6 @@
                 dcStatusNotRead: 'Не удалось прочитать состояние кластера. Показатели не отображаются, пока чтение не пройдёт успешно.',
                 subscriptions: 'Подписки',
 
-                // Cluster
                 allClustersOverview: 'Обзор всех кластеров',
                 allClusters: 'Все кластеры',
                 multiClusterSummary: 'Сводка по всем управляемым кластерам',
@@ -100722,7 +100686,6 @@
                 clusterHealthCephUnknown: 'Нет актуального состояния Ceph, не учитывается',
                 clusterHealthCephSilent: 'Ceph не отвечает уже несколько минут, ограничено значением {cap}',
 
-                // Nodes
                 nodes: 'Ноды',
                 loadingMetrics: 'Загрузка метрик...',
                 checkConnectionAndRetry: 'Проверьте подключение и попробуйте снова.',
@@ -100740,7 +100703,6 @@
                 diskUsage: 'Использование диска',
                 allocated: 'выделено',
 
-                // VMs & Resources
                 virtualMachines: 'Виртуальные машины',
                 containers: 'Контейнеры',
                 vm: 'VM',
@@ -100872,7 +100834,6 @@
                 dragToReorder: 'Нажмите, чтобы включить или выключить, стрелками меняйте порядок',
                 noBootDevices: 'Загрузочные устройства не найдены',
                 resizeDiskHint: 'Увеличить на (например, +10G) или новый размер',
-                // SMBIOS Settings
                 smbiosSettings: 'Настройки SMBIOS',
                 smbiosHint: 'System Management BIOS: полезно для лицензирования Windows и идентификации VM',
                 applySmbiosFromClusterConfig: 'Применить настройки SMBIOS из конфигурации кластера',
@@ -100915,7 +100876,6 @@
                 disk: 'Диск',
                 network: 'Сеть',
 
-                // VM Creation Wizard
                 next: 'Далее',
                 back: 'Назад',
                 required: 'Обязательно',
@@ -100934,7 +100894,6 @@
                 allIsos: 'Все ISO',
                 virtioDriversHint: 'Будет подключён как дополнительный CD-ROM для установки драйверов Windows',
 
-                // MK: New wizard translations
                 advancedCpu: 'Расширенные настройки CPU',
                 extraCpuFlags: 'Дополнительные флаги CPU',
                 extraCpuFlagsHint: 'Нажимайте, чтобы переключать флаг: по умолчанию → включён (+) → выключен (−). Нужен перезапуск VM.',
@@ -101042,7 +101001,6 @@
                 loadSshKeyFile: 'Загрузить файл SSH-ключа',
                 sshKeyHintMultiple: 'По одному ключу на строку. Вставьте или загрузите из файла.',
                 ctCredentialRequired: 'Введите пароль root или публичный SSH-ключ, чтобы создать контейнер.',
-                // SSH Shell Login
                 dropKeyFileHere: 'Перетащите файл ключа сюда или нажмите',
                 keyLoaded: 'Ключ загружен',
                 lines: 'строк',
@@ -101053,7 +101011,6 @@
                 useHostSettings: 'Использовать настройки хоста',
                 dnsServersHint: 'Список DNS-серверов через пробел',
                 disconnected: 'Отключено',
-                // NS May 2026 (#380): named-disconnect banners
                 clustersDisconnectedNamed: 'Отключено кластеров: {count} ({names})',
                 nodesOfflineNamed: 'Нод не в сети: {count} ({names})',
                 andNMore: '{names} и ещё {more}',
@@ -101152,17 +101109,14 @@
                 month: 'Месяц',
                 year: 'Год',
 
-                // Detail View
                 hostname: 'Имя хоста',
                 tags: 'Теги',
                 changesRequireRestart: 'Примечание: некоторые изменения требуют перезапуска',
 
-                // Tags - NS Jan 2026
                 manageTags: 'Управление тегами',
                 newTag: 'Новый тег...',
                 existingTags: 'Существующие теги',
 
-                // Schedules - MK Jan 2026
                 schedules: 'Расписания',
                 scheduledActions: 'Запланированные действия',
                 newSchedule: 'Новое расписание',
@@ -101178,7 +101132,6 @@
                 forOnce: 'для однократного',
                 forWeekly: 'для еженедельного',
 
-                // Reports - NS Jan 2026
                 reports: 'Отчёты',
                 insights: 'Аналитика',
                 statusCritical: 'Критично',
@@ -101250,7 +101203,6 @@
                 rngBadSource: 'Выберите один из трёх источников.',
                 rngBadMaxBytes: 'Лимит - целое число байт, 0 = без лимита.',
                 rngBadPeriod: 'Период - целое число миллисекунд от 1 до 4294967295.',
-                // virtiofs, directory mappings - LW Oct 2026
                 vfsTitle: 'Общие каталоги хоста (virtiofs)',
                 vfsNone: 'Ни один каталог хоста не открыт этой VM.',
                 vfsAdd: 'Добавить общий каталог',
@@ -101780,10 +101732,8 @@
                 powerHostMaxW: 'Полная нагрузка (Вт)',
                 powerHostGone: 'больше не в кластере',
                 powerHostsSaved: 'Профили хостов сохранены',
-                // NS Oct 2026 - how old the figures of a history report are
                 reportAsOf: 'По состоянию на {time}',
                 reportUpdating: 'обновляется',
-                // LW Oct 2026 - the per-VM power table: a guest without a host, memory over 100 %
                 powerNoHost: 'Хост не записан: гостя больше нет, а его история старше учёта хостов. Его доля в «Нераспределённом».',
                 powerMemOverAssigned: 'Больше выделенного: Proxmox считает процесс QEMU, который у гостя без драйвера balloon может превышать его RAM. Хост всё равно на это тратит энергию.',
                 powerHostSaveFailed: 'Не удалось сохранить профиль хоста',
@@ -101961,7 +101911,6 @@
                 reportUnread: 'Не удалось прочитать отчёт',
                 reportValueUnread: 'Не удалось прочитать',
 
-                // CVE Scanner - MK Mar 2026
                 cveScanner: 'Сканер CVE',
                 cveScanDesc: 'Проверяет все ноды по SSH на устаревшие пакеты и уязвимости.',
                 scanAllNodes: 'Проверить все ноды',
@@ -101990,7 +101939,6 @@
                 cveApplyHint: 'Применяйте исправления через менеджер обновлений',
                 openUpdateManager: 'Открыть менеджер обновлений',
 
-                // Automation Tab - NS Jan 2026
                 automation: 'Автоматизация',
                 schedulesDesc: 'Автоматический запуск, остановка, перезагрузка или снапшоты VM по расписанию',
                 noTagsInCluster: 'В этом кластере пока нет тегов',
@@ -102012,7 +101960,6 @@
                 ruleCreated: 'Правило создано',
                 enforced: 'Принудительно',
 
-                // Config Modal Tabs
                 generalTab: 'Общее',
                 resourcesTab: 'Ресурсы',
                 storageTab: 'Хранилище',
@@ -102025,7 +101972,6 @@
                 pegaproxActions: 'Действия PegaProx',
                 optionsTab: 'Параметры',
 
-                // Datacenter
                 options: 'Параметры',
                 storage: 'Хранилище',
                 backup: 'Резервное копирование',
@@ -102057,7 +102003,6 @@
                 exclusionRule3: 'Исключённые ноды остаются видимыми и могут принимать ручные миграции',
                 exclusionRule4: 'VM с исключённых нод всё равно могут быть перенесены, если нода перегружена',
 
-                // NS: Backup translations - Dec 2025
                 noBackups: 'Резервные копии не найдены',
                 noBackupsHint: 'Создайте резервную копию или проверьте хранилища резервных копий',
                 backupMode: 'Режим резервного копирования',
@@ -102085,7 +102030,6 @@
                 booting: 'Загрузка...',
                 verifying: 'Проверка...',
                 cleaningUp: 'Очистка...',
-                // LW: backup mode options
                 backupModeSnapshot: 'Снапшот (без остановки)',
                 backupModeSuspend: 'Приостановка (короткая пауза)',
                 backupModeStop: 'Остановка (VM будет остановлена)',
@@ -102096,7 +102040,6 @@
                 backupNotes: 'Заметки (необязательно)',
                 backupNotesPlaceholder: 'например, перед крупным обновлением, еженедельная копия...',
 
-                // File restore
                 fileRestore: 'Восстановление файлов',
                 fileRestoreBrowseFailed: 'Не удалось просмотреть файлы резервной копии',
                 fileRestoreSuccess: 'Файл успешно восстановлен',
@@ -102108,7 +102051,6 @@
                 restoreFile: 'Восстановить файл',
                 emptyDirectory: 'Пустой каталог',
 
-                // HA
                 ha: 'HA',
                 haStatus: 'Состояние HA',
 
@@ -102148,7 +102090,6 @@
                 nodeUnreachable: 'Нода недоступна',
                 offlineSince: 'Не в сети с',
                 firewall: 'Firewall',
-                // SDN translations - MK Feb 2026
                 sdn: 'SDN',
                 sdnNotAvailable: 'SDN недоступен',
                 sdnNotConfigured: 'Программно-определяемая сеть (SDN) не настроена в этом кластере.',
@@ -102219,7 +102160,6 @@
                 link: 'Линк',
                 resourceUsage: 'Использование ресурсов',
 
-                // Storage
                 storageId: 'ID хранилища',
                 directory: 'Каталог',
                 path: 'Путь',
@@ -102236,10 +102176,8 @@
                 portal: 'Портал',
                 skipCertVerification: 'Не проверять сертификат',
 
-                // Backup
                 backupJobs: 'Задания резервного копирования',
                 noBackupJobs: 'Нет заданий резервного копирования',
-                // LW Oct 2026 - backup job runs and batch restore
                 bkpRunsHistory: "История запусков",
                 bkpRunsTitle: "Запуски {id}",
                 bkpRunsPeriod: "Период",
@@ -102320,12 +102258,10 @@
                 selection: 'Выбор',
                 retention: 'Хранение',
 
-                // Replication
                 replicationJobs: 'Задания репликации',
                 guest: 'Гость',
                 job: 'Задание',
 
-                // Firewall
                 firewallOptions: 'Параметры firewall',
                 firewallRules: 'Правила firewall',
                 noFirewallRules: 'Нет правил firewall',
@@ -102350,7 +102286,6 @@
                 fwAddAlias: 'Добавить псевдоним',
                 fwAddIpset: 'Добавить набор IP',
 
-                // Ceph
                 ceph: 'Ceph',
                 cephStatus: 'Состояние Ceph',
                 cephHealth: 'Состояние кластера',
@@ -102453,7 +102388,6 @@
                 cephReadFailedDesc: "Ни одна из доступных нод не ответила на запрос Ceph. Это не означает, что Ceph не установлен. Повторите попытку позже.",
                 cephInit: 'Инициализировать Ceph',
 
-                // RBD Mirroring
                 cephMirroring: 'Зеркалирование',
                 cephMirrorMode: 'Режим зеркалирования',
                 cephMirrorModePool: 'Пул (все образы)',
@@ -102478,7 +102412,6 @@
                 cephMirrorSiteName: 'Имя площадки',
                 cephMirrorBackToOverview: 'Назад к обзору',
 
-                // Settings
                 balancingConfig: 'Настройка балансировки',
                 migrationThreshold: 'Порог миграции',
                 migrationThresholdDesc: 'Разница оценок, запускающая миграцию',
@@ -102648,7 +102581,6 @@
                 optionsTitle: 'Параметры',
                 intervalBetweenChecks: 'Интервал между проверками баланса',
 
-                // HA
                 highAvailability: 'Высокая доступность (HA)',
                 haMonitoring: 'Мониторинг HA',
                 haMonitorActive: 'Монитор HA активен',
@@ -102684,9 +102616,7 @@
                 primary: 'Основной',
                 fallbacks: 'Запасные',
 
-                // Messages
 
-                // Task Bar
                 tasks: 'Задачи',
                 taskMigrate: 'Миграция',
                 taskStart: 'Запуск',
@@ -102722,7 +102652,6 @@
                 operationFailed: 'Операция не удалась',
                 confirmAction: 'Подтвердите действие',
 
-                // Misc
                 lastCheck: 'Последняя проверка',
                 clusterInfo: 'Сведения о кластере',
                 primaryHost: 'Основной хост',
@@ -102738,7 +102667,6 @@
                 lastMigrations: 'Последние миграции',
                 noMigrations: 'Миграций нет',
 
-                // Options labels
                 keyboardLayout: 'Раскладка клавиатуры',
                 httpProxy: 'HTTP-прокси',
                 consoleViewer: 'Просмотрщик консоли',
@@ -102782,7 +102710,6 @@
                 hardwareWatchdog: 'Аппаратный watchdog',
                 watchdogWarning: 'ВНИМАНИЕ: при потере кворума нода автоматически перезагрузится!',
 
-                // Fencing Explanation - NS Jan 2026
                 fencingExplanation: 'Как предотвращается split-brain',
                 fencingStep1Title: '1. Обнаружение потери кворума',
                 fencingStep1Desc: 'Изолированная нода теряет кворум (< 50% голосов), и /etc/pve становится ТОЛЬКО ДЛЯ ЧТЕНИЯ. pve-ha-lrm автоматически останавливает все VM под HA.',
@@ -102802,7 +102729,6 @@
                 important2NodeCluster: 'важно для кластеров из 2 нод!',
                 online: 'В сети',
 
-                // 2-Node Cluster Mode - NS Jan 2026
                 twoNodeMode: 'Режим кластера из 2 нод',
                 twoNodeWarning: 'Ограничение кластера из 2 нод',
                 twoNodeExplanation: 'В кластере Proxmox из 2 нод при отказе одной оставшаяся теряет кворум и не может запускать VM. Этот режим позволяет PegaProx автоматически принудительно задать кворум на оставшейся ноде.',
@@ -102813,7 +102739,6 @@
                 twoNodeTip: 'Совет',
                 twoNodeTipText: 'Для лучшего результата установите «sshpass» на сервер PegaProx: apt install sshpass',
 
-                // Split-Brain Risk - 2-Node - NS Jan 2026
                 splitBrainRisk: 'Риск split-brain без фенсинга!',
                 splitBrainRiskDesc: 'Если обе ноды живы, но сеть между ними отказала, принудительный кворум может привести к тому, что ОБЕ ноды запустят одну и ту же VM = повреждение данных!',
                 safeSolutions: 'Безопасные решения для кластеров из 2 нод:',
@@ -102826,7 +102751,6 @@
                 recoveryDelayCheck: 'Задержка восстановления ≥ 30 секунд',
                 selfFencingEnabled: 'Самофенсинг включён',
 
-                // Storage-based Split-Brain Protection - NS Jan 2026
                 storageHeartbeat: 'Защита от split-brain через хранилище',
                 recommendedFor2Node: 'Рекомендуется для кластеров из 2 нод!',
                 storageHeartbeatDesc: 'Использует общее хранилище (NFS/Ceph/iSCSI) для координации нод. Если нода перестаёт писать heartbeat, она подтверждается мёртвой. Механизм «ядовитой пилюли» велит изолированной ноде остановить VM до начала восстановления.',
@@ -102847,7 +102771,6 @@
                 nodeAgentRequired: 'Нужен агент ноды!',
                 nodeAgentRequiredDesc: 'Для работы этой функции нужно установить агент PegaProx на каждую ноду Proxmox. Агент пишет heartbeat и реагирует на «ядовитые пилюли».',
 
-                // Automatic Split-Brain Protection - NS Jan 2026 - FULLY AUTOMATIC
                 splitBrainProtection: 'Защита от split-brain',
                 fullyAutomatic: '100% АВТОМАТИЧЕСКИ',
                 autoProtectionExplain: 'PegaProx сам находит общее хранилище, устанавливает агенты нод и защищает от split-brain, настраивать ничего не нужно!',
@@ -102860,19 +102783,16 @@
                 noSharedStorageFound: 'Общее хранилище (NFS/CephFS) не найдено. Защита работает через проверку по SSH.',
                 notSafeForDualNetwork: 'Небезопасно для схем с двумя сетями (отдельные сети серверов и хранилищ)',
 
-                // Block Storage Warning - NS Jan 2026
                 blockStorageOnly: 'Найдены только блочные хранилища',
                 blockStorageExplain: 'Блочные хранилища (LVM, iSCSI, RBD) не могут хранить файлы heartbeat. Для полной защиты при двух сетях добавьте небольшой ресурс NFS.',
                 sshOnlyActive: 'Защита только через SSH активна',
                 sshOnlyRisk: 'Работает при одной сети. Для двух сетей (отдельные серверная и iSCSI) добавьте небольшой ресурс NFS (хватит 100 МБ).',
 
-                // Multiple Storages - NS Jan 2026
                 clickToSelect: 'Нажмите для выбора',
                 selected: 'Выбрано',
                 currentlyActive: 'Сейчас активно',
                 blockStoragesIgnored: 'Блочные хранилища (не подходят)',
 
-                // Self-Fence Protection - NS Jan 2026
                 selfFenceProtection: 'Защита самофенсингом',
                 advancedSettings: 'Расширенные настройки',
                 selfFenceExplain: 'Сначала решает кворум: при трёх и более голосах (QDevice считается) нода, потерявшая кворум, останавливает свои VM. Где кворум решить не может (два голоса или кворум задан принудительно), нода без большинства спрашивает экземпляры PegaProx, кто лидер, и останавливает свои VM, если лидер не отвечает; на двух нодах без QDevice (стратегия фенсинга WAIT) она только пишет это в журнал и оставляет их работать. То, что остановил её фенсинг, не запускается на этой ноде автоматически снова, кроме VM PegaProx.',
@@ -102901,7 +102821,6 @@
                 enable2NodeMode: 'Включить режим кластера из 2 нод',
                 twoNodeModeDesc: 'Принудительно задавать кворум на оставшейся ноде при отказе одной, только после того как отказавшая нода выключена и подтверждена выключенной (IPMI в разделе «Фенсинг по нодам»), если не включено небезопасное восстановление двух нод.',
 
-                // Legacy translations (kept for compatibility)
                 autoSplitBrainProtection: 'Автоматическая защита от split-brain',
                 noSetupRequired: 'НАСТРОЙКА НЕ НУЖНА',
                 autoProtectionDesc: 'PegaProx автоматически предотвращает split-brain с помощью ваших учётных данных SSH.',
@@ -102916,7 +102835,6 @@
                 sharedStoragePath: 'Путь в общем хранилище',
                 agentAutoInstall: 'Агент ноды установится автоматически по SSH',
 
-                // Device Passthrough
                 devicePassthrough: 'Проброс устройств',
                 ptModeMapped: 'Сопоставленное устройство (рекомендуется)',
                 ptModeRaw: 'Прямое устройство',
@@ -102956,7 +102874,6 @@
                 userTagAccess: 'Доступ пользователей к тегам',
                 registeredTags: 'Зарегистрированные теги',
 
-                // Subscription
                 subscriptionStatus: 'Состояние подписки',
                 licensed: 'Лицензировано',
                 notLicensed: 'Не лицензировано',
@@ -102978,7 +102895,6 @@
                 subscriptionBenefit2: 'Техническую поддержку от Proxmox',
                 subscriptionBenefit3: 'Отсутствие предупреждения о подписке при входе',
 
-                // Maintenance
                 maintenanceModeTitle: 'Включение режима обслуживания',
                 maintenanceWarning: 'Внимание: все работающие VM и контейнеры на этой ноде будут автоматически перенесены на другие ноды.',
                 maintenanceDesc: 'Нода будет исключена из балансировки нагрузки, пока режим обслуживания не выключен.',
@@ -103100,7 +103016,6 @@
                 saveSettings: 'Сохранить настройки',
                 haEnabled: 'HA включён',
 
-                // Common notifications
                 saveFailed: 'Не удалось сохранить',
                 invalidDnsName: 'Недопустимое имя: разрешены только буквы, цифры, дефисы и точки; каждая часть должна начинаться и заканчиваться буквой или цифрой (не более 63 символов на часть)',
                 addTag: 'Добавить тег...',
@@ -103127,7 +103042,6 @@
                 vmLocked: 'VM заблокирована',
                 vmUnlocked: 'VM разблокирована',
 
-                // Security Settings
                 securitySettings: 'Настройки безопасности',
                 securityDashboard: 'Панель безопасности',
                 issuesFound: 'найдено проблем',
@@ -103195,13 +103109,11 @@
                 attempts: 'попыток',
                 remaining: 'осталось',
 
-                // About page translations
                 about: 'О программе',
                 developmentTeam: 'Команда разработчиков',
                 creditsAcknowledgments: 'Благодарности',
                 links: 'Ссылки',
 
-                // update Manager
                 updateManager: 'Менеджер обновлений',
                 cloudNavDashboard: 'Панель',
                 cloudNavCompute: 'Вычисления',
@@ -103385,7 +103297,6 @@
                 includeReboot: 'Перезагрузить после обновления',
                 includeRebootHint: 'Рекомендуется для обновлений ядра',
 
-                // PegaProx Auto-Update - NS Jan 2026
                 confirmUpdate: 'Обновление будет скачано и установлено. Будет создана резервная копия. Сервер перезапустится автоматически. Продолжить?',
                 downloadingUpdate: 'Скачивание обновления...',
                 installingUpdate: 'Установка обновления...',
@@ -103413,7 +103324,6 @@
                 rollbackSuccess: 'Откат выполнен! Сервер перезапускается...',
                 rollbackWarning: '⚠️ Откат перезапустит сервер. Убедитесь, что сохранили всю несохранённую работу.',
 
-                // Security / Military Grade Encryption - NS Jan 2026
                 securityStatus: 'Состояние безопасности',
                 dataEncryption: 'Шифрование данных',
                 passwordHashing: 'Хэширование паролей',
@@ -103451,7 +103361,6 @@
                 lastRotation: 'Последняя смена',
                 backups: 'Резервные копии',
                 allowedOrigins: 'Разрешённые источники',
-                // IP Whitelisting
                 ipWhitelisting: 'Белый список IP',
                 enableIPWhitelist: 'Включить белый список IP',
                 ipWhitelistDesc: 'Разрешить доступ только с определённых IP-адресов',
@@ -103462,7 +103371,6 @@
                 blockedIPs: 'Всегда блокируются',
                 testIP: 'Проверить доступ IP',
                 supportedFormats: 'Поддерживаемые форматы',
-                // Config Backup/Restore
                 configBackupRestore: 'Резервное копирование и восстановление конфигурации',
                 exportConfig: 'Экспорт конфигурации',
                 importConfig: 'Импорт конфигурации',
@@ -103493,7 +103401,6 @@
                 backupBy: 'Создал',
                 restored: 'Восстановлено',
                 skipped: 'Пропущено',
-                // Secure Backup
                 secureBackup: 'Защищённая резервная копия',
                 secureBackupDesc: 'Резервные копии шифруются AES-256-GCM. Нужно указать ваш пароль и пароль шифрования резервной копии.',
                 securityVerification: 'Проверка безопасности',
@@ -103567,7 +103474,6 @@
                 checkingNodes: 'Проверка доступных обновлений на нодах...',
                 connectingToCluster: 'Подключение к кластеру...',
                 processingResults: 'Обработка результатов...',
-                // Repo management - MK
                 repoInfo: 'Управляйте APT-репозиториями этой ноды. Включайте и выключайте репозитории, чтобы задать, какие пакеты доступны.',
                 repoProxmoxNotice: 'Примечание: из-за перехода Proxmox на новый формат источников отображение сейчас может быть неточным. Мы над этим работаем.',
                 requiresSubscription: 'Нужна подписка',
@@ -103580,17 +103486,14 @@
                 updateLogs: 'Журналы обновления',
                 started: 'Запущено',
 
-                // VM Detail buttons
                 configuration: 'Конфигурация',
 
-                // Config Modal
                 cpuCores: 'Ядра CPU',
                 cpuLimit: 'Лимит CPU',
                 memory: 'Память (RAM)',
                 hardware: 'Оборудование',
                 disks: 'Диски',
 
-                // Config Modal Tabs
                 mountIso: 'Подключить ISO',
                 noMedia: 'Нет носителя',
                 noIsoEject: 'Без ISO (извлечь)',
@@ -103741,12 +103644,10 @@
                 fstrim: 'FSTRIM после клонирования/миграции',
                 fstrimHint: 'Автоматически выполнять TRIM после клонирования',
 
-                // More modals
                 optional: 'необязательно',
                 snapshotDescription: 'Описание снапшота...',
                 saveRamState: 'Сохранить состояние RAM (гибернация)',
 
-                // NS: Feb 2026 - Efficient snapshot translations
                 spaceEfficientSnapshot: 'Экономный снапшот',
                 spaceEfficientSnapshots: 'Экономные снапшоты',
                 snapshotMode: 'Режим снапшота',
@@ -103900,7 +103801,6 @@
                 regionEU: 'Стандарты ЕС / DACH',
                 regionUS: 'Оборонные / федеральные стандарты США',
                 downloadReport: 'Скачать отчёт (PDF)',
-                // Compliance PDF (MK Apr 2026 — restructured framework reports)
                 complianceReport: 'Отчёт о соответствии',
                 coverageSummary: 'Сводка покрытия',
                 property: 'Свойство',
@@ -103953,7 +103853,6 @@
                 limitationsDesc: 'Только техническая конфигурация. Средства контроля стандартов включают также политики, обучение, физическую безопасность, реагирование на инциденты и документированные процедуры, которые здесь не оцениваются.',
                 selectClusterFirst: 'Сначала выберите кластер',
                 complianceMappingLoadFail: 'Не удалось загрузить сопоставление соответствия',
-                // Audit-grade PDF (MK Apr 2026)
                 complianceAssessmentReport: 'Отчёт об оценке соответствия',
                 subjectOrg: 'Субъект',
                 frameworkRevision: 'Редакция стандарта',
@@ -104296,7 +104195,6 @@
                 connecting: 'Подключение...',
                 needsRestart: 'НУЖЕН ПЕРЕЗАПУСК',
 
-                // NS: Alerts, Tasks, Tags, Affinity - Dec 2025
                 alerts: 'Оповещения',
                 alertsDesc: 'Уведомления по e-mail при превышении порогов',
                 createAlert: 'Создать оповещение',
@@ -104368,7 +104266,6 @@
                 noOutput: 'Вывода нет',
                 output: 'Вывод',
 
-                // CIS Hardening
                 hardenNode: 'Усиление ноды PVE',
                 hardenDesc: 'Применяйте средства усиления CIS Benchmark к отдельным нодам PVE по SSH.',
                 hardenCisRef: 'На основе CIS Benchmark, аудита безопасности Lynis и руководств DoD STIG',
@@ -104476,7 +104373,6 @@
                 cisFilePerms: 'Права на системные файлы',
                 cisFilePermsDesc: 'Задаёт правильные права на /etc/passwd, /etc/shadow, /etc/group, /etc/gshadow',
                 cisFilePermsImpact: 'Без влияния: стандартное усиление Linux',
-                // Lynis
                 lynDns: 'Резервный DNS-сервер',
                 lynDnsDesc: 'Обеспечивает хотя бы 2 DNS-сервера для избыточности (настраивается)',
                 lynDnsImpact: 'Защищает от сбоев DNS',
@@ -104535,7 +104431,6 @@
                 lynTmpdir: 'Отдельный /tmp для каждой сессии',
                 lynTmpdirDesc: 'Создаёт изолированные временные каталоги для каждой сессии пользователя, защищая от атак через гонки в /tmp',
                 lynTmpdirImpact: 'Нет: затрагивает только интерактивные сессии',
-                // STIG (DoD)
                 stigRecommendations: 'Руководства',
                 stigSession: 'Лимит одновременных сессий',
                 stigSessionDesc: 'Ограничивает каждого пользователя 10 одновременными сессиями. Root исключён ради операций кластера.',
@@ -104562,7 +104457,6 @@
                 stigAuditLockDesc: 'Блокирует конфигурацию аудита флагом -e 2. Правила нельзя изменить без перезагрузки, поэтому атакующий не сможет отключить аудит.',
                 stigAuditLockImpact: 'Для изменения правил аудита нужна перезагрузка',
 
-                // PegaProx Recommendations
                 pegaApparmor: 'AppArmor (мандатный контроль доступа)',
                 pegaApparmorDesc: 'Включает AppArmor и применяет все профили. Ограничивает доступ программ даже при их компрометации: дополнительный уровень защиты поверх обычных прав на файлы.',
                 pegaApparmorImpact: 'Для стандартного PVE нет; своим службам могут понадобиться профили',
@@ -104588,7 +104482,6 @@
                 enforceRule: 'Принудительно применять',
                 enforceRuleHint: 'Блокировать миграции, нарушающие это правило',
 
-                // Console Settings - NS Jan 2026
                 consoleSettings: 'Порты консоли',
                 vncPort: 'Порт VNC',
                 shellPort: 'Порт Shell',
@@ -104627,7 +104520,6 @@
                 migrationHistory: 'История миграций',
                 noMigrationHistory: 'Миграций не записано',
 
-                // LW: Password expiry settings
                 passwordExpiry: 'Срок действия пароля',
                 passwordExpiryDesc: 'Заставлять пользователей менять пароль через заданное число дней.',
                 passwordExpiryHint: 'Пользователи получают напоминания на почту за 14, 7, 3 и 1 день до истечения. В интерфейсе показывается баннер. Для писем нужно настроить SMTP.',
@@ -104635,7 +104527,6 @@
                 expiryDays: 'Пароль истекает через',
                 warningDays: 'Предупреждать пользователей за',
 
-                // LW: Password expiry banner
                 passwordExpired: 'Срок действия вашего пароля истёк!',
                 passwordExpiresIn: 'Ваш пароль истекает через {days} дн.',
                 pleaseChangeNow: 'Пожалуйста, смените его сейчас.',
@@ -104643,7 +104534,6 @@
                 changePassword: 'Сменить пароль',
                 dismissForNow: 'Напомнить позже',
 
-                // LW: Reset all passwords - Dec 2025
                 forcePasswordReset: 'Принудительный сброс паролей',
                 forcePasswordResetDesc: 'Немедленно сделать пароли всех пользователей просроченными. Используйте после инцидентов безопасности.',
                 resetAllPasswords: 'Сбросить все',
@@ -104654,7 +104544,6 @@
                 includeAdminsInExpiry: 'Включая учётные записи администраторов',
                 includeAdminsInExpiryDesc: 'Администраторам тоже придётся регулярно менять пароли',
 
-                // Theme System - NS Jan 2026
                 appearance: 'Внешний вид',
                 themeDesc: 'Выберите цветовую тему интерфейса',
                 themeNote: 'Тема применяется сразу и сохраняется в вашей учётной записи.',
@@ -104665,8 +104554,6 @@
                 currentDefault: 'Сейчас по умолчанию',
                 themeInProfile: 'Смените тему в «Мой профиль» (нажмите на имя пользователя справа вверху)',
 
-                // UI Layout - LW Jan 2026
-                // LW: Feb 2026 - Layout Style (Modern vs Corporate)
                 layoutStyle: 'Стиль интерфейса',
                 layoutStyleDesc: 'Выберите современный дашборд или корпоративный стиль.',
                 layoutModern: 'Современный',
@@ -104677,7 +104564,6 @@
                 layoutSelectionDesc: 'Выберите удобный стиль интерфейса. Его можно сменить в любой момент в «Мой профиль → Стиль интерфейса».',
                 layoutSelectionHint: 'Сменить можно в любой момент в «Мой профиль → Стиль интерфейса»',
                 topologyView: 'Топология',
-                // MK May 2026 — worldmap (offline cluster geo-view)
                 worldMap: 'Карта мира',
                 worldMapHint: 'Расположение кластеров',
                 sidebarToolsSection: 'Инструменты',
@@ -104833,7 +104719,6 @@
                 pbsNoLogOutput: 'Журнал пуст',
                 pbsPrunePermanentWarning: "Внимание: копии, не подходящие под политику хранения, будут удалены безвозвратно!",
                 breadcrumbAll: 'Все',
-                // TaskBar Settings - NS Feb 2026
                 taskbarAutoExpand: 'Авторазворачивание панели задач',
                 showVmidSidebar: 'Показывать ID VM в боковой панели',
                 showVmidSidebarDesc: 'Показывать VMID рядом с именем гостя в дереве боковой панели',
@@ -104844,7 +104729,6 @@
                 taskbarAutoExpandDisabled: 'Авторазворачивание панели задач выключено',
                 dragToResize: 'Перетащите, чтобы изменить размер',
                 userColumnHint: 'Показывает пользователя PegaProx, если он есть, иначе пользователя Proxmox',
-                // LW: Support Bundle translations - Feb 2026
                 support: 'Поддержка',
                 supportBundle: 'Пакет для поддержки',
                 supportBundleDesc: 'Создать диагностический пакет с журналами, конфигурацией и сведениями о системе для разбора проблем. Чувствительные данные (пароли, токены, секреты) автоматически скрываются.',
@@ -104869,7 +104753,6 @@
                 documentation: 'Документация',
                 releases: 'Релизы',
                 quickSystemInfo: 'Краткие сведения о системе',
-                // MK: Storage Rescan translations - Feb 2026
                 rescan: 'Пересканировать',
                 rescanningStorage: 'Пересканирование хранилища...',
                 storageRescanSuccess: 'Пересканирование хранилища завершено',
@@ -104908,7 +104791,6 @@
                 snapshotsAge: 'Возраст',
                 snapshotsAction: 'Действие',
                 noSnapshots: 'Снапшоты не найдены',
-                // topology: affinity/legend/search keys — NS Apr 2026
                 filterNodesVms: 'Фильтр нод или VM…',
                 toggleAffinityEdges: 'Показать / скрыть связи правил affinity',
                 affinity: 'Affinity',
@@ -105096,7 +104978,6 @@
                 backupInventory: 'Инвентарь копий',
                 firstDetected: 'Впервые обнаружено',
                 noFix: 'нет исправления',
-                // sysadmin extras (May 2026)
                 backupRunning: 'Резервное копирование запущено',
                 apiHealth: 'Состояние API',
                 compare: 'Сравнить',
@@ -105172,7 +105053,6 @@
                 shortcutsHint: 'Нажмите ? для списка горячих клавиш',
                 themeToggle: 'Переключить тему',
                 clusterHealthSshMissing: 'Для «Здоровья кластера» PegaProx нужен доступ к ноде по SSH (corosync-cfgtool, pvecm, systemctl). Настройте SSH-учётные данные Node-Shell кластера и обновите.',
-                // MK + LW 2026-05-31 — rollups (per-tag / per-pool)
                 rollups: 'Сводки',
                 pools: 'пулы',
                 byTag: 'По тегу',
@@ -105180,14 +105060,12 @@
                 tag: 'Тег',
                 noGroupings: 'VM пока не сгруппированы.',
                 rollupsHint: 'VM с несколькими тегами учитываются в сводке каждого тега. CPU: сумма мгновенных %; RAM/диск: суммарная доля заполнения; сетевой I/O: накопленный с запуска VM.',
-                // MK + LW 2026-05-31 — sensors panel
                 sensors: 'Датчики',
                 sensor: 'Датчик',
                 sensorsHint: 'Аппаратные датчики через lm-sensors. Красные ячейки превышают критический порог, жёлтые превышают максимум.',
                 temperatureC: 'Температура (°C)',
                 tempHistoryTitle: 'Температура во времени (самый горячий датчик)',
                 samples: 'замеров',
-                // NS 2026-07-15 — hardware monitoring (#609)
                 hardwareMonitoring: 'Мониторинг оборудования',
                 hardwareMonitoringDisabledDesc: 'Внутриполосный мониторинг оборудования (IPMI) не включён. Он читает датчики, питание, инвентарь и журнал аппаратных событий прямо на ноде, без учётных данных, только чтение.',
                 enableHardwareMonitoring: 'Включить мониторинг оборудования',
@@ -105209,13 +105087,11 @@
                 powerDraw: 'Потребление',
                 partNumber: 'Артикул',
                 chassisIntrusion: 'Вскрытие корпуса',
-                // NS 2026-07-16 — hardware alerting / cluster rollup (#609 phase 2)
                 hardwareHealth: 'Здоровье оборудования',
                 degradedHardware: 'Неисправное оборудование',
                 hwAlertWarnPlus: 'Предупреждение и хуже',
                 hwAlertCritOnly: 'Только критические',
                 clustersDegradedHwNamed: 'Кластеров с неисправным оборудованием: {count}: {names}',
-                // NS 2026-07-16 — out-of-band Redfish (#609 phase 3)
                 redfishOob: 'Внеполосный (Redfish)',
                 redfishOobDesc: 'Чтение состояния оборудования по сети управления через Redfish API BMC: внеполосный запасной вариант с учётными данными, когда внутриполосный IPMI недоступен.',
                 redfishBmcHint: 'Адрес BMC этой ноды. Пароль хранится зашифрованным и больше не показывается.',
@@ -105229,18 +105105,15 @@
                 bmcTestFail: 'Ошибка',
                 bmcSaved: 'Адрес BMC сохранён',
                 bmcRemoved: 'Адрес BMC удалён',
-                // MK + LW 2026-05-31 — cluster health panel
                 configVersion: 'Конфигурация v',
                 corosyncRings: 'Кольца Corosync',
                 address: 'Адрес',
                 services: 'Службы',
-                // MK + LW 2026-05-31 — guest-agent enrichment
                 guestDetail: 'Сведения о госте',
                 loggedInUsers: 'Вошедшие пользователи',
                 clockSkew: 'Расхождение часов',
                 filesystems: 'Файловые системы',
                 interfaces: 'Интерфейсы',
-                // MK + LW 2026-05-31 — monitoring expansion strings (Top Talkers / Interface Statistics / SMART)
                 topTalkers: 'Самые активные',
                 topTalkersHint: 'CPU/RAM/диск: мгновенные значения; дисковый и сетевой I/O накоплены с запуска VM (активные VM сверху).',
                 cpuPercent: 'CPU %',
@@ -105253,7 +105126,6 @@
                 errOrDropHint: 'Ненулевые ошибки / потери RX/TX выделены красным. Счётчики накоплены с загрузки.',
                 keyAttributes: 'Ключевые атрибуты',
                 allAttributes: 'Все атрибуты',
-                // reasons of the migration preflight and the what-if verdict, the maintenance dialog - NS Oct 2026
                 pf_affinity: 'Правило affinity «{rule}» не пускает её на {node}',
                 pf_affinity_soft: 'Правило affinity «{rule}» (не принудительное){detail}',
                 pf_affinity_unread: 'Не удалось проверить правила affinity',
@@ -105369,10 +105241,8 @@
                 maintDlgAck: 'Я понимаю, всё равно включить обслуживание',
                 maintDlgEnable: 'Включить обслуживание',
                 maintDlgMore: 'и ещё {n}',
-                // LW Oct 2026 - SMTP: check the mail server certificate
                 smtpVerifyTls: 'Проверять сертификат сервера',
                 smtpVerifyTlsWarning: 'Сертификат почтового сервера не проверяется. Любой на сетевом пути может выдать себя за сервер и прочитать пароль SMTP и все письма. Отключайте только для релея с самоподписанным сертификатом в доверенной сети.',
-                // LW Oct 2026 (#1189) - interface defaults (layout and language lock)
                 uiLockTitle: 'Настройки интерфейса по умолчанию',
                 uiLockDesc: 'Закрепить макет или язык для всех пользователей. Их собственный выбор сохраняется и вернётся, когда здесь снова будет выбрано «Пользователи выбирают сами».',
                 uiLockLayout: 'Макет для всех',
@@ -105382,7 +105252,6 @@
                 uiLockAdminsHint: 'Если не включено, на администраторов это не распространяется.',
                 uiLayoutLockedHint: 'Макет задан вашим администратором',
                 uiLanguageLockedHint: 'Задано вашим администратором',
-                // LW Oct 2026 - custom hardening profiles (Harden PVE Node, Compliance Dashboard)
                 hpCustomProfiles: 'Свои профили',
                 hpCustomProfile: 'Свой профиль',
                 hpManage: 'Управление профилями',
@@ -105420,7 +105289,6 @@
                 hpOther: 'Прочее',
                 hpStoredDropped: 'Сохранённые проверки, которых нет в этой версии, пропущены: {ids}',
                 hpDroppedNote: 'Проверки этого профиля, которых нет в этой версии, пропущены: {ids}',
-                // LW Oct 2026 - Corporate Layout - Redesigned
                 layoutCorporateRedesigned: 'Corporate Redesigned',
                 corpClassicDeprecated: 'Классический корпоративный макет устарел: теперь он получает только исправления и в одном из следующих выпусков будет заменён на Corporate Redesigned. Вернуться можно в разделе «Мой профиль».',
                 corpClassicSwitchNow: 'Переключить сейчас',
@@ -105446,7 +105314,6 @@
                 crNothingToShow: 'Нечего показать',
                 crNoMatch: 'Ничего не подходит под фильтр',
                 crLoadFailed: 'Не удалось загрузить список',
-                // LW Oct 2026 - Corporate Redesigned: dashboard, object views and charts
                 crSummary: 'Сводка по инфраструктуре',
                 crNOffline: '{n} не в сети',
                 crAllOnline: 'все в сети',
@@ -105487,7 +105354,6 @@
                 crDiskIo: 'Дисковый ввод-вывод',
                 crRead: 'Чтение',
                 crWrite: 'Запись',
-                // LW Oct 2026 - Corporate Redesigned: topology, compliance, the modules
                 crTopoScope: 'Кластеров: {clusters}, нод: {nodes}, гостей: {guests}',
                 crTopoScopeOne: 'Нод: {nodes}, гостей: {guests}',
                 crTopoSearch: 'Найти ноду, гостя или VMID',
@@ -105546,7 +105412,6 @@
                 crUserMenu: 'Меню пользователя',
                 crCollapseNamed: 'Свернуть {name}',
                 crExpandNamed: 'Развернуть {name}',
-                // LW Oct 2026 - Corporate Redesigned: the task center
                 crTaskCompleted: 'Завершено',
                 crTaskScope: 'Область',
                 crTaskScopeCluster: 'Этот кластер',
@@ -105577,7 +105442,6 @@
                 crTaskWaiting: 'Ожидают {n} из {total}',
                 crTaskWarnedN: 'С предупреждениями: {n}',
                 crTaskResize: 'Изменить размер списка задач (стрелки)',
-                // LW Oct 2026 - Corporate Redesigned: the datastores
                 crDsFilter: 'Фильтр по имени, типу или ноде',
                 crDsProblems: 'Проблемы',
                 crDsProblemsHint: 'Только хранилища, которые недоступны, видны не со всех нод или заполнены больше чем на 80%',
@@ -105606,7 +105470,6 @@
                 crDsCtIso: 'Образ ISO',
                 crDsCtVztmpl: 'Шаблон контейнера',
                 crDsCtSnippets: 'Сниппет',
-                // LW Oct 2026 - Corporate Redesigned: config drift, the side panel
                 crDriftRiskOverview: "Обзор рисков",
                 crDriftOpenFindings: "Открытые замечания",
                 crDriftOpenWord: "открыто",
@@ -105754,7 +105617,6 @@
                 crDriftBaselineHint: "Сохраняет текущее состояние каждого объекта как новый эталон. Открытые отклонения отмечаются как заменённые; нарушения политик и инциденты остаются.",
                 crDriftBaselineNote: "Эталон сброшен. Объектов сохранено как новый эталон: {n}.",
                 crDriftBaselineKept: "Не прочитаны, поэтому сохраняют старый эталон ({kinds}): {n}.",
-                // LW Oct 2026 - Corporate Redesigned: storage balancing, the datastore gaps
                 crStoreThresholds: "Цвета хранилищ: предупреждение от {warn}%, критично выше {crit}%",
                 crStoreProblemsHint: "Только хранилища, которые недоступны, видны не со всех нод или заполнены на {warn}% и больше",
                 crStoreHealthUnreported: "Состояние не сообщено",
@@ -105913,7 +105775,6 @@
                 crSbRiskNode: "{target} не подключено на {node}, где работает гость.",
                 crSbRiskRunning: "Гость запущен: PVE копирует диск во время работы, что добавляет нагрузку на ввод-вывод до завершения.",
                 crSbRiskNoGuest: "Гостя нет в видимом вам здесь инвентаре.",
-                // LW Oct 2026 - Corporate Redesigned: the summary of a VM or container
                 crVmHealth: "Рабочее состояние",
                 crVmHealthFoot: "В каждой строке указано, на чём она основана и когда прочитана. Отклонённое, неудачное или не выполненное чтение считается неизвестным, а не исправным. Строки не складываются в общую оценку.",
                 crVmCountsHint: "Строк по состояниям. «Неизвестно» включает все строки, которые не прочитаны, не загружены или не разрешены.",
@@ -106140,7 +106001,6 @@
                 crVmDiskQemuHint: "Заполненность по данным гостевого агента; без агента Proxmox не сообщает заполненность диска VM.",
                 crVmDiskCtHint: "Заполненность корневого диска по данным Proxmox.",
                 crVmFromList: "из списка гостей",
-                // LW Oct 2026 - Corporate Redesigned: the Reports summary and Infrastructure Insights
                 crRpTitle: "Отчёт по кластеру",
                 crRpKpis: "Ключевые показатели",
                 crRpRange6h: "6 ч",
@@ -106314,7 +106174,6 @@
                 crInsNoGuests: "В выбранной области нет гостей",
                 crInsNoTags: "Ни у одного гостя нет тегов: все гости попадают в «(без тега)».",
                 crInsRollupBasis: "По спискам гостей, которые уже есть на этой странице (гостей: {n}). Гость с несколькими тегами считается в каждом из них, поэтому сумма строк больше числа гостей. Шаблоны считаются остановленными гостями.",
-                // LW Oct 2026 - Corporate Redesigned: what-if, the capacity panel, the module links
                 crWiView: "Вид",
                 crWiViewRanking: "Единые точки отказа",
                 crWiIntro: "Моделирует отказ или обслуживание на основе конфигурации и нагрузки, которые ноды сообщают сейчас. Только читает и ничего не меняет; результат - расчёт, а не измерение.",
@@ -106442,7 +106301,6 @@
                 crVmOpenDrift: "Расхождения конфигурации",
                 crVmOpenDriftTitle: "Соответствие > Обнаружение расхождений конфигурации этого кластера. Здесь ничего из этого не учитывается",
                 crInsWhatIfTitle: "Смоделировать отказ в этом кластере (Отчёты > Что если)",
-                // LW Oct 2026 - Corporate Redesigned: the fixes of the round 3 review
                 crBoundaryTitle: "Этот вид не удалось отрисовать",
                 crBoundaryHint: "Ответ сервера имел форму, которую эта страница не ожидает. Остальной PegaProx продолжает работать.",
                 crVmHaDisagree: "Списки расходятся",
@@ -106467,7 +106325,6 @@
                 crDriftTokensUncounted: "Сервер не сообщает, сколько API-токенов он прочитал: проверка считается пройденной и тогда, когда в кластере нет токенов.",
                 crInsUntagged: "(без тега)",
                 crInsNoPool: "(без пула)",
-                // LW Nov 2026 - Corporate Redesigned: Automation > Harden PVE Node
                 crHdAccess: "SSH / вход",
                 crHdAccessHint: "Меняет доступ по SSH или вход: перед применением нужно отметить подтверждение доступа",
                 crHdLoginHint: "Может отрезать учётные записи (пустые пароли, лимит сеансов, неактивные учётные записи или блокировки)",
@@ -106655,7 +106512,6 @@
                 crAlFoot: "«Скрыть» только прячет строку здесь; ничего не подтверждается и ничего не меняется на сервере. Активные оповещения читаются только для выбранного кластера.",
                 crTcNotRead: "ещё не прочитано",
                 crTcSince: "с {time}",
-                // LW Nov 2026 - Datacenter > Summary of the preview
                 crDcStatusArea: "Состояние кластера",
                 crDcInventory: "Ноды, гости и ресурсы",
                 crDcConnection: "Подключение",
@@ -106801,7 +106657,6 @@
                 crDcInfraRules: "Критично: потеря кворума, неподключённый кластер, ноды не в сети, критическое состояние оборудования, CPU или RAM выше {crit}%, хранилище выше {scrit}%. Предупреждение: деградация оборудования, CPU или RAM выше {warn}%, хранилище от {swarn}%. Активные оповещения перечислены ниже и в этот вердикт не входят.",
                 crDcVotesMismatch: "Не совпадает с состоянием кластера (параметры corosync считают иначе): прочитайте голоса с ноды.",
                 crDcLocalShort: "Локальное",
-                // LW Nov 2026 - Automation > Updates of the preview
                 crUpdTab: "Обновления",
                 crUpdIntro: "Обновления пакетов на нодах этого кластера. Проверка обновляет списки пакетов на нодах и ничего не устанавливает; пакеты устанавливаются только поэтапным обновлением, которое вы запускаете или планируете здесь.",
                 crUpdRefresh: "Обновить",
@@ -107083,7 +106938,6 @@
                 crUpdGuestsText: "PegaProx не читает состояние пакетов внутри виртуальных машин и контейнеров: для этого пришлось бы выполнять команду в каждом госте. Здесь лучше ничего не показывать, чем гадать.",
                 crUpdLinkText: "В этом макете у менеджера обновлений своя вкладка «Обновления» рядом с «Настройками». Её открытие читает последнюю проверку и ничего не запускает.",
                 crUpdLinkOpen: "Открыть «Обновления»",
-                // LW Nov 2026 - Corporate Redesigned: the performance metrics of a node and a guest
                 crPfKpis: "Ключевые показатели",
                 crPfAgoS: "{n} с назад",
                 crPfAgoM: "{n} мин назад",
@@ -107208,7 +107062,6 @@
                 crPfThisGuest: "этим гостем",
                 crPfNotCollectedNode: "Не собирается ни одним источником, который читает PegaProx: CPU steal, кэшированная и буферная память, доступная память ядра, IOPS дисков, задержка дисков, пропускная способность дисков ноды, пакеты, ошибки и отбросы во времени, а также средняя нагрузка за 5 и 15 минут во времени.",
                 crPfNotCollectedGuest: "Не собирается ни одним источником, который читает PegaProx: CPU steal, ожидание I/O, swap, кэшированная и буферная память, IOPS дисков, задержка дисков, а также пакеты, ошибки и отбросы.",
-                // LW Nov 2026 - stage X of the preview: what the review of round 4 found
                 crHdRiskMaint: "{node} в режиме обслуживания: так сейчас говорит список нод. Маршруты применения и отката это не проверяют.",
                 crHdRiskUpdating: "На {node} сейчас выполняется обновление (поэтапное или обновление ноды): изменение здесь может с ним столкнуться.",
                 crHdRiskOffline: "{node} не в сети по списку нод: запрос, скорее всего, не выполнится.",
@@ -107239,7 +107092,6 @@
                 crAlAckedN: "Подтверждено: {n}",
                 crAlMutedN: "Заглушено: {n}",
                 crAlCountedToo: "Учтено вместе с ними: {what}.",
-                // LW Nov 2026 - Corporate Redesigned: the configuration dialog of a QEMU VM (cr_vmcfg.js)
                 crVc1Change: "1 изменение",
                 crVcNChanges: "Изменений: {n}",
                 crVc1Restart: "1 требует перезапуска",
@@ -107367,7 +107219,6 @@
                 crVcOther: "Другие настройки",
                 crVcOtherHint: "Заданы у этой VM, но в этом диалоге для них нет поля. Показаны как сохранены; при сохранении остаются как есть.",
                 crVcOtherNone: "У каждой настройки этой VM есть поле в этом диалоге.",
-                // LW Nov 2026 - round 5, the Hardware tab of a QEMU VM in Corporate Redesigned
                 crVc1Note: "1 примечание",
                 crVcNNotes: "Примечаний: {n}",
                 crVcNotes: "Проверьте перед сохранением",
@@ -107671,7 +107522,6 @@
                 crVcTipHot_memory: "Память можно добавлять во время работы VM. Нужна NUMA. Включение или выключение вступает в силу при следующем запуске.",
                 crVcTipHot_cpu: "vCPU можно добавлять во время работы VM, до сокеты x ядра. Включение или выключение вступает в силу при следующем запуске.",
                 crVcTipHot_cloudinit: "Изменение настроек cloud-init пересобирает диск cloud-init работающей VM.",
-                // LW Nov 2026 - round 6: the network of a node in Corporate Redesigned
                 crNnGroupPhysical: "Физические",
                 crNnGroupBond: "Bond",
                 crNnGroupBridge: "Мост",
@@ -107764,7 +107614,6 @@
                 crNnListNotRead: "не удалось прочитать список интерфейсов",
                 crNnListEmpty: "В ответе нет интерфейсов.",
                 crNnDeps: "Зависимости",
-                // LW Nov 2026 - round 6: hardware health and disks of a node in Corporate Redesigned
                 crNhStCritical: "Критично",
                 crNhStCriticalHint: "На уровне предела Critical, сообщённого датчиком, или выше, либо контроллер сообщает критическое состояние",
                 crNhStAlarm: "Тревога",
@@ -107910,7 +107759,6 @@
                 crNdTypeUnknown: "тип не сообщён",
                 crNdSizeUnknown: "размер не сообщён",
                 crNdSmart: "SMART",
-                // LW Nov 2026 - round 6: summary, tasks and guests of a node in Corporate Redesigned
                 crNsTitle: "Состояние ноды",
                 crNsOvCritical: "Критично",
                 crNsOvWarning: "Предупреждение",
@@ -107995,7 +107843,6 @@
                 crNgCpuHint: "{v} % от его {n} vCPU",
                 crNgMemHint: "{v} % от его памяти",
                 crNgEmpty: "В списке ресурсов нет гостей {node}.",
-                // LW Nov 2026 - round 7: the configuration of a node in the preview (cr_nodecfg.js)
                 crNcHealthDesc: "Текущая нагрузка и ёмкость ноды, а также то, что требует внимания.",
                 crNcNetDesc: "Интерфейсы по видам, из чего каждый состоит, и изменения, ожидающие «Применить».",
                 crNcSysDesc: "Что нода сообщила в своей сводке, адрес, который PegaProx для неё использует, и её интерфейсы.",
@@ -108111,7 +107958,6 @@
                 crNcSyslogCount: "Строк: {n}",
                 crNcSyslogShown: "{n} из {m} строк",
                 crNcSyslogNoMatch: "Ни одна строка не подходит под фильтр.",
-                // LW Nov 2026 - round 7: storage, repositories and Ceph of a node in the preview (cr_nodestore.js)
                 crNvDisksDesc: "Физические диски этой ноды с состоянием, износом и тем, что их использует. SMART читается для каждого диска по запросу.",
                 crNvUsedOf: "Занято {used} из {total} ({pct}%)",
                 crNvAllocOf: "Выделено {used} из {total} ({pct}%)",
@@ -108215,13 +108061,11 @@
                 crNxUsedPct: "Занято, %",
                 crNcUpdating: "Повторное чтение...",
                 crNcUpdatingTitle: "Идёт новое чтение ноды. Пока оно не вернётся, карточка показывает значения последнего чтения.",
-                // LW Nov 2026 - one rule set for the preview: node count, a status without nodes, balancing members
                 crNodesUncounted: "Не учтено кластеров: {n}",
                 crNodesUncountedHint: "Кластеры, состояние которых ещё не пришло или вернулось без единой ноды, в этот подсчёт не входят.",
                 crNodesNotRead: "Не прочитано",
                 crNodesNotReadHint: "Состояние вернулось без единой ноды: Proxmox VE не передал состояние кластера. Его ноды не учитываются, а гости и ресурсы учитываются.",
                 crSbStateLocal: "Не общих: {n}",
-                // LW Nov 2026 - decisions before the push: live VM changes, network Apply, certificate upload, unsaved edits, repositories
                 crVcWhyDiskWritten: "Настройки диска, например резервное копирование или репликация, сразу записываются в конфигурацию; работающий диск не затрагивается.",
                 crNnApplyTypeName: "Введите имя ноды {node}, чтобы подтвердить, что вы проверили изменения и знаете об отсутствии автоматического отката.",
                 crNnApplyListFailed: "Не удалось прочитать список интерфейсов {node}, поэтому этот диалог не может показать, что затронет «Применить». «Применить» недоступно, пока список не прочитан.",
@@ -108231,7 +108075,6 @@
                 crNcLeaveKeep: "Продолжить редактирование",
                 crNcLeaveDiscard: "Отменить и продолжить",
                 crNrAbsentNoSwitch: "Нода отказывается переключать запись, которой у неё нет, поэтому переключателя здесь нет. Сначала её нужно добавить в источники ноды.",
-                // LW Nov 2026 - timeline, shell and subscription of a node in Corporate Redesigned (cr_nodemisc.js)
                 crTlMore: "Что известно об этом событии",
                 crTlKind: "Вид",
                 crTlEvent: "Событие",
@@ -108272,7 +108115,6 @@
                 crSubHide: "Скрыть",
                 crSubFailed: "Не удалось прочитать подписку ноды: {why}",
                 crSubEmpty: "{node} не вернула данных о подписке.",
-                // LW Nov 2026 - the hardware inventory of a node (processor, memory, disk health, PCI) and the storage tables
                 crNvVg: "Группа томов",
                 crNvPool: "Пул",
                 crNvLvs: "Логические тома",
@@ -108325,7 +108167,6 @@
                 crNhPciCrypto: "Контроллер шифрования",
                 crNhPciAccel: "Ускоритель вычислений",
                 crNhIbCause: "Способствует",
-                // LW Nov 2026 - the Reports modules CVE Scanner, Cost Dashboard, Power & Carbon, Network Topology and API Health
                 crMdReadFailed: "Не удалось прочитать отчёт: {why}",
                 crMdStale: "Последнее чтение в {time} не вернулось ({why}): показатели более ранние.",
                 crMdStaleShort: "Последнее обновление не вернулось ({why}): показатели из предыдущего чтения.",
@@ -108479,7 +108320,6 @@
                 crNetUnlinkedDesc: "В их сетевой конфигурации не указан ни мост их ноды, ни VNet, или её не удалось прочитать.",
                 crNetShow: "Показать",
                 crNetHide: "Скрыть",
-                // LW Nov 2026 - one node or one backup server upgraded on its own, the security class from a CVE scan of the session
                 crUpdIntroHosts: "Обновления пакетов на нодах этого кластера и на серверах резервного копирования в его проверке. Проверка обновляет списки пакетов и ничего не устанавливает; пакеты устанавливаются поэтапным обновлением, которое вы запускаете или планируете здесь, либо обновлением одной ноды или одного сервера резервного копирования из его строки.",
                 crUpdJobStarting: "Запуск",
                 crUpdJobUpdating: "Обновление",
@@ -108527,7 +108367,6 @@
                 crUpdSecFromScan: "Обновления безопасности: из проверки CVE этого сеанса в {time} (ответили {ok} из {n} нод).",
                 crUpdSecNoScan: "Обновления безопасности: в списке обновлений Proxmox VE нет набора. Сканер CVE читает его по каждой ноде (один сеанс SSH на ноду, только по его кнопке); результат показывается здесь на этот сеанс.",
                 crUpdOpenCve: "Открыть сканер CVE",
-                // LW Nov 2026 - Resources > Snapshot overview
                 crSnapIntro: "Самые старые снапшоты всех гостей этого кластера, читаются при открытии вкладки. Выберите строки, чтобы удалить несколько сразу.",
                 crSnapSel: "Выбрать",
                 crSnapSelAll: "Выбрать все",
@@ -108554,7 +108393,6 @@
                 crSnapNoneBefore: "Снапшотов, созданных до {date}, нет.",
                 crSnapFoot: "Удаление спрашивает подтверждение, прежде чем что-либо удалить. Гостя, список снапшотов которого не удалось прочитать, сервер молча пропускает.",
                 crSnapFootRead: "Для удаления снапшотов нужно право vm.snapshot. Гостя, список снапшотов которого не удалось прочитать, сервер молча пропускает.",
-                // LW Nov 2026 - Automation > Affinity rules
                 crAffIntro: "Держать гостей на одной ноде или раздельно на разных нодах. Правила этого кластера, читаются при открытии вкладки.",
                 crAffRule: "Правило",
                 crAffEnforce: "Принудительно",
@@ -108565,7 +108403,6 @@
                 crAffDelFailed: "Правило {name} не удалено: сервер отказал или не ответил.",
                 crAffFoot: "«Удалить» удаляет правило сразу, без вопросов, как во всех макетах.",
                 crAffFootRead: "На резервном экземпляре правила только показываются: изменяет их активный экземпляр.",
-                // LW Nov 2026 - round 10: disk and storage actions of a node, the affinity delete confirmation
                 crAffFootAsk: "«Удалить» сначала спрашивает, показывая правило, его тип и гостей.",
                 crAffDelTitle: "Удалить правило привязки {name}?",
                 crAffDeleting: "Удаление...",
@@ -108645,7 +108482,6 @@
                 crDoBack: "Назад",
                 crDoCreate: "Создать",
                 crDoCreating: "Создание...",
-                // LW Nov 2026 - round 11: Restore tests of a cluster in Corporate Redesigned
                 crRtAssurFailed: "Не удалось прочитать гарантию восстановления ({reason}): подтверждения, критические гости и пробелы не сообщаются.",
                 crRtAttention: "Требует внимания",
                 crRtBackupCount: "Найдено копий",
@@ -108753,7 +108589,6 @@
                 crRtSubWeekly: "в еженедельном запуске",
                 crRtUnknown: "Состояние неизвестно",
                 crRtWhen: "День и час",
-                // LW Nov 2026 - round 11: the Backup SLA of a cluster in Corporate Redesigned
                 crSlaAppliesAll: "Все VM и контейнеры этого кластера: одна цель для всех",
                 crSlaAppliesTo: "Применяется к",
                 crSlaAtRisk: "Под угрозой",
@@ -108843,7 +108678,6 @@
                 crSlaWhereNote: "Любое хранилище с содержимым резервных копий, которое не является сервером резервного копирования (local, NFS, CIFS и другие)",
                 crSlaWithBackup: "С копией",
                 crSlaZeroOff: "0 выключает SLA.",
-                // LW Nov 2026 - round 11: the ISO Sync of a cluster in Corporate Redesigned
                 crIsoActivityDesc: "Что этот сеанс браузера просил сервер скопировать, и последний результат, который хранит сервер.",
                 crIsoActivityTitle: "Активность синхронизации",
                 crIsoAllBusy: "Синхронизация всех недостающих файлов из этого сеанса ещё ждёт результатов",
