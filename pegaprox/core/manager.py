@@ -17347,8 +17347,9 @@ echo "AGENT_INSTALLED_OK"
             removed_devices = []
             
             for dev in devices:
-                # Check if device exists in config (net0 is always valid for QEMU)
-                if dev in config or (dev == 'net0' and vm_type == 'qemu'):
+                # Check if device exists in config. PVE refuses an order naming a device the
+                # config does not have (Qemu.pm, 'invalid bootorder'), a missing net0 as well
+                if dev in config:
                     valid_devices.append(dev)
                 else:
                     removed_devices.append(dev)

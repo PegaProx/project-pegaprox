@@ -85,3 +85,11 @@ def test_the_route_sends_the_cleaned_order_to_proxmox(api, seed):
     assert r.status_code == 200, r.get_data(as_text=True)
     assert r.get_json()['changed'] is True and r.get_json()['removed'] == ['ide2'], r.get_json()
     assert m._sent == [('PUT', f'{BASE}/qemu/100/config', {'boot': 'order=scsi0;net0'})]
+
+
+def test_a_net0_the_vm_does_not_have_leaves_the_boot_order_too():
+    """PVE refuses a boot order with a missing net0 as with any missing device, so it goes as well."""
+    m = _mgr({k: v for k, v in STALE.items() if k != 'net0'})
+    res = m.sanitize_boot_order('pve1', 100, 'qemu')
+    assert res['success'] is True and res['removed'] == ['ide2', 'net0'], res
+    assert m._sent == [('PUT', f'{BASE}/qemu/100/config', {'boot': 'order=scsi0'})]
