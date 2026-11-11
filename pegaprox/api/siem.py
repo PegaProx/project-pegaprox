@@ -120,7 +120,11 @@ def _current_user():
         return ''
 
 
-_SECRET_KEYS = ('token', 'password', 'api_key', 'apikey', 'secret', 'auth', 'authorization')
+# MK Nov 2026 - 'key' and the rest for the custom headers: X-API-Key, DD-API-KEY,
+# X-Insert-Key, Ocp-Apim-Subscription-Key, Cookie, X-Honeycomb-Team, X-Pass, X-Credential
+# and Signature carry the credential too. No settings field of a type has one of them.
+_SECRET_KEYS = ('token', 'password', 'api_key', 'apikey', 'secret', 'auth', 'authorization', 'key',
+                'cookie', 'pass', 'credential', 'signature', 'honeycomb')
 _MASK = '********'
 
 
