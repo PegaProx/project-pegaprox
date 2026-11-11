@@ -143,22 +143,23 @@ def test_esxi_reads_writes_and_the_keepalive_do_not_follow_a_redirect(net, code)
     endpoint = net.start(code, [
         (('POST', '/api/session'), _json(201, 'sess-1')),
         (('GET', '/api/vcenter/vm'), _json(200, [])),
-        (('POST', '/api/vcenter/vm/vm-1'), _json(200, {})),
     ])
     mgr = _esxi(endpoint.port)
     assert mgr.connect() is True, mgr.last_error
     errors = [mgr.api_get('/api/appliance/networking').get('error', ''),
               mgr.api_post('/api/content/library', {'x': 1}).get('error', ''),
               mgr.api_delete('/api/content/library/lib-2').get('error', '')]
-    # the CPU change lands, the notes PATCH after it is redirected
-    mgr.update_vm_config('vm-1', {'cpu_count': 2, 'notes': 'note-for-the-guest'})
+    # the config of a guest makes no call over REST, the API has none for it
+    assert mgr.update_vm_config('vm-1', {'cpu_count': 2, 'notes': 'note-for-the-guest'}) == {
+        'error': 'Configuration change requires SOAP/pyvmomi connection'}
     mgr._ping_session()
     assert net.target.seen == []
     # the version lookup during connect was redirected too: nothing of the target in server_info
     assert SECRET not in json.dumps(mgr.server_info)
     assert all('redirect' in e for e in errors), errors
     seen = [(m, p) for m, p, _ in endpoint.seen]
-    assert ('PATCH', '/api/vcenter/vm/vm-1') in seen and ('GET', '/api/session') in seen
+    assert ('GET', '/api/session') in seen
+    assert not [p for _m, p in seen if p.startswith('/api/vcenter/vm/vm-1')], seen
 
 
 def test_the_esxi_connection_test_hands_back_nothing_from_a_redirect(net, api, seed):
@@ -444,5 +445,6 @@ def test_every_request_of_the_esxi_client_refuses_redirects():
                 or name == 'ha_transport.http':
             flag = [k for k in node.keywords if k.arg == 'allow_redirects']
             calls.append((node.lineno, name, bool(flag) and ast.unparse(flag[0].value) == 'False'))
-    assert len(calls) >= 12
+    # 11 since the guest config over REST went, which had a call the API does not have
+    assert len(calls) >= 11
     assert [c for c in calls if not c[2]] == []

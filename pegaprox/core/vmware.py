@@ -738,8 +738,11 @@ class VMwareManager:
                 'vm': vm._moId,
                 'name': cfg.name if cfg else vm.name,
                 'power_state': str(runtime.powerState).replace('powered', 'POWERED_').upper() if runtime else 'UNKNOWN',
-                'cpu': {'count': cpu_count, 'sockets': sockets, 'cores_per_socket': cores_per_socket},
-                'memory': {'size_MiB': cfg.hardware.memoryMB if cfg and cfg.hardware else 0},
+                # hot_add_enabled as in the REST detail, the settings tab shows it
+                'cpu': {'count': cpu_count, 'sockets': sockets, 'cores_per_socket': cores_per_socket,
+                        'hot_add_enabled': bool(getattr(cfg, 'cpuHotAddEnabled', False))},
+                'memory': {'size_MiB': cfg.hardware.memoryMB if cfg and cfg.hardware else 0,
+                           'hot_add_enabled': bool(getattr(cfg, 'memoryHotAddEnabled', False))},
                 'guest_OS': cfg.guestFullName if cfg else '',
                 'guest_id': guest_id,
                 'hardware': {
@@ -1182,31 +1185,11 @@ class VMwareManager:
         """
         if self._connection_type == 'soap':
             return self._soap_update_vm_config(vm_id, config)
-        
-        # REST API approach
-        spec = {}
-        if 'cpu_count' in config:
-            spec['cpu'] = {'count': int(config['cpu_count'])}
-        if 'memory_mb' in config:
-            spec['memory'] = {'size_MiB': int(config['memory_mb'])}
-        if not spec:
-            return {'error': 'No configuration changes specified'}
-        
-        result = self.api_post(f'/api/vcenter/vm/{vm_id}', spec)
-        # REST PATCH for notes
-        if 'notes' in config and 'error' not in result:
-            from pegaprox.core import ha_transport
-            try:
-                url = f"{self._base_url}/api/vcenter/vm/{vm_id}"
-                resp = ha_transport.http(
-                    'PATCH', url,
-                    headers={**self._headers(), 'Content-Type': 'application/json'},
-                    json={'annotation': config['notes']},
-                    verify=self.ssl_verify, timeout=30, allow_redirects=False
-                )
-            except:
-                pass
-        return result if 'error' not in result else result
+        # MK Nov 2026 - the REST API has no call for this. The POST, and the notes PATCH after
+        # it, went to the VM itself, which takes neither (CPU and memory are PATCHes on
+        # .../hardware/cpu and .../hardware/memory, the notes are not in the REST model), and a
+        # notes-only edit was refused as no change at all. Same answer as update_vm_network.
+        return {'error': 'Configuration change requires SOAP/pyvmomi connection'}
     
     def _soap_update_vm_config(self, vm_id: str, config: dict) -> dict:
         """Update VM config via pyvmomi."""

@@ -311,7 +311,6 @@ EXITS = {
     ('pegaprox/core/vmware.py', 'VMwareManager.api_get', 'http-direct'): (2, 'read'),
     ('pegaprox/core/vmware.py', 'VMwareManager.api_post', 'http-guarded'): (2, 'guard'),
     ('pegaprox/core/vmware.py', 'VMwareManager.api_delete', 'http-guarded'): (1, 'guard'),
-    ('pegaprox/core/vmware.py', 'VMwareManager.update_vm_config', 'http-guarded'): (1, 'guard'),
     ('pegaprox/core/vmware.py', 'VMwareManager._ping_session', 'http-direct'): (1, 'read'),
     ('pegaprox/core/vmware.py', 'VMwareManager._connect_soap', 'soap'): (1, 'guard'),
     ('pegaprox/core/vmware.py', 'VMwareManager._connect_soap', 'socket'): (1, 'read'),
@@ -510,13 +509,14 @@ def test_the_inventory_counts_what_the_report_says():
         by[verdict] += n
     # S4 with the witness and the lease link, and the connection check, the three restarts
     # asking systemctl in one helper, the join fingerprint read through tls_fingerprint,
-    # the stored key's leg of _pve_node_exec:
-    # 257 calls out of this process, 152 (function, kind) pairs in 138 functions; 46 of
+    # the stored key's leg of _pve_node_exec, less the ESXi guest config over REST (the API
+    # has no such call):
+    # 256 calls out of this process, 151 (function, kind) pairs in 137 functions; 45 of
     # them guarded at the exit and 86 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 257 and len(EXITS) == 152
-    assert len({(f, q) for f, q, _k in EXITS}) == 138
-    assert by['guard'] == 46 and by['client'] == 86
+    assert sum(n for n, _v in EXITS.values()) == 256 and len(EXITS) == 151
+    assert len({(f, q) for f, q, _k in EXITS}) == 137
+    assert by['guard'] == 45 and by['client'] == 86
 
 
 @pytest.mark.parametrize('key', sorted(k for k, v in EXITS.items() if v[1] == 'guard'),
