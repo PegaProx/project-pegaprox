@@ -15461,7 +15461,8 @@ def create_container_api(cluster_id, node):
             quota_hold_update(_held, vmids=[vmid])
         else:
             quota_release(_held)        # one it cannot tell apart would count twice for hours
-        ct_name = ct_config.get('hostname', f'ct-{vmid}')
+        # the name the container got: the create form sends it as `name` (manager.create_container)
+        ct_name = ct_config.get('hostname', ct_config.get('name', f'ct-{vmid}'))
         log_audit(user, 'container.create', f"Created CT {vmid} ({ct_name}) on {node}", cluster=manager.config.name)
         
         # Broadcast to all clients
