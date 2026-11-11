@@ -115,9 +115,9 @@ def test_a_stopped_script_runs_once_not_once_per_credential(monkeypatch, tmp_pat
     m._get_node_ip = lambda n: '192.0.2.10'
     m._last_ssh_stderr = lambda ip: ''
     m.ssh_password_to_offer = lambda ip: 'secret'
-    m._ssh_run_command_with_key_output = lambda host, user, cmd, key, timeout=30: _bash(cmd, tmp_path)
-    m._ssh_run_command_output = lambda host, user, cmd, timeout=30: _bash(cmd, tmp_path)
-    m._ssh_run_command_with_password_output = lambda host, user, cmd, pw, timeout=30: _bash(cmd, tmp_path)
+    m._ssh_run_command_with_key_output = lambda host, user, cmd, key, timeout=30, node=None: _bash(cmd, tmp_path)
+    m._ssh_run_command_output = lambda host, user, cmd, timeout=30, node=None: _bash(cmd, tmp_path)
+    m._ssh_run_command_with_password_output = lambda host, user, cmd, pw, timeout=30, node=None: _bash(cmd, tmp_path)
     r = _apply(m)[PROBE]
     assert r['success'] is False
     assert (tmp_path / 'runs').read_text().count('ran') == 1

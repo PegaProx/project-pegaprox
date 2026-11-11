@@ -15,6 +15,7 @@ import hashlib
 
 from pegaprox.constants import SSH_MAX_CONCURRENT
 from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys, verify_transport_host_key
+from pegaprox.models.tasks import ssh_port_of
 from pegaprox.globals import (
     _ssh_active_connections, _ssh_connection_lock,
     cluster_managers,
@@ -220,6 +221,8 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
     cluster whose nodes listen elsewhere got no node command from this path. For any
     other port the pin is looked up and stored as [host]:port, the name paramiko and
     OpenSSH give it.
+    A node behind a per-node forward (node_endpoints) answers on a port of its own,
+    and its address then belongs to the forward, whose port 22 is not the node.
 
     ESXi SSH quirks:
     - Only allows keyboard-interactive and publickey auth (NOT password)
@@ -497,10 +500,11 @@ def node_login(config):
     return (user.strip() if isinstance(user, str) else '') or 'root'
 
 
-def node_ssh_port(config):
-    """The port every SSH path dials this cluster's nodes on: the cluster's ssh_port, 22
-    when none is set (the save route only takes 1..65535)."""
-    return _port_or_22(getattr(config, 'ssh_port', 22))
+def node_ssh_port(config, node=None, host=None):
+    """The port every SSH path dials this cluster's nodes on: the node's own where it has
+    one (node_endpoints, see ssh_port_of), else the cluster's ssh_port, 22 when none is
+    set (the save route only takes 1..65535)."""
+    return _port_or_22(ssh_port_of(config, node, host))
 
 
 def ssh_password_for(config):
@@ -675,7 +679,7 @@ def _stored_key_exec(pve_mgr, node, host, user, cmd, timeout, fallback, stdin_da
     try:
         client = pve_mgr._ssh_connect(host, retries=1, connect_timeout=8, failure=failure,
                                       login=user, quiet=True, guard_asked=True,
-                                      queue_wait=min(120, max(10, int(timeout))))
+                                      queue_wait=min(120, max(10, int(timeout))), node=node)
     except Exception as e:
         client, failure = None, {'kind': 'error', 'detail': str(e)}
     if client is not None:
@@ -872,7 +876,7 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
             return 1, '', f"cannot run node commands on '{node}': {_why}"
         rc, out, err = _ssh_exec(node_host, _ssh_user, _ssh_pass, cmd,
                                   timeout=timeout, use_controlmaster=use_controlmaster,
-                                  stdin_data=stdin_data, port=node_ssh_port(pve_mgr.config))
+                                  stdin_data=stdin_data, port=node_ssh_port(pve_mgr.config, node, node_host))
         # SSH error patterns that indicate the node itself is dead, not the cmd
         looks_like_node_down = (
             rc != 0 and any(s in str(err).lower() for s in (

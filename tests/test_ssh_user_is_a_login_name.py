@@ -200,7 +200,7 @@ def test_content_sync_does_not_put_a_bad_user_into_the_node_shell(monkeypatch):
     m.ssh_password_to_offer = lambda host=None: 'pw'
     sent = []
 
-    def connect(ip):
+    def connect(ip, **kw):
         client = MagicMock()
 
         def exec_command(cmd, timeout=None):
@@ -230,7 +230,7 @@ def test_content_sync_quotes_and_ends_the_options_for_a_valid_user(monkeypatch):
     m.ssh_password_to_offer = lambda host=None: ''
     sent = []
 
-    def connect(ip):
+    def connect(ip, **kw):
         client = MagicMock()
 
         def exec_command(cmd, timeout=None):

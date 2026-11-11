@@ -154,7 +154,8 @@ class FakeMgr:
     def _get_node_ip(self, node):
         return dict((n, ip) for n, ip, _ in self.nodes).get(node)
 
-    def _ssh_connect(self, host, retries=3, retry_delay=2.0, connect_timeout=30, failure=None):
+    def _ssh_connect(self, host, retries=3, retry_delay=2.0, connect_timeout=30, failure=None,
+                     node=None):
         self.ssh_calls.append((host, retries, connect_timeout))
         if host in self.ssh_fail:
             failure.update(kind=self.ssh_fail[host], detail='nope')

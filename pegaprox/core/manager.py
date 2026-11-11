@@ -98,7 +98,8 @@ from pegaprox.globals import (
     _ssh_connection_lock, task_pegaprox_users_cache, task_pegaprox_users_lock,
 )
 from pegaprox.models.tasks import (MaintenanceTask, PegaProxConfig, balancer_cooldown,
-                                   BALANCER_COOLDOWN_DEFAULT)
+                                   BALANCER_COOLDOWN_DEFAULT, node_endpoint_of,
+                                   ssh_port_of, api_port_of)
 from pegaprox.core.config import save_config
 from pegaprox.utils.realtime import broadcast_sse, is_cluster_watched
 from pegaprox.utils.ssh import get_ssh_connection_stats, _ssh_track_connection, ssh_password_for, node_login
@@ -1216,8 +1217,29 @@ class PegaProxManager:
         MK May 2026 — added so deployments with non-standard PVE listen ports
         (firewall constraints, jumpbox setups) can use PegaProx without
         forcing a reverse-proxy in front of PVE (which would terminate TLS
-        and create a MitM-able intermediate hop)."""
+        and create a MitM-able intermediate hop).
+
+        Always the cluster's port, also after a failover: config.host, auth_host and the
+        fallback hosts are paired with it, so connect_to_proxmox only fails over to a
+        host that answers on it."""
         return getattr(self.config, 'api_port', 8006)
+
+    def node_endpoint(self, node_name) -> dict:
+        """What this cluster overrides for one node: {host?, ssh_port?, api_port?}."""
+        return node_endpoint_of(self.config, node_name)
+
+    def ssh_port_for(self, node_name=None) -> int:
+        """The SSH port to dial one node at, its own or the cluster's."""
+        return ssh_port_of(self.config, node_name)
+
+    def api_port_for(self, node_name=None) -> int:
+        """The API port to dial one node at, its own or the cluster's.
+
+        Only for a leg that goes straight to that node (the reachability probe, the link
+        the UI offers). Everything routed through the cluster host keeps using
+        `api_port`: Proxmox answers for every node there.
+        """
+        return api_port_of(self.config, node_name)
 
     @property
     def nodes(self) -> dict:
@@ -1601,6 +1623,16 @@ class PegaProxManager:
 
             # Build list of hosts to try: primary first, then fallbacks
             hosts_to_try = [self.config.host] + (self.config.fallback_hosts or [])
+            # then the nodes with an address of their own, where they answer on the
+            # cluster's API port: every URL built after the connect pairs the host with
+            # api_port. Capped like fallback_hosts: on a cluster of hundreds of nodes a
+            # full map would turn one connect attempt into hundreds of timeouts.
+            for _node, _ep in sorted((getattr(self.config, 'node_endpoints', None) or {}).items()):
+                if len(hosts_to_try) >= 32:
+                    break
+                if _ep.get('host') and self.api_port_for(_node) == self.api_port \
+                        and _ep['host'] not in hosts_to_try:
+                    hosts_to_try.append(_ep['host'])
             
             self._ssl_verify = self.config.ssl_verification
             if not self._ssl_verify and not getattr(self, '_ssl_warn_shown', False):
@@ -5371,11 +5403,11 @@ class PegaProxManager:
             ssh_key = getattr(self.config, 'ssh_key', '')
             ssh_password = self.ssh_password_to_offer(node_ip)
             if ssh_key:
-                ok = self._ssh_run_command_with_key(node_ip, ssh_user, cmd, ssh_key)
+                ok = self._ssh_run_command_with_key(node_ip, ssh_user, cmd, ssh_key, node=node_name)
             if not ok:
-                ok = self._ssh_run_command(node_ip, ssh_user, cmd)
+                ok = self._ssh_run_command(node_ip, ssh_user, cmd, node=node_name)
             if not ok and ssh_password:
-                ok = self._ssh_run_command_with_password(node_ip, ssh_user, cmd, ssh_password)
+                ok = self._ssh_run_command_with_password(node_ip, ssh_user, cmd, ssh_password, node=node_name)
 
             if ok:
                 task.native_ha = True
@@ -5767,11 +5799,12 @@ class PegaProxManager:
             cmd = f"{prefix}ha-manager crm-command node-maintenance disable {node_name}"
             ssh_key = getattr(self.config, 'ssh_key', '')
 
-            # build list of IPs to try: target node first, then other cluster nodes
-            candidate_ips = []
+            # build list of (IP, node) to try: target node first, then other cluster nodes.
+            # The node goes along for its SSH port: several can share one address.
+            candidates = []
             target_ip = self._get_node_ip(node_name)
             if target_ip:
-                candidate_ips.append(target_ip)
+                candidates.append((target_ip, node_name))
 
             # NS: gather other online nodes as fallback — the ha-manager command
             # is cluster-wide so it works from any node
@@ -5782,25 +5815,26 @@ class PegaProxManager:
                         continue
                     if info.get('status') == 'online' or not info.get('offline', True):
                         other_ip = self._get_node_ip(nn)
-                        if other_ip and other_ip not in candidate_ips:
-                            candidate_ips.append(other_ip)
+                        if other_ip and (other_ip, self.ssh_port_for(nn)) not in \
+                                [(ip, self.ssh_port_for(n)) for ip, n in candidates]:
+                            candidates.append((other_ip, nn))
             except:
                 pass
 
-            if not candidate_ips:
+            if not candidates:
                 self.logger.error(f"[MAINT] no reachable nodes to disable HA maintenance for {node_name}")
                 return
 
-            for ip in candidate_ips:
+            for ip, nn in candidates:
                 ok = False
                 # each node with its own password where it has one (#1136)
                 ssh_password = self.ssh_password_to_offer(ip)
                 if ssh_key:
-                    ok = self._ssh_run_command_with_key(ip, ssh_user, cmd, ssh_key)
+                    ok = self._ssh_run_command_with_key(ip, ssh_user, cmd, ssh_key, node=nn)
                 if not ok:
-                    ok = self._ssh_run_command(ip, ssh_user, cmd)
+                    ok = self._ssh_run_command(ip, ssh_user, cmd, node=nn)
                 if not ok and ssh_password:
-                    ok = self._ssh_run_command_with_password(ip, ssh_user, cmd, ssh_password)
+                    ok = self._ssh_run_command_with_password(ip, ssh_user, cmd, ssh_password, node=nn)
 
                 if ok:
                     self.logger.info(f"[MAINT] disabled native HA maintenance for {node_name} (via {ip})")
@@ -8684,7 +8718,7 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
                 _hkc, _kh = cli_hostkey_opts()
                 result = node_cmd(
                     ['ssh', '-o', 'ConnectTimeout=5', '-o', f'StrictHostKeyChecking={_hkc}',
-                     '-o', f'UserKnownHostsFile={_kh}', *self._ssh_port_args(),
+                     '-o', f'UserKnownHostsFile={_kh}', *self._ssh_port_args(node, ssh_host),
                      '--', f'{ssh_user}@{ssh_host}', 'poweroff'],
                     capture_output=True, timeout=15, host=str(ssh_host)
                 )
@@ -8778,11 +8812,11 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
                 # qm list and pct list: a look, no step (#625)
                 with ha.reading():
                     if ssh_key:
-                        output = self._ssh_run_command_with_key_output(ip, ssh_user, check_cmd, ssh_key)
+                        output = self._ssh_run_command_with_key_output(ip, ssh_user, check_cmd, ssh_key, node=node)
                     if output is None:
-                        output = self._ssh_run_command_output(ip, ssh_user, check_cmd)
+                        output = self._ssh_run_command_output(ip, ssh_user, check_cmd, node=node)
                     if output is None and ssh_password:
-                        output = self._ssh_run_command_with_password_output(ip, ssh_user, check_cmd, ssh_password)
+                        output = self._ssh_run_command_with_password_output(ip, ssh_user, check_cmd, ssh_password, node=node)
                 return (ip, output) if output is not None else None
 
             # Run SSH checks in parallel using gevent pool
@@ -8868,11 +8902,11 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
                 ssh_password = self.ssh_password_to_offer(ip)
                 # Quick connectivity test (a look, no round of its own in an automatic group, #625)
                 with ha.reading():
-                    test_output = self._ssh_run_command_output(ip, ssh_user, "echo OK")
+                    test_output = self._ssh_run_command_output(ip, ssh_user, "echo OK", node=node)
                     if test_output is None and ssh_key:
-                        test_output = self._ssh_run_command_with_key_output(ip, ssh_user, "echo OK", ssh_key)
+                        test_output = self._ssh_run_command_with_key_output(ip, ssh_user, "echo OK", ssh_key, node=node)
                     if test_output is None and ssh_password:
-                        test_output = self._ssh_run_command_with_password_output(ip, ssh_user, "echo OK", ssh_password)
+                        test_output = self._ssh_run_command_with_password_output(ip, ssh_user, "echo OK", ssh_password, node=node)
 
                 if test_output is not None:
                     working_ip = ip
@@ -8907,11 +8941,11 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
                     
                     success = False
                     if ssh_key:
-                        success = self._ssh_run_command_with_key(working_ip, ssh_user, stop_cmd, ssh_key)
+                        success = self._ssh_run_command_with_key(working_ip, ssh_user, stop_cmd, ssh_key, node=node)
                     if not success:
-                        success = self._ssh_run_command(working_ip, ssh_user, stop_cmd)
+                        success = self._ssh_run_command(working_ip, ssh_user, stop_cmd, node=node)
                     if not success and ssh_password:
-                        success = self._ssh_run_command_with_password(working_ip, ssh_user, stop_cmd, ssh_password)
+                        success = self._ssh_run_command_with_password(working_ip, ssh_user, stop_cmd, ssh_password, node=node)
                     
                     if success:
                         stopped.append(f"VM {vmid}")
@@ -8926,11 +8960,11 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
                     
                     success = False
                     if ssh_key:
-                        success = self._ssh_run_command_with_key(working_ip, ssh_user, stop_cmd, ssh_key)
+                        success = self._ssh_run_command_with_key(working_ip, ssh_user, stop_cmd, ssh_key, node=node)
                     if not success:
-                        success = self._ssh_run_command(working_ip, ssh_user, stop_cmd)
+                        success = self._ssh_run_command(working_ip, ssh_user, stop_cmd, node=node)
                     if not success and ssh_password:
-                        success = self._ssh_run_command_with_password(working_ip, ssh_user, stop_cmd, ssh_password)
+                        success = self._ssh_run_command_with_password(working_ip, ssh_user, stop_cmd, ssh_password, node=node)
                     
                     if success:
                         stopped.append(f"CT {ctid}")
@@ -9331,7 +9365,7 @@ WantedBy=multi-user.target
         script's placeholders are made of."""
         return isinstance(url, str) and bool(cls._AGENT_URL_RE.fullmatch(url)) and '__' not in url
 
-    def _ha_agent_ssh(self, node_ip, cmd, timeout=30):
+    def _ha_agent_ssh(self, node_ip, cmd, timeout=30, node=None):
         """One command on a node with the credentials the agent installer uses: the
         configured key, then the password, then whatever ssh finds on its own. None
         when none of them got through."""
@@ -9340,12 +9374,12 @@ WantedBy=multi-user.target
         ssh_password = self.ssh_password_to_offer(node_ip)
         out = None
         if ssh_key:
-            out = self._ssh_run_command_with_key_output(node_ip, ssh_user, cmd, ssh_key, timeout=timeout)
+            out = self._ssh_run_command_with_key_output(node_ip, ssh_user, cmd, ssh_key, timeout=timeout, node=node)
         if out is None and ssh_password:
             out = self._ssh_run_command_with_password_output(node_ip, ssh_user, cmd, ssh_password,
-                                                             timeout=timeout)
+                                                             timeout=timeout, node=node)
         if out is None:
-            out = self._ssh_run_command_output(node_ip, ssh_user, cmd, timeout=timeout)
+            out = self._ssh_run_command_output(node_ip, ssh_user, cmd, timeout=timeout, node=node)
         return out
 
     def _ha_node_names(self):
@@ -9675,7 +9709,8 @@ fi
             import base64
             script_b64 = base64.b64encode(agent_script.encode()).decode()
             unit_b64 = base64.b64encode(self._FENCE_AGENT_SERVICE.encode()).decode()
-            result = self._ha_agent_ssh(node_ip, self._fence_agent_install_cmd(script_b64, unit_b64))
+            result = self._ha_agent_ssh(node_ip, self._fence_agent_install_cmd(script_b64, unit_b64),
+                                        node=node_name)
 
             if result and 'AGENT_INSTALLED' in result:
                 if 'LEGACY_AGENT_REMOVED' in result:
@@ -9793,7 +9828,7 @@ fi
         """uninstall self-fence agent from a single node via SSH; a node agent stays"""
         try:
             self.logger.info(f"[HA] Uninstalling self-fence agent from {node_name}")
-            result = self._ha_agent_ssh(node_ip, self._fence_agent_uninstall_cmd())
+            result = self._ha_agent_ssh(node_ip, self._fence_agent_uninstall_cmd(), node=node_name)
 
             if result and 'AGENT_UNINSTALLED' in result:
                 self.logger.info(f"[HA] ✓ Self-fence agent uninstalled from {node_name}")
@@ -9811,7 +9846,7 @@ fi
         left. They have separate names now, so one uninstall no longer covers both."""
         try:
             result = self._ha_agent_ssh(node_ip, self._fence_agent_uninstall_cmd()
-                                        + self._node_agent_uninstall_cmd())
+                                        + self._node_agent_uninstall_cmd(), node=node_name)
             if result and 'AGENT_UNINSTALLED' in result and 'NODE_AGENT_REMOVED' in result:
                 self.logger.info(f"[HA] ✓ Agents removed from {node_name}")
                 (self.ha_config.get('fence_agent_versions') or {}).pop(node_name, None)
@@ -9841,7 +9876,7 @@ fi
             cmd = self._fence_agent_ctl_cmd(action)
             for node_name, node_ip in ips.items():
                 if node_ip:
-                    self._ha_agent_ssh(node_ip, cmd)
+                    self._ha_agent_ssh(node_ip, cmd, node=node_name)
                     self.logger.info(f"[HA] Self-fence agent on {node_name}: {action}")
 
         except Exception as e:
@@ -9926,7 +9961,7 @@ fi
             try:
                 # a look at the agents; on a pool thread no request context says so (#625)
                 with ha.reading():
-                    return self._parse_agent_check(self._ha_agent_ssh(ips[name], cmd))
+                    return self._parse_agent_check(self._ha_agent_ssh(ips[name], cmd, node=name))
             except Exception as e:
                 self.logger.debug(f"[HA] agent check on {name}: {e}")
                 return None
@@ -10067,7 +10102,7 @@ fi
             def look(name):
                 try:
                     with ha.reading():
-                        return self._parse_agent_check(self._ha_agent_ssh(ips[name], cmd))
+                        return self._parse_agent_check(self._ha_agent_ssh(ips[name], cmd, node=name))
                 except Exception as e:
                     self.logger.debug(f"[HA] agent check on {name}: {e}")
                     return None
@@ -10203,11 +10238,11 @@ fi
                 # pvecm status: a look at corosync, no step (#625)
                 with ha.reading():
                     if ssh_key:
-                        out = self._ssh_run_command_with_key_output(node_ip, ssh_user, cmd, ssh_key)
+                        out = self._ssh_run_command_with_key_output(node_ip, ssh_user, cmd, ssh_key, node=node_name)
                     if out is None and ssh_password:
-                        out = self._ssh_run_command_with_password_output(node_ip, ssh_user, cmd, ssh_password)
+                        out = self._ssh_run_command_with_password_output(node_ip, ssh_user, cmd, ssh_password, node=node_name)
                     if out is None:
-                        out = self._ssh_run_command_output(node_ip, ssh_user, cmd)
+                        out = self._ssh_run_command_output(node_ip, ssh_user, cmd, node=node_name)
                 if not out or 'Expected votes' not in out:
                     continue
 
@@ -10360,11 +10395,11 @@ fi
 
                 out = None
                 if ssh_key:
-                    out = self._ssh_run_command_with_key_output(node_ip, ssh_user, cleanup_cmd, ssh_key)
+                    out = self._ssh_run_command_with_key_output(node_ip, ssh_user, cleanup_cmd, ssh_key, node=node_name)
                 if out is None and ssh_password:
-                    out = self._ssh_run_command_with_password_output(node_ip, ssh_user, cleanup_cmd, ssh_password)
+                    out = self._ssh_run_command_with_password_output(node_ip, ssh_user, cleanup_cmd, ssh_password, node=node_name)
                 if out is None:
-                    out = self._ssh_run_command_output(node_ip, ssh_user, cleanup_cmd)
+                    out = self._ssh_run_command_output(node_ip, ssh_user, cleanup_cmd, node=node_name)
 
                 if out and ('HEARTBEAT_DIR_CLEANED' in out or 'HEARTBEAT_DIR_ABSENT' in out):
                     result['cleaned'] = True
@@ -10788,11 +10823,11 @@ echo "AGENT_INSTALLED_OK"
                 """The install command over the first way in that works: its answer."""
                 output = None
                 if ssh_key:
-                    output = self._ssh_run_command_with_key_output(node_ip, ssh_user, install_cmd, ssh_key)
+                    output = self._ssh_run_command_with_key_output(node_ip, ssh_user, install_cmd, ssh_key, node=node)
                 if not answered(output):
-                    output = self._ssh_run_command_output(node_ip, ssh_user, install_cmd)
+                    output = self._ssh_run_command_output(node_ip, ssh_user, install_cmd, node=node)
                 if not answered(output) and ssh_password:
-                    output = self._ssh_run_command_with_password_output(node_ip, ssh_user, install_cmd, ssh_password)
+                    output = self._ssh_run_command_with_password_output(node_ip, ssh_user, install_cmd, ssh_password, node=node)
                 return output or ''
 
             # MK Oct 2026 (#625) - where the script under this name is the self-fence
@@ -10953,18 +10988,21 @@ echo "AGENT_INSTALLED_OK"
                 self.logger.warning(f"[SSH] {e} - set a valid SSH user for this cluster")
             return None
 
-    def _ssh_port_args(self):
+    def _ssh_port_args(self, node=None, host=None):
         """'-p <port>' for the command-line SSH family and the SSH fence when this
         cluster's nodes listen somewhere other than 22, nothing for 22 (the argv stays
         what it always was).
 
         MK Nov 2026 - none of them passed a port, so with ssh_port set the HA checks, the
         in-band BMC read and the fence all knocked on 22. With -p, OpenSSH pins the host
-        as [host]:port, the name paramiko gives it too."""
-        port = node_ssh_port(self.config)
+        as [host]:port, the name paramiko gives it too.
+
+        `node` is whose address `host` is, for its own port out of node_endpoints."""
+        port = node_ssh_port(self.config, node, host)
         return [] if port == 22 else ['-p', str(port)]
 
-    def _ssh_run_command_output(self, host: str, user: str, command: str, timeout: int = 30) -> str:
+    def _ssh_run_command_output(self, host: str, user: str, command: str, timeout: int = 30,
+                                node: str = None) -> str:
         """Run SSH command and return output - HA PRIORITY (no rate limiting)
 
         NS: Jan 2026 - HA status checks bypass semaphore for immediate execution
@@ -10995,7 +11033,7 @@ echo "AGENT_INSTALLED_OK"
             result = node_cmd(
                 ['ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                  '-o', f'UserKnownHostsFile={_kh}',
-                 '-o', 'BatchMode=yes', *self._ssh_port_args(), *login, command],
+                 '-o', 'BatchMode=yes', *self._ssh_port_args(node, host), *login, command],
                 capture_output=True, text=True, timeout=timeout, host=host
             )
             if result.returncode == 0:
@@ -11013,7 +11051,8 @@ echo "AGENT_INSTALLED_OK"
         finally:
             _ssh_track_connection('ha', -1)
     
-    def _ssh_run_command_with_key_output(self, host: str, user: str, command: str, key: str, timeout: int = 30) -> str:
+    def _ssh_run_command_with_key_output(self, host: str, user: str, command: str, key: str, timeout: int = 30,
+                                         node: str = None) -> str:
         """Run SSH command with key and return output - HA PRIORITY (no rate limiting)
 
         NS: Jan 2026 - HA operations bypass semaphore
@@ -11060,7 +11099,7 @@ echo "AGENT_INSTALLED_OK"
                 result = node_cmd(
                     ['ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                      '-o', f'UserKnownHostsFile={_kh}',
-                     '-i', key_file, *self._ssh_port_args(), *login, command],
+                     '-i', key_file, *self._ssh_port_args(node, host), *login, command],
                     capture_output=True, text=True, timeout=timeout, host=host
                 )
                 if result.returncode == 0:
@@ -11079,7 +11118,8 @@ echo "AGENT_INSTALLED_OK"
         finally:
             _ssh_track_connection('ha', -1)
     
-    def _ssh_run_command_with_password_output(self, host: str, user: str, command: str, password: str, timeout: int = 30) -> str:
+    def _ssh_run_command_with_password_output(self, host: str, user: str, command: str, password: str, timeout: int = 30,
+                                              node: str = None) -> str:
         """Run SSH command with password and return output - HA PRIORITY (no rate limiting)
 
         NS: Jan 2026 - HA operations bypass semaphore
@@ -11120,7 +11160,7 @@ echo "AGENT_INSTALLED_OK"
             result = node_cmd(
                 ['sshpass', '-e', 'ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                  '-o', f'UserKnownHostsFile={_kh}',
-                 *self._ssh_port_args(), *login, command],
+                 *self._ssh_port_args(node, host), *login, command],
                 capture_output=True, text=True, timeout=timeout, env=env, host=host
             )
             if result.returncode == 0:
@@ -11140,7 +11180,7 @@ echo "AGENT_INSTALLED_OK"
         finally:
             _ssh_track_connection('ha', -1)
     
-    def _ssh_read_output(self, host: str, user: str, command: str, timeout: int = 30) -> str:
+    def _ssh_read_output(self, host: str, user: str, command: str, timeout: int = 30, node: str = None) -> str:
         """stdout of a read on a node with the cluster's own credentials, None when none of
         them got through: the configured key, then the keys ssh finds itself, then the
         password - the order of _ssh_node_output_ex.
@@ -11153,15 +11193,16 @@ echo "AGENT_INSTALLED_OK"
         """
         ssh_key = getattr(self.config, 'ssh_key', '')
         if ssh_key:
-            out = self._ssh_run_command_with_key_output(host, user, command, ssh_key, timeout=timeout)
+            out = self._ssh_run_command_with_key_output(host, user, command, ssh_key, timeout=timeout, node=node)
             if out is not None:
                 return out
-        out = self._ssh_run_command_output(host, user, command, timeout=timeout)
+        out = self._ssh_run_command_output(host, user, command, timeout=timeout, node=node)
         if out is not None:
             return out
         password = self.ssh_password_to_offer(host)
         if password:
-            return self._ssh_run_command_with_password_output(host, user, command, password, timeout=timeout)
+            return self._ssh_run_command_with_password_output(host, user, command, password, timeout=timeout,
+                                                              node=node)
         return None
 
     # Legacy storage-based functions kept for advanced users who want extra safety
@@ -11671,17 +11712,17 @@ echo "AGENT_INSTALLED_OK"
             # Method 1: Try SSH with configured key first (most secure)
             if ssh_key:
                 self.logger.info(f"[HA] Trying SSH with configured key...")
-                if self._ssh_run_command_with_key(node_ip, ssh_user, force_cmd, ssh_key, need=ha.NEED_STEP):
+                if self._ssh_run_command_with_key(node_ip, ssh_user, force_cmd, ssh_key, need=ha.NEED_STEP, node=target_node):
                     return True
             
             # Method 2: Try passwordless SSH (if system keys are set up)
-            if self._ssh_run_command(node_ip, ssh_user, force_cmd, need=ha.NEED_STEP):
+            if self._ssh_run_command(node_ip, ssh_user, force_cmd, need=ha.NEED_STEP, node=target_node):
                 return True
             
             # Method 3: Try SSH with password (using sshpass - secure env var method)
             if ssh_password:
                 if self._ssh_run_command_with_password(node_ip, ssh_user, force_cmd, ssh_password,
-                                                       need=ha.NEED_STEP):
+                                                       need=ha.NEED_STEP, node=target_node):
                     return True
             
             self.logger.error(f"[HA] Could not force quorum via SSH")
@@ -11758,7 +11799,7 @@ echo "AGENT_INSTALLED_OK"
 
             # Method 1: Try SSH with configured key first (most secure)
             if ssh_key:
-                if self._ssh_run_command_with_key(node_ip, ssh_user, guarded_cmd, ssh_key, need=ha.NEED_STEP):
+                if self._ssh_run_command_with_key(node_ip, ssh_user, guarded_cmd, ssh_key, need=ha.NEED_STEP, node=target_node):
                     self.logger.info(f"[HA] ✓ Quorum restored to {total_nodes} nodes")
                     broadcast_sse('ha_status', {
                         'event': 'quorum_restored',
@@ -11769,7 +11810,7 @@ echo "AGENT_INSTALLED_OK"
                     return
             
             # Method 2: Try passwordless SSH
-            if self._ssh_run_command(node_ip, ssh_user, guarded_cmd, need=ha.NEED_STEP):
+            if self._ssh_run_command(node_ip, ssh_user, guarded_cmd, need=ha.NEED_STEP, node=target_node):
                 self.logger.info(f"[HA] ✓ Quorum restored to {total_nodes} nodes")
                 broadcast_sse('ha_status', {
                     'event': 'quorum_restored',
@@ -11782,7 +11823,7 @@ echo "AGENT_INSTALLED_OK"
             # Method 3: Try SSH with password
             if ssh_password:
                 if self._ssh_run_command_with_password(node_ip, ssh_user, guarded_cmd, ssh_password,
-                                                       need=ha.NEED_STEP):
+                                                       need=ha.NEED_STEP, node=target_node):
                     self.logger.info(f"[HA] ✓ Quorum restored to {total_nodes} nodes")
                     broadcast_sse('ha_status', {
                         'event': 'quorum_restored',
@@ -12070,7 +12111,7 @@ echo "AGENT_INSTALLED_OK"
                 
                 # Run on surviving node
                 success = bool(ssh_password) and self._ssh_run_command_with_password(
-                    surviving_ip, ssh_user, fence_cmd, ssh_password)
+                    surviving_ip, ssh_user, fence_cmd, ssh_password, node=surviving_node)
                 
                 if success:
                     fenced_disks.append(disk)
@@ -12124,7 +12165,7 @@ echo "AGENT_INSTALLED_OK"
         return disks
     
     def _ssh_run_command(self, host: str, user: str, command: str, key_file: str = None,
-                         need: float = None) -> bool:
+                         need: float = None, node: str = None) -> bool:
         """Run SSH command on remote host - HA PRIORITY (no rate limiting)
 
         NS: Jan 2026 - HA operations bypass the semaphore because:
@@ -12158,7 +12199,7 @@ echo "AGENT_INSTALLED_OK"
             ssh_cmd = ['ssh', '-o', f'StrictHostKeyChecking={_hkc}', '-o', f'UserKnownHostsFile={_kh}', '-o', f'ConnectTimeout={ct}', '-o', 'BatchMode=yes']
             if key_file:
                 ssh_cmd.extend(['-i', key_file])
-            ssh_cmd.extend(self._ssh_port_args())
+            ssh_cmd.extend(self._ssh_port_args(node, host))
             ssh_cmd.extend(login)
             ssh_cmd.append(command)
             
@@ -12182,7 +12223,7 @@ echo "AGENT_INSTALLED_OK"
             _ssh_track_connection('ha', -1)
     
     def _ssh_run_command_with_key(self, host: str, user: str, command: str, key_content: str,
-                                  need: float = None) -> bool:
+                                  need: float = None, node: str = None) -> bool:
         """Run SSH command using a private key from cluster config
 
         MK: Security fix - writes key to temp file with strict permissions,
@@ -12225,7 +12266,7 @@ echo "AGENT_INSTALLED_OK"
             self.logger.info(f"[HA] Trying SSH with configured key...")
             
             # Run SSH with the key file
-            result = self._ssh_run_command(host, user, command, key_file=key_path, need=need)
+            result = self._ssh_run_command(host, user, command, key_file=key_path, need=need, node=node)
             
             return result
             
@@ -12246,7 +12287,7 @@ echo "AGENT_INSTALLED_OK"
                     pass
     
     def _ssh_run_command_with_password(self, host: str, user: str, command: str, password: str,
-                                       need: float = None) -> bool:
+                                       need: float = None, node: str = None) -> bool:
         """Run SSH command with password using sshpass - HA PRIORITY (no rate limiting)
 
         MK: Security fix - use SSHPASS environment variable instead of
@@ -12287,14 +12328,14 @@ echo "AGENT_INSTALLED_OK"
             if which_result.returncode != 0:
                 self.logger.warning(f"[HA] sshpass not installed, trying without password...")
                 _ssh_track_connection('ha', -1)  # Will be tracked by _ssh_run_command
-                return self._ssh_run_command(host, user, command, need=need)
+                return self._ssh_run_command(host, user, command, need=need, node=node)
             
             ct = self.ha_config.get('ssh_connect_timeout', 10)
             _hkc, _kh = cli_hostkey_opts()
             ssh_cmd = [
                 'sshpass', '-e',
                 'ssh', '-o', f'StrictHostKeyChecking={_hkc}', '-o', f'UserKnownHostsFile={_kh}', '-o', f'ConnectTimeout={ct}',
-                *self._ssh_port_args(),
+                *self._ssh_port_args(node, host),
                 *login,
                 command
             ]
@@ -12378,8 +12419,9 @@ echo "AGENT_INSTALLED_OK"
             
             # Get target node IP
             target_ip = self._ha_get_node_ip(target_node)
+            ip_node = target_node   # whose SSH port goes with target_ip
             if not target_ip:
-                target_ip = self.raw_host
+                target_ip, ip_node = self.raw_host, None
             
             # Use cluster credentials for SSH
             ssh_user = node_login(self.config)
@@ -12391,22 +12433,22 @@ echo "AGENT_INSTALLED_OK"
             
             # Try passwordless SSH first (a change inside /etc/pve: it wants the lease time of
             # a step left, whatever confirmed before it, #625)
-            if self._ssh_run_command(target_ip, ssh_user, move_cmd, need=ha.NEED_STEP):
+            if self._ssh_run_command(target_ip, ssh_user, move_cmd, need=ha.NEED_STEP, node=ip_node):
                 return True
             
             # Try with password
             if ssh_password and self._ssh_run_command_with_password(target_ip, ssh_user, move_cmd, ssh_password,
-                                                                    need=ha.NEED_STEP):
+                                                                    need=ha.NEED_STEP, node=ip_node):
                 return True
             
             # Alternative: Try to copy instead of move (in case mv fails due to permissions)
             copy_cmd = self._ha_claimed(f"cp {source_path} {target_path} && rm {source_path}")
             
-            if self._ssh_run_command(target_ip, ssh_user, copy_cmd, need=ha.NEED_STEP):
+            if self._ssh_run_command(target_ip, ssh_user, copy_cmd, need=ha.NEED_STEP, node=ip_node):
                 return True
             
             if ssh_password and self._ssh_run_command_with_password(target_ip, ssh_user, copy_cmd, ssh_password,
-                                                                    need=ha.NEED_STEP):
+                                                                    need=ha.NEED_STEP, node=ip_node):
                 return True
             
             self.logger.error(f"[HA] ✗ Could not move VM config - SSH access required")
@@ -13035,6 +13077,17 @@ echo "AGENT_INSTALLED_OK"
         circuit breaker (skip lookups for known-dead nodes) and feeds the
         breaker on the result (None → register failure, IP → reset).
         """
+        # An address the operator configured for this node is the answer, before the
+        # breaker and before any probing: discovery reads the addresses the node
+        # reports for itself, which in the setups this map exists for are precisely
+        # the ones PegaProx cannot reach. Nothing here can fail, so there is also no
+        # failure to count against the node.
+        configured = node_endpoint_of(self.config, node_name).get('host')
+        if configured:
+            self.logger.debug(f"[NodeIP] {node_name} -> {configured} (configured endpoint)")
+            node_creds.note_address(getattr(self, 'id', None), node_name, configured, primary=True)
+            return configured
+
         blocked, remaining = self._is_node_blocked(node_name)
         if blocked:
             self.logger.debug(
@@ -13163,9 +13216,9 @@ echo "AGENT_INSTALLED_OK"
             # knock on the SSH port of a hardened node is only noise in its log -
             # the API port tells whether the address answers
             if getattr(self.config, 'ssh_disabled', False):
-                probe_port = self.api_port or 8006
+                probe_port = api_port_of(self.config, node_name) or 8006
             else:
-                probe_port = getattr(self.config, 'ssh_port', 22) or 22
+                probe_port = ssh_port_of(self.config, node_name)
 
             # ================================================================
             # STEP 1: Find which interface the PRIMARY node uses for management
@@ -13585,7 +13638,7 @@ echo "AGENT_INSTALLED_OK"
     def _ssh_connect(self, host: str, retries: int = 3, retry_delay: float = 2.0,
                      connect_timeout: int = 30, failure: dict = None, pinned_as: str = None,
                      login: str = None, quiet: bool = False, queue_wait: float = 120,
-                     guard_asked: bool = False):
+                     guard_asked: bool = False, node: str = None):
         """SSH connect with retry logic and connection rate limiting
 
         NS: Jan 2026 - Limits concurrent CONNECTION ATTEMPTS (not active sessions).
@@ -13610,6 +13663,12 @@ echo "AGENT_INSTALLED_OK"
         `quiet` its connect lines at debug (a polled path), `queue_wait` how long it waits
         for a connection slot, `guard_asked` it asked guard_ssh for its one command before
         connecting.
+
+        `node`: whose address `host` is. Only needed to pick that node's own SSH port
+        out of the cluster's endpoint map -- several nodes can sit behind one address
+        on different ports, so the address alone does not say which port to dial.
+        Without it the cluster's ssh_port is used, which is what every node of an
+        ordinary cluster gets anyway.
         """
         # #941 — decide before we open a socket. Every SSH path to a PVE node comes
         # through here, so refusing here is what stops the traffic AND stops the token
@@ -13642,7 +13701,7 @@ echo "AGENT_INSTALLED_OK"
         
         # Get connection parameters
         username = login or node_login(self.config)
-        ssh_port = getattr(self.config, 'ssh_port', 22) or 22
+        ssh_port = ssh_port_of(self.config, node, host)
         ssh_key = getattr(self.config, 'ssh_key', '')
         _said = self.logger.debug if quiet else self.logger.info
         
@@ -13906,11 +13965,11 @@ echo "AGENT_INSTALLED_OK"
             
             # Connect via SSH
             failure = {}
-            ssh = self._ssh_connect(node_ip, failure=failure)
+            ssh = self._ssh_connect(node_ip, failure=failure, node=node_name)
             if not ssh:
                 # Check why SSH failed - get username for hint
                 username = node_login(self.config)
-                ssh_port = getattr(self.config, 'ssh_port', 22) or 22
+                ssh_port = ssh_port_of(self.config, node_name, node_ip)
                 
                 if failure.get('kind') == 'auth' and not self.config.ssh_key:
                     # MK Oct 2026 (#1136) - most often a node with a root password of its own
@@ -13990,7 +14049,7 @@ echo "AGENT_INSTALLED_OK"
                 # Reconnect for reboot command
                 reboot_asked_at = time.monotonic()
                 failure = {}
-                ssh = self._ssh_connect(node_ip, failure=failure)
+                ssh = self._ssh_connect(node_ip, failure=failure, node=node_name)
                 # JB Nov 2026 - no connection means no reboot, and the wait below sees the node online and calls it done:
                 # a kernel update ended as success without its reboot
                 if not ssh:
@@ -15580,7 +15639,7 @@ echo "AGENT_INSTALLED_OK"
         if not node_ip:
             return -1, '', f'Cannot resolve IP for node {node}'
 
-        ssh = self._ssh_connect(node_ip)
+        ssh = self._ssh_connect(node_ip, node=node)
         if not ssh:
             return -1, '', f'SSH connection to {node} ({node_ip}) failed'
 
@@ -17931,7 +17990,7 @@ echo "AGENT_INSTALLED_OK"
 
             # check if file already exists
             try:
-                ssh_chk = self._ssh_connect(tgt_ip)
+                ssh_chk = self._ssh_connect(tgt_ip, node=tgt_node)
                 _, out, _ = ssh_chk.exec_command(f"test -f '{tgt_path}/{filename}' && echo EXISTS", timeout=10)
                 out.channel.recv_exit_status()
                 if 'EXISTS' in out.read().decode(errors='replace'):
@@ -17944,7 +18003,7 @@ echo "AGENT_INSTALLED_OK"
 
             # ensure target directory exists
             try:
-                ssh_mk = self._ssh_connect(tgt_ip)
+                ssh_mk = self._ssh_connect(tgt_ip, node=tgt_node)
                 ssh_mk.exec_command(f"mkdir -p '{tgt_path}'", timeout=10)
                 ssh_mk.close()
             except:
@@ -17963,7 +18022,7 @@ echo "AGENT_INSTALLED_OK"
                 # the login name lands in a root shell on the source node
                 if not validate_ssh_user(ssh_user):
                     raise ValueError(f'SSH user {ssh_user!r} is not a valid user name')
-                ssh_src = self._ssh_connect(src_ip)
+                ssh_src = self._ssh_connect(src_ip, node=source_node)
                 # try with sshpass if password available
                 # NOTE: this scp runs node->node (executed ON the source PVE node), so
                 # it uses that node's own ~/.ssh/known_hosts, not the hub's. Just harden
@@ -18013,8 +18072,8 @@ echo "AGENT_INSTALLED_OK"
             if not synced:
                 try:
                     self.logger.info(f"[SYNC] SFTP relay: {src_ip}:{src_file} → {tgt_ip}:{tgt_path}/{filename}")
-                    ssh_s = self._ssh_connect(src_ip)
-                    ssh_t = self._ssh_connect(tgt_ip)
+                    ssh_s = self._ssh_connect(src_ip, node=source_node)
+                    ssh_t = self._ssh_connect(tgt_ip, node=tgt_node)
                     sftp_s = ssh_s.open_sftp()
                     sftp_t = ssh_t.open_sftp()
                     # ensure dir on target via sftp
@@ -18060,7 +18119,7 @@ echo "AGENT_INSTALLED_OK"
             node_ip = self.member_node_ip(node)
             if not node_ip:
                 return None
-            ssh = self._ssh_connect(node_ip)
+            ssh = self._ssh_connect(node_ip, node=node)
             # use pvesm to get the base path
             subdir = 'template/iso' if content_type == 'iso' else 'template/cache'
             # MK May 2026 (#481 port) — shlex.quote on storage to block shell injection
@@ -19651,7 +19710,7 @@ echo "AGENT_INSTALLED_OK"
         user = node_login(self.config)
 
         with ha.reading():
-            raw = self._ssh_read_output(ip, user, self._SENSORS_PROBE, timeout=8)
+            raw = self._ssh_read_output(ip, user, self._SENSORS_PROBE, timeout=8, node=node)
         if raw is None:
             return {'error': f'no answer from node {node} over SSH'}
         raw, _, hw_dump = raw.partition('__PP_HWMON__')
@@ -19713,7 +19772,7 @@ echo "AGENT_INSTALLED_OK"
             # is perfectly fine. Parse the human-readable output instead - it works wherever
             # `sensors` itself does. Not tried when the probe found no lm-sensors at all.
             with ha.reading():
-                text = self._ssh_read_output(ip, user, 'sensors 2>/dev/null', timeout=8)
+                text = self._ssh_read_output(ip, user, 'sensors 2>/dev/null', timeout=8, node=node)
             out = self._parse_sensors_text(text) if text and text.strip() else []
             if out:
                 return {'sensors': out, 'count': len(out), 'source': 'text'}
@@ -19932,8 +19991,8 @@ echo "AGENT_INSTALLED_OK"
         # path future-proof regardless.
         SERVICES = ['pveproxy', 'pvedaemon', 'pve-cluster', 'corosync', 'pvestatd']
         tasks = {
-            'cfg':   (lambda: self._ssh_read_output(ip, user, 'corosync-cfgtool -s 2>&1', timeout=8)),
-            'pvecm': (lambda: self._ssh_read_output(ip, user, 'pvecm status 2>&1', timeout=8)),
+            'cfg':   (lambda: self._ssh_read_output(ip, user, 'corosync-cfgtool -s 2>&1', timeout=8, node=node)),
+            'pvecm': (lambda: self._ssh_read_output(ip, user, 'pvecm status 2>&1', timeout=8, node=node)),
         }
         for svc in SERVICES:
             # closure-bind svc explicitly — late-binding bites here otherwise
@@ -19941,7 +20000,7 @@ echo "AGENT_INSTALLED_OK"
             tasks[f'svc:{svc}'] = (lambda q=quoted: self._ssh_read_output(
                 ip, user,
                 f'systemctl show -p ActiveState,SubState,ActiveEnterTimestamp,Result {q} 2>&1',
-                timeout=8))
+                timeout=8, node=node))
         results = run_concurrent_dict(tasks, timeout=12)
 
         out = {'corosync': None, 'pvecm': None, 'services': []}
@@ -20041,7 +20100,7 @@ echo "AGENT_INSTALLED_OK"
             return {'error': f'no SSH-reachable IP for node {node}'}
 
         user = node_login(self.config)
-        output = self._ssh_read_output(ip, user, 'cat /proc/net/dev', timeout=10)
+        output = self._ssh_read_output(ip, user, 'cat /proc/net/dev', timeout=10, node=node)
         if not output:
             return {'error': 'SSH read failed (auth, timeout, or empty)'}
 
@@ -20783,12 +20842,12 @@ echo "AGENT_INSTALLED_OK"
         last_err = ''
         ssh_key = getattr(self.config, 'ssh_key', '')
         if ssh_key:
-            out = self._ssh_run_command_with_key_output(node_ip, ssh_user, cmd, ssh_key, timeout=timeout)
+            out = self._ssh_run_command_with_key_output(node_ip, ssh_user, cmd, ssh_key, timeout=timeout, node=node_name)
             if out is not None:
                 return out, None
             last_err = self._last_ssh_stderr(node_ip) or last_err
 
-        out = self._ssh_run_command_output(node_ip, ssh_user, cmd, timeout=timeout)
+        out = self._ssh_run_command_output(node_ip, ssh_user, cmd, timeout=timeout, node=node_name)
         if out is not None:
             return out, None
         last_err = self._last_ssh_stderr(node_ip) or last_err
@@ -20801,7 +20860,7 @@ echo "AGENT_INSTALLED_OK"
             # what the key steps left must not be read as the password's answer when
             # this step leaves none (a timeout, no sshpass) - #1156
             self.__dict__.setdefault('_ssh_last_stderr', {}).pop(node_ip, None)
-            out = self._ssh_run_command_with_password_output(node_ip, ssh_user, cmd, ssh_password, timeout=timeout)
+            out = self._ssh_run_command_with_password_output(node_ip, ssh_user, cmd, ssh_password, timeout=timeout, node=node_name)
             if out is not None:
                 return out, None
             if self._last_ssh_stderr(node_ip):

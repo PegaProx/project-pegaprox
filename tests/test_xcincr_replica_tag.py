@@ -61,7 +61,7 @@ class FakeMgr:
         self.puts.append((url, data))
         return _R(200)
 
-    def _ssh_connect(self, ip):
+    def _ssh_connect(self, ip, **kw):
         return _Ssh()
 
 

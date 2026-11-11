@@ -19,6 +19,7 @@ from flask_sock import Sock
 # MK 2026-06-04 (CWE-117 log-injection scanner findings): strip CR/LF/U+2028/9
 # from anything user-controlled before f-stringing into a logger.
 from pegaprox.utils.sanitization import sanitize_log_message as _sl
+from pegaprox.models.tasks import ssh_port_of
 from pegaprox.constants import *
 from pegaprox.globals import (
     cluster_managers, vmware_managers,
@@ -528,6 +529,11 @@ def validate_ws_token_api():
                         'host': cluster_host,
                         'node_ips': node_ips,
                         'ssh_port': getattr(cfg, 'ssh_port', 22) or 22,
+                        # Per-node SSH ports, for the nodes that have their own. Both
+                        # context sources have to carry it or a shell works on one flow
+                        # and not the other.
+                        'node_ports': {n: ssh_port_of(cfg, n, ip) for n, ip in node_ips.items()
+                                       if not n.startswith('_')},
                         # MK Sep 2026 (#956) - the termproxy's PVE upgrade port. Both context
                         # sources have to carry it or the bug survives on one of the two flows.
                         'api_port': int(getattr(mgr, 'api_port', 8006) or 8006),

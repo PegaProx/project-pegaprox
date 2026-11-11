@@ -184,6 +184,7 @@ def save_config():
                     'backup_sla_max_age_hours': int(getattr(manager.config, 'backup_sla_max_age_hours', 0) or 0),
                     # MK May 2026 — Proxmox API port override (default 8006). Direct-TLS only.
                     'api_port': int(getattr(manager.config, 'api_port', 8006) or 8006),
+                    'node_endpoints': getattr(manager.config, 'node_endpoints', {}) or {},
                 }
 
                 db.save_cluster(cluster_id, cluster_data)

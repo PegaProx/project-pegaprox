@@ -809,7 +809,7 @@ def install_ipmitool_api(cluster_id):
         ssh = None
         try:
             for attempt in range(3):
-                ssh = mgr._ssh_connect(node_ip)
+                ssh = mgr._ssh_connect(node_ip, node=node)
                 if ssh:
                     break
                 if attempt < 2:
@@ -1967,7 +1967,7 @@ def get_smbios_autoconfig_status(cluster_id, node):
         if not node_ip:
             return jsonify({'installed': False, 'running': False, 'error': f'Could not determine SSH-reachable IP for node {node}'})
 
-        ssh = mgr._ssh_connect(node_ip)
+        ssh = mgr._ssh_connect(node_ip, node=node)
         if not ssh:
             return jsonify({'installed': False, 'running': False, 'error': 'SSH not available - check SSH key in cluster settings'})
         
@@ -2023,7 +2023,7 @@ def deploy_smbios_autoconfig(cluster_id, node):
 
         # NS Apr 2026 - retry SSH 3x, transient failures shouldn't kill the whole deploy
         for attempt in range(3):
-            ssh = mgr._ssh_connect(node_ip)
+            ssh = mgr._ssh_connect(node_ip, node=node)
             if ssh:
                 break
             if attempt < 2:
@@ -2097,7 +2097,7 @@ def remove_smbios_autoconfig(cluster_id, node):
         if not node_ip:
             return jsonify({'error': f'Could not determine SSH-reachable IP for node {node}'}), 502
 
-        ssh = mgr._ssh_connect(node_ip)
+        ssh = mgr._ssh_connect(node_ip, node=node)
         if not ssh:
             return jsonify({'error': 'SSH connection failed - check SSH key in cluster settings'}), 500
 
@@ -2158,7 +2158,7 @@ def control_smbios_autoconfig(cluster_id, node):
         if not node_ip:
             return jsonify({'error': f'Could not determine SSH-reachable IP for node {node}'}), 502
 
-        ssh = mgr._ssh_connect(node_ip)
+        ssh = mgr._ssh_connect(node_ip, node=node)
         if not ssh:
             return jsonify({'error': 'SSH connection failed'}), 500
 
@@ -2244,7 +2244,7 @@ def get_smbios_autoconfig_status_all(cluster_id):
                     results[node_name] = {'installed': False, 'running': False, 'error': 'Could not determine node IP'}
                     continue
 
-                ssh = mgr._ssh_connect(node_ip, retries=1)
+                ssh = mgr._ssh_connect(node_ip, retries=1, node=node_name)
                 if not ssh:
                     results[node_name] = {'installed': False, 'running': False, 'error': 'SSH not available'}
                     continue
@@ -2339,7 +2339,7 @@ def deploy_smbios_autoconfig_all(cluster_id):
 
             # retry transient SSH failures before giving up
             for attempt in range(3):
-                ssh = mgr._ssh_connect(node_ip)
+                ssh = mgr._ssh_connect(node_ip, node=node)
                 if ssh:
                     break
                 if attempt < 2:
@@ -2557,7 +2557,7 @@ def install_starlvm_plugin(cluster_id):
         ssh = None
         try:
             for attempt in range(3):
-                ssh = mgr._ssh_connect(node_ip)
+                ssh = mgr._ssh_connect(node_ip, node=node)
                 if ssh:
                     break
                 if attempt < 2:
@@ -2620,7 +2620,7 @@ def starlvm_plugin_status(cluster_id):
             return {'node': node, 'reachable': False}
         ssh = None
         try:
-            ssh = mgr._ssh_connect(node_ip)
+            ssh = mgr._ssh_connect(node_ip, node=node)
             if not ssh:
                 return {'node': node, 'reachable': False}
             # read-only, no sudo needed (dpkg-query / file test are world-readable)
@@ -3048,7 +3048,7 @@ def run_custom_script(cluster_id, script_id):
         if not node_ip:
             return {'node': node, 'success': False, 'error': 'Could not determine SSH-reachable IP', 'output': ''}
         try:
-            ssh = mgr._ssh_connect(node_ip)
+            ssh = mgr._ssh_connect(node_ip, node=node)
             if not ssh:
                 return {'node': node, 'success': False, 'error': 'SSH connection failed', 'output': ''}
 

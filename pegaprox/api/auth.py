@@ -14,6 +14,7 @@ from flask import Blueprint, jsonify, request, make_response
 from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
+from pegaprox.models.tasks import ssh_port_of
 from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import (
@@ -1769,10 +1770,16 @@ def get_cluster_creds_internal(cluster_id):
     # used to pin 8006. One port per cluster is all PegaProx models, so a multi-node cluster
     # reached on a non-default port needs the same port on every node; that is still better
     # than the literal, which was wrong for every node at once.
+    # #956 again: one port per cluster is no longer all PegaProx models. A node with
+    # its own SSH port is named here, the rest of the map is the cluster's port, and a
+    # consumer that does not know the key falls back to `ssh_port` as before.
+    _cfg = getattr(mgr, 'config', None)
+    node_ports = {n: ssh_port_of(_cfg, n, ip) for n, ip in node_ips.items() if not n.startswith('_')}
     resp = {
         'host': cluster_host,
         'node_ips': node_ips,
         'ssh_port': ssh_port,
+        'node_ports': node_ports,
         'api_port': int(cluster_port or 8006),
         'verify_pve_tls': verify_pve_tls,
     }

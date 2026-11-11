@@ -423,7 +423,7 @@ def probe_ssh(mgr, node):
     base['ip'] = ip
     base['credential'] = _credential_at(mgr, ip)
     failure = {}
-    client = mgr._ssh_connect(ip, retries=1, connect_timeout=SSH_TIMEOUT, failure=failure)
+    client = mgr._ssh_connect(ip, retries=1, connect_timeout=SSH_TIMEOUT, failure=failure, node=node)
     if client is None:
         kind = failure.get('kind') or 'error'
         code = {'auth': 'AUTH_REFUSED', 'host_key': 'HOST_KEY', 'unreachable': 'UNREACHABLE',

@@ -58,7 +58,7 @@ def test_the_xcpng_update_says_it_rebooted_and_whether_the_host_came_back(monkey
     ssh = types.SimpleNamespace(exec_command=lambda cmd, timeout=None: (sent.append(cmd), (None, out, out))[1],
                                 close=lambda: None)
     mgr = types.SimpleNamespace(id='x1', _rolling_update={}, _get_host_ip=lambda n: '10.0.0.9',
-                                _ssh_connect=lambda ip: ssh, _wait_for_host_online=lambda n, timeout=300: online)
+                                _ssh_connect=lambda ip, **kw: ssh, _wait_for_host_online=lambda n, timeout=300: online)
     task = UpdateTask('h1', True)
     xcpng.XcpngManager._perform_node_update(mgr, 'h1', task)
     assert 'reboot' in sent and task.status == 'completed', (sent, task.status, task.error)

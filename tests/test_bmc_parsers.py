@@ -111,6 +111,6 @@ def test_read_orchestrator_graceful(monkeypatch):
     class M2:
         class config: ssh_user = 'root'
         def _get_node_ip(self, n): return '10.0.0.1'
-        def _ssh_run_command_output(self, ip, user, cmd, timeout=15): return _full()
+        def _ssh_run_command_output(self, ip, user, cmd, timeout=15, node=None): return _full()
     r = bmc.read_node_bmc_inband(M2(), 'pve1')
     assert r['available'] is True and r['health'] == 'critical' and r['fru']['product'] == 'PowerEdge R740'

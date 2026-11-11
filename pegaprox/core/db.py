@@ -386,6 +386,7 @@ class PegaProxDB:
                 ssh_key_encrypted TEXT DEFAULT '',
                 ssh_port INTEGER DEFAULT 22,
                 api_port INTEGER DEFAULT 8006,
+                node_endpoints TEXT DEFAULT '{}',
                 ha_settings TEXT DEFAULT '{}',
                 created_at TEXT,
                 updated_at TEXT
@@ -1487,6 +1488,10 @@ class PegaProxDB:
                 # MK Aug 2026 (#689) — optional FQDN suffix for "Open in Proxmox" node links.
                 # e.g. "example.local" turns pve01 → https://pve01.example.local:8006. Empty = off.
                 ('node_ui_suffix', "TEXT DEFAULT ''"),
+                # Per-node address/port overrides, a JSON object keyed by node name.
+                # '{}' (the common case) costs a node nothing: the map is only
+                # consulted for names that appear in it.
+                ('node_endpoints', """TEXT DEFAULT '{}'"""),
                 # seconds the balancer leaves a guest alone after moving it (was a fixed 900)
                 ('migration_cooldown', "INTEGER DEFAULT 900"),
                 # MK Oct 2026 - CIDR the remote migrations into this cluster dial its nodes in.
@@ -3905,6 +3910,7 @@ class PegaProxDB:
                 'ssh_disabled': bool(row['ssh_disabled']) if 'ssh_disabled' in row.keys() else False,
                 'backup_sla_max_age_hours': int(row['backup_sla_max_age_hours']) if 'backup_sla_max_age_hours' in row.keys() and row['backup_sla_max_age_hours'] is not None else 0,
                 'api_port': int(row['api_port']) if 'api_port' in row.keys() and row['api_port'] is not None else 8006,
+                'node_endpoints': json.loads(row['node_endpoints'] or '{}') if 'node_endpoints' in row.keys() else {},
                 # MK May 2026 — worldmap fields (per-cluster)
                 'latitude': float(row['latitude']) if 'latitude' in row.keys() and row['latitude'] is not None else None,
                 'longitude': float(row['longitude']) if 'longitude' in row.keys() and row['longitude'] is not None else None,
@@ -3998,6 +4004,7 @@ class PegaProxDB:
             'backup_sla_max_age_hours': int(row['backup_sla_max_age_hours']) if 'backup_sla_max_age_hours' in row.keys() and row['backup_sla_max_age_hours'] is not None else 0,
             # MK May 2026 — Proxmox API port override (default 8006). Direct-TLS only, never proxied.
             'api_port': int(row['api_port']) if 'api_port' in row.keys() and row['api_port'] is not None else 8006,
+            'node_endpoints': json.loads(row['node_endpoints'] or '{}') if 'node_endpoints' in row.keys() else {},
             # MK May 2026 — worldmap fields (per-cluster, NULL = not plotted)
             'latitude': float(row['latitude']) if 'latitude' in row.keys() and row['latitude'] is not None else None,
             'longitude': float(row['longitude']) if 'longitude' in row.keys() and row['longitude'] is not None else None,
@@ -4022,15 +4029,21 @@ class PegaProxDB:
         # edit (rename, password rotation, etc.) would wipe the dot off the map.
         existing_lat = existing_lon = existing_loc_label = None
         existing_node_ui_suffix = ''
+        # Same reason as the worldmap fields: the edit dialog only sends the endpoint
+        # map when its panel was open, and INSERT OR REPLACE would otherwise clear
+        # every override on an unrelated save.
+        existing_node_endpoints = '{}'
         if existing:
             try:
-                cursor.execute('SELECT latitude, longitude, location_label, node_ui_suffix FROM clusters WHERE id = ?', (cluster_id,))
+                cursor.execute('SELECT latitude, longitude, location_label, node_ui_suffix, node_endpoints FROM clusters WHERE id = ?', (cluster_id,))
                 _loc = cursor.fetchone()
                 if _loc:
                     existing_lat = _loc['latitude']
                     existing_lon = _loc['longitude']
                     existing_loc_label = _loc['location_label']
                     existing_node_ui_suffix = _loc['node_ui_suffix'] if 'node_ui_suffix' in _loc.keys() and _loc['node_ui_suffix'] else ''
+                    if 'node_endpoints' in _loc.keys() and _loc['node_endpoints']:
+                        existing_node_endpoints = _loc['node_endpoints']
             except Exception:
                 pass
 
@@ -4051,13 +4064,13 @@ class PegaProxDB:
              backup_sla_max_age_hours,
              api_port,
              latitude, longitude, location_label,
-             node_ui_suffix,
+             node_ui_suffix, node_endpoints,
              proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict,
              transfer_network,
              created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?)
+                    ?, ?)
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -4104,6 +4117,7 @@ class PegaProxDB:
             data.get('longitude', existing_lon),
             data.get('location_label', existing_loc_label) or '',
             (data.get('node_ui_suffix', existing_node_ui_suffix) or '').strip().lstrip('.'),
+            json.dumps(data['node_endpoints']) if 'node_endpoints' in data else existing_node_endpoints,
             # INSERT OR REPLACE rewrites every column, so a flag the payload omits
             # gets forced to 0. A merge-restore from an older backup that predates
             # these fields would silently switch them off. Fall back to the stored

@@ -152,7 +152,7 @@ def _get_node_multipath_data(manager, node):
         logging.debug(f"[Multipath] Resolved {node} → {node_ip}")
 
         # Connect via paramiko (handles SSH key + password auth correctly)
-        ssh = manager._ssh_connect(node_ip, retries=2, retry_delay=1.0)
+        ssh = manager._ssh_connect(node_ip, retries=2, retry_delay=1.0, node=node)
         if not ssh:
             result['error'] = f'SSH connection failed to {node} ({node_ip}). Check credentials.'
             return result
@@ -423,7 +423,7 @@ def setup_multipath(cluster_id):
 
             try:
                 # Connect via paramiko (handles SSH key + password auth correctly)
-                ssh = manager._ssh_connect(node_ip, retries=2, retry_delay=1.0)
+                ssh = manager._ssh_connect(node_ip, retries=2, retry_delay=1.0, node=node)
                 if not ssh:
                     node_result['success'] = False
                     node_result['error'] = f'SSH connection failed to {node} ({node_ip}). Check credentials.'
@@ -712,7 +712,7 @@ def reconfigure_multipath(cluster_id, node):
             return jsonify({'error': f'Unknown or unreachable node {node!r}'}), 400
 
         # Connect via paramiko
-        ssh = manager._ssh_connect(node_ip, retries=2, retry_delay=1.0)
+        ssh = manager._ssh_connect(node_ip, retries=2, retry_delay=1.0, node=node)
         if not ssh:
             return jsonify({'error': f'SSH connection failed to {node} ({node_ip}). Check credentials.'}), 500
 
@@ -873,7 +873,7 @@ def login_iscsi_target(cluster_id, node):
             return jsonify({'error': f'Unknown or unreachable node {node!r}'}), 400
 
         # Connect via paramiko
-        ssh = manager._ssh_connect(node_ip, retries=2, retry_delay=1.0)
+        ssh = manager._ssh_connect(node_ip, retries=2, retry_delay=1.0, node=node)
         if not ssh:
             return jsonify({'error': f'SSH connection failed to {node} ({node_ip}). Check credentials.'}), 400
 

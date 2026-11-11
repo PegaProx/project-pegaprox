@@ -28,18 +28,24 @@
             // #689 — when the cluster has a node FQDN suffix configured, link via <node>.<suffix>
             // (e.g. pve01.example.local) instead of the raw IP/host the API returns.
             const suffix = (target.node_ui_suffix || '').trim().replace(/^\.+/, '');
-            const host = (suffix && nodeName) ? `${nodeName}.${suffix}`
-                                              : getProxmoxNodeHost(target, target.node || target.name);
+            // a node with an address of its own (node_endpoints) is linked there, with its port:
+            // the two only go together
+            const ep = target.node_endpoint || {};
+            const host = ep.host || ((suffix && nodeName) ? `${nodeName}.${suffix}`
+                                              : getProxmoxNodeHost(target, target.node || target.name));
             if (!host) return null;
+            // the node's own GUI port where it has one, else the cluster's, else the default.
+            // The literal 8006 here was wrong for every cluster on another port.
+            const port = ep.port || target.api_port || 8006;
 
             if (kind === 'node') {
                 if (!nodeName) return null;
-                return `https://${host}:8006/#v1:0:=${encodeURIComponent(`node/${nodeName}`)}:4:=aptrepositories:=contentIso:::9::`;
+                return `https://${host}:${port}/#v1:0:=${encodeURIComponent(`node/${nodeName}`)}:4:=aptrepositories:=contentIso:::9::`;
             }
 
             if (kind === 'qemu' || kind === 'lxc') {
                 if (target.vmid == null || target.vmid === '') return null;
-                return `https://${host}:8006/#v1:0:=${encodeURIComponent(`${kind}/${target.vmid}`)}:4:::::::`;
+                return `https://${host}:${port}/#v1:0:=${encodeURIComponent(`${kind}/${target.vmid}`)}:4:::::::`;
             }
 
             return null;
@@ -73,7 +79,7 @@
         }
 
         // Node Card Component
-        function NodeCard({ name, metrics, index, clusterId, nodeUiSuffix, onMaintenanceToggle, onStartUpdate, onOpenNodeConfig, onNodeAction, onRemoveNode, onMoveNode, isFavorite, onToggleFavorite, guestActions, onGuestsAction }) {
+        function NodeCard({ name, metrics, index, clusterId, nodeUiSuffix, nodeEndpoint, onMaintenanceToggle, onStartUpdate, onOpenNodeConfig, onNodeAction, onRemoveNode, onMoveNode, isFavorite, onToggleFavorite, guestActions, onGuestsAction }) {
             const { t } = useTranslation();
             // #625 v2: a standby shows maintenance and update state, it does not change them
             const { getAuthHeaders, haReadOnly } = useAuth();
@@ -155,7 +161,7 @@
             const isUpdating = metrics.is_updating;
             const updateTask = metrics.update_task;
             const isOffline = metrics.offline || metrics.status === 'offline';
-            const proxmoxTarget = { ...metrics, kind: 'node', name, node: name, node_ui_suffix: nodeUiSuffix || '' };  // #689
+            const proxmoxTarget = { ...metrics, kind: 'node', name, node: name, node_ui_suffix: nodeUiSuffix || '', node_endpoint: nodeEndpoint };  // #689
             const proxmoxUrl = getProxmoxObjectUrl(proxmoxTarget);
             
             // Can only update if in maintenance and evacuation complete
@@ -975,7 +981,7 @@
 
         // LW: Feb 2026 - compact node row for corporate overview
         // NS: Mar 2026 - added sparkline history + detail cards
-        function NodeCompactRow({ name, metrics, clusterId, nodeUiSuffix, onOpenNodeConfig, onMaintenanceToggle, onStartUpdate, onNodeAction, onRemoveNode, onMoveNode }) {
+        function NodeCompactRow({ name, metrics, clusterId, nodeUiSuffix, nodeEndpoint, onOpenNodeConfig, onMaintenanceToggle, onStartUpdate, onNodeAction, onRemoveNode, onMoveNode }) {
             const { t } = useTranslation();
             const { getAuthHeaders, haReadOnly } = useAuth();  // #625: read-only on a standby
             const [expanded, setExpanded] = useState(false);
@@ -1010,7 +1016,7 @@
             const isUpdating = metrics?.is_updating;
             const updateTask = metrics?.update_task;
             const canUpdate = isInMaintenance && maintenanceTask?.status && (['completed', 'completed_with_errors'].includes(maintenanceTask.status) || metrics?.maintenance_acknowledged) && !isUpdating;
-            const proxmoxTarget = { ...metrics, kind: 'node', name, node: name, node_ui_suffix: nodeUiSuffix || '' };  // #689
+            const proxmoxTarget = { ...metrics, kind: 'node', name, node: name, node_ui_suffix: nodeUiSuffix || '', node_endpoint: nodeEndpoint };  // #689
             const proxmoxUrl = getProxmoxObjectUrl(proxmoxTarget);
 
             const formatBytes = (bytes) => { if(!bytes)return'0 B';const k=1024,s=['B','KB','MB','GB','TB','PB'],i=Math.floor(Math.log(bytes)/Math.log(k));return(bytes/Math.pow(k,i)).toFixed(1)+' '+s[i]; };

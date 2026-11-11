@@ -99,7 +99,7 @@ def _sensor_manager(**cfg):
 def test_the_sensor_read_logs_in_as_every_other_path(ssh_user, login):
     m = _sensor_manager(ssh_user=ssh_user)
     seen = []
-    m._ssh_read_output = lambda ip, user, cmd, timeout=30: seen.append(user) or None
+    m._ssh_read_output = lambda ip, user, cmd, timeout=30, node=None: seen.append(user) or None
     m.get_node_sensors('pve1')
     assert seen == [login]
 
@@ -109,8 +109,8 @@ def test_the_inband_bmc_read_logs_in_as_every_other_path(ssh_user, login):
     from pegaprox.core import bmc
     m = _sensor_manager(ssh_user=ssh_user)
     seen = []
-    m._ssh_run_command_with_key_output = lambda ip, user, cmd, key, timeout=15: seen.append(user) or None
-    m._ssh_run_command_output = lambda ip, user, cmd, timeout=15: seen.append(user) or None
+    m._ssh_run_command_with_key_output = lambda ip, user, cmd, key, timeout=15, node=None: seen.append(user) or None
+    m._ssh_run_command_output = lambda ip, user, cmd, timeout=15, node=None: seen.append(user) or None
     m.ssh_password_to_offer = lambda host: ''
     bmc.read_node_bmc_inband(m, 'pve1')
     assert seen and set(seen) == {login}

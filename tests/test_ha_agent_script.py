@@ -2468,7 +2468,7 @@ def test_a_node_whose_peer_has_no_known_address_gets_a_working_agent(monkeypatch
     m._ha_detect_fence_strategy = lambda: 'quorum'
     m._ha_node_ip_map = lambda: {'pve1': '10.9.0.1', 'pve2': None}
     sent = {}
-    m._ha_agent_ssh = lambda ip, cmd, timeout=30: sent.update({ip: _sent_script(cmd)}) or 'AGENT_INSTALLED\n'
+    m._ha_agent_ssh = lambda ip, cmd, timeout=30, node=None: sent.update({ip: _sent_script(cmd)}) or 'AGENT_INSTALLED\n'
 
     assert m._ha_install_self_fence_on_all_nodes() == {'pve1': True, 'pve2': False}
 
@@ -2595,7 +2595,7 @@ def test_the_agent_check_keeps_what_it_knew_of_a_node_that_did_not_answer(thresh
     m.ha_failure_threshold = threshold
     m._ha_node_ip_map = lambda: dict(IPS)
     v2 = NO_AGENT.replace('FENCE_VERSION=0', 'FENCE_VERSION=2')
-    m._ha_agent_ssh = lambda ip, cmd, timeout=30: {'10.9.0.1': v2, '10.9.0.2': None, '10.9.0.3': NO_AGENT}[ip]
+    m._ha_agent_ssh = lambda ip, cmd, timeout=30, node=None: {'10.9.0.1': v2, '10.9.0.2': None, '10.9.0.3': NO_AGENT}[ip]
     before = m._ha_fence_timing('pve2')
     assert before['wait'] > delay
 
@@ -2633,7 +2633,7 @@ def _deployed(monkeypatch, members=(), **ha_config):
     m.scripts, m.installs, m.stored = {}, [], {}
     m._ha_store_settings = lambda **keys: m.stored.update(keys) or True
 
-    def ssh(ip, cmd, timeout=30):
+    def ssh(ip, cmd, timeout=30, node=None):
         if 'AGENT_CHECK_DONE' in cmd:
             if m.scripts.get(ip) is None:
                 return NO_AGENT
@@ -2700,7 +2700,7 @@ def test_a_node_that_runs_the_script_of_now_is_left_alone(monkeypatch):
     assert m._ha_redeploy_fence_agents('test') == {} and m.installs == []
 
     answers = m._ha_agent_ssh
-    m._ha_agent_ssh = lambda ip, cmd, timeout=30: None if ip == '10.9.0.2' else answers(ip, cmd)
+    m._ha_agent_ssh = lambda ip, cmd, timeout=30, node=None: None if ip == '10.9.0.2' else answers(ip, cmd)
     monkeypatch.setattr(ha, 'members', lambda: [{'url': NEW}])
     assert m._ha_redeploy_fence_agents('test') == {'pve1': True}
     assert m.installs == ['10.9.0.1']
@@ -2757,7 +2757,7 @@ def test_a_cluster_with_the_old_agent_only_gets_a_look_and_nothing_else(monkeypa
     monkeypatch.setattr(ha, 'own_url', lambda: LEADER)
     monkeypatch.setattr(ha, 'members', lambda: [{'url': NEW}])
     sent, stored = [], {}
-    m._ha_agent_ssh = lambda ip, cmd, timeout=30: sent.append(cmd) or (NO_AGENT if ip == '10.9.0.3' else V1_AGENT)
+    m._ha_agent_ssh = lambda ip, cmd, timeout=30, node=None: sent.append(cmd) or (NO_AGENT if ip == '10.9.0.3' else V1_AGENT)
     m._ha_store_settings = lambda **keys: stored.update(keys) or True
     assert m._ha_agent_members_changed() is True        # not looked at yet
 
@@ -2805,7 +2805,7 @@ def test_a_monitor_start_leaves_the_old_agent_on_the_node_byte_for_byte(node, mo
                              'two_node_flag': False, 'detection_reason': 'detected'})
     m._ha_node_ip_map = lambda: {'pve1': '10.9.0.1'}
     m._ha_detect_fence_strategy = lambda: 'quorum'
-    m._ha_agent_ssh = lambda ip, cmd, timeout=30: node.sh(cmd)
+    m._ha_agent_ssh = lambda ip, cmd, timeout=30, **kw: node.sh(cmd)
     m._ha_store_settings = lambda **keys: True
     monkeypatch.setattr(ha, 'own_url', lambda: LEADER)
     monkeypatch.setattr(ha, 'members', lambda: [])
