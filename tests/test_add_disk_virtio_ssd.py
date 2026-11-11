@@ -11,6 +11,7 @@ from test_vm_disk_unlock import _Resp, _mgr
 
 def _added(disk_id, **disk):
     m = _mgr()
+    m._api_get.return_value = _Resp(200, data={'scsi0': 'local-lvm:vm-100-disk-0,size=32G'})
     m._api_put.return_value = _Resp(200, text='')
     res = m.add_disk('pve1', 100, 'qemu', {'disk_id': disk_id, 'storage': 'local-lvm', 'size': 8, **disk})
     assert res['success'] is True, res
