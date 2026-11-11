@@ -98,6 +98,25 @@ def _row_to_policy(r):
     }
 
 
+def _keep_value(body, key, default):
+    """retention_count or retention_days of a create or edit body, as a whole number >= 0.
+
+    Left out, null or '' gives `default` (7 or 0 on create, None on edit, where the stored
+    value then stays). A negative number is 0, which _prune reads as "no rule" anyway.
+    Text, a fraction, true/false or a list raise ValueError, which both routes answer
+    with a 400; a bare int() there ended in a 500.
+    """
+    v = body.get(key)
+    if v is None or v == '':
+        return default
+    if isinstance(v, bool) or (isinstance(v, float) and not v.is_integer()):
+        raise ValueError(f'{key} must be a whole number')
+    try:
+        return max(0, int(v))
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f'{key} must be a whole number') from None
+
+
 class TargetResolutionFailed(Exception):
     """The cluster could not say what this policy points at.
 
@@ -658,9 +677,11 @@ def create_policy(cluster_id):
     run_once_at = (body.get('run_once_at') or '').strip()[:32]
     prune_only = bool(body.get('prune_only'))
     # 7 is the default of a field left out; a 0 that was sent means "no count rule", as on edit
-    rc = body.get('retention_count')
-    retention_count = max(0, int(7 if rc in (None, '') else rc))
-    retention_days = max(0, int(body.get('retention_days') or 0))
+    try:
+        retention_count = _keep_value(body, 'retention_count', 7)
+        retention_days = _keep_value(body, 'retention_days', 0)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     include_ram = bool(body.get('include_ram'))
     enabled = bool(body.get('enabled', True))
     notes = (body.get('notes') or '')[:500]
@@ -789,6 +810,10 @@ def update_policy(cluster_id, pid):
             datetime.fromisoformat(body['run_once_at'])
         except Exception:
             return jsonify({'error': 'run_once_at must be an ISO datetime'}), 400
+    try:
+        keep = [(k, _keep_value(body, k, None)) for k in ('retention_count', 'retention_days')]
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
     fields = []; params = []
     for k, t in (('name', str), ('target_type', str), ('target_value', str),
@@ -804,10 +829,9 @@ def update_policy(cluster_id, pid):
             pass
     if 'prune_only' in body:
         fields.append('prune_only=?'); params.append(1 if body['prune_only'] else 0)
-    if 'retention_count' in body:
-        fields.append('retention_count=?'); params.append(int(body['retention_count']))
-    if 'retention_days' in body:
-        fields.append('retention_days=?'); params.append(int(body['retention_days']))
+    for k, v in keep:
+        if v is not None:   # left out or empty: the stored value stays
+            fields.append(f'{k}=?'); params.append(v)
     if 'include_ram' in body:
         fields.append('include_ram=?'); params.append(1 if body['include_ram'] else 0)
     if 'enabled' in body:
