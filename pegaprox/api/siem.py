@@ -141,6 +141,10 @@ def _mask(d):
             # a stored mask is a secret that is not set (see _stored_secret). Shown as the
             # mask it read as set, so the form shows the field empty instead
             out[k] = _MASK if v != _MASK else ''
+        elif k == 'headers' and v:
+            # headers stored as anything but an object (see _headers_not_an_object) slip
+            # past the mask by name, so none of them is shown
+            out[k] = _MASK
         else:
             out[k] = v
     return out
@@ -177,6 +181,14 @@ def _keeps_stored_secret(new, old):
         elif v == _MASK and _is_secret(k) and _stored_secret(old, k):
             return True
     return False
+
+
+def _headers_not_an_object(settings):
+    # MK Nov 2026 - the textarea of the tab takes any JSON, and a list of name/value pairs
+    # made headers as well, which the mask by name never looked into. Headers are an
+    # object of names and values, nothing else.
+    h = settings.get('headers') if isinstance(settings, dict) else None
+    return h is not None and not isinstance(h, dict)
 
 
 def _not_the_mask(value, what):
@@ -423,7 +435,11 @@ def _http_post(url, body_bytes, headers, timeout=10, verify_tls=True):
 
 def _headers_of(settings):
     headers = {'Content-Type': 'application/json'}
-    for name, value in dict(settings.get('headers') or {}).items():
+    custom = settings.get('headers') or {}
+    if not isinstance(custom, dict):
+        # stored before the routes took an object only (see _headers_not_an_object)
+        raise ValueError('the headers of this target are not a JSON object, enter them again')
+    for name, value in custom.items():
         headers[name] = _not_the_mask(value, f'{name} header') if _is_secret(name) else value
     return headers
 
@@ -566,6 +582,8 @@ def create_target():
 
     if not name or typ not in TYPES or not endpoint:
         return jsonify({'error': f'name, type ({", ".join(sorted(TYPES))}), endpoint required'}), 400
+    if _headers_not_an_object(settings):
+        return jsonify({'error': 'headers must be a JSON object'}), 400
 
     tid = uuid.uuid4().hex[:12]
     try:
@@ -606,6 +624,8 @@ def update_target(tid):
     moved = 'endpoint' in body and str(body['endpoint']).strip() != (row['endpoint'] or '').strip()
     if 'settings' in body:
         new = body['settings'] if isinstance(body['settings'], dict) else {}
+        if _headers_not_an_object(new):
+            return jsonify({'error': 'headers must be a JSON object'}), 400
         if moved and _keeps_stored_secret(new, stored):
             return jsonify({'error': 'Re-enter the token or password of this target to change its endpoint.',
                             'code': 'CREDENTIAL_REQUIRED'}), 400
