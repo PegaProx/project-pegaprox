@@ -201,3 +201,51 @@ def test_a_container_mount_point_destroys_only_its_own_unused_volume():
         call(_url(105, 'lxc'), data={'delete': 'unused1'}),
     ]
     assert m._api_delete.call_args_list == []
+
+
+# When no unusedN slot holds the volume, remove_disk falls back to the storage content DELETE.
+# PVE frees whatever volume that names, with no look at any guest config, and it parks only a
+# volume of the guest itself in unusedN. So the fallback is for a volume named after this guest.
+
+def test_a_disk_of_another_guest_is_detached_and_never_freed_on_the_storage():
+    """VM 100 holds VM 200's disk: after the detach no slot holds it, and no storage delete is sent."""
+    before = {'scsi1': 'local-lvm:vm-200-disk-0,size=4G'}
+    res, m = _remove([before, {}], 'scsi1')
+    assert res == {'success': True,
+                   'message': 'Disk scsi1 detached (volume kept: local-lvm:vm-200-disk-0 does not belong to guest 100)'}, res
+    assert m._api_put.call_args_list == [call(_url(), data={'delete': 'scsi1'})]
+    assert m._api_delete.call_args_list == []
+
+
+def test_an_iso_in_a_removed_cd_drive_stays_on_the_storage():
+    """Removing ide2 with its data never deletes the ISO it had loaded, which other guests may use."""
+    before = {'ide2': 'local:iso/debian-12.iso,media=cdrom,size=600M'}
+    res, m = _remove([before, {}], 'ide2')
+    assert res['success'] is True and 'volume kept' in res['message'], res
+    assert m._api_put.call_args_list == [call(_url(), data={'delete': 'ide2'})]
+    assert m._api_delete.call_args_list == []
+
+
+def test_a_linked_clone_volume_belongs_to_the_guest_named_last():
+    """base-99-disk-0/vm-100-disk-1 is VM 100's disk: freed when VM 100 drops it, kept when VM 99 does."""
+    cases = (
+        ('local-zfs:base-99-disk-0/vm-100-disk-1', 100, 'local-zfs'),
+        ('local:99/base-99-disk-0.qcow2/100/vm-100-disk-1.qcow2', 100, 'local'),
+        ('local:100/vm-100-disk-1.qcow2', 100, 'local'),
+        ('local-zfs:subvol-100-disk-1', 100, 'local-zfs'),
+        ('local-zfs:base-99-disk-0/vm-100-disk-1', 99, None),
+        ('local:99/base-99-disk-0.qcow2/100/vm-100-disk-1.qcow2', 99, None),
+        ('local:100/vm-100-disk-1.qcow2', 99, None),
+        ('local:snippets/vm-100-cloudinit.yml', 100, None),
+        ('local-lvm:vm-1000-disk-1', 100, None),
+    )
+    for volid, vmid, storage in cases:
+        res, m = _remove([{'scsi1': f'{volid},size=4G'}, {}], 'scsi1', vmid=vmid)
+        assert res['success'] is True, (volid, vmid, res)
+        if storage:
+            assert m._api_delete.call_args_list == [
+                call(f'{BASE}/storage/{storage}/content/' + volid.replace(':', '%3A').replace('/', '%2F')),
+            ], (volid, vmid)
+        else:
+            assert m._api_delete.call_args_list == [], (volid, vmid)
+            assert res['message'] == f'Disk scsi1 detached (volume kept: {volid} does not belong to guest {vmid})', res

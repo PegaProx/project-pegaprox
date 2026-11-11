@@ -319,6 +319,23 @@ def _pve_message(text, max_chars=200):
     return ' '.join(msg.split())[:max_chars] or 'no reason given'
 
 
+def _volume_owner(volid):
+    """The vmid a disk volume belongs to, read from its name as the PVE storage plugins do
+    (parse_volname), or None for a volume that names no guest (iso/, snippets/, a raw LUN)."""
+    parts = str(volid or '').split(',')[0].strip().partition(':')[2].split('/')
+    # vm-100-disk-0 or subvol-100-disk-0 at the root, or a linked clone on ZFS/RBD,
+    # base-99-disk-0/vm-100-disk-1, which belongs to the guest named last
+    if len(parts) == 1 or (len(parts) == 2 and re.match(r'(?:base|basevol)-\d+-', parts[0])):
+        m = re.match(r'(?:vm|base|basevol|subvol)-(\d+)-', parts[-1])
+        return int(m.group(1)) if m else None
+    # directory storages: 100/vm-100-disk-0.qcow2, or 99/base-99-disk-0.qcow2/100/<name> linked
+    if len(parts) == 2 and parts[0].isdigit():
+        return int(parts[0])
+    if len(parts) == 4 and parts[0].isdigit() and parts[2].isdigit():
+        return int(parts[2])
+    return None
+
+
 # MK Oct 2026 (#954) - who holds a Proxmox HA rule off: the rolling update, or the
 # maintenance of one node. A rule held by both, or by two maintenances, goes back on when
 # the last of them lets go; one lock per cluster keeps a hold and a release from crossing.
@@ -18451,6 +18468,12 @@ echo "AGENT_INSTALLED_OK"
                                     self.logger.warning(f"[WARN] Failed to delete {unused_slot}: {delete_response.text}")
                             else:
                                 self.logger.warning(f"[WARN] Could not find {volume_path} in unused slots. Raw config keys: {list(raw_config.keys())}")
+                                # PVE parks only a volume of this guest in unusedN. The storage API
+                                # frees whatever it is named and looks at no guest config, so another
+                                # guest's disk or an ISO never goes there
+                                if _volume_owner(volume_path) != int(vmid):
+                                    self.logger.warning(f"[WARN] {volume_path} does not belong to {vm_type}/{vmid}: nothing deleted")
+                                    return {'success': True, 'message': f'Disk {disk_id} detached (volume kept: {volume_path} does not belong to guest {vmid})'}
                                 # Volume not found in unused - try direct storage API delete
                                 storage_name = volume_path.split(':')[0] if ':' in volume_path else None
                                 if storage_name:
