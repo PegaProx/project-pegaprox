@@ -963,6 +963,71 @@ def _without_plugin_secrets(entries):
             for e in entries]
 
 
+def _plugin_url(u):
+    from urllib.parse import urlsplit
+    try:
+        p = urlsplit(str(u or '').strip())
+        scheme = p.scheme.lower()
+        return (scheme, (p.hostname or '').rstrip('.'), p.port or {'http': 80, 'https': 443}.get(scheme),
+                p.path.rstrip('/'))
+    except ValueError:
+        return None
+
+
+def _plugin_fingerprint(f):
+    # the certificate PVE accepts for that url instead of a CA-signed one, none if unset
+    return str(f or '').strip().upper()
+
+
+# what decides where PVE sends the stored token or key
+_PLUGIN_TARGET = {'url': _plugin_url, 'fingerprint': _plugin_fingerprint}
+
+
+def _plugin_secret_moves(session, entry_url, data, secret, what):
+    """A PUT that points an IPAM or DNS entry at another url, or at another certificate,
+    without its token or key.
+
+    MK Nov 2026 - PVE merges an update, so a PUT with only a new url keeps the stored token
+    (or PowerDNS key), and its update hook calls the new url with it right away. A new
+    fingerprint, or 'delete' dropping it, does the same for whoever holds the other
+    certificate. Since the reads above drop the secret, it goes only to the server it was
+    typed for: a change of either needs it typed again. If we cannot read the current entry
+    we do not guess."""
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Expected a JSON object'}), 400
+    # requests leaves None out of the form body, sends a list item by item and a dict by its
+    # keys. Only a string here is what PVE gets, so the fields this depends on must be one.
+    fields = {k: data[k] for k in (*_PLUGIN_TARGET, 'delete', secret) if data.get(k) is not None}
+    for k, v in fields.items():
+        if not isinstance(v, str):
+            return jsonify({'error': f"'{k}' must be a string"}), 400
+    if fields.get(secret, '').strip():
+        return None
+    dropped = set(re.split(r'[\s,;\0]+', fields.get('delete', '')))
+    changed = [k for k in _PLUGIN_TARGET if k in fields or k in dropped]
+    if not changed:
+        return None
+    current = None
+    try:
+        r = session.get(entry_url, timeout=10)
+        if r.status_code == 200:
+            current = r.json().get('data')
+    except Exception as e:
+        logging.warning(f"[SDN] could not read {what} before the update: {e}")
+    if isinstance(current, dict):
+        new = {k: _PLUGIN_TARGET[k](None if k in dropped else fields.get(k)) for k in changed}
+        if all(new[k] is not None and new[k] == _PLUGIN_TARGET[k](current.get(k)) for k in changed):
+            # PVE takes the PUT only while the entry is still the one compared here
+            seen = current.get('digest')
+            if data.get('digest') not in (None, '', seen):
+                return jsonify({'error': f'This {what} was changed meanwhile, reload it and try again.'}), 409
+            if seen:
+                data['digest'] = seen
+            return None
+    return jsonify({'error': f'Re-enter the {secret} of this {what} to change its url or fingerprint.',
+                    'code': 'CREDENTIAL_REQUIRED'}), 400
+
+
 @bp.route('/api/clusters/<cluster_id>/datacenter/sdn', methods=['GET'])
 @require_auth(perms=['node.view'])
 def get_sdn_overview(cluster_id):
@@ -1947,7 +2012,11 @@ def update_sdn_ipam(cluster_id, ipam_id):
         data = request.json or {}
         
         url = f"https://{host}:{port}/api2/json/cluster/sdn/ipams/{ipam_id}"
-        response = manager._create_session().put(url, data=data, timeout=10)
+        session = manager._create_session()
+        refused = _plugin_secret_moves(session, url, data, 'token', 'IPAM')
+        if refused:
+            return refused
+        response = session.put(url, data=data, timeout=10)
         
         if response.status_code == 200:
             user = getattr(request, 'session', {}).get('user', 'system')
@@ -2069,7 +2138,11 @@ def update_sdn_dns(cluster_id, dns_id):
         data = request.json or {}
         
         url = f"https://{host}:{port}/api2/json/cluster/sdn/dns/{dns_id}"
-        response = manager._create_session().put(url, data=data, timeout=10)
+        session = manager._create_session()
+        refused = _plugin_secret_moves(session, url, data, 'key', 'DNS server')
+        if refused:
+            return refused
+        response = session.put(url, data=data, timeout=10)
         
         if response.status_code == 200:
             user = getattr(request, 'session', {}).get('user', 'system')
