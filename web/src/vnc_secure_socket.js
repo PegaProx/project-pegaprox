@@ -458,41 +458,63 @@
     //   onTransport(t)  — called with 'ws' or 'poll' when committed
     //   forcePolling    — skip WS, go straight to polling (debug)
     //
-    // Returns a Promise resolving to the chosen socket-shaped object.
+    // Returns a Promise resolving to the chosen socket-shaped object. It rejects when
+    // the fallback cannot even start (no console ticket), so the caller shows an error.
     function connectVnc(opts) {
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
             const {
                 wsUrl, pollUrl, wsKey, getPollHandle,
                 wsTimeoutMs = 4000, onTransport, forcePolling,
             } = opts;
 
             let committed = false;
+            let fellBack = false;
             const commit = (sock, kind) => {
                 if (committed) return;
                 committed = true;
                 if (typeof onTransport === 'function') { try { onTransport(kind); } catch(_){} }
                 resolve(sock);
             };
+            const giveUp = (why) => {
+                if (committed) return;
+                committed = true;
+                reject(new Error(why));
+            };
 
             const goPolling = async (reason) => {
-                if (committed) return;
+                // LW Nov 2026 - the timer closes the hanging WSS, and that close lands here
+                // as well. Set before the first await, so only one of them fetches a ticket:
+                // a second vncproxy session on the VM is what the lazy ticket is there to avoid
+                if (committed || fellBack) return;
+                fellBack = true;
                 console.warn('[connectVnc] falling back to HTTP-polling:', reason);
                 if (typeof getPollHandle !== 'function') {
                     console.error('[connectVnc] no getPollHandle provided — cannot fall back');
+                    giveUp('no polling fallback');
                     return;
                 }
                 let handle;
                 try { handle = await getPollHandle(); }
-                catch (e) { console.error('[connectVnc] getPollHandle failed:', e); return; }
+                catch (e) {
+                    console.error('[connectVnc] getPollHandle failed:', e);
+                    giveUp('polling fallback: ' + ((e && e.message) || e));
+                    return;
+                }
                 if (committed) return;
                 if (!handle || !handle.key_b64 || !handle.session_id) {
                     console.error('[connectVnc] getPollHandle returned no usable handle');
+                    giveUp('polling fallback: no usable handle');
                     return;
                 }
                 const ps = new PollingVncSocket(pollUrl, handle.key_b64, handle.session_id, {
                     pveTicket: handle.pve_ticket, pvePort: handle.pve_port,
                 });
-                ps.addEventListener('open', () => commit(ps, 'poll'));
+                // the WSS may still have won in the meantime; a poll socket nobody holds
+                // would keep long-polling until the page goes
+                ps.addEventListener('open', () => {
+                    if (committed) ps.close();
+                    else commit(ps, 'poll');
+                });
                 ps.addEventListener('close', () => {
                     if (!committed) commit(ps, 'poll');
                 });
