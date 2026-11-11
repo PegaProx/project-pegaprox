@@ -14088,7 +14088,7 @@
             const [showVmwareClone, setShowVmwareClone] = useState(false);
             const [vmwareCloneName, setVmwareCloneName] = useState('');
             const [showVmwareDelete, setShowVmwareDelete] = useState(false);
-            const [vmwareConfigEdit, setVmwareConfigEdit] = useState({ cpu: '', memory: '', notes: '', cpu_hot_add: false, memory_hot_add: false });
+            const [vmwareConfigEdit, setVmwareConfigEdit] = useState({});  // only what the user changed
             const [vmwareConfigSaving, setVmwareConfigSaving] = useState(false);
             const [showVmwareMigrate, setShowVmwareMigrate] = useState(false);
             const [vmwareMigrationPlan, setVmwareMigrationPlan] = useState(null);
@@ -18734,6 +18734,8 @@
             
             // Watch VM detail via SSE (replaces 10s polling)
             useEffect(() => {
+                // what was typed for one guest is not saved on the next
+                setVmwareConfigEdit({});
                 if (selectedVMware?.id && vmwareSelectedVm) {
                     // Initial fetch
                     fetchVMwareVmDetail(selectedVMware.id, vmwareSelectedVm);
@@ -18827,16 +18829,31 @@
                 } catch(e) { addToast('Error', e.message, 'error'); }
             };
             
+            // LW Nov 2026 - what the guest has now: the settings tab shows it under the user's
+            // changes, and a save sends only what differs. The form started at empty notes and
+            // both switches off and a save sent all of it, so a CPU change wiped the notes of
+            // the guest and turned hot-add off
+            const vmwareConfigNow = (vm) => ({
+                cpu: vm?.cpu?.count || vm?.cpu_count || vm?.num_cpu || 0,
+                memory: vm?.memory?.size_MiB || vm?.memory_size_MiB || vm?.memory_mb || 0,
+                notes: vm?.annotation || vm?.notes || vm?.config?.annotation || '',
+                cpu_hot_add: !!vm?.cpu?.hot_add_enabled,
+                memory_hot_add: !!vm?.memory?.hot_add_enabled,
+            });
+
             // VMware VM Config Save
             const handleVmwareConfigSave = async (vmId) => {
                 setVmwareConfigSaving(true);
                 try {
+                    const now = vmwareConfigNow(vmwareVmDetail);
+                    const edit = vmwareConfigEdit;
+                    const cpu = parseInt(edit.cpu), memory = parseInt(edit.memory);
                     const payload = {};
-                    if (vmwareConfigEdit.cpu) payload.cpu_count = parseInt(vmwareConfigEdit.cpu);
-                    if (vmwareConfigEdit.memory) payload.memory_mb = parseInt(vmwareConfigEdit.memory);
-                    if (vmwareConfigEdit.notes !== undefined && vmwareConfigEdit.notes !== null) payload.notes = vmwareConfigEdit.notes;
-                    if (vmwareConfigEdit.cpu_hot_add !== undefined) payload.cpu_hot_add = vmwareConfigEdit.cpu_hot_add;
-                    if (vmwareConfigEdit.memory_hot_add !== undefined) payload.memory_hot_add = vmwareConfigEdit.memory_hot_add;
+                    if (cpu > 0 && cpu !== now.cpu) payload.cpu_count = cpu;
+                    if (memory > 0 && memory !== now.memory) payload.memory_mb = memory;
+                    if (edit.notes !== undefined && edit.notes !== now.notes) payload.notes = edit.notes;
+                    if (edit.cpu_hot_add !== undefined && edit.cpu_hot_add !== now.cpu_hot_add) payload.cpu_hot_add = edit.cpu_hot_add;
+                    if (edit.memory_hot_add !== undefined && edit.memory_hot_add !== now.memory_hot_add) payload.memory_hot_add = edit.memory_hot_add;
                     
                     if (Object.keys(payload).length === 0) {
                         addToast('No changes', 'warning');
@@ -18850,6 +18867,7 @@
                     });
                     if (resp?.ok) {
                         addToast('VM configuration updated', 'success');
+                        setVmwareConfigEdit({});
                         fetchVMwareVmDetail(selectedVMware.id, vmId);
                         fetchVMwareVms(selectedVMware.id);
                     } else {
@@ -28567,10 +28585,9 @@
                                                             
                                                             {/* Settings Tab -- Editable VM Configuration */}
                                                             {vmwareVmTab === 'settings' && (() => {
-                                                                // Initialize edit form from VM detail
-                                                                const initCpu = vmwareConfigEdit.cpu || cpuCount || 1;
-                                                                const initMem = vmwareConfigEdit.memory || memGB * 1024 || 2048;
-                                                                const initNotes = vmwareConfigEdit.notes !== undefined && vmwareConfigEdit.notes !== '' ? vmwareConfigEdit.notes : (vm.annotation || vm.notes || vm.config?.annotation || '');
+                                                                // what the guest has, under what the user changed
+                                                                const cfgNow = vmwareConfigNow(vm);
+                                                                const cfgForm = { ...cfgNow, ...vmwareConfigEdit };
                                                                 const perfData = vm.performance || {};
                                                                 
                                                                 // #625: on a standby the settings show, but nothing here saves
@@ -28626,16 +28643,16 @@
                                                                                     <div className="pt-2 border-t border-proxmox-border/50 space-y-2">
                                                                                         <label className="flex items-center justify-between cursor-pointer">
                                                                                             <span className="text-sm text-gray-400">{t('cpuHotAdd')}</span>
-                                                                                            <div onClick={() => setVmwareConfigEdit(p => ({...p, cpu_hot_add: !p.cpu_hot_add}))}
-                                                                                                className={`w-10 h-5 rounded-full transition-colors cursor-pointer flex items-center ${vmwareConfigEdit.cpu_hot_add ? 'bg-emerald-500' : 'bg-gray-700'}`}>
-                                                                                                <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${vmwareConfigEdit.cpu_hot_add ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                                                                                            <div onClick={() => setVmwareConfigEdit(p => ({...p, cpu_hot_add: !(p.cpu_hot_add ?? cfgNow.cpu_hot_add)}))}
+                                                                                                className={`w-10 h-5 rounded-full transition-colors cursor-pointer flex items-center ${cfgForm.cpu_hot_add ? 'bg-emerald-500' : 'bg-gray-700'}`}>
+                                                                                                <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${cfgForm.cpu_hot_add ? 'translate-x-5' : 'translate-x-0.5'}`} />
                                                                                             </div>
                                                                                         </label>
                                                                                         <label className="flex items-center justify-between cursor-pointer">
                                                                                             <span className="text-sm text-gray-400">{t('memoryHotAdd')}</span>
-                                                                                            <div onClick={() => setVmwareConfigEdit(p => ({...p, memory_hot_add: !p.memory_hot_add}))}
-                                                                                                className={`w-10 h-5 rounded-full transition-colors cursor-pointer flex items-center ${vmwareConfigEdit.memory_hot_add ? 'bg-emerald-500' : 'bg-gray-700'}`}>
-                                                                                                <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${vmwareConfigEdit.memory_hot_add ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                                                                                            <div onClick={() => setVmwareConfigEdit(p => ({...p, memory_hot_add: !(p.memory_hot_add ?? cfgNow.memory_hot_add)}))}
+                                                                                                className={`w-10 h-5 rounded-full transition-colors cursor-pointer flex items-center ${cfgForm.memory_hot_add ? 'bg-emerald-500' : 'bg-gray-700'}`}>
+                                                                                                <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${cfgForm.memory_hot_add ? 'translate-x-5' : 'translate-x-0.5'}`} />
                                                                                             </div>
                                                                                         </label>
                                                                                     </div>
@@ -28649,7 +28666,7 @@
                                                                                         <Icons.FileText className="w-4 h-4" /> {t('notes')}
                                                                                     </h3>
                                                                                     <textarea
-                                                                                        value={vmwareConfigEdit.notes !== undefined && vmwareConfigEdit.notes !== '' ? vmwareConfigEdit.notes : (vm.annotation || vm.notes || vm.config?.annotation || '')}
+                                                                                        value={cfgForm.notes}
                                                                                         onChange={e => setVmwareConfigEdit(p => ({...p, notes: e.target.value}))}
                                                                                         placeholder={t('vmDescriptionNotesPlaceholder')}
                                                                                         rows={4}
@@ -28741,7 +28758,7 @@
                                                                         {/* Save Button */}
                                                                         {!haReadOnly && (
                                                                         <div className="flex justify-end gap-3">
-                                                                            <button onClick={() => setVmwareConfigEdit({ cpu: '', memory: '', notes: '', cpu_hot_add: false, memory_hot_add: false })}
+                                                                            <button onClick={() => setVmwareConfigEdit({})}
                                                                                 className="px-4 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-white text-sm">
                                                                                 {t('resetChanges')}
                                                                             </button>
