@@ -101,3 +101,30 @@ def test_a_key_cap_that_is_no_whole_number_does_not_stop_the_start(tmp_path, raw
                          cwd=_ROOT, env=env, capture_output=True, text=True, timeout=120)
     assert run.returncode == 0, run.stderr[-2000:]
     assert run.stdout.split()[-1] == str(cap)
+
+
+def _start_with(tmp_path, name, raw, expr):
+    env = dict(os.environ, **{name: raw},
+               PEGAPROX_CONFIG_DIR=str(tmp_path / 'config'), PEGAPROX_LOG_DIR=str(tmp_path / 'logs'))
+    return subprocess.run([sys.executable, '-c', 'from pegaprox.core import dbcrypto; print(' + expr + ')'],
+                          cwd=_ROOT, env=env, capture_output=True, text=True, timeout=120)
+
+
+@pytest.mark.parametrize('raw', ['60s', 'off', '1m', ' ', 'nan', 'inf'])
+def test_a_ttl_that_is_no_number_does_not_stop_the_start(tmp_path, raw):
+    """PEGAPROX_HEAVY_READ_TTL went through float() at import with nothing around it:
+    '60s' raised there and PegaProx did not start. It falls back to 60 seconds now, and so
+    do nan and inf, which float() takes and the cache sweep never let go of."""
+    run = _start_with(tmp_path, 'PEGAPROX_HEAVY_READ_TTL', raw, 'dbcrypto._HEAVY_TTL')
+    assert run.returncode == 0, run.stderr[-2000:]
+    assert float(run.stdout.split()[-1]) == 60.0
+
+
+@pytest.mark.parametrize('raw', ['four', '2.5', ' '])
+def test_a_concurrency_that_is_no_whole_number_keeps_the_cap(tmp_path, raw):
+    """A value int() did not take left no semaphore at all, so every distinct heavy read
+    went to the threadpool at once."""
+    run = _start_with(tmp_path, 'PEGAPROX_HEAVY_READ_CONCURRENCY', raw,
+                      'dbcrypto._heavy_sem() is not None and dbcrypto._heavy_sem().counter')
+    assert run.returncode == 0, run.stderr[-2000:]
+    assert run.stdout.split()[-1] == '4'

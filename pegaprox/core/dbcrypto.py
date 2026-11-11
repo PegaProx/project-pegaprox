@@ -25,6 +25,7 @@ MK May 2026 — "Stufe 3" of the security review response.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import platform
 import threading
@@ -505,7 +506,20 @@ def _heavy_read_offload(sql: str, params: tuple, transform=None):
 #     queries hit the crypto threadpool at once, so distinct-key misses can't
 #     GIL-storm the hub.
 import time as _time
-_HEAVY_TTL = float(os.environ.get('PEGAPROX_HEAVY_READ_TTL', '60') or '60')
+
+
+def _ttl():
+    # read at import like the key cap below: '60s' or 'off' must not keep PegaProx from
+    # starting. nan and inf parse but are no time; the sweep never let go of an entry
+    # stored with either
+    try:
+        ttl = float(os.environ.get('PEGAPROX_HEAVY_READ_TTL', '').strip() or 60)
+    except ValueError:
+        return 60.0
+    return ttl if math.isfinite(ttl) else 60.0
+
+
+_HEAVY_TTL = _ttl()
 _HEAVY_CACHE: dict = {}      # cache_key -> (expiry_monotonic, rows)
 _HEAVY_INFLIGHT: dict = {}   # cache_key -> AsyncResult
 # MK Oct 2026 - an entry used to stay until the next read of its key replaced it, so a
@@ -540,6 +554,14 @@ def _heavy_cache_store(key, rows, ttl):
         for k in older[:over]:
             _HEAVY_CACHE.pop(k, None)
 
+def _heavy_concurrency():
+    # a value that is no whole number keeps the default; it used to take the cap away
+    try:
+        return max(1, int(os.environ.get('PEGAPROX_HEAVY_READ_CONCURRENCY', '').strip() or 4))
+    except ValueError:
+        return 4
+
+
 def _heavy_sem():
     # Lazily build a gevent BoundedSemaphore (needs the hub). Cap concurrent
     # distinct heavy queries; default 4. Falls back to None if gevent absent.
@@ -549,8 +571,7 @@ def _heavy_sem():
     except NameError:
         try:
             from gevent.lock import BoundedSemaphore
-            n = int(os.environ.get('PEGAPROX_HEAVY_READ_CONCURRENCY', '4') or '4')
-            _HEAVY_SEM_OBJ = BoundedSemaphore(max(1, n))
+            _HEAVY_SEM_OBJ = BoundedSemaphore(_heavy_concurrency())
         except Exception:
             _HEAVY_SEM_OBJ = None
         return _HEAVY_SEM_OBJ

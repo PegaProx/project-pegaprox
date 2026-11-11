@@ -257,6 +257,22 @@ def small_queue(monkeypatch):
     importlib.reload(sl)
 
 
+@pytest.mark.parametrize('raw', ['64M', 'lots', '1.5', '', ' '])
+def test_a_queue_size_that_is_no_whole_number_does_not_stop_the_start(tmp_path, raw):
+    """PEGAPROX_SYSLOG_QUEUE_MB went through int() at import, and api/reports.py imports
+    this module, so '64M' kept PegaProx from starting. It means 64 now."""
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PEGAPROX_SYSLOG_QUEUE_MB=raw,
+               PEGAPROX_CONFIG_DIR=str(tmp_path / 'config'), PEGAPROX_LOG_DIR=str(tmp_path / 'logs'))
+    run = subprocess.run([sys.executable, '-c', 'import pegaprox.background.syslog_server as sl; '
+                          'print(sl._QUEUE_MAX_BYTES)'],
+                         cwd=root, env=env, capture_output=True, text=True, timeout=120)
+    assert run.returncode == 0, run.stderr[-2000:]
+    assert run.stdout.split()[-1] == str(64 * 1024 * 1024)
+
+
 def test_large_messages_hit_the_byte_ceiling_long_before_the_count(small_queue):
     """20000 entries x 64 KB is 1.2 GB. The count cap never came near it."""
     big = _row('x' * 60000)

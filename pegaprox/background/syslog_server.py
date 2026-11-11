@@ -41,7 +41,16 @@ _DROPPED = 0
 # demand, on a box whose job is to keep clusters running. Count the bytes as well and stop
 # at whichever bound is reached first. 64 MB is roomy for the real traffic (a syslog line
 # is a couple of hundred bytes, so this is ~300k of them) and survivable on a small VM.
-_QUEUE_MAX_BYTES = int(os.environ.get('PEGAPROX_SYSLOG_QUEUE_MB', '64')) * 1024 * 1024
+# 0 or less turns the byte ceiling off. Read at import (reports.py imports this module), so
+# a value that is no whole number means 64 rather than a server that does not start.
+def _queue_max_mb():
+    try:
+        return int(os.environ.get('PEGAPROX_SYSLOG_QUEUE_MB', '').strip() or 64)
+    except ValueError:
+        return 64
+
+
+_QUEUE_MAX_BYTES = _queue_max_mb() * 1024 * 1024
 _QUEUE_BYTES = 0
 _QUEUE_BYTES_LOCK = threading.Lock()
 
