@@ -28,7 +28,7 @@ from pegaprox.utils.rbac import (
 )
 from pegaprox.utils.realtime import broadcast_sse, broadcast_update, push_immediate_update
 from pegaprox.core.config import load_config, save_config
-from pegaprox.core.manager import PegaProxManager
+from pegaprox.core.manager import PegaProxManager, ha_cache_node_status
 from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
 from pegaprox.utils.sanitization import bounded_list, validate_ssh_user, validate_host_address, dns_suffix
 from pegaprox.utils.sanitization import task_ref_ok
@@ -1529,16 +1529,11 @@ def get_cluster_metrics(cluster_id):
         return jsonify(node_map_for_caller(cluster_id, mgr._cached_metrics))
     
     # If HA is tracking nodes, build metrics from HA data
+    # MK Nov 2026 - the entries of a disconnected get_node_status(): the node card formats
+    # the score and the percentages of every node that is not offline
     if mgr.ha_node_status:
-        ha_metrics = {}
-        for name, data in mgr.ha_node_status.items():
-            ha_metrics[name] = {
-                'status': data.get('status', 'unknown'),
-                'cpu': 0,
-                'memory': {'used': 0, 'total': 0},
-                'disk': {'used': 0, 'total': 0},
-                'from_ha_cache': True
-            }
+        ha_metrics = {name: dict(entry, from_ha_cache=True)
+                      for name, entry in ha_cache_node_status(mgr.ha_node_status).items()}
         return jsonify(node_map_for_caller(cluster_id, ha_metrics))
     
     # Return error with empty metrics - frontend will keep old data

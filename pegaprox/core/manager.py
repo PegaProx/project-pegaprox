@@ -725,6 +725,31 @@ def _cooldown_from_tasks(mgr, table):
                      f"from the cluster's task list: {', '.join(str(v) for v in sorted(moved)[:20])}")
 
 
+def ha_cache_node_status(ha_node_status):
+    """The node map of get_node_status() from the HA loop's last look, for when PVE cannot
+    be asked: the fields of a live entry with the figures at 0. The /metrics fallback
+    hands out the same entries. MK Nov 2026"""
+    return {
+        name: {
+            'status': data.get('status', 'offline'),
+            'cpu_percent': 0,
+            'mem_percent': 0,
+            'mem_used': 0,
+            'mem_total': 0,
+            'disk_percent': 0,
+            'disk_used': 0,
+            'disk_total': 0,
+            'netin': 0,
+            'netout': 0,
+            'score': 0,
+            'uptime': 0,
+            'offline': data.get('status') == 'offline',
+            'last_seen': data.get('last_seen').isoformat() if data.get('last_seen') else None
+        }
+        for name, data in ha_node_status.items()
+    }
+
+
 class UnreadList(list):
     """The [] get_vm_resources() answers when cluster/resources did not answer.
 
@@ -2074,25 +2099,7 @@ class PegaProxManager:
         if not self.is_connected or not self.session:
             # return cached ha status if disconnected
             if self.ha_node_status:
-                return {
-                    name: {
-                        'status': data.get('status', 'offline'),
-                        'cpu_percent': 0,
-                        'mem_percent': 0,
-                        'mem_used': 0,
-                        'mem_total': 0,
-                        'disk_percent': 0,
-                        'disk_used': 0,
-                        'disk_total': 0,
-                        'netin': 0,
-                        'netout': 0,
-                        'score': 0,
-                        'uptime': 0,
-                        'offline': data.get('status') == 'offline',
-                        'last_seen': data.get('last_seen').isoformat() if data.get('last_seen') else None
-                    }
-                    for name, data in self.ha_node_status.items()
-                }
+                return ha_cache_node_status(self.ha_node_status)
             return {}
 
         # NS 2026-06-05 (#528 scaling): short result cache. get_node_status
