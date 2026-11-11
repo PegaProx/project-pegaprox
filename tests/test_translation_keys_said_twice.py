@@ -47,7 +47,7 @@ def test_the_pickers_say_what_they_pick():
 @pytest.mark.skipif(not shutil.which('node'), reason='needs node')
 def test_no_language_turns_a_cluster_picker_into_a_storage_cluster_picker():
     tr = _effective()
-    assert len(tr) == 9
+    assert len(tr) == 10
     for lang, keys in tr.items():
         assert all(keys[k] for k in KEYS), (lang, keys)
         assert keys['selectCluster'] != keys['selectStorageCluster'], lang
@@ -57,7 +57,7 @@ def test_no_language_turns_a_cluster_picker_into_a_storage_cluster_picker():
 def test_each_of_these_keys_is_defined_once_per_language():
     src = open(TR, encoding='utf-8').read()
     for key in KEYS:
-        assert len(re.findall(r'^\s*%s: ' % key, src, re.M)) == 9, key
+        assert len(re.findall(r'^\s*%s: ' % key, src, re.M)) == 10, key
 
 
 def test_the_two_headings_ask_for_the_special_case():

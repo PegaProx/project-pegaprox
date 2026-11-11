@@ -15,7 +15,7 @@ TR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '
 def test_no_key_is_defined_twice_in_a_language():
     lines = open(TR, encoding='utf-8').read().split('\n')
     starts = [(i, m.group(1)) for i, ln in enumerate(lines) if (m := re.match(r'^ {12}([a-z][a-z]): \{', ln))]
-    assert {lang for _, lang in starts} == {'de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it'} and len(starts) == 9
+    assert {lang for _, lang in starts} == {'de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru'} and len(starts) == 10
     twice = {}
     for n, (at, lang) in enumerate(starts):
         end = starts[n + 1][0] if n + 1 < len(starts) else len(lines)
