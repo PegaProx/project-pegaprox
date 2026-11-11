@@ -168,12 +168,26 @@ def _send_apprise(alert_data, cfg):
         return False, str(e)
 
 
+# MK Nov 2026 - the config.json we shipped had ntfy on with the topic "pegaprox-test" on
+# ntfy.sh, a public topic anyone can subscribe to, so enabling the plugin sent every
+# alert there before anything was set. An update keeps config.json (#1134), so that
+# pair without a token of its own counts as not set.
+_SHIPPED_EXAMPLE = ('https://ntfy.sh', 'pegaprox-test')
+
+
+def _ntfy_ready(cfg):
+    if not (cfg.get('ntfy_enabled') and cfg.get('ntfy_topic')):
+        return False
+    url = str(cfg.get('ntfy_url') or 'https://ntfy.sh').rstrip('/').lower()
+    return bool(cfg.get('ntfy_token')) or (url, str(cfg['ntfy_topic'])) != _SHIPPED_EXAMPLE
+
+
 # ─── Alert handler (called by PegaProx alert system) ───
 
 def _notification_handler(alert_data):
     cfg = _load_config()
 
-    if cfg.get('ntfy_enabled') and cfg.get('ntfy_topic'):
+    if _ntfy_ready(cfg):
         ok, err = _send_ntfy(alert_data, cfg)
         if ok:
             logging.info(f"[Notifications] ntfy sent: {alert_data.get('alert_name')}")
@@ -235,9 +249,11 @@ def _send_test():
         'message': 'This is a test notification from PegaProx. If you see this, notifications are working!',
     }
     results = {}
-    if cfg.get('ntfy_enabled') and cfg.get('ntfy_topic'):
+    if _ntfy_ready(cfg):
         ok, err_msg = _send_ntfy(test_alert, cfg)
         results['ntfy'] = {'success': ok, 'error': err_msg}
+    elif cfg.get('ntfy_enabled') and cfg.get('ntfy_topic'):
+        results['ntfy'] = {'success': False, 'error': 'pegaprox-test on ntfy.sh is the old example topic, set a topic of your own'}
     else:
         results['ntfy'] = {'success': False, 'error': 'Not enabled or no topic'}
 
