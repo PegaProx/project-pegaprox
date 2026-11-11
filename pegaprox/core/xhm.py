@@ -74,11 +74,6 @@ _PVE_NIC_TO_XCP = {
     'rtl8139': 'rtl8139',
     'e1000e': 'e1000',
 }
-_XCP_NIC_TO_PVE = {
-    'netfront': 'virtio',
-    'e1000': 'e1000',
-    'rtl8139': 'rtl8139',
-}
 
 # NS: Mar 2026 - ESXi guest OS -> Proxmox ostype
 # MK: Apr 2026 — comprehensive ESXi guestId → PVE ostype mapping (#222)
@@ -381,16 +376,15 @@ def plan_xcpng_to_pve(source_cluster_id, source_vmid, target_cluster_id):
         })
         total_bytes += d.get('size', 0)
 
-    # networks
+    # networks - a VIF record carries no NIC model, and the runner gives every NIC virtio
     nets_info = []
     for n in cfg.get('networks', []):
-        pve_model = _XCP_NIC_TO_PVE.get('e1000', 'virtio')  # default virtio on PVE
         nets_info.append({
             'id': n.get('id', ''),
             'mac': n.get('mac', ''),
             'network': n.get('network', ''),
             'bridge': n.get('bridge', ''),
-            'target_model': pve_model,
+            'target_model': 'virtio',
         })
 
     # available PVE targets
