@@ -388,6 +388,58 @@
             return null;
         }
 
+        // LW Nov 2026 - smbios1 of a VM, read and written like the PVE GUI does (Parser.js
+        // parseQemuSmbios1 / printQemuSmbios1). qemu-server takes only [A-Za-z0-9+/]+={0,2} in a
+        // value, so every value but the uuid goes base64-encoded and base64=1 says so.
+        const SMBIOS1_FIELDS = ['uuid', 'manufacturer', 'product', 'version', 'serial', 'sku', 'family'];
+        const smbiosB64Encode = (text) => {
+            let bin = '';
+            new TextEncoder().encode(text).forEach(b => { bin += String.fromCharCode(b); });
+            return btoa(bin);
+        };
+        const smbiosB64Decode = (value) => {
+            try {
+                return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(value), c => c.charCodeAt(0)));
+            } catch (e) {
+                return value;  // not base64 after all, show it as it is
+            }
+        };
+
+        function parseSmbios1(raw) {
+            const out = Object.fromEntries(SMBIOS1_FIELDS.map(k => [k, '']));
+            let base64 = false;
+            String(raw || '').split(',').forEach(part => {
+                const i = part.indexOf('=');
+                if (i < 0) return;
+                const key = part.slice(0, i).trim();
+                const value = part.slice(i + 1).trim();
+                if (key === 'base64') base64 = /^(1|on|yes|true)$/i.test(value);
+                else if (SMBIOS1_FIELDS.includes(key)) out[key] = value;
+            });
+            if (base64) {
+                SMBIOS1_FIELDS.forEach(k => { if (k !== 'uuid' && out[k]) out[k] = smbiosB64Decode(out[k]); });
+            }
+            return out;
+        }
+
+        // every value that is set, the uuid as it is, the rest encoded; base64=1 when one is
+        function smbios1Value(fields) {
+            const parts = [];
+            let base64 = false;
+            SMBIOS1_FIELDS.forEach(k => {
+                const value = String(fields?.[k] ?? '');
+                if (value === '') return;
+                if (k === 'uuid') {
+                    parts.push(`uuid=${value}`);
+                } else {
+                    base64 = true;
+                    parts.push(`${k}=${smbiosB64Encode(value)}`);
+                }
+            });
+            if (base64) parts.push('base64=1');
+            return parts.join(',');
+        }
+
         // LW Oct 2026 - the VirtIO RNG of a VM. PVE keeps it as rng0 =
         // "[source=]<file>[,max_bytes=N][,period=N]" and fills in 1024 bytes per 1000 ms when
         // the numbers are left out. The server checks the same rules before PVE sees the value.
@@ -2781,50 +2833,18 @@
                                                         )}
                                                         
                                                         {(() => {
-                                                            // Parse existing smbios1 value
-                                                            const smbiosRaw = getValue('options', 'smbios1') || '';
-                                                            const parseSmbios = (raw) => {
-                                                                const result = { uuid: '', manufacturer: '', product: '', version: '', serial: '', sku: '', family: '' };
-                                                                if (!raw) return result;
-                                                                raw.split(',').forEach(part => {
-                                                                    const [key, ...valueParts] = part.split('=');
-                                                                    const value = valueParts.join('='); // Handle values with = in them
-                                                                    if (key && result.hasOwnProperty(key)) {
-                                                                        result[key] = value || '';
-                                                                    }
-                                                                });
-                                                                return result;
-                                                            };
+                                                            // the values as text: a value the PVE GUI wrote comes base64 (base64=1)
+                                                            const smbios = parseSmbios1(getValue('options', 'smbios1'));
                                                             
-                                                            const smbios = parseSmbios(smbiosRaw);
-                                                            
-                                                            // Sanitize for Proxmox SMBIOS - only A-Za-z0-9, learned the hard way that underscores dont work either
-                                                            const sanitizeSmbios = (value) => {
-                                                                if (!value) return '';
-                                                                return value
-                                                                    .replace(/\s+/g, '')  // Remove spaces
-                                                                    .replace(/[^A-Za-z0-9]/g, '');  // Remove ALL other chars including underscores
-                                                            };
-                                                            
-                                                            const buildSmbios = (newValues) => {
-                                                                const parts = [];
-                                                                Object.entries(newValues).forEach(([key, value]) => {
-                                                                    if (value && value.trim()) {
-                                                                        // UUID is special - don't sanitize
-                                                                        const finalValue = key === 'uuid' ? value : sanitizeSmbios(value);
-                                                                        if (finalValue) {
-                                                                            parts.push(`${key}=${finalValue}`);
-                                                                        }
-                                                                    }
-                                                                });
-                                                                return parts.join(',');
-                                                            };
-                                                            
+                                                            // what is typed stays as typed, the writer encodes it the way PVE takes it
                                                             const updateSmbios = (field, value) => {
                                                                 const newSmbios = { ...smbios, [field]: value };
-                                                                const encoded = buildSmbios(newSmbios);
-                                                                handleChange('options', 'smbios1', encoded || null);
+                                                                handleChange('options', 'smbios1', smbios1Value(newSmbios) || null);
                                                             };
+                                                            
+                                                            // a preset keeps the uuid and goes through the same writer
+                                                            const applySmbiosPreset = (values) => handleChange('options', 'smbios1', smbios1Value({ uuid: smbios.uuid, ...values }));
+                                                            const presetSerial = (prefix) => prefix + Math.random().toString(36).substr(2, 8).toUpperCase();
                                                             
                                                             const generateUuid = () => {
                                                                 return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
@@ -2845,8 +2865,8 @@
                                                                     </div>
                                                                     
                                                                     {/* Format hint */}
-                                                                    <p className="text-[10px] text-yellow-500/70">
-                                                                        ⚠️ {t('smbiosFormatHint') || 'Only letters and numbers allowed (A-Za-z0-9)'}
+                                                                    <p className="text-[10px] text-gray-500">
+                                                                        {t('smbiosFormatHint') || 'Any text is allowed. Like the Proxmox VE GUI, PegaProx stores the values base64-encoded (base64=1).'}
                                                                     </p>
                                                                     
                                                                     <div className="grid grid-cols-2 gap-3">
@@ -2860,9 +2880,6 @@
                                                                                 placeholder="e.g. Dell"
                                                                                 className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
                                                                             />
-                                                                            {smbios.manufacturer && sanitizeSmbios(smbios.manufacturer) !== smbios.manufacturer && (
-                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.manufacturer)}</p>
-                                                                            )}
                                                                         </div>
                                                                         
                                                                         {/* Product */}
@@ -2875,9 +2892,6 @@
                                                                                 placeholder="e.g. PowerEdgeR740"
                                                                                 className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
                                                                             />
-                                                                            {smbios.product && sanitizeSmbios(smbios.product) !== smbios.product && (
-                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.product)}</p>
-                                                                            )}
                                                                         </div>
                                                                         
                                                                         {/* Version */}
@@ -2890,9 +2904,6 @@
                                                                                 placeholder="e.g. v1"
                                                                                 className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
                                                                             />
-                                                                            {smbios.version && sanitizeSmbios(smbios.version) !== smbios.version && (
-                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.version)}</p>
-                                                                            )}
                                                                         </div>
                                                                         
                                                                         {/* Serial */}
@@ -2905,9 +2916,6 @@
                                                                                 placeholder="e.g. ABC123"
                                                                                 className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
                                                                             />
-                                                                            {smbios.serial && sanitizeSmbios(smbios.serial) !== smbios.serial && (
-                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.serial)}</p>
-                                                                            )}
                                                                         </div>
                                                                         
                                                                         {/* SKU */}
@@ -2920,9 +2928,6 @@
                                                                                 placeholder="e.g. SKU12345"
                                                                                 className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
                                                                             />
-                                                                            {smbios.sku && sanitizeSmbios(smbios.sku) !== smbios.sku && (
-                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.sku)}</p>
-                                                                            )}
                                                                         </div>
                                                                         
                                                                         {/* Family */}
@@ -2935,9 +2940,6 @@
                                                                                 placeholder="e.g. Server"
                                                                                 className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
                                                                             />
-                                                                            {smbios.family && sanitizeSmbios(smbios.family) !== smbios.family && (
-                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.family)}</p>
-                                                                            )}
                                                                         </div>
                                                                     </div>
                                                                     
@@ -2946,64 +2948,47 @@
                                                                         <div className="p-3 bg-black/50 rounded-lg border border-proxmox-border">
                                                                             <label className="block text-[10px] text-gray-500 mb-1">{t('preview') || 'Preview'} (smbios1):</label>
                                                                             <code className="text-xs text-green-400 font-mono break-all">
-                                                                                {buildSmbios(smbios)}
+                                                                                {smbios1Value(smbios)}
                                                                             </code>
                                                                         </div>
                                                                     )}
                                                                     
-                                                                    {/* Quick presets - using only safe characters (A-Za-z0-9) */}
+                                                                    {/* Quick presets */}
                                                                     <div className="pt-2 border-t border-proxmox-border">
                                                                         <label className="block text-xs text-gray-400 mb-2">{t('presets') || 'Quick Presets'}</label>
                                                                         <div className="flex flex-wrap gap-2">
                                                                             <button
-                                                                                onClick={() => {
-                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
-                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=Dell,product=PowerEdgeR740,version=v1,serial=DELL${Math.random().toString(36).substr(2, 8).toUpperCase()},family=Server`);
-                                                                                }}
+                                                                                onClick={() => applySmbiosPreset({ manufacturer: 'Dell', product: 'PowerEdgeR740', version: 'v1', serial: presetSerial('DELL'), family: 'Server' })}
                                                                                 className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
                                                                             >
                                                                                 Dell Server
                                                                             </button>
                                                                             <button
-                                                                                onClick={() => {
-                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
-                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=HP,product=ProLiantDL380,version=v1,serial=MXQ${Math.random().toString(36).substr(2, 8).toUpperCase()},family=Server`);
-                                                                                }}
+                                                                                onClick={() => applySmbiosPreset({ manufacturer: 'HP', product: 'ProLiantDL380', version: 'v1', serial: presetSerial('MXQ'), family: 'Server' })}
                                                                                 className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
                                                                             >
                                                                                 HP Server
                                                                             </button>
                                                                             <button
-                                                                                onClick={() => {
-                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
-                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=Lenovo,product=ThinkPadX1,version=v1,serial=PF${Math.random().toString(36).substr(2, 8).toUpperCase()},family=ThinkPad`);
-                                                                                }}
+                                                                                onClick={() => applySmbiosPreset({ manufacturer: 'Lenovo', product: 'ThinkPadX1', version: 'v1', serial: presetSerial('PF'), family: 'ThinkPad' })}
                                                                                 className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
                                                                             >
                                                                                 Lenovo Laptop
                                                                             </button>
                                                                             <button
                                                                                 onClick={async () => {
-                                                                                    // NS: fetch smbios settings from cluster config
-                                                                                    const sanitize = (v) => (v || '').replace(/\s+/g, '').replace(/[^A-Za-z0-9]/g, '');
+                                                                                    // NS: fetch smbios settings from cluster config, the values the node daemon writes
+                                                                                    let settings = { manufacturer: 'Proxmox', product: 'PegaProxManagment', version: 'v1', family: 'ProxmoxVE' };
                                                                                     try {
                                                                                         const res = await authFetch(`${API_URL}/clusters/${clusterId}/smbios-autoconfig`);
-                                                                                        const settings = res?.ok ? await res.json() : {};
-                                                                                        const mfg = sanitize(settings.manufacturer) || 'Proxmox';
-                                                                                        const prod = sanitize(settings.product) || 'PegaProxManagment';
-                                                                                        const ver = sanitize(settings.version) || 'v1';
-                                                                                        const fam = sanitize(settings.family) || 'ProxmoxVE';
-                                                                                        const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(2, 14);
-                                                                                        const randomPart = Math.floor(Math.random() * 9000 + 1000);
-                                                                                        const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
-                                                                                        handleChange('options', 'smbios1', `${base}manufacturer=${mfg},product=${prod},version=${ver},serial=PVE${timestamp}${randomPart},family=${fam}`);
+                                                                                        if (res?.ok) settings = { ...settings, ...(await res.json()) };
                                                                                     } catch (e) {
                                                                                         // fallback to defaults
-                                                                                        const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
-                                                                                        const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(2, 14);
-                                                                                        const randomPart = Math.floor(Math.random() * 9000 + 1000);
-                                                                                        handleChange('options', 'smbios1', `${base}manufacturer=Proxmox,product=PegaProxManagment,version=v1,serial=PVE${timestamp}${randomPart},family=ProxmoxVE`);
                                                                                     }
+                                                                                    const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(2, 14);
+                                                                                    const randomPart = Math.floor(Math.random() * 9000 + 1000);
+                                                                                    applySmbiosPreset({ manufacturer: settings.manufacturer, product: settings.product, version: settings.version,
+                                                                                                        serial: `PVE${timestamp}${randomPart}`, family: settings.family });
                                                                                 }}
                                                                                 className="px-2 py-1 bg-proxmox-orange/20 border border-proxmox-orange/50 rounded text-xs text-proxmox-orange hover:bg-proxmox-orange/30"
                                                                                 title={t('applySmbiosFromClusterConfig') || 'Apply SMBIOS settings from cluster configuration'}
@@ -3011,10 +2996,7 @@
                                                                                 🦄 PegaProx
                                                                             </button>
                                                                             <button
-                                                                                onClick={() => {
-                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
-                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=Microsoft,product=VirtualMachine,version=HyperV,serial=0000000000000000,family=VirtualMachine`);
-                                                                                }}
+                                                                                onClick={() => applySmbiosPreset({ manufacturer: 'Microsoft', product: 'VirtualMachine', version: 'HyperV', serial: '0000000000000000', family: 'VirtualMachine' })}
                                                                                 className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
                                                                             >
                                                                                 Hyper-V
