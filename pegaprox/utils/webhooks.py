@@ -169,6 +169,18 @@ def _build_teams(alert):
     }
 
 
+def _delivered(r):
+    """(success, detail) for the answer of a webhook endpoint.
+
+    The senders follow no redirect, so a 3xx means the alert went nowhere: only a 2xx
+    is a delivery, and the detail says why a 3xx is not one.
+    """
+    code = r.status_code
+    if 300 <= code < 400:
+        return False, f'HTTP {code}, redirect not followed'
+    return 200 <= code < 300, f'HTTP {code}'
+
+
 def _post_ntfy(channel, alert):
     """ntfy wants a plaintext body + headers. Different shape from JSON webhooks."""
     if not requests:
@@ -191,7 +203,7 @@ def _post_ntfy(channel, alert):
         return False, 'blocked: unsafe url'
     try:
         r = requests.post(url, data=body.encode('utf-8'), headers=headers, timeout=6, allow_redirects=False)
-        return 200 <= r.status_code < 300, f'HTTP {r.status_code}'
+        return _delivered(r)
     except Exception as e:
         return False, _redact_webhook_url(str(e))
 
@@ -227,7 +239,7 @@ def send_to_channel(channel, alert):
 
     try:
         r = requests.post(url, json=body, timeout=6, allow_redirects=False)
-        return 200 <= r.status_code < 400, f'HTTP {r.status_code}'
+        return _delivered(r)
     except Exception as e:
         return False, _redact_webhook_url(str(e))
 
