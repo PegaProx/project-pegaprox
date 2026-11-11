@@ -657,7 +657,9 @@ def create_policy(cluster_id):
         schedule_day = 1
     run_once_at = (body.get('run_once_at') or '').strip()[:32]
     prune_only = bool(body.get('prune_only'))
-    retention_count = max(0, int(body.get('retention_count') or 7))
+    # 7 is the default of a field left out; a 0 that was sent means "no count rule", as on edit
+    rc = body.get('retention_count')
+    retention_count = max(0, int(7 if rc in (None, '') else rc))
     retention_days = max(0, int(body.get('retention_days') or 0))
     include_ram = bool(body.get('include_ram'))
     enabled = bool(body.get('enabled', True))
