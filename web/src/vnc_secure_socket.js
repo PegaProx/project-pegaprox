@@ -35,6 +35,20 @@
              : new Uint8Array(buf);
     }
 
+    function _concat(parts) {
+        if (parts.length === 1) return parts[0];
+        let n = 0;
+        for (const p of parts) n += p.length;
+        const out = new Uint8Array(n);
+        let off = 0;
+        for (const p of parts) { out.set(p, off); off += p.length; }
+        return out;
+    }
+
+    // pveproxy refuses a client websocket frame over 128 KiB, and the server hands each
+    // polling send to PVE as one frame
+    const POLL_SEND_MAX = 64 * 1024;
+
     class SecureVncSocket {
         // mirror native WebSocket constants
         static get CONNECTING() { return 0; }
@@ -270,6 +284,8 @@
             this._sendSeq = 0;
             this._recvSeq = 0;
             this._recvLoopP = null;
+            this._outQueue = [];      // input noVNC sent while a send POST was out
+            this._sending = false;
 
             this._keyP = window.crypto.subtle.importKey(
                 'raw', _b64ToU8(keyB64), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']
@@ -410,20 +426,53 @@
             return btoa(s);
         }
 
-        async send(data) {
+        send(data) {
             if (this._closed || this._readyState !== 1 || !this._key || !this._pollId) {
                 // could queue, but in practice noVNC waits for `open` event
                 return;
             }
             const u8 = (typeof data === 'string') ? new TextEncoder().encode(data) : _u8(data);
+            // a copy: noVNC rewrites the buffer it hands over for its next message
+            this._outQueue.push(u8.slice());
+            if (!this._sending) this._drainSends();
+        }
+
+        // LW Nov 2026 - one send POST at a time. Side by side they reached the server in
+        // whatever order the connections took, and it refuses any frame but the next number:
+        // after one swap every later frame was refused, input and update requests alike, and
+        // the console froze. What noVNC sends while a POST is out goes along in the next one, up
+        // to POLL_SEND_MAX - RFB is a byte stream, where one message ends does not travel with it.
+        async _drainSends() {
+            this._sending = true;
             try {
-                const frame = await this._encrypt(u8);
-                const b64 = await this._bufToB64(frame);
-                await this._post({ action: 'send', poll_id: this._pollId, data_b64: b64 });
-            } catch (err) {
-                console.error('[PollingVncSocket] send failed:', err);
-                this._dispatch('error', new Event('error'));
+                while (this._outQueue.length && !this._closed) {
+                    const plain = this._nextSend();
+                    try {
+                        const frame = await this._encrypt(plain);
+                        const b64 = await this._bufToB64(frame);
+                        await this._post({ action: 'send', poll_id: this._pollId, data_b64: b64 });
+                    } catch (err) {
+                        console.error('[PollingVncSocket] send failed:', err);
+                        this._dispatch('error', new Event('error'));
+                    }
+                }
+            } finally {
+                this._sending = false;
             }
+        }
+
+        // the front of the queue, at most POLL_SEND_MAX bytes. A part that does not fit is cut
+        // there, so a long paste goes out in several POSTs
+        _nextSend() {
+            const q = this._outQueue;
+            let take = 0, n = 0;
+            while (take < q.length && n + q[take].length <= POLL_SEND_MAX) n += q[take++].length;
+            const parts = q.splice(0, take);
+            if (q.length && n < POLL_SEND_MAX) {
+                parts.push(q[0].subarray(0, POLL_SEND_MAX - n));
+                q[0] = q[0].subarray(POLL_SEND_MAX - n);
+            }
+            return _concat(parts);
         }
 
         close(code, reason) {
