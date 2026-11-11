@@ -323,6 +323,9 @@ TOKEN_BLIND_SECONDS = 7200
 # no migration takes this long: a task that still reports running then is stuck, and the
 # token (the rights of its user) is not left on the target for it
 TOKEN_MAX_SECONDS = 7 * 86400
+# a delete the target did not take is tried again, this far apart, before the warning
+TOKEN_DELETE_TRIES = 3
+TOKEN_DELETE_PAUSE = 150
 
 
 def token_expiry():
@@ -341,7 +344,9 @@ def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
     "401 Unauthorized". Only the end of the task takes it away: its status is read by
     its UPID, and neither a task missing from a task list nor a duration is an end. A
     status that cannot be read for TOKEN_BLIND_SECONDS in a row gives up on the task,
-    and so does a task still running after TOKEN_MAX_SECONDS.
+    and so does a task still running after TOKEN_MAX_SECONDS. A delete the target does
+    not take (a short outage, the lease between two leaders) is tried TOKEN_DELETE_TRIES
+    times before the warning.
     Used by the migration by hand (api/vms.py) and by the cross-cluster balancer.
     """
     logger = getattr(source_mgr, 'logger', None) or log
@@ -374,16 +379,19 @@ def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
         waited += TOKEN_POLL_SECONDS
         if not state:
             blind += TOKEN_POLL_SECONDS
-    try:
-        res = target_mgr.delete_api_token(token_name)
-    except Exception as e:
-        res = {'success': False, 'error': str(e)}
-    if isinstance(res, dict) and res.get('success'):
-        logger.info(f"[TOKEN-CLEANUP] Deleted migration token {token_name}")
-    else:
-        why = res.get('error') if isinstance(res, dict) else res
-        logger.warning(f"[TOKEN-CLEANUP] Migration token {token_name} of {what} is still on the "
-                       f"target cluster, delete it there: {why}")
+    for attempt in range(TOKEN_DELETE_TRIES):
+        if attempt:
+            time.sleep(TOKEN_DELETE_PAUSE)
+        try:
+            res = target_mgr.delete_api_token(token_name)
+        except Exception as e:
+            res = {'success': False, 'error': str(e)}
+        if isinstance(res, dict) and res.get('success'):
+            logger.info(f"[TOKEN-CLEANUP] Deleted migration token {token_name}")
+            return
+    why = res.get('error') if isinstance(res, dict) else res
+    logger.warning(f"[TOKEN-CLEANUP] Migration token {token_name} of {what} is still on the "
+                   f"target cluster after {TOKEN_DELETE_TRIES} tries, delete it there: {why}")
 
 
 # --- SSH relay -------------------------------------------------------------------------

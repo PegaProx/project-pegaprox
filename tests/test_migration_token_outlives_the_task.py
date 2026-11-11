@@ -268,7 +268,9 @@ def test_a_token_that_could_not_be_deleted_is_not_reported_as_deleted(migration,
         migration.tgt.delete_api_token = refuse
     else:
         migration.delete_answer = answer
-    assert migration.follow([(EVER, 'OK')]) == [SETTLE]
+    # tried three times, minutes apart
+    tried = migration.follow([(EVER, 'OK')])
+    assert len(tried) == 3 and tried[0] == SETTLE and tried[2] - tried[1] == tried[1] - tried[0] >= 60, tried
     said = [r.getMessage() for r in caplog.records if migration.token in r.getMessage()]
     assert [m for m in _warned(caplog, migration.token) if 'no lease' in m], said
     assert not [m for m in said if 'eleted migration token' in m], said
@@ -309,6 +311,22 @@ def test_a_started_migration_keeps_its_token_when_a_later_step_fails(migration, 
     token = migration.again(status=500)
     assert migration.deleted == []
     assert [job['args'][2] for job in migration.kept] == [migration.token, token]
+
+
+def test_a_delete_the_target_did_not_take_is_tried_again(migration, caplog):
+    """A single refused delete, a short outage of the target or the lease between two
+    leaders, left the token there for good."""
+    caplog.set_level(logging.INFO)
+    answers = [{'success': False, 'error': 'no lease'}, {'success': True}]
+
+    def flaky(name):
+        migration.deleted.append((name, migration.clock.t))
+        return answers.pop(0)
+    migration.tgt.delete_api_token = flaky
+    tried = migration.follow([(EVER, 'OK')])
+    assert len(tried) == 2 and tried[0] == SETTLE < tried[1], tried
+    assert not _warned(caplog, migration.token)
+    assert [r for r in caplog.records if 'Deleted migration token ' + migration.token in r.getMessage()]
 
 @pytest.mark.parametrize('expire, sent', [(None, 0), (1893456000, 1893456000)])
 def test_the_token_is_created_with_the_expire_it_is_given(expire, sent):
