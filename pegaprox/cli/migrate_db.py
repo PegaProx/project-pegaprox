@@ -193,6 +193,11 @@ def _encrypt_via_sqlcipher_export(plain_path: str, encrypted_path: str, key_raw:
     count copied across all tables (for the log line)."""
     if os.path.exists(encrypted_path):
         os.remove(encrypted_path)
+    # MK Nov 2026 - created 0600 before SQLCipher opens it. A file SQLite creates gets
+    # the umask (0644 as a rule), and the chmod meant for it sat after the return. The
+    # journal SQLite writes next to it takes the same mode.
+    os.close(os.open(encrypted_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    os.chmod(encrypted_path, 0o600)
 
     import sqlcipher3
     hex_key = key_raw.hex()
@@ -224,11 +229,6 @@ def _encrypt_via_sqlcipher_export(plain_path: str, encrypted_path: str, key_raw:
         return total
     finally:
         enc.close()
-    # tighten perms on the new file
-    try:
-        os.chmod(encrypted_path, 0o600)
-    except Exception:
-        pass
 
 
 def _verify_row_counts(plain_path: str, encrypted_path: str) -> None:
