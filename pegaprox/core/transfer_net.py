@@ -19,6 +19,9 @@ network keeps the management host, and the caller says so.
 Where PegaProx relays replication data over SSH itself, a node's transfer address is
 used only when PegaProx reaches it and the host key there is the one pinned for the
 node's management address (the caller connects with pinned_as, ssh_security.pin_as).
+
+The temporary token such a migration authenticates with at the target goes when its task
+has ended, not before (drop_token_when_done).
 """
 
 import ipaddress
@@ -27,6 +30,8 @@ import shlex
 import threading
 import time
 from urllib.parse import quote
+
+from pegaprox.core import bulk_migrate
 
 log = logging.getLogger(__name__)
 
@@ -306,6 +311,71 @@ def endpoint(token, host, fingerprint):
     address format takes it."""
     return (f"apitoken=PVEAPIToken={token['token_id']}={token['token_value']},"
             f"host={host},fingerprint={fingerprint}")
+
+
+# --- the token of a remote migration ---------------------------------------------------
+
+TOKEN_POLL_SECONDS = 15
+# the source node may still be closing its tunnels when the task reports its end
+TOKEN_SETTLE_SECONDS = 30
+# a task whose status cannot be read for this long in a row is given up on
+TOKEN_BLIND_SECONDS = 7200
+# no migration takes this long: a task that still reports running then is stuck, and the
+# token (the rights of its user, no expiry) is not left on the target for it
+TOKEN_MAX_SECONDS = 7 * 86400
+
+
+def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
+    """Delete the temporary token of a remote migration once its task has ended.
+
+    The source node presents the token at the target for as long as the task runs, the
+    tunnels it opens late included, so a token deleted earlier ends the migration with
+    "401 Unauthorized". Only the end of the task takes it away: its status is read by
+    its UPID, and neither a task missing from a task list nor a duration is an end. A
+    status that cannot be read for TOKEN_BLIND_SECONDS in a row gives up on the task,
+    and so does a task still running after TOKEN_MAX_SECONDS.
+    Used by the migration by hand (api/vms.py) and by the cross-cluster balancer.
+    """
+    logger = getattr(source_mgr, 'logger', None) or log
+    logger.info(f"[TOKEN-CLEANUP] Following {task_upid} of {what}, token {token_name}")
+    waited = blind = 0
+    while True:
+        try:
+            state = bulk_migrate.task_state(source_mgr, task_upid)
+        except Exception as e:
+            logger.warning(f"[TOKEN-CLEANUP] Status of {task_upid} of {what}: {e}")
+            state = None
+        if state and state[0] != 'running':
+            # the route answered when the task started: an end that is not a clean OK is a warning
+            clean = state[0] == 'ok' and not str(state[1]).startswith('WARNINGS')
+            (logger.info if clean else logger.warning)(
+                f"[TOKEN-CLEANUP] Migration of {what} ended: {state[0]} {state[1]}".rstrip())
+            time.sleep(TOKEN_SETTLE_SECONDS)
+            break
+        if state:
+            blind = 0
+        elif blind >= TOKEN_BLIND_SECONDS:
+            logger.warning(f"[TOKEN-CLEANUP] No status of {task_upid} of {what} for {blind}s, "
+                           f"deleting token {token_name} without knowing how the migration ended")
+            break
+        if waited >= TOKEN_MAX_SECONDS:
+            logger.warning(f"[TOKEN-CLEANUP] {task_upid} of {what} still reports running after {waited}s, "
+                           f"deleting token {token_name}: the migration loses its access to the target")
+            break
+        time.sleep(TOKEN_POLL_SECONDS)
+        waited += TOKEN_POLL_SECONDS
+        if not state:
+            blind += TOKEN_POLL_SECONDS
+    try:
+        res = target_mgr.delete_api_token(token_name)
+    except Exception as e:
+        res = {'success': False, 'error': str(e)}
+    if isinstance(res, dict) and res.get('success'):
+        logger.info(f"[TOKEN-CLEANUP] Deleted migration token {token_name}")
+    else:
+        why = res.get('error') if isinstance(res, dict) else res
+        logger.warning(f"[TOKEN-CLEANUP] Migration token {token_name} of {what} is still on the "
+                       f"target cluster, delete it there: {why}")
 
 
 # --- SSH relay -------------------------------------------------------------------------

@@ -31,6 +31,7 @@ import pytest
 
 import pegaprox.api.vms as vms
 import pegaprox.background.cross_cluster_lb as xclb
+from pegaprox.core import transfer_net
 from test_transfer_network import CID, TGT, _fresh_caches, _source, _target  # noqa: F401
 
 # the task of a PegaProx that logs in with an API token, as Proxmox names it
@@ -237,7 +238,7 @@ def test_a_migration_without_a_task_id_keeps_its_token_two_hours(monkeypatch, ca
     caplog.set_level(logging.INFO)
     src, tgt = MagicMock(), MagicMock()
     src.logger = logging.getLogger('test.migration_token.source')
-    job = {'target': xclb.drop_token_when_done, 'args': (tgt, src, 'pegaprox-migrate-1', upid, 'qemu/105')}
+    job = {'target': transfer_net.drop_token_when_done, 'args': (tgt, src, 'pegaprox-migrate-1', upid, 'qemu/105')}
     migration = _Migration(src, tgt, job, 'pegaprox-migrate-1', monkeypatch)
     assert migration.follow([(EVER, 'running')]) == [2 * HOUR]
     assert _warned(caplog, migration.token)

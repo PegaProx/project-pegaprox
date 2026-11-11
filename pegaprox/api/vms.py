@@ -15045,9 +15045,8 @@ def cross_cluster_migrate_api():
             push_immediate_update(source_cluster_id, delay=0.5)
             
             # The token goes when the task has ended, not before: the source node presents it
-            # for as long as the migration runs (background/cross_cluster_lb.py)
-            from pegaprox.background.cross_cluster_lb import drop_token_when_done
-            cleanup_thread = threading.Thread(target=ha.as_job(drop_token_when_done, 'token cleanup'),
+            # for as long as the migration runs (core/transfer_net.py)
+            cleanup_thread = threading.Thread(target=ha.as_job(transfer_net.drop_token_when_done, 'token cleanup'),
                                               args=(target_manager, source_manager, token_name, task_upid,
                                                     f'{vm_type}/{vmid}'),
                                               daemon=True)
