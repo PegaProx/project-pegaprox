@@ -10698,12 +10698,15 @@ def lease_status(st=None, checks=None):
 # --- what each instance measures and announces -----------------------------------
 
 def _reaches(mgr):
+    from pegaprox.core.manager import PegaProxManager
     hosts = [getattr(mgr, 'host', None)]
     hosts += list(getattr(getattr(mgr, 'config', None), 'fallback_hosts', None) or [])
     for host in [h for h in hosts if isinstance(h, str) and h][:REACH_HOSTS]:
         try:
+            # mgr.host comes bracketed, a fallback host as it was found or typed
             resp = mgr._create_session().get(
-                f"https://{host}:{mgr.api_port}/api2/json/version", timeout=REACH_TIMEOUT)
+                f"https://{PegaProxManager._bracket_ipv6(host)}:{mgr.api_port}/api2/json/version",
+                timeout=REACH_TIMEOUT)
             # an answer is an answer: a ticket that ran out says the API is there
             if resp.status_code in (200, 401):
                 return True
