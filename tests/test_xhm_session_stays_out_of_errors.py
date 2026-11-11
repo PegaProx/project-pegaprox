@@ -88,7 +88,9 @@ def test_a_traceback_of_the_module_logger_keeps_its_lines_but_not_the_session(ca
 def test_the_support_bundle_blanks_a_session_in_the_log(api, seed, tmp_path, monkeypatch):
     (tmp_path / 'pegaprox.log').write_text(
         f"2026-11-11 08:00:01 ERROR [XHM:t1] Transfer error: url: /import_raw_vdi?session_id={SESSION}&vdi=u1\n"
-        "2026-11-11 08:00:02 INFO [XHM:t1] Phase: failed\n")
+        # a line written before the log record sanitizer was there, the map of a pool move
+        f"2026-11-11 08:00:02 ERROR remote_migrate_vm 101: {{'force': 'true', 'session_id': '{SESSION}'}}\n"
+        "2026-11-11 08:00:03 INFO [XHM:t1] Phase: failed\n")
     monkeypatch.setattr(settings_mod, 'LOG_DIR', str(tmp_path))
     admin = api.as_user(seed.user('root', role='admin'))
     r = admin.get('/api/support-bundle')
@@ -97,5 +99,7 @@ def test_the_support_bundle_blanks_a_session_in_the_log(api, seed, tmp_path, mon
         name = next(n for n in zf.namelist() if n.endswith('/pegaprox.log'))
         log = zf.read(name).decode()
     assert SESSION not in log
-    assert 'import_raw_vdi?session_id=[REDACTED]&vdi=u1' in log
+    # the same helper as the log lines, so the same mark
+    assert 'import_raw_vdi?session_id=***&vdi=u1' in log
+    assert "remote_migrate_vm 101: {'force': 'true', 'session_id': '***'}" in log
     assert 'Phase: failed' in log

@@ -546,6 +546,52 @@ def redact_request_line(line):
     return re.sub(r'\?([^\s"#]*)', _query, line)
 
 
+# MK Nov 2026 - the HTTP handlers of XAPI (import_raw_vdi, export_raw_vdi, rrd_updates)
+# take the session in the query string, and the session is the pool login until XCP-ng
+# drops it. requests names the url of a call that fails in its exception text, encoded
+# (session_id=OpaqueRef%3A...) once requests or urlencode built the query, and urllib3
+# logs every request line with it at DEBUG. The value ends where the url ends: blank,
+# & (%26 in a url inside a url) or the quote or bracket a urllib3 message or a repr puts
+# around it. The dict form ('session_id': 'OpaqueRef:...') needs the quote on the value,
+# a keyword repr (session_id='...') may have one, and with blanks around the = or a bare
+# colon the value has to be an OpaqueRef, so prose and a line of code stay as they are.
+_SESSION_ID_RE = re.compile(
+    r'''(session_id(?:=['"]?|%3D|['"]?\s*:\s*['"]|\s*[:=]\s*['"]?(?=OpaqueRef)))'''
+    r'''(?:(?!%26)[^&\s'"()\[\]<>,;\\])+''', re.IGNORECASE)
+
+
+def scrub_session_id(text):
+    """`text` with the value of every session_id written as ***.
+
+    The rest stays, so a failed call still says which handler it was and how it failed.
+    Takes anything (an exception too) and returns its text; None and '' come back as
+    they are."""
+    if text is None:
+        return None
+    text = str(text)
+    if not text:
+        return text
+    return _SESSION_ID_RE.sub(r'\1***', text)
+
+
+def _names_a_session(exc):
+    """Whether a traceback of exc shows a session_id: its own text or the text of an
+    exception it was raised from or while handling, as the traceback prints them."""
+    todo, seen = [exc], set()
+    while todo and len(seen) < 10:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        try:
+            if _SESSION_ID_RE.search(str(e)):
+                return True
+        except Exception:
+            pass    # the traceback prints <exception str() failed> for this one
+        todo.extend((getattr(e, '__cause__', None), getattr(e, '__context__', None)))
+    return False
+
+
 class LogInjectionFilter(logging.Filter):
     """Neutralise control characters on every log record, at the sink.
 
@@ -607,7 +653,8 @@ def install_log_record_sanitizer():
     factory is already installed rather than replacing it, and is idempotent.
 
     Same deliberate scope as the filter: `msg` and `args` only. A traceback arrives via
-    exc_info and is rendered by the formatter, so it keeps its newlines.
+    exc_info and is rendered by the formatter, so it keeps its newlines. The one thing a
+    traceback loses here is an XAPI session (scrub_session_id), see below.
     """
     global _RECORD_FACTORY_INSTALLED
     if _RECORD_FACTORY_INSTALLED:
@@ -636,10 +683,26 @@ def install_log_record_sanitizer():
         # the formatter afterwards, so tracebacks keep their newlines.
         _render = record.getMessage
 
+        # MK Nov 2026 - and an XAPI session in a url (scrub_session_id). The per-cluster
+        # XCPng_<name> loggers and urllib3's request lines in --debug reach no filter of
+        # their own, this runs for both.
         def _clean_render(_r=_render):
-            return sanitize_log_message(_r())
+            return scrub_session_id(sanitize_log_message(_r()))
 
         record.getMessage = _clean_render
+
+        # logger.exception: the traceback shows the exception text again, and the text of
+        # each exception it was raised from or while handling. Rendered here only when one
+        # of those names a session: every other traceback is rendered once, by the
+        # handler's formatter, with a formatException of its own if it has one. Newlines
+        # stay.
+        if record.exc_info and not record.exc_text:
+            try:
+                if _names_a_session(record.exc_info[1]):
+                    record.exc_text = scrub_session_id(
+                        logging.Formatter().formatException(record.exc_info))
+            except Exception:
+                pass
         return record
 
     logging.setLogRecordFactory(_sanitising_factory)

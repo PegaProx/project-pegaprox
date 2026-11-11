@@ -22,7 +22,7 @@ from pegaprox.core import ha, rolling_runs
 
 import requests
 from pegaprox.utils.auth import require_auth, load_users, save_users, validate_session, TOTP_AVAILABLE, ARGON2_AVAILABLE, _check_default_password_in_use, verify_password, needs_password_rehash
-from pegaprox.utils.sanitization import sanitize_identifier, sanitize_int, sanitize_csv_field
+from pegaprox.utils.sanitization import sanitize_identifier, sanitize_int, sanitize_csv_field, scrub_session_id
 from pegaprox.utils.ssh import get_ssh_connection_stats
 from pegaprox.utils.concurrent import GEVENT_AVAILABLE
 from pegaprox.utils.audit import log_audit, get_client_ip
@@ -4348,8 +4348,9 @@ def generate_support_bundle():
                 line = re.sub(r'(password["\']?\s*[:=]\s*["\']?)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
                 line = re.sub(r'(token["\']?\s*[:=]\s*["\']?)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
                 line = re.sub(r'(secret["\']?\s*[:=]\s*["\']?)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
-                # an XAPI session in a raw VDI url is the XCP-ng pool login
-                line = re.sub(r'(session_id=)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
+                # an XAPI session in a raw VDI url is the XCP-ng pool login; the same helper
+                # as the log record sanitizer, for the lines written before it was there
+                line = scrub_session_id(line)
                 # MK Oct 2026 - mail addresses: alice@corp.example -> ***@corp.example
                 # (a dotted name ending in letters, so root@pam and root@10.0.0.5 stay).
                 # The name before the @ is at most 64 long (RFC 5321): unbounded, every

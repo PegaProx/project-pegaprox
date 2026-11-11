@@ -17,7 +17,7 @@ from datetime import datetime
 from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.core import ha_transport
 from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec, ssh_password_for, ssh_password_to, bare_host, is_ipv6_literal, node_login
-from pegaprox.utils.sanitization import validate_ssh_user
+from pegaprox.utils.sanitization import validate_ssh_user, scrub_session_id
 from pegaprox.utils.realtime import broadcast_sse
 from pegaprox.utils.audit import log_audit
 
@@ -26,24 +26,17 @@ logger = logging.getLogger(__name__)
 # MK Nov 2026 - the raw VDI urls carry the XAPI session in the query string, and a
 # request that fails names its url in the exception text. That text went into the
 # task error, the SSE log stream every migration viewer gets and the server log, and
-# the session is the pool login itself until XCP-ng drops it.
-_XAPI_SESSION_RE = re.compile(r'(session_id=)[^&\s\'"]+', re.IGNORECASE)
-
-
-def _scrub_session(text):
-    if not text:
-        return text
-    return _XAPI_SESSION_RE.sub(r'\1***', str(text))
-
-
+# the session is the pool login itself until XCP-ng drops it. The log record sanitizer
+# app.py installs blanks it on every logger now; this filter keeps the module logger
+# clean where that is not installed.
 class _ScrubSessionFilter(logging.Filter):
     # logger.exception appends the traceback, and its last line is the same exception text
     def filter(self, record):
         try:
-            record.msg = _scrub_session(record.getMessage())
+            record.msg = scrub_session_id(record.getMessage())
             record.args = None
             if record.exc_info and not record.exc_text:
-                record.exc_text = _scrub_session(logging.Formatter().formatException(record.exc_info))
+                record.exc_text = scrub_session_id(logging.Formatter().formatException(record.exc_info))
         except Exception:
             pass    # a log line that cannot render must not stop the migration
         return True
@@ -205,7 +198,7 @@ class XHMigrationTask:
         self._last_sse_log = 0
 
     def log(self, msg):
-        msg = _scrub_session(msg)
+        msg = scrub_session_id(msg)
         ts = datetime.now().strftime('%H:%M:%S')
         entry = f"[{ts}] {msg}"
         self.log_lines.append(entry)
@@ -234,7 +227,7 @@ class XHMigrationTask:
         self.phase_times[phase] = {'start': datetime.now().isoformat(), 'end': None, 'duration': None}
 
         if error:
-            error = _scrub_session(error)
+            error = scrub_session_id(error)
             self.error = error
             self.status = 'failed'
             self.log(f"FAILED: {error}")
