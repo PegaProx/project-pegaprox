@@ -11,6 +11,7 @@ VMs using the existing cross-cluster migration infrastructure.
 """
 
 import time
+import uuid
 import logging
 import threading
 from datetime import datetime
@@ -150,8 +151,10 @@ def run_cross_cluster_balance_check(group):
     if not ha.confirm_step(f'cross-cluster balancing of {vmid}'):
         return
 
-    # 7. create temp API token on target cluster
-    token_name = f"xclb-{group_id[:8]}-{vmid}"
+    # 7. create temp API token on target cluster, one per migration: VMIDs repeat across
+    # clusters and a guest still moving can be picked again, and a token of the same name
+    # is replaced, which revoked the one a running migration authenticates with
+    token_name = f"xclb-{group_id[:8]}-{vmid}-{uuid.uuid4().hex[:6]}"
     token = lo_mgr.create_api_token(token_name, expire=transfer_net.token_expiry())
     if not token.get('success'):
         logger.error(f"[XCLB] Token creation failed on {lo_cid}: {token.get('error')}")

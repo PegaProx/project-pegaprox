@@ -71,8 +71,9 @@ def _token_in(endpoint):
 class _Migration:
     """A started migration: its source, its target, its token and the thread that follows it."""
 
-    def __init__(self, src, tgt, job, token, monkeypatch, expire=None):
+    def __init__(self, src, tgt, job, token, monkeypatch, expire=None, again=None):
         self.src, self.tgt, self.job, self.token, self.expire = src, tgt, job, token, expire
+        self.again = again
         self.clock, self.deleted, self.delete_answer = _Clock(), [], {'success': True}
         self.script, self.waiting = [(EVER, 'running')], False
         src.cluster_type = 'proxmox'
@@ -133,14 +134,17 @@ def by_hand(api, seed, monkeypatch):
     created, create = [], tgt.create_api_token
     tgt.create_api_token = lambda name, **kw: created.append(kw) or create(name, **kw)
     admin = api.as_user(seed.user('root', role='admin'))
-    r = admin.post('/api/cross-cluster-migrate', json={
-        'source_cluster': CID, 'target_cluster': TGT, 'vmid': 105, 'vm_type': 'qemu', 'source_node': 'pve1',
-        'target_node': 'pve2', 'target_storage': 'local-lvm', 'delete_source': False})
-    assert r.status_code == 200, r.get_data(as_text=True)
+
+    def start():
+        r = admin.post('/api/cross-cluster-migrate', json={
+            'source_cluster': CID, 'target_cluster': TGT, 'vmid': 105, 'vm_type': 'qemu', 'source_node': 'pve1',
+            'target_node': 'pve2', 'target_storage': 'local-lvm', 'delete_source': False})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        return _token_in(src.remote_migrate_vm.call_args[0][3])
+    token = start()
     (job,) = kept
     assert job['daemon'] is True
-    return _Migration(src, tgt, job, _token_in(src.remote_migrate_vm.call_args[0][3]), monkeypatch,
-                      expire=created[0].get('expire'))
+    return _Migration(src, tgt, job, token, monkeypatch, expire=created[0].get('expire'), again=start)
 
 
 @pytest.fixture
@@ -166,13 +170,17 @@ def balancer(monkeypatch):
     monkeypatch.setattr(xclb, 'get_db', lambda: _DB())
     monkeypatch.setattr(xclb, 'log_audit', lambda *a, **kw: None)
     monkeypatch.setattr(xclb.transfer_net, 'migration_route', lambda mgr, node=None: None)
-    xclb.run_cross_cluster_balance_check({
-        'id': 'g1', 'name': 'group', 'cross_cluster_threshold': 5, 'cross_cluster_dry_run': 0,
-        'cross_cluster_include_containers': 0})
+
+    def start():
+        xclb.run_cross_cluster_balance_check({
+            'id': 'g1', 'name': 'group', 'cross_cluster_threshold': 5, 'cross_cluster_dry_run': 0,
+            'cross_cluster_include_containers': 0})
+        return _token_in(hi.remote_migrate_vm.call_args[1]['target_endpoint'])
+    token = start()
     (job,) = kept
     assert job['daemon'] is True
-    return _Migration(hi, lo, job, _token_in(hi.remote_migrate_vm.call_args[1]['target_endpoint']), monkeypatch,
-                      expire=lo.create_api_token.call_args.kwargs.get('expire'))
+    return _Migration(hi, lo, job, token, monkeypatch,
+                      expire=lo.create_api_token.call_args.kwargs.get('expire'), again=start)
 
 
 @pytest.fixture(params=['by_hand', 'balancer'])
@@ -271,6 +279,20 @@ def test_pve_refuses_the_token_by_itself_a_day_after_the_longest_wait(migration)
     expire = migration.expire or 0
     assert time.time() + longest - 60 <= expire <= time.time() + longest
 
+
+
+def test_two_migrations_in_the_same_second_get_a_token_each(migration, monkeypatch):
+    """create_api_token replaces a token of the same name. The name was the second of the
+    start by hand and group plus VMID in the balancer, which picks a guest that is still
+    moving again on its next cycle: the second migration revoked the token the first one
+    was copying with, and the first one's cleanup deleted the second one's."""
+    now = time.time()
+    monkeypatch.setattr(time, 'time', lambda: now)
+    # the other guest 105 on the target is there for the cleanup; the preflight would refuse the VMID
+    migration.tgt.get_vm_resources = lambda *a, **k: []
+    first, second = migration.again(), migration.again()
+    assert first != second
+    assert all(name.startswith(('pegaprox-migrate-', 'xclb-g1-105-')) for name in (first, second))
 
 @pytest.mark.parametrize('expire, sent', [(None, 0), (1893456000, 1893456000)])
 def test_the_token_is_created_with_the_expire_it_is_given(expire, sent):

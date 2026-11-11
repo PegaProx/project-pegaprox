@@ -14969,9 +14969,10 @@ def cross_cluster_migrate_api():
     except Exception as e:
         logging.debug(f"Could not check VM size: {e}")
     
-    # Generate unique token name
+    # Generate unique token name: create_api_token replaces a token of the same name, and
+    # two migrations started in the same second revoked the first one's while it copied
     import time
-    token_name = f"pegaprox-migrate-{int(time.time())}"
+    token_name = f"pegaprox-migrate-{int(time.time())}-{uuid.uuid4().hex[:8]}"
     target_token = None
     
     try:
