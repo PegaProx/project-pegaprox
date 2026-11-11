@@ -3603,10 +3603,13 @@ class XcpngManager:
         return {'success': True, 'message': 'Nothing to revert (XCP-ng applies changes immediately)'}
 
     def get_cluster_networks(self):
-        """Cluster-wide network overview with VM assignments."""
+        """Cluster-wide network overview, in the shape PegaProxManager answers it:
+        {'networks': [...]} with one row per pool network. The network record names no
+        host and no guest, so nodes and vms stay empty and the VIF/PIF counts come along.
+        MK Nov 2026 - was a bare list, which every reader of data.networks took as none"""
         api = self._api()
         if not api:
-            return []
+            return {'networks': [], 'storage_assignments': []}
         try:
             result = []
             for net_ref in api.network.get_all():
@@ -3619,14 +3622,16 @@ class XcpngManager:
                     'name': rec.get('name_label', ''),
                     'bridge': rec.get('bridge', ''),
                     'uuid': rec.get('uuid', ''),
+                    'active': 1,
+                    'nodes': [], 'vms': [],
                     'vif_count': vif_count,
                     'pif_count': pif_count,
                     'mtu': int(rec.get('MTU', 1500)),
                 })
-            return result
+            return {'networks': result, 'storage_assignments': []}
         except Exception as e:
             self.logger.error(f"get_cluster_networks: {e}")
-            return []
+            return {'networks': [], 'storage_assignments': []}
 
     # ──────────────────────────────────────────
     # Node reboot / shutdown - XAPI calls

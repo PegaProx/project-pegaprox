@@ -971,7 +971,8 @@ def get_cluster_networks_api(cluster_id):
         logging.error(f"[API] cannot read the caller's guests on {_sl(cluster_id)}: {e}")
         return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
     got = mgr.get_cluster_networks()
-    if mine is None:
+    # XCP-ng: the pool's networks with counts, no guest and no node in them, nothing to cut
+    if mine is None or getattr(mgr, 'cluster_type', None) == 'xcpng':
         return jsonify(got)
     return jsonify(_networks_for_confined(cluster_id, got, mine))
 
@@ -981,7 +982,7 @@ def _networks_for_confined(cluster_id, got, mine):
     the nodes in `mine` (where those run) and the bridges there. `got` is the manager's
     30 s cache that every caller is served from, so the cut is made of copies."""
     if not isinstance(got, dict):
-        return got   # XCP-ng: the pool's networks with counts, no guest and no node in them
+        return got
     nets = [n for n in got.get('networks') or [] if isinstance(n, dict)]
     stores = [s for s in got.get('storage_assignments') or [] if isinstance(s, dict)]
     rows = [r for x in nets + stores for r in x.get('vms') or [] if isinstance(r, dict)]
