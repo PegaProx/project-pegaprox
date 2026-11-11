@@ -22,7 +22,7 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'web', 'src')
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 
 
 def _read(*parts):
@@ -4069,7 +4069,8 @@ def test_the_panel_speaks_the_serving_contract(panel):
 
 OLD_CONSOLE_CLAUSE = {'de': 'Konsolen öffnen sich immer', 'en': 'consoles always open', 'zh': '控制台始终',
                       'pl': 'konsole zawsze', 'fr': r"consoles s\'ouvrent toujours", 'es': 'consolas siempre',
-                      'pt': 'consoles sempre', 'ko': '콘솔은 항상', 'it': 'console si aprono sempre'}
+                      'pt': 'consoles sempre', 'ko': '콘솔은 항상', 'it': 'console si aprono sempre',
+                      'ru': 'консоли всегда открываются'}
 
 
 def test_the_serving_strings_say_no_em_dash():
@@ -4846,7 +4847,8 @@ INTRO = ('Run up to four PegaProx instances as one group. One is the leader: it 
 # what the old texts said about every standby, in each language
 READ_ONLY = {'de': ('schreibgeschützt', 'nur lesend'), 'en': ('read-only', 'read only'), 'zh': ('只读',),
              'pl': ('tylko do odczytu', 'tylko odczyt'), 'fr': ('lecture seule',), 'es': ('solo lectura',),
-             'pt': ('somente leitura', 'somente para leitura'), 'ko': ('읽기 전용',), 'it': ('sola lettura',)}
+             'pt': ('somente leitura', 'somente para leitura'), 'ko': ('읽기 전용',), 'it': ('sola lettura',),
+             'ru': ('только для чтения', 'только чтение')}
 KIND_KEYS = ('pgHaRoleDescLeader', 'pgHaRoleDescActive', 'pgHaRoleDescStandby', 'pgHaForwardPausedServing',
              'pgHaManagersServing', 'pgHaPromoteLeader', 'pgHaPromoteLeaderDesc', 'pgHaPromoteLeaderSyncFailed')
 KIND_REWORDED = ('pgHaIntro', 'pgHaLiveView', 'pgHaLiveViewHint', 'pgHaLiveViewSaved', 'pgHaForwardWrites',

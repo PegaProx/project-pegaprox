@@ -48,16 +48,16 @@ def _shared_read():
 @pytest.mark.parametrize('key', KEYS)
 def test_every_new_string_is_in_every_language_once(key):
     found = len(re.findall(rf'^\s*{key}:', _read('web', 'src', 'translations.js'), re.M))
-    assert found == 9, f'{key} is in {found} of 9 language blocks - the UI would show the key'
+    assert found == 10, f'{key} is in {found} of 10 language blocks - the UI would show the key'
 
 
 def test_both_keys_are_used_and_the_placeholders_survive_translation():
     used = set(re.findall(r"t\('(clusterHealthCeph[A-Za-z]*)'\)", _widget()))
     assert used == set(KEYS)
     values = re.findall(r"^\s*clusterHealthCephCap: '(.*)',$", _read('web', 'src', 'translations.js'), re.M)
-    assert len(values) == 9 and all('{cap}' in v and '{status}' in v for v in values), values
+    assert len(values) == 10 and all('{cap}' in v and '{status}' in v for v in values), values
     silent = re.findall(r"^\s*clusterHealthCephSilent: '(.*)',$", _read('web', 'src', 'translations.js'), re.M)
-    assert len(silent) == 9 and all('{cap}' in v for v in silent), silent
+    assert len(silent) == 10 and all('{cap}' in v for v in silent), silent
 
 
 def test_no_em_dash_in_what_this_change_added():

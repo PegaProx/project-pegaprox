@@ -23,7 +23,7 @@ def _lang_blocks():
 
 def test_the_dns_read_failure_key_is_in_every_language_once_with_its_placeholder():
     blocks = _lang_blocks()
-    assert list(blocks) == ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+    assert list(blocks) == ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
     for lang, block in blocks.items():
         found = re.findall(r"^\s+dnsReadFailed: '([^']*)',$", block, re.M)
         assert len(found) == 1, lang

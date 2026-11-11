@@ -24,7 +24,7 @@ from test_ha_ui import CLUSTER, VM, _App, _FakeServer, _classes, browser  # noqa
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHOTS = os.environ.get('PEGAPROX_SHOTS', '')
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 KEYS = ['srShotsTitle', 'srShotsSummary', 'srShotsCapturing', 'srShotsInterrupted', 'srShotsTiming',
         'srShotsNoPermission', 'srShotsGone', 'srShotsLoadFailed', 'srTestPdfTitle', 'srTestPdfStarted',
         'srTestVmid', 'srShotsAfterStart', 'srShotsGrabTime', 'srTestPdfResults', 'srTestPdfFailed']
@@ -56,7 +56,7 @@ def _block():
 @pytest.mark.parametrize('key', KEYS)
 def test_every_new_string_is_in_every_language_once(key):
     found = len(re.findall(rf'^\s*{key}:', _read('web', 'src', 'translations.js'), re.M))
-    assert found == 9, f'{key} is in {found} of 9 language blocks - the UI would show the key'
+    assert found == 10, f'{key} is in {found} of 10 language blocks - the UI would show the key'
 
 
 def test_every_new_key_is_used_and_nothing_uses_a_missing_one():
@@ -68,7 +68,7 @@ def test_the_reused_keys_exist_everywhere():
     tr = _read('web', 'src', 'translations.js')
     for key in ('drDrillExportPdf', 'failed', 'skipped', 'vmid', 'name', 'status', 'error', 'size', 'details',
                 'planName', 'sourceCluster', 'targetCluster', 'startTime', 'endTime'):
-        assert len(re.findall(rf'^\s*{key}:', tr, re.M)) >= 9, key
+        assert len(re.findall(rf'^\s*{key}:', tr, re.M)) >= 10, key
 
 
 def test_placeholders_survive_translation():
@@ -76,7 +76,7 @@ def test_placeholders_survive_translation():
     for key, phs in (('srShotsSummary', ('{taken}', '{failed}', '{skipped}', '{s}')),
                      ('srShotsTiming', ('{s}', '{ms}'))):
         values = re.findall(rf'^\s*{key}: ["\'](.*)["\'],$', tr, re.M)
-        assert len(values) == 9 and all(all(p in v for p in phs) for v in values), (key, values)
+        assert len(values) == 10 and all(all(p in v for p in phs) for v in values), (key, values)
 
 
 def test_no_em_dash_in_what_this_change_added():

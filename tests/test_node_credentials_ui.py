@@ -92,7 +92,7 @@ def test_the_ssh_hint_no_longer_says_only_a_key_helps():
     for lang, block in _lang_blocks().items():
         line = re.search(r'^                sshKeyExplanation: (.*)$', block, re.M).group(1)
         assert 'Node' in line or 'node' in line or '节点' in line or '노드' in line or 'nœud' in line \
-            or 'nodo' in line or 'nó' in line or 'węz' in line, lang
+            or 'nodo' in line or 'nó' in line or 'węz' in line or 'нод' in line, lang
     en = re.search(r'^                sshKeyExplanation: (.*)$', _lang_blocks()['en'], re.M).group(1)
     assert 'Node credentials' in en and 'do not share one root password' not in en
 

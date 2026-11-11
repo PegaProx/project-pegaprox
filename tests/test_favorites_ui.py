@@ -81,7 +81,7 @@ def test_the_search_rows_still_hand_the_toggle_what_it_reads(dash):
 def test_the_fallback_is_translated_everywhere():
     """t() hands back the key itself on a miss; the fallback has to exist in every language."""
     tr = _read('web', 'src', 'translations.js')
-    assert len(re.findall(r"^ +actionFailed: '[^']+',$", tr, re.M)) == 9
+    assert len(re.findall(r"^ +actionFailed: '[^']+',$", tr, re.M)) == 10
 
 
 def test_no_em_dash_in_the_new_lines(dash):

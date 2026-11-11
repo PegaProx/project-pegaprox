@@ -74,7 +74,7 @@ def test_placeholders_survive_translation_and_no_em_dash():
     assert len(names) == 46
     for key in names:
         values = re.findall(rf'^\s*{key}: "(.*)",$', tr, re.M)
-        assert len(values) == 9, key
+        assert len(values) == 10, key
         wanted = set(re.findall(r'\{(\w+)\}', values[LANGS.index('en')]))
         for v in values:
             assert set(re.findall(r'\{(\w+)\}', v)) == wanted, (key, v)

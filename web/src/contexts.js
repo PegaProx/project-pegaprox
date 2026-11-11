@@ -9,7 +9,7 @@
         // NS May 2026 (#389): supported language allowlist — reused for input validation
         // both at init (localStorage) and at switch time. Keep in sync with the
         // backend allowlist in pegaprox/api/users.py and the LanguageSwitcher list.
-        const SUPPORTED_LANGS = ['de', 'en', 'it', 'fr', 'es', 'pt', 'ko', 'zh', 'pl'];
+        const SUPPORTED_LANGS = ['de', 'en', 'it', 'fr', 'es', 'pt', 'ko', 'zh', 'pl', 'ru'];
 
         // map navigator.language ("en-US", "de-AT", ...) onto a supported code, or null
         function _detectBrowserLang() {
@@ -306,6 +306,7 @@
                 { code: 'ko', flag: '🇰🇷', label: 'KO', title: '한국어' },
                 { code: 'zh', flag: '🇨🇳', label: 'ZH', title: t('languageSimplifiedChinese') },
                 { code: 'pl', flag: '🇵🇱', label: 'PL', title: 'Polski' },
+                { code: 'ru', flag: '🇷🇺', label: 'RU', title: 'Русский' },
             ];
         }
 

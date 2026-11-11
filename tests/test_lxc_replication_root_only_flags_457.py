@@ -420,7 +420,7 @@ def test_an_unreadable_log_keeps_the_proxmox_status(monkeypatch):
 # --- the dialogs -----------------------------------------------------------------------------
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 
 
 def _src(name):

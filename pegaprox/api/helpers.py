@@ -286,7 +286,7 @@ def save_server_settings(settings):
 # MK Nov 2026 - corporate-redesigned can be pinned as well. A corporate lock still means the
 # classic Corporate, which is frozen, so without it nobody could be given the redesign
 UI_LAYOUT_LOCKS = ('modern', 'corporate', 'corporate-redesigned', 'cloud')
-UI_LANGUAGE_LOCKS = ('de', 'en', 'it', 'fr', 'es', 'pt', 'ko', 'zh', 'pl')
+UI_LANGUAGE_LOCKS = ('de', 'en', 'it', 'fr', 'es', 'pt', 'ko', 'zh', 'pl', 'ru')
 UI_LOCKED = 'UI_LOCKED'
 
 

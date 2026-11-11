@@ -167,7 +167,7 @@ def test_the_new_strings_exist_in_every_language(key):
     src = open('web/src/translations.js', encoding='utf-8').read()
     starts = {m.group(1): m.start()
               for m in re.finditer(r'^ {12}([a-z]{2}): \{$', src, re.M)}
-    assert len(starts) == 9, sorted(starts)
+    assert len(starts) == 10, sorted(starts)
 
     order = sorted(starts.items(), key=lambda kv: kv[1])
     for i, (lang, pos) in enumerate(order):
