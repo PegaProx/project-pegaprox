@@ -826,10 +826,17 @@ def perform_pegaprox_update():
                 file_list = [p for p in patterns if '*' not in p and '?' not in p]
             else:
                 # absolute fallback - at least get the essentials
+                # MK Nov 2026 - the page asks for every language but English as a file of
+                # its own (web/Dev/build.sh), by the hash of the build it came with: a new
+                # page next to the old files shows their strings, or English. sw.js caches
+                # them per build, so it comes along with them
                 file_list = [
                     'pegaprox_multi_cluster.py', 'version.json',
                     'requirements.txt', 'deploy.sh', 'update.sh',
-                    'web/index.html', 'web/index.html.original',
+                    'web/index.html', 'web/index.html.original', 'web/sw.js',
+                    'pegaprox/utils/index_page.py',
+                    'web/i18n/de.json', 'web/i18n/es.json', 'web/i18n/fr.json', 'web/i18n/it.json',
+                    'web/i18n/ko.json', 'web/i18n/pl.json', 'web/i18n/pt.json', 'web/i18n/zh.json',
                 ]
 
             for remote_path in file_list:
