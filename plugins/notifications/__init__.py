@@ -8,13 +8,17 @@ through Apprise (80+ notification services: Slack, Discord, Telegram, etc.)
 Apprise is optional — install with: pip install apprise
 """
 import os
+import re
 import json
+import hashlib
+import hmac
 import logging
+import secrets
 import requests
 from datetime import datetime
 from flask import request
 
-from pegaprox.api.plugins import register_plugin_route
+from pegaprox.api.plugins import register_plugin_route, _config_generation, _config_written
 from pegaprox.globals import _notification_handlers
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -31,9 +35,11 @@ except ImportError:
 def _load_config():
     try:
         with open(os.path.join(PLUGIN_DIR, 'config.json')) as f:
-            return json.load(f)
+            cfg = json.load(f)
     except:
-        return {'ntfy_enabled': False, 'apprise_enabled': False}
+        cfg = None
+    # a file that holds a list or a number is no config either
+    return cfg if isinstance(cfg, dict) else {'ntfy_enabled': False, 'apprise_enabled': False}
 
 def _save_config(cfg):
     # the token and the apprise urls are credentials of their own: owner only
@@ -42,6 +48,7 @@ def _save_config(cfg):
     with os.fdopen(fd, 'w') as f:
         os.fchmod(f.fileno(), 0o600)    # O_CREAT's mode does nothing for a file that exists
         json.dump(cfg, f, indent=4)
+    _config_written(_PLUGIN)    # the handles read before this write find nothing now
 
 
 # MK Nov 2026 - the config route handed the ntfy token and every apprise url back as
@@ -49,25 +56,91 @@ def _save_config(cfg):
 # discord://<webhook id>/<token>, mailto://user:pass@...). They are write-only now
 # like the SMTP password in the settings: a masked value sent back keeps what is stored.
 _MASK = '********'
+_SCHEME = re.compile(r'^[A-Za-z][A-Za-z0-9+.-]*$')
+_HANDLE = re.compile(r'#([0-9a-f]{16})([0-9a-f]{16})$')
+# without the database key a handle holds for this process only
+_PROCESS_KEY = secrets.token_bytes(32)
+# the config editor in the settings gives out the same handles for this list
+_PLUGIN, _URLS = 'notifications', 'apprise_urls'
+# a stored entry can be null, so a handle that finds nothing gets this instead
+_NOT_STORED = object()
 
 
-def _masked_url(u):
-    scheme = str(u).split('://', 1)[0] if '://' in str(u) else ''
-    return f'{scheme}://{_MASK}' if scheme else _MASK
+def _entry_key():
+    try:
+        from pegaprox.core.db import get_db
+        return get_db().aes_key or _PROCESS_KEY
+    except Exception:
+        return _PROCESS_KEY
 
 
-def _keep_stored_urls(new_urls, stored):
+def _url_list(v):
+    if isinstance(v, list):
+        return v
+    return [v] if v else []
+
+
+def _url_mask(u):
+    u = str(u)
+    scheme = u.split('://', 1)[0] if '://' in u else ''
+    return f"{scheme + '://' if _SCHEME.match(scheme) else ''}{_MASK}"
+
+
+def _entry_fp(plugin, lpath, o, key):
+    msg = b'\x00'.join((b'plugin-config-entry', plugin.encode(), _config_generation(plugin).encode(),
+                        lpath.encode(), json.dumps(o).encode()))
+    return hmac.new(key, msg, hashlib.sha256).digest()[:8]
+
+
+def _entry_pad(nonce, key):
+    return hmac.new(key, b'plugin-config-pad\x00' + nonce, hashlib.sha256).digest()[:8]
+
+
+def _entry_handle(plugin, lpath, o, key):
+    """MK Nov 2026 - a masked url was put back by its place in the list, so deleting the
+    first of two telegram urls kept the first one. Each carries a handle of its own: a
+    random nonce and a print of the url keyed with the server's key, under a pad of that
+    nonce. Equal urls never show the same handle, and until config.json is written again a
+    handle finds a stored copy of its url however many copies there are."""
+    nonce = secrets.token_bytes(8)
+    pad = _entry_pad(nonce, key)
+    return '#' + nonce.hex() + bytes(a ^ b for a, b in zip(_entry_fp(plugin, lpath, o, key), pad)).hex()
+
+
+def _handle_fp(text, key):
+    m = _HANDLE.search(text)
+    if not m:
+        return None, None
+    nonce, blob = bytes.fromhex(m.group(1)), bytes.fromhex(m.group(2))
+    return m.start(), bytes(a ^ b for a, b in zip(blob, _entry_pad(nonce, key)))
+
+
+def _masked_urls(urls, key):
+    return [_url_mask(u) + _entry_handle(_PLUGIN, _URLS, u, key) for u in urls]
+
+
+def _keep_stored_urls(new_urls, stored, key):
+    """new_urls with each masked url back to the stored one it stands for, and the
+    places of masks that stand for none."""
     if not isinstance(new_urls, list):
-        return stored
-    kept = []
+        return stored, []
+    kept, unknown, table = [], [], None
     for i, u in enumerate(new_urls):
-        if isinstance(u, str) and u.endswith(_MASK):
-            # unchanged entry from the masked list: the stored url at the same place
-            if i < len(stored) and _masked_url(stored[i]) == u:
-                kept.append(stored[i])
-            continue
+        if isinstance(u, str) and _MASK in u:
+            # a stored url with the value of the handle, wherever it sits now
+            hit, (at, fp) = _NOT_STORED, _handle_fp(u, key)
+            if fp is not None:
+                if table is None:
+                    table = {_entry_fp(_PLUGIN, _URLS, v, key): v for v in stored}
+                hit = table.get(fp, _NOT_STORED)
+                if hit is not _NOT_STORED and _url_mask(hit) != u[:at]:
+                    hit = _NOT_STORED
+            if hit is _NOT_STORED:
+                unknown.append(f'apprise_urls[{i}]')
+                continue
+            u = hit
         kept.append(u)
-    return kept
+    return kept, unknown
 
 
 def _require_admin():
@@ -210,19 +283,28 @@ def _get_config():
     cfg = _load_config()
     if cfg.get('ntfy_token'):
         cfg['ntfy_token'] = _MASK
-    cfg['apprise_urls'] = [_masked_url(u) for u in cfg.get('apprise_urls') or []]
+    key = _entry_key()
+    cfg['apprise_urls'] = _masked_urls(_url_list(cfg.get('apprise_urls')), key)
     cfg['apprise_available'] = _apprise_available
     return cfg
 
 def _update_config():
     err = _require_admin()
     if err: return err
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return {'error': 'Expected a JSON object'}, 400
     cfg = _load_config()
     if data.get('ntfy_token') == _MASK:
         data.pop('ntfy_token')
     if 'apprise_urls' in data:
-        data['apprise_urls'] = _keep_stored_urls(data['apprise_urls'], cfg.get('apprise_urls') or [])
+        urls, unknown = _keep_stored_urls(data['apprise_urls'], _url_list(cfg.get('apprise_urls')), _entry_key())
+        if unknown:
+            # a stale or unknown handle is neither saved as a target nor dropped with the url it stood for
+            return {'error': f"Type the url of {', '.join(unknown)} instead of {_MASK}, or reload the "
+                             "config: the masked url stands for nothing stored.",
+                    'code': 'CREDENTIAL_REQUIRED', 'fields': unknown}, 400
+        data['apprise_urls'] = urls
     for k in ['ntfy_enabled', 'ntfy_url', 'ntfy_topic', 'ntfy_token',
               'ntfy_priority_map', 'apprise_enabled', 'apprise_urls']:
         if k in data:
