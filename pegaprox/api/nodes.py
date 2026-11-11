@@ -1883,28 +1883,53 @@ StandardError=journal
 WantedBy=multi-user.target
 '''
 
+# MK Nov 2026 - one set of defaults for the form (GET), a save (PUT) and both deploy routes.
+# PUT used to fall back to 'Virtual Machine' / 'PVE8' while the rest used these, so every
+# save that left a key out moved it from one set to the other
+SMBIOS_AUTOCONFIG_DEFAULTS = {
+    'enabled': False,
+    'manufacturer': 'Proxmox',
+    'product': 'PegaProxManagment',
+    'version': 'v1',
+    'family': 'ProxmoxVE',
+}
+_SMBIOS_TEXT_KEYS = ('manufacturer', 'product', 'version', 'family')
+
+
+def _smbios_settings(mgr):
+    """The saved settings of the cluster over the defaults. A key never saved, or saved as
+    something other than its type, reads as its default."""
+    stored = getattr(mgr.config, 'smbios_autoconfig', None)
+    stored = stored if isinstance(stored, dict) else {}
+    settings = dict(SMBIOS_AUTOCONFIG_DEFAULTS)
+    if isinstance(stored.get('enabled'), bool):
+        settings['enabled'] = stored['enabled']
+    for key in _SMBIOS_TEXT_KEYS:
+        if isinstance(stored.get(key), str):
+            settings[key] = stored[key]
+    return settings
+
+
+def _smbios_script(settings):
+    """The node daemon with the cluster's values (defense-in-depth: they land in Python
+    string literals, so strip quotes/backslashes - NS Feb 2026)"""
+    def _clean(val):
+        return re.sub(r'[^a-zA-Z0-9 ._-]', '', str(val))[:64]
+    return SMBIOS_SCRIPT_TEMPLATE.format(**{key: _clean(settings[key]) for key in _SMBIOS_TEXT_KEYS})
+
+
 @bp.route('/api/clusters/<cluster_id>/smbios-autoconfig', methods=['GET'])
 @require_auth(perms=['node.view'])
 def get_smbios_autoconfig(cluster_id):
     """get smbios settings for the cluster, returns defaults if not configured yet"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+
     try:
         if cluster_id not in cluster_managers:
             return jsonify({'error': 'Cluster not found'}), 404
-        
-        # defaults if nothing configured - NS: proxmox doesnt allow underscores so no spaces either
-        mgr = cluster_managers[cluster_id]
-        settings = getattr(mgr.config, 'smbios_autoconfig', None) or {
-            'enabled': False,
-            'manufacturer': 'Proxmox',
-            'product': 'PegaProxManagment',
-            'version': 'v1',
-            'family': 'ProxmoxVE'
-        }
-        
-        return jsonify(settings)
+
+        return jsonify(_smbios_settings(cluster_managers[cluster_id]))
     except Exception as e:
         logging.error(f"Error getting SMBIOS config: {e}")
         return jsonify({'error': safe_error(e, 'Failed to get SMBIOS config')}), 500
@@ -1923,32 +1948,40 @@ def update_smbios_autoconfig(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Expected a JSON object'}), 400
     mgr = cluster_managers[cluster_id]
 
-    # NS Feb 2026: Validate SMBIOS values to prevent template injection
-    for key in ['manufacturer', 'product', 'version', 'family']:
-        val = data.get(key, '')
-        if val and not re.match(r'^[a-zA-Z0-9 ._-]{1,64}$', val):
-            return jsonify({'error': f'Invalid {key}: only alphanumeric, spaces, dots, hyphens allowed (max 64 chars)'}), 400
+    # MK Nov 2026 - a key the body leaves out keeps its saved value; it used to fall
+    # back to a default ('enabled' to False on every save that did not send it)
+    settings = _smbios_settings(mgr)
+    if 'enabled' in data:
+        if not isinstance(data['enabled'], bool):
+            return jsonify({'error': 'Invalid enabled: must be true or false'}), 400
+        settings['enabled'] = data['enabled']
 
-    # Update settings
-    mgr.config.smbios_autoconfig = {
-        'enabled': data.get('enabled', False),
-        'manufacturer': data.get('manufacturer', 'Proxmox'),
-        'product': data.get('product', 'Virtual Machine'),
-        'version': data.get('version', 'PVE8'),
-        'family': data.get('family', 'ProxmoxVE')
-    }
-    
+    # NS Feb 2026: Validate SMBIOS values to prevent template injection
+    for key in _SMBIOS_TEXT_KEYS:
+        if key not in data:
+            continue
+        val = data[key]
+        if not isinstance(val, str):
+            return jsonify({'error': f'Invalid {key}: must be a string'}), 400
+        if val and not re.fullmatch(r'[a-zA-Z0-9 ._-]{1,64}', val):
+            return jsonify({'error': f'Invalid {key}: only alphanumeric, spaces, dots, hyphens allowed (max 64 chars)'}), 400
+        settings[key] = val
+
+    mgr.config.smbios_autoconfig = settings
+
     # Save to database
     db = get_db()
     db.update_cluster(cluster_id, {'smbios_autoconfig': json.dumps(mgr.config.smbios_autoconfig)})
     
     usr = getattr(request, 'session', {}).get('user', 'system')
     log_audit(usr, 'smbios_autoconfig.updated', f"SMBIOS auto-config updated", cluster=mgr.config.name)
-    
-    return jsonify({'success': True, 'message': 'Settings saved'})
+
+    return jsonify({'success': True, 'message': 'Settings saved', 'settings': settings})
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/smbios-autoconfig/status', methods=['GET'])
@@ -2018,8 +2051,8 @@ def deploy_smbios_autoconfig(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     mgr = cluster_managers[cluster_id]
-    settings = getattr(mgr.config, 'smbios_autoconfig', None) or {}
-    
+    settings = _smbios_settings(mgr)
+
     ssh = None
     try:
         # PR #324: resolve SSH-reachable mgmt IP via manager (not cluster/status)
@@ -2037,16 +2070,7 @@ def deploy_smbios_autoconfig(cluster_id, node):
         if not ssh:
             return jsonify({'error': 'SSH connection failed after 3 attempts - check SSH key in cluster settings'}), 500
 
-        # Generate script with settings (defense-in-depth: strip quotes/backslashes - NS Feb 2026)
-        def _sanitize_smbios(val):
-            """Strip characters dangerous in Python string literals as defense-in-depth."""
-            return re.sub(r'[^a-zA-Z0-9 ._-]', '', str(val))[:64]
-        script = SMBIOS_SCRIPT_TEMPLATE.format(
-            manufacturer=_sanitize_smbios(settings.get('manufacturer', 'Proxmox')),
-            product=_sanitize_smbios(settings.get('product', 'PegaProxManagment')),
-            version=_sanitize_smbios(settings.get('version', 'v1')),
-            family=_sanitize_smbios(settings.get('family', 'ProxmoxVE'))
-        )
+        script = _smbios_script(settings)
 
         # Write script and service to node (SFTP with exec_command fallback) — raises on failure
         _ssh_write_file(ssh, '/opt/pegaprox-smbios-autoconfig.py', script, 0o755)
@@ -2297,8 +2321,8 @@ def deploy_smbios_autoconfig_all(cluster_id):
         return jsonify({'error': 'Cluster not found'}), 404
     
     mgr = cluster_managers[cluster_id]
-    settings = getattr(mgr.config, 'smbios_autoconfig', None) or {}
-    
+    settings = _smbios_settings(mgr)
+
     # Get all nodes in cluster. PR #324: we no longer pre-pin IPs from
     # cluster/status (that's the corosync ring IP on VLAN setups) --
     # each node gets resolved via _get_node_ip inside the loop.
@@ -2322,15 +2346,7 @@ def deploy_smbios_autoconfig_all(cluster_id):
         return jsonify({'error': 'No nodes found in cluster'}), 404
     
     results = []
-    def _sanitize_smbios_val(val):
-        """Strip characters dangerous in Python string literals as defense-in-depth."""
-        return re.sub(r'[^a-zA-Z0-9 ._-]', '', str(val))[:64]
-    script = SMBIOS_SCRIPT_TEMPLATE.format(
-        manufacturer=_sanitize_smbios_val(settings.get('manufacturer', 'Proxmox')),
-        product=_sanitize_smbios_val(settings.get('product', 'PegaProxManagment')),
-        version=_sanitize_smbios_val(settings.get('version', 'v1')),
-        family=_sanitize_smbios_val(settings.get('family', 'ProxmoxVE'))
-    )
+    script = _smbios_script(settings)
 
     for node in nodes:
         node_ip = mgr._get_node_ip(node)
