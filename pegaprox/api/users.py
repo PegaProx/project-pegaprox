@@ -26,7 +26,7 @@ from pegaprox.utils.rbac import (
     invalidate_tenants_cache,
     load_custom_roles, save_custom_roles, get_custom_roles, invalidate_roles_cache,
     get_role_permissions_for_user, load_tenants, save_tenants,
-    get_user_permissions, has_permission, get_user_effective_role,
+    get_user_permissions, has_permission, get_user_effective_role, get_acting_role,
     get_user_clusters, filter_clusters_for_user,
     load_vm_acls, save_vm_acls, get_vm_acls, invalidate_vm_acls_cache,
     user_can_access_vm, get_user_vms,
@@ -1439,7 +1439,8 @@ def get_my_tenants():
             'id': tid,
             'name': t.get('name', tid),
             'is_home': tid == home,
-            'effective_role': get_user_effective_role(user, tid),
+            # an API token's own role there, not its owner's
+            'effective_role': get_acting_role(user, tid),
         })
     return jsonify({'tenants': out, 'home': home})
 

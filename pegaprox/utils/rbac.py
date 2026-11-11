@@ -514,6 +514,33 @@ def get_user_effective_role(user: dict, tenant_id: str = None) -> str:
         return tenant_perms[tenant_id].get('role', user.get('role', ROLE_VIEWER))
     return user.get('role', ROLE_VIEWER)
 
+
+def get_acting_role(user: dict, tenant_id: str = None) -> str:
+    """The role a caller is told it holds in `tenant_id` (/api/me/permissions, /api/me/tenants).
+
+    A session user: get_user_effective_role. An API token acts with its own role, of
+    what its owner holds there (_token_permissions), so the answer is the owner's role
+    in that tenant where that role grants nothing the token's role does not, and the
+    token's role otherwise. Roles are compared by what they grant, so this covers a
+    custom role on either side; the builtins nest, so for them it is the lower one.
+    get_user_effective_role cannot answer for a token: it reads the owner's tenant
+    override before any role, and the record of an API token still carries the owner's
+    tenant_permissions.
+    """
+    if not user.get('_token_owner_capped'):
+        return get_user_effective_role(user, tenant_id)
+    if not tenant_id:
+        tenant_id = user.get('tenant_id', DEFAULT_TENANT_ID)
+    token_role = user.get('effective_role') or ROLE_VIEWER
+    owner = {k: v for k, v in user.items() if k not in ('effective_role', '_token_owner_capped')}
+    held = get_user_effective_role(owner, tenant_id)
+    if held == token_role:
+        return token_role
+
+    def _grants(role):
+        return set(get_role_permissions_for_user({'role': role}, _tenant_defining_role(role, tenant_id)))
+    return held if _grants(held) <= _grants(token_role) else token_role
+
 def invalidate_tenants_cache():
     """sec (audit): tenants_db is the cache get_user_clusters reads, and it was only ever
     populated (`if not tenants_db`) — never invalidated. So removing a cluster from a tenant
