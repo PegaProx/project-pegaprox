@@ -1,0 +1,70 @@
+name: Closing Wednesday
+
+# NS Nov 2026 - Closing Wednesday: until 1.5 is tagged we take no new pull requests from outside
+# the team. A PR opened in that window gets one note saying so and the after-1.5 label. Nothing is
+# closed, the PR just waits. Once the v1.5.0 tag exists the job does nothing, so the freeze ends on
+# its own and this file can go after the release.
+#
+# pull_request_target for the write token, the PR head is never checked out. GitHub reads this
+# workflow from the default branch (main), whatever branch the PR is against.
+on:
+  pull_request_target:
+    types: [opened, reopened]
+    branches: [Testing, main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  notice:
+    runs-on: ubuntu-latest
+    if: >
+      github.event.pull_request.author_association != 'OWNER'
+      && github.event.pull_request.author_association != 'MEMBER'
+      && github.event.pull_request.author_association != 'COLLABORATOR'
+    steps:
+      - name: Note the freeze on the PR
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const MARKER = '<!-- pegaprox-closing-wednesday -->';
+            const LABEL = 'after-1.5';
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            if (((pr.user && pr.user.login) || '').endsWith('[bot]')) {
+              console.log('skip: bot author');
+              return;
+            }
+
+            // the freeze ends with the release tag, an rc or other pre-release tag doesn't end it.
+            // If the lookup fails we still post, that is what the file is here for.
+            try {
+              const { data: refs } = await github.rest.git.listMatchingRefs({ owner, repo, ref: 'tags/v1.5' });
+              if (refs.some(r => /^refs\/tags\/v1\.5(\.0)?$/.test(r.ref))) {
+                console.log('skip: 1.5 is out');
+                return;
+              }
+            } catch (e) {
+              core.warning(`could not look up the 1.5 tag (${e.status || e.message})`);
+            }
+
+            // one note per PR, a reopen doesn't post a second one
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: pr.number, per_page: 100 });
+            if (comments.some(c => c.user && c.user.login === 'github-actions[bot]' && (c.body || '').includes(MARKER))) {
+              console.log('skip: already noted');
+              return;
+            }
+
+            await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body:
+              `${MARKER}\n👋 Thanks for the PR! We're in the freeze for 1.5 (Closing Wednesday): until 1.5 ` +
+              `is released we don't take new pull requests. This one stays open and is parked with the ` +
+              `\`${LABEL}\` label, nothing needed from you right now.\n\n` +
+              `Bug reports and feature requests are welcome as issues, as always.\n\n*Automated note.*` });
+            try {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: [LABEL] });
+            } catch (e) {
+              core.warning(`could not set the ${LABEL} label (${e.status || e.message})`);
+            }
+            console.log('noted');
