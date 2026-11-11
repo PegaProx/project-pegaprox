@@ -1072,6 +1072,10 @@
                             setSelectedEsxi(null);
                             setEsxiVms([]);
                         }
+                    } else {
+                        // LW Nov 2026 - a refused removal keeps the host in the list and says why
+                        const err = r ? await r.json().catch(() => null) : null;
+                        alert(err?.error || (r ? `${t('deleteFailed') || 'Delete failed'} (HTTP ${r.status})` : t('connectionFailed')));
                     }
                 } catch (e) {
                     console.error('disconnecting esxi:', e);
