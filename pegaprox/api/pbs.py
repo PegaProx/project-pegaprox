@@ -1304,7 +1304,7 @@ def run_pbs_job(pbs_id, job_type, job_id):
     if 'error' not in result:
         log_audit(request.session.get('user', 'admin'), f'pbs.job.{job_type}', 
                   f"Started {job_type} job '{job_id}' on {mgr.name}")
-    return jsonify(result)
+    return _pbs_answer(result)
 
 
 @bp.route('/api/pbs/<pbs_id>/datastores/<store>/namespaces', methods=['GET'])
