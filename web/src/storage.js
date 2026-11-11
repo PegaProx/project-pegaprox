@@ -37,6 +37,10 @@
             const [syncStatus, setSyncStatus] = useState(null);
             const [syncLoading, setSyncLoading] = useState(false);
             const [syncContentType, setSyncContentType] = useState('iso');
+            // LW Nov 2026 - the type a status read asks for. Its timers run the closure of an
+            // older render, which still holds the type from before a switch
+            const syncContentRef = useRef(syncContentType);
+            syncContentRef.current = syncContentType;
             const [syncingFiles, setSyncingFiles] = useState({});  // {filename: true} while syncing
             // MK May 2026 — Backup SLA tracking sub-tab
             const [slaData, setSlaData] = useState(null);
@@ -104,9 +108,13 @@
             };
 
             const refreshSyncStatus = () => {
+                const content = syncContentRef.current;
                 setSyncLoading(true);
-                authFetch(`${API_URL}/clusters/${clusterId}/iso-sync/status?content=${syncContentType}`)
-                    .then(r => r?.json()).then(d => { if(d) setSyncStatus(d); }).catch(()=>{}).finally(()=>setSyncLoading(false));
+                authFetch(`${API_URL}/clusters/${clusterId}/iso-sync/status?content=${content}`)
+                    .then(r => r?.json()).then(d => {
+                        // an answer for the type shown before a switch is not this table
+                        if (d && content === syncContentRef.current) setSyncStatus(d);
+                    }).catch(()=>{}).finally(()=>setSyncLoading(false));
             };
 
             const _pollSyncResult = (filename, attempt = 0) => {
@@ -1367,8 +1375,11 @@
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <select value={syncContentType} onChange={e => {
+                                        syncContentRef.current = e.target.value;
                                         setSyncContentType(e.target.value);
-                                        setTimeout(refreshSyncStatus, 50);
+                                        // the rows of the other type would sync a file under this one
+                                        setSyncStatus(null);
+                                        refreshSyncStatus();
                                     }} className="bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-1.5 text-sm text-white">
                                         <option value="iso">ISOs</option>
                                         <option value="vztmpl">Templates</option>
