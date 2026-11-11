@@ -17,7 +17,7 @@ from datetime import datetime
 
 from pegaprox.globals import cluster_managers
 from pegaprox.core.db import get_db
-from pegaprox.core import ha, transfer_net
+from pegaprox.core import bulk_migrate, ha, transfer_net
 from pegaprox.utils.audit import log_audit
 
 logger = logging.getLogger('pegaprox.xclb')
@@ -66,45 +66,64 @@ def _pick_node(manager, highest=True):
         return None
 
 
-def _token_cleanup_thread(target_mgr, source_mgr, token_name, task_upid, vmid, vm_type):
-    """Monitor migration task, then delete temp token.
-    MK: Same approach as vms.py cross-cluster migration cleanup.
+TOKEN_POLL_SECONDS = 15
+# the source node may still be closing its tunnels when the task reports its end
+TOKEN_SETTLE_SECONDS = 30
+# a task whose status cannot be read for this long in a row is given up on
+TOKEN_BLIND_SECONDS = 7200
+# no migration takes this long: a task that still reports running then is stuck, and the
+# token (the rights of its user, no expiry) is not left on the target for it
+TOKEN_MAX_SECONDS = 7 * 86400
+
+
+def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
+    """Delete the temporary token of a remote migration once its task has ended.
+
+    The source node presents the token at the target for as long as the task runs, the
+    tunnels it opens late included, so a token deleted earlier ends the migration with
+    "401 Unauthorized". Only the end of the task takes it away: its status is read by
+    its UPID, and neither a task missing from a task list nor a duration is an end. A
+    status that cannot be read for TOKEN_BLIND_SECONDS in a row gives up on the task,
+    and so does a task still running after TOKEN_MAX_SECONDS.
+    Used by the migration by hand (api/vms.py) and by the balancer below.
     """
-    max_wait, poll_interval = 7200, 15
-    min_wait = 120  # NS: 2 min for automated LB (shorter than manual's 5 min)
-    elapsed = 0
-    logger.info(f"[XCLB-CLEANUP] Monitoring {task_upid} for {vm_type}/{vmid}...")
-
-    while elapsed < max_wait:
+    log = getattr(source_mgr, 'logger', None) or logger
+    log.info(f"[TOKEN-CLEANUP] Following {task_upid} of {what}, token {token_name}")
+    waited = blind = 0
+    while True:
         try:
-            tasks = source_mgr.get_tasks(limit=100)
-            found = False
-            for t in tasks:
-                if t and t.get('upid') == task_upid:
-                    found = True
-                    status = t.get('status', '')
-                    if status and status != 'running':
-                        level = 'info' if status == 'OK' else 'warning'
-                        getattr(logger, level)(f"[XCLB-CLEANUP] {vmid} ended: {status}")
-                        time.sleep(30)
-                        target_mgr.delete_api_token(token_name)
-                        return
-                    break
-            # task scrolled out of list after min_wait -> assume done
-            if not found and elapsed > min_wait:
-                logger.info(f"[XCLB-CLEANUP] Task gone after {elapsed}s, assuming done")
-                target_mgr.delete_api_token(token_name)
-                return
+            state = bulk_migrate.task_state(source_mgr, task_upid)
         except Exception as e:
-            logger.warning(f"[XCLB-CLEANUP] Poll error: {e}")
-        time.sleep(poll_interval)
-        elapsed += poll_interval
-
-    logger.warning(f"[XCLB-CLEANUP] Timeout after {max_wait}s, deleting token anyway")
+            log.warning(f"[TOKEN-CLEANUP] Status of {task_upid} of {what}: {e}")
+            state = None
+        if state and state[0] != 'running':
+            log.info(f"[TOKEN-CLEANUP] Migration of {what} ended: {state[0]} {state[1]}".rstrip())
+            time.sleep(TOKEN_SETTLE_SECONDS)
+            break
+        if state:
+            blind = 0
+        elif blind >= TOKEN_BLIND_SECONDS:
+            log.warning(f"[TOKEN-CLEANUP] No status of {task_upid} of {what} for {blind}s, "
+                        f"deleting token {token_name} without knowing how the migration ended")
+            break
+        if waited >= TOKEN_MAX_SECONDS:
+            log.warning(f"[TOKEN-CLEANUP] {task_upid} of {what} still reports running after {waited}s, "
+                        f"deleting token {token_name}: the migration loses its access to the target")
+            break
+        time.sleep(TOKEN_POLL_SECONDS)
+        waited += TOKEN_POLL_SECONDS
+        if not state:
+            blind += TOKEN_POLL_SECONDS
     try:
-        target_mgr.delete_api_token(token_name)
-    except Exception:
-        pass
+        res = target_mgr.delete_api_token(token_name)
+    except Exception as e:
+        res = {'success': False, 'error': str(e)}
+    if isinstance(res, dict) and res.get('success'):
+        log.info(f"[TOKEN-CLEANUP] Deleted migration token {token_name}")
+    else:
+        why = res.get('error') if isinstance(res, dict) else res
+        log.warning(f"[TOKEN-CLEANUP] Migration token {token_name} of {what} is still on the "
+                    f"target cluster, delete it there: {why}")
 
 
 def run_cross_cluster_balance_check(group):
@@ -232,8 +251,8 @@ def run_cross_cluster_balance_check(group):
                       f"from {hi_cid} to {lo_cid} (group:{group_id})")
             # spawn token cleanup thread (its delete comes later and asks at its exit)
             threading.Thread(
-                target=ha.as_job(_token_cleanup_thread, f'token cleanup for {vmid}'),
-                args=(lo_mgr, hi_mgr, token_name, task_upid, vmid, vm_type),
+                target=ha.as_job(drop_token_when_done, f'token cleanup for {vmid}'),
+                args=(lo_mgr, hi_mgr, token_name, task_upid, f'{vm_type}/{vmid}'),
                 daemon=True
             ).start()
         else:

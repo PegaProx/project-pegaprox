@@ -15044,83 +15044,12 @@ def cross_cluster_migrate_api():
             # NS: Push immediate update for live UI (source cluster)
             push_immediate_update(source_cluster_id, delay=0.5)
             
-            # Schedule intelligent token cleanup - monitors task status
-            def cleanup_token_when_done():
-                import time
-                max_wait = 7200  # Maximum 2 hours (large VMs can take a long time!)
-                poll_interval = 15  # Check every 15 seconds
-                elapsed = 0
-                min_wait_before_assuming_done = 300  # MK: Wait at least 5 minutes before assuming task is done
-                
-                logging.info(f"[TOKEN-CLEANUP] Monitoring task {task_upid} for completion...")
-                
-                while elapsed < max_wait:
-                    try:
-                        # Get task status from source cluster (where the migration task runs)
-                        tasks = source_manager.get_tasks(limit=100)
-                        task_found = False
-                        
-                        for task in tasks:
-                            if task and task.get('upid') == task_upid:
-                                task_found = True
-                                status = task.get('status', '')
-                                
-                                # check task is finished
-                                if status and status != 'running':
-                                    if status == 'OK':
-                                        logging.info(f"[TOKEN-CLEANUP] Migration task completed successfully!")
-                                    else:
-                                        logging.warning(f"[TOKEN-CLEANUP] Migration task ended with status: {status}")
-                                    
-                                    # MK: Wait a bit more after task completion to be safe
-                                    # The VM might still be syncing final state
-                                    time.sleep(30)
-                                    
-                                    # Task finished - delete token
-                                    target_manager.delete_api_token(token_name)
-                                    logging.info(f"[TOKEN-CLEANUP] Deleted migration token: {token_name}")
-                                    return
-                                break
-                        
-                        # MK: Fix for Issue #19 - Don't delete token too early!
-                        # If task not found, it might have completed and scrolled out of task list
-                        # BUT we need to wait much longer to be safe (was 60s, now 5 min minimum)
-                        if not task_found and elapsed > min_wait_before_assuming_done:
-                            # Double-check: Try to verify VM exists on target cluster
-                            try:
-                                # Check if VM exists on target (migration successful)
-                                target_vms = target_manager.get_vm_resources()
-                                vm_on_target = any(
-                                    v.get('vmid') == vmid or v.get('vmid') == target_vmid
-                                    for v in (target_vms or [])
-                                )
-                                if vm_on_target:
-                                    logging.info(f"[TOKEN-CLEANUP] VM found on target cluster, migration likely successful")
-                                else:
-                                    logging.info(f"[TOKEN-CLEANUP] VM not yet on target, waiting longer...")
-                                    time.sleep(poll_interval)
-                                    elapsed += poll_interval
-                                    continue
-                            except Exception as e:
-                                logging.warning(f"[TOKEN-CLEANUP] Could not verify VM on target: {e}")
-                            
-                            logging.info(f"[TOKEN-CLEANUP] Task no longer in task list after {elapsed}s, assuming completed")
-                            target_manager.delete_api_token(token_name)
-                            logging.info(f"[TOKEN-CLEANUP] Deleted migration token: {token_name}")
-                            return
-                            
-                    except Exception as e:
-                        logging.warning(f"[TOKEN-CLEANUP] Error checking task status: {e}")
-                    
-                    time.sleep(poll_interval)
-                    elapsed += poll_interval
-                
-                # Timeout - delete token anyway
-                logging.warning(f"[TOKEN-CLEANUP] Timeout after {max_wait}s waiting for task, deleting token anyway")
-                target_manager.delete_api_token(token_name)
-                logging.info(f"[TOKEN-CLEANUP] Deleted migration token: {token_name}")
-            
-            cleanup_thread = threading.Thread(target=ha.as_job(cleanup_token_when_done, 'token cleanup'),
+            # The token goes when the task has ended, not before: the source node presents it
+            # for as long as the migration runs (background/cross_cluster_lb.py)
+            from pegaprox.background.cross_cluster_lb import drop_token_when_done
+            cleanup_thread = threading.Thread(target=ha.as_job(drop_token_when_done, 'token cleanup'),
+                                              args=(target_manager, source_manager, token_name, task_upid,
+                                                    f'{vm_type}/{vmid}'),
                                               daemon=True)
             cleanup_thread.start()
             
