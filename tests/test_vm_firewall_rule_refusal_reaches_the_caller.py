@@ -102,3 +102,14 @@ def test_a_body_that_is_no_json_goes_out_short_and_a_page_not_at_all(admin, pve)
     pve.post.return_value = _Resp(596, ValueError('no JSON'), text='Connection timed out ' * 50)
     body = admin.post(URL, json=RULE).get_json()
     assert body['error'].startswith('Connection timed out') and len(body['error']) <= 200, body
+
+
+@pytest.mark.parametrize('upstream, text, said', [
+    (401, '', 'Proxmox VE refused the stored credentials (HTTP 401)'),
+    (403, '<html><body>Forbidden</body></html>', 'Proxmox VE does not allow this with the stored credentials (HTTP 403)'),
+])
+def test_a_401_or_403_without_a_json_body_names_its_status_once(admin, pve, upstream, text, said):
+    # PVE sends its 401 with no body at all, a proxy may send a page
+    pve.post.return_value = _Resp(upstream, ValueError('no JSON'), text=text)
+    body = admin.post(URL, json=RULE).get_json()
+    assert body['error'] == said, body

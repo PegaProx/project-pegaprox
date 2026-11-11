@@ -2761,7 +2761,8 @@ def create_vm_firewall_rule(cluster_id, node, vmtype, vmid):
         elif isinstance(body, dict) and not body.get('message'):
             pve_err = ''    # {"data": null}: the status is all PVE said
         else:
-            pve_err = parse_pve_error(r.text, f'HTTP {r.status_code}')
+            # a 401 or 403 names its status in the answer already, an empty body adds nothing
+            pve_err = parse_pve_error(r.text, '' if r.status_code in (401, 403) else f'HTTP {r.status_code}')
         logging.warning(f"VM FW rule create failed: {r.status_code} data={data} pve_response={r.text[:300]}")
         return upstream_failure(r.status_code, pve_err, pve_status=r.status_code)
     except Exception as e:
