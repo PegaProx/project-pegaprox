@@ -262,8 +262,10 @@ def _audit(ask):
 
 def _alerts(ask):
     """Alerts as they fired and cleared (alerts.py active-alerts keeps the open ones). A
-    confined caller gets the ones on their guests and none about a node."""
+    confined caller gets the ones on their guests and none about a node, a cluster-wide
+    caller a node's only with node.view, as active-alerts."""
     filtered = ask.scoped or ask.node is not None
+    no_nodes = not ask.scoped and not ask.holds('node.view')
     cols = ('id, alert_id, severity, message, metric, target_type, target_id, target_name, '
             'triggered_at, resolved_at, resolved_by')
     out, depths = [], []
@@ -273,6 +275,8 @@ def _alerts(ask):
         if ask.vmid is not None:
             sql += " AND target_type = 'vm' AND target_id = ?"
             params.append(str(ask.vmid))
+        if no_nodes:
+            sql += " AND COALESCE(target_type, '') != 'node'"
         rows, depth = _window(ask, _select(sql, params, column, order=''), column, ask.reads('alert', filtered))
         kept = _Kept(ask, depth)
         for r in rows:

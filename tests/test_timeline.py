@@ -657,6 +657,29 @@ def test_a_viewer_gets_what_viewers_read(env):
     assert {'audit', 'alert', 'migration', 'task'} <= kinds
 
 
+@pytest.mark.parametrize('denied', [(), ('node.view',)])
+def test_a_nodes_alerts_are_for_a_caller_with_node_view_as_in_active_alerts(env, denied):
+    from pegaprox.api.helpers import caller_is_scoped
+    env.seed.tenant('own', clusters=[CID])
+    u = env.seed.user('opal', role='viewer', tenant_id='own', denied=list(denied))
+    assert caller_is_scoped(u, CID) is False
+    c = env.api.as_user(u)
+    active = {a['target_name'] for a in c.get(f'/api/clusters/{CID}/active-alerts').get_json()['active_alerts']}
+    ids = {e['id'] for e in _get(c, '&kinds=alert')['events']}
+    # the node page: its guests' alerts stay, the node's own goes with node.view
+    on_node = {e['id'] for e in _get(c, '&kinds=alert&node=pve2')['events']}
+    if denied:
+        assert active == {'web01'}
+        assert ids == {'alert:al1', 'alert:al2', 'alert:al2:resolved'}
+        assert on_node == {'alert:al2', 'alert:al2:resolved'}
+    else:
+        assert active == {'web01', 'pve2'}
+        assert ids == {'alert:al1', 'alert:al2', 'alert:al2:resolved', 'alert:al3'}
+        assert on_node == {'alert:al2', 'alert:al2:resolved', 'alert:al3'}
+    admin = {e['id'] for e in _get(_admin_client(env), '&kinds=alert')['events']}
+    assert 'alert:al3' in admin
+
+
 def test_another_tenant_is_refused(env):
     env.seed.tenant('acme', clusters=['other'])
     c = env.api.as_user(env.seed.user('milton', role='user', tenant_id='acme'))
