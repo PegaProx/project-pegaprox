@@ -608,6 +608,11 @@ def get_bmc_endpoint_api(cluster_id, node):
 def set_bmc_endpoint_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - one BMC watches the whole host and every tenant on it: like the DELETE
+    # below, not for a caller confined to some guests here
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     consent_err = _require_redfish_consent()
@@ -671,6 +676,11 @@ def test_bmc_endpoint_api(cluster_id, node):
     Returns {available, health?, reason?} — read-only, no config change."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # it sends the stored BMC login and answers with the host's health, which /hardware
+    # keeps from a confined caller too
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     consent_err = _require_redfish_consent()
