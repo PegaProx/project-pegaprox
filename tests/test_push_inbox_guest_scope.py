@@ -53,6 +53,7 @@ def world(api, seed, db, monkeypatch):
     dflt    viewer of the default tenant, pool grant on pool_a
     wide    viewer of tenant_x without a grant: cluster-wide
     nonode  viewer of tenant_x with node.view denied: cluster-wide, no node pages
+    whole   viewer of the default tenant without a grant: every cluster, whole
     root    admin
     """
     seed.tenant('tenant_x', clusters=[CID])
@@ -64,6 +65,7 @@ def world(api, seed, db, monkeypatch):
         'dflt': seed.user('dflt', role='viewer'),
         'wide': seed.user('wide', role='viewer', tenant_id='tenant_x'),
         'nonode': seed.user('nonode', role='viewer', tenant_id='tenant_x', denied=['node.view']),
+        'whole': seed.user('whole', role='viewer'),
         'root': seed.user('root', role='admin'),
     }
     for name in ('carol', 'dave', 'dflt'):
@@ -226,3 +228,21 @@ def test_the_summary_of_node_alerts_reaches_only_subscribers_with_node_view(worl
     for name in CONFINED + ('nonode',):
         got = world.inbox(name)
         assert 'more alerts' not in got and 'pve-n' not in got, (name, got)
+
+
+def test_an_alert_of_the_ha_group_reaches_only_subscribers_who_see_every_cluster(world, monkeypatch):
+    import pegaprox.core.ha as ha
+    import pegaprox.utils.webhooks as webhooks
+    monkeypatch.setattr(ha, '_later', lambda delay, fn, name: fn())
+    monkeypatch.setattr(webhooks, 'send_to_channels', lambda alert, channel_ids=None: None)
+    ha.missed_schedules('scheduled actions', ['start web-b', 'snapshot mail-b'],
+                        (time.time() - 120, time.time() - 60))
+
+    assert caller_is_scoped(world.users['whole'], CID) is False
+    for name in ('root', 'whole'):
+        got = world.inbox(name)
+        assert 'HA group: schedules missed' in got and 'start web-b' in got, (name, got)
+    # a tenant's accounts and the confined ones: the names are of every cluster's schedules
+    for name in CONFINED + ('wide', 'nonode'):
+        assert world.inbox(name) == '', name
+        assert name not in world.woken, (name, world.woken)

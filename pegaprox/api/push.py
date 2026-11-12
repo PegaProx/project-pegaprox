@@ -413,10 +413,33 @@ def _alert_handler(alert_data: dict):
                         continue
                 except Exception:
                     continue
+            elif alert_data.get('target_type') == 'instance' and not _sees_every_cluster(_all_users.get(u), u):
+                # the HA group's own alerts: a missed schedule names actions of every cluster
+                continue
             _push_to_inbox(u, title, body, sev, url, tag)
             _wake_user(u)
     except Exception as e:
         logging.debug(f"[push] alert_handler swallowed: {e}")
+
+
+def _sees_every_cluster(urec, username):
+    """Whether a subscriber sees every cluster whole: no tenant limits it, and no pool
+    grant or guest ACL confines it in any of them. An alert about this instance and its
+    HA group goes to these subscribers only. Fails closed."""
+    if not urec:
+        return False
+    try:
+        from pegaprox.globals import cluster_managers
+        from pegaprox.utils.rbac import acts_as_admin, get_user_clusters
+        from pegaprox.api.helpers import caller_is_scoped
+        udict = dict(urec, username=username)
+        if acts_as_admin(udict):
+            return True
+        if get_user_clusters(udict, include_pools=False) is not None:
+            return False
+        return not any(caller_is_scoped(udict, cid) for cid in list(cluster_managers))
+    except Exception:
+        return False
 
 
 def register_alert_handler():
