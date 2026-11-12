@@ -168,6 +168,15 @@ _TASK_USER_NEGCACHE = {}
 _TASK_USER_NEGCACHE_MAX = 5000
 _TASK_USER_NEGCACHE_TTL = 120.0
 
+# MK Nov 2026 - the source node checks the target cluster (its version, guests and storages)
+# before it forks a remote migration, and the POST is answered only then: over a slow link
+# between the clusters that takes longer than the general api_timeout
+REMOTE_MIGRATE_TIMEOUT = 60
+# a POST that got no answer may have started its task all the same, or start it a little
+# later: the node's task list is read this long before the migration counts as not started
+REMOTE_MIGRATE_LOOK_SECONDS = 30
+REMOTE_MIGRATE_LOOK_EVERY = 5
+
 
 # a guest a recovery moved while its node was online, and did not start (design 5.6)
 HELD_NOTE = ("moved while {node} was online and not started on purpose - {node} may still run "
@@ -14526,12 +14535,23 @@ echo "AGENT_INSTALLED_OK"
             # this fix reached one line; both now go through the shared rule.
             from pegaprox.utils.sanitization import redact_secrets
             self.logger.debug(f"Migration data: {redact_secrets(data)}")
-            response = self._api_post(url, data=data)
+            sent = time.monotonic()
+            try:
+                response = self._api_post(url, data=data, timeout=(self.api_timeout, REMOTE_MIGRATE_TIMEOUT))
+            except requests.exceptions.ReadTimeout:
+                return self._unanswered_remote_migrate(node, vmid, vm_type, target_endpoint, sent,
+                                                       REMOTE_MIGRATE_TIMEOUT)
             
             if response.status_code == 200:
                 task_data = response.json()
                 self.logger.info(f"[OK] Remote migration started for {vmid}, task: {task_data.get('data')}")
                 return {'success': True, 'task': task_data.get('data')}
+            elif (response.status_code == 596
+                  and 'timed out' in f"{getattr(response, 'reason', '')} {response.text}".lower()):
+                # pveproxy hands the call on to pvedaemon (or to the node) and answers 596 once it
+                # waited too long for it, while the node goes on with its checks
+                return self._unanswered_remote_migrate(node, vmid, vm_type, target_endpoint, sent,
+                                                       int(time.monotonic() - sent))
             else:
                 error_msg = response.text
                 self.logger.error(f"[ERROR] Remote migration failed: {error_msg}")
@@ -14560,6 +14580,54 @@ echo "AGENT_INSTALLED_OK"
             return None
         return [t for t in data if isinstance(t, dict) and t.get('type') == kind
                 and str(t.get('id')) == str(vmid) and str(t.get('upid') or '').startswith(f'UPID:{node}:')]
+
+    def _node_clock(self, node):
+        """The node's own time (epoch seconds), None when it cannot be read."""
+        try:
+            r = self._api_get(f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/time")
+            if r.status_code == 200:
+                return int((r.json().get('data') or {}).get('time'))
+        except Exception as e:
+            self.logger.debug(f"time of {node} unreadable: {e}")
+        return None
+
+    def _unanswered_remote_migrate(self, node, vmid, vm_type, target_endpoint, sent, waited):
+        """A remote_migrate POST sent at `sent` (monotonic) got no answer in `waited` seconds.
+
+        The node may have forked the task all the same, or still does once its checks are
+        through. A migration task of the guest that the node started after the POST, by its
+        own clock, is the answer then; the node's task list is read for
+        REMOTE_MIGRATE_LOOK_SECONDS. Without one the error says what did not answer, so the
+        caller drops its token as for a refused start."""
+        deadline = time.monotonic() + REMOTE_MIGRATE_LOOK_SECONDS
+        offset, read = None, False
+        while True:
+            if offset is None:
+                clock = self._node_clock(node)
+                if clock is not None:
+                    offset = clock - time.time()
+            tasks = self.migration_tasks(node, vmid, vm_type) if offset is not None else None
+            if tasks is not None:
+                read = True
+                # the node's time when the POST went out, a few seconds to spare
+                since = time.time() + offset - (time.monotonic() - sent) - 5
+                ours = [t for t in tasks if (t.get('starttime') or 0) >= since]
+                if ours:
+                    upid = max(ours, key=lambda t: t.get('starttime') or 0)['upid']
+                    self.logger.warning(f"[WARN] Remote migration of {vmid} got no answer within {waited}s, "
+                                        f"but {node} started it: {upid}")
+                    return {'success': True, 'task': upid}
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(REMOTE_MIGRATE_LOOK_EVERY)
+        host = re.search(r'(?:^|,)host=([^,]+)', target_endpoint or '')
+        error_msg = (f"the source node {node} did not answer the remote migration request within {waited} s; "
+                     f"check that the source nodes reach the target cluster's API"
+                     + (f" at {host.group(1)}" if host else ''))
+        if not read:
+            error_msg += f" (whether {node} started the task could not be read)"
+        self.logger.error(f"[ERROR] Remote migration failed: {error_msg}")
+        return {'success': False, 'error': error_msg}
     
     @staticmethod
     def tls_fingerprint(host, port, timeout=None):
