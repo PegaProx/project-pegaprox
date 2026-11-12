@@ -136,7 +136,9 @@ def test_runtime_the_dry_run_lists_what_to_enter_again(open_app):
     box = _restore_results(app)
 
     text = box.inner_text()
-    for line in ('Secrets to enter again', 'SMTP password', 'LDAP bind password',
+    for line in ('Secrets to enter again',
+                 'The restore could not keep these: the backup does not carry them, or it points them at '
+                 'another server.', 'SMTP password', 'LDAP bind password',
                  'Alert channel "ops": URL, and token or topic if it has one.', 'Cluster "lab": password or API token secret',
                  'Cluster "lab": own root password of node(s) pve2, pve3, under Node credentials',
                  'Cluster "lab": key of the HA self-fence agents. Install the self-fence agent again.',
@@ -166,7 +168,8 @@ def test_runtime_the_list_speaks_german(open_app):
 
     text = _restore_results(app, 'de').inner_text()
 
-    for line in ('Neu einzugebende Geheimnisse', 'SMTP-Passwort', 'Alarmkanal "ops"', 'Cluster "lab": Passwort',
+    for line in ('Neu einzugebende Geheimnisse', 'Die Wiederherstellung konnte sie nicht übernehmen',
+                 'SMTP-Passwort', 'Alarmkanal "ops"', 'Cluster "lab": Passwort',
                  'Cluster "lab": eigenes Root-Passwort von Node(s) pve2, pve3',
                  'Cluster "lab": Schlüssel der HA-Self-Fence-Agenten', 'BMC-Passwort des Fencing von Node(s) pve1'):
         assert line in text, text
