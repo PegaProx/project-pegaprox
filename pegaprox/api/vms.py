@@ -10398,10 +10398,11 @@ def _execute_replication(job):
                     # the task's own status by its UPID until it ends, however long a first full
                     # copy takes, and the token goes then: an hour's wait gave up on it, and the
                     # finally below took the token from the migration still copying. The job
-                    # stays in flight meanwhile, so its next run does not start beside it
+                    # stays in flight meanwhile, so its next run does not start beside it. The
+                    # settle and the delete after the end run on in the background
                     handed = True
                     end = transfer_net.drop_token_when_done(target_mgr, source_mgr, token_name, mig_task,
-                                                            f'{vm_type}/{clone_vmid}')
+                                                            f'{vm_type}/{clone_vmid}', later=True)
                     mig_ok, mig_detail = (end[0] == 'ok', end[1]) if end else (
                         False, 'the end of the task could not be read, see the log of the source cluster')
                 else:

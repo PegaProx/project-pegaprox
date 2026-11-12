@@ -336,7 +336,7 @@ def token_expiry():
     return int(time.time()) + TOKEN_MAX_SECONDS + 86400
 
 
-def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
+def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what, later=False):
     """Delete the temporary token of a remote migration once its task has ended.
 
     The source node presents the token at the target for as long as the task runs, the
@@ -352,7 +352,9 @@ def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
     bulk_migrate.task_state reads it, or None when it was given up on. The migration by
     hand (api/vms.py) and the cross-cluster balancer run it in a thread of its own; a
     Site Recovery run and a cross-cluster replication run follow their migration with it
-    and take their verdict from it.
+    and take their verdict from it. They pass later=True: the answer comes as soon as the
+    task has ended, and the settle and the delete run on in a job of their own, so a run
+    of many guests does not wait them out guest by guest.
     """
     logger = getattr(source_mgr, 'logger', None) or log
     logger.info(f"[TOKEN-CLEANUP] Following {task_upid} of {what}, token {token_name}")
@@ -369,7 +371,6 @@ def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
             clean = state[0] == 'ok' and not str(state[1]).startswith('WARNINGS')
             (logger.info if clean else logger.warning)(
                 f"[TOKEN-CLEANUP] Migration of {what} ended: {state[0]} {state[1]}".rstrip())
-            time.sleep(TOKEN_SETTLE_SECONDS)
             end = state
             break
         if state:
@@ -386,6 +387,23 @@ def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
         waited += TOKEN_POLL_SECONDS
         if not state:
             blind += TOKEN_POLL_SECONDS
+    if later:
+        # a plain thread like the other token cleanups: a replication run is a native
+        # thread itself, and a greenlet spawned from one without monkey patching never runs
+        from pegaprox.core import ha
+        threading.Thread(target=ha.as_job(_drop_token, f'token cleanup for {what}'),
+                         args=(target_mgr, token_name, what, logger, end is not None),
+                         daemon=True, name='token-cleanup').start()
+    else:
+        _drop_token(target_mgr, token_name, what, logger, end is not None)
+    return end
+
+
+def _drop_token(target_mgr, token_name, what, logger, settle):
+    """The delete of drop_token_when_done: TOKEN_SETTLE_SECONDS after the end of the task
+    when it has one, then up to TOKEN_DELETE_TRIES tries. True when the target took it."""
+    if settle:
+        time.sleep(TOKEN_SETTLE_SECONDS)
     for attempt in range(TOKEN_DELETE_TRIES):
         if attempt:
             time.sleep(TOKEN_DELETE_PAUSE)
@@ -395,11 +413,11 @@ def drop_token_when_done(target_mgr, source_mgr, token_name, task_upid, what):
             res = {'success': False, 'error': str(e)}
         if isinstance(res, dict) and res.get('success'):
             logger.info(f"[TOKEN-CLEANUP] Deleted migration token {token_name}")
-            return end
+            return True
     why = res.get('error') if isinstance(res, dict) else res
     logger.warning(f"[TOKEN-CLEANUP] Migration token {token_name} of {what} is still on the "
                    f"target cluster after {TOKEN_DELETE_TRIES} tries, delete it there: {why}")
-    return end
+    return False
 
 
 # --- SSH relay -------------------------------------------------------------------------

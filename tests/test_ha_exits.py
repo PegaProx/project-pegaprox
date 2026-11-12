@@ -716,6 +716,8 @@ AUTOMATIONS = {
     ('pegaprox/api/metrics_exporter.py', '_spawn'): (1, 'read'),
     # the node network configs behind the transfer network view, API GETs only
     ('pegaprox/core/transfer_net.py', '_spawn'): (1, 'read'),
+    # the token delete after a Site Recovery or replication migration, a job of its own
+    ('pegaprox/core/transfer_net.py', 'drop_token_when_done'): (1, 'job'),
     ('pegaprox/api/groups.py', 'trigger_xclb_balance_now'): (1, 'confirm'),
     # a history report (power, costs, right-sizing) worked out in a greenlet of its own:
     # the metrics history and the guest list (an API GET), nothing else

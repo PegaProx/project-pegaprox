@@ -431,8 +431,10 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
             return True, ''
         # the task's own status by its UPID until it ends, however long the copy takes, and
         # the token goes then. A fixed hour took it away under a large guest, and the wait
-        # here gave up at the same hour and reported a guest failed that was still moving
-        end = transfer_net.drop_token_when_done(tgt_mgr, src_mgr, _sr_token_name, task_upid, what)
+        # here gave up at the same hour and reported a guest failed that was still moving.
+        # The settle and the delete run on in the background, the next guest does not wait
+        end = transfer_net.drop_token_when_done(tgt_mgr, src_mgr, _sr_token_name, task_upid, what,
+                                                later=True)
         if not end:
             err = "The end of the migration task could not be read, see the log of the source cluster"
             logger.error(f"[SR] {err} (vmid {vmid}, task {task_upid})")

@@ -351,7 +351,7 @@ def run(db, monkeypatch):
     # run reads the end of its migration from the token cleanup
     monkeypatch.setattr(vms, '_wait_for_task', lambda mgr, upid, **k: (True, 'OK'))
     monkeypatch.setattr(vms.transfer_net, 'drop_token_when_done',
-                        lambda target, source, token, upid, what: ('failed', 'migration aborted')
+                        lambda target, source, token, upid, what, **kw: ('failed', 'migration aborted')
                         if 'vzmigrate' in str(upid) else ('ok', 'OK'))
     monkeypatch.setattr(vms, '_capture_vm_identity', lambda *a, **k: {})
     monkeypatch.setattr(vms, '_cleanup_snapshot', lambda *a, **k: None)

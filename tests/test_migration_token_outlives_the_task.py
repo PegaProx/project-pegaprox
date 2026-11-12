@@ -66,6 +66,19 @@ def _threads(monkeypatch, module):
     return kept
 
 
+def _on_start(monkeypatch, module, start):
+    """Each thread `module` starts goes to start(target, args, kwargs) instead."""
+    fake = types.SimpleNamespace(**{k: getattr(threading, k) for k in dir(threading) if not k.startswith('__')})
+    fake.Thread = lambda target, args=(), kwargs=None, **k: types.SimpleNamespace(
+        start=lambda: start(target, args, kwargs or {}))
+    monkeypatch.setattr(module, 'threading', fake)
+
+
+def _in_place(monkeypatch, module):
+    """The threads `module` starts run in place, on the clock of the test."""
+    _on_start(monkeypatch, module, lambda fn, args, kwargs: fn(*args, **kwargs))
+
+
 def _token_in(endpoint):
     return re.search(r'root@pam!([^=]+)=', endpoint).group(1)
 
@@ -215,6 +228,7 @@ def failover(monkeypatch):
     # it sleeps, goes by the same clock
     import gevent
     monkeypatch.setattr(gevent, 'spawn', lambda fn, *a, **kw: fn(*a, **kw))
+    _in_place(monkeypatch, transfer_net)
     for module in (sr, vms):
         monkeypatch.setattr(module, 'time', types.SimpleNamespace(**{**vars(time), 'sleep': migration.clock.sleep}))
     return migration
@@ -287,6 +301,8 @@ def replication(db, monkeypatch):
     migration = _Migration(src, tgt, job, 'xcrepl-j1-0', monkeypatch)
     monkeypatch.setattr(vms, 'time', types.SimpleNamespace(**{**vars(time), 'sleep': migration.clock.sleep,
                                                                'time': lambda: 1794400000.0}))
+    # the token delete the run leaves to the background runs in place, on the same clock
+    _in_place(monkeypatch, transfer_net)
     migration.said = said
     return migration
 
@@ -498,3 +514,104 @@ def test_the_token_is_created_with_the_expire_it_is_given(expire, sent):
     [(url, data)] = posted
     assert url.endswith('/access/users/root@pam/token/t')
     assert data['expire'] == sent and data['privsep'] == 0
+
+
+# --- a run of many guests does not wait for each token delete ---------------------------
+
+def _left_to_the_background(monkeypatch):
+    """The jobs the run hands to the background, kept instead of started."""
+    kept = []
+    _on_start(monkeypatch, transfer_net, lambda *job: kept.append(job))
+    return kept
+
+
+def test_a_failover_answers_when_its_task_ends_and_the_token_goes_after(failover, monkeypatch):
+    """A planned failover moves its guests one after another, and each waited the settle
+    and the tries of its token delete before the next one started: half a minute a guest
+    at least, five more while the target refused the delete."""
+    later = _left_to_the_background(monkeypatch)
+    end = HOUR
+    assert failover.follow([(end, 'running'), (EVER, 'OK')], hours=2) == []
+    assert failover.result == (True, '') and failover.clock.t == end
+    # and not before the source node is done with it
+    (fn, args, kw), = later
+    assert fn(*args, **kw) is True
+    assert [t for _name, t in failover.deleted] == [end + SETTLE]
+
+
+def test_a_failed_failover_answers_at_once_as_well(failover, monkeypatch):
+    later = _left_to_the_background(monkeypatch)
+    assert failover.follow([(600, 'running'), (EVER, 'migration aborted')], hours=2) == []
+    ok, err = failover.result
+    assert not ok and 'migration aborted' in err and failover.clock.t == 600
+    (fn, args, kw), = later
+    fn(*args, **kw)
+    assert [t for _name, t in failover.deleted] == [600 + SETTLE]
+
+
+def test_a_delete_the_target_refuses_after_a_failover_is_still_tried_and_reported(failover, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    later = _left_to_the_background(monkeypatch)
+    failover.delete_answer = {'success': False, 'error': 'no lease'}
+    failover.follow([(600, 'running'), (EVER, 'OK')], hours=2)
+    assert failover.result == (True, '') and failover.deleted == []
+    (fn, args, kw), = later
+    assert fn(*args, **kw) is False
+    tried = [t for _name, t in failover.deleted]
+    assert len(tried) == transfer_net.TOKEN_DELETE_TRIES and tried[0] == 600 + SETTLE, tried
+    assert [m for m in _warned(caplog, failover.token) if 'no lease' in m]
+
+
+def test_a_replication_run_records_its_verdict_when_the_task_ends(replication, monkeypatch):
+    later = _left_to_the_background(monkeypatch)
+    end = HOUR
+    assert replication.follow([(end, 'running'), (EVER, 'OK')], hours=2) == []
+    assert replication.said == [('ok', '')] and replication.clock.t == end
+    (fn, args, kw), = later
+    fn(*args, **kw)
+    assert [t for _name, t in replication.deleted] == [end + SETTLE]
+
+
+def test_a_migration_by_hand_still_deletes_in_the_thread_that_follows_it(by_hand, monkeypatch):
+    """The route already runs the cleanup in a thread of its own: the delete comes there,
+    after the settle, and nothing else is started for it."""
+    later = _left_to_the_background(monkeypatch)
+    assert by_hand.follow([(600, 'running'), (EVER, 'OK')], hours=1) == [600 + SETTLE]
+    assert later == []
+
+
+# a replication run as the threaded server runs it, in a process gevent did not patch
+_UNPATCHED = r'''
+import json, os, sys, threading, types
+from pegaprox.core import transfer_net
+transfer_net.TOKEN_SETTLE_SECONDS = 0
+deleted = threading.Event()
+source = types.SimpleNamespace(cluster_type='proxmox', logger=None,
+                               get_task_status=lambda node, upid: {'status': 'stopped', 'exitstatus': 'OK'})
+target = types.SimpleNamespace(delete_api_token=lambda name: deleted.set() or {'success': True})
+upid = 'UPID:pve1:0000ABCD:00000001:6700AAAA:qmigrate:105:root@pam!pegaprox:'
+ends = []
+run = threading.Thread(target=lambda: ends.append(
+    transfer_net.drop_token_when_done(target, source, 'xcrepl-j1-0', upid, 'qemu/9100', later=True)))
+run.start()
+run.join(60)
+print(json.dumps({'end': ends, 'deleted': deleted.wait(30)}))
+sys.stdout.flush()
+os._exit(0)
+'''
+
+
+def test_the_token_goes_after_a_run_in_a_thread_gevent_did_not_patch(tmp_path):
+    """A replication run is a plain thread. Where PegaProx serves without gevent
+    (PEGAPROX_NO_GEVENT), a greenlet spawned from such a thread waits for a hub that never
+    runs, and the token would have stayed on the target until it expires."""
+    import json
+    import os
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PEGAPROX_CONFIG_DIR=str(tmp_path / 'config'), PEGAPROX_LOG_DIR=str(tmp_path / 'logs'))
+    run = subprocess.run([sys.executable, '-c', _UNPATCHED], cwd=root, env=env, capture_output=True, text=True,
+                         timeout=180)
+    assert run.returncode == 0, run.stderr[-2000:]
+    assert json.loads(run.stdout.splitlines()[-1]) == {'end': [['ok', 'OK']], 'deleted': True}
