@@ -3,7 +3,8 @@
 The restore answers secrets_to_enter: each SMTP, LDAP, OIDC or ACME DNS secret, alert
 channel and cluster that ends up without what it sends with, because the backup left it
 out and this instance holds none for the same server (api/settings.py _restored_secrets),
-and the nodes of a cluster the backup moved that lost their own root password.
+the nodes of a cluster the backup moved that lost their own root password, and the HA
+agent key and fence passwords an overwrite leaves empty.
 The results of Settings, Security Settings, Restore from Backup list them, for the dry
 run as well, and turn yellow as they do for errors.
 
@@ -40,8 +41,9 @@ def test_every_setting_the_restore_names_has_its_label():
     assert labelled == set(_RESTORE_SECRETS)
     # the ones that carry a name
     assert "s.channel !== undefined" in panel and "s.cluster !== undefined" in panel
-    # the nodes of a cluster before the cluster itself, which they carry the name of
-    assert panel.index('Array.isArray(s.nodes)') < panel.index('s.cluster !== undefined')
+    # what belongs to a cluster before the cluster itself, which they carry the name of
+    for kind in ('s.agent_token', 'Array.isArray(s.fences)', 'Array.isArray(s.nodes)'):
+        assert panel.index(kind) < panel.index('s.cluster !== undefined'), kind
 
 
 def test_the_results_list_them_and_turn_yellow():
@@ -55,7 +57,7 @@ def test_the_results_list_them_and_turn_yellow():
 
 def test_every_key_exists_once_per_language_and_none_is_unused():
     used = _used()
-    assert len(used) == 10, sorted(used)
+    assert len(used) == 12, sorted(used)
     for lang, block in _blocks().items():
         for key in used:
             n = len(re.findall(r'^ +%s: ' % key, block, re.M))
@@ -96,7 +98,9 @@ ANSWER = {'mode': 'merge', 'dry_run': True, 'backup_version': '1.5.0', 'backup_d
           'backup_by': 'admin', 'restored': {'server_settings': True, 'clusters': 1}, 'skipped': {},
           'errors': [], 'secrets_to_enter': [{'setting': 'smtp_password'}, {'setting': 'ldap_bind_password'},
                                              {'channel': 'ops'}, {'cluster': 'lab'},
-                                             {'cluster': 'lab', 'nodes': ['pve2', 'pve3']}]}
+                                             {'cluster': 'lab', 'nodes': ['pve2', 'pve3']},
+                                             {'cluster': 'lab', 'agent_token': True},
+                                             {'cluster': 'lab', 'fences': ['pve1']}]}
 
 
 # what the way to the results reads in the two languages the tests click through
@@ -134,7 +138,9 @@ def test_runtime_the_dry_run_lists_what_to_enter_again(open_app):
     text = box.inner_text()
     for line in ('Secrets to enter again', 'SMTP password', 'LDAP bind password',
                  'Alert channel "ops": URL, and token or topic if it has one.', 'Cluster "lab": password or API token secret',
-                 'Cluster "lab": own root password of node(s) pve2, pve3, under Node credentials'):
+                 'Cluster "lab": own root password of node(s) pve2, pve3, under Node credentials',
+                 'Cluster "lab": key of the HA self-fence agents. Install the self-fence agent again.',
+                 'Cluster "lab": BMC password of the fence of node(s) pve1'):
         assert line in text, text
     assert 'restoreSecret' not in text
     assert 'bg-yellow-500/10' in box.get_attribute('class')
@@ -161,6 +167,7 @@ def test_runtime_the_list_speaks_german(open_app):
     text = _restore_results(app, 'de').inner_text()
 
     for line in ('Neu einzugebende Geheimnisse', 'SMTP-Passwort', 'Alarmkanal "ops"', 'Cluster "lab": Passwort',
-                 'Cluster "lab": eigenes Root-Passwort von Node(s) pve2, pve3'):
+                 'Cluster "lab": eigenes Root-Passwort von Node(s) pve2, pve3',
+                 'Cluster "lab": Schlüssel der HA-Self-Fence-Agenten', 'BMC-Passwort des Fencing von Node(s) pve1'):
         assert line in text, text
     assert not app.errors, app.errors

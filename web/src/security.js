@@ -1633,7 +1633,9 @@
             // LW Nov 2026 - what the restore answer names in secrets_to_enter
             const secretToEnter = (s) => {
                 if (s.channel !== undefined) return t('restoreSecretChannel').replace('{name}', () => s.channel);
+                if (s.agent_token) return t('restoreSecretAgentKey').replace('{name}', () => s.cluster);
                 // the nodes go in first, a cluster name can hold any text
+                if (Array.isArray(s.fences)) return t('restoreSecretFences').replace('{nodes}', () => s.fences.join(', ')).replace('{name}', () => s.cluster);
                 if (Array.isArray(s.nodes)) return t('restoreSecretNodes').replace('{nodes}', () => s.nodes.join(', ')).replace('{name}', () => s.cluster);
                 if (s.cluster !== undefined) return t('restoreSecretCluster').replace('{name}', () => s.cluster);
                 return {
