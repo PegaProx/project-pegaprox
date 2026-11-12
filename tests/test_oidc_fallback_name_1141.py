@@ -210,6 +210,7 @@ def test_no_name_and_no_sub_is_refused(db):
 
 GRAPH_ME = 'https://graph.example/v1.0/me'
 USERINFO = 'https://graph.example/oidc/userinfo'
+ISSUER = 'https://login.example/tenant/v2.0'   # what the IdP's discovery names, and its tokens carry
 ENTRA = {'enabled': True, 'provider': 'entra', 'client_id': 'pegaprox', 'auto_create_users': True,
          'redirect_uri': 'https://pegaprox.example/oidc/callback', 'default_role': 'viewer',
          'admin_group_id': '', 'user_group_id': '', 'viewer_group_id': '', 'group_mappings': []}
@@ -237,7 +238,7 @@ def idp(tmp_path, signer, monkeypatch):
     monkeypatch.setattr(oidc, '_jwks_clients', {})
     ep = _Endpoint({'keys': [_jwk(signer.public_key(), 'k1')]}, tls=tls)
     monkeypatch.setattr(oidc, 'get_oidc_endpoints', lambda config: {
-        'jwks': ep.url + '/jwks', 'graph_me': GRAPH_ME, 'userinfo': USERINFO})
+        'jwks': ep.url + '/jwks', 'graph_me': GRAPH_ME, 'userinfo': USERINFO, 'issuer': ISSUER})
     # the userinfo URL is not what is under test, and its guard would resolve DNS
     monkeypatch.setattr(oidc, 'sanitize_outbound_url', lambda url, **kw: url)
     yield ep
@@ -246,7 +247,7 @@ def idp(tmp_path, signer, monkeypatch):
 
 def _id_token(key, **claims):
     now = int(time.time())
-    body = {'iss': 'https://login.example/tenant/v2.0', 'aud': 'pegaprox', 'iat': now,
+    body = {'iss': ISSUER, 'aud': 'pegaprox', 'iat': now,
             'exp': now + 300, 'nonce': 'the-nonce', 'sub': SUB,
             'preferred_username': 'Wanda@Corp.Example', 'email': 'wanda@corp.example'}
     body.update(claims)
@@ -298,11 +299,24 @@ def test_an_unverified_id_token_never_names_the_account(api, db, idp, signer, mo
 
 
 def test_a_token_with_a_bad_signature_never_names_the_account(api, db, idp, monkeypatch, caplog):
-    # signed by a key the IdP does not publish: verification fails and the decode falls
-    # back to reading the token unchecked
+    # signed by a key the IdP does not publish: the sign-in stops at the signature check,
+    # it is not read unchecked any more (test_oidc_id_token_fails_closed.py)
     stranger = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     with caplog.at_level(logging.WARNING):
         r = _sign_in(api, monkeypatch, _id_token(stranger, preferred_username='root'))
+    assert 'InvalidSignatureError' in caplog.text
+    assert 'falling back to unverified decode' not in caplog.text
+    assert r.status_code == 401, r.get_data(as_text=True)
+    assert _accounts(db) == []
+
+
+def test_a_token_read_unchecked_never_names_the_account(api, db, idp, signer, monkeypatch, caplog):
+    # the one way left to an unchecked token with the switch off: the key set cannot be
+    # loaded at all while TLS is verified. Its name claims still count for nothing
+    monkeypatch.setattr(oidc, 'get_oidc_endpoints', lambda config: {
+        'jwks': 'https://127.0.0.1:1/jwks', 'graph_me': GRAPH_ME, 'userinfo': USERINFO, 'issuer': ISSUER})
+    with caplog.at_level(logging.WARNING):
+        r = _sign_in(api, monkeypatch, _id_token(signer, preferred_username='root'))
     assert 'falling back to unverified decode' in caplog.text
     assert r.status_code == 200, r.get_data(as_text=True)
     assert r.get_json()['user'] == _key(SUB)
@@ -380,7 +394,8 @@ def test_the_verified_mark_cannot_come_from_the_token():
     # the unverified decode is plain JSON: whatever key the token carries, it is not the type
     claims = oidc.oidc_decode_id_token(
         _token(rsa.generate_private_key(public_exponent=65537, key_size=2048),
-               {'sub': 'x', 'exp': int(time.time()) + 300, '_VerifiedClaims': True, 'verified': True}),
+               {'sub': 'x', 'aud': 'pegaprox', 'exp': int(time.time()) + 300, '_VerifiedClaims': True,
+                'verified': True}),
         config={'provider': 'generic', 'client_id': 'pegaprox', 'oidc_skip_jwt_verification': True})
     assert claims['sub'] == 'x' and not oidc.oidc_id_token_verified(claims)
     assert not oidc.oidc_id_token_verified(dict(claims))

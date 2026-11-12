@@ -245,8 +245,9 @@ def test_a_token_signed_by_a_stranger_does_not_name_the_account(api, db, idp, mo
     with caplog.at_level(logging.WARNING):
         r = _adfs(api, monkeypatch, _id_token(stranger, upn='root@corp.example'), username_claim='upn')
     assert r.status_code == 401
-    assert 'falling back to unverified decode' in caplog.text
-    assert 'its signature was not checked' in caplog.text
+    # refused at the signature check already, before any claim is picked
+    assert 'InvalidSignatureError' in caplog.text
+    assert 'falling back to unverified decode' not in caplog.text
     assert _accounts(db) == []
 
 
