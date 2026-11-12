@@ -6,7 +6,7 @@ import json
 import time
 import logging
 from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117 tainted-log sanitiser
-from pegaprox.utils.sanitization import redact_url, redact_secrets
+from pegaprox.utils.sanitization import redact_url, redact_secrets, url_without_login
 import threading
 import uuid
 import hashlib
@@ -2858,7 +2858,8 @@ def download_from_url(cluster_id, node, storage):
                 download_data['checksum-algorithm'] = algo
                 download_data['checksum'] = hash_value
         
-        logging.info(f"Downloading {_sl(redact_url(url))} as {_sl(filename)} to {_sl(storage)}")
+        # the login comes off by structure, a blank in the password would end it early in redact_url
+        logging.info(f"Downloading {_sl(redact_url(url_without_login(url)))} as {_sl(filename)} to {_sl(storage)}")
         resp = manager._create_session().post(download_url, data=download_data, timeout=60)
         
         if resp.status_code == 200:
