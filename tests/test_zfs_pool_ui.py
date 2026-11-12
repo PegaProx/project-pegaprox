@@ -335,7 +335,8 @@ def test_runtime_it_speaks_german(open_app):
     page = app.page
     page.get_by_text('Testi').first.click()
     page.locator('button[title="Node Konfiguration"]').first.click()
-    page.locator('button', has_text='Disks').last.click()
+    # the tabs of the Modern node dialog speak the user's language too
+    page.locator('button', has_text='Festplatten').last.click()
     opener = page.locator('[data-zfs-open="tank"]')
     opener.wait_for(timeout=8000)
     assert opener.inner_text().strip() == 'Pool-Details'
