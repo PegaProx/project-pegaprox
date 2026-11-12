@@ -601,6 +601,41 @@ def caller_is_scoped(user, cluster_id):
     return False
 
 
+def alert_scope(user, cluster_id):
+    """Which alerts of `cluster_id` `user` may read: a predicate over what an alert is
+    about (target_type, target_id), or None for all of them.
+
+    A caller confined in the cluster (caller_is_scoped) gets the cluster's own and those
+    of the guests it may view. Nothing about a node: its pools, OSDs, clock and QDevice, a
+    node threshold, a task without a guest - a pool or guest grant reaches none of them,
+    and the alerts name the nodes. A cluster-wide caller gets them all, a node's only with
+    node.view, which the node pages ask. The active-alerts list and the push inbox both
+    go by this, so the bell shows nothing the list does not. Fails closed."""
+    from pegaprox.utils.rbac import user_can_access_vm, has_permission
+    try:
+        confined = caller_is_scoped(user, cluster_id)
+    except Exception:
+        confined = True
+    if confined:
+        def _sees(target_type, target_id):
+            if target_type == 'cluster':
+                return True
+            if target_type != 'vm':
+                return False
+            try:
+                return bool(user_can_access_vm(user, cluster_id, int(target_id), 'vm.view'))
+            except Exception:
+                return False
+        return _sees
+    try:
+        sees_nodes = has_permission(user, 'node.view')
+    except Exception:
+        sees_nodes = False
+    if sees_nodes:
+        return None
+    return lambda target_type, target_id: target_type != 'node'
+
+
 # MK Oct 2026 - what a confined caller does not get of a node's maintenance: the guests in it
 # (moving, pending, failed, placed off their pin, the templates moved or left behind) and the
 # HA rules held off over them, which the maintenance plan does not show such a caller either.

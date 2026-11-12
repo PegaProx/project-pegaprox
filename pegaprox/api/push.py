@@ -351,9 +351,8 @@ def _wake_all():
 # ──────────────────────────────────────────────────────────────────────────
 
 def _alert_handler(alert_data: dict):
-    """Receives every alert from background/alerts.py. Stores in inbox per
-    *all* admin users (since alerts aren't user-scoped today) and sends
-    a wake-up push to every registered subscription."""
+    """Receives every alert from background/alerts.py. Stores it in the inbox of
+    each subscriber who may read it and sends their subscriptions a wake-up push."""
     try:
         title = alert_data.get('alert_name') or 'PegaProx Alert'
         body = alert_data.get('message') or ''
@@ -379,7 +378,9 @@ def _alert_handler(alert_data: dict):
         # cluster-less system alerts (no cid) go to all. Fail CLOSED on a lookup error.
         from pegaprox.utils.rbac import get_user_clusters
         from pegaprox.utils.auth import load_users
+        from pegaprox.api.helpers import alert_scope
         _all_users = load_users()
+        target = (alert_data.get('target_type') or 'cluster', alert_data.get('target_id'))
         for u in users:
             if cid:
                 # NS Jul 2026 (CodeAnt re-scan — fail-open fix) — a subscriber whose user record
@@ -398,6 +399,16 @@ def _alert_handler(alert_data: dict):
                 except Exception:
                     continue                              # fail closed — never leak on error
                 if allowed is not None and cid not in allowed:
+                    continue
+                # reaching the cluster is not seeing all of it: a subscriber confined to a
+                # pool or to some guests, or without node.view, gets what the active-alerts
+                # list shows them. Asked of everyone, a default-tenant account (allowed is
+                # None) can hold a pool grant here too.
+                try:
+                    sees = alert_scope(udict, cid)
+                    if sees is not None and not sees(*target):
+                        continue
+                except Exception:
                     continue
             _push_to_inbox(u, title, body, sev, url, tag)
             _wake_user(u)

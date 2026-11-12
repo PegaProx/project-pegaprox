@@ -16,7 +16,8 @@ from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
-from pegaprox.api.helpers import bounded_limit, check_cluster_access, safe_error, scope_vm_rows, require_unconfined
+from pegaprox.api.helpers import (bounded_limit, check_cluster_access, safe_error, scope_vm_rows,
+                                  require_unconfined, alert_scope)
 from pegaprox.background.alerts import load_alerts_config, save_alerts_config
 from pegaprox.background import alert_events
 
@@ -497,18 +498,12 @@ def get_active_alerts(cluster_id):
             "WHERE cluster_id = ? AND resolved_at IS NULL ORDER BY triggered_at DESC",
             (cluster_id,)).fetchall()
         incidents = [dict(zip(_q, r)) for r in rows]
-        _ok = _alert_scoper(cluster_id)
-        if _ok is not None:
-            # MK Oct 2026 - its own guests' incidents and the cluster's (Ceph health). Nothing
-            # about a node: its pools, OSDs, clock and QDevice, a node threshold, a task without
-            # a guest - a pool or guest grant reaches none of them, and the rows name the nodes
-            incidents = [i for i in incidents if i.get('target_type') == 'cluster'
-                         or (i.get('target_type') == 'vm' and _ok(i.get('target_id')))]
-        elif not _caller_sees_nodes():
-            # MK Oct 2026 - a node's incidents (its ZFS pools and their devices, OSDs, clock,
-            # QDevice, node tasks) are what the node pages show, and those ask node.view. A
-            # cluster-wide role without it keeps the guests' and the cluster's.
-            incidents = [i for i in incidents if i.get('target_type') != 'node']
+        # a confined caller: its own guests' incidents and the cluster's (Ceph health); a
+        # cluster-wide role without node.view: all but a node's. The push inbox asks the same.
+        from pegaprox.utils.auth import build_authz_user
+        _sees = alert_scope(build_authz_user(request.session.get('user', ''), request.session), cluster_id)
+        if _sees is not None:
+            incidents = [i for i in incidents if _sees(i.get('target_type'), i.get('target_id'))]
         mutes = alert_events.active_mutes(cluster_id)
         out = []
         for i in incidents:

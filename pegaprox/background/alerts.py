@@ -570,6 +570,8 @@ This is an automated alert from PegaProx.
                 'current_value': round(current_value, 1),
                 'target_type': target_type,
                 'target_name': target_name,
+                # the vmid or the node: who may read the alert goes by it (push inbox)
+                'target_id': '' if target_id is None else str(target_id),
                 'cluster_id': cluster_id,
                 'severity': severity,
                 'timestamp': datetime.now().isoformat(),
@@ -858,6 +860,7 @@ def emit_rolling_update_reboot_event(cluster_id, node):
             'metric': 'rolling_update_reboot',
             'target_type': 'node',
             'target_name': node,
+            'target_id': node,
             'cluster_id': cluster_id,
             'severity': rule.get('severity') if rule.get('severity') not in (None, 'auto') else 'info',
             'current_value': 'rebooting',
@@ -1105,6 +1108,7 @@ def _send_metric_resolved(items):
         alert_data = {
             'alert_name': name, 'metric': metric, 'operator': operator, 'threshold': threshold,
             'current_value': 'resolved', 'target_type': target_type, 'target_name': target_name,
+            'target_id': '' if target_id is None else str(target_id),
             'cluster_id': cluster_id, 'severity': 'info', 'timestamp': datetime.now().isoformat(),
             'message': message, 'event': 'resolved',
         }

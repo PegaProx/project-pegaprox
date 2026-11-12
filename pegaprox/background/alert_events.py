@@ -1882,7 +1882,7 @@ def _apply(rule, cid, p, mutes, now):
     db = get_db()
     cur = db.conn.cursor()
     rows = cur.execute(
-        "SELECT id, object_key, current_value, message, severity, target_type, target_name "
+        "SELECT id, object_key, current_value, message, severity, target_type, target_id, target_name "
         "FROM active_alerts WHERE cluster_id = ? AND alert_id = ? AND metric = ? AND resolved_at IS NULL",
         (cid, rid, metric)).fetchall()
     open_rows = {(r['object_key'] or ''): _row(r) for r in rows}
@@ -1928,6 +1928,7 @@ def _apply(rule, cid, p, mutes, now):
                 name, message = p.fine[obj]
                 notices.append(('resolved', {'object': obj, 'name': name, 'message': message,
                                              'target_type': row['target_type'],
+                                             'target_id': row['target_id'],
                                              'target_name': row['target_name'], 'value': 0,
                                              'display': 'resolved', 'severity': 'info'}))
             continue
@@ -1995,6 +1996,7 @@ def _deliver(A, rule, cid, cname, kind, c, recipients):
         'alert_name': name, 'metric': rule.get('metric'), 'operator': 'event',
         'threshold': rule.get('threshold'), 'current_value': c.get('display', c.get('value')),
         'target_type': c.get('target_type') or 'cluster', 'target_name': c.get('target_name') or cname,
+        'target_id': str(c.get('target_id') or ''),
         'cluster_id': cid, 'severity': sev, 'timestamp': datetime.now().isoformat(),
         'message': c['message'], 'event': kind, 'object': c.get('object', ''),
     }
