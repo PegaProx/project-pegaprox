@@ -2229,7 +2229,10 @@ def _plain_http_reply(request, addr, https_port, domain='', same_port=False):
     path = parts[1].replace('\r', '').replace('\n', '') if len(parts) >= 2 else '/'
 
     # MK: Mar 2026 - serve ACME challenges on port 80 instead of redirecting
-    if not same_port and path.startswith('/.well-known/acme-challenge/'):
+    # MK Nov 2026 - on the TLS port as well: with port 80 forwarded to it, the redirect went
+    # to :5000, and Let's Encrypt follows a redirect only to port 80 or 443. The answer is
+    # public anyway, an unknown token is redirected like any other path.
+    if path.startswith('/.well-known/acme-challenge/'):
         from pegaprox.core.acme import get_challenge_response
         key_auth = get_challenge_response(path.split('/')[-1])
         if key_auth:

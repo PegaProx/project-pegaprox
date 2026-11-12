@@ -45,6 +45,10 @@ import pegaprox.utils.audit as audit
 _trusted = audit._is_trusted_proxy
 audit._is_trusted_proxy = lambda addr: not str(addr).endswith('127.0.0.2') and _trusted(addr)
 
+# an HTTP-01 challenge in progress
+import pegaprox.core.acme as acme
+acme._pending_challenges['tok-known_1'] = 'tok-known_1.key-authorization'
+
 
 @web.route('/ping')
 def ping():
@@ -211,6 +215,24 @@ def test_a_trusted_proxy_that_terminated_tls_is_served(server):
 
     assert answer.startswith(b'HTTP/1.1 200'), answer[:120]
     assert answer.endswith(b'pong')
+
+
+# -- ACME HTTP-01 ------------------------------------------------------------------------
+#
+# Only the extra port answered a challenge token. With port 80 forwarded to the TLS port
+# the token got a redirect to :5000, and Let's Encrypt follows one only to port 80 or 443.
+
+def test_a_known_acme_token_is_answered_on_both_ports_an_unknown_one_redirected(server, extra):
+    def ask(port, token):
+        return _plain('127.0.0.1', port, f'GET /.well-known/acme-challenge/{token} HTTP/1.1\r\n'
+                                         'Host: pegaprox.example\r\nConnection: close\r\n\r\n')
+
+    for port in (extra, server):
+        known, unknown = ask(port, 'tok-known_1'), ask(port, 'tok-unknown_2')
+        assert known.startswith(b'HTTP/1.1 200'), (port, known[:120])
+        assert known.endswith(b'\r\n\r\ntok-known_1.key-authorization'), known
+        assert unknown.startswith(b'HTTP/1.1 301'), (port, unknown[:120])
+        assert _location(unknown) == f'https://pegaprox.example:{server}/.well-known/acme-challenge/tok-unknown_2'
 
 
 # -- the port in the Host header -------------------------------------------------------
