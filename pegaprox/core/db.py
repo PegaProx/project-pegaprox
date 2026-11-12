@@ -4200,9 +4200,14 @@ class PegaProxDB:
                 cols = [row[1] for row in cursor.execute('PRAGMA table_info("%s")' % tbl).fetchall()]
             except Exception:
                 continue
-            if 'cluster_id' in cols:
+            if 'cluster_id' in cols and tbl not in self.KEPT_ON_CLUSTER_DELETE:
                 cursor.execute('DELETE FROM "%s" WHERE cluster_id = ?' % tbl, (cluster_id,))
         self.conn.commit()
+
+    # MK Nov 2026 - audit_log got a cluster_id with #1121, so the sweep above took a deleted
+    # cluster's entries with it. They are history, and every row is a link of the hash chain:
+    # the integrity check showed the hole as rows missing, the way tampering looks.
+    KEPT_ON_CLUSTER_DELETE = ('audit_log', 'audit_checkpoints')
 
     # MK Oct 2026 - the moves the balancer made, with why. migration_history is a local
     # table: the instance whose balancer moved the guest holds the row, a standby asks it.

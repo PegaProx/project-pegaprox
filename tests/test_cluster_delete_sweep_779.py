@@ -55,6 +55,8 @@ def test_delete_cluster_sweeps_every_cluster_id_table(db):
     DELETE_CID, KEEP_CID = 'cid-delete-me', 'cid-keep-me'
     exercised = []
     for table, cols in tables:
+        if table in db.KEPT_ON_CLUSTER_DELETE:
+            continue  # the audit trail outlives the cluster, see the test below
         ok_del = _insert_row(conn, table, cols, DELETE_CID, salt='d')
         ok_keep = _insert_row(conn, table, cols, KEEP_CID, salt='k')
         if ok_del and ok_keep:
@@ -75,6 +77,23 @@ def test_delete_cluster_sweeps_every_cluster_id_table(db):
         kept = conn.execute('SELECT COUNT(*) FROM "%s" WHERE cluster_id=?' % table, (KEEP_CID,)).fetchone()[0]
         assert left == 0, f"{table}: {left} orphaned row(s) survived delete_cluster (#779 regression)"
         assert kept >= 1, f"{table}: sweep wrongly deleted the OTHER cluster's rows"
+
+
+def test_a_deleted_cluster_keeps_its_audit_trail(db):
+    # audit_log carries a cluster_id since #1121, and the sweep took the deleted cluster's
+    # entries out of the hash chain: the integrity check then reported them missing
+    for i in range(3):
+        db.add_audit_entry('alice', f'cluster.e{i}', f'e {i}', '10.0.0.1', 'gone', 'info', cluster_id='cid-gone')
+        db.add_audit_entry('bob', f'cluster.k{i}', f'k {i}', '10.0.0.2', 'kept', 'info', cluster_id='cid-kept')
+    assert db.verify_audit_log_integrity()['intact'] is True
+
+    db.delete_cluster('cid-gone')
+
+    left = db.conn.execute("SELECT COUNT(*) FROM audit_log WHERE cluster_id = 'cid-gone'").fetchone()[0]
+    assert left == 3, 'audit chain lost rows'
+    res = db.verify_audit_log_integrity()
+    assert res['intact'] is True, res
+    assert res['chain']['missing'] == 0 and res['chain']['rows'] == 6
 
 
 def test_delete_cluster_is_idempotent_on_missing(db):
