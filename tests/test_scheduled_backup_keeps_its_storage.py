@@ -4,13 +4,21 @@ The create and update routes took backup_storage, but the save left it out of th
 task and the load had nothing to read back. The scheduler loop and POST .../run both load
 the task from the database, so every scheduled backup went to 'local'.
 
+The manager here is a double of the real one, so a method it does not have, or a call it
+does not take, fails the test. The one before had every method: it took the storage as a
+fourth argument, which XcpngManager.backup_vm takes by name only, so on XCP-ng every
+scheduled backup raised a TypeError. PegaProxManager has no backup_vm at all; the storage
+is followed on XCP-ng, whose manager has the call.
+
 MK Nov 2026
 """
 import json
+from unittest.mock import create_autospec
 
 import pytest
 
 from pegaprox.background import scheduler
+from pegaprox.core.xcpng import XcpngManager
 
 
 @pytest.fixture
@@ -23,8 +31,13 @@ def root(api, seed):
 @pytest.fixture
 def backups(api):
     sent = []
-    m = api.make_fake_manager('cluster_1')
-    m.backup_vm.side_effect = lambda node, vmid, vt, storage: sent.append(storage)
+    m = create_autospec(XcpngManager, instance=True)
+    m.cluster_type = 'xcpng'
+
+    def backup(node, vmid, vm_type='qemu', **kw):
+        sent.append(kw['storage'])
+        return 'OpaqueRef:backup-task'
+    m.backup_vm.side_effect = backup
     api.set_manager('cluster_1', m)
     return sent
 

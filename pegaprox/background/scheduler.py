@@ -414,9 +414,9 @@ def execute_scheduled_task(task):
             snap_name = f"scheduled_{datetime.now().strftime('%Y%m%d_%H%M')}"
             manager.create_snapshot(target_node, int(target_id), target_type, snap_name, 'Scheduled snapshot', False)
         elif action == 'backup':
-            # Trigger backup job
+            # XcpngManager.backup_vm takes what follows the guest type by name
             storage = task.get('backup_storage', 'local')
-            manager.backup_vm(target_node, int(target_id), target_type, storage)
+            manager.backup_vm(target_node, int(target_id), target_type, storage=storage)
         
         log_audit('scheduler', 'scheduled_task.executed', f"Task '{task.get('name')}' executed: {action} on {target_type}/{target_id}")
         
