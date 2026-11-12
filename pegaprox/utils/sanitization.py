@@ -141,8 +141,8 @@ def url_path_climbs(url) -> bool:
 
 
 def refuse_climbing_paths(session):
-    """Wrap session.request so a URL whose path climbs (url_path_climbs) is refused with a
-    ValueError before requests folds it. Returns the session."""
+    """Wrap session.request so a URL whose path climbs (url_path_climbs) or that carries a
+    '#' is refused with a ValueError before requests folds or cuts it. Returns the session."""
     if getattr(session, '_paths_checked', False):
         return session
     request = session.request
@@ -150,6 +150,10 @@ def refuse_climbing_paths(session):
     def checked(method, url, *args, **kwargs):
         if url_path_climbs(url):
             raise ValueError('refused an API path with a . or .. segment')
+        # MK Nov 2026 - no API URL of ours has a fragment, and requests never sends one: a
+        # value with a '#' in it cut off the part of the path the code put after it
+        if '#' in str(url):
+            raise ValueError('refused an API URL with a fragment')
         return request(method, url, *args, **kwargs)
     session.request = checked
     session._paths_checked = True

@@ -7,6 +7,9 @@ check, which reads the id's own fields. A task id is now checked for its form be
 anything else, and the API sessions of both managers refuse a path with such a
 segment, whatever value put it there.
 MK Oct 2026
+
+They refuse a URL with a '#' as well: requests sends no fragment, so a value holding one
+cut off the rest of the path the code put after it. MK Nov 2026
 """
 import types
 from unittest.mock import MagicMock
@@ -91,6 +94,41 @@ def test_the_session_refuses_a_climbing_path_before_anything_is_sent():
     assert rec.sent[-1].endswith('/tasks/' + GOOD + '/log')
 
 
+class _Wire(_Recorder):
+    """What goes into the request line."""
+    def send(self, request, **kwargs):
+        r = super().send(request, **kwargs)
+        self.sent[-1] = request.path_url
+        return r
+
+
+@pytest.mark.parametrize('url', [
+    'https://h:8006/api2/json/nodes/n1/qemu/200?purge=1#/storage/local/content/x',
+    'https://h:8006/api2/json/nodes/n1/storage/local/prunebackups#/content/y',
+    'https://h:8006/api2/json/nodes/n1#',
+])
+def test_the_session_refuses_a_url_with_a_fragment_before_anything_is_sent(url):
+    s = requests.Session()
+    rec = _Recorder()
+    s.mount('https://', rec)
+    refuse_climbing_paths(s)
+    for call in (s.get, s.delete, s.post):
+        with pytest.raises(ValueError):
+            call(url)
+    assert rec.sent == []
+    # counterproof: unguarded, the request line ends at the '#'
+    plain = requests.Session()
+    wire = _Wire()
+    plain.mount('https://', wire)
+    plain.delete(url)
+    assert wire.sent == [url.split('#')[0].split(':8006', 1)[1]]
+    # and a '#' quoted into the path or handed over as a parameter still goes out
+    s.delete('https://h:8006/api2/json/nodes/n1/storage/local/content/local%3Aiso%2Fa%23b.iso')
+    s.get('https://h:8006/api2/json/nodes/n1/storage/local/content', params={'note': 'a#b'})
+    assert rec.sent == ['https://h:8006/api2/json/nodes/n1/storage/local/content/local%3Aiso%2Fa%23b.iso',
+                        'https://h:8006/api2/json/nodes/n1/storage/local/content?note=a%23b']
+
+
 def test_both_managers_build_guarded_sessions():
     from pegaprox.core.manager import PegaProxManager
     from pegaprox.core.pbs import PBSManager
@@ -99,6 +137,7 @@ def test_both_managers_build_guarded_sessions():
     assert getattr(m._create_session(), '_paths_checked', False) is True
     p = PBSManager('p1', {'name': 'pbs', 'host': '10.0.0.5'})
     assert getattr(p._session, '_paths_checked', False) is True
+
 
 
 # --- the routes ---------------------------------------------------------------------------
