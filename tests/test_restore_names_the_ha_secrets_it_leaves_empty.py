@@ -2,11 +2,10 @@
 
 The HA settings of a cluster hold the key its self-fence agents sign the leader question
 with, and the BMC password of each node's fence. A backup without secrets leaves both
-out (api/settings.py _strip_cluster_secrets). A merge restore keeps what the cluster has,
-and so does an overwrite while the backup leaves the cluster's addresses. An overwrite
-that moves the cluster writes the backup's HA settings as they are: the installed agents
-are answered 403 from then on and the fences have nothing to log in with, and the answer
-of the restore said nothing of it.
+out (api/settings.py _strip_cluster_secrets). Both modes keep what the cluster has while
+the backup leaves the cluster's addresses. A restore that moves the cluster leaves them
+empty: the installed agents are answered 403 from then on and the fences have nothing to
+log in with, and the answer of the restore said nothing of it.
 
 The answer names them now in secrets_to_enter, the dry run as well: the agent key of the
 cluster, and the nodes whose fence the backup still has without its password. MK
@@ -61,9 +60,10 @@ def _ha():
     return get_db().get_cluster('c1')['ha_settings']
 
 
+@pytest.mark.parametrize('mode', ['merge', 'overwrite'])
 @pytest.mark.parametrize('dry_run', [False, True], ids=['restore', 'dry-run'])
-def test_an_overwrite_that_moves_the_cluster_names_the_agent_key_and_the_fences(admin, dry_run):
-    res = _restore(admin, _row(host='10.9.9.9'), 'overwrite', dry_run=dry_run)
+def test_a_restore_that_moves_the_cluster_names_the_agent_key_and_the_fences(admin, mode, dry_run):
+    res = _restore(admin, _row(host='10.9.9.9'), mode, dry_run=dry_run)
 
     assert res.get('secrets_to_enter') == [{'cluster': 'lab'},
                                            {'cluster': 'lab', 'agent_token': True},

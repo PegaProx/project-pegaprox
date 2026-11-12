@@ -2572,13 +2572,18 @@ def _strip_cluster_secrets(cluster):
     the node agents sign their leader question with, and the BMC password of each
     node's fence."""
     _strip_secret_fields(cluster)
-    ha_settings = cluster.get('ha_settings') if isinstance(cluster, dict) else None
+    _strip_ha_secrets(cluster.get('ha_settings') if isinstance(cluster, dict) else None)
+    return cluster
+
+
+def _strip_ha_secrets(ha_settings):
+    """A cluster's HA settings without the agent token and the BMC password of each fence."""
     if isinstance(ha_settings, dict):
         _strip_secret_fields(ha_settings)
         fencing = ha_settings.get('fencing')
         for fence in (fencing.values() if isinstance(fencing, dict) else ()):
             _strip_secret_fields(fence)
-    return cluster
+    return ha_settings
 
 
 def _keep_guarded_ha_settings(cluster, existing):
@@ -2643,15 +2648,25 @@ def _keep_ha_secrets(cluster, existing):
         cluster['ha_settings'] = ha
 
 
+def _drop_ha_secrets(cluster):
+    """A merge over a cluster the backup moves keeps the guarded HA settings, but not the
+    agent key and the fence passwords: the key would go to the nodes at the new address
+    with the next agent install, and a fence would power off a machine that need not be
+    a node of the cluster now."""
+    if isinstance(cluster.get('ha_settings'), dict):
+        # a copy, the answer compares with what the cluster holds
+        cluster['ha_settings'] = _strip_ha_secrets(json.loads(json.dumps(cluster['ha_settings'])))
+
+
 def _ha_secrets_left_empty(cluster, existing):
     """What of a cluster's HA secrets the restore of its row leaves empty: whether the key
     the self-fence agents sign with goes, and the nodes whose fence loses its BMC password.
 
-    A merge keeps both, and so does an overwrite while the backup leaves the cluster's
-    addresses (above). An overwrite that moves the cluster writes the backup's HA settings
-    as they are, and a backup without secrets has neither: every installed agent is then
-    answered 403 and the fence has nothing to log in with. A fence the backup does not
-    have is gone as a whole and needs no password. Returns (token, [node])."""
+    Both modes keep them while the backup leaves the cluster's addresses (above). A backup
+    that moves the cluster takes none of the stored ones along, a merge either, and one
+    without secrets has neither: every installed agent is then answered 403 and the fence
+    has nothing to log in with. A fence the backup does not have is gone as a whole and
+    needs no password. Returns (token, [node])."""
     held = existing.get('ha_settings') if isinstance(existing.get('ha_settings'), dict) else {}
     sent = cluster.get('ha_settings') if isinstance(cluster.get('ha_settings'), dict) else {}
     token = not _blank_ha_secret('agent_token', held.get('agent_token')) and \
@@ -3302,6 +3317,8 @@ def restore_config():
                     
                     if existing and mode == 'merge':
                         _keep_guarded_ha_settings(cluster, existing)
+                        if moved:
+                            _drop_ha_secrets(cluster)
                     # Keep existing passwords if not in backup. The credential lives under
                     # 'pass' (db.py get_cluster) and save_cluster encrypts what it is given, so
                     # without this a restore of a backup without secrets writes '' over every

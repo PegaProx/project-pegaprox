@@ -5,13 +5,13 @@ with, and the BMC password of each node's fence. A backup without secrets leaves
 An overwrite restore wrote the backup's HA settings as they were: every installed agent was
 answered 403 from then on, and a tiebreak node that hears no leader fences itself.
 
-An overwrite now keeps them by the rule of the cluster's own password (api/settings.py
+Both modes now keep them by the rule of the cluster's own password (api/settings.py
 _cluster_moves): a blank in the backup keeps what the cluster has while the backup names no
 address the cluster does not have, and a fence's password while the fence keeps its type
-and its BMC. A backup that moves the cluster takes none of them along, and the answer names
-them. A backup that carries its own writes those. Anything in a secret's place that is not
-a string counts as blank, as do a password of blanks only and an agent key the cluster
-would not take as one. MK
+and its BMC. A backup that moves the cluster takes none of them along, a merge either, and
+the answer names them. An overwrite that carries its own writes those. Anything in a
+secret's place that is not a string counts as blank, as do a password of blanks only and
+an agent key the cluster would not take as one. MK
 """
 import hmac
 import io
@@ -115,8 +115,9 @@ def test_a_dry_run_of_it_names_nothing(admin):
 
 
 @MOVES
-def test_an_overwrite_that_moves_the_cluster_takes_them_not_along(api, admin, change):
-    res = _restore(admin, _row(**change), 'overwrite')
+@pytest.mark.parametrize('mode', ['merge', 'overwrite'])
+def test_a_backup_that_moves_the_cluster_takes_them_not_along(api, admin, mode, change):
+    res = _restore(admin, _row(**change), mode)
 
     assert not _ha().get('agent_token')
     assert _passwords() == {'pve1': None, 'pve2': None}
@@ -151,6 +152,22 @@ def test_a_backup_that_carries_its_own_writes_those(admin, moved):
     assert _ha()['agent_token'] == 'cd' * 32
     assert _passwords() == {'pve1': 'bmc-new', 'pve2': 'bmc-two'}
     assert not [s for s in res.get('secrets_to_enter', []) if 'agent_token' in s or 'fences' in s], res
+
+
+def test_a_merge_that_moves_the_cluster_takes_none_from_the_backup_either(admin):
+    """A merge writes no guarded HA setting from a backup: the agent key and the fences come
+    from the HA routes, and the agent install makes a new key."""
+    row = _row(secrets=True, host='10.9.9.9')
+    row['ha_settings']['agent_token'] = 'cd' * 32
+
+    res = _restore(admin, row, 'merge')
+
+    assert not _ha().get('agent_token')
+    assert _passwords() == {'pve1': None, 'pve2': None}
+    assert {'cluster': 'lab', 'agent_token': True} in res['secrets_to_enter']
+    # the rest of what the cluster holds stays
+    assert _ha()['self_fence_installed'] is True
+    assert {n: f['host'] for n, f in _ha()['fencing'].items()} == {'pve1': '10.0.1.1', 'pve2': '10.0.1.2'}
 
 
 @pytest.mark.parametrize('value', [[], {}, 0, 1234, True], ids=['list', 'dict', 'zero', 'number', 'true'])

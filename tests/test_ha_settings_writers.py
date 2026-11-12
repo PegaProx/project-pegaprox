@@ -321,7 +321,8 @@ WRITERS = {
     },
     'core/manager.py': {'_ha_agent_token', '_ha_store_settings'},    # one key into the row
     'api/settings.py': {'_keep_guarded_ha_settings',       # a merge restore: guarded keys from the row
-                        '_keep_ha_secrets'},               # a restore in place: the agent key, the BMC passwords
+                        '_keep_ha_secrets',                # a restore in place: the agent key, the BMC passwords
+                        '_drop_ha_secrets'},               # a merge that moves the cluster: without those two
 }
 # file -> the functions that copy fields named in a list onto a cluster config
 COPIERS = {
