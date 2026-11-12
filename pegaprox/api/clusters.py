@@ -1334,11 +1334,16 @@ def reorder_clusters():
     if not order:
         return jsonify({'error': 'No order provided'}), 400
 
-    _own = get_user_clusters(build_authz_user(request.session.get('user', ''), request.session))
+    # MK Nov 2026 - the clusters PUT .../sort-order lets the caller move. A pool grant on
+    # another tenant's cluster put that cluster in the list as well
+    from pegaprox.api.helpers import caller_is_scoped
+    _caller = build_authz_user(request.session.get('user', ''), request.session)
+    _own = get_user_clusters(_caller, include_pools=False)
     if _own is not None:
         order = [c for c in order if c in _own]
-        if not order:
-            return jsonify({'error': 'No order provided'}), 400
+    order = [c for c in order if not caller_is_scoped(_caller, c)]
+    if not order:
+        return jsonify({'error': 'No order provided'}), 400
 
     db = get_db()
     cursor = db.conn.cursor()
