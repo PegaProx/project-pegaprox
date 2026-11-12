@@ -530,6 +530,15 @@ def test_auto_without_port_80_says_why_in_one_line(host, capsys):
     assert 'HTTP on port 5000 still redirects' in lines[0]
 
 
+def test_the_help_names_no_default_port():
+    """It said "default 80", which no install opens without being asked to."""
+    out = subprocess.run([sys.executable, os.path.join(REPO, 'pegaprox_multi_cluster.py'), '--help'],
+                         cwd=REPO, capture_output=True, text=True, timeout=60,
+                         env={**os.environ, 'PEGAPROX_NO_GEVENT': '1'}).stdout
+    line, = [l for l in out.splitlines() if l.strip().startswith('PEGAPROX_HTTP_PORT')]
+    assert line.split(None, 1)[1] == 'extra http port for the redirect (default none)'
+
+
 def test_main_asks_the_resolver_and_opens_nothing_behind_a_reverse_proxy():
     """main() is too big to run here, so how it gets to the port is read in its source."""
     src = inspect.getsource(app_mod.main)

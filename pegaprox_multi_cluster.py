@@ -238,7 +238,7 @@ Env vars:
   PEGAPROX_ALLOWED_ORIGINS   cors origins
   PEGAPROX_MAX_REQUEST_SIZE  max API request size (default 10MB)
   PEGAPROX_MAX_UPLOAD_SIZE   max file upload size (default 4GB)
-  PEGAPROX_HTTP_PORT         http port for redirect (default 80)
+  PEGAPROX_HTTP_PORT         extra http port for the redirect (default none)
         """)
     else:
         debug_mode = '--debug' in sys.argv
