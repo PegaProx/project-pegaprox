@@ -950,6 +950,11 @@ def create_alert():
     ok, err = check_cluster_access(data.get('cluster_id', ''))
     if not ok:
         return err
+    # MK Nov 2026 - nor may a caller confined to pools or guests there, as on the
+    # per-cluster routes; the same for the rule's cluster on an edit or a delete
+    _cerr = require_unconfined(data.get('cluster_id', ''))
+    if _cerr:
+        return _cerr
     config = load_alerts_config()
 
     _te = _threshold_error(data)
@@ -995,11 +1000,17 @@ def update_alert(alert_id):
             ok, err = check_cluster_access(alert.get('cluster_id', ''))
             if not ok:
                 return err
+            _cerr = require_unconfined(alert.get('cluster_id', ''))
+            if _cerr:
+                return _cerr
             _new_cid = data.get('cluster_id', alert.get('cluster_id', ''))
             if _new_cid != alert.get('cluster_id', ''):
                 ok2, err2 = check_cluster_access(_new_cid)
                 if not ok2:
                     return err2
+                _cerr = require_unconfined(_new_cid)
+                if _cerr:
+                    return _cerr
             alert.update({
                 'name': data.get('name', alert['name']),
                 'cluster_id': data.get('cluster_id', alert['cluster_id']),
@@ -1028,6 +1039,9 @@ def delete_alert(alert_id):
     ok, err = check_cluster_access(_target.get('cluster_id', ''))
     if not ok:
         return err
+    _cerr = require_unconfined(_target.get('cluster_id', ''))
+    if _cerr:
+        return _cerr
     config['alerts'] = [a for a in config['alerts'] if a['id'] != alert_id]
     save_alerts_config(config)
 
