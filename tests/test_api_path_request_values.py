@@ -202,3 +202,26 @@ def test_a_backup_delete_with_a_storage_that_is_no_name_sends_nothing(api, seed,
                    'local%3Abackup%2Fvzdump-qemu-100-2026_01_01-00_00_00.vma.zst'),
         ('DELETE', '/api2/json/nodes/n1/storage/pbs-store.1/content/'
                    'pbs-store.1%3Abackup%2Fvm%2F100%2F2026-11-01T00%3A00%3A00Z')]
+
+
+# --- the storage of the ISO list of a node ---------------------------------------------------
+
+@pytest.fixture
+def isos(pve):
+    pve.get_iso_list.side_effect = lambda node, storage=None: PegaProxManager.get_iso_list(pve, node, storage)
+    return pve
+
+
+@pytest.mark.parametrize('storage', ['#', 'a/b', 'local?x=', 'local/content?content=vztmpl&x='])
+def test_an_iso_list_of_a_storage_that_is_no_name_sends_nothing(api, seed, isos, storage):
+    c = api.as_user(seed.user('stv', role='viewer',
+                              permissions=['storage.view', 'cluster.view', 'node.view']))
+    r = c.get('/api/clusters/cluster_1/nodes/n1/isos', query_string={'storage': storage})
+    assert r.status_code == 200 and r.get_json() == []
+    assert isos.rec.sent == []
+    # counterproof: storage names as Proxmox VE gives them are read
+    for real in ('local', 'nfs-iso.2', 'iso_store'):
+        r = c.get('/api/clusters/cluster_1/nodes/n1/isos', query_string={'storage': real})
+        assert r.get_json() == [{'volid': 'local:iso/a.iso', 'content': 'iso', 'storage': real}]
+    assert isos.rec.sent == [('GET', f'/api2/json/nodes/n1/storage/{real}/content?content=iso')
+                             for real in ('local', 'nfs-iso.2', 'iso_store')]

@@ -19,6 +19,7 @@ import re
 import shlex
 from pegaprox.utils.ssh_security import cli_hostkey_opts  # secure host-key opts for subprocess ssh/scp
 from pegaprox.utils.sanitization import validate_snapshot_name, validate_hostname, validate_ssh_user, redact_secrets
+from pegaprox.utils.sanitization import validate_storage_name
 import requests
 import urllib3
 from datetime import datetime, timedelta
@@ -17865,6 +17866,10 @@ echo "AGENT_INSTALLED_OK"
             if not self.connect_to_proxmox():
                 return []
         
+        # MK Nov 2026 - a storage the caller names goes into the path: a name, or no request
+        if storage and not validate_storage_name(storage):
+            self.logger.warning(f"[ISO] refused to list ISOs of storage {storage!r}: no storage name")
+            return []
         try:
             host = self.host
             isos = []
