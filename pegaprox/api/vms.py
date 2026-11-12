@@ -10153,9 +10153,10 @@ def _execute_replication(job):
             f"https://{source_mgr.host}:{source_mgr.api_port}/api2/json/nodes/{source_node}"
             f"/{vm_type}/{vmid}/snapshot"
         )
+        snap_descr = f'Cross-cluster replication {job_id}'
         snap_resp = source_mgr._api_post(snap_url, data={
             'snapname': snap_name,
-            'description': f'Cross-cluster replication {job_id}'
+            'description': snap_descr
         })
         if snap_resp.status_code != 200:
             _update_repl_status(db, job_id, 'error', f'Snapshot failed: {snap_resp.text}')
@@ -10272,6 +10273,7 @@ def _execute_replication(job):
             return
 
         handed = False
+        clone_gone = False
         try:
             # the target node's transfer address when the target cluster has one (MK Oct 2026)
             xfer = transfer_net.migration_route(target_mgr, target_node or None)
@@ -10408,6 +10410,8 @@ def _execute_replication(job):
                 else:
                     mig_ok, mig_detail = False, 'no task UPID'
                 if mig_ok:
+                    # PVE removed the clone with the migration (delete=1)
+                    clone_gone = True
                     logging.info(f"[XCREPL] Job {job_id}: migration complete")
                     # MK May 2026 (#456) — restore source identity on the replica so
                     # DR failover lands on the right hostname + DHCP-MAC. Best-effort —
@@ -10448,7 +10452,12 @@ def _execute_replication(job):
                 except Exception:
                     pass
 
-        # 6. cleanup snapshot on source (clone auto-deleted by delete_source=True)
+        # 6. cleanup on source: PVE deletes the clone only with a migration that went through,
+        # one that did not start, timed out or failed leaves it there (MK Nov 2026)
+        if not clone_gone:
+            # a clone from the snapshot carries the snapshot's description, a direct one the guest's
+            _remove_failed_clone(source_mgr, source_node, clone_vmid, vm_type, clone_label,
+                                 snap_descr if use_snap_clone else None, job_id)
         _cleanup_snapshot(source_mgr, source_node, vmid, vm_type, snap_name)
 
         # LW: handle retention - delete oldest replicas on target if over limit
@@ -10581,6 +10590,70 @@ def _cleanup_snapshot(mgr, node, vmid, vm_type, snap_name):
                     logging.warning(f"[XCREPL] Could not auto-unlock VM {vmid}: {unlock_err}")
     except Exception as e:
         logging.debug(f"[XCREPL] Lock-state recheck on {vmid} failed (non-fatal): {e}")
+
+
+# a failed run's clone waits this long for a migration task of it that still runs
+CLONE_TASK_WAIT = 600
+CLONE_TASK_POLL = 10
+
+
+def _remove_failed_clone(mgr, node, clone_vmid, vm_type, label, description, job_id):
+    """Remove the temporary clone a replication run leaves on the source when its migration
+    did not go through.
+
+    Only that clone: the guest at clone_vmid on node must still carry the clone's label and,
+    for a clone made from the run's snapshot, the snapshot's description (None: not checked).
+    And not while a migration task of it runs there: one is waited for up to CLONE_TASK_WAIT,
+    and a task list that cannot be read is no empty one. True when it was removed; a clone
+    that stays is logged with the reason."""
+    what = f"{vm_type}/{clone_vmid} '{label}' on {node}"
+    left = f"[XCREPL] Job {job_id}: the temporary clone {what} is left on the source cluster"
+    try:
+        waited = 0
+        while True:
+            tasks = mgr.migration_tasks(node, clone_vmid, vm_type)
+            if tasks is None:
+                logging.warning(f"{left}: the task list of {node} could not be read, so a migration of it "
+                                f"may still run - delete it there once none does")
+                return False
+            running = [t.get('upid') for t in tasks if not t.get('endtime')]
+            if not running:
+                break
+            if waited >= CLONE_TASK_WAIT:
+                logging.warning(f"{left}: its migration {running[0]} still runs after {waited}s - "
+                                f"delete it there once that task has ended")
+                return False
+            time.sleep(CLONE_TASK_POLL)
+            waited += CLONE_TASK_POLL
+
+        url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{clone_vmid}"
+        r = mgr._api_get(f"{url}/config")
+        if r.status_code != 200:
+            if 'does not exist' in f"{getattr(r, 'reason', '')} {r.text}":
+                logging.info(f"[XCREPL] Job {job_id}: the temporary clone {what} is gone already")
+            else:
+                logging.warning(f"{left}: its config could not be read (HTTP {r.status_code})")
+            return False
+        cfg = r.json().get('data') or {}
+        name = cfg.get('hostname' if vm_type == 'lxc' else 'name')
+        if name != label or (description is not None
+                             and str(cfg.get('description') or '').strip() != description):
+            logging.warning(f"[XCREPL] Job {job_id}: VMID {clone_vmid} on {node} is not the temporary clone "
+                            f"of this run any more (name '{name}'), it stays")
+            return False
+        r = mgr._api_delete(url, params={'purge': 1, 'destroy-unreferenced-disks': 1})
+        if r.status_code != 200:
+            logging.warning(f"{left}: the delete was refused (HTTP {r.status_code}: {(r.text or '')[:200]})")
+            return False
+        ok, detail = _wait_for_task(mgr, r.json().get('data'), timeout=600)
+        if not ok:
+            logging.warning(f"{left}: its delete did not go through ({detail})")
+            return False
+        logging.info(f"[XCREPL] Job {job_id}: removed the temporary clone {what} after the failed run")
+        return True
+    except Exception as e:
+        logging.warning(f"{left}: {e}")
+        return False
 
 
 def _cleanup_clone_and_snap(mgr, node, clone_vmid, orig_vmid, vm_type, snap_name):

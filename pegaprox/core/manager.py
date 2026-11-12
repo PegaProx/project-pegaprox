@@ -14541,6 +14541,26 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"[ERROR] Remote migration error: {e}")
             return {'success': False, 'error': str(e)}
     
+    def migration_tasks(self, node, vmid, vm_type):
+        """The migration tasks of vmid on node as the node lists them, running and ended
+        (upid, starttime, endtime, status; a running one has no endtime). A remote migration
+        is one of them: qmigrate for a VM, vzmigrate for a container. None when the list
+        cannot be read."""
+        kind = 'qmigrate' if vm_type == 'qemu' else 'vzmigrate'
+        try:
+            r = self._api_get(f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/tasks",
+                              params={'vmid': vmid, 'typefilter': kind, 'source': 'all', 'limit': 50})
+            if r.status_code != 200:
+                return None
+            data = r.json().get('data')
+        except Exception as e:
+            self.logger.debug(f"migration tasks of {vmid} on {node} unreadable: {e}")
+            return None
+        if not isinstance(data, list):
+            return None
+        return [t for t in data if isinstance(t, dict) and t.get('type') == kind
+                and str(t.get('id')) == str(vmid) and str(t.get('upid') or '').startswith(f'UPID:{node}:')]
+    
     @staticmethod
     def tls_fingerprint(host, port, timeout=None):
         """SHA-256 of the certificate host:port presents, colon-separated uppercase.
