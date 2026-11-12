@@ -4434,6 +4434,12 @@ def generate_support_bundle():
             # 10. Application + Cluster Logs
             # NS: redact sensitive data from all log output
             def _redact_log(line):
+                # older config lines carry a password whole, blanks in it too: the audit
+                # line as cipassword=... up to its end, the logged body as a quoted value
+                end = '\n' if line.endswith('\n') else ''
+                line = masked_details(line[:len(line) - len(end)]) + end
+                line = re.sub(r'''(password['"]?\s*:\s*)(['"])(?:\\.|(?!\2)[^\\])+\2''', r'\1\2[REDACTED]\2', line,
+                              flags=re.IGNORECASE)
                 line = re.sub(r'(password["\']?\s*[:=]\s*["\']?)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
                 line = re.sub(r'(token["\']?\s*[:=]\s*["\']?)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
                 line = re.sub(r'(secret["\']?\s*[:=]\s*["\']?)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
