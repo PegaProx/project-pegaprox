@@ -509,6 +509,18 @@
                 try {
                     const _sp = new URLSearchParams(window.location.search);
                     if (_sp.get('code') && _sp.get('state')) {
+                        // LW Nov 2026 - the SSO button still needs its state, or the page a
+                        // refused callback leaves behind has no button. The public OIDC config
+                        // does not touch the session, so it cannot race the callback.
+                        fetch(`${API_URL}/auth/oidc/config`)
+                            .then(r => r.ok ? r.json() : null)
+                            .then(d => {
+                                if (d && d.enabled !== undefined) {
+                                    setOidcEnabled(!!d.enabled);
+                                    setOidcButtonText(d.button_text || 'Sign in with SSO');
+                                }
+                            })
+                            .catch(() => {});
                         setLoading(false);
                         return;
                     }
