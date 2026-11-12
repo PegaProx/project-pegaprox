@@ -2121,8 +2121,8 @@ def _resolve_http_redirect_port(setting, https_port):
     """The extra plain-HTTP port to open next to the TLS one, or -1 for none.
 
     -1 or nothing stored: none. 0 (auto): 80 where _may_bind_port80() says it can be
-    opened, otherwise none and one line in the log. Anything above: that port.
-    PEGAPROX_HTTP_PORT, when set, wins over the setting.
+    opened, otherwise none and one line in the log. Anything above: that port, unless it is
+    https_port itself. PEGAPROX_HTTP_PORT, when set, wins over the setting.
 
     MK Nov 2026 - auto looked at the uid only, and the deb, deploy.sh, the appliances
     and the Docker image all run as the pegaprox user, so 0 meant the same as -1
@@ -2139,9 +2139,9 @@ def _resolve_http_redirect_port(setting, https_port):
         wanted = -1 if setting is None else int(setting)
     except (TypeError, ValueError):
         wanted = -1
-    if wanted == 0:
-        if _may_bind_port80():
-            return 80
+    if wanted == 0 and _may_bind_port80():
+        wanted = 80
+    elif wanted == 0:
         try:
             import pwd
             user = pwd.getpwuid(os.geteuid()).pw_name
@@ -2153,6 +2153,12 @@ def _resolve_http_redirect_port(setting, https_port):
         return -1
     if wanted > 65535:
         print(f"WARNING: HTTP redirect port {wanted} is out of range, no extra port opened")
+        return -1
+    # MK Nov 2026 - the TLS port itself: the extra listener took it first, the main one then
+    # stopped the start with "Address already in use", and plain HTTP there redirects anyway
+    if wanted == https_port:
+        print(f"HTTP redirect port {wanted} is the HTTPS port, which redirects plain HTTP "
+              f"itself, no extra port opened")
         return -1
     return wanted if wanted > 0 else -1
 

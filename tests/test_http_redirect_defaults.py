@@ -530,6 +530,21 @@ def test_auto_without_port_80_says_why_in_one_line(host, capsys):
     assert 'HTTP on port 5000 still redirects' in lines[0]
 
 
+def test_the_https_port_is_no_extra_port(host, capsys):
+    """The extra listener bound it first and the main one then stopped the start with
+    "Address already in use". Plain HTTP on that port redirects without it."""
+    host(caps=NET_BIND)
+    got = {'setting': app_mod._resolve_http_redirect_port(5000, 5000),
+           'auto on 80': app_mod._resolve_http_redirect_port(0, 80),
+           'next to it': app_mod._resolve_http_redirect_port(5001, 5000)}
+    host(env='5000')
+    got['env'] = app_mod._resolve_http_redirect_port(-1, 5000)
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+
+    assert got == {'setting': -1, 'auto on 80': -1, 'next to it': 5001, 'env': -1}
+    assert len(lines) == 3 and all('is the HTTPS port' in l for l in lines), lines
+
+
 def test_the_help_names_no_default_port():
     """It said "default 80", which no install opens without being asked to."""
     out = subprocess.run([sys.executable, os.path.join(REPO, 'pegaprox_multi_cluster.py'), '--help'],
