@@ -2782,6 +2782,22 @@ def backup_config():
                 backup_data['server_settings']['acme_dns_rfc2136_secret'] = ''
             if 'acme_dns_cloudflare_token' in backup_data['server_settings']:
                 backup_data['server_settings']['acme_dns_cloudflare_token'] = ''
+            # MK Nov 2026 - the others went out sealed as stored, and the alert channels as
+            # they are: a hook url carries its token, an ntfy topic is the feed. Blank, not
+            # left out, so a restore knows they were there (_restored_secrets)
+            _ss = backup_data['server_settings']
+            for _k in _RESTORE_SECRETS:
+                if _k in _ss:
+                    _ss[_k] = ''
+            from pegaprox.api.push import _VAPID_KEY_NAME
+            if isinstance(_ss.get(_VAPID_KEY_NAME), dict):
+                _ss[_VAPID_KEY_NAME] = dict(_ss[_VAPID_KEY_NAME], private_pem='')
+            _hooks = _ss.get('alert_webhooks')
+            if _hooks:
+                # a row that is no object is a bare url, and no channel anything sends to
+                _ss['alert_webhooks'] = [dict(ch, **{k: '' for k in _CHANNEL_SECRETS if k in ch})
+                                         for ch in (_hooks if isinstance(_hooks, list) else [])
+                                         if isinstance(ch, dict)]
         
         # Clusters
         clusters = database.get_all_clusters()
