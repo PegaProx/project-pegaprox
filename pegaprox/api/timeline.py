@@ -29,6 +29,7 @@ from pegaprox.globals import cluster_managers
 from pegaprox.core import timeline as tl
 from pegaprox.core import node_history
 from pegaprox.core.db import get_db
+from pegaprox.utils.audit import masked_details
 from pegaprox.utils.auth import require_auth
 from pegaprox.api.helpers import bounded_limit, caller_is_scoped, check_cluster_access
 
@@ -225,7 +226,7 @@ def _audit(ask):
     """The cluster's audit rows (settings.py /api/clusters/<id>/audit). A confined caller
     gets the rows that name one of their guests, as there."""
     filtered = ask.scoped or ask.vmid is not None or ask.node is not None
-    rows, depth = _window(ask, _select('SELECT id, timestamp, user, action, details, severity FROM audit_log '
+    rows, depth = _window(ask, _select('SELECT id, timestamp, user, action, details, severity, cluster FROM audit_log '
                                        'WHERE cluster_id = ?', (ask.cid,), 'timestamp'),
                           'timestamp', ask.reads('audit', filtered))
     known = set(ask.node_names())
@@ -251,7 +252,8 @@ def _audit(ask):
         if not ask.keeps(guest, {node} if node else ()):
             continue
         kept.add(tl.event('audit', r['id'], at, cluster=ask.cid, severity=tl.severity_of(r['severity']),
-                          title=r['action'], details=details, node=node, guest=guest,
+                          title=r['action'], details=masked_details(details, r['cluster'] or ''),
+                          node=node, guest=guest,
                           guest_name=ask.guest_name(guest) if guest is not None else '',
                           what='audit', params={'action': r['action'], 'user': r['user'] or ''},
                           route=f'/api/clusters/{ask.cid}/audit'))

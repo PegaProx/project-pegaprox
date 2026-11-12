@@ -4,6 +4,7 @@ PegaProx Audit Logging - Layer 3
 """
 
 import os
+import re
 import json
 import time
 import logging
@@ -190,6 +191,31 @@ def log_audit(user: str, action: str, details: str = None, ip_address: str = Non
     safe_cluster = sanitize_log_message(cluster) if cluster else ""
     cluster_info = f" [{safe_cluster}]" if safe_cluster else ""
     logging.info(f"Audit: {safe_user} - {safe_action}{cluster_info} - {safe_details}")
+
+
+# A config change wrote its values as sent before its line named a secret key with ***,
+# so an older row can hold "cipassword=<the password>". The stored row stays as it was
+# signed, the routes that hand rows out mask it with these. The password may contain
+# ", " or " [" itself, so the rest of the change list goes with it; the cluster stays.
+_CLEAR_CIPASSWORD = re.compile(r'(\bcipassword=)(?!\*\*\*(?:,|\s|$))[\s\S]*')
+
+
+def masked_details(details, cluster=''):
+    """The details of an audit row with a cloud-init password in clear replaced by ***."""
+    if not isinstance(details, str) or 'cipassword=' not in details:
+        return details
+    tail = f' [{cluster}]' if cluster and details.endswith(f' [{cluster}]') else ''
+    body = details[:len(details) - len(tail)]
+    return _CLEAR_CIPASSWORD.sub(r'\g<1>***', body, count=1) + tail
+
+
+def masked_rows(rows):
+    """Audit rows (dicts) as a route hands them out: a row that needs it is a masked copy."""
+    out = []
+    for row in rows:
+        shown = masked_details(row.get('details'), row.get('cluster') or '')
+        out.append(row if shown == row.get('details') else dict(row, details=shown))
+    return out
 
 def _is_loopback(addr):
     """Check if address is loopback (trusted proxy)

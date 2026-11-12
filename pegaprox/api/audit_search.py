@@ -14,6 +14,7 @@ import logging
 from flask import Blueprint, jsonify, request
 
 from pegaprox.utils.auth import require_auth
+from pegaprox.utils.audit import masked_rows
 from pegaprox.core.db import get_db
 
 bp = Blueprint('audit_search', __name__)
@@ -68,7 +69,7 @@ def search():
             offset=offset, limit=limit, scope=_caller_scope(),
         )
         return jsonify({
-            'entries': rows,
+            'entries': masked_rows(rows),
             'total': total,
             'offset': offset,
             'limit': limit,

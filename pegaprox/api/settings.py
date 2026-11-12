@@ -25,7 +25,7 @@ from pegaprox.utils.auth import require_auth, load_users, save_users, validate_s
 from pegaprox.utils.sanitization import sanitize_identifier, sanitize_int, sanitize_csv_field, scrub_session_id
 from pegaprox.utils.ssh import get_ssh_connection_stats
 from pegaprox.utils.concurrent import GEVENT_AVAILABLE
-from pegaprox.utils.audit import log_audit, get_client_ip
+from pegaprox.utils.audit import log_audit, get_client_ip, masked_rows, masked_details
 from pegaprox.utils.index_page import serve_file, serve_index
 from pegaprox.api.helpers import (
     load_server_settings, save_server_settings, check_cluster_access,
@@ -3628,6 +3628,8 @@ def get_audit_log_api():
         verify_integrity=verify,
         scope=scope,
     )
+    # verified as stored above, handed out with an old cloud-init password masked
+    entries = masked_rows(entries)
 
     if fmt == 'csv':
         # NS Apr 2026 — compliance-ready CSV. Streamed to avoid holding the
@@ -3788,7 +3790,7 @@ def get_cluster_audit_log_api(cluster_id):
 
         filtered = [e for e in filtered if _mentions_accessible(e.get('details', ''))]
 
-    return jsonify(filtered)
+    return jsonify(masked_rows(filtered))
 
 
 @bp.route('/api/audit/integrity', methods=['GET'])
@@ -4346,14 +4348,14 @@ def generate_support_bundle():
             try:
                 db = get_db()
                 cursor = db.conn.cursor()
-                cursor.execute('SELECT timestamp, user, action, details, ip_address FROM audit_log ORDER BY timestamp DESC LIMIT 500')
+                cursor.execute('SELECT timestamp, user, action, details, ip_address, cluster FROM audit_log ORDER BY timestamp DESC LIMIT 500')
                 audit_entries = []
                 for row in cursor.fetchall():
                     audit_entries.append({
                         'timestamp': row[0],
                         'user': row[1],
                         'action': row[2],
-                        'details': row[3],
+                        'details': masked_details(row[3], row[5] or ''),
                         'ip': (row[4][:10] + '...') if row[4] and len(row[4]) > 10 else row[4]
                     })
                 zf.writestr(f"{bundle_prefix}/audit_log.json", json.dumps(audit_entries, indent=2))
