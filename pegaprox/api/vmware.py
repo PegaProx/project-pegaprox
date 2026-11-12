@@ -1296,6 +1296,10 @@ def get_vmware_migration_plan(vmware_id, vm_id):
     # Available Proxmox targets — only clusters the caller may reach (don't leak others' topology)
     targets = []
     for cid, cmgr in list(cluster_managers.items()):
+        # MK Nov 2026 - an ESXi host registered for XHM (or an XCP-ng pool) sits in the same
+        # dict, has no PVE nodes and failed the whole plan with an AttributeError
+        if getattr(cmgr, 'cluster_type', 'proxmox') != 'proxmox':
+            continue
         if cmgr.is_connected:
             allowed, _ = check_cluster_access(cid)
             if not allowed:
