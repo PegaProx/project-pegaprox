@@ -1561,6 +1561,10 @@ def get_server_settings():
     # limited to a tenant (api/banners.py)
     from pegaprox.api.banners import BANNERS_KEY
     settings.pop(BANNERS_KEY, None)
+    # nor the push keypair: the browsers take the public half from /api/push/vapid-key,
+    # and the private half is sealed like the secrets masked above
+    from pegaprox.api.push import _VAPID_KEY_NAME
+    settings.pop(_VAPID_KEY_NAME, None)
     # MK Oct 2026 (#1189) - the lock as it is in effect. The form sends these back with every
     # save of the tab, and a stored value outside the lists would turn each one into a 400
     lock = ui_lock(settings)
