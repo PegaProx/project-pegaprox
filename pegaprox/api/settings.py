@@ -2754,9 +2754,17 @@ def backup_config():
             logging.warning("[Backup] Backup password too short")
             return jsonify({'error': 'Backup password must be at least 8 characters'}), 400
         
-        include_secrets = data.get('include_secrets', False)
-        include_users = data.get('include_users', True)
-        include_audit = data.get('include_audit', False)
+        # MK Nov 2026 - read as checkboxes: the string "false" was true, and with it the
+        # export carried every secret and the audit log
+        from pegaprox.api.helpers import _checkbox
+        flags = {}
+        for name, default in (('include_secrets', False), ('include_users', True), ('include_audit', False)):
+            flags[name] = default if data.get(name) is None else _checkbox(data.get(name))
+            if flags[name] is None:
+                return jsonify({'error': f'{name} is true or false', 'code': 'INVALID_FIELD', 'field': name}), 400
+        include_secrets = flags['include_secrets']
+        include_users = flags['include_users']
+        include_audit = flags['include_audit']
         
         database = get_db()
         
