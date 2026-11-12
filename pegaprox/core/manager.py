@@ -759,6 +759,10 @@ def ha_cache_node_status(ha_node_status):
     }
 
 
+# a journal cursor as sd_journal_get_cursor writes it (s=...;i=...;b=...;m=...;t=...;x=...)
+_JOURNAL_CURSOR = re.compile(r'^s=[0-9a-f]+;i=[0-9a-f]+;')
+
+
 class UnreadList(list):
     """The [] get_vm_resources() answers when cluster/resources did not answer.
 
@@ -769,24 +773,26 @@ class UnreadList(list):
     MK Nov 2026 - it can carry why: `status` the HTTP status PVE sent (0 for none), `text`
     its body or our own reason, `offline` for a cluster out of reach. The node reads below
     answer it too, and their routes turn it into an error (api/helpers.unread_failure).
+    `timed_out`: PVE took the request but did not answer in time, which is no cluster
+    out of reach (a 504 there).
     """
-    __slots__ = ('text', 'status', 'offline')
+    __slots__ = ('text', 'status', 'offline', 'timed_out')
     unavailable = True
 
-    def __init__(self, text='', status=0, offline=False):
+    def __init__(self, text='', status=0, offline=False, timed_out=False):
         super().__init__()
-        self.text, self.status, self.offline = text, status, offline
+        self.text, self.status, self.offline, self.timed_out = text, status, offline, timed_out
 
 
 class UnreadDict(dict):
     """The {} of a read whose answer is an object, when it did not answer. Same fields as
     UnreadList. MK Nov 2026"""
-    __slots__ = ('text', 'status', 'offline')
+    __slots__ = ('text', 'status', 'offline', 'timed_out')
     unavailable = True
 
-    def __init__(self, text='', status=0, offline=False):
+    def __init__(self, text='', status=0, offline=False, timed_out=False):
         super().__init__()
-        self.text, self.status, self.offline = text, status, offline
+        self.text, self.status, self.offline, self.timed_out = text, status, offline, timed_out
 
 
 def unread(kind, response=None, error=None):
@@ -19605,18 +19611,31 @@ echo "AGENT_INSTALLED_OK"
                 return unread(UnreadList)
         
         try:
-            url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/syslog"
-            params = {'limit': limit}
-            if since:
-                params['since'] = since
+            # MK Nov 2026 - /syslog runs journalctl over the whole journal and answers the first
+            # `limit` lines of it: the oldest ones, after 13 s or a read timeout on a node with
+            # months of log. /journal seeks to the end (lastentries), as the PVE web UI does.
+            # Its first and last entries are the cursors of the range it read.
+            url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/journal"
+            # since (a UNIX time there) and lastentries exclude each other
+            params = {'since': since} if since else {'lastentries': limit}
             response = self._create_session().get(url, params=params)
             
             if response.status_code == 200:
-                data = response.json().get('data', [])
-                # Reverse to get newest first, then return
-                lines = [line.get('t', '') for line in data]
-                return list(reversed(lines))
+                body = response.json() or {}
+                if body.get('error'):
+                    # the reader stopped part way and said why
+                    return UnreadList(str(body['error'])[:300])
+                lines = [line for line in body.get('data') or [] if isinstance(line, str)]
+                if lines and _JOURNAL_CURSOR.match(lines[0]):
+                    lines = lines[1:]
+                if lines and _JOURNAL_CURSOR.match(lines[-1]):
+                    lines = lines[:-1]
+                # newest first
+                return list(reversed(lines))[:limit]
             return unread(UnreadList, response)
+        except requests.exceptions.ReadTimeout as e:
+            self.logger.warning(f"System log of node {node} took too long: {e}")
+            return UnreadList(str(e)[:300], timed_out=True)
         except Exception as e:
             self.logger.error(f"Error getting syslog: {e}")
             return unread(UnreadList, error=e)

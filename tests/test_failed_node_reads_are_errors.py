@@ -90,7 +90,9 @@ READS = [
      [{'iface': 'vmbr0', 'type': 'bridge'}]),
     ('time', f'/nodes/{NODE}/time', {'data': {'timezone': 'Europe/Vienna', 'time': 1}},
      {'timezone': 'Europe/Vienna', 'time': 1}),
-    ('syslog', f'/nodes/{NODE}/syslog', {'data': [{'n': 1, 't': 'first'}, {'n': 2, 't': 'second'}]},
+    # the tail of the journal: its first and last entries are the cursors of the range
+    ('syslog', f'/nodes/{NODE}/journal', {'data': ['s=0a;i=1;b=0b;m=1;t=1;x=1', 'first', 'second',
+                                                  's=0a;i=2;b=0b;m=2;t=2;x=2'], 'success': 1},
      ['second', 'first']),
     ('certificates', f'/nodes/{NODE}/certificates/info', {'data': [{'filename': 'pve-ssl.pem'}]},
      [{'filename': 'pve-ssl.pem'}]),

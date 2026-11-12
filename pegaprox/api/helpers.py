@@ -1324,9 +1324,11 @@ def upstream_failure(status, error='', system='Proxmox VE', default=500, **extra
 # MK Nov 2026 - reads that answered 200 with [] or {} when Proxmox VE refused them or did not
 # answer at all, so a node looked as if it had no interfaces, tasks, pools or certificates.
 # One shape for all of them: 502 with the reason and the status PVE sent, 503 when the
-# cluster is out of reach. `what` names the read in English ("the task list of node pve1").
+# cluster is out of reach, 504 when PVE took the read and was too slow (timed_out). `what`
+# names the read in English ("the task list of node pve1").
 PVE_READ_FAILED = 'PVE_READ_FAILED'
 PVE_UNREACHABLE = 'PVE_UNREACHABLE'
+PVE_TIMEOUT = 'PVE_TIMEOUT'
 
 
 def pve_read_failed(status, text, what, **extra):
@@ -1350,11 +1352,21 @@ def pve_unreachable(what, **extra):
                     'code': PVE_UNREACHABLE, 'offline': True}), 503
 
 
+def pve_timed_out(what, **extra):
+    """504 for a read Proxmox VE took but did not answer in time: the cluster is there and
+    the read was too slow, so this is no 'offline'."""
+    from flask import jsonify
+    return jsonify({**extra, 'error': f'Proxmox VE took too long to send {what}',
+                    'code': PVE_TIMEOUT, 'timeout': True}), 504
+
+
 def unread_failure(result, what, **extra):
     """None for an answer that was read. For the UnreadList or UnreadDict a manager read
     hands back when it did not answer (core/manager.py), the error response to send."""
     if not getattr(result, 'unavailable', False):
         return None
+    if getattr(result, 'timed_out', False):
+        return pve_timed_out(what, **extra)
     if getattr(result, 'offline', False):
         return pve_unreachable(what, **extra)
     return pve_read_failed(getattr(result, 'status', 0) or 0, getattr(result, 'text', '') or '',
