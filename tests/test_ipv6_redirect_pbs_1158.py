@@ -19,6 +19,7 @@ session a recording adapter, paramiko a fake client.
 import ast
 import os
 import socket
+import threading
 import types
 from urllib.parse import urlsplit
 
@@ -76,7 +77,8 @@ def test_both_redirect_handlers_read_the_host_through_the_same_parser():
     """The port-80 server and the plain-HTTP branch of the HTTPS port answered the same
     Host header differently. The second one lives inside _start_gevent_server, so the
     wiring is checked in the source; its behaviour is the parser's, tested above, and the
-    non-IPv6 path runs end to end in test_redirect_head_deadline."""
+    non-IPv6 path runs end to end in test_redirect_head_deadline. The port-80 server
+    answers each client in _answer_plain_http."""
     with open(os.path.join(ROOT, 'pegaprox', 'app.py'), encoding='utf-8') as fh:
         tree = ast.parse(fh.read())
     users = set()
@@ -86,7 +88,7 @@ def test_both_redirect_handlers_read_the_host_through_the_same_parser():
                 if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
                         and call.func.id == '_host_for_location'):
                     users.add(node.name)
-    assert {'_start_http_redirect', '_handle_http_redirect'} <= users
+    assert {'_answer_plain_http', '_handle_http_redirect'} <= users
 
 
 # -- the port-80 redirect server, end to end on a fake socket ------------------------------
@@ -99,6 +101,7 @@ class _Client:
     def __init__(self, raw):
         self.raw = raw
         self.sent = b''
+        self.closed = threading.Event()
 
     def settimeout(self, t):
         pass
@@ -110,7 +113,7 @@ class _Client:
         self.sent += data
 
     def close(self):
-        pass
+        self.closed.set()
 
 
 class _Listener:
@@ -149,6 +152,8 @@ def _redirect(monkeypatch, host_line, https_port=5000, domain='', path='/dashboa
     monkeypatch.setattr(app_mod, 'socket', fake)
     with pytest.raises(_Stop):
         app_mod._start_http_redirect('0.0.0.0', 8080, https_port, domain)
+    # each client is answered in a thread of its own
+    assert client.closed.wait(5), 'the client was never answered'
     text = client.sent.decode()
     assert text.startswith('HTTP/1.1 301'), text
     locations = [l for l in text.split('\r\n') if l.lower().startswith('location:')]

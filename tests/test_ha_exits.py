@@ -753,6 +753,8 @@ AUTOMATIONS = {
     ('pegaprox/api/vms.py', 'handle_vnc_websocket'): (1, 'console'),
     ('pegaprox/api/vms.py', 'vnc_websocket_proxy'): (1, 'console'),
     ('pegaprox/app.py', '_start_gevent_server.signal_handler'): (1, 'local'),
+    # one thread (a greenlet under gevent) per client of the extra HTTP redirect port
+    ('pegaprox/app.py', '_start_http_redirect'): (1, 'local'),
     ('pegaprox/core/ha.py', 'pull_soon'): (1, 'peer'),
     # the lease loop, the etag tick and when_active (the deferred boot gates)
     ('pegaprox/core/ha.py', '_lease_spawn'): (1, 'lease'),

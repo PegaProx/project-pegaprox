@@ -31,6 +31,7 @@ PATH = '/vms/101?tab=console&x=1'
 _SERVER = r'''
 import gevent.monkey; gevent.monkey.patch_all()
 import sys
+import threading
 from flask import Flask
 import pegaprox.app as app_mod
 
@@ -43,6 +44,9 @@ def ping():
     return 'pong'
 
 
+# the extra port, started the way main() starts it
+threading.Thread(target=app_mod._start_http_redirect,
+                 args=(sys.argv[1], int(sys.argv[5]), int(sys.argv[2]), ''), daemon=True).start()
 app_mod._start_gevent_server(web, sys.argv[1], int(sys.argv[2]), (sys.argv[3], sys.argv[4]),
                              None, 4)
 '''
@@ -84,14 +88,16 @@ def _read_all(s):
             data += chunk
     except ConnectionResetError:
         data += b'<reset>'
+    except socket.timeout:
+        data += b'<timeout>'
     finally:
         s.close()
     return data
 
 
 def _plain(host, port, head, src=None, timeout=5):
-    """Send a plain-HTTP request head, return everything that comes back. A reset reads as
-    the marker <reset>, which no answer starts with."""
+    """Send a plain-HTTP request head, return everything that comes back. A reset or a
+    timeout reads as the marker <reset> or <timeout>, which no answer starts with."""
     s = _connect(host, port, src, timeout)
     s.sendall(head.encode())
     return _read_all(s)
@@ -116,16 +122,17 @@ def _location(answer):
 
 def _start(where, host):
     cert, key = _tls_files(where)
-    port = _free_port(host)
+    port, extra = _free_port(host), _free_port(host)
     log = open(where / 'server.log', 'w')
     env = {**os.environ, 'PYTHONPATH': REPO, 'PEGAPROX_CONFIG_DIR': str(where / 'config')}
-    proc = subprocess.Popen([sys.executable, '-c', _SERVER, host, str(port), cert, key],
+    proc = subprocess.Popen([sys.executable, '-c', _SERVER, host, str(port), cert, key, str(extra)],
                             cwd=str(where), env=env, stdout=log, stderr=subprocess.STDOUT)
     end = time.monotonic() + 60
     while True:
         try:
-            if b'pong' in _tls_get(host, port, timeout=2):
-                return proc, log, port
+            if b'pong' in _tls_get(host, port, timeout=2) and _plain(
+                    host, extra, 'GET / HTTP/1.1\r\nHost: x\r\n\r\n', timeout=2).startswith(b'HTTP/1.1 301'):
+                return proc, log, (port, extra)
         except OSError:
             pass
         if proc.poll() is not None or time.monotonic() > end:
@@ -146,18 +153,29 @@ def _stop(proc, log):
 
 
 @pytest.fixture(scope='module')
-def server(tmp_path_factory):
-    proc, log, port = _start(tmp_path_factory.mktemp('redirect4'), '127.0.0.1')
-    yield port
+def ports(tmp_path_factory):
+    """(TLS port, extra port) of a server on 127.0.0.1"""
+    proc, log, both = _start(tmp_path_factory.mktemp('redirect4'), '127.0.0.1')
+    yield both
     _stop(proc, log)
+
+
+@pytest.fixture(scope='module')
+def server(ports):
+    return ports[0]
+
+
+@pytest.fixture(scope='module')
+def extra(ports):
+    return ports[1]
 
 
 @pytest.fixture(scope='module')
 def server6(tmp_path_factory):
     if not _ipv6():
         pytest.skip('no IPv6 loopback here')
-    proc, log, port = _start(tmp_path_factory.mktemp('redirect6'), '::1')
-    yield port
+    proc, log, both = _start(tmp_path_factory.mktemp('redirect6'), '::1')
+    yield both[0]
     _stop(proc, log)
 
 
@@ -186,6 +204,70 @@ def test_a_trusted_proxy_that_terminated_tls_is_served(server):
 
     assert answer.startswith(b'HTTP/1.1 200'), answer[:120]
     assert answer.endswith(b'pong')
+
+
+# -- the extra port --------------------------------------------------------------------
+#
+# It answered one client after the other, with a 5 s timeout on each: three connections that
+# sent nothing held a redirect back for 15 s, without a login. And it read a single
+# recv(4096), so a head that came in two segments lost its Host and the redirect went to
+# localhost.
+
+def test_idle_clients_on_the_extra_port_do_not_hold_up_a_redirect(server, extra):
+    idle = [_connect('127.0.0.1', extra) for _ in range(3)]
+    try:
+        gevent.sleep(0.2)
+        t0 = time.monotonic()
+        answer = _plain('127.0.0.1', extra,
+                        f'GET {PATH} HTTP/1.1\r\nHost: 127.0.0.1:{extra}\r\nConnection: close\r\n\r\n')
+        took = time.monotonic() - t0
+    finally:
+        for s in idle:
+            s.close()
+
+    assert answer.startswith(b'HTTP/1.1 301'), answer[:120]
+    assert _location(answer) == f'https://127.0.0.1:{server}{PATH}'
+    assert took < 1, f'three idle clients held the redirect back for {took:.1f}s'
+
+
+def test_a_head_in_two_segments_keeps_its_host_on_the_extra_port(server, extra):
+    s = _connect('127.0.0.1', extra)
+    s.sendall(f'GET {PATH} HTTP/1.1\r\n'.encode())
+    gevent.sleep(0.3)
+    s.sendall(b'Host: pegaprox.lan\r\nConnection: close\r\n\r\n')
+    answer = _read_all(s)
+
+    assert answer.startswith(b'HTTP/1.1 301'), answer[:120]
+    assert _location(answer) == f'https://pegaprox.lan:{server}{PATH}'
+
+
+def test_the_log_says_what_became_of_the_extra_port(monkeypatch, capsys):
+    """Listening only once bound, a refused bind names what it needs, and main() no longer
+    announces the port before it knows."""
+    class Refused:
+        def __init__(self, *a, **k):
+            pass
+
+        def setsockopt(self, *a):
+            pass
+
+        def bind(self, addr):
+            raise PermissionError(13, 'Permission denied')
+
+    with monkeypatch.context() as m:
+        m.setattr(app_mod.socket, 'socket', Refused)
+        app_mod._start_http_redirect('0.0.0.0', 80, 5000, '')
+    refused = capsys.readouterr().out
+
+    with socket.socket() as taken:
+        taken.bind(('127.0.0.1', 0))
+        taken.listen(1)
+        app_mod._start_http_redirect('127.0.0.1', taken.getsockname()[1], 5000, '')
+    busy = capsys.readouterr().out
+
+    assert 'needs root or CAP_NET_BIND_SERVICE' in refused and 'listening' not in refused
+    assert 'already in use' in busy and 'listening' not in busy
+    assert 'Started additional' not in inspect.getsource(app_mod.main)
 
 
 # -- which extra port main() opens -------------------------------------------------------
