@@ -202,6 +202,10 @@ def _prune_old_logs():
                 _limit = _max_mb * 1024 * 1024
                 _fts = cur.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' "
                                    "AND name = 'logs_fts'").fetchone() is not None
+                # the rows the retention delete took are still in the FTS index: fold them in
+                # first, or the cap measures them as well and drops too many of the live ones
+                if _fts and n and n > 0 and _bytes_in_use(cur) > _limit:
+                    _fold_fts_deletes(conn)
                 for _round in range(3):
                     _used = _bytes_in_use(cur)
                     if _used <= _limit:

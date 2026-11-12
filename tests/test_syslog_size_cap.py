@@ -216,6 +216,27 @@ def test_quiet_hours_after_a_flood_keep_the_history(full_db):
         assert _in_use() <= _CAP_MB * 1024 * 1024
 
 
+def test_a_retention_delete_before_the_cap_does_not_make_it_drop_more(tmp_path, monkeypatch):
+    """The rows the retention delete took stay in the FTS5 index until a merge. The cap
+    measured them along with the live rows, took the average row for far more than it is
+    and kept little more than half of the cap instead of nine tenths."""
+    monkeypatch.setattr(sl, 'DB_FILE', str(tmp_path / 'syslog.db'))
+    sl._init_db()
+    old = (datetime.datetime.now() - datetime.timedelta(days=60)).isoformat()
+    for k in range(24):
+        sl._flush_batch([(old,) + line[1:] for line in _lines(1000, 200 + k)])
+    for k in range(12):
+        sl._flush_batch(_lines(1000, 300 + k))
+    _settings(monkeypatch, syslog_retention_days=30, syslog_max_db_mb=_CAP_MB)
+
+    sl._prune_old_logs()
+
+    cap = _CAP_MB * 1024 * 1024
+    assert 12000 > _count() > 1000, _count()
+    assert _in_use() <= cap
+    assert _in_use() >= 0.8 * cap, f'{_in_use() * 100 // cap}% of the cap kept, about 90% fit'
+
+
 # --- memory: the count cap was a cap on the wrong thing ----------------------
 
 def _row(message):
