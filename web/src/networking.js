@@ -29,10 +29,12 @@
                         // LW Nov 2026 - an XCP-ng pool used to answer the bare list, take either
                         const list = Array.isArray(data) ? data : (data?.networks || []);
                         setNetworks(list);
-                        // auto-select from sidebar click or pick first
+                        // auto-select from sidebar click, else keep the pick if this list has it, else the first.
+                        // After a cluster switch selectedNetwork still names a network of the cluster before
                         if (list.length > 0) {
-                            const pick = initialNetwork && list.find(n => n.name === initialNetwork)
-                                ? initialNetwork : (selectedNetwork || list[0].name);
+                            const has = name => name && list.some(n => n.name === name);
+                            const pick = has(initialNetwork) ? initialNetwork
+                                : has(selectedNetwork) ? selectedNetwork : list[0].name;
                             setSelectedNetwork(pick);
                         }
                     } else {
