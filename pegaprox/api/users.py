@@ -2461,6 +2461,9 @@ def get_all_pool_permissions_api(cluster_id):
     """Get all pool permissions for a cluster"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - the per-pool route above answers a pool- or ACL-scoped caller for its
+    # own pools only. This one handed the same caller every pool's grants at once
+    _confined, _granted = _pool_visibility(cluster_id)
     
     db = get_db()
     perms = db.get_pool_permissions(cluster_id)
@@ -2469,6 +2472,8 @@ def get_all_pool_permissions_api(cluster_id):
     by_pool = {}
     for p in perms:
         pool_id = p['pool_id']
+        if _confined and pool_id not in _granted:
+            continue
         if pool_id not in by_pool:
             by_pool[pool_id] = []
         by_pool[pool_id].append(p)
