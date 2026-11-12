@@ -1529,6 +1529,9 @@
             // NS: #127 - lazy-load IPs from guest agent for running qemu VMs
             const ipCache = useRef({});
             const [ipTick, setIpTick] = useState(0);
+            // vmid -> when a guest that gave no address may be asked again. Without it every
+            // render of the list asked it again, many times a second for each open tab
+            const ipRetryAt = useRef({});
 
             const filterLabels = {
                 all: t('all'),
@@ -1661,22 +1664,29 @@
             // fetch IPs for visible running qemu VMs - #127
             useEffect(() => {
                 if (!paginatedResources?.length) return;
+                const now = Date.now();
                 const toFetch = paginatedResources.filter(r =>
                     r.type === 'qemu' && r.status === 'running' && !ipCache.current[r.vmid]
+                    && !(ipRetryAt.current[r.vmid] > now)
                 );
                 if (!toFetch.length) return;
                 toFetch.forEach(vm => {
                     ipCache.current[vm.vmid] = 'loading';
                     const cid = vm._clusterId || clusterId;
+                    // no address yet (agent still starting or not installed): again in a minute.
+                    // A refused or failed call, a 429 among them, waits five
+                    const retryIn = (ms) => { ipCache.current[vm.vmid] = null; ipRetryAt.current[vm.vmid] = Date.now() + ms; };
                     fetch(`/api/clusters/${cid}/vms/${vm.node}/qemu/${vm.vmid}/guest-info`, {
                         credentials: 'include', headers: getAuthHeaders()
                     })
-                    .then(r => r.ok ? r.json() : null)
+                    .then(r => r.ok ? r.json() : Promise.reject(r.status))
                     .then(data => {
-                        ipCache.current[vm.vmid] = data?.ip_addresses?.length ? data.ip_addresses[0] : null;
+                        if (!data?.ip_addresses?.length) return retryIn(60000);
+                        ipCache.current[vm.vmid] = data.ip_addresses[0];
+                        delete ipRetryAt.current[vm.vmid];
                         setIpTick(t => t + 1);
                     })
-                    .catch(() => { ipCache.current[vm.vmid] = null; });
+                    .catch(() => retryIn(300000));
                 });
             }, [paginatedResources]);
 
