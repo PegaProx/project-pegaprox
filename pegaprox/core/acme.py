@@ -123,7 +123,29 @@ def _jws_header(account_key, url, nonce, kid=None):
 
 
 def _signed_request(url, payload, account_key, nonce, kid=None):
-    """Send a JWS-signed POST to an ACME endpoint"""
+    """Send a JWS-signed POST to an ACME endpoint.
+
+    RFC 8555 6.5: a CA refuses a nonce with badNonce and a fresh one in Replay-Nonce,
+    and the client should send the request again with that. Some CAs refuse a share of
+    nonces on purpose, so without this a renewal failed now and then and waited a day."""
+    resp = _post_jws(url, payload, account_key, nonce, kid)
+    fresh = resp.headers.get('Replay-Nonce')
+    if resp.status_code == 400 and fresh and _problem_type(resp) == 'urn:ietf:params:acme:error:badNonce':
+        logging.info(f"[ACME] The CA refused the nonce for {url}, sending again with its fresh one")
+        resp = _post_jws(url, payload, account_key, fresh, kid)
+    return resp
+
+
+def _problem_type(resp):
+    try:
+        problem = resp.json()
+    except ValueError:
+        return None
+    return problem.get('type') if isinstance(problem, dict) else None
+
+
+def _post_jws(url, payload, account_key, nonce, kid=None):
+    """One JWS-signed POST to an ACME endpoint"""
     header = _jws_header(account_key, url, nonce, kid)
     protected = _b64url(json.dumps(header))
 

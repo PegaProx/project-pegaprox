@@ -3,7 +3,13 @@
 # A CA that went away during the certificate download came back as the raw exception
 # text, "('Connection aborted.', RemoteDisconnected(...))", without the step or the CA.
 # It says both now, and the served pair stays as it was.
+#
+# A badNonce refusal (RFC 8555 6.5) carries a fresh nonce for one more try, and some CAs
+# refuse a share of nonces on purpose: 2 of 8 orders failed on that against a test CA. The
+# request goes once more with the fresh nonce now.
+import base64
 import datetime
+import json as _json
 import os
 import socket
 import ssl
@@ -34,6 +40,10 @@ class _Resp:
         if self._js is None:
             raise ValueError('not json')
         return self._js
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
 
 
 def _self_signed(cn, key, san=None, ca=False):
@@ -154,3 +164,93 @@ def test_a_ca_that_does_not_answer_in_time_is_named(served, monkeypatch):
     res = _order(monkeypatch, served, 'https://ca.example/cert/1', download=slow)
 
     assert res['message'] == 'Certificate download failed: no answer from the CA at ca.example in time'
+
+
+_BAD_NONCE = {'type': 'urn:ietf:params:acme:error:badNonce',
+              'detail': 'JWS has an invalid anti-replay nonce: N0kjQlpzJJN8jnvCLl4GvQ'}
+
+
+@pytest.fixture
+def ca_posts(monkeypatch):
+    """The CA end of _signed_request: answers[i] answers the i-th POST; returns the
+    nonces the POSTs were signed with."""
+    sent = []
+
+    def install(*answers):
+        def post(method, url, json=None, **kw):
+            assert method == 'POST'
+            protected = json['protected']
+            header = _json.loads(base64.urlsafe_b64decode(protected + '=' * (-len(protected) % 4)))
+            sent.append(header['nonce'])
+            return answers[len(sent) - 1]
+        monkeypatch.setattr(acme, '_guard_acme_url', lambda url: url)
+        monkeypatch.setattr(acme, '_acme_request', post)
+        return sent
+    return install
+
+
+def test_a_bad_nonce_is_sent_once_more_with_the_fresh_one(ca_posts):
+    sent = ca_posts(_Resp(400, js=_BAD_NONCE, headers={'Replay-Nonce': 'fresh-1'}),
+                    _Resp(201, js={'status': 'valid'}, headers={'Replay-Nonce': 'next'}))
+
+    resp = acme._signed_request('https://ca.example/acct', {'termsOfServiceAgreed': True}, _ACCOUNT_KEY, 'n1')
+
+    assert resp.status_code == 201
+    assert sent == ['n1', 'fresh-1']
+
+
+def _refused(problem, fresh=None):
+    return _Resp(400, js=problem, headers={'Replay-Nonce': fresh} if fresh else {})
+
+
+@pytest.mark.parametrize('answers,posts', [
+    # refused again: one more try is all
+    ([_refused(_BAD_NONCE, 'fresh-1'), _refused(_BAD_NONCE, 'fresh-2'), _Resp(201)], 2),
+    # no fresh nonce to try with
+    ([_refused(_BAD_NONCE), _Resp(201)], 1),
+    # refused for something else
+    ([_refused({'type': 'urn:ietf:params:acme:error:malformed', 'detail': 'bad'}, 'fresh-3'), _Resp(201)], 1),
+    ([_Resp(400, text='<html>bad request</html>', headers={'Replay-Nonce': 'fresh-4'}), _Resp(201)], 1),
+])
+def test_only_one_more_try_and_only_for_a_bad_nonce(ca_posts, answers, posts):
+    sent = ca_posts(*answers)
+
+    resp = acme._signed_request('https://ca.example/order', None, _ACCOUNT_KEY, 'n1', kid='k')
+
+    assert resp.status_code == 400
+    assert len(sent) == posts, sent
+
+
+def test_an_account_refused_for_its_nonce_is_registered_on_the_fresh_one(tmp_path, monkeypatch):
+    directory = {'newNonce': 'https://ca.example/nonce', 'newAccount': 'https://ca.example/acct',
+                 'newOrder': 'https://ca.example/order'}
+    answers = {
+        'https://ca.example/acct': [_Resp(400, js=_BAD_NONCE, headers={'Replay-Nonce': 'fresh-1'}),
+                                    _Resp(201, headers={'Replay-Nonce': 'n2', 'Location': 'https://ca.example/acct/1'})],
+        'https://ca.example/order': [_Resp(201, js={'authorizations': ['https://ca.example/authz/1'],
+                                                    'finalize': FINALIZE},
+                                           headers={'Replay-Nonce': 'n3', 'Location': 'https://ca.example/order/1'})],
+        'https://ca.example/authz/1': [_Resp(200, js={'status': 'pending', 'challenges': []},
+                                             headers={'Replay-Nonce': 'n4'})],
+    }
+    posted = []
+
+    def plain(method, url, json=None, **kw):
+        if method == 'GET':
+            return _Resp(200, js=directory)
+        if method == 'HEAD':
+            return _Resp(200, headers={'Replay-Nonce': 'n1'})
+        posted.append(url)
+        return answers[url].pop(0)
+
+    monkeypatch.setattr('pegaprox.utils.url_security.sanitize_outbound_url', lambda url, **kw: url)
+    monkeypatch.setattr(acme, '_guard_acme_url', lambda url: url)
+    monkeypatch.setattr(acme, '_acme_allow_private', lambda: False)
+    monkeypatch.setattr(acme, '_acme_request', plain)
+
+    res = acme._create_order(DOMAIN, 'ops@example.com', str(tmp_path), directory_url='https://ca.example/dir')
+
+    assert res['success'] is True, res
+    assert res['kid'] == 'https://ca.example/acct/1'
+    assert posted == ['https://ca.example/acct', 'https://ca.example/acct',
+                      'https://ca.example/order', 'https://ca.example/authz/1']
