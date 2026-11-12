@@ -93,7 +93,8 @@ def test_both_redirect_handlers_read_the_host_through_the_same_parser():
         return out
     assert {'_start_http_redirect', '_handle_http_redirect'} <= users('_answer_plain_http')
     assert '_answer_plain_http' in users('_plain_http_reply')
-    assert users('_host_for_location') == {'_plain_http_reply'}
+    # _port_of_host takes the port of a bracketed Host only where the parser takes the address
+    assert users('_host_for_location') == {'_plain_http_reply', '_port_of_host'}
 
 
 # -- the port-80 redirect server, end to end on a fake socket ------------------------------

@@ -213,6 +213,28 @@ def test_a_trusted_proxy_that_terminated_tls_is_served(server):
     assert answer.endswith(b'pong')
 
 
+# -- the port in the Host header -------------------------------------------------------
+#
+# The TLS port sent every client to the port it listens on. Behind docker -p 8443:5000 or a
+# port forward the client reached it through another one, and https://host:5000 led nowhere.
+
+def test_the_tls_port_sends_a_client_back_to_the_port_it_came_through(server, extra):
+    def location(port, host):
+        return _location(_plain('127.0.0.1', port, f'GET {PATH} HTTP/1.1\r\nHost: {host}\r\n'
+                                                   'Connection: close\r\n\r\n'))
+
+    assert location(server, 'pegaprox.lan:8443') == f'https://pegaprox.lan:8443{PATH}'
+    assert location(server, '192.0.2.5:8443') == f'https://192.0.2.5:8443{PATH}'
+    assert location(server, '[2001:db8::10]:8443') == f'https://[2001:db8::10]:8443{PATH}'
+    assert location(server, 'pegaprox.lan:443') == f'https://pegaprox.lan{PATH}'
+    # no port, or none that is one: the port it listens on
+    for host in ('pegaprox.lan', 'pegaprox.lan:', 'pegaprox.lan:abc', 'pegaprox.lan:70000',
+                 '[2001:db8::10]', '[evil.example]:8443'):
+        assert location(server, host).endswith(f':{server}{PATH}'), host
+    # the extra port is no way to the TLS port, whatever the client typed
+    assert location(extra, 'pegaprox.lan:8080') == f'https://pegaprox.lan:{server}{PATH}'
+
+
 # -- forwarded headers -----------------------------------------------------------------
 #
 # X-Forwarded-Proto and X-Forwarded-Port count only from a trusted proxy. The redirect

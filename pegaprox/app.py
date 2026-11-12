@@ -2186,6 +2186,20 @@ def _port_number(value):
     return port if 0 < port <= 65535 else None
 
 
+def _port_of_host(host_value):
+    """The port a Host header names ("name:8443", "[2001:db8::10]:8443"), or None."""
+    hv = (host_value or '').strip()
+    if hv.startswith('['):
+        if not _host_for_location(hv):
+            return None
+        rest = hv.partition(']')[2]
+    elif hv.count(':') == 1:
+        rest = hv[hv.index(':'):]
+    else:
+        return None
+    return _port_number(rest[1:]) if rest.startswith(':') else None
+
+
 def _http_reply(status, body='', location=None):
     head = f"HTTP/1.1 {status}\r\n"
     if location:
@@ -2246,7 +2260,13 @@ def _plain_http_reply(request, addr, https_port, domain='', same_port=False):
     if domain:
         host = domain.rsplit(':', 1)[0] if ':' in domain and not domain.startswith('[') else domain
 
-    port = (_port_number(fwd_port) if trusted else None) or https_port
+    # MK Nov 2026 - on the TLS port, the port in the Host header is the one the client reached
+    # this listener through (docker -p 8443:5000, a port forward), so HTTPS is there as well.
+    # The extra port is no such port and sends the client to the TLS port.
+    port = _port_number(fwd_port) if trusted else None
+    if port is None and same_port:
+        port = _port_of_host(host_value)
+    port = port or https_port
     location = f'https://{host}{path}' if port == 443 else f'https://{host}:{port}{path}'
     return _http_reply('301 Moved Permanently', location=location)
 
