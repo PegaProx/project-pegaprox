@@ -16,7 +16,7 @@ from pegaprox.constants import (
     MAX_AUDIT_LOG_SIZE,
 )
 from pegaprox.core.db import get_db
-from pegaprox.utils.sanitization import sanitize_log_message
+from pegaprox.utils.sanitization import sanitize_log_message, redact_url
 
 def load_audit_log():
     """Read the recent audit entries at start and return how many there are, for the
@@ -199,10 +199,29 @@ def log_audit(user: str, action: str, details: str = None, ip_address: str = Non
 # ", " or " [" itself, so the rest of the change list goes with it; the cluster stays.
 _CLEAR_CIPASSWORD = re.compile(r'(\bcipassword=)(?!\*\*\*(?:,|\s|$))[\s\S]*')
 
+# The ISO download by URL wrote the first 50 characters of the URL and '...' before its
+# line named the host only, a mirror login (user:pass@) in them included. The login runs
+# to the last '@' of the netloc; a URL cut off before its path has no host to tell it by
+# and goes whole. The rest is shown as a new row shows it, through redact_url.
+_OLD_DOWNLOAD = re.compile(r'(Started download: [\s\S]*? from )(https?://)([\s\S]*)(\.\.\.)')
+
+
+def _old_download_url(m):
+    lead, scheme, cut, dots = m.groups()
+    netloc = re.split(r'[/?#]', cut, maxsplit=1)[0]
+    if netloc == cut:
+        return f'{lead}{scheme}[REDACTED]{dots}'
+    return lead + redact_url(scheme + netloc.rpartition('@')[2] + cut[len(netloc):]) + dots
+
 
 def masked_details(details, cluster=''):
-    """The details of an audit row with a cloud-init password in clear replaced by ***."""
-    if not isinstance(details, str) or 'cipassword=' not in details:
+    """The details of an audit row with a cloud-init password in clear replaced by ***,
+    and the URL of an older download row without its login."""
+    if not isinstance(details, str):
+        return details
+    if 'Started download: ' in details:
+        details = _OLD_DOWNLOAD.sub(_old_download_url, details, count=1)
+    if 'cipassword=' not in details:
         return details
     tail = f' [{cluster}]' if cluster and details.endswith(f' [{cluster}]') else ''
     body = details[:len(details) - len(tail)]
