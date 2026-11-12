@@ -39,8 +39,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # c61a5e24 the Modern resources list that scrolls sideways instead of cutting columns off,
 # 5d61ba09 the Modern resources search with one icon, which moves the list up by its height,
 # f0fac2bc the blueprints in Modern and Cloud (a button in the resources row, the renamed template tab),
-# 848e4a56 the Modern header that wraps up to 1645 px, so at 1600 every Modern view starts 24 px lower
-BASE_REV = os.environ.get('PEGAPROX_GUARD_BASE', '848e4a56')
+# 848e4a56 the Modern header that wraps up to 1645 px, so at 1600 every Modern view starts 24 px lower,
+# 7a50f1a5 the tenth language button (RU) in the Modern and Cloud headers, which moves the controls before it
+# 57 px to the left (the Modern header wraps up to 1880 px now, at 1600 it took two lines already)
+BASE_REV = os.environ.get('PEGAPROX_GUARD_BASE', '7a50f1a5')
 
 # 2026-10-30 09:00:00 UTC, what Date.now() says in every guarded page
 FIXED = calendar.timegm((2026, 10, 30, 9, 0, 0))
