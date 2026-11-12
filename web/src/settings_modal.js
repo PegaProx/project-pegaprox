@@ -3704,6 +3704,7 @@
                             acme_dns_cloudflare_account_id: acmeDnsConfig.account_id || data.acme_dns_cloudflare_account_id || '',
                             cert_info: data.cert_info || null,
                             http_redirect_port: data.http_redirect_port || 0,
+                            http_redirect_state: data.http_redirect_state || null,
                             reverse_proxy_enabled: data.reverse_proxy_enabled || false,
                             audit_retention_days: data.audit_retention_days || 90,
                             air_gap_mode: data.air_gap_mode || false,
@@ -8155,7 +8156,29 @@
                                                     max="65535"
                                                     className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
                                                 />
-                                                <p className="text-xs text-gray-500 mt-1">{t('httpRedirectPortHint') || '0 = auto (80 if root), -1 = disabled'}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{t('httpRedirectPortHint') || '-1 = no extra port, 0 = auto (80 if the service may open it)'}</p>
+                                                {serverSettings.http_redirect_state && (() => {
+                                                    // LW Nov 2026 - what the running server does; the field above takes effect after a restart
+                                                    const st = serverSettings.http_redirect_state;
+                                                    if (!st.same_port) {
+                                                        // the Flask fallback runs none either, so reverse proxy mode is named only when it is on
+                                                        return <p className="text-xs text-gray-500 mt-1">{t(serverSettings.reverse_proxy_enabled ? 'httpRedirectStateOff' : 'httpRedirectStateNone')}</p>;
+                                                    }
+                                                    // the two reasons the server names itself; an OS error as it came
+                                                    const reason = st.extra_error === 'needs root or CAP_NET_BIND_SERVICE' ? t('httpRedirectReasonPrivilege')
+                                                        : st.extra_error === 'already in use' ? t('httpRedirectReasonInUse') : st.extra_error;
+                                                    return (
+                                                        <div className="mt-1 space-y-0.5">
+                                                            <p className="text-xs text-green-400">{t('httpRedirectStateSamePort').replace('{port}', () => String(st.same_port))}</p>
+                                                            {st.extra_port && !st.extra_error && (
+                                                                <p className="text-xs text-green-400">{t('httpRedirectStateExtra').replace('{port}', () => String(st.extra_port))}</p>
+                                                            )}
+                                                            {st.extra_port && st.extra_error && (
+                                                                <p className="text-xs text-yellow-400">{t('httpRedirectStateExtraFailed').replace('{port}', () => String(st.extra_port)).replace('{reason}', () => reason)}</p>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })()}
                                             </div>
                                         </div>
                                     </div>
