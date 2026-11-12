@@ -833,18 +833,41 @@ def _entry_key():
         return _CONFIG_PROCESS_KEY
 
 
+# no plugin config nests this deep: a list or an object further down is shown masked whole,
+# so neither the mask nor the editor's indented text runs out of stack on a file that does
+_CONFIG_SHOWN_DEPTH = 64
+
+
+def _shown_whole(obj):
+    """Whether obj holds a list or an object at _CONFIG_SHOWN_DEPTH or below, one the
+    editor shows masked whole. Without recursion, for a file of any depth."""
+    todo = [(obj, 0)]
+    while todo:
+        o, level = todo.pop()
+        if isinstance(o, (dict, list)):
+            if level >= _CONFIG_SHOWN_DEPTH:
+                return True
+            todo.extend((x, level + 1) for x in (o.values() if isinstance(o, dict) else o))
+    return False
+
+
 def _masked_config(obj, plugin='', key=None):
-    """obj with every string and number under a secret-named key masked, at any depth."""
+    """obj with every string and number under a secret-named key masked, at any depth, and
+    every list or object _CONFIG_SHOWN_DEPTH levels down masked whole."""
     key = _entry_key() if key is None else key
 
-    def mask(obj, secret, path, entry=False):
+    def mask(obj, secret, path, entry=False, level=0):
+        if isinstance(obj, (dict, list)) and level >= _CONFIG_SHOWN_DEPTH:
+            return _CONFIG_MASK
         if isinstance(obj, dict):
-            return {k: mask(v, _key_secret(k, v, secret, entry), _key_path(path, k)) for k, v in obj.items()}
+            return {k: mask(v, _key_secret(k, v, secret, entry), _key_path(path, k), level=level + 1)
+                    for k, v in obj.items()}
         if isinstance(obj, list):
             out = []
             for i, x in enumerate(obj):
                 form = _masked_form(x, secret)
-                out.append(form + _entry_handle(plugin, path, x, key) if form else mask(x, secret, f'{path}[{i}]', True))
+                out.append(form + _entry_handle(plugin, path, x, key) if form
+                           else mask(x, secret, f'{path}[{i}]', True, level + 1))
             return out
         form = _masked_form(obj, secret)
         return obj if form is None else form
@@ -1118,9 +1141,10 @@ def get_plugin_config(plugin_id):
         return jsonify({'error': safe_error(e)}), 500
     try:
         raw = json.dumps(_masked_config(json.loads(raw), plugin_id), indent=4)
-    except ValueError:
-        # a file that does not parse can hold a credential in any shape; the editor
-        # starts from an empty object and a save writes a new file
+    except (ValueError, RecursionError):
+        # a file that does not parse (or nests deeper than the parser goes) can hold a
+        # credential in any shape; the editor starts from an empty object and a save
+        # writes a new file
         raw = ''
     return jsonify({'config': raw})
 
@@ -1154,9 +1178,13 @@ def save_plugin_config(plugin_id):
     try:
         if config_path.exists():
             stored, have_stored = json.loads(config_path.read_text(encoding='utf-8')), True
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         pass    # a file that does not parse is written anew
     if _CONFIG_MASK in json.dumps(new_cfg):
+        if _shown_whole(stored):
+            # the editor showed the deepest part of the stored file masked whole, and a mask
+            # for a whole list or object is not put back: refused, nothing of it is lost
+            return jsonify({'error': 'The config is nested too deeply'}), 400
         try:
             new_cfg = _unmasked_config(new_cfg, stored, plugin_id)
         except RecursionError:

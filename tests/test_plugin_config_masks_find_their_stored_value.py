@@ -368,6 +368,50 @@ def test_a_config_nested_too_deeply_is_refused(admin, opening, closing, depth):
     assert _stored(admin) == {'token': 'tk-deep-1'}
 
 
+def _nested(opening, closing, depth, inner):
+    return opening * depth + inner + closing * depth
+
+
+@pytest.mark.parametrize('opening, closing', [('{"a": ', '}'), ('[', ']')])
+def test_a_config_nested_deeper_than_the_editor_shows_still_opens(admin, opening, closing):
+    """Such a file can be saved through the editor when no mask is in it, and the next GET
+    ran out of stack in the mask and the indented dump: a 500, the editor could not load."""
+    deep = _nested(opening, closing, 1000, '{"token": "tk-deep-2", "title": "far down"}')
+    (admin.dir / 'demo' / 'config.json').write_text('{"token": "tk-deep-1", "title": "Alerts", "deep": %s}' % deep)
+    r = admin.get('/api/plugins/demo/config')
+    assert r.status_code == 200, r.get_data(as_text=True)[:500]
+    text = r.get_json()['config']
+    assert 'tk-deep-1' not in text and 'tk-deep-2' not in text and 'far down' not in text
+    shown = json.loads(text)
+    assert shown['token'] == '********' and shown['title'] == 'Alerts'
+    # the first levels as they are, the rest masked whole
+    levels, o = 0, shown['deep']
+    while isinstance(o, (dict, list)):
+        o, levels = (o['a'] if isinstance(o, dict) else o[0]), levels + 1
+    assert o == '********' and levels == plugins_api._CONFIG_SHOWN_DEPTH - 1, (o, levels)
+
+
+def test_a_config_nested_deeper_than_the_parser_goes_opens_empty(admin):
+    """Like a file that does not parse: the editor starts from an empty object."""
+    (admin.dir / 'demo' / 'config.json').write_text(_nested('[', ']', 20000, '"tk-deep-1"'))
+    r = admin.get('/api/plugins/demo/config')
+    assert r.status_code == 200, r.get_data(as_text=True)[:500]
+    assert r.get_json()['config'] == ''
+
+
+def test_saving_what_the_editor_showed_of_a_config_that_deep_is_refused(admin):
+    """A mask that stands for a whole object is not put back: the save would write the mask
+    in its place."""
+    deep = _nested('{"a": ', '}', 200, '{"title": "far down"}')
+    stored = '{"token": "tk-deep-1", "title": "Alerts", "deep": %s}' % deep
+    (admin.dir / 'demo' / 'config.json').write_text(stored)
+    shown = json.loads(admin.get('/api/plugins/demo/config').get_json()['config'])
+    shown['title'] = 'Alerts 2'
+    r = admin.put('/api/plugins/demo/config', json={'config': json.dumps(shown)})
+    assert r.status_code == 400 and r.get_json()['error'] == 'The config is nested too deeply', r.get_json()
+    assert (admin.dir / 'demo' / 'config.json').read_text() == stored
+
+
 @pytest.mark.parametrize('same', [False, True], ids=['other value', 'same value'])
 def test_a_handle_holds_only_in_the_list_it_was_read_from(admin, same):
     cfg = {'targets': [{'name': 'a', 'tokens': ['tk-a-51e0']},
