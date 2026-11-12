@@ -264,7 +264,7 @@ def _sign_in(api, monkeypatch, id_token, graph=(403, {}), userinfo=None, **confi
     monkeypatch.setattr(auth_api, 'oidc_get_user_groups_ex', lambda c, token: ([], True))
     answers = {GRAPH_ME: graph, USERINFO: (200, userinfo if userinfo is not None else {'sub': SUB})}
     monkeypatch.setattr(oidc, 'requests', types.SimpleNamespace(
-        get=lambda url, headers=None, timeout=None: _Resp(*answers[url])))
+        get=lambda url, headers=None, timeout=None, allow_redirects=True: _Resp(*answers[url])))
     for k in [k for k in auth_api.login_attempts_by_ip if str(k).startswith('oidc_cb_')]:
         auth_api.login_attempts_by_ip.pop(k, None)
     browser = api.app.test_client()

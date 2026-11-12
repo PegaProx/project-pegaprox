@@ -269,10 +269,12 @@ def test_the_requests_are_made_as_before_where_the_switch_does_not_apply(monkeyp
     if provider == 'entra':
         oidc.oidc_get_user_groups_ex(cfg, 'at')
     assert not [c for c in calls if c[0] == 'pin'], calls
-    assert calls[0] == ('post', endpoints['token'], {'data': calls[0][2]['data'], 'timeout': 15})
+    # none of them follows a redirect (test_oidc_sign_in_follows_no_redirect.py), else as before
+    assert calls[0] == ('post', endpoints['token'], {'data': calls[0][2]['data'], 'timeout': 15,
+                                                     'allow_redirects': False})
     for kind, url, kw in calls[1:]:
         assert kind == 'get' and url in endpoints.values(), (kind, url)
-        assert set(kw) == {'headers', 'timeout'}, kw
+        assert set(kw) == {'headers', 'timeout', 'allow_redirects'} and kw['allow_redirects'] is False, kw
 
 
 @pytest.mark.parametrize('provider,jwks,switch', [

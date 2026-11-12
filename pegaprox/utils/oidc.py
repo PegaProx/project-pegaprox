@@ -334,6 +334,21 @@ def oidc_idp_request_target(config: dict, url: str, allow_private: bool) -> tupl
     return resolve_and_pin_url(url, allow_private=allow_private, tls_verified=False), {'verify': False}
 
 
+def _redirect_refused(what: str, resp) -> str:
+    """Log where an IdP endpoint redirected to, and return the error that names it.
+
+    MK Nov 2026 - the sign-in requests do not follow a redirect, as discovery and the JWKS
+    step of the settings test already did not: its target is a URL the guard never saw,
+    and a 307 from the token endpoint posts the client secret there again. The Location is
+    whatever answered, so it is sanitised before it reaches the log (CWE-117).
+    """
+    from pegaprox.utils.sanitization import sanitize_log_message as _sl
+    loc = _sl(str((getattr(resp, 'headers', None) or {}).get('Location', '(no Location header)')))[:200]
+    logging.warning(f"[OIDC] the {what} answered HTTP {resp.status_code} redirecting to {loc!r} - "
+                    f"not following it. The identity provider has to name the final URL.")
+    return f"The {what} redirected (HTTP {resp.status_code}), which is not followed"
+
+
 def oidc_build_auth_url(config: dict, state: str) -> tuple:
     """Build the OIDC authorization URL for redirect
 
@@ -411,7 +426,9 @@ def oidc_exchange_code(config: dict, code: str, code_verifier: str = None) -> di
                     "settings (covers discovery + token + userinfo)."
                 )
             return {'error': 'Token endpoint failed pre-flight URL validation'}
-        resp = requests.post(token_url, data=data, timeout=15, **tls_kw)
+        resp = requests.post(token_url, data=data, timeout=15, allow_redirects=False, **tls_kw)
+        if 300 <= resp.status_code < 400:
+            return {'error': _redirect_refused('token endpoint', resp)}
         if resp.status_code != 200:
             logging.error(f"[OIDC] Token exchange failed: {resp.status_code} {resp.text[:300]}")
             return {'error': f'Token exchange failed: {resp.status_code}'}
@@ -581,7 +598,7 @@ def oidc_get_user_info(config: dict, access_token: str) -> dict:
     try:
         if config.get('provider') == 'entra' and endpoints.get('graph_me'):
             # LW: Microsoft Graph gives us more data than OIDC userinfo
-            resp = requests.get(endpoints['graph_me'], headers=headers, timeout=10)
+            resp = requests.get(endpoints['graph_me'], headers=headers, timeout=10, allow_redirects=False)
             if resp.status_code == 200:
                 graph_data = resp.json()
                 user_info = {
@@ -607,7 +624,9 @@ def oidc_get_user_info(config: dict, access_token: str) -> dict:
             except SsrfError as guard_err:
                 logging.warning(f"[OIDC] userinfo endpoint rejected by SSRF guard: {guard_err}")
                 return {'error': 'Userinfo endpoint failed pre-flight URL validation'}
-            resp = requests.get(userinfo_url, headers=headers, timeout=10, **tls_kw)
+            resp = requests.get(userinfo_url, headers=headers, timeout=10, allow_redirects=False, **tls_kw)
+            if 300 <= resp.status_code < 400:
+                return {'error': _redirect_refused('userinfo endpoint', resp)}
             if resp.status_code == 200:
                 user_info = resp.json()
     except Exception as e:
@@ -748,7 +767,8 @@ def oidc_get_user_groups_ex(config: dict, access_token: str):
     try:
         # NS: Entra Graph API for group memberships
         while url:
-            resp = requests.get(url, headers=headers, timeout=10)
+            # a redirect is not followed (see _redirect_refused): any status but 200 is a failed fetch
+            resp = requests.get(url, headers=headers, timeout=10, allow_redirects=False)
             if resp.status_code != 200:
                 logging.warning(f"[OIDC] Group fetch failed: {resp.status_code}")
                 complete = False
