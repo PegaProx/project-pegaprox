@@ -80,19 +80,33 @@ def _alert_scoper(cluster_id, user=None):
     return _ok
 
 
+def _rule_target(rule):
+    """(target_type, target_id) of a rule, as alert_scope asks it. A row of the old alerts
+    table has no target_type and names its guest or node in vmid / node."""
+    if rule.get('target_type'):
+        return rule['target_type'], rule.get('target_id')
+    if rule.get('vmid') not in (None, ''):
+        return 'vm', rule['vmid']
+    if rule.get('node'):
+        return 'node', rule['node']
+    return 'cluster', None
+
+
 def _visible_rules(rules):
-    """The rules of `rules` the caller may read, as GET /api/clusters/<id>/alerts hands them
-    out: a confined caller gets the vm rules of the guests it sees. One scope per cluster."""
+    """The rules of `rules` the caller may read, by the rule active-alerts reads the
+    incidents by (alert_scope): a confined caller gets the cluster's and those of the guests
+    it sees, a node's rules only a cluster-wide caller with node.view. One scope per cluster."""
     from pegaprox.utils.auth import build_authz_user
     user = build_authz_user(request.session.get('user', ''), request.session)
     scopes, out = {}, []
     for a in rules:
-        if isinstance(a, dict) and a.get('target_type') == 'vm':
-            cid = a.get('cluster_id')
-            if cid not in scopes:
-                scopes[cid] = _alert_scoper(cid, user)
-            if scopes[cid] is not None and not scopes[cid](a.get('target_id')):
-                continue
+        if not isinstance(a, dict):
+            continue
+        cid = a.get('cluster_id')
+        if cid not in scopes:
+            scopes[cid] = alert_scope(user, cid)
+        if scopes[cid] is not None and not scopes[cid](*_rule_target(a)):
+            continue
         out.append(a)
     return out
 
@@ -279,10 +293,12 @@ def get_cluster_alerts(cluster_id):
     try:
         alerts = load_cluster_alerts()
         cluster_alerts = alerts.get(cluster_id, [])
-        _ok = _alert_scoper(cluster_id)
-        if _ok is not None:
-            cluster_alerts = [a for a in cluster_alerts
-                              if a.get('target_type') != 'vm' or _ok(a.get('target_id'))]
+        # the rules go by what active-alerts shows of their incidents: no node's rule (its
+        # name and threshold) for a confined caller or one without node.view
+        from pegaprox.utils.auth import build_authz_user
+        _sees = alert_scope(build_authz_user(request.session.get('user', ''), request.session), cluster_id)
+        if _sees is not None:
+            cluster_alerts = [a for a in cluster_alerts if isinstance(a, dict) and _sees(*_rule_target(a))]
         return jsonify({'alerts': cluster_alerts})
     except Exception as e:
         logging.error(f"Error getting cluster alerts: {e}")
@@ -1240,17 +1256,14 @@ def alerts_force_check():
     from pegaprox.utils.rbac import acts_as_admin
     _fc_admin = acts_as_admin(_bau(request.session.get('user', ''), request.session))
     if not _fc_admin:
-        _ev_only = A._last_eval
         from pegaprox.utils.rbac import get_user_clusters as _guc
         _al = _guc(_bau(request.session.get('user', ''), request.session))
-        _all_rules = A.load_alerts_config().get('alerts') or []
-        if _al is not None:
-            _rc = {a.get('id'): a.get('cluster_id') for a in _all_rules}
-            _ev_only = {k: v for k, v in _ev_only.items() if _rc.get(k) in _al}
-        # nor what the loop read for a vm rule on a guest the caller does not see
-        _ids = lambda rows: {a.get('id') for a in rows if isinstance(a, dict)}
-        _hidden = _ids(_all_rules) - _ids(_visible_rules(_all_rules))
-        _ev_only = {k: v for k, v in _ev_only.items() if k not in _hidden}
+        _all_rules = [a for a in (A.load_alerts_config().get('alerts') or [])
+                      if isinstance(a, dict) and (_al is None or a.get('cluster_id') in _al)]
+        # what the loop read for the rules the diagnostics list the caller, nothing of the
+        # others (a guest's it does not see, a node's) nor of a rule no longer configured
+        _shown = {a.get('id') for a in _visible_rules(_all_rules)}
+        _ev_only = {k: v for k, v in list(A._last_eval.items()) if k in _shown}
         return jsonify({'ok': True, 'evaluations': _ev_only, 'forced': False,
                         'note': 'a forced run fires every tenant\'s rules — global admin only'})
     if (request.args.get('reset_cooldown', '').lower() in ('1', 'true', 'yes')):

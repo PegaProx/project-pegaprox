@@ -304,7 +304,8 @@ def test_cluster_alert_rules_scoped(api, seed, db, monkeypatch):
         {'id': 'r3', 'name': 'node cpu', 'target_type': 'node', 'target_id': 'n1'},
     ]})
     body = api.as_user(u).get('/api/clusters/cluster_1/alerts').get_json()
-    assert [a['id'] for a in body['alerts']] == ['r1', 'r3'], body
+    # nor a node's rule: active-alerts keeps that node's incidents from a confined caller too
+    assert [a['id'] for a in body['alerts']] == ['r1'], body
 
 
 # ── webhook secrets behind ?full=1 ────────────────────────────────────────────
