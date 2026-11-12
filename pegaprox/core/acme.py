@@ -12,6 +12,7 @@ import re
 import requests
 import secrets
 import ssl
+from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding, utils
@@ -547,6 +548,17 @@ def _acme_problem(resp):
     return f"HTTP {resp.status_code}"
 
 
+def _no_answer(url, err):
+    """A request to the CA that got no HTTP answer, said with the CA it went to. The raw
+    text was "('Connection aborted.', RemoteDisconnected(...))", with no step and no CA."""
+    host = urlparse(url).netloc or url
+    if isinstance(err, requests.Timeout):
+        return f"no answer from the CA at {host} in time"
+    if isinstance(err, requests.ConnectionError):
+        return f"no answer from the CA at {host}, the connection was closed or refused"
+    return f"no answer from the CA at {host} ({type(err).__name__})"
+
+
 # one whole PEM certificate: base64 and line breaks between its two lines, nothing else
 _PEM_CERT_RE = re.compile(r'-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----')
 
@@ -690,7 +702,10 @@ def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid):
         return {'success': False, 'message': 'Timed out waiting for certificate'}
 
     cert_url = order_data['certificate']
-    cert_resp = _signed_request(cert_url, None, account_key, nonce, kid)
+    try:
+        cert_resp = _signed_request(cert_url, None, account_key, nonce, kid)
+    except requests.RequestException as e:
+        return {'success': False, 'message': f"Certificate download failed: {_no_answer(cert_url, e)}"}
     cert_pem = cert_resp.text or ''
 
     # A renewal writes into the dir the listener loads from. A rate limit or a proxy page
