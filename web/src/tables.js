@@ -163,7 +163,9 @@
             const isUpdating = metrics.is_updating;
             const updateTask = metrics.update_task;
             const isOffline = metrics.offline || metrics.status === 'offline';
-            const scoreCell = nodeScoreCell(metrics.score);
+            // an HA cache entry sends 0 for the figures nobody could read: '-', not an idle node
+            const unread = !!metrics.from_ha_cache;
+            const scoreCell = nodeScoreCell(unread ? null : metrics.score);
             const proxmoxTarget = { ...metrics, kind: 'node', name, node: name, node_ui_suffix: nodeUiSuffix || '' };  // #689
             const proxmoxUrl = getProxmoxObjectUrl(proxmoxTarget);
             
@@ -630,8 +632,8 @@
                     </div>
 
                     <div className="grid grid-cols-2 gap-4 mb-4">
-                        <Gauge value={metrics.cpu_percent} label="CPU" />
-                        <Gauge value={metrics.mem_percent} label="RAM" />
+                        <Gauge value={unread ? null : metrics.cpu_percent} label="CPU" />
+                        <Gauge value={unread ? null : metrics.mem_percent} label="RAM" />
                     </div>
 
                     <div className="space-y-3 pt-3 border-t border-proxmox-border">
@@ -650,7 +652,7 @@
                         <div className="flex items-center justify-between text-xs">
                             <span className="text-gray-500">{t('ramUsage')}</span>
                             <span className="text-gray-300 font-mono">
-                                {formatBytes(metrics.mem_used)} / {formatBytes(metrics.mem_total)}
+                                {unread ? '-' : `${formatBytes(metrics.mem_used)} / ${formatBytes(metrics.mem_total)}`}
                             </span>
                         </div>
                         {metrics.ksm && metrics.ksm.shared > 0 && (
@@ -671,8 +673,8 @@
                         
                         {expanded && (
                             <div className="space-y-3 pt-2 border-t border-gray-700/50 animate-fade-in">
-                                {/* Disk Usage - hidden for XCP-ng (no dom0 disk stats) */}
-                                {metrics.disk_percent != null && <><div className="flex items-center justify-between text-xs">
+                                {/* Disk Usage - hidden for XCP-ng (no dom0 disk stats) and for an HA cache entry */}
+                                {metrics.disk_percent != null && !unread && <><div className="flex items-center justify-between text-xs">
                                     <span className="text-gray-500 flex items-center gap-2">
                                         <Icons.HardDrive /> {t('disk')}
                                     </span>
@@ -706,7 +708,7 @@
                                     <div className="flex items-center gap-2">
                                         <Sparkline data={history.netin} width={50} height={16} color="#22c55e" />
                                         <span className="text-green-400 font-mono w-16 text-right">
-                                            {history.netin[history.netin.length-1]?.toFixed(1) || '0.0'} MB/s
+                                            {unread ? '-' : `${history.netin[history.netin.length-1]?.toFixed(1) || '0.0'} MB/s`}
                                         </span>
                                     </div>
                                 </div>
@@ -717,7 +719,7 @@
                                     <div className="flex items-center gap-2">
                                         <Sparkline data={history.netout} width={50} height={16} color="#f97316" />
                                         <span className="text-orange-400 font-mono w-16 text-right">
-                                            {history.netout[history.netout.length-1]?.toFixed(1) || '0.0'} MB/s
+                                            {unread ? '-' : `${history.netout[history.netout.length-1]?.toFixed(1) || '0.0'} MB/s`}
                                         </span>
                                     </div>
                                 </div>

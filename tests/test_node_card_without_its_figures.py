@@ -4,6 +4,10 @@ threw in the render, first on the score and then in the Gauge, and with no error
 on that path the dashboard went white while the cluster was out of reach. The card now
 shows '-' for a missing score and the gauge an empty ring with '-'.
 
+The HA cache entries /metrics hands out now carry 0 for the score, CPU, RAM, disk and
+network, which the card drew as a measured idle node. An entry marked from_ha_cache shows
+'-' there too and leaves the disk lines out; a live node at 0 still reads 0.
+
 ui.js and tables.js are compiled with the Babel the repo ships (static/js/babel.min.js) and
 NodeCard is drawn through a small hook runtime in node, the components it uses (Gauge,
 Sparkline) with it: hooks keep their slots, each child gets its own.
@@ -85,19 +89,42 @@ function walk(n, fn) {
     if (n.props) walk(n.props.children, fn);
 }
 const textOf = n => (n.props.children || []).map(c => (typeof c === 'string' || typeof c === 'number') ? String(c) : '').join('').trim();
-const draw = metrics => {
+const allText = n => Array.isArray(n) ? n.map(allText).join('')
+    : (typeof n === 'string' || typeof n === 'number') ? String(n)
+    : (n && typeof n === 'object' && n.props) ? allText(n.props.children || []) : '';
+// the label/value lines of the card, by the key of their label
+const ROWS = ['ramUsage', 'disk', 'diskUsage', 'networkIn', 'networkOut'];
+const draw = (metrics, expand) => {
     hooks = hookRuntime();
+    const card = hooks;
+    const props = { name: 'pve1', metrics, index: 0, clusterId: 'c1' };
     let tree;
-    try { tree = deep(NodeCard({ name: 'pve1', metrics, index: 0, clusterId: 'c1' })); }
+    try {
+        tree = deep(NodeCard(props));
+        if (expand) {
+            // open the details and draw again on the same hooks
+            let more = null;
+            walk(tree, n => { if (!more && n.type === 'button' && textOf(n) === 'showMore') more = n; });
+            more.props.onClick();
+            hooks = card; card.reset();
+            tree = deep(NodeCard(props));
+        }
+    }
     catch (e) { return { threw: e.message }; }
     let score = null;
     const gauges = [];
+    const rows = {};
     walk(tree, n => {
         const cls = typeof n.props.className === 'string' ? n.props.className : '';
         if (score === null && cls.includes('font-mono font-bold text-lg')) score = { text: textOf(n), cls };
         if (n.type === 'text' && cls.includes('gauge-text')) gauges.push(textOf(n));
+        const parts = (n.props.children || []).filter(c => c && typeof c === 'object' && c.props);
+        if (n.type === 'div' && parts.length >= 2 && parts[0].type === 'span') {
+            const label = allText(parts[0]).trim();
+            if (ROWS.includes(label)) rows[label] = allText(parts[parts.length - 1]).trim();
+        }
     });
-    return { score, gauges };
+    return { score, gauges, rows };
 };
 const live = { status: 'online', cpu_percent: 12, mem_percent: 40, mem_used: 4, mem_total: 10, disk_percent: 5,
     disk_used: 1, disk_total: 20, netin: 0, netout: 0, uptime: 100, offline: false };
@@ -106,10 +133,14 @@ console.log(JSON.stringify({
     haRoute: draw({ status: 'online', cpu: 0, memory: { used: 0, total: 0 }, disk: { used: 0, total: 0 }, from_ha_cache: true }),
     // the HA cache entries of get_node_status(), which the route hands out now
     haManager: draw(Object.assign({}, live, { cpu_percent: 0, mem_percent: 0, mem_used: 0, mem_total: 0, score: 0,
-                                              from_ha_cache: true })),
+                                              disk_percent: 0, disk_used: 0, disk_total: 0, from_ha_cache: true }), true),
+    // the mark decides, not the zeros
+    haWithFigures: draw(Object.assign({}, live, { score: 120, from_ha_cache: true })),
+    // a live node that is idle: real zeros
+    idle: draw(Object.assign({}, live, { cpu_percent: 0, mem_percent: 0, score: 0, disk_percent: 0 }), true),
     nullScore: draw(Object.assign({}, live, { score: null })),
     zero: draw(Object.assign({}, live, { score: 0 })),
-    mid: draw(Object.assign({}, live, { score: 123.4 })),
+    mid: draw(Object.assign({}, live, { score: 123.4 }), true),
     high: draw(Object.assign({}, live, { score: 170 })),
     text: draw(Object.assign({}, live, { score: '42.6' })),
 }));
@@ -141,12 +172,34 @@ def test_a_node_with_its_figures_reads_as_before(cards):
     assert cards['mid']['score']['text'] == '123' and 'text-yellow-400' in cards['mid']['score']['cls'], cards
     assert cards['high']['score']['text'] == '170' and 'text-red-400' in cards['high']['score']['cls'], cards
     assert cards['mid']['gauges'] == ['12.0%', '40.0%'], cards['mid']
-    # what the route answers from the HA cache now: zeros, drawn as zeros
-    assert cards['haManager']['score']['text'] == '0' and cards['haManager']['gauges'] == ['0.0%', '0.0%'], cards
+    # a live node at 0 is drawn as 0
+    assert cards['idle']['score']['text'] == '0' and cards['idle']['gauges'] == ['0.0%', '0.0%'], cards['idle']
+
+
+def test_the_details_of_a_live_node_read_as_before(cards):
+    assert cards['mid']['rows'] == {'ramUsage': '4.0 B / 10.0 B', 'disk': '5.0%', 'diskUsage': '1.0 B / 20.0 B',
+                                    'networkIn': '0.0 MB/s', 'networkOut': '0.0 MB/s'}, cards['mid']
+    # a live disk at 0 keeps its line
+    assert cards['idle']['rows']['disk'] == '0.0%', cards['idle']
+
+
+def test_an_ha_cache_entry_shows_no_figures_it_did_not_read(cards):
+    # what the route answers from the HA cache now: zeros that nobody measured
+    got = cards['haManager']
+    assert 'threw' not in got, got
+    assert got['score']['text'] == '-' and got['gauges'] == ['-', '-'], got
+    got = cards['haWithFigures']
+    assert got['score']['text'] == '-' and got['gauges'] == ['-', '-'], got
+
+
+def test_an_ha_cache_entry_has_no_ram_disk_or_network_figures(cards):
+    got = cards['haManager']
+    assert 'threw' not in got, got
+    assert got['rows'] == {'ramUsage': '-', 'networkIn': '-', 'networkOut': '-'}, got
 
 
 def test_no_score_is_not_coloured_as_a_load(cards):
     # undefined < 100 and < 150 are both false, which drew a missing score in the red of a busy node
-    for case in ('haRoute', 'nullScore'):
+    for case in ('haRoute', 'haManager', 'nullScore'):
         cls = cards[case]['score']['cls']
         assert not any(c in cls for c in ('text-green-400', 'text-yellow-400', 'text-red-400')), (case, cls)
