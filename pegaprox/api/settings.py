@@ -2109,7 +2109,9 @@ def update_server_settings():
                 return refused
             domain = request.form.get('domain', '')
             port = request.form.get('port', '5000')
-            http_redirect_port = request.form.get('http_redirect_port', '0')
+            # MK Nov 2026 - no fallback for this one: 0 opens port 80 where that is allowed, so
+            # a form without the field switched that on. Without it the stored value stays.
+            http_redirect_port = (request.form.get('http_redirect_port') or '').strip()
             ssl_enabled = request.form.get('ssl_enabled', 'false').lower() == 'true'
             default_theme = request.form.get('default_theme', 'proxmoxDark')
             reverse_proxy = request.form.get('reverse_proxy_enabled', 'false').lower() == 'true'
@@ -2118,7 +2120,7 @@ def update_server_settings():
 
             if settings.get('port') != int(port):
                 restart_required = True
-            if settings.get('http_redirect_port') != int(http_redirect_port):
+            if http_redirect_port and settings.get('http_redirect_port') != int(http_redirect_port):
                 restart_required = True
             if settings.get('ssl_enabled') != ssl_enabled:
                 restart_required = True
@@ -2129,7 +2131,8 @@ def update_server_settings():
 
             settings['domain'] = domain
             settings['port'] = int(port)
-            settings['http_redirect_port'] = int(http_redirect_port)
+            if http_redirect_port:
+                settings['http_redirect_port'] = int(http_redirect_port)
             settings['ssl_enabled'] = ssl_enabled
             settings['reverse_proxy_enabled'] = reverse_proxy
             settings['trusted_proxies'] = trusted_proxies
