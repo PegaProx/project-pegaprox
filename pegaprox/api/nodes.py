@@ -1520,6 +1520,22 @@ def _ssh_sudo_prefix(ssh):
     return prefix
 
 
+# MK Nov 2026 - the SMBIOS status reads ran without a channel timeout: a node that took the
+# SSH login and then hung kept the request open (paramiko waits an hour for the channel and
+# forever for its output). 20 s, as the starlvm probe has.
+_SMBIOS_PROBE_TIMEOUT = 20
+
+
+def _smbios_answer(stdout):
+    """Output of a status command run with timeout=_SMBIOS_PROBE_TIMEOUT. TimeoutError when
+    the node did not finish answering in that time: read_capped stops at the timeout without
+    a word, and an empty answer would read as "not installed"."""
+    text = _read_capped(stdout)
+    if not stdout.channel.eof_received:
+        raise TimeoutError(f'No answer from the node within {_SMBIOS_PROBE_TIMEOUT} s')
+    return text
+
+
 def _ssh_run_script(ssh, script, timeout=180):
     """Run a script on the node WITHOUT ever writing it to a file.
 
@@ -2032,20 +2048,24 @@ def get_smbios_autoconfig_status(cluster_id, node):
         if not ssh:
             return jsonify({'installed': False, 'running': False, 'error': 'SSH not available - check SSH key in cluster settings'})
         
-        # Check if script exists
-        stdin, stdout, stderr = ssh.exec_command('test -f /opt/pegaprox-smbios-autoconfig.py && echo exists')
-        installed = 'exists' in _read_capped(stdout)
-        
-        # Check if service is running
-        stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig 2>/dev/null || echo inactive')
-        status = _read_capped(stdout).strip()
-        running = status == 'active'
-        
-        # Get last log entries
-        stdin, stdout, stderr = ssh.exec_command('tail -5 /var/log/pegaprox-smbios.log 2>/dev/null || echo "No logs yet"')
-        logs = _read_capped(stdout).strip()
-        
-        ssh.close()
+        try:
+            # Check if script exists
+            stdin, stdout, stderr = ssh.exec_command('test -f /opt/pegaprox-smbios-autoconfig.py && echo exists',
+                                                     timeout=_SMBIOS_PROBE_TIMEOUT)
+            installed = 'exists' in _smbios_answer(stdout)
+            
+            # Check if service is running
+            stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig 2>/dev/null || echo inactive',
+                                                     timeout=_SMBIOS_PROBE_TIMEOUT)
+            status = _smbios_answer(stdout).strip()
+            running = status == 'active'
+            
+            # Get last log entries
+            stdin, stdout, stderr = ssh.exec_command('tail -5 /var/log/pegaprox-smbios.log 2>/dev/null || echo "No logs yet"',
+                                                     timeout=_SMBIOS_PROBE_TIMEOUT)
+            logs = _smbios_answer(stdout).strip()
+        finally:
+            ssh.close()
         
         return jsonify({
             'installed': installed,
@@ -2054,6 +2074,8 @@ def get_smbios_autoconfig_status(cluster_id, node):
             'logs': logs
         })
         
+    except TimeoutError as e:
+        return jsonify({'installed': False, 'running': False, 'error': str(e)})
     except Exception as e:
         logging.error(f"Error checking SMBIOS autoconfig status: {e}")
         return jsonify({'installed': False, 'running': False, 'error': safe_error(e, 'Failed to get node status')})
@@ -2303,12 +2325,14 @@ def get_smbios_autoconfig_status_all(cluster_id):
                 
                 try:
                     # Check if script exists
-                    stdin, stdout, stderr = ssh.exec_command('test -f /opt/pegaprox-smbios-autoconfig.py && echo exists')
-                    installed = 'exists' in _read_capped(stdout)
+                    stdin, stdout, stderr = ssh.exec_command('test -f /opt/pegaprox-smbios-autoconfig.py && echo exists',
+                                                             timeout=_SMBIOS_PROBE_TIMEOUT)
+                    installed = 'exists' in _smbios_answer(stdout)
                     
                     # Check if service is running
-                    stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig 2>/dev/null || echo inactive')
-                    status = _read_capped(stdout).strip()
+                    stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig 2>/dev/null || echo inactive',
+                                                             timeout=_SMBIOS_PROBE_TIMEOUT)
+                    status = _smbios_answer(stdout).strip()
                     running = status == 'active'
                     
                     results[node_name] = {
@@ -2319,6 +2343,8 @@ def get_smbios_autoconfig_status_all(cluster_id):
                 finally:
                     ssh.close()
                     
+            except TimeoutError as e:
+                results[node_name] = {'installed': False, 'running': False, 'error': str(e)}
             except Exception as e:
                 results[node_name] = {'installed': False, 'running': False, 'error': safe_error(e, 'Failed to get node status')}
         
