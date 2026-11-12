@@ -8,7 +8,9 @@ that address; the cluster edit asks for it again in that case (api/clusters.py
 _config_edit_checks).
 
 Both modes now keep them while the backup leaves the addresses as they are, and drop them
-otherwise. The nodes' own root passwords go where the cluster says its nodes are, so a move
+otherwise. A node address in the HA settings that the cluster does not have counts as well:
+the HA node checks log in there with the cluster's root password. The nodes' own root
+passwords go where the cluster says its nodes are, so a move
 drops them as well, whatever the row carries, as the cluster edit does; those the backup
 holds for the cluster are stored again. The answer names every cluster that ends up without
 a password or token, and the nodes that lost their own. MK
@@ -74,10 +76,14 @@ def test_a_backup_without_secrets_restored_here_keeps_the_cluster_credentials(ad
     assert 'secrets_to_enter' not in res, res
 
 
+# a node address only the HA settings name
+HA_NODE_ADDRESS = {'ha_settings': {'node_ips': {'pve2': '203.0.113.9'}}}
+
+
 @pytest.mark.parametrize('mode', ['merge', 'overwrite'])
 @pytest.mark.parametrize('change', [{'host': '10.9.9.9'}, {'fallback_hosts': ['10.0.0.2', '10.9.9.9']},
-                                    {'ssh_port': 2222}, {'ssl_verification': False}],
-                         ids=['host', 'fallback-host', 'ssh-port', 'no-certificate-check'])
+                                    {'ssh_port': 2222}, {'ssl_verification': False}, HA_NODE_ADDRESS],
+                         ids=['host', 'fallback-host', 'ssh-port', 'no-certificate-check', 'ha-node-address'])
 def test_a_backup_that_moves_the_cluster_takes_no_stored_credential_along(admin, mode, change):
     res = _restore(admin, {'c1': _without_secrets(**change)}, mode)
 
@@ -91,6 +97,21 @@ def test_a_host_it_already_falls_back_to_is_no_move(admin):
     _restore(admin, {'c1': _without_secrets(host='10.0.0.2', fallback_hosts=['10.0.0.1'])}, 'overwrite')
 
     assert _secrets()['pass'] == 'root-pw'
+
+
+@pytest.mark.parametrize('mode', ['merge', 'overwrite'])
+@pytest.mark.parametrize('typed', [{'pve1': '10.0.0.1', 'pve2': ['[10.0.0.2]', '']}, {'pve2': '10.0.5.2'},
+                                   {'pve2': None}],
+                         ids=['host-and-fallback', 'stored', 'empty'])
+def test_a_node_address_the_credential_goes_to_already_is_no_move(admin, seed, mode, typed):
+    """The counterweight: the cluster's own host and fallback host, the HA settings' stored
+    address, and an empty one."""
+    seed.db.save_cluster('c1', dict(ROW, ha_settings={'node_ips': {'pve2': '10.0.5.2'}}))
+
+    res = _restore(admin, {'c1': _without_secrets(ha_settings={'node_ips': typed})}, mode)
+
+    assert _secrets() == {'pass': 'root-pw', 'api_token_secret': 'token-secret', 'ssh_key': 'SSH-KEY'}
+    assert 'secrets_to_enter' not in res, res
 
 
 def test_a_cluster_this_instance_does_not_have_is_named(admin):
@@ -114,8 +135,9 @@ def test_a_password_the_backup_carries_is_stored_for_a_new_host_too(admin, mode)
 # -- the nodes' own root passwords ------------------------------------------------------------
 
 MOVES = pytest.mark.parametrize('change', [{'host': '10.9.9.9'}, {'fallback_hosts': ['10.0.0.2', '10.9.9.9']},
-                                           {'ssh_port': 2222}, {'ssl_verification': False}],
-                                ids=['host', 'fallback-host', 'ssh-port', 'no-certificate-check'])
+                                           {'ssh_port': 2222}, {'ssl_verification': False}, HA_NODE_ADDRESS],
+                                ids=['host', 'fallback-host', 'ssh-port', 'no-certificate-check',
+                                     'ha-node-address'])
 
 
 @pytest.fixture

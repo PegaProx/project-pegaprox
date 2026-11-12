@@ -223,6 +223,47 @@ def test_a_backup_that_moves_the_cluster_names_them_whatever_stands_in_their_pla
     assert {'cluster': 'lab', 'fences': ['pve1', 'pve2']} in res['secrets_to_enter']
 
 
+@pytest.mark.parametrize('dry_run', [False, True], ids=['restore', 'dry-run'])
+@pytest.mark.parametrize('mode', ['merge', 'overwrite'])
+def test_a_node_address_the_cluster_does_not_have_moves_it(api, admin, mode, dry_run):
+    """The host stays, but the HA node checks would log in at the typed address with the
+    cluster's root password, and the agent install may pick it."""
+    from pegaprox.core.db import get_db
+    row = _row()
+    row['ha_settings']['node_ips'] = {'pve2': '203.0.113.9'}
+
+    res = _restore(admin, row, mode, dry_run=dry_run)
+
+    assert res.get('secrets_to_enter') == [{'cluster': 'lab'}, {'cluster': 'lab', 'agent_token': True},
+                                           {'cluster': 'lab', 'fences': ['pve1', 'pve2']}]
+    stored = get_db().get_cluster('c1')
+    if dry_run:
+        assert stored['pass'] == 'root-pw' and _ha()['agent_token'] == TOKEN
+        assert 'node_ips' not in _ha()
+        return
+    assert stored['pass'] == '' and not _ha().get('agent_token')
+    assert _passwords() == {'pve1': None, 'pve2': None}
+    assert _ha()['node_ips'] == {'pve2': '203.0.113.9'}
+    _started(api)
+    assert _agent_asks(api).status_code == 403
+
+
+@pytest.mark.parametrize('mode', ['merge', 'overwrite'])
+def test_the_node_addresses_the_cluster_has_keep_them(admin, seed, mode):
+    """The counterweight: the stored address, the cluster's host, and an empty one."""
+    held = json.loads(json.dumps(ROW))
+    held['ha_settings']['node_ips'] = {'pve2': '10.0.5.2'}
+    seed.db.save_cluster('c1', held)
+    row = _row()
+    row['ha_settings']['node_ips'] = {'pve1': '10.0.0.1', 'pve2': ['10.0.5.2', '']}
+
+    res = _restore(admin, row, mode)
+
+    assert 'secrets_to_enter' not in res, res
+    assert _ha()['agent_token'] == TOKEN
+    assert _passwords() == {'pve1': 'bmc-one', 'pve2': 'bmc-two'}
+
+
 def test_a_row_without_ha_settings_keeps_the_agent_key(admin):
     """An older backup: the fences it does not have are gone, the agents keep their key."""
     row = _row()

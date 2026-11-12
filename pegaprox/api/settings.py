@@ -2776,7 +2776,8 @@ def _cluster_moves(cluster, existing):
     """What in a backup's row of a cluster that is here takes its stored credential to an
     address it was not typed for, counted as the cluster edit counts it (api/clusters.py
     _config_edit_checks): a host or fallback host the cluster does not have, another SSH
-    port, the certificate check turned off."""
+    port, the certificate check turned off. And a node address in the HA settings that the
+    cluster does not have: no route writes those, only a restore."""
     from pegaprox.api.clusters import _host_key
     known = {_host_key(existing.get('host'))} | {_host_key(h) for h in existing.get('fallback_hosts') or []}
     fallback = cluster.get('fallback_hosts') if isinstance(cluster.get('fallback_hosts'), list) else []
@@ -2789,7 +2790,23 @@ def _cluster_moves(cluster, existing):
         moved.append('ssh_port')
     if existing.get('ssl_verification') and not cluster.get('ssl_verification', True):
         moved.append('ssl_verification')
+    # the HA node checks log in there with the cluster's root password, and the agent
+    # install may pick one (core/manager.py _ha_get_all_node_ips)
+    if _typed_node_ips(cluster.get('ha_settings')) - _typed_node_ips(existing.get('ha_settings')) - known:
+        moved.append('node_ips')
     return moved
+
+
+def _typed_node_ips(ha_settings):
+    """The node addresses typed into a cluster's HA settings, as _host_key writes them."""
+    from pegaprox.api.clusters import _host_key
+    typed = ha_settings.get('node_ips') if isinstance(ha_settings, dict) else None
+    out = set()
+    for ips in (typed.values() if isinstance(typed, dict) else ()):
+        out.update(_host_key(ip) for ip in (ips if isinstance(ips, list) else [ips]))
+    # the manager skips an empty one
+    out.discard('')
+    return out
 
 
 @bp.route('/api/config/backup', methods=['POST'])
