@@ -327,9 +327,9 @@ class _FakeClient:
         self.closed.set()
 
 
-def _extra_port_answer(monkeypatch, lines, src, https_port=5000):
+def _extra_port_answer(monkeypatch, lines, src, https_port=5000, target='/dashboard'):
     """The extra port's answer to one request from `src`, on a fake socket module."""
-    client = _FakeClient(('GET /dashboard HTTP/1.1\r\nHost: pegaprox.example\r\n'
+    client = _FakeClient((f'GET {target} HTTP/1.1\r\nHost: pegaprox.example\r\n'
                           + ''.join(l + '\r\n' for l in lines) + '\r\n').encode())
     queue = [client]
 
@@ -384,6 +384,34 @@ def test_a_trusted_proxy_moves_the_port_only_with_a_number(monkeypatch):
         got[value] = _location(answer)
 
     assert got == {v: f'https://pegaprox.example{p}/dashboard' for v, p in wanted.items()}
+
+
+# -- the request target ------------------------------------------------------------------
+#
+# It went after the host as it came. A target that starts with an at sign turned the host
+# and port into the user part of the Location, and the absolute form gave no URL at all.
+
+AT = '@'                                     # spelled out, two targets below use it
+
+
+@pytest.mark.parametrize('target, path', [
+    (AT + 'other.example/x', '/'),
+    (AT + 'other.example', '/'),
+    ('http://other.example/x?y=1', '/x?y=1'),
+    (f'http://u{AT}other.example/x', '/x'),
+    ('https://other.example', '/'),
+    ('other.example/x', '/'),
+    ('*', '/'),
+    ('/dashboard?tab=1', '/dashboard?tab=1'),
+    ('//other.example/x', '//other.example/x'),   # a path, after a host
+])
+def test_only_a_path_goes_after_the_host(monkeypatch, server, target, path):
+    on_extra = _location(_extra_port_answer(monkeypatch, [], src='192.0.2.7', target=target))
+    on_tls_port = _location(_plain('127.0.0.1', server, f'GET {target} HTTP/1.1\r\nHost: pegaprox.lan:8443\r\n'
+                                                        'Connection: close\r\n\r\n'))
+
+    assert on_extra == f'https://pegaprox.example:5000{path}'
+    assert on_tls_port == f'https://pegaprox.lan:8443{path}'
 
 
 # -- the extra port --------------------------------------------------------------------

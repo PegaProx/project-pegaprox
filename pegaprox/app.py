@@ -2237,6 +2237,12 @@ def _plain_http_reply(request, addr, https_port, domain='', same_port=False):
     lines = request.split('\r\n\r\n', 1)[0].split('\r\n')
     parts = lines[0].split(' ')
     path = parts[1].replace('\r', '').replace('\n', '') if len(parts) >= 2 else '/'
+    # MK Nov 2026 - only a path goes after the host. A target that starts with an at sign
+    # made the Location https://host:5000@other.host/x, which names other.host. The absolute
+    # form of a client that takes us for a proxy keeps its path, any other target is /.
+    if not path.startswith('/'):
+        m = re.match(r'[A-Za-z][A-Za-z0-9+.-]*://[^/]*(/.*)?$', path)
+        path = (m.group(1) if m else None) or '/'
 
     # MK: Mar 2026 - serve ACME challenges on port 80 instead of redirecting
     # MK Nov 2026 - on the TLS port as well: with port 80 forwarded to it, the redirect went
