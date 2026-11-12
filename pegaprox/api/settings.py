@@ -2356,6 +2356,13 @@ def restart_server():
         logging.error(f"Error restarting server: {e}")
         return jsonify({'error': safe_error(e, 'Server restart failed')}), 500
 
+def _acme_pair_needs_restart():
+    """True unless every TLS listener of this process serves the pair on disk now. No
+    listener at all (plain HTTP on purpose) needs a restart for it too."""
+    from pegaprox.utils.served_pair import serves
+    return serves(SSL_CERT_FILE) is not True
+
+
 # MK: Mar 2026 - ACME / Let's Encrypt endpoints (#96)
 @bp.route('/api/settings/acme/status', methods=['GET'])
 @require_auth(perms=['node.certificate'])
@@ -2489,10 +2496,9 @@ def request_acme_certificate():
             settings['ssl_enabled'] = True
             save_server_settings(settings)
             log_audit(usr, 'settings.acme_issued', f"Certificate issued for {domain}, expires {result.get('expires', '?')}")
-            # #725 — the new cert is on disk now, but the running TLS context still
-            # holds the old one until the service restarts. Tell the UI, same as the
-            # manual-upload path does, so the operator knows to restart to serve it.
-            result['restart_required'] = True
+            # the new cert is on disk now and the listeners take it up themselves
+            # (utils/served_pair.py), a restart is only needed when one of them did not
+            result['restart_required'] = _acme_pair_needs_restart()
 
         return jsonify(result)
 
@@ -2527,7 +2533,7 @@ def complete_acme_dns_challenge():
             save_server_settings(settings)
             usr = getattr(request, 'session', {}).get('user', 'admin')
             log_audit(usr, 'settings.acme_issued', f"Certificate issued via DNS-01, expires {result.get('expires', '?')}")
-            result['restart_required'] = True   # #725 — restart to serve the new cert
+            result['restart_required'] = _acme_pair_needs_restart()
 
         return jsonify(result)
     except Exception as e:

@@ -12270,8 +12270,9 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
         nonlocal server_ready
         ssl_context = None
         if ssl_cert and ssl_key:
-            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ssl_context.load_cert_chain(ssl_cert, ssl_key)
+            # follows the pair on disk like the HTTPS port, a renewal needs no restart
+            from pegaprox.utils.served_pair import ServedPair
+            ssl_context = ServedPair(ssl_cert, ssl_key).context
             proto = "wss"
         else:
             proto = "ws"
@@ -13496,10 +13497,19 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
 
 
 async def main():
+    sys.path.insert(0, os.environ.get('PEGAPROX_PKG_BASE') or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     ssl_context = None
     if SSL_CERT and SSL_KEY and os.path.exists(SSL_CERT) and os.path.exists(SSL_KEY):
-        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_context.load_cert_chain(SSL_CERT, SSL_KEY)
+        # a renewed pair reaches this process only through the files, so the context
+        # follows them (pegaprox/utils/served_pair.py)
+        try:
+            from pegaprox.utils.served_pair import ServedPair
+        except ImportError as _e:
+            print(f"[SSH-WS] WARNING: served_pair not importable ({_e}), a new certificate needs a restart")
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_context.load_cert_chain(SSL_CERT, SSL_KEY)
+        else:
+            ssl_context = ServedPair(SSL_CERT, SSL_KEY).context
     
     # Issue #71/#95: empty host = all interfaces (dual-stack IPv4+IPv6)
     ws_host = None if not BIND_HOST else BIND_HOST
@@ -13510,7 +13520,6 @@ async def main():
     # crcro on issue #388 reported the exact SSH-WS InvalidUpgrade trace this fixes.
     _lpr_ssh = None
     try:
-        sys.path.insert(0, os.environ.get('PEGAPROX_PKG_BASE') or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
         from pegaprox.utils.ws_lenient import lenient_process_request as _lpr_ssh
     except Exception as _e:
         print(f"[SSH-WS] WARNING: lenient_process_request not importable ({_e}) — strict handshake only")

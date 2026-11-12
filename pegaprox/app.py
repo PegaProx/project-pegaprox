@@ -1332,6 +1332,14 @@ def _unloadable(cert_file, key_file):
         return e
 
 
+def _tls_server_context(cert_file, key_file):
+    """The context of the HTTPS listener, with the pair loaded."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(cert_file, key_file)
+    return ctx
+
+
 def _generate_self_signed(cert_file, key_file, domain, app_name):
     from OpenSSL import crypto
     key = crypto.PKey()
@@ -2005,7 +2013,9 @@ def main(debug_mode=False):
 
     if ssl_context:
         print(f"HTTPS on https://{bind_host}:{port}")
-        app.run(host=bind_host, port=port, debug=False, ssl_context=ssl_context, threaded=True)
+        from pegaprox.utils.served_pair import ServedPair
+        app.run(host=bind_host, port=port, debug=False, threaded=True,
+                ssl_context=ServedPair(ssl_context[0], ssl_context[1], _tls_server_context).context)
     else:
         print(f"HTTP on http://{bind_host}:{port}")
         app.run(host=bind_host, port=port, debug=False, threaded=True)
@@ -2988,9 +2998,10 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
 
     if ssl_context:
         print(f"HTTPS on https://{bind_host}:{port}", flush=True)
-        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        ssl_ctx.load_cert_chain(ssl_context[0], ssl_context[1])
+        # the context follows cert.pem/key.pem, a renewal is served without a restart
+        # (pegaprox/utils/served_pair.py)
+        from pegaprox.utils.served_pair import ServedPair
+        ssl_ctx = ServedPair(ssl_context[0], ssl_context[1], _tls_server_context).context
         # MK Nov 2026 - plain HTTP on this port is always answered with a redirect.
         # http_redirect_port -1 used to switch this check off too, and with -1 being the
         # default every plain request got a reset, a trusted proxy with X-Forwarded-Proto
