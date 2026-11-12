@@ -17,6 +17,12 @@ services:
       - "5000:5000"   # web UI + API
       - "5001:5001"   # VNC websocket (noVNC console)
       - "5002:5002"   # SSH websocket (xterm.js)
+      # NS Nov 2026 - http://host:5000 is redirected to https://host:5000 with nothing set.
+      # For http://host on port 80 and for ACME HTTP-01, uncomment this line, and below
+      # environment: with PEGAPROX_HTTP_PORT. The image runs as the pegaprox user; Docker
+      # 20.10 and newer let it open port 80 inside the container. If the log says port 80
+      # needs root or CAP_NET_BIND_SERVICE, map "80:8080" and set PEGAPROX_HTTP_PORT to 8080.
+      # - "80:80"     # extra HTTP port: redirect to https and ACME HTTP-01
     volumes:
       - pegaprox-config:/app/config
       - pegaprox-logs:/app/logs
@@ -30,6 +36,7 @@ services:
     #   PEGAPROX_BEHIND_PROXY: "true"           # behind nginx/haproxy
     #   PEGAPROX_TRUSTED_PROXIES: "172.16.0.0/12"
     #   PEGAPROX_ALLOWED_ORIGINS: "https://pegaprox.example.com"
+    #   PEGAPROX_HTTP_PORT: "80"                # with the "80:80" port line above
 
   # MK Oct 2026 (#625) - the witness: the third vote of an automatic group, at a third
   # site and never on a host that runs PegaProx. Same image, the command `witness`.
