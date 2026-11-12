@@ -652,7 +652,7 @@
                         <div className="flex items-center justify-between text-xs">
                             <span className="text-gray-500">{t('ramUsage')}</span>
                             <span className="text-gray-300 font-mono">
-                                {unread ? '-' : `${formatBytes(metrics.mem_used)} / ${formatBytes(metrics.mem_total)}`}
+                                {unread ? '-' : <>{formatBytes(metrics.mem_used)} / {formatBytes(metrics.mem_total)}</>}
                             </span>
                         </div>
                         {metrics.ksm && metrics.ksm.shared > 0 && (
