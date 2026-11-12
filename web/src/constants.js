@@ -12,7 +12,7 @@
         // const API_URL = 'https://pegaprox.internal/api' // old staging
         
         // NS: Central version constant - keep in sync with backend PEGAPROX_VERSION
-        const PEGAPROX_VERSION = "1.4.1";
+        const PEGAPROX_VERSION = "1.5.0";
         const DEBUG = false; // set true for verbose logging
 
         // Human-readable cluster label. Rename only writes display_name; name is

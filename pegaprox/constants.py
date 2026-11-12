@@ -8,8 +8,8 @@ import os
 from pathlib import Path
 
 # Version
-PEGAPROX_VERSION = "1.4.1"
-PEGAPROX_BUILD = "2026.10.24"
+PEGAPROX_VERSION = "1.5.0"
+PEGAPROX_BUILD = "2026.11.15"
 
 # File Paths & Directories
 # MK Sep 2026 (#826): both directories are resolvable from the environment.

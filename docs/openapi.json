@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "PegaProx API",
-    "version": "1.4.1",
+    "version": "1.5.0",
     "description": "Multi-cluster management API for Proxmox VE, ESXi and XCP-ng.\n\nGenerated from the live route table. Path, method, parameter, tag and permission information is derived from the application itself. Request and response body schemas are being filled in per resource group and are described as generic objects until then.",
     "license": {
       "name": "AGPL-3.0-only",
