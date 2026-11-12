@@ -31,7 +31,7 @@ from pegaprox.utils.auth import (
     ARGON2_AVAILABLE, TOTP_AVAILABLE,
     mfa_enrolment_state, MFA_DUE, MFA_SKIPPED_ON_STANDBY,
 )
-from pegaprox.utils.audit import log_audit, get_client_ip
+from pegaprox.utils.audit import log_audit, get_client_ip, is_audit_pseudo_actor
 from pegaprox.utils.ldap import (get_ldap_settings, ldap_authenticate, ldap_provision_user,
                                  ldap_build_user_row, LDAP_AUTH_SOURCES)
 from pegaprox.utils.oidc import (
@@ -341,6 +341,17 @@ def oidc_callback():
         check_username = oidc_derive_username(user_info, users, name=picked_name)
         if check_username not in users:
             return jsonify({'error': unmatched or 'User account does not exist. Contact an administrator.'}), 403
+    else:
+        # MK Nov 2026 - the background jobs write their audit entries under a few names, and
+        # an account created under one would read those entries as its own. One that exists
+        # already signs in as before.
+        users = load_users()
+        new_name = oidc_derive_username(user_info, users, name=picked_name)
+        if new_name and new_name not in users and is_audit_pseudo_actor(new_name):
+            logging.warning(f"[OIDC] Sign-in refused: '{new_name}' is reserved for entries "
+                            f"PegaProx writes itself")
+            return jsonify({'error': f"The username '{new_name}' is reserved for entries PegaProx "
+                                     f"writes itself. Contact an administrator."}), 403
     
     # Determine auth_source label
     provider = config.get('provider', 'oidc')
@@ -984,6 +995,16 @@ def auth_login():
         ldap_result = ldap_authenticate(username, password)
         
         if ldap_result.get('success'):
+            # MK Nov 2026 - the background jobs write their audit entries under a few names,
+            # and an account created under one would read those entries as its own. One that
+            # exists already signs in as before.
+            ldap_name = str(ldap_result.get('username') or username).lower()
+            if (ldap_config['auto_create_users'] and ldap_name not in users_db
+                    and is_audit_pseudo_actor(ldap_name)):
+                logging.warning(f"[LDAP] Refused to create an account named '{ldap_name}': "
+                                f"the name is reserved for entries PegaProx writes itself")
+                return jsonify({'error': f"The username '{ldap_name}' is reserved for entries "
+                                         f"PegaProx writes itself. Contact an administrator."}), 403
             # LW: LDAP auth succeeded - provision/update local user
             if (ldap_config['auto_create_users'] or username in users_db) and ha.is_standby():
                 # MK Sep 2026 (#625) - a standby writes no users row: the next sync puts

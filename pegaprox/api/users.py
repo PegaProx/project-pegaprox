@@ -21,7 +21,7 @@ from pegaprox.utils.auth import (
     mark_admin_initialized, invalidate_all_user_sessions, revoke_user_api_tokens,
     build_authz_user,
 )
-from pegaprox.utils.audit import log_audit
+from pegaprox.utils.audit import log_audit, is_audit_pseudo_actor
 from pegaprox.utils.rbac import (
     invalidate_tenants_cache,
     load_custom_roles, save_custom_roles, get_custom_roles, invalidate_roles_cache,
@@ -983,6 +983,11 @@ def create_user():
     
     if len(username) < 3:
         return jsonify({'error': 'Username must be at least 3 characters'}), 400
+    # the background jobs write their audit entries under these names, and an account
+    # holding one would read them as its own
+    if is_audit_pseudo_actor(username):
+        return jsonify({'error': f"The username '{username}' is reserved for entries PegaProx "
+                                 f"writes itself - choose another"}), 400
     
     # Validate password policy
     is_valid, error_msg = validate_password_policy(password)
