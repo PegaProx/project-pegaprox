@@ -2676,6 +2676,26 @@ def _restored_secrets(incoming, current, mode):
     return secrets, to_enter
 
 
+def _cluster_moves(cluster, existing):
+    """What in a backup's row of a cluster that is here takes its stored credential to an
+    address it was not typed for, counted as the cluster edit counts it (api/clusters.py
+    _config_edit_checks): a host or fallback host the cluster does not have, another SSH
+    port, the certificate check turned off."""
+    from pegaprox.api.clusters import _host_key
+    known = {_host_key(existing.get('host'))} | {_host_key(h) for h in existing.get('fallback_hosts') or []}
+    fallback = cluster.get('fallback_hosts') if isinstance(cluster.get('fallback_hosts'), list) else []
+    moved = []
+    if _host_key(cluster.get('host')) not in known:
+        moved.append('host')
+    if any(_host_key(h) not in known for h in fallback):
+        moved.append('fallback_hosts')
+    if _port_of(cluster.get('ssh_port'), 22) != _port_of(existing.get('ssh_port'), 22):
+        moved.append('ssh_port')
+    if existing.get('ssl_verification') and not cluster.get('ssl_verification', True):
+        moved.append('ssl_verification')
+    return moved
+
+
 @bp.route('/api/config/backup', methods=['POST'])
 
 @require_auth(roles=[ROLE_ADMIN])
@@ -3196,21 +3216,39 @@ def restore_config():
                         continue
                     
                     existing = database.get_cluster(cluster_id)
+                    moved = _cluster_moves(cluster, existing) if existing else []
+                    cluster_name = str(cluster.get('name') or cluster_id)
                     
                     if existing and mode == 'merge':
-                        # Keep existing passwords if not in backup
-                        # sec (audit): this keyed off 'password_encrypted', which neither the
-                        # backup nor get_cluster() ever emits — the credential lives under 'pass'
-                        # (db.py:2884/2971) and save_cluster reads data.get('pass'). Dead as
-                        # written, and load-bearing now that a "secrets excluded" backup really
-                        # does omit them: without this a merge-restore encrypts '' over every
-                        # cluster password and SSH key.
-                        for _sk in ('pass', 'ssh_key', 'api_token_secret'):
-                            if not cluster.get(_sk) and existing.get(_sk):
-                                cluster[_sk] = existing[_sk]
-                        if not cluster.get('ssh_key_encrypted') and existing.get('ssh_key_encrypted'):
-                            cluster['ssh_key_encrypted'] = existing['ssh_key_encrypted']
                         _keep_guarded_ha_settings(cluster, existing)
+                    # Keep existing passwords if not in backup. The credential lives under
+                    # 'pass' (db.py get_cluster) and save_cluster encrypts what it is given, so
+                    # without this a restore of a backup without secrets writes '' over every
+                    # cluster password and SSH key.
+                    # MK Nov 2026 - an overwrite did write it, and a merge kept them for any
+                    # host the backup named. Both keep them while the backup leaves the
+                    # addresses they go to as they are, else the answer names the cluster
+                    if existing and not moved:
+                        for _sk in ('pass', 'ssh_key', 'api_token_secret'):
+                            if _blank_secret(cluster.get(_sk)) and existing.get(_sk):
+                                cluster[_sk] = existing[_sk]
+                    if _blank_secret(cluster.get('pass')) and _blank_secret(cluster.get('api_token_secret')):
+                        results.setdefault('secrets_to_enter', []).append({'cluster': cluster_name})
+                    # the nodes' own root passwords go where the cluster says its nodes are, and
+                    # are dropped for such a move whatever the row carries, as the cluster edit
+                    # does (api/clusters.py _drop_node_passwords). Those the backup has for the
+                    # cluster are stored again below
+                    if moved:
+                        from pegaprox.core import node_creds
+                        _nc = data.get('node_credentials')
+                        _nc = _nc.get(cluster_id) if isinstance(_nc, dict) else None
+                        _carried = {n for n, v in (_nc.items() if isinstance(_nc, dict) else ())
+                                    if node_creds.node_name_ok(n) and not node_creds.value_problem(v)}
+                        _lose = [r['node'] for r in node_creds.state(cluster_id)
+                                 if r.get('has_password') and r['node'] not in _carried]
+                        if _lose:
+                            results.setdefault('secrets_to_enter', []).append(
+                                {'cluster': cluster_name, 'nodes': _lose})
 
                     # NS Oct 2026 - it goes onto the ssh command line; a bad one is not restored
                     from pegaprox.utils.sanitization import validate_ssh_user
@@ -3230,6 +3268,10 @@ def restore_config():
                         cluster['node_ui_suffix'] = _sfx
 
                     if not dry_run:
+                        if moved:
+                            # before the row lands: a drop that fails restores nothing of it
+                            from pegaprox.api.clusters import _drop_node_passwords
+                            _drop_node_passwords(cluster_id, cluster_name, moved)
                         database.save_cluster(cluster_id, cluster)
                     cluster_count += 1
                 except Exception as e:
