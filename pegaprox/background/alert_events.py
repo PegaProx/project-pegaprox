@@ -162,6 +162,9 @@ _coverage = {}    # cid -> (epoch, status, rows or None): the last not-backed-up
 _coverage_locks = {}
 _coverage_guard = threading.Lock()
 _status = {}      # cid -> {source: {'at': epoch, 'ok': bool, 'note': str}} for the diagnostics
+# the sources read on the nodes (pools, clocks, QDevice votes, OSDs): their notes name the
+# nodes they asked, as their alerts do, so the diagnostics show them where a node's alerts go
+NODE_SOURCES = ('zfs', 'clock', 'qdevice', 'ceph_osd')
 _clock = {}       # cid -> the last read_node_clocks() of a cluster, any caller
 _starts = {}      # cid -> {vmid: [epoch of each start or reboot task]}
 _osd = {}         # cid -> {'at': last try, 'node', 'seen', 'absent_until', 'last': the last read (ceph_osds)}

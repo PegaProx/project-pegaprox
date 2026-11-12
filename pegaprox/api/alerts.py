@@ -1220,6 +1220,14 @@ def alerts_diagnostics():
     # NS Oct 2026 - the count, the recipients and the channels were the whole installation's
     # for a caller confined to some clusters; they get their own rules and nothing global
     _whole = _allowed is None
+    _sources = alert_events.source_status(None if _allowed is None else set(_allowed))
+    # MK Nov 2026 - what was read on a cluster's nodes, for whom alert_scope lets through that
+    # cluster's node alerts: not for a caller confined there, nor one without node.view
+    _user = build_authz_user(request.session.get('user', ''), request.session)
+    for _cid, _seen in _sources.items():
+        if alert_scope(_user, _cid) is not None:
+            for _k in alert_events.NODE_SOURCES:
+                _seen.pop(_k, None)
     return jsonify({
         'last_tick_at': A._last_tick_at,
         'tick_interval_seconds': 60,
@@ -1251,7 +1259,7 @@ def alerts_diagnostics():
         ],
         # what the event sources last read per cluster (failed tasks, Ceph, replication,
         # snapshots), same cluster filter as the rules
-        'event_sources': alert_events.source_status(None if _allowed is None else set(_allowed)),
+        'event_sources': _sources,
     })
 
 
