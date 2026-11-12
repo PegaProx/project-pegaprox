@@ -16595,6 +16595,9 @@ echo "AGENT_INSTALLED_OK"
             else:
                 s.verify = False
                 s.mount('https://', _NoHostnameCheckAdapter(**_pool_kw))
+            # MK Nov 2026 - the same path check as the cached session, this one is root@pam
+            from pegaprox.utils.sanitization import refuse_climbing_paths
+            refuse_climbing_paths(s)
             _refuse_redirects(s)
             ha_transport.guard_session(s)
             # self.host is already IPv6-bracketed by the property — use it directly.

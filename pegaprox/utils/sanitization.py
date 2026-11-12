@@ -145,7 +145,10 @@ def refuse_climbing_paths(session):
     '#' is refused with a ValueError before requests folds or cuts it. Returns the session."""
     if getattr(session, '_paths_checked', False):
         return session
-    request = session.request
+    # like manager._refuse_redirects: a stand-in without request() sends nothing through it
+    request = getattr(session, 'request', None)
+    if request is None:
+        return session
 
     def checked(method, url, *args, **kwargs):
         if url_path_climbs(url):
