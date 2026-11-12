@@ -15,7 +15,7 @@ import html as html_lib  # MK May 2026 - aliased so we don't shadow local `html`
 from datetime import datetime
 
 from pegaprox.constants import (
-    ALERTS_CONFIG_FILE, GITHUB_VERSION_URL, MIRROR_VERSION_URL,
+    ALERTS_CONFIG_FILE, GITHUB_REPO_URL, GITHUB_VERSION_URL, MIRROR_VERSION_URL,
     PEGAPROX_VERSION,
 )
 from pegaprox.globals import (
@@ -690,13 +690,14 @@ def check_update_available_alert():
         '',
         'Changelog:',
     ]
+    # MK Nov 2026 - the link of the mail is an https page or the repo, never another scheme
+    download_url = ha.valid_https_url(remote.get('download_url')) or GITHUB_REPO_URL
     body_lines += [f"  - {line}" for line in changelog[:10]]
-    body_lines += ['', f"Download: {remote.get('download_url', '')}"]
+    body_lines += ['', f"Download: {download_url}"]
     body = '\n'.join([ln for ln in body_lines if ln is not None])
     # MK May 2026 - changelog + version come from remote update server (version.json).
     # If GitHub-mirror is ever compromised an attacker could ship `<script>` inside
     # the release notes; escape them all before they hit the email's HTML body.
-    download_url = remote.get('download_url', '')
     html_items = ''.join(f"<li>{html_lib.escape(str(c))}</li>" for c in changelog[:10])
     html_body = (
         f"<h2>PegaProx update available</h2>"

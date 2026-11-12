@@ -521,7 +521,8 @@ def check_pegaprox_update():
             'latest_build': remote_version.get('build'),
             'release_date': remote_version.get('release_date'),
             'changelog': remote_version.get('changelog', []),
-            'download_url': remote_version.get('download_url', GITHUB_REPO_URL),
+            # MK Nov 2026 - the UI links this as it comes, so only an https page gets through
+            'download_url': ha.valid_https_url(remote_version.get('download_url')) or GITHUB_REPO_URL,
             'update_available': update_available,
             'install_method': _method,
             'in_app_update_supported': _method == 'source',
