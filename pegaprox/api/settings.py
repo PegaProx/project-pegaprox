@@ -2600,6 +2600,82 @@ def _keep_guarded_ha_settings(cluster, existing):
     cluster['ha_settings'] = merged
 
 
+# The sealed secrets of the server settings: the settings that name the server each one is
+# sent to, and whether the settings send it at all
+_RESTORE_SECRETS = {
+    'smtp_password': (('smtp_host', 'smtp_port'),
+                      lambda s: s.get('smtp_host') and s.get('smtp_user')),
+    'ldap_bind_password': (('ldap_server', 'ldap_port'),
+                           lambda s: s.get('ldap_server') and s.get('ldap_bind_dn')),
+    'oidc_client_secret': (('oidc_provider', 'oidc_cloud_environment', 'oidc_tenant_id',
+                            'oidc_authority', 'oidc_client_id'),
+                           lambda s: s.get('oidc_client_id')),
+    'acme_dns_rfc2136_secret': (('acme_dns_rfc2136_nameserver', 'acme_dns_rfc2136_port'),
+                                lambda s: s.get('acme_dns_provider') == 'rfc2136'),
+    # always Cloudflare's API, whatever the zone
+    'acme_dns_cloudflare_token': ((), lambda s: s.get('acme_dns_provider') == 'cloudflare'),
+}
+_CHANNEL_SECRETS = ('url', 'token', 'topic')
+
+
+def _blank_secret(value):
+    # a sealed secret is a string; a list or a number in its place carries none either
+    return not isinstance(value, str) or value in ('', '********')
+
+
+def _restored_secrets(incoming, current, mode):
+    """The secrets a restore of `incoming` stores, and the ones to enter again.
+
+    MK Nov 2026 - a backup without secrets carries them blank. The restore wrote that blank
+    over the stored secret (overwrite), or kept the stored one whatever server the backup
+    pointed it at (merge). A blank now keeps the stored secret while the server it was typed
+    for stays the same, as the settings save does. Once the backup moves the server it goes
+    empty, and the answer names it. An alert channel is kept by its id, one this instance
+    does not know comes back turned off. A push keypair without its private key is not
+    written. Adjusts `incoming` for those two; returns ({setting: value}, to_enter)."""
+    current = current or {}
+    after = dict(current)
+    after.update({k: v for k, v in incoming.items()
+                  if mode != 'merge' or v not in (None, '', [])})
+
+    def server(s, keys):
+        return [str(s.get(k) if s.get(k) is not None else '').strip().lower().rstrip('.') for k in keys]
+
+    secrets, to_enter = {}, []
+    for key, (keys, sent) in _RESTORE_SECRETS.items():
+        if not _blank_secret(incoming.get(key)):
+            continue
+        held = current.get(key)
+        same = server(after, keys) == server(current, keys)
+        secrets[key] = held if held and same else ''
+        if not secrets[key] and sent(after):
+            to_enter.append({'setting': key})
+
+    channels = incoming.get('alert_webhooks')
+    if isinstance(channels, list):
+        live = {ch.get('id'): ch for ch in (current.get('alert_webhooks') or [])
+                if isinstance(ch, dict) and ch.get('id')}
+        out = []
+        for ch in channels:
+            if isinstance(ch, dict) and _blank_secret(ch.get('url')):
+                ch, held = dict(ch), live.get(ch.get('id')) or {}
+                if held.get('url'):
+                    ch.update({k: held[k] for k in _CHANNEL_SECRETS if k in held and _blank_secret(ch.get(k))})
+                else:
+                    # every alert would log a failed send to it until somebody gives it a url
+                    ch.update(url='', enabled=False)
+                    to_enter.append({'channel': str(ch.get('name') or ch.get('id') or '')})
+            out.append(ch)
+        incoming['alert_webhooks'] = out
+
+    from pegaprox.api.push import _VAPID_KEY_NAME
+    kp = incoming.get(_VAPID_KEY_NAME)
+    if _VAPID_KEY_NAME in incoming and not (isinstance(kp, dict) and kp.get('private_pem')):
+        # the browsers subscribed to this instance keep getting their pushes
+        incoming.pop(_VAPID_KEY_NAME)
+    return secrets, to_enter
+
+
 @bp.route('/api/config/backup', methods=['POST'])
 
 @require_auth(roles=[ROLE_ADMIN])
@@ -3038,17 +3114,26 @@ def restore_config():
                     from pegaprox.core import ha
                     incoming_ss = {k: v for k, v in (data['server_settings'] or {}).items()
                                    if k not in _PROTECTED_CONSENT and k != ha.MEMBER_SETTING}
+                    _secrets, _to_enter = _restored_secrets(incoming_ss, current, mode)
                     if mode == 'merge':
                         # Only update non-empty values
                         for key, value in incoming_ss.items():
                             if value not in [None, '', []]:
                                 current[key] = value
+                        current.update(_secrets)
                         save_server_settings(current)
                     else:
                         for _k in _PROTECTED_CONSENT:
                             if (current or {}).get(_k) is not None:
                                 incoming_ss[_k] = current[_k]
+                        incoming_ss.update(_secrets)
                         save_server_settings(incoming_ss)
+                else:
+                    # the dry run names them as well, it is what the restore dialog shows first
+                    _to_enter = _restored_secrets(dict(data['server_settings'] or {}),
+                                                  load_server_settings(), mode)[1]
+                if _to_enter:
+                    results['secrets_to_enter'] = _to_enter
                 results['restored']['server_settings'] = True
             except Exception as e:
                 results['errors'].append(f"Server settings: {str(e)}")
