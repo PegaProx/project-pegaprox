@@ -1561,27 +1561,27 @@
 
             // LW: XCP-ng doesn't have Ceph, repos differ, subscription not applicable
             const allTabs = isXcpng ? [
-                { id: 'summary', label: 'Summary', icon: Icons.Activity },
-                { id: 'performance', label: 'Performance', icon: Icons.BarChart },
-                { id: 'shell', label: 'Shell', icon: Icons.Terminal },
-                { id: 'network', label: 'Network', icon: Icons.Network },
-                { id: 'system', label: 'System', icon: Icons.Cog },
+                { id: 'summary', label: t('summary'), icon: Icons.Activity },
+                { id: 'performance', label: t('performance'), icon: Icons.BarChart },
+                { id: 'shell', label: t('shell'), icon: Icons.Terminal },
+                { id: 'network', label: t('network'), icon: Icons.Network },
+                { id: 'system', label: t('nodeTabSystem'), icon: Icons.Cog },
                 { id: 'disks', label: t('storageRepos') || 'Storage', icon: Icons.HardDrive },
-                { id: 'tasks', label: 'Tasks', icon: Icons.Play },
+                { id: 'tasks', label: t('tasks'), icon: Icons.Play },
                 { id: 'timeline', label: t('tlTab'), icon: Icons.Clock },
             ] : [
-                { id: 'summary', label: 'Summary', icon: Icons.Activity },
-                { id: 'performance', label: 'Performance', icon: Icons.BarChart },
-                { id: 'shell', label: 'Shell', icon: Icons.Terminal },
-                { id: 'network', label: 'Network', icon: Icons.Network },
-                { id: 'system', label: 'System', icon: Icons.Cog },
+                { id: 'summary', label: t('summary'), icon: Icons.Activity },
+                { id: 'performance', label: t('performance'), icon: Icons.BarChart },
+                { id: 'shell', label: t('shell'), icon: Icons.Terminal },
+                { id: 'network', label: t('network'), icon: Icons.Network },
+                { id: 'system', label: t('nodeTabSystem'), icon: Icons.Cog },
                 { id: 'hardware', label: t('hardware') || 'Hardware', icon: Icons.Cpu },
-                { id: 'disks', label: 'Disks', icon: Icons.HardDrive },
-                { id: 'repos', label: 'Repositories', icon: Icons.Package },
-                { id: 'tasks', label: 'Tasks', icon: Icons.Play },
+                { id: 'disks', label: t('disks'), icon: Icons.HardDrive },
+                { id: 'repos', label: t('repositories'), icon: Icons.Package },
+                { id: 'tasks', label: t('tasks'), icon: Icons.Play },
                 // LW Oct 2026 - what happened on this node, from the flight recorder
                 { id: 'timeline', label: t('tlTab'), icon: Icons.Clock },
-                { id: 'subscription', label: 'Subscription', icon: Icons.Shield },
+                { id: 'subscription', label: t('subscriptionInfo'), icon: Icons.Shield },
                 { id: 'ceph', label: 'Ceph', icon: Icons.Database },
             ];
             // #625 v2 - a standby shows the node but changes nothing on it: every tab that can
