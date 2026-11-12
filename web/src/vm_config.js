@@ -3686,7 +3686,6 @@
                                                                 checked={getValue('hardware', 'numa') == 1}
                                                                 onChange={(v) => handleChange('hardware', 'numa', v)}
                                                                 needsRestart={true}
-                                                                t={t}
                                                             />
                                                         </div>
                                                         <div></div>
@@ -6226,13 +6225,11 @@
                                                         label={t('startOnBoot')}
                                                         checked={getValue('options', 'onboot') == 1}
                                                         onChange={(v) => handleChange('options', 'onboot', v)}
-                                                        t={t}
                                                     />
                                                     <ConfigCheckboxField
                                                         label={t('protection')}
                                                         checked={getValue('options', 'protection') == 1}
                                                         onChange={(v) => handleChange('options', 'protection', v)}
-                                                        t={t}
                                                     />
                                                 </div>
                                                 {isQemu && (
@@ -6334,14 +6331,12 @@
                                                                 checked={getValue('options', 'kvm') == 1}
                                                                 onChange={(v) => handleChange('options', 'kvm', v)}
                                                                 needsRestart={true}
-                                                                t={t}
                                                             />
                                                             <ConfigCheckboxField
                                                                 label="ACPI"
                                                                 checked={getValue('options', 'acpi') == 1}
                                                                 onChange={(v) => handleChange('options', 'acpi', v)}
                                                                 needsRestart={true}
-                                                                t={t}
                                                             />
                                                         </div>
                                                     </>
@@ -6354,7 +6349,6 @@
                                                             onChange={(v) => handleChange('options', 'unprivileged', v)}
                                                             disabled={true}
                                                             needsRestart={true}
-                                                            t={t}
                                                         />
                                                         <LxcFeaturesCard vm={vm} clusterId={clusterId} authFetch={authFetch} addToast={addToast} t={t} haReadOnly={haReadOnly} />
                                                     </>

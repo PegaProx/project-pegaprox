@@ -10663,11 +10663,17 @@
 
         // Shared form components (defined outside ConfigModal to prevent re-creation)
         // ns: could use a form library but this is fine for now
-        const ConfigInputField = ({ label, value, onChange, type = 'text', disabled = false, suffix = '', options = null, placeholder = '', needsRestart = false, t }) => (
+        // the restart tag of these fields takes the language itself, most of the forms never passed t
+        const ConfigRestartBadge = ({ className }) => {
+            const { t } = useTranslation();
+            return <CrVcRestartBadge className={className}>{t('needsRestart')}</CrVcRestartBadge>;
+        };
+
+        const ConfigInputField = ({ label, value, onChange, type = 'text', disabled = false, suffix = '', options = null, placeholder = '', needsRestart = false }) => (
             <div>
                 <label className="block text-xs font-medium text-gray-400 mb-1">
                     {label}
-                    {needsRestart && <CrVcRestartBadge className="ml-2 text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t ? t('needsRestart') : 'NEEDS RESTART'}</CrVcRestartBadge>}
+                    {needsRestart && <ConfigRestartBadge className="ml-2 text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium" />}
                 </label>
                 {options ? (
                     <select
@@ -10701,7 +10707,7 @@
         );
 
         // checkbox version
-        const ConfigCheckboxField = ({ label, checked, onChange, disabled = false, needsRestart = false, t }) => (
+        const ConfigCheckboxField = ({ label, checked, onChange, disabled = false, needsRestart = false }) => (
             <label className="flex items-center gap-3 cursor-pointer">
                 <input
                     type="checkbox"
@@ -10711,12 +10717,12 @@
                     className="w-4 h-4 rounded border-proxmox-border bg-proxmox-dark text-proxmox-orange focus:ring-proxmox-orange"
                 />
                 <span className="text-sm text-gray-300">{label}</span>
-                {needsRestart && <CrVcRestartBadge className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t ? t('needsRestart') : 'RESTART'}</CrVcRestartBadge>}
+                {needsRestart && <ConfigRestartBadge className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium" />}
             </label>
         );
 
         // LW: Memory input with MB/GB unit selector - makes it easier to set RAM values
-        const MemoryInputField = ({ label, value, onChange, disabled = false, needsRestart = false, minMB = 128, stepMB = 128, t }) => {
+        const MemoryInputField = ({ label, value, onChange, disabled = false, needsRestart = false, minMB = 128, stepMB = 128 }) => {
             // value is always in MB internally
             const [unit, setUnit] = useState(value >= 1024 ? 'GB' : 'MB');
             
@@ -10739,7 +10745,7 @@
                 <div>
                     <label className="block text-xs font-medium text-gray-400 mb-1">
                         {label}
-                        {needsRestart && <CrVcRestartBadge className="ml-2 text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t ? t('needsRestart') : 'NEEDS RESTART'}</CrVcRestartBadge>}
+                        {needsRestart && <ConfigRestartBadge className="ml-2 text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium" />}
                     </label>
                     <div className="flex gap-2">
                         <input
