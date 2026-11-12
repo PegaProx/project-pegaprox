@@ -163,6 +163,29 @@ def refuse_climbing_paths(session):
     return session
 
 
+# MK Nov 2026 - the WSGI server decodes the request path once, so a route argument can
+# still hold '%2F' (sent as '%252F'). Proxmox VE decodes the whole path again before it
+# splits it, and in its API path that is a separator; a '?' or '#' moves what the code put
+# after the value into the query or cuts it off. No node, storage, guest or job id of
+# Proxmox VE or PBS holds any of these.
+_ODD_IN_A_NAME = re.compile(r'[%?#\\\x00-\x1f\x7f]')
+_PATH_ARG_RE = re.compile(r'<path:(\w+)>')
+# a user or group name of ours: only our own table is asked about it
+_OUR_OWN_NAMES = frozenset(('subject_id',))
+
+
+def odd_route_argument(rule, view_args):
+    """The name of the first argument of a cluster or PBS route (`rule` as the URL map
+    writes it) that holds a '%', '?', '#', a backslash or a control character, or None.
+    A <path:> argument may hold a '/' and each route that takes one checks or quotes it
+    itself."""
+    skip = set(_PATH_ARG_RE.findall(rule)) | _OUR_OWN_NAMES
+    for name, value in (view_args or {}).items():
+        if name not in skip and isinstance(value, str) and _ODD_IN_A_NAME.search(value):
+            return name
+    return None
+
+
 # NS Oct 2026 - an SSH login name goes onto the ssh/sshpass/scp command line and into
 # shell strings run on the nodes. Starting with '-' it is an OpenSSH option there
 # (-oProxyCommand=... runs a command on this host), so only what a POSIX login name

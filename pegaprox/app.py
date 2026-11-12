@@ -472,6 +472,35 @@ def create_app():
         return portal_only_request_refusal(
             look_up_tokens=bool(request.environ.get('pegaprox.rate_counted')))
 
+    # MK Nov 2026 - the arguments of the cluster and PBS routes go into the API path of the
+    # cluster as they are, in every route that takes one. One that holds what no name there
+    # holds (sanitization.odd_route_argument) is refused here, before any route asks the
+    # cluster with it and before a standby hands the call on.
+    _ARG_LABELS = {'node': 'node name', 'node_name': 'node name', 'storage': 'storage name',
+                   'storage_name': 'storage name', 'storage_id': 'storage name',
+                   'snapname': 'snapshot name', 'vm_type': 'guest type', 'vmtype': 'guest type'}
+
+    @app.before_request
+    def refuse_odd_route_arguments():
+        rule = request.url_rule
+        if rule is None or not request.view_args:
+            return None
+        on_cluster = rule.rule.startswith('/api/clusters/')
+        if not on_cluster and not rule.rule.startswith('/api/pbs/'):
+            return None
+        from pegaprox.utils.sanitization import odd_route_argument
+        name = odd_route_argument(rule.rule, request.view_args)
+        if name is None:
+            return None
+        if on_cluster:
+            # an XCP-ng pool and an ESXi host name their hosts freely ('xen host #1') and
+            # put no argument into a URL path. Looked up only here: a standby refuses its
+            # consoles before anything asks the cluster registry
+            mgr = g.cluster_managers.get(request.view_args.get('cluster_id'))
+            if mgr is not None and getattr(mgr, 'cluster_type', 'proxmox') in ('xcpng', 'esxi'):
+                return None
+        return jsonify({'error': f"Invalid {_ARG_LABELS.get(name, name.replace('_', ' '))}"}), 400
+
     # MK Sep 2026 (#625) - a standby takes its configuration from the active instance
     # and would lose a local change at the next sync, so it refuses writes. With the
     # live view on it also holds connections to the clusters, and a write there is an
@@ -790,10 +819,11 @@ _LENGTH_RE = re.compile(r'[0-9]{1,9}')
 # done above or cannot apply (refuse_writes_on_standby lets /api/ha/ through,
 # count_around_a_read and tell_the_members_about_a_write look at other methods and paths,
 # say_no_lease_after_a_refused_write at a refusal of an exit, and these send through none;
-# hold_portal_only_accounts holds an account, and a call carrying one goes to Flask below)
+# hold_portal_only_accounts holds an account, and a call carrying one goes to Flask below;
+# refuse_odd_route_arguments looks at the cluster and PBS routes only)
 _STOOD_IN_FOR = {
     'before': ('validate_request', 'check_ip_whitelist', 'hold_portal_only_accounts',
-               'refuse_writes_on_standby', 'count_around_a_read'),
+               'refuse_odd_route_arguments', 'refuse_writes_on_standby', 'count_around_a_read'),
     'after': ('compress_response', 'add_security_headers', 'tell_the_members_about_a_write',
               'say_no_lease_after_a_refused_write', '_say_we_hold_the_key'),
 }
