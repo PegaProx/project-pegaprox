@@ -19133,13 +19133,16 @@
                     const resp = await authFetch(`${API_URL}/vmware/${selectedVMware.id}/vms/${vmId}/console`, { method: 'POST' });
                     if (resp?.ok) {
                         const data = await resp.json();
+                        // LW Nov 2026 - only the two schemes the server builds, anything else takes the fallback below
+                        const webUrl = typeof data.web_url === 'string' && /^https:\/\//i.test(data.web_url) ? data.web_url : '';
+                        const vmrcUrl = typeof data.vmrc_url === 'string' && /^vmrc:\/\//i.test(data.vmrc_url) ? data.vmrc_url : '';
                         // Priority: web_url (works in browser) > vmrc_url > url (websocket)
-                        if (data.web_url) {
-                            window.open(data.web_url, '_blank', 'width=1024,height=768,menubar=no,toolbar=no');
+                        if (webUrl) {
+                            window.open(webUrl, '_blank', 'width=1024,height=768,menubar=no,toolbar=no');
                             addToast(`Console opened for VM`, 'success');
-                        } else if (data.vmrc_url) {
+                        } else if (vmrcUrl) {
                             // Try VMRC protocol link
-                            window.location.href = data.vmrc_url;
+                            window.location.href = vmrcUrl;
                             addToast('Opening VMRC...', 'info');
                         } else if (data.url) {
                             // WebSocket URL -- need WebMKS viewer (fallback: open ESXi UI)
