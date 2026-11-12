@@ -42,8 +42,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 848e4a56 the Modern header that wraps up to 1645 px, so at 1600 every Modern view starts 24 px lower,
 # 7a50f1a5 the tenth language button (RU) in the Modern and Cloud headers, which moves the controls before it
 # 57 px to the left (the Modern header wraps up to 1880 px now, at 1600 it took two lines already),
-# 314e9dfb the style rules of the utility classes the static stylesheet lacked (badges, gaps, min heights)
-BASE_REV = os.environ.get('PEGAPROX_GUARD_BASE', '314e9dfb')
+# 314e9dfb the style rules of the utility classes the static stylesheet lacked (badges, gaps, min heights),
+# 44b1262d the version 1.5.0 in the footer and under the settings title
+BASE_REV = os.environ.get('PEGAPROX_GUARD_BASE', '44b1262d')
 
 # 2026-10-30 09:00:00 UTC, what Date.now() says in every guarded page
 FIXED = calendar.timegm((2026, 10, 30, 9, 0, 0))
