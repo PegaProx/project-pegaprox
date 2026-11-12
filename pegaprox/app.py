@@ -2158,8 +2158,10 @@ def _read_request_head(sock, limit=8192):
 
     Both redirect listeners read through this: the plain branch of the TLS port and the
     extra port. The deadline is PEGAPROX_HEADER_TIMEOUT for the whole head (below, with the
-    other server timeouts), each recv waits 5 s at most. Returns the text, which is '' when
-    the client closed without sending anything, or None once the deadline has passed.
+    other server timeouts), the one the TLS side gets in _IdleTimeoutMixin; each recv waits
+    5 s at most. With 5 s per recv alone, a byte every 4 s held a pool slot for hours.
+    Returns the text, which is '' when the client closed without sending anything, or None
+    once the deadline has passed.
     """
     until = time.monotonic() + _HEADER_TIMEOUT if _HEADER_TIMEOUT > 0 else None
     data = b''
@@ -2175,80 +2177,88 @@ def _read_request_head(sock, limit=8192):
     return data.decode('utf-8', errors='ignore')
 
 
-def _answer_plain_http(client, addr, https_port, domain):
-    """One client of the extra port: the ACME token it asks for, or a 301 to HTTPS."""
+def _port_number(value):
+    """value as a TCP port, 1-65535, or None"""
+    value = (value or '').strip()
+    if not re.fullmatch(r'[0-9]{1,5}', value):
+        return None
+    port = int(value)
+    return port if 0 < port <= 65535 else None
+
+
+def _http_reply(status, body='', location=None):
+    head = f"HTTP/1.1 {status}\r\n"
+    if location:
+        head += f"Location: {location}\r\n"
+    data = body.encode()
+    if data:
+        head += "Content-Type: text/plain\r\n"
+    return (head + f"Content-Length: {len(data)}\r\nConnection: close\r\n\r\n").encode() + data
+
+
+def _plain_http_reply(request, addr, https_port, domain='', same_port=False):
+    """The answer to one plain-HTTP request head, for both redirect listeners: the plain
+    branch of the TLS port (`same_port`) and the extra port.
+
+    An ACME token it asks for, a 301 to the HTTPS port, or a 400 for a trusted proxy that
+    says its client spoke HTTPS already. There is nothing to redirect that one to, and
+    closing without a word showed up as a 502 at the proxy.
+
+    MK Nov 2026 - X-Forwarded-Proto and X-Forwarded-Port count only from a trusted proxy
+    (loopback, PEGAPROX_TRUSTED_PROXIES or the trusted_proxies setting), the port only as
+    a number. The redirect followed an X-Forwarded-Port from anyone, a value that was no
+    number ended it without an answer, and on the TLS port X-Forwarded-Proto https from
+    anyone closed the connection.
+    """
+    lines = request.split('\r\n\r\n', 1)[0].split('\r\n')
+    parts = lines[0].split(' ')
+    path = parts[1].replace('\r', '').replace('\n', '') if len(parts) >= 2 else '/'
+
+    # MK: Mar 2026 - serve ACME challenges on port 80 instead of redirecting
+    if not same_port and path.startswith('/.well-known/acme-challenge/'):
+        from pegaprox.core.acme import get_challenge_response
+        key_auth = get_challenge_response(path.split('/')[-1])
+        if key_auth:
+            return _http_reply('200 OK', key_auth)
+
+    host_value, fwd_proto, fwd_port = None, '', ''
+    for line in lines[1:]:
+        low = line.lower()
+        if low.startswith('host:'):
+            if host_value is None:
+                host_value = line.split(':', 1)[1]
+        elif low.startswith('x-forwarded-proto:'):
+            fwd_proto = line.split(':', 1)[1].strip().lower()
+        elif low.startswith('x-forwarded-port:'):
+            fwd_port = line.split(':', 1)[1]
+
+    from pegaprox.utils.audit import _is_trusted_proxy
+    trusted = bool(addr) and _is_trusted_proxy(addr[0])
+    if trusted and fwd_proto == 'https':
+        return _http_reply('400 Bad Request', 'Plain HTTP here only redirects to HTTPS, and '
+                                              'X-Forwarded-Proto says the client used HTTPS already.\n')
+
+    # NS Jul 2026 (CodeAnt http-response-splitting) - the Host header is untrusted; reject
+    # non-hostname chars before it can reach the Location header. A configured domain wins.
+    host = _host_for_location(host_value) or 'localhost'
+    if not re.match(r'^[A-Za-z0-9._\-\[\]:]+$', host):
+        host = 'localhost'
+    if domain:
+        host = domain.rsplit(':', 1)[0] if ':' in domain and not domain.startswith('[') else domain
+
+    port = (_port_number(fwd_port) if trusted else None) or https_port
+    location = f'https://{host}{path}' if port == 443 else f'https://{host}:{port}{path}'
+    return _http_reply('301 Moved Permanently', location=location)
+
+
+def _answer_plain_http(client, addr, https_port, domain='', same_port=False):
+    """Read one plain-HTTP request head from `client`, send what _plain_http_reply says, close."""
     try:
         request = _read_request_head(client)
         if request is None:
             return
-        path = '/'
-        if request:
-            first_line = request.split('\r\n')[0]
-            parts = first_line.split(' ')
-            if len(parts) >= 2:
-                path = parts[1].replace('\r', '').replace('\n', '')
-
-        # MK: Mar 2026 - serve ACME challenges on port 80 instead of redirecting
-        if path.startswith('/.well-known/acme-challenge/'):
-            acme_token = path.split('/')[-1]
-            from pegaprox.core.acme import get_challenge_response
-            challenge_resp = get_challenge_response(acme_token)
-            if challenge_resp:
-                http_resp = (
-                    f"HTTP/1.1 200 OK\r\n"
-                    f"Content-Type: text/plain\r\n"
-                    f"Content-Length: {len(challenge_resp)}\r\n"
-                    f"Connection: close\r\n"
-                    f"\r\n"
-                    f"{challenge_resp}"
-                )
-                client.sendall(http_resp.encode())
-                return
-
-        host_header = ''
-        fwd_proto = ''
-        fwd_port = ''
-        for line in request.split('\r\n'):
-            low = line.lower()
-            if low.startswith('host:'):
-                host_header = _host_for_location(line.split(':', 1)[1])
-            elif low.startswith('x-forwarded-proto:'):
-                fwd_proto = line.split(':', 1)[1].strip().lower()
-            elif low.startswith('x-forwarded-port:'):
-                fwd_port = line.split(':', 1)[1].strip()
-
-        # behind reverse proxy with SSL termination? skip redirect
-        from pegaprox.utils.audit import _is_trusted_proxy
-        if fwd_proto == 'https' and _is_trusted_proxy(addr[0]):
-            return
-
-        # NS Jul 2026 (CodeAnt http-response-splitting) - host_header is untrusted;
-        # strip CR/LF + reject non-hostname chars before it can reach the Location header.
-        import re as _re
-        redirect_host = (host_header or 'localhost').split('/')[0].strip()
-        if not _re.match(r'^[A-Za-z0-9._\-\[\]:]+$', redirect_host):
-            redirect_host = 'localhost'
-        if domain:
-            if ':' in domain and not domain.startswith('['):
-                redirect_host = domain.rsplit(':', 1)[0]
-            else:
-                redirect_host = domain
-
-        port = int(fwd_port) if fwd_port else https_port
-        if port == 443:
-            redirect_url = f'https://{redirect_host}{path}'
-        else:
-            redirect_url = f'https://{redirect_host}:{port}{path}'
-
-        response = (
-            f"HTTP/1.1 301 Moved Permanently\r\n"
-            f"Location: {redirect_url}\r\n"
-            f"Content-Length: 0\r\n"
-            f"Connection: close\r\n"
-            f"\r\n"
-        )
         client.settimeout(5.0)
-        client.sendall(response.encode())
+        client.sendall(_plain_http_reply(request, addr, https_port, domain, same_port))
     except Exception:
         pass
     finally:
@@ -2900,78 +2910,9 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
                     pass
 
         def _handle_http_redirect(self, client_socket, address):
-            """Send HTTP 301 redirect to HTTPS version"""
-            try:
-                # NS Oct 2026 (#997) - the 5s was per recv, so a byte every 4s held this
-                # pool slot for hours. One deadline for the whole request head, the same
-                # PEGAPROX_HEADER_TIMEOUT the TLS side gets in _IdleTimeoutMixin.
-                request = _read_request_head(client_socket)
-                if request is None:
-                    return
-                path = '/'
-                if request:
-                    first_line = request.split('\r\n')[0]
-                    parts = first_line.split(' ')
-                    if len(parts) >= 2:
-                        path = parts[1].replace('\r', '').replace('\n', '')
-
-                host = self._redirect_domain or 'localhost'
-                for line in request.split('\r\n'):
-                    if line.lower().startswith('host:'):
-                        host = _host_for_location(line.split(':', 1)[1])
-                        break
-
-                # NS Jul 2026 (CodeAnt http-response-splitting) — the Host header is untrusted;
-                # reject non-hostname chars before it can reach the Location header (open-redirect
-                # / header injection). A configured _redirect_domain (below) always wins.
-                import re as _re
-                if not _re.match(r'^[A-Za-z0-9._\-\[\]:]+$', host or ''):
-                    host = 'localhost'
-
-                if self._redirect_domain:
-                    d = self._redirect_domain
-                    if ':' in d and not d.startswith('['):
-                        host = d.rsplit(':', 1)[0]
-                    else:
-                        host = d
-
-                # NS: #125 - respect proxy headers so we don't redirect to internal port
-                fwd_proto = ''
-                fwd_port = ''
-                for line in request.split('\r\n'):
-                    lower = line.lower()
-                    if lower.startswith('x-forwarded-proto:'):
-                        fwd_proto = line.split(':', 1)[1].strip().lower()
-                    elif lower.startswith('x-forwarded-port:'):
-                        fwd_port = line.split(':', 1)[1].strip()
-
-                if fwd_proto == 'https':
-                    # already behind SSL-terminating proxy, don't redirect
-                    return
-
-                port = int(fwd_port) if fwd_port else self.server_port
-                if port == 443:
-                    redirect_url = f'https://{host}{path}'
-                else:
-                    redirect_url = f'https://{host}:{port}{path}'
-
-                response = (
-                    f"HTTP/1.1 301 Moved Permanently\r\n"
-                    f"Location: {redirect_url}\r\n"
-                    f"Content-Type: text/html\r\n"
-                    f"Content-Length: 0\r\n"
-                    f"Connection: close\r\n"
-                    f"\r\n"
-                )
-                client_socket.settimeout(5.0)
-                client_socket.sendall(response.encode())
-            except Exception:
-                pass
-            finally:
-                try:
-                    client_socket.close()
-                except Exception:
-                    pass
+            """Send HTTP 301 redirect to HTTPS version, under one deadline for the head"""
+            _answer_plain_http(client_socket, address, self.server_port, self._redirect_domain,
+                               same_port=True)
 
     # Server args - add WebSocket handler if available
     # MK 2026-05-31 — actually wire `workers` into the request-handler pool.

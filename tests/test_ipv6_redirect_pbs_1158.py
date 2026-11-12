@@ -77,18 +77,23 @@ def test_both_redirect_handlers_read_the_host_through_the_same_parser():
     """The port-80 server and the plain-HTTP branch of the HTTPS port answered the same
     Host header differently. The second one lives inside _start_gevent_server, so the
     wiring is checked in the source; its behaviour is the parser's, tested above, and the
-    non-IPv6 path runs end to end in test_redirect_head_deadline. The port-80 server
-    answers each client in _answer_plain_http."""
+    non-IPv6 path runs end to end in test_redirect_head_deadline. Both now answer through
+    _answer_plain_http, whose reply (_plain_http_reply) reads the Host."""
     with open(os.path.join(ROOT, 'pegaprox', 'app.py'), encoding='utf-8') as fh:
         tree = ast.parse(fh.read())
-    users = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef):
-            for call in ast.walk(node):
-                if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-                        and call.func.id == '_host_for_location'):
-                    users.add(node.name)
-    assert {'_answer_plain_http', '_handle_http_redirect'} <= users
+
+    def users(name):
+        out = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                for call in ast.walk(node):
+                    if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                            and call.func.id == name):
+                        out.add(node.name)
+        return out
+    assert {'_start_http_redirect', '_handle_http_redirect'} <= users('_answer_plain_http')
+    assert '_answer_plain_http' in users('_plain_http_reply')
+    assert users('_host_for_location') == {'_plain_http_reply'}
 
 
 # -- the port-80 redirect server, end to end on a fake socket ------------------------------

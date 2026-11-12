@@ -17,6 +17,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import threading
 import time
 
 import gevent
@@ -37,6 +38,12 @@ import pegaprox.app as app_mod
 
 app_mod._start_console_servers = lambda *a, **k: None
 web = Flask('redirect-defaults')
+
+# loopback is always a trusted proxy, so a peer at 127.0.0.2 stands in for a host on the
+# network that is none
+import pegaprox.utils.audit as audit
+_trusted = audit._is_trusted_proxy
+audit._is_trusted_proxy = lambda addr: not str(addr).endswith('127.0.0.2') and _trusted(addr)
 
 
 @web.route('/ping')
@@ -204,6 +211,127 @@ def test_a_trusted_proxy_that_terminated_tls_is_served(server):
 
     assert answer.startswith(b'HTTP/1.1 200'), answer[:120]
     assert answer.endswith(b'pong')
+
+
+# -- forwarded headers -----------------------------------------------------------------
+#
+# X-Forwarded-Proto and X-Forwarded-Port count only from a trusted proxy. The redirect
+# followed an X-Forwarded-Port from anyone, ended without an answer on one that was no
+# number, and on the TLS port closed the connection on an X-Forwarded-Proto https from
+# anyone, which a browser shows as an empty reply.
+
+UNTRUSTED = '127.0.0.2'
+
+
+def test_forwarded_headers_from_a_host_that_is_no_proxy_change_nothing(server):
+    head = (f'GET {PATH} HTTP/1.1\r\nHost: pegaprox.lan:{server}\r\nX-Forwarded-Proto: https\r\n'
+            'X-Forwarded-Port: 443\r\nConnection: close\r\n\r\n')
+    answer = _plain('127.0.0.1', server, head, src=UNTRUSTED)
+
+    assert answer.startswith(b'HTTP/1.1 301'), answer[:120]
+    assert _location(answer) == f'https://pegaprox.lan:{server}{PATH}'
+
+
+def test_a_trusted_proxy_saying_https_on_a_plain_redirect_gets_a_400(server, extra):
+    """The extra port, and the TLS port when the header comes after the first segment, so
+    the look ahead of DualProtocolWSGIServer does not see it. Both closed without a word."""
+    whole = 'GET / HTTP/1.1\r\nHost: pegaprox.lan\r\nX-Forwarded-Proto: https\r\nConnection: close\r\n\r\n'
+    on_extra = _plain('127.0.0.1', extra, whole)
+
+    # a server slow to accept looks ahead after the second segment and serves the request,
+    # the 404 of the app; then again with a longer gap
+    for gap in (0.3, 1.0, 2.0):
+        s = _connect('127.0.0.1', server)
+        s.sendall(b'GET / HTTP/1.1\r\nHost: pegaprox.lan\r\n')
+        gevent.sleep(gap)
+        s.sendall(b'X-Forwarded-Proto: https\r\nConnection: close\r\n\r\n')
+        on_tls_port = _read_all(s)
+        if not on_tls_port.startswith(b'HTTP/1.1 404'):
+            break
+
+    for answer in (on_extra, on_tls_port):
+        assert answer.startswith(b'HTTP/1.1 400'), answer[:120]
+        assert b'X-Forwarded-Proto' in answer
+
+
+class _Stop(BaseException):
+    """Ends the accept loop; BaseException so the server's own handlers let it through."""
+
+
+class _FakeClient:
+    def __init__(self, raw):
+        self.raw, self.sent, self.closed = raw, b'', threading.Event()
+
+    def settimeout(self, t):
+        pass
+
+    def recv(self, n):
+        return self.raw[:n]
+
+    def sendall(self, data):
+        self.sent += data
+
+    def close(self):
+        self.closed.set()
+
+
+def _extra_port_answer(monkeypatch, lines, src, https_port=5000):
+    """The extra port's answer to one request from `src`, on a fake socket module."""
+    client = _FakeClient(('GET /dashboard HTTP/1.1\r\nHost: pegaprox.example\r\n'
+                          + ''.join(l + '\r\n' for l in lines) + '\r\n').encode())
+    queue = [client]
+
+    class Listener:
+        def __init__(self, *a, **k):
+            pass
+
+        def setsockopt(self, *a):
+            pass
+
+        def bind(self, addr):
+            pass
+
+        def listen(self, n):
+            pass
+
+        def settimeout(self, t):
+            pass
+
+        def accept(self):
+            if not queue:
+                raise _Stop()
+            return queue.pop(), (src, 40000)
+
+    with monkeypatch.context() as m:
+        m.setattr(app_mod.socket, 'socket', Listener)
+        with pytest.raises(_Stop):
+            app_mod._start_http_redirect('0.0.0.0', 8080, https_port, '')
+    assert client.closed.wait(5)
+    return client.sent
+
+
+@pytest.mark.parametrize('lines', [
+    ['X-Forwarded-Port: 443'],
+    ['X-Forwarded-Proto: https', 'X-Forwarded-Port: 443'],
+    ['X-Forwarded-Port: abc'],
+    ['X-Forwarded-Port: 8443'],
+])
+def test_the_extra_port_ignores_forwarded_headers_from_a_host_that_is_no_proxy(monkeypatch, lines):
+    answer = _extra_port_answer(monkeypatch, lines, src='192.0.2.7')
+
+    assert answer.startswith(b'HTTP/1.1 301'), answer
+    assert _location(answer) == 'https://pegaprox.example:5000/dashboard'
+
+
+def test_a_trusted_proxy_moves_the_port_only_with_a_number(monkeypatch):
+    wanted = {'8443': ':8443', '443': '', ' 9443 ': ':9443', '': ':5000',
+              'abc': ':5000', '0': ':5000', '70000': ':5000', '-1': ':5000', '+443': ':5000'}
+    got = {}
+    for value in wanted:
+        answer = _extra_port_answer(monkeypatch, [f'X-Forwarded-Port: {value}'], src='127.0.0.1')
+        got[value] = _location(answer)
+
+    assert got == {v: f'https://pegaprox.example{p}/dashboard' for v, p in wanted.items()}
 
 
 # -- the extra port --------------------------------------------------------------------
