@@ -142,10 +142,10 @@ def print_system_requirements():
 ║  • Use Redis for session storage in multi-node setups (future)               ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║  Network Requirements:                                                        ║
-║  • Port 5000: Main API & Web UI (configurable via PEGAPROX_PORT)             ║
+║  • Port 5000: Main API & Web UI (Settings > Server, or --set-port N)         ║
 ║  • Port 5001: VNC WebSocket (noVNC console) - auto: main_port + 1            ║
 ║  • Port 5002: SSH WebSocket (Node shell) - auto: main_port + 2               ║
-║  • HTTPS recommended (--ssl-cert/--ssl-key or auto-generated)                ║
+║  • HTTPS: own certificate or ACME in Settings > Server, else self-signed     ║
 ║  • Access to all Proxmox nodes on port 8006                                  ║
 ║  • Self-signed certs: Users must accept cert on ports 5001/5002 separately   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
