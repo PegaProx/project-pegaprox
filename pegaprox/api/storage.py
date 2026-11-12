@@ -1009,7 +1009,8 @@ def get_storage_cluster_status(cluster_id, sc_id):
     if error:
         return error
     
-    # Find the storage cluster config    sc_config = None
+    # Find the storage cluster config
+    sc_config = None
     with _storage_config_lock:
         if cluster_id in storage_clusters_config:
             for sc in storage_clusters_config[cluster_id].get('clusters', []):
