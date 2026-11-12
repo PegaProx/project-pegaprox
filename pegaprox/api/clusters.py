@@ -1366,6 +1366,15 @@ def update_cluster_sort_order(cluster_id):
 
     Request body: { "sort_order": 5 }
     """
+    # MK Nov 2026 - cluster.config alone let a caller move any cluster it could name, another
+    # tenant's too. The same gate as the location route beside it, and before the lookup,
+    # so an id of somebody else's cluster is answered like one that does not exist
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
