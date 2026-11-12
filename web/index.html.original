@@ -4647,6 +4647,9 @@
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-objhead + .cr-tabs, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-objhead + .corp-tab-strip { margin-top: 6px; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-tabs { overflow-x: auto; overflow-y: hidden; flex-wrap: nowrap; scrollbar-width: thin; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-tabs button { flex: 0 0 auto; }
+        /* the cluster has a dozen tabs: they wrap to a second line as in classic Corporate, scrolled
+           sideways the last ones sat out of sight at 1280 (and at 1600 in German and Russian) */
+        @media (min-width: 821px) { body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-tabs[data-cr-tabs="cluster"] { flex-wrap: wrap; overflow: visible; } }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-tabs .cr-ico svg { width: 13px; height: 13px; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-perf .cr-panel-header { height: auto; min-height: 34px; flex-wrap: wrap; padding: 4px 10px; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-perf .cr-panel-actions { flex-wrap: wrap; gap: 8px; }

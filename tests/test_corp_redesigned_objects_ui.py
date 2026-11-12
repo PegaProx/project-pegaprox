@@ -510,7 +510,7 @@ def test_runtime_the_cluster_tabs_are_a_tab_list(open_app):
     page.keyboard.press('ArrowRight')
     page.wait_for_function('() => document.querySelectorAll(".cr-crumbs li").length === 3', timeout=5000)
     assert _crumbs(page) == ['All', 'Testi', 'Resources']
-    # at 1280 the strip scrolls instead of cutting off its last tabs
+    # at 1280 the strip wraps instead of cutting off its last tabs
     page.keyboard.press('End')
     last = page.locator('[data-cr-tabs="cluster"] [data-cr-tab="settings"]')
     assert last.get_attribute('aria-selected') == 'true'
