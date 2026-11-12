@@ -25,9 +25,22 @@ CID = 'cluster_1'
 CONFINED = ('carol', 'dave', 'erin', 'dflt')
 
 
+GUESTS = {100: {'vmid': 100, 'name': 'db-a'}, 200: {'vmid': 200, 'name': 'web-b'},
+          201: {'vmid': 201, 'name': 'mail-b'}}
+
+
 def _guest(vmid, name, cpu):
     return {'vmid': vmid, 'name': name, 'type': 'qemu', 'node': 'pve1', 'status': 'running',
             'cpu': cpu, 'mem': 1, 'maxmem': 2, 'disk': 1, 'maxdisk': 2}
+
+
+def _replication(rule, job_ids, failing=True):
+    """One pass of a replication rule over these jobs, all failing or all in sync."""
+    jobs = [{'id': j, 'guest': int(j.split('-')[0]), 'source': 'pve1', 'target': 'pve2'} for j in job_ids]
+    st = ({'fail_count': 2, 'error': 'storage gone', 'last_sync': time.time() - 30} if failing
+          else {'fail_count': 0, 'error': '', 'last_sync': time.time()})
+    seen = {'guests': GUESTS, 'replication': {'jobs': jobs, 'status': {j['id']: dict(st) for j in jobs}}}
+    alert_events._evaluate(alerts, rule, CID, seen, [], {}, time.time())
 
 
 @pytest.fixture
@@ -146,16 +159,8 @@ def test_a_node_alert_reaches_the_cluster_wide_subscribers_with_node_view(world,
 
 def test_an_event_rule_and_its_resolved_notes_keep_to_the_guests_a_subscriber_sees(world):
     rule = world.rule('cluster', '', metric='replication', threshold=60, notify_resolved=True)
-    guests = {100: {'vmid': 100, 'name': 'db-a'}, 200: {'vmid': 200, 'name': 'web-b'}}
-    jobs = [{'id': '100-0', 'guest': 100, 'source': 'pve1', 'target': 'pve2'},
-            {'id': '200-0', 'guest': 200, 'source': 'pve1', 'target': 'pve2'}]
-
-    def tick(status):
-        seen = {'guests': guests, 'replication': {'jobs': jobs, 'status': {j['id']: dict(status) for j in jobs}}}
-        alert_events._evaluate(alerts, rule, CID, seen, [], {}, time.time())
-
-    tick({'fail_count': 2, 'error': 'storage gone', 'last_sync': time.time() - 30})
-    tick({'fail_count': 0, 'error': '', 'last_sync': time.time()})
+    _replication(rule, ['100-0', '200-0'])
+    _replication(rule, ['100-0', '200-0'], failing=False)
 
     root = world.inbox('root')
     assert 'Replication 200-0 of web-b (200) is failing' in root, root
@@ -186,3 +191,38 @@ def test_the_resolved_note_of_a_metric_rule_keeps_to_the_guests_a_subscriber_see
         got = world.inbox(name)
         assert 'Vm db-a: cpu is no longer > 90%' in got, (name, got)
         assert 'web-b' not in got, (name, got)
+
+
+def test_the_summary_of_an_event_rule_reaches_a_confined_subscriber_only_for_its_own_guests(world, monkeypatch):
+    monkeypatch.setattr(alert_events, 'NOTICES_PER_RULE', 2)
+    mixed = world.rule('cluster', '', metric='replication', name='mixed')
+    own = world.rule('cluster', '', metric='replication', name='own')
+    _replication(mixed, ['100-0', '100-1', '200-0', '201-0'])
+    _replication(own, ['100-0', '100-1', '100-2', '100-3'])
+
+    root = world.inbox('root')
+    assert 'mixed: 2 more alerts' in root and 'web-b' in root and 'mail-b' in root, root
+    assert 'own: 2 more alerts' in root, root
+    for name in CONFINED:
+        got = world.inbox(name)
+        # a summary of its own guests still reaches it, one naming others does not
+        assert 'own: 2 more alerts' in got, (name, got)
+        assert 'mixed: 2 more alerts' not in got, (name, got)
+        assert 'web-b' not in got and 'mail-b' not in got, (name, got)
+
+
+def test_the_summary_of_node_alerts_reaches_only_subscribers_with_node_view(world, monkeypatch):
+    monkeypatch.setattr(alert_events, 'NOTICES_PER_RULE', 2)
+    rule = world.rule('cluster', '', metric='task_failed', name='updates', task_type='aptupdate')
+    now = time.time()
+    tasks = [{'type': 'aptupdate', 'node': f'pve-n{i}', 'id': '', 'status': 'command failed',
+              'starttime': now - 60, 'endtime': now - 30, 'upid': f'UPID:pve-n{i}:aptupdate'}
+             for i in range(4)]
+    alert_events._evaluate(alerts, rule, CID, {'tasks': tasks, 'guests': GUESTS}, [], {}, now)
+
+    for name in ('root', 'wide'):
+        got = world.inbox(name)
+        assert 'updates: 2 more alerts' in got and 'pve-n3' in got, (name, got)
+    for name in CONFINED + ('nonode',):
+        got = world.inbox(name)
+        assert 'more alerts' not in got and 'pve-n' not in got, (name, got)

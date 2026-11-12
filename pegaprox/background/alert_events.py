@@ -1977,6 +1977,9 @@ def _send(rule, cid, notices, settings):
             word = {'firing': 'more alerts', 'resolved': 'more resolved', 'changed': 'more changes'}[kind]
             _deliver(A, rule, cid, cname, kind, {
                 'object': '', 'target_type': 'cluster', 'target_name': cname,
+                # the guests and nodes it stands for: whoever reads it has to see each one
+                'targets': sorted({(c.get('target_type') or 'cluster', str(c.get('target_id') or ''))
+                                   for c in rest}),
                 'name': f"{rule.get('name') or rule.get('metric')}: {len(rest)} {word}",
                 'message': f"{len(rest)} {word} for this rule on {cname}: {names}",
                 'value': len(rest), 'display': len(rest),
@@ -2000,6 +2003,8 @@ def _deliver(A, rule, cid, cname, kind, c, recipients):
         'cluster_id': cid, 'severity': sev, 'timestamp': datetime.now().isoformat(),
         'message': c['message'], 'event': kind, 'object': c.get('object', ''),
     }
+    if c.get('targets'):
+        alert_data['targets'] = [list(t) for t in c['targets']]
     stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     rows = [('Rule', rule.get('name') or rule.get('metric')), ('Cluster', cname), ('Time', stamp)]
     rows += list(c.get('details') or [])

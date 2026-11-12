@@ -380,7 +380,10 @@ def _alert_handler(alert_data: dict):
         from pegaprox.utils.auth import load_users
         from pegaprox.api.helpers import alert_scope
         _all_users = load_users()
-        target = (alert_data.get('target_type') or 'cluster', alert_data.get('target_id'))
+        targets = [(alert_data.get('target_type') or 'cluster', alert_data.get('target_id'))]
+        # the summary of an event rule names the alerts it stands for: each has to be readable
+        targets += [tuple(t) for t in (alert_data.get('targets') or ())
+                    if isinstance(t, (list, tuple)) and len(t) == 2]
         for u in users:
             if cid:
                 # NS Jul 2026 (CodeAnt re-scan — fail-open fix) — a subscriber whose user record
@@ -406,7 +409,7 @@ def _alert_handler(alert_data: dict):
                 # None) can hold a pool grant here too.
                 try:
                     sees = alert_scope(udict, cid)
-                    if sees is not None and not sees(*target):
+                    if sees is not None and not all(sees(*t) for t in targets):
                         continue
                 except Exception:
                     continue
