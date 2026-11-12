@@ -2604,17 +2604,58 @@ def _keep_guarded_ha_settings(cluster, existing):
     cluster['ha_settings'] = merged
 
 
+def _keep_ha_secrets(cluster, existing):
+    """The HA secrets of a cluster whose addresses the backup leaves as they are: a blank
+    in the backup keeps the key the self-fence agents sign with, and a fence's BMC password
+    while the fence keeps its type and its BMC. The same rule as the cluster's password.
+
+    An overwrite wrote the backup's HA settings as they were, and a backup without secrets
+    has neither: every installed agent was answered 403 from then on, and a tiebreak node
+    that hears no leader fences itself. A merge has kept them already."""
+    held = existing.get('ha_settings') if isinstance(existing.get('ha_settings'), dict) else {}
+    sent = cluster.get('ha_settings')
+    ha = dict(sent) if isinstance(sent, dict) else {}
+    kept = False
+    token = held.get('agent_token')
+    if not _blank_ha_secret('agent_token', token) and _blank_ha_secret('agent_token', ha.get('agent_token')):
+        ha['agent_token'] = token
+        kept = True
+    held_fences = held.get('fencing') if isinstance(held.get('fencing'), dict) else {}
+    if isinstance(ha.get('fencing'), dict):
+        from pegaprox.api.clusters import _host_key
+        fences = dict(ha['fencing'])
+        for node, new in fences.items():
+            old = held_fences.get(node)
+            if not (isinstance(old, dict) and isinstance(new, dict)):
+                continue
+            # the password goes to the BMC the fence names
+            if (str(new.get('type') or '').lower(), _host_key(new.get('host'))) != \
+                    (str(old.get('type') or '').lower(), _host_key(old.get('host'))):
+                continue
+            secret = set(old) - set(_strip_secret_fields(dict(old)))
+            keep = {k: old[k] for k in secret
+                    if not _blank_ha_secret(k, old[k]) and _blank_ha_secret(k, new.get(k))}
+            if keep:
+                fences[node] = dict(new, **keep)
+                kept = True
+        ha['fencing'] = fences
+    if kept:
+        cluster['ha_settings'] = ha
+
+
 def _ha_secrets_left_empty(cluster, existing):
     """What of a cluster's HA secrets the restore of its row leaves empty: whether the key
     the self-fence agents sign with goes, and the nodes whose fence loses its BMC password.
 
-    A merge keeps both (above). An overwrite writes the backup's HA settings as they are,
-    and a backup without secrets has neither: every installed agent is then answered 403
-    and the fence has nothing to log in with. A fence the backup does not have is gone
-    as a whole and needs no password. Returns (token, [node])."""
+    A merge keeps both, and so does an overwrite while the backup leaves the cluster's
+    addresses (above). An overwrite that moves the cluster writes the backup's HA settings
+    as they are, and a backup without secrets has neither: every installed agent is then
+    answered 403 and the fence has nothing to log in with. A fence the backup does not
+    have is gone as a whole and needs no password. Returns (token, [node])."""
     held = existing.get('ha_settings') if isinstance(existing.get('ha_settings'), dict) else {}
     sent = cluster.get('ha_settings') if isinstance(cluster.get('ha_settings'), dict) else {}
-    token = bool(held.get('agent_token')) and _blank_secret(sent.get('agent_token'))
+    token = not _blank_ha_secret('agent_token', held.get('agent_token')) and \
+        _blank_ha_secret('agent_token', sent.get('agent_token'))
     held_fences = held.get('fencing') if isinstance(held.get('fencing'), dict) else {}
     sent_fences = sent.get('fencing') if isinstance(sent.get('fencing'), dict) else {}
     fences = []
@@ -2624,7 +2665,7 @@ def _ha_secrets_left_empty(cluster, existing):
             continue
         # what the export without secrets leaves out of a fence
         secret = set(fence) - set(_strip_secret_fields(dict(fence)))
-        if any(fence[k] and _blank_secret(new.get(k)) for k in secret):
+        if any(not _blank_ha_secret(k, fence[k]) and _blank_ha_secret(k, new.get(k)) for k in secret):
             fences.append(str(node))
     return token, sorted(fences)
 
@@ -2650,6 +2691,17 @@ _CHANNEL_SECRETS = ('url', 'token', 'topic')
 def _blank_secret(value):
     # a sealed secret is a string; a list or a number in its place carries none either
     return not isinstance(value, str) or value in ('', '********')
+
+
+_AGENT_KEY = re.compile(r'[0-9a-f]{64}')
+
+
+def _blank_ha_secret(key, value):
+    # the manager makes a new agent key for whatever is not one (core/manager.py _ha_agent_token),
+    # and a BMC password of blanks only is none either
+    if key == 'agent_token':
+        return not (isinstance(value, str) and _AGENT_KEY.fullmatch(value))
+    return _blank_secret(value) or not value.strip()
 
 
 def _restored_secrets(incoming, current, mode):
@@ -3261,6 +3313,8 @@ def restore_config():
                         for _sk in ('pass', 'ssh_key', 'api_token_secret'):
                             if _blank_secret(cluster.get(_sk)) and existing.get(_sk):
                                 cluster[_sk] = existing[_sk]
+                        # the agent key and the fence passwords as well
+                        _keep_ha_secrets(cluster, existing)
                     if _blank_secret(cluster.get('pass')) and _blank_secret(cluster.get('api_token_secret')):
                         results.setdefault('secrets_to_enter', []).append({'cluster': cluster_name})
                     # the nodes' own root passwords go where the cluster says its nodes are, and

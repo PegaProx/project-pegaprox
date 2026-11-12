@@ -3,7 +3,8 @@
 The HA settings of a cluster hold the key its self-fence agents sign the leader question
 with, and the BMC password of each node's fence. A backup without secrets leaves both
 out (api/settings.py _strip_cluster_secrets). A merge restore keeps what the cluster has,
-an overwrite restore writes the backup's HA settings as they are: the installed agents
+and so does an overwrite while the backup leaves the cluster's addresses. An overwrite
+that moves the cluster writes the backup's HA settings as they are: the installed agents
 are answered 403 from then on and the fences have nothing to log in with, and the answer
 of the restore said nothing of it.
 
@@ -31,12 +32,14 @@ def admin(api, seed):
     return _admin_with_password(api, seed)
 
 
-def _row(secrets=False):
+def _row(secrets=False, **changes):
     """The row of c1 as an export holds it, with or without its secrets."""
     from pegaprox.core.db import get_db
     from pegaprox.api.settings import _strip_cluster_secrets
     row = get_db().get_all_clusters()['c1']
-    return row if secrets else _strip_cluster_secrets(row)
+    row = row if secrets else _strip_cluster_secrets(row)
+    row.update(changes)
+    return row
 
 
 def _restore(client, row, mode, dry_run=False):
@@ -59,10 +62,11 @@ def _ha():
 
 
 @pytest.mark.parametrize('dry_run', [False, True], ids=['restore', 'dry-run'])
-def test_an_overwrite_without_secrets_names_the_agent_key_and_the_fences(admin, dry_run):
-    res = _restore(admin, _row(), 'overwrite', dry_run=dry_run)
+def test_an_overwrite_that_moves_the_cluster_names_the_agent_key_and_the_fences(admin, dry_run):
+    res = _restore(admin, _row(host='10.9.9.9'), 'overwrite', dry_run=dry_run)
 
-    assert res.get('secrets_to_enter') == [{'cluster': 'lab', 'agent_token': True},
+    assert res.get('secrets_to_enter') == [{'cluster': 'lab'},
+                                           {'cluster': 'lab', 'agent_token': True},
                                            {'cluster': 'lab', 'fences': ['pve1', 'pve2']}]
     if not dry_run:
         # it names what the restore did
@@ -71,7 +75,7 @@ def test_an_overwrite_without_secrets_names_the_agent_key_and_the_fences(admin, 
 
 
 def test_a_fence_the_backup_does_not_have_is_not_named(admin):
-    row = _row()
+    row = _row(host='10.9.9.9')
     del row['ha_settings']['fencing']['pve2']
 
     res = _restore(admin, row, 'overwrite')
