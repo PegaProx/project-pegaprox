@@ -545,6 +545,22 @@ def url_without_login(url):
     return urlunsplit(p._replace(netloc=p.netloc.rpartition('@')[2]))
 
 
+# the login of an http(s) URL in a line: up to its last '@' before the path, or, with a
+# blank in it, up to an '@' that a host and a path follow
+_URL_LOGIN = re.compile(
+    r'''(https?://)(?:[^/?#\s'"<>]+@|[^/?#'"<>]*@(?=[A-Za-z0-9_.\-:\[\]]+[/?#]))''')
+
+
+def mask_url_logins(text):
+    """`text` with the user:password@ of each http(s) URL in it as [REDACTED]@.
+
+    For a line shown whole, a task log line say, where redact_url() would take the
+    path and the query as well."""
+    if not text or not isinstance(text, str) or '@' not in text:
+        return text
+    return _URL_LOGIN.sub(r'\1[REDACTED]@', text)
+
+
 def redact_request_line(line):
     """An access-log line with credential-looking query values blanked.
 

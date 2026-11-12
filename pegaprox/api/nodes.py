@@ -16,7 +16,7 @@ from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117
-from pegaprox.utils.sanitization import task_ref_ok
+from pegaprox.utils.sanitization import task_ref_ok, mask_url_logins
 from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth, load_users, verify_password
@@ -1359,6 +1359,8 @@ def get_node_task_log_api(cluster_id, node, upid):
     limit = bounded_limit(request.args.get('limit'), 500, 5000)
 
     log_lines = manager.get_node_task_log(node, upid, start, limit)
+    # a download task names its URL as given, with a mirror login (user:pass@) in it
+    log_lines = [mask_url_logins(line) for line in log_lines or []]
     # Join lines into a single string for display
     log_text = '\n'.join(log_lines) if log_lines else ''
 
