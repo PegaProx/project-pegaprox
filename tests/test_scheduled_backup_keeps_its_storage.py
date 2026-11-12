@@ -8,7 +8,8 @@ The manager here is a double of the real one, so a method it does not have, or a
 does not take, fails the test. The one before had every method: it took the storage as a
 fourth argument, which XcpngManager.backup_vm takes by name only, so on XCP-ng every
 scheduled backup raised a TypeError. PegaProxManager has no backup_vm at all; the storage
-is followed on XCP-ng, whose manager has the call.
+is followed on XCP-ng, whose manager has the call, and Proxmox VE refuses a backup task
+before it is stored (test_scheduled_tasks_report_their_outcome.py).
 
 MK Nov 2026
 """
@@ -18,6 +19,7 @@ from unittest.mock import create_autospec
 import pytest
 
 from pegaprox.background import scheduler
+from pegaprox.core.manager import PegaProxManager
 from pegaprox.core.xcpng import XcpngManager
 
 
@@ -42,6 +44,13 @@ def backups(api):
     return sent
 
 
+@pytest.fixture
+def pve(api):
+    m = create_autospec(PegaProxManager, instance=True)
+    api.set_manager('cluster_1', m)
+    return m
+
+
 def _create(client, **over):
     body = {'name': 'nightly', 'cluster_id': 'cluster_1', 'target_type': 'qemu', 'target_id': '101',
             'target_node': 'pve1', 'action': 'backup', 'backup_storage': 'pbs-x'}
@@ -58,7 +67,7 @@ def _loaded(task_id):
 def test_the_loaded_task_backs_up_to_the_storage_it_was_created_with(root, backups):
     task = _create(root)
     assert task['backup_storage'] == 'pbs-x'
-    scheduler.execute_scheduled_task(_loaded(task['id']))
+    assert scheduler.execute_scheduled_task(_loaded(task['id'])) is None
     assert backups == ['pbs-x']
 
 
@@ -95,3 +104,14 @@ def test_rows_stored_without_a_storage_read_as_local(db):
     assert _loaded('t1').get('backup_storage') == 'local'
     assert _loaded('t2').get('backup_storage') == 'local'
     assert _loaded('t2')['config'] == {'foo': 'bar'}
+
+
+def test_on_proxmox_ve_a_backup_task_is_refused_before_it_is_stored(root, pve):
+    assert not hasattr(pve, 'backup_vm')
+    r = root.post('/api/scheduled-tasks', json={
+        'name': 'nightly', 'cluster_id': 'cluster_1', 'target_type': 'qemu', 'target_id': '101',
+        'target_node': 'pve1', 'action': 'backup', 'backup_storage': 'pbs-x'})
+    assert r.status_code == 400, r.get_data(as_text=True)
+    assert 'not supported for Proxmox VE scheduled tasks' in r.get_json()['error']
+    assert scheduler.load_scheduled_tasks()['tasks'] == []
+    assert pve.mock_calls == []

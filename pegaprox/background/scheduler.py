@@ -386,43 +386,86 @@ def _touch_last_run(task_id, when):
         logging.error(f"Failed to record last_run for scheduled task {task_id}: {e}")
 
 
+# what each action calls on the manager; only XcpngManager has the power and backup ones
+_ACTION_METHODS = {'start': 'start_vm', 'stop': 'stop_vm', 'restart': 'restart_vm',
+                   'shutdown': 'shutdown_vm', 'snapshot': 'create_snapshot', 'backup': 'backup_vm'}
+
+# MK Nov 2026 - PegaProxManager has none of start_vm, stop_vm, restart_vm, shutdown_vm and
+# backup_vm, so these tasks never ran on Proxmox VE: an AttributeError the log called a
+# failure, while POST .../run answered that the task was executed. They are refused by name
+# rather than made to run, or tasks saved long ago would start acting after an update.
+PVE_REFUSED_ACTIONS = ('start', 'stop', 'restart', 'shutdown', 'backup')
+PVE_REFUSAL = ('This action is not supported for Proxmox VE scheduled tasks. Use Scheduled '
+               'Actions for start, stop, shutdown and reboot, a snapshot policy, a Proxmox VE '
+               'backup job or the rolling update scheduler instead.')
+
+
+def task_refusal(cluster_id, action):
+    """Why a task of `action` cannot run on the cluster, None when it can."""
+    if action not in _ACTION_METHODS:
+        return f"Unknown action '{_sl(str(action))[:40]}'"
+    manager = cluster_managers.get(cluster_id)
+    if getattr(manager, 'cluster_type', 'proxmox') == 'proxmox':
+        return PVE_REFUSAL if action in PVE_REFUSED_ACTIONS else None
+    if not hasattr(manager, _ACTION_METHODS[action]):
+        return f"The action '{action}' is not supported for scheduled tasks on this cluster."
+    return None
+
+
+def _failure(result):
+    """What went wrong by a manager's answer, None when it did the work. The snapshot calls
+    answer a dict, the XCP-ng power and backup calls a task id or None."""
+    if isinstance(result, dict):
+        return None if result.get('success') else str(result.get('error') or 'the cluster refused it')
+    return None if result else 'the cluster started no task'
+
+
 def execute_scheduled_task(task):
-    """Execute a scheduled task"""
+    """Execute a scheduled task. Returns None when it ran, else (status, why): 400 for an
+    action the cluster's tasks cannot run, 404 for a cluster that is gone, 500 when the
+    cluster did not do it. The scheduler and POST .../run both report that outcome."""
     cluster_id = task.get('cluster_id', '')
     action = task.get('action', '')
     target_type = task.get('target_type', 'vm')
     target_id = task.get('target_id', '')
     target_node = task.get('target_node', '')
+    name = task.get('name')
     
     if cluster_id not in cluster_managers:
-        logging.error(f"Scheduled task failed: Cluster {cluster_id} not found")
-        return
+        logging.error(f"Scheduled task failed: Cluster {_sl(cluster_id)} not found")
+        return 404, 'Cluster not found'
+
+    refusal = task_refusal(cluster_id, action)
+    if refusal:
+        logging.warning(f"Scheduled task {_sl(name)} not run: {refusal}")
+        log_audit('scheduler', 'scheduled_task.failed', f"Task '{name}' was not run: {refusal}")
+        return 400, refusal
     
     manager = cluster_managers[cluster_id]
-    logging.info(f"Executing scheduled task: {_sl(task.get('name'))} - {action} on {target_type}/{target_id}")
+    logging.info(f"Executing scheduled task: {_sl(name)} - {action} on {target_type}/{target_id}")
     
     try:
-        if action == 'start':
-            manager.start_vm(target_node, int(target_id), target_type)
-        elif action == 'stop':
-            manager.stop_vm(target_node, int(target_id), target_type)
-        elif action == 'restart':
-            manager.restart_vm(target_node, int(target_id), target_type)
-        elif action == 'shutdown':
-            manager.shutdown_vm(target_node, int(target_id), target_type)
-        elif action == 'snapshot':
+        if action == 'snapshot':
             snap_name = f"scheduled_{datetime.now().strftime('%Y%m%d_%H%M')}"
-            manager.create_snapshot(target_node, int(target_id), target_type, snap_name, 'Scheduled snapshot', False)
+            result = manager.create_snapshot(target_node, int(target_id), target_type, snap_name, 'Scheduled snapshot', False)
         elif action == 'backup':
             # XcpngManager.backup_vm takes what follows the guest type by name
             storage = task.get('backup_storage', 'local')
-            manager.backup_vm(target_node, int(target_id), target_type, storage=storage)
-        
-        log_audit('scheduler', 'scheduled_task.executed', f"Task '{task.get('name')}' executed: {action} on {target_type}/{target_id}")
-        
+            result = manager.backup_vm(target_node, int(target_id), target_type, storage=storage)
+        else:
+            result = getattr(manager, _ACTION_METHODS[action])(target_node, int(target_id), target_type)
     except Exception as e:
         logging.error(f"Scheduled task failed: {e}")
-        log_audit('scheduler', 'scheduled_task.failed', f"Task '{task.get('name')}' failed: {e}")
+        log_audit('scheduler', 'scheduled_task.failed', f"Task '{name}' failed: {e}")
+        return 500, f"Task '{name}' failed, see the server log"
+
+    failed = _failure(result)
+    if failed:
+        logging.error(f"Scheduled task {_sl(name)} failed: {_sl(failed)}")
+        log_audit('scheduler', 'scheduled_task.failed', f"Task '{name}' failed: {failed}")
+        return 500, f"Task '{name}' failed: {failed}"
+    log_audit('scheduler', 'scheduled_task.executed', f"Task '{name}' executed: {action} on {target_type}/{target_id}")
+    return None
 
 # Scheduler thread
 _scheduler_thread = None

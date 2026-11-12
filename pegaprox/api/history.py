@@ -16,10 +16,20 @@ from pegaprox.models.tasks import balancer_cooldown
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
-from pegaprox.background.scheduler import load_scheduled_tasks, save_scheduled_tasks, execute_scheduled_task
+from pegaprox.background.scheduler import (load_scheduled_tasks, save_scheduled_tasks, execute_scheduled_task,
+                                            task_refusal)
 from pegaprox.api.helpers import bounded_limit, get_connected_manager, check_cluster_access
 
 bp = Blueprint('history', __name__)
+
+
+def _task_refused(task):
+    """The 400 answer for a task the cluster's tasks cannot run, None for one they can.
+    MK Nov 2026 - said here instead of failing every night (scheduler.task_refusal)."""
+    why = task_refusal(task.get('cluster_id', ''), task.get('action', ''))
+    if why:
+        return jsonify({'error': why}), 400
+    return None
 
 @bp.route('/api/scheduled-tasks', methods=['GET'])
 @require_auth(perms=['cluster.view'])
@@ -91,6 +101,9 @@ def create_scheduled_task():
         'last_run': None,
         'created': datetime.now().isoformat()
     }
+    refused = _task_refused(new_task)
+    if refused:
+        return refused
     
     config['tasks'].append(new_task)
     save_scheduled_tasks(config)
@@ -109,7 +122,8 @@ def update_scheduled_task(task_id):
     
     for task in config['tasks']:
         if task['id'] == task_id:
-            task.update({
+            changed = dict(task)
+            changed.update({
                 'name': data.get('name', task['name']),
                 'cluster_id': data.get('cluster_id', task['cluster_id']),
                 'target_type': data.get('target_type', task['target_type']),
@@ -122,6 +136,12 @@ def update_scheduled_task(task_id):
                 'backup_storage': data.get('backup_storage', task.get('backup_storage', 'local')),
                 'enabled': data.get('enabled', task['enabled']),
             })
+            # a stored row stays as it is until it is edited; the edit is held to the rules
+            # of a new task
+            refused = _task_refused(changed)
+            if refused:
+                return refused
+            task.update(changed)
             save_scheduled_tasks(config)
             return jsonify(task)
     
@@ -148,7 +168,12 @@ def run_scheduled_task_now(task_id):
     
     for task in config['tasks']:
         if task['id'] == task_id:
-            execute_scheduled_task(task)
+            # MK Nov 2026 - this answered success whatever the task did; a refused or failed
+            # run says so, and leaves last_run alone so the next slot still runs it
+            failed = execute_scheduled_task(task)
+            if failed:
+                status, why = failed
+                return jsonify({'error': why}), status
             # the scheduler compares this stamp with the group's clock, not the host's (#625)
             task['last_run'] = ha.schedule_now().isoformat()
             save_scheduled_tasks(config)
