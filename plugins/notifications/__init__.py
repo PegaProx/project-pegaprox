@@ -10,7 +10,6 @@ Apprise is optional — install with: pip install apprise
 import os
 import re
 import json
-import errno
 import hashlib
 import hmac
 import logging
@@ -19,7 +18,8 @@ import requests
 from datetime import datetime
 from flask import request
 
-from pegaprox.api.plugins import register_plugin_route, _config_generation, _config_written, _login_masked
+from pegaprox.api.plugins import (register_plugin_route, _config_generation, _config_written, _login_masked,
+                                  _write_config, _config_not_writable)
 from pegaprox.globals import _notification_handlers
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -43,20 +43,9 @@ def _load_config():
     return cfg if isinstance(cfg, dict) else {'ntfy_enabled': False, 'apprise_enabled': False}
 
 def _save_config(cfg):
-    # the token and the apprise urls are credentials of their own: owner only
-    path = os.path.join(PLUGIN_DIR, 'config.json')
-    # MK Nov 2026 - with O_TRUNC the file was empty before fchmod ran, and a config.json
-    # of another owner (EPERM) stayed empty. Mode first, then the content.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
-    with os.fdopen(fd, 'w') as f:
-        try:
-            os.fchmod(f.fileno(), 0o600)    # O_CREAT's mode does nothing for a file that exists
-        except OSError as e:
-            if e.errno != errno.EPERM:
-                raise
-            logging.warning(f"[Notifications] {path} belongs to another user, its mode stays as it is")
-        f.truncate(0)
-        json.dump(cfg, f, indent=4)
+    # the token and the apprise urls are credentials of their own: owner only. A new file
+    # takes the place of config.json, so it is 0600 whoever owned the old one
+    _write_config(os.path.join(PLUGIN_DIR, 'config.json'), json.dumps(cfg, indent=4))
     _config_written(_PLUGIN)    # the handles read before this write find nothing now
 
 
@@ -347,7 +336,14 @@ def _update_config():
               'ntfy_priority_map', 'apprise_enabled', 'apprise_urls']:
         if k in data:
             cfg[k] = data[k]
-    _save_config(cfg)
+    try:
+        _save_config(cfg)
+    except OSError as e:
+        msg = _config_not_writable(e)
+        if not msg:
+            raise
+        logging.warning(f"[Notifications] config.json not saved: {e}")
+        return {'error': msg}, 500
     return {'success': True}
 
 def _send_test():

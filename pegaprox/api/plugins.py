@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import sys
 import threading
 import logging
@@ -1061,19 +1062,43 @@ def _unmasked_config(new, stored, plugin='', key=None):
     return out
 
 
+# a folder PegaProx cannot write to: the save says so, config.json stays as it was
+_CONFIG_NOT_WRITABLE = (errno.EACCES, errno.EPERM, errno.EROFS)
+
+
+def _config_not_writable(e):
+    """The answer for a config.json that could not be written because of its folder, or None."""
+    if not isinstance(e, OSError):
+        return None
+    if e.errno in _CONFIG_NOT_WRITABLE:
+        return 'PegaProx cannot write to the plugin folder, config.json was not changed'
+    if e.errno == errno.EBUSY:
+        # a config.json mounted as a file of its own: no new file can take its place
+        return ('config.json is mounted as a single file and cannot be replaced, mount the plugin '
+                'folder instead; config.json was not changed')
+    return None
+
+
 def _write_config(path, raw):
-    # MK Nov 2026 - O_TRUNC emptied the file before fchmod, and a config.json of another
-    # owner (EPERM) was left empty. The mode is set first, then the file is rewritten.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
-    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+    """Write a plugin's config.json, secrets and all. The text goes to a new file beside
+    it, created 0600, which then takes its place: the file ends 0600 and the service's,
+    whoever owned the old one, where a chmod of that one fails. An error leaves the old
+    file as it was."""
+    path = str(path)
+    tmp = os.path.join(os.path.dirname(path), f'.config.json.{secrets.token_hex(6)}.tmp')
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            fh.write(raw)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
         try:
-            os.fchmod(fh.fileno(), 0o600)
-        except OSError as e:
-            if e.errno != errno.EPERM:
-                raise
-            logging.warning(f"[PLUGINS] {path} belongs to another user, its mode stays as it is")
-        fh.truncate(0)
-        fh.write(raw)
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 @bp.route('/api/plugins/<plugin_id>/config', methods=['GET'])
@@ -1153,12 +1178,22 @@ def save_plugin_config(plugin_id):
         try:
             os.chmod(config_path, 0o600)
         except OSError:
-            pass    # a file of another owner keeps its mode, as on a write
+            # a file of another owner: the same text goes into one of the service's own,
+            # and the handles still hold, as nothing in it changed
+            try:
+                if stat.S_IMODE(os.stat(config_path).st_mode) & 0o077:
+                    _write_config(config_path, config_path.read_text(encoding='utf-8'))
+            except OSError as e:
+                logging.warning(f"[PLUGINS] config.json of {plugin_id} keeps its mode: {e}")
     else:
         try:
             _write_config(config_path, raw)
             _config_written(plugin_id)
         except Exception as e:
+            msg = _config_not_writable(e)
+            if msg:
+                logging.warning(f"[PLUGINS] config.json of {plugin_id} not saved: {e}")
+                return jsonify({'error': msg}), 500
             return jsonify({'error': safe_error(e, 'Failed to write config')}), 500
 
     usr = getattr(request, 'session', {}).get('user', 'system')
