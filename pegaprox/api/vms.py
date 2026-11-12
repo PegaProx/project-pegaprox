@@ -1046,17 +1046,32 @@ def _backfill_zero_datastore_sizes(manager, host, port, content):
             it['size_from_config'] = True  # LW: UI could badge this later if we want
 
 
+def _bad_node_or_storage(node, storage):
+    """A 400 when the node a datastore route was given or its storage is no name, else None.
+    Both go into the API path as they come, and a '/', '?' or '#' in one would move the call
+    to another endpoint. No node given is fine, the route picks one. MK Nov 2026"""
+    from pegaprox.utils.sanitization import validate_hostname, validate_storage_name
+    if node and not (isinstance(node, str) and validate_hostname(node)):
+        return jsonify({'error': 'Invalid node name'}), 400
+    if not validate_storage_name(storage):
+        return jsonify({'error': 'Invalid storage name'}), 400
+    return None
+
+
 @bp.route('/api/clusters/<cluster_id>/datastores/<storage_name>/content', methods=['GET'])
 @require_auth(perms=['storage.view'])
 def get_datastore_content(cluster_id, storage_name):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+    node = request.args.get('node')
+    _bad = _bad_node_or_storage(node, storage_name)
+    if _bad:
+        return _bad
+
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
-    
-    node = request.args.get('node')
+
     # MK Nov 2026 - ISOs, snippets and templates have no vmid to scope them by: a confined
     # caller lists the storage of a node their guests run on, and is given the first of those
     # when it names none
@@ -1163,6 +1178,9 @@ def delete_datastore_content(cluster_id, storage_name, volid):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _bad = _bad_node_or_storage(request.args.get('node'), storage_name)
+    if _bad:
+        return _bad
     # sec (audit): this permanently destroys a volume, and the only thing between a scoped caller
     # and another tenant's data was an "is it referenced in a live VM config" scan — which is a
     # referential-integrity check, not authorization, and which backup archives never trip. Its own
@@ -1268,8 +1286,8 @@ def delete_datastore_content(cluster_id, storage_name, volid):
                                                             cluster_id)
         
         # Delete the volume
-        # URL encode the volid properly
-        encoded_volid = volid.replace('/', '%2F')
+        # MK Nov 2026 - the whole volid as one segment, a '?' or '#' in it is no part of the path
+        encoded_volid = url_quote(volid, safe='')
         delete_url = f"https://{host}:{port}/api2/json/nodes/{node}/storage/{storage_name}/content/{encoded_volid}"
         response = manager._create_session().delete(delete_url, timeout=10)
         
@@ -1319,6 +1337,9 @@ def upload_to_datastore(cluster_id, storage_name):
     try:
         host, port = manager.host, manager.api_port
         node = request.form.get('node') or request.args.get('node')
+        _bad = _bad_node_or_storage(node, storage_name)
+        if _bad:
+            return _bad
         content_type = request.form.get('content', 'iso')  # iso, vztmpl, etc.
 
         if not node:
@@ -1482,6 +1503,9 @@ def download_iso_from_url(cluster_id, storage_name):
         url = data.get('url', '').strip()
         filename = data.get('filename', '').strip()
         node = data.get('node', '').strip()
+        _bad = _bad_node_or_storage(node, storage_name)
+        if _bad:
+            return _bad
         
         if not url:
             return jsonify({'error': 'URL is required'}), 400
