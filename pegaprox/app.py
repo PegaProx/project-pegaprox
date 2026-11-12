@@ -2085,6 +2085,9 @@ def _host_for_location(host_value):
     return hv.rsplit(':', 1)[0] if ':' in hv else hv
 
 
+# what a port below 1024 takes, in the log and in http_redirect_state
+_NEEDS_PORT_PRIVILEGE = 'needs root or CAP_NET_BIND_SERVICE'
+
 # where _may_bind_port80 looks; tests point these at files of their own
 _PROC_STATUS = '/proc/self/status'
 _UNPRIVILEGED_PORT_START = '/proc/sys/net/ipv4/ip_unprivileged_port_start'
@@ -2144,8 +2147,9 @@ def _resolve_http_redirect_port(setting, https_port):
             user = pwd.getpwuid(os.geteuid()).pw_name
         except Exception:
             user = f'uid {os.geteuid()}'
-        print(f"HTTP redirect auto: port 80 not available for user {user} (needs root or "
-              f"CAP_NET_BIND_SERVICE), HTTP on port {https_port} still redirects")
+        print(f"HTTP redirect auto: port 80 not available for user {user} "
+              f"({_NEEDS_PORT_PRIVILEGE}), HTTP on port {https_port} still redirects")
+        g.HTTP_REDIRECT_STATE.update(extra_port=80, extra_error=_NEEDS_PORT_PRIVILEGE)
         return -1
     if wanted > 65535:
         print(f"WARNING: HTTP redirect port {wanted} is out of range, no extra port opened")
@@ -2315,20 +2319,26 @@ def _start_http_redirect(bind_host, http_redirect_port, https_port, domain):
         sock.listen(100)
         sock.settimeout(1.0)
     except PermissionError:
-        print(f"WARNING: Cannot bind to port {http_redirect_port} (needs root or CAP_NET_BIND_SERVICE). "
+        print(f"WARNING: Cannot bind to port {http_redirect_port} ({_NEEDS_PORT_PRIVILEGE}). "
               f"HTTP redirect not available on it.")
+        g.HTTP_REDIRECT_STATE.update(extra_port=http_redirect_port, extra_error=_NEEDS_PORT_PRIVILEGE)
         return
     except OSError as e:
         if e.errno == errno.EADDRINUSE:
             print(f"WARNING: Port {http_redirect_port} already in use. HTTP redirect not available on it.")
+            why = 'already in use'
         else:
             print(f"WARNING: HTTP redirect server failed: {e}")
+            why = e.strerror or str(e)
+        g.HTTP_REDIRECT_STATE.update(extra_port=http_redirect_port, extra_error=why)
         return
     except Exception as e:
         print(f"WARNING: HTTP redirect server failed: {e}")
+        g.HTTP_REDIRECT_STATE.update(extra_port=http_redirect_port, extra_error=str(e) or 'failed')
         return
 
     print(f"HTTP redirect server listening on port {http_redirect_port}")
+    g.HTTP_REDIRECT_STATE.update(extra_port=http_redirect_port, extra_error='')
     slots = threading.BoundedSemaphore(_REDIRECT_CLIENTS)
 
     def serve(client, addr):
@@ -2976,6 +2986,7 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
             redirect_domain=domain,
             **server_kwargs
         )
+        g.HTTP_REDIRECT_STATE['same_port'] = port
     else:
         print(f"HTTP on http://{bind_host}:{port}", flush=True)
         print("WARNING: Running without HTTPS - noVNC console may not work!", flush=True)

@@ -1570,6 +1570,10 @@ def get_server_settings():
     lock = ui_lock(settings)
     settings.update(ui_layout_lock=lock['layout'], ui_language_lock=lock['language'],
                     ui_lock_admins=lock['admins'])
+    # MK Nov 2026 - what answers plain HTTP right now (app.main), for the line under the
+    # redirect port. Read-only: both save paths below take named fields and leave it out
+    from pegaprox import globals as _g
+    settings['http_redirect_state'] = dict(_g.HTTP_REDIRECT_STATE)
     return jsonify(settings)
 
 

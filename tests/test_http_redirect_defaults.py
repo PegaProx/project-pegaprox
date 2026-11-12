@@ -12,6 +12,7 @@ The real server runs in a subprocess, called the way main() calls it, with no re
 setting at all: once on 127.0.0.1 and once on ::1. MK
 """
 import inspect
+import json
 import os
 import socket
 import ssl
@@ -24,6 +25,7 @@ import gevent
 import pytest
 
 import pegaprox.app as app_mod
+from pegaprox import globals as g
 from test_redirect_head_deadline import _tls_files
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -53,6 +55,12 @@ acme._pending_challenges['tok-known_1'] = 'tok-known_1.key-authorization'
 @web.route('/ping')
 def ping():
     return 'pong'
+
+
+@web.route('/state')
+def state():
+    from pegaprox import globals as g
+    return g.HTTP_REDIRECT_STATE
 
 
 # the extra port, started the way main() starts it
@@ -528,3 +536,77 @@ def test_main_asks_the_resolver_and_opens_nothing_behind_a_reverse_proxy():
     block = src[src.index('_resolve_http_redirect_port(') - 200:src.index('target=_start_http_redirect')]
     assert 'if ssl_context and not reverse_proxy:' in block
     assert 'PEGAPROX_HTTP_PORT' not in src
+
+
+# -- what the settings show ------------------------------------------------------------
+#
+# The settings page had only the stored number and a hint that was wrong for -1. It now gets
+# what this process actually runs as http_redirect_state, which no save writes back.
+
+@pytest.fixture(autouse=True)
+def state(monkeypatch):
+    """A state of its own for each test; the in-process ones bind, refuse and resolve."""
+    fresh = {'same_port': None, 'extra_port': None, 'extra_error': ''}
+    monkeypatch.setattr(g, 'HTTP_REDIRECT_STATE', fresh, raising=False)
+    return fresh
+
+
+def test_the_running_server_records_both_redirects(server, extra):
+    answer = _tls_get('127.0.0.1', server, '/state')
+    body = answer.split(b'\r\n\r\n', 1)[1]
+
+    assert answer.startswith(b'HTTP/1.1 200'), answer[:200]
+    assert json.loads(body) == {'same_port': server, 'extra_port': extra, 'extra_error': ''}
+
+
+def test_the_state_says_why_an_extra_port_is_not_listening(state, monkeypatch, host):
+    class Refused:
+        def __init__(self, *a, **k):
+            pass
+
+        def setsockopt(self, *a):
+            pass
+
+        def bind(self, addr):
+            raise PermissionError(13, 'Permission denied')
+
+    with monkeypatch.context() as m:
+        m.setattr(app_mod.socket, 'socket', Refused)
+        app_mod._start_http_redirect('0.0.0.0', 81, 5000, '')
+    refused = dict(state)
+
+    with socket.socket() as taken:
+        taken.bind(('127.0.0.1', 0))
+        taken.listen(1)
+        busy_port = taken.getsockname()[1]
+        app_mod._start_http_redirect('127.0.0.1', busy_port, 5000, '')
+        busy = dict(state)
+
+    host()                                     # a plain user without the capability
+    app_mod._resolve_http_redirect_port(0, 5000)
+    auto = dict(state)
+
+    assert refused == {'same_port': None, 'extra_port': 81, 'extra_error': 'needs root or CAP_NET_BIND_SERVICE'}
+    assert busy == {'same_port': None, 'extra_port': busy_port, 'extra_error': 'already in use'}
+    assert auto == {'same_port': None, 'extra_port': 80, 'extra_error': 'needs root or CAP_NET_BIND_SERVICE'}
+
+
+def test_the_settings_read_shows_the_state_and_no_save_stores_it(api, db, seed, state):
+    state.update(same_port=5000, extra_port=80, extra_error='already in use')
+    c = api.as_user(seed.user('root', role='admin'))
+
+    read = c.get('/api/settings/server')
+    assert read.status_code == 200, read.get_data(as_text=True)[:300]
+    shown = read.get_json()['http_redirect_state']
+    assert shown == {'same_port': 5000, 'extra_port': 80, 'extra_error': 'already in use'}
+
+    sent = {'http_redirect_port': 8080, 'http_redirect_state': {'same_port': 1, 'extra_port': 2}}
+    assert c.post('/api/settings/server', json=sent).status_code == 200
+    assert c.post('/api/settings/server', data={'domain': '', 'port': '5000', 'http_redirect_port': '-1',
+                                                'http_redirect_state': 'x'}).status_code == 200
+
+    from pegaprox.api.helpers import load_server_settings
+    stored = load_server_settings()
+    assert 'http_redirect_state' not in stored
+    assert stored['http_redirect_port'] == -1
+    assert g.HTTP_REDIRECT_STATE == {'same_port': 5000, 'extra_port': 80, 'extra_error': 'already in use'}
