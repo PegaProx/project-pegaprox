@@ -449,6 +449,18 @@ def test_a_head_in_two_segments_keeps_its_host_on_the_extra_port(server, extra):
     assert _location(answer) == f'https://pegaprox.lan:{server}{PATH}'
 
 
+def test_a_head_with_bare_line_feeds_is_answered_on_both_ports(server, extra):
+    """printf 'GET / HTTP/1.0\\n\\n' | nc ends its head with LF LF. Both listeners waited
+    for CRLF CRLF until their recv ran out after 5 s and closed without an answer, and the
+    one recv the extra port had before lost the Host of such a head."""
+    head = f'GET {PATH} HTTP/1.0\nHost: pegaprox.lan\n\n'
+    for port in (extra, server):
+        answer = _plain('127.0.0.1', port, head, timeout=3)
+
+        assert answer.startswith(b'HTTP/1.1 301'), (port, answer[:120])
+        assert _location(answer) == f'https://pegaprox.lan:{server}{PATH}', port
+
+
 def test_the_log_says_what_became_of_the_extra_port(monkeypatch, capsys):
     """Listening only once bound, a refused bind names what it needs, and main() no longer
     announces the port before it knows."""

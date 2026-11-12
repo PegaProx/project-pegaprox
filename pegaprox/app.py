@@ -2172,10 +2172,13 @@ def _read_request_head(sock, limit=8192):
     5 s at most. With 5 s per recv alone, a byte every 4 s held a pool slot for hours.
     Returns the text, which is '' when the client closed without sending anything, or None
     once the deadline has passed.
+
+    MK Nov 2026 - a blank line of LF alone ends it too (printf 'GET / HTTP/1.0\\n\\n' | nc).
+    Such a head never showed CRLF CRLF, and the next recv ran out without an answer.
     """
     until = time.monotonic() + _HEADER_TIMEOUT if _HEADER_TIMEOUT > 0 else None
     data = b''
-    while b'\r\n\r\n' not in data and len(data) < limit:
+    while b'\r\n\r\n' not in data and b'\n\n' not in data and len(data) < limit:
         left = 5.0 if until is None else min(5.0, until - time.monotonic())
         if left <= 0:
             return None
@@ -2234,7 +2237,8 @@ def _plain_http_reply(request, addr, https_port, domain='', same_port=False):
     number ended it without an answer, and on the TLS port X-Forwarded-Proto https from
     anyone closed the connection.
     """
-    lines = request.split('\r\n\r\n', 1)[0].split('\r\n')
+    # a line may end in LF alone, as pywsgi takes it on the TLS side (_read_request_head)
+    lines = [l.rstrip('\r') for l in re.split(r'\r?\n\r?\n', request, maxsplit=1)[0].split('\n')]
     parts = lines[0].split(' ')
     path = parts[1].replace('\r', '').replace('\n', '') if len(parts) >= 2 else '/'
     # MK Nov 2026 - only a path goes after the host. A target that starts with an at sign
