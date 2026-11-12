@@ -225,3 +225,63 @@ def test_an_iso_list_of_a_storage_that_is_no_name_sends_nothing(api, seed, isos,
         assert r.get_json() == [{'volid': 'local:iso/a.iso', 'content': 'iso', 'storage': real}]
     assert isos.rec.sent == [('GET', f'/api2/json/nodes/n1/storage/{real}/content?content=iso')
                              for real in ('local', 'nfs-iso.2', 'iso_store')]
+
+
+# --- a node in the body of a template download, a restore and a clone ------------------------
+
+ELSEWHERE_IN_A_BODY = ['n1/qemu/200/config?description=', 'n1/qemu/200/config#', 'n1 x']
+
+
+@pytest.fixture
+def admin(api, seed):
+    return api.as_user(seed.user('root_adm', role='admin'))
+
+
+def _posts(pve):
+    return [p for (meth, p) in pve.rec.sent if meth == 'POST']
+
+
+@pytest.mark.parametrize('node', ELSEWHERE_IN_A_BODY)
+def test_a_template_download_onto_a_node_that_is_no_name_sends_nothing(admin, pve, node):
+    body = {'storage': 'local', 'template': 'debian-12-standard_12.2-1_amd64.tar.zst'}
+    _refused(admin.post('/api/clusters/cluster_1/templates/download', json=dict(body, node=node)),
+             'Invalid node name')
+    assert pve.rec.sent == []
+    # counterproof: onto a node's name, and onto the node the route picks
+    for q in ({'node': 'pve-02'}, {}):
+        r = admin.post('/api/clusters/cluster_1/templates/download', json=dict(body, **q))
+        assert r.status_code == 200, r.get_data(as_text=True)
+    assert _posts(pve) == ['/api2/json/nodes/pve-02/aplinfo', '/api2/json/nodes/n1/aplinfo']
+
+
+@pytest.mark.parametrize('node', ELSEWHERE_IN_A_BODY)
+def test_a_restore_onto_a_node_that_is_no_name_sends_nothing(admin, pve, node):
+    body = {'volid': 'local:backup/vzdump-qemu-100-2026_01_01-00_00_00.vma.zst',
+            'target_vmid': 300, 'mode': 'new'}
+    _refused(admin.post('/api/clusters/cluster_1/backup-restore', json=dict(body, target_node=node)),
+             'Invalid target_node')
+    assert pve.rec.sent == []
+    r = admin.post('/api/clusters/cluster_1/backup-restore', json=dict(body, target_node='pve-02'))
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert _posts(pve) == ['/api2/json/nodes/pve-02/qemu']
+
+
+@pytest.mark.parametrize('node', ELSEWHERE_IN_A_BODY)
+def test_a_clone_onto_a_node_that_is_no_name_sends_nothing(admin, pve, node):
+    pve.clone_vm.return_value = {'success': True, 'data': 'UPID:n1:1:2:3:qmclone:100:root@pam:'}
+    pve._wait_for_task.return_value = True
+    body = {'newid': 301, 'name': 'c', 'ciuser': 'ops'}
+    _refused(admin.post('/api/clusters/cluster_1/vms/n1/qemu/100/clone',
+                        json=dict(body, target_node=node)), 'Invalid target node')
+    assert pve.rec.sent == [] and not pve.clone_vm.called
+    # counterproof: a node's name gets the clone and its Cloud-Init settings
+    r = admin.post('/api/clusters/cluster_1/vms/n1/qemu/100/clone', json=dict(body, target_node='pve-02'))
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert _posts(pve) == ['/api2/json/nodes/pve-02/qemu/301/config']
+    # and XCP-ng takes no target node, so a host name with spaces is left to it
+    pve.cluster_type = 'xcpng'
+    pve.clone_vm.reset_mock()
+    pve.clone_vm.return_value = {'success': True, 'vmid': 302}
+    r = admin.post('/api/clusters/cluster_1/vms/xcp%20host%20a/qemu/100/clone',
+                   json={'newid': 302, 'name': 'c', 'target_node': 'xcp host a'})
+    assert r.status_code == 200 and pve.clone_vm.called, r.get_data(as_text=True)

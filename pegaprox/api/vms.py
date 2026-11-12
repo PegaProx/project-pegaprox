@@ -5133,6 +5133,13 @@ def clone_vm_api(cluster_id, node, vm_type, vmid):
 
     manager = cluster_managers[cluster_id]
     data = request.json or {}
+    # MK Nov 2026 - on Proxmox VE the target node goes into the Cloud-Init config path below:
+    # a node name only (XCP-ng takes no target and its host names may hold spaces)
+    from pegaprox.utils.sanitization import validate_hostname
+    _tn = data.get('target_node')
+    if _tn and getattr(manager, 'cluster_type', 'proxmox') not in ('xcpng', 'esxi') \
+            and not (isinstance(_tn, str) and validate_hostname(_tn)):
+        return jsonify({'error': 'Invalid target node'}), 400
 
     # NS Oct 2026 - a clone is a new guest, so it keeps to what a restore into a new VMID
     # asks: the tenant's VMID range for a VMID the caller names, and for a caller confined

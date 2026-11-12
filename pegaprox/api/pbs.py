@@ -4492,6 +4492,10 @@ def restore_backup(cluster_id):
         return jsonify({'error': 'volid is required (storage:backup/...)'}), 400
     if not target_node:
         return jsonify({'error': 'target_node is required'}), 400
+    # MK Nov 2026 - it goes into the restore path, as the batch restore checks it
+    from pegaprox.utils.sanitization import validate_hostname
+    if not validate_hostname(target_node):
+        return jsonify({'error': 'Invalid target_node'}), 400
     try:
         target_vmid = int(body.get('target_vmid'))
     except (ValueError, TypeError):

@@ -2649,6 +2649,10 @@ def download_template(cluster_id):
         storage = data.get('storage')
         template = data.get('template')
         target_node = data.get('node')
+        # MK Nov 2026 - the node goes into the API path as it comes: a node name only
+        from pegaprox.utils.sanitization import validate_hostname
+        if target_node and not (isinstance(target_node, str) and validate_hostname(target_node)):
+            return jsonify({'error': 'Invalid node name'}), 400
         
         if not storage:
             return jsonify({'error': 'Storage is required'}), 400
