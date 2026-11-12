@@ -519,18 +519,20 @@ def redact_url(value):
             out += '?' + '&'.join(parts)
         return out
 
+    # the login runs to the last '@' before the path, as the fetcher reads it: a password
+    # with an '@' in it otherwise left its tail in the line as the host
     return re.sub(
-        r'(https?)://(?:([^/@\s]+)@)?([A-Za-z0-9_.\-:\[\]]+)([^\s\'"<>]*)',
+        r'(https?)://(?:([^/?#\s\'"<>]+)@)?([A-Za-z0-9_.\-:\[\]]+)([^\s\'"<>]*)',
         _one, text)
 
 
 def url_without_login(url):
     """A single URL (not a log text) with its user:password@ taken off.
 
-    redact_url() reads free text, so a login there ends at the first '@' or blank. A
-    typed URL is split the way the fetcher splits it: the netloc runs to the first '/',
-    '?' or '#', the host is what follows its last '@'. Pass the result on to
-    redact_url() for the path and the query."""
+    redact_url() reads free text, so a login there ends at a blank. A typed URL is split
+    the way the fetcher splits it: the netloc runs to the first '/', '?' or '#', the host
+    is what follows its last '@'. Pass the result on to redact_url() for the path and the
+    query."""
     if not url:
         return url
     from urllib.parse import urlsplit, urlunsplit
