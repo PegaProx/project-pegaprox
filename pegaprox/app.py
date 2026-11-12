@@ -1364,6 +1364,43 @@ def _generate_self_signed(cert_file, key_file, domain, app_name):
     _write_atomic(cert_file, crypto.dump_certificate(crypto.FILETYPE_PEM, cert), 0o644)
 
 
+def _acme_renewal_check():
+    """One round of the ACME renewal thread. A renewal is written to the audit log like
+    one from the settings page, and production logs at WARNING, so a renewed pair that
+    a listener did not take up is said at that level."""
+    from pegaprox.api.helpers import load_server_settings, acme_dns_config_from_settings
+    settings = load_server_settings()
+    domain = settings.get('domain')
+    if not (settings.get('acme_enabled') and domain):
+        return
+    from pegaprox.core.acme import check_and_renew, get_cert_info
+    # renew INTO the dir the TLS listener loads from (config/ssl). The old heuristic
+    # wrote to the retired <root>/ssl, so a renewed cert was issued but never served.
+    renewed = check_and_renew(
+        domain, settings.get('acme_email', ''),
+        SSL_DIR, staging=settings.get('acme_staging', False),
+        directory_url=settings.get('acme_directory_url', ''),
+        challenge_type=settings.get('acme_challenge_type') or 'http-01',
+        dns_provider=settings.get('acme_dns_provider') or 'manual',
+        dns_config=acme_dns_config_from_settings(settings)
+    )
+    if not renewed:
+        return
+    from pegaprox.utils.audit import log_audit
+    from pegaprox.utils.served_pair import serves, load_error
+    expires = (get_cert_info(SSL_DIR) or {}).get('expires', '?')
+    if serves(SSL_CERT_FILE) is False:
+        error = load_error(SSL_CERT_FILE)
+        todo = f"it does not load: {error}" if error else "restart PegaProx to serve it"
+        logging.warning(f"[ACME] Certificate for {domain} renewed (expires {expires}), but the "
+                        f"previous one is still served, {todo}")
+        log_audit('system', 'settings.acme_renewed',
+                  f"Certificate renewed for {domain}, expires {expires}. Not served yet, {todo}")
+    else:
+        logging.info(f"[ACME] Certificate for {domain} renewed and served, expires {expires}")
+        log_audit('system', 'settings.acme_renewed', f"Certificate renewed for {domain}, expires {expires}")
+
+
 def _write_atomic(path, data, mode):
     tmp = path + '.tmp'
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
@@ -1860,27 +1897,10 @@ def main(debug_mode=False):
         time.sleep(30)  # wait for server to fully start
         while True:
             try:
-                _settings = load_server_settings()
-                if _settings.get('acme_enabled') and _settings.get('domain'):
-                    from pegaprox.core.acme import check_and_renew
-                    # #725 (nvaert1986) — renew INTO the dir the TLS listener loads
-                    # from (config/ssl). The old heuristic wrote to the retired
-                    # <root>/ssl, so a renewed cert was issued but never served.
-                    _ssl = SSL_DIR
-                    _challenge_type = _settings.get('acme_challenge_type') or 'http-01'
-                    _dns_provider = _settings.get('acme_dns_provider') or 'manual'
-                    renewed = check_and_renew(
-                        _settings['domain'], _settings.get('acme_email', ''),
-                        _ssl, staging=_settings.get('acme_staging', False),
-                        directory_url=_settings.get('acme_directory_url', ''),
-                        challenge_type=_challenge_type,
-                        dns_provider=_dns_provider,
-                        dns_config=acme_dns_config_from_settings(_settings)
-                    )
-                    if renewed:
-                        logging.info("[ACME] Certificate renewed, restart required for new cert")
+                _acme_renewal_check()
             except Exception as e:
-                logging.debug(f"[ACME] Renewal check error: {e}")
+                # at debug level a production start never showed this
+                logging.warning(f"[ACME] Renewal check error: {e}")
             time.sleep(86400)  # check once per day
 
     threading.Thread(target=acme_renewal_loop, daemon=True).start()

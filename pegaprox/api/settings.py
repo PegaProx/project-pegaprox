@@ -2379,6 +2379,12 @@ def get_acme_status():
 
         settings = load_server_settings()
         cert_info = get_cert_info(ssl_dir)
+        # cert_info is the pair on disk, and the listeners take a new one up themselves.
+        # One that kept an older pair needs a restart, unless the pair on disk does not
+        # load: the start would refuse it too, and cert_error says why
+        from pegaprox.utils.served_pair import serves, load_error
+        stale = serves(SSL_CERT_FILE) is False
+        cert_error = load_error(SSL_CERT_FILE) if stale else ''
 
         return jsonify({
             'acme_enabled': settings.get('acme_enabled', False),
@@ -2402,6 +2408,9 @@ def get_acme_status():
             'acme_directory_url': settings.get('acme_directory_url', ''),
             'domain': settings.get('domain', ''),
             'cert': cert_info,
+            'cert_served': not stale,
+            'restart_required': stale and not cert_error,
+            'cert_error': cert_error,
         })
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get ACME status')}), 500
