@@ -543,6 +543,10 @@ def collect_metrics_snapshot():
     for cluster_id, mgr in list(cluster_managers.items()):
         if not mgr.is_connected:
             continue
+        # an ESXi host registered for XHM is in cluster_managers too: no nodes, no storage
+        # of its own to sample, and every cycle it only left a failure line here
+        if getattr(mgr, 'cluster_type', 'proxmox') == 'esxi':
+            continue
         
         try:
             cluster_data = {
