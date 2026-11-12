@@ -1630,6 +1630,21 @@
                 }
             };
 
+            // LW Nov 2026 - what the restore answer names in secrets_to_enter
+            const secretToEnter = (s) => {
+                if (s.channel !== undefined) return t('restoreSecretChannel').replace('{name}', () => s.channel);
+                // the nodes go in first, a cluster name can hold any text
+                if (Array.isArray(s.nodes)) return t('restoreSecretNodes').replace('{nodes}', () => s.nodes.join(', ')).replace('{name}', () => s.cluster);
+                if (s.cluster !== undefined) return t('restoreSecretCluster').replace('{name}', () => s.cluster);
+                return {
+                    smtp_password: t('restoreSecretSmtp'),
+                    ldap_bind_password: t('restoreSecretLdap'),
+                    oidc_client_secret: t('restoreSecretOidc'),
+                    acme_dns_rfc2136_secret: t('restoreSecretRfc2136'),
+                    acme_dns_cloudflare_token: t('restoreSecretCloudflare'),
+                }[s.setting] || s.setting;
+            };
+
             return (
                 <div className="space-y-6">
                     {/* Security Notice */}
@@ -1745,7 +1760,7 @@
 
                     {/* Results */}
                     {lastResult && (
-                        <div className={`p-4 rounded-lg border ${lastResult.errors?.length > 0 ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-green-500/10 border-green-500/30'}`}>
+                        <div className={`p-4 rounded-lg border ${lastResult.errors?.length > 0 || lastResult.secrets_to_enter?.length > 0 ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-green-500/10 border-green-500/30'}`}>
                             <h5 className="font-medium text-white mb-2">
                                 {lastResult.dry_run ? (t('dryRunResults') || 'Dry Run Results') : (t('restoreResults') || 'Restore Results')}
                             </h5>
@@ -1777,6 +1792,18 @@
                                     </div>
                                 )}
                                 
+                                {lastResult.secrets_to_enter?.length > 0 && (
+                                    <div className="mt-2">
+                                        <strong className="text-yellow-400">{t('restoreSecretsToEnter')}:</strong>
+                                        <div className="text-xs text-gray-400">{t('restoreSecretsToEnterDesc')}</div>
+                                        <ul className="ml-4">
+                                            {lastResult.secrets_to_enter.map((s, i) => (
+                                                <li key={i}>{secretToEnter(s)}</li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
+
                                 {lastResult.errors?.length > 0 && (
                                     <div className="mt-2">
                                         <strong className="text-red-400">{t('errors') || 'Errors'}:</strong>
