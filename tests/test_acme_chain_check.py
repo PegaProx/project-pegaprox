@@ -148,6 +148,9 @@ REFUSED = {
     'cut after -----BEGIN CERT': (_cut_at('-----BEGIN CERT', 2), 'cut off'),
     'cut in the second header dashes': (_cut_at('-----BEGIN CERTIFICATE---', 2), 'cut off'),
     'cut before the last END dashes': (lambda csr: _full(csr).rstrip()[:-3], 'cut off'),
+    # a whole leaf, but the served chain carries the intermediate it needs
+    'cut after the leaf END line': (_cut_at('-----END CERTIFICATE-----\n'),
+                                    'leaves out the intermediate CN=Test Intermediate'),
     'the intermediate of another CA': (lambda csr: _pem(CA.leaf(csr.public_key()), OTHER.intermediate),
                                        'does not link up'),
     'an intermediate with the right name and another key': (_same_name_other_key, 'does not link up'),
@@ -215,3 +218,45 @@ def test_a_private_ca_that_issues_from_its_root_keeps_working(tmp_path, monkeypa
         assert app_module._unloadable(str(ssl_dir / 'cert.pem'), str(ssl_dir / 'key.pem')) is None
         assert acme.get_cert_info(str(ssl_dir))['issuer'] == 'Test Root'
 
+
+def test_a_renewal_that_drops_a_self_signed_root_is_taken(tmp_path, monkeypatch):
+    # no client needs the root on top of the served chain, so nothing is missing without it
+    ssl_dir = tmp_path / 'ssl'
+    _serve(ssl_dir, lambda pub: (CA.leaf(pub, 19), CA.intermediate, CA.root))
+    res = _order(monkeypatch, ssl_dir, _full)
+    assert res['success'] is True, res
+
+
+def test_a_leaf_alone_from_another_issuer_is_taken(served, monkeypatch):
+    # a move to a private CA that signs from its root: nothing of the old chain applies
+    res = _order(monkeypatch, served, lambda csr: _pem(OTHER.leaf(csr.public_key(), from_root=True)))
+    assert res['success'] is True, res
+    assert acme.get_cert_info(str(served))['issuer'] == 'Other Root'
+
+
+def _trust(monkeypatch, tmp_path, *roots):
+    bundle = tmp_path / 'trust.pem'
+    bundle.write_text(_pem(*roots) if roots else '')
+    monkeypatch.setenv('SSL_CERT_FILE', str(bundle))
+    monkeypatch.setenv('SSL_CERT_DIR', str(tmp_path / 'no-ca-dir'))
+
+
+@pytest.mark.parametrize('root_trusted', [True, False])
+def test_a_ca_that_stops_sending_its_cross_signed_root(tmp_path, monkeypatch, root_trusted):
+    # the served chain ends at the root as signed by an older one; the new chain stops at
+    # the intermediate. Fine where the root is a trust anchor, a cut chain where it is not.
+    old_root_key = ec.generate_private_key(ec.SECP256R1())
+    cross = _ca_cert(CA.root.subject, CA.root_key, _name('Old Root'), old_root_key)
+    ssl_dir = tmp_path / 'ssl'
+    _serve(ssl_dir, lambda pub: (CA.leaf(pub, 19), CA.intermediate, cross))
+    before = (ssl_dir / 'cert.pem').read_bytes()
+    _trust(monkeypatch, tmp_path, CA.root) if root_trusted else _trust(monkeypatch, tmp_path, OTHER.root)
+
+    res = _order(monkeypatch, ssl_dir, _full)
+
+    if root_trusted:
+        assert res['success'] is True, res
+    else:
+        assert res['success'] is False, res
+        assert 'leaves out the intermediate CN=Test Root' in res['message'], res['message']
+        assert (ssl_dir / 'cert.pem').read_bytes() == before

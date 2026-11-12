@@ -608,6 +608,56 @@ def _checked_chain(chain_pem, domain_key, domain):
     return chain
 
 
+def _served_chain(cert_path):
+    """The certificates of the pair served now, [] if there is none to read."""
+    try:
+        with open(cert_path, 'rb') as f:
+            return x509.load_pem_x509_certificates(f.read())
+    except (OSError, ValueError):
+        return []
+
+
+def _trusted_issuer(cert):
+    """True if a root this host trusts (system store and Requests' bundle) issued cert."""
+    try:
+        context = _acme_ssl_context()
+        anchors = zip(context.get_ca_certs(), context.get_ca_certs(binary_form=True))
+    except (ssl.SSLError, OSError):
+        return False
+    wanted = sorted(str(a.value) for a in cert.issuer)
+    for info, der in anchors:
+        # only the roots with the issuer's name get parsed, a store has odd ones
+        if sorted(v for rdn in info.get('subject', ()) for _, v in rdn) != wanted:
+            continue
+        try:
+            ca = x509.load_der_x509_certificate(der)
+        except ValueError:
+            continue
+        if ca.subject == cert.issuer and _issued_by(cert, ca):
+            return True
+    return False
+
+
+def _dropped_intermediate(chain, served):
+    """The name of an intermediate the served chain carries and the new one leaves out, or None.
+
+    A renewal from the same issuer that comes back shorter is taken only if it still ends
+    at its anchor: a self-signed certificate, an issuer the served chain never sent as an
+    intermediate either (a private CA that signs from its root), or a root this host
+    trusts (a CA that stops sending a cross-signed root). Without an intermediate we used
+    to send, clients that hold only the root fail on the new chain."""
+    if not served or served[0].issuer != chain[0].issuer or len(chain) >= len(served):
+        return None
+    top = chain[-1]
+    if top.issuer == top.subject:
+        return None
+    if not any(c.subject == top.issuer and c.issuer != c.subject for c in served):
+        return None
+    if _trusted_issuer(top):
+        return None
+    return top.issuer.rfc4514_string()
+
+
 def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid):
     """Generate the domain key/CSR, finalize the ACME order, and save cert files."""
     domain_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -648,15 +698,20 @@ def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid):
     # pair to load. Nothing is replaced until the chain parses and fits our key.
     if cert_resp.status_code != 200:
         return {'success': False, 'message': f"Certificate download failed: {_acme_problem(cert_resp)}"}
+    cert_path = os.path.join(ssl_dir, 'cert.pem')
+    key_path = os.path.join(ssl_dir, 'key.pem')
     try:
-        cert_obj = _checked_chain(cert_pem, domain_key, domain)[0]
+        chain = _checked_chain(cert_pem, domain_key, domain)
     except ValueError as e:
         return {'success': False, 'message': f"Certificate download failed: {e}"}
+    missing = _dropped_intermediate(chain, _served_chain(cert_path))
+    if missing:
+        return {'success': False, 'message': f"Certificate download failed: the chain leaves out "
+                f"the intermediate {missing} that the served chain carries"}
+    cert_obj = chain[0]
     expires = cert_obj.not_valid_after_utc.isoformat()
 
     os.makedirs(ssl_dir, exist_ok=True)
-    cert_path = os.path.join(ssl_dir, 'cert.pem')
-    key_path = os.path.join(ssl_dir, 'key.pem')
 
     from pegaprox.app import _write_atomic
     try:
