@@ -16,6 +16,7 @@ import ssl
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding, utils
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
@@ -546,23 +547,65 @@ def _acme_problem(resp):
     return f"HTTP {resp.status_code}"
 
 
-def _leaf_certificate(chain_pem, domain_key):
-    """The end-entity certificate of a downloaded chain, or ValueError.
+# one whole PEM certificate: base64 and line breaks between its two lines, nothing else
+_PEM_CERT_RE = re.compile(r'-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----')
 
-    RFC 8555 9.1: the body holds certificates only, the end-entity one first, and that
-    one has to carry the key we put in the CSR. Anything else (an error page from a proxy,
-    a key block) is not written over the pair the listener serves."""
+
+def _issued_by(cert, issuer):
+    """True if issuer is named as the issuer of cert and its key signed cert."""
+    try:
+        cert.verify_directly_issued_by(issuer)
+        return True
+    except (ValueError, TypeError, InvalidSignature):
+        return False
+
+
+def _cert_names(cert):
+    """The DNS names a certificate is for: its SAN, else its CN."""
+    try:
+        names = cert.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
+    except x509.ExtensionNotFound:
+        names = [a.value for a in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)]
+    return {str(n).lower().rstrip('.') for n in names}
+
+
+def _cert_label(cert):
+    """A certificate's subject, or its names when the subject is empty."""
+    return cert.subject.rfc4514_string() or ', '.join(sorted(_cert_names(cert)))
+
+
+def _checked_chain(chain_pem, domain_key, domain):
+    """The certificates of a downloaded chain, the end-entity one first, or ValueError.
+
+    RFC 8555 9.1: the body holds PEM certificates and nothing else, the end-entity one
+    first, each one certified by the one after it, and the first has to carry the key and
+    the name we put in the CSR. Anything else (an error page from a proxy, a key block, a
+    body cut off on the way) is not written over the pair the listener serves."""
     labels = re.findall(r'-----BEGIN ([^-\r\n]*)-----', chain_pem)
     if not chain_pem.lstrip().startswith('-----BEGIN CERTIFICATE-----') or set(labels) != {'CERTIFICATE'}:
         raise ValueError('the CA did not answer with a PEM certificate chain')
-    blocks = re.findall(r'-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----', chain_pem, re.S)
-    if len(blocks) != len(labels):
+    blocks = _PEM_CERT_RE.findall(chain_pem)
+    # a body cut inside a header line ('-----BEGIN CERT') has no label to find, so every
+    # BEGIN and END there is has to belong to a whole block
+    if not len(blocks) == chain_pem.count('-----BEGIN') == chain_pem.count('-----END'):
         raise ValueError('the certificate chain is cut off')
-    chain = [x509.load_pem_x509_certificate(b.encode()) for b in blocks]
+    if _PEM_CERT_RE.sub('', chain_pem).strip():
+        raise ValueError('the certificate chain carries text outside its certificates')
+    try:
+        chain = [x509.load_pem_x509_certificate(b.encode()) for b in blocks]
+    except ValueError:
+        raise ValueError('a certificate of the chain does not parse')
+    for cert, issuer in zip(chain, chain[1:]):
+        if not _issued_by(cert, issuer):
+            raise ValueError(f"the certificate chain does not link up: {_cert_label(issuer)} "
+                             f"did not issue {_cert_label(cert)}")
     spki = (serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
     if chain[0].public_key().public_bytes(*spki) != domain_key.public_key().public_bytes(*spki):
         raise ValueError('the certificate is not for the key of this request')
-    return chain[0]
+    if domain.lower().rstrip('.') not in _cert_names(chain[0]):
+        raise ValueError(f'the certificate is not for {domain}')
+    return chain
 
 
 def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid):
@@ -606,7 +649,7 @@ def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid):
     if cert_resp.status_code != 200:
         return {'success': False, 'message': f"Certificate download failed: {_acme_problem(cert_resp)}"}
     try:
-        cert_obj = _leaf_certificate(cert_pem, domain_key)
+        cert_obj = _checked_chain(cert_pem, domain_key, domain)[0]
     except ValueError as e:
         return {'success': False, 'message': f"Certificate download failed: {e}"}
     expires = cert_obj.not_valid_after_utc.isoformat()
