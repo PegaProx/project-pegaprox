@@ -5259,10 +5259,15 @@ class PegaProxDB:
         conds = []
         params = []
         if q:
-            # search across user, action, details, cluster
-            conds.append('(user LIKE ? OR action LIKE ? OR details LIKE ? OR cluster LIKE ?)')
+            # search across user, action, details, cluster. A details hit has to hold in
+            # the text the route hands out as well (masked_details), else a masked value
+            # could still be told by searching for it
+            from pegaprox.utils.audit import masked_details
+            self.conn.create_function('shown_details', 2, lambda d, c: masked_details(d, c or ''))
+            conds.append('(user LIKE ? OR action LIKE ? OR (details LIKE ? AND shown_details(details, cluster) LIKE ?)'
+                         ' OR cluster LIKE ?)')
             wild = f'%{q}%'
-            params.extend([wild, wild, wild, wild])
+            params.extend([wild, wild, wild, wild, wild])
         if user:
             conds.append('user = ?')
             params.append(user)
