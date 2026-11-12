@@ -60,7 +60,7 @@ def _mask_channel(ch):
     return c
 
 
-def _alert_scoper(cluster_id):
+def _alert_scoper(cluster_id, user=None):
     """sec (audit): the cluster-scoped alert reads sit behind check_cluster_access only, which by
     design admits pool-/ACL-scoped callers. Their rows name VMs (target_id / target_name) and carry
     live metric values, so a confined caller enumerated the whole cluster through them. Returns a
@@ -68,7 +68,7 @@ def _alert_scoper(cluster_id):
     from pegaprox.utils.auth import build_authz_user
     from pegaprox.utils.rbac import user_can_access_vm
     from pegaprox.api.helpers import caller_is_scoped
-    _au = build_authz_user(request.session.get('user', ''), request.session)
+    _au = user if user is not None else build_authz_user(request.session.get('user', ''), request.session)
     if not caller_is_scoped(_au, cluster_id):
         return None
 
@@ -78,6 +78,23 @@ def _alert_scoper(cluster_id):
         except (TypeError, ValueError):
             return False
     return _ok
+
+
+def _visible_rules(rules):
+    """The rules of `rules` the caller may read, as GET /api/clusters/<id>/alerts hands them
+    out: a confined caller gets the vm rules of the guests it sees. One scope per cluster."""
+    from pegaprox.utils.auth import build_authz_user
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    scopes, out = {}, []
+    for a in rules:
+        if isinstance(a, dict) and a.get('target_type') == 'vm':
+            cid = a.get('cluster_id')
+            if cid not in scopes:
+                scopes[cid] = _alert_scoper(cid, user)
+            if scopes[cid] is not None and not scopes[cid](a.get('target_id')):
+                continue
+        out.append(a)
+    return out
 
 
 def _caller_sees_nodes():
@@ -899,9 +916,11 @@ def get_alerts():
     # how a viewer-capped token read every tenant's rows. acting_user applies the token floor.
     from pegaprox.api.helpers import acting_user
     _allowed = get_user_clusters(acting_user())
+    cfg = dict(cfg)
     if _allowed is not None:
-        cfg = dict(cfg)
         cfg['alerts'] = [a for a in cfg.get('alerts', []) if a.get('cluster_id') in _allowed]
+    # reaching a cluster is not seeing every guest in it: the per-cluster list's rule
+    cfg['alerts'] = _visible_rules(cfg.get('alerts', []))
     return jsonify(cfg)
 
 @bp.route('/api/alerts', methods=['POST'])
@@ -1167,7 +1186,7 @@ def alerts_diagnostics():
     from pegaprox.utils.rbac import get_user_clusters
     _allowed = get_user_clusters(build_authz_user(request.session.get('user', ''), request.session))
     _reach = (lambda cid: True) if _allowed is None else (lambda cid: cid in _allowed)
-    _rules = [a for a in cfg.get('alerts', []) if _reach(a.get('cluster_id'))]
+    _rules = _visible_rules([a for a in cfg.get('alerts', []) if _reach(a.get('cluster_id'))])
     # NS Oct 2026 - the count, the recipients and the channels were the whole installation's
     # for a caller confined to some clusters; they get their own rules and nothing global
     _whole = _allowed is None
@@ -1224,10 +1243,14 @@ def alerts_force_check():
         _ev_only = A._last_eval
         from pegaprox.utils.rbac import get_user_clusters as _guc
         _al = _guc(_bau(request.session.get('user', ''), request.session))
+        _all_rules = A.load_alerts_config().get('alerts') or []
         if _al is not None:
-            _rc = {a.get('id'): a.get('cluster_id')
-                   for a in (A.load_alerts_config().get('alerts') or [])}
+            _rc = {a.get('id'): a.get('cluster_id') for a in _all_rules}
             _ev_only = {k: v for k, v in _ev_only.items() if _rc.get(k) in _al}
+        # nor what the loop read for a vm rule on a guest the caller does not see
+        _ids = lambda rows: {a.get('id') for a in rows if isinstance(a, dict)}
+        _hidden = _ids(_all_rules) - _ids(_visible_rules(_all_rules))
+        _ev_only = {k: v for k, v in _ev_only.items() if k not in _hidden}
         return jsonify({'ok': True, 'evaluations': _ev_only, 'forced': False,
                         'note': 'a forced run fires every tenant\'s rules — global admin only'})
     if (request.args.get('reset_cooldown', '').lower() in ('1', 'true', 'yes')):
