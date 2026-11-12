@@ -1668,12 +1668,14 @@ def delete_sdn_fabric(cluster_id, fabric_id):
 
 def _sdn_crud_resource(cluster_id, family, item_id=None):
     """Helper: implements GET/POST/PUT/DELETE for /cluster/sdn/<family>[/{id}].
-    Returns (status_code, response_body|None, error|None). Used by all the
+    Returns the (response, status) pair the route hands on. Used by all the
     routemap + prefixlist routes below.
     """
     manager, error = get_connected_manager(cluster_id)
     if error:
-        return None, error  # error is already a (resp, code) tuple
+        # MK Nov 2026 - error is already the (resp, code) pair, the 404 or the 503 of a
+        # cluster that is not connected; wrapped in (None, error) Flask made a 500 of it
+        return error
     host, port = manager.host, manager.api_port
     base_url = f"https://{host}:{port}/api2/json/cluster/sdn/{family}"
     method = request.method
