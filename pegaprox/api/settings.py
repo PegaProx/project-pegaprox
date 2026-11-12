@@ -3169,6 +3169,13 @@ def restore_config():
                         continue
                     
                     if not dry_run:
+                        # a backup from before password_changed_at had a column carries no
+                        # date, and an account without one reads as expired. One that comes
+                        # in new starts its clock now, one that is here keeps its own date
+                        if (not u.get('password_changed_at')
+                                and (u.get('auth_source') or 'local') == 'local'
+                                and database.get_user(uname) is None):
+                            u = dict(u, password_changed_at=datetime.now().isoformat())
                         database.save_user(uname, u)
                     user_count += 1
                 except Exception as e:

@@ -18,6 +18,8 @@ offset.
 
 MK
 """
+import io
+import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -235,6 +237,34 @@ def test_a_new_account_starts_with_a_fresh_password(api, db, seed, expiry_on):
     banner = _banner(api, 'ivan')
 
     assert banner['expired'] is False and banner['days_until_expiry'] == 90, banner
+
+
+def _restore_users(api, seed, users):
+    import pegaprox.api.settings as settings_api
+    admin = seed.user('root', role='admin')
+    salt, h = hash_password(OLD_PW)
+    seed.db.save_user('root', dict(seed.db.get_user('root'), password_salt=salt, password_hash=h))
+    data = {'version': 'test', 'export_date': '2026-01-01T10:00:00', 'users': users}
+    blob = settings_api._encrypt_backup(json.dumps(data), 'backup-pw')
+    r = api.as_user(admin).post('/api/config/restore', content_type='multipart/form-data',
+                                data={'user_password': OLD_PW, 'backup_password': 'backup-pw',
+                                      'restore_users': 'true',
+                                      'backup_file': (io.BytesIO(blob), 'x.pegabackup')})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert r.get_json()['restored']['users'] == len(users), r.get_json()
+
+
+def test_an_account_a_backup_without_dates_brings_in_is_not_expired(api, db, seed, expiry_on):
+    """A backup made before the column existed carries no password_changed_at. An account
+    it brings in new starts its clock with the restore, as the migration does for the
+    accounts already there; one that is here keeps the date it has."""
+    db.save_user('kept', _row(password_changed_at=_ago(30)))
+
+    _restore_users(api, seed, {'newbie': _row(), 'kept': _row(display_name='Kept')})
+
+    newbie = _banner(api, 'newbie')
+    assert newbie['expired'] is False and newbie['days_until_expiry'] == 90, newbie
+    assert _banner(api, 'kept')['days_until_expiry'] == 60
 
 
 # --- the mail --------------------------------------------------------------------------
