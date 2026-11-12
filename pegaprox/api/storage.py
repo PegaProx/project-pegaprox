@@ -2838,7 +2838,8 @@ def download_from_url(cluster_id, node, storage):
         from pegaprox.utils.url_security import resolve_and_pin_url, SsrfError
         try:
             # sec (audit): tls_verified=False pins the resolved IP for https too (defense-in-depth vs
-            # DNS-rebind), matching the sibling ISO-download path in vms.py; PVE still cert-verifies.
+            # DNS-rebind), matching the sibling ISO-download path in vms.py. That path also turns
+            # PVE's certificate check off (below), which a pinned https URL needs anyway.
             url = resolve_and_pin_url(url, allowed_schemes=('https', 'http'), tls_verified=False)
         except SsrfError as _ssrf:
             return jsonify({'error': f'URL rejected by SSRF guard: {_ssrf}'}), 400
@@ -2850,7 +2851,12 @@ def download_from_url(cluster_id, node, storage):
             'filename': filename,
             'content': content
         }
-        
+
+        # the host is the pinned IP now, and no mirror's certificate names that, so PVE
+        # would refuse every https download; same rule as download_iso_from_url in vms.py
+        if url.startswith('https://'):
+            download_data['verify-certificates'] = 0
+
         if checksum:
             # Format: algorithm:hash (e.g., sha256:abc123...)
             if ':' in checksum:
