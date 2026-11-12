@@ -17,16 +17,9 @@ from test_ha_ui import PBS, _App, _FakeServer, browser  # noqa: F401
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Arbitrary values that were already without a rule when this check came in. They are
-# layout and colour details, not stacking; each one wants its own look before it gets a rule.
-KNOWN_WITHOUT_RULE = {
-    'bg-[#1a2e38]', 'bg-[var(--corp-card-bg)]', 'border-[#344955]', 'border-[#3a5565]',
-    'border-[#49afd9]', 'border-[var(--corp-border-medium)]',
-    'drop-shadow-[0_8px_20px_rgba(229,112,0,0.35)]', 'hover:scale-[1.03]', 'max-h-[150px]',
-    'max-h-[40rem]', 'max-w-[180px]', 'max-w-[220px]', 'max-w-[520px]', 'max-w-[60px]',
-    'min-h-[120px]', 'min-h-[38px]', 'min-w-[12rem]', 'min-w-[16px]', 'min-w-[180px]',
-    'min-w-[20rem]', 'min-w-[90px]', 'text-[#5a7a8a]', 'text-[10.5px]',
-}
+# Arbitrary values allowed to go without a rule for now. The ones that were here when this check
+# came in have their rule in the shell since, with every other utility the build lacked.
+KNOWN_WITHOUT_RULE = set()
 
 
 def _read(*parts):
