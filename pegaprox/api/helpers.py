@@ -70,8 +70,9 @@ def load_server_settings():
         # HTTP redirect port - NS Jan 2026
         # Now that we have protocol detection on the main port, this is only needed
         # if you want HTTP:80 → HTTPS:5000 redirect
-        # 0 = auto (80 if root, disabled otherwise), -1 = disabled, or specific port
-        'http_redirect_port': -1,  # Disabled by default - protocol detection handles same-port redirect
+        # 0 = auto (80 if the service may open it, see app._may_bind_port80), -1 = no
+        # extra port, or a specific port
+        'http_redirect_port': -1,  # no extra port by default - protocol detection handles same-port redirect
         # Brute force protection settings
         'login_max_attempts': 5,
         'login_lockout_time': 300,  # 5 min

@@ -1,14 +1,17 @@
-"""Plain HTTP on the HTTPS port is answered with a redirect, whatever http_redirect_port says.
+"""How PegaProx answers plain HTTP while it serves HTTPS, with the settings as they ship.
 
-With -1, the default of every install, _start_gevent_server ran its server without the
-protocol check, and a browser that opened http://host:5000 got a connection reset instead
-of a 301 (Chromium ERR_CONNECTION_RESET, curl exit code 56). A trusted proxy that forwards
-plain HTTP with X-Forwarded-Proto: https got the same reset. -1 now means no extra port and
-nothing else.
+- The TLS port: with http_redirect_port -1, the default of every install,
+  _start_gevent_server ran its server without the protocol check, and a browser that opened
+  http://host:5000 got a connection reset instead of a 301 (Chromium ERR_CONNECTION_RESET,
+  curl exit code 56). A trusted proxy that forwards plain HTTP with X-Forwarded-Proto: https
+  got the same reset. -1 now means no extra port and nothing else.
+- The extra port main() opens (_resolve_http_redirect_port): 0 (auto) only ever opened port
+  80 as root, which none of the packages runs as.
 
 The real server runs in a subprocess, called the way main() calls it, with no redirect
 setting at all: once on 127.0.0.1 and once on ::1. MK
 """
+import inspect
 import os
 import socket
 import ssl
@@ -19,6 +22,7 @@ import time
 import gevent
 import pytest
 
+import pegaprox.app as app_mod
 from test_redirect_head_deadline import _tls_files
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -182,3 +186,91 @@ def test_a_trusted_proxy_that_terminated_tls_is_served(server):
 
     assert answer.startswith(b'HTTP/1.1 200'), answer[:120]
     assert answer.endswith(b'pong')
+
+
+# -- which extra port main() opens -------------------------------------------------------
+#
+# 0 (auto) looked at the uid only. The deb, deploy.sh, the appliances and the Docker image
+# all run as the pegaprox user, whose units grant CAP_NET_BIND_SERVICE as an ambient
+# capability, so auto never opened port 80 anywhere it was asked for. A PEGAPROX_HTTP_PORT
+# that is no number stopped the start with a ValueError.
+
+NO_CAP = 'Name:\tpython3\nCapInh:\t0000000000000000\nCapEff:\t0000000000000000\n'
+NET_BIND = 'Name:\tpython3\nCapInh:\t0000000000000400\nCapEff:\t0000000000000400\n'
+FULL_SET = 'Name:\tpython3\nCapEff:\t000001ffffffffff\n'
+
+
+@pytest.fixture
+def host(monkeypatch, tmp_path):
+    """The uid, the capability line and the kernel's port limit this process sees."""
+    status, start = tmp_path / 'status', tmp_path / 'ip_unprivileged_port_start'
+    monkeypatch.setattr(app_mod, '_PROC_STATUS', str(status))
+    monkeypatch.setattr(app_mod, '_UNPRIVILEGED_PORT_START', str(start))
+    monkeypatch.delenv('PEGAPROX_HTTP_PORT', raising=False)
+
+    def set_(uid=1000, caps=NO_CAP, limit='1024', env=None):
+        monkeypatch.setattr(app_mod.os, 'geteuid', lambda: uid)
+        for path, text in ((status, caps), (start, limit)):
+            if text is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(text + '\n')
+        if env is not None:
+            monkeypatch.setenv('PEGAPROX_HTTP_PORT', env)
+    return set_
+
+
+@pytest.mark.parametrize('setting, seen, expected', [
+    (-1, {}, -1),
+    (None, {}, -1),
+    (0, {'uid': 0}, 80),
+    (0, {'caps': NET_BIND}, 80),                  # the ambient capability of the units
+    (0, {'caps': FULL_SET}, 80),
+    (0, {}, -1),                                  # a plain user, limit 1024
+    (0, {'limit': '0'}, 80),                      # inside a Docker container
+    (0, {'limit': '80'}, 80),
+    (0, {'limit': '81'}, -1),
+    (0, {'caps': None, 'limit': None}, -1),       # nothing readable: no port 80
+    (0, {'caps': 'CapEff:\tzz\n'}, -1),
+    (80, {}, 80),                                 # an explicit port is opened as asked
+    (18080, {}, 18080),
+    ('8081', {}, 8081),
+    ('abc', {}, -1),
+    (-5, {}, -1),
+    (70000, {}, -1),
+    # PEGAPROX_HTTP_PORT wins over the setting, and goes the same way
+    (-1, {'env': '18080'}, 18080),
+    (80, {'env': '-1'}, -1),
+    (-1, {'env': '0', 'caps': NET_BIND}, 80),
+    (-1, {'env': '0'}, -1),
+    (8080, {'env': ' 9090 '}, 9090),
+])
+def test_the_extra_port_main_opens(host, setting, seen, expected):
+    host(**seen)
+    assert app_mod._resolve_http_redirect_port(setting, 5000) == expected
+
+
+def test_an_env_port_that_is_no_number_is_warned_about_not_fatal(host, capsys):
+    host(env='abc')
+
+    assert app_mod._resolve_http_redirect_port(8080, 5000) == 8080
+    assert "PEGAPROX_HTTP_PORT='abc' is not a port number" in capsys.readouterr().out
+
+
+def test_auto_without_port_80_says_why_in_one_line(host, capsys):
+    host(uid=os.getuid() or 1000)
+
+    assert app_mod._resolve_http_redirect_port(0, 5000) == -1
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert len(lines) == 1, lines
+    assert 'port 80 not available' in lines[0]
+    assert 'needs root or CAP_NET_BIND_SERVICE' in lines[0]
+    assert 'HTTP on port 5000 still redirects' in lines[0]
+
+
+def test_main_asks_the_resolver_and_opens_nothing_behind_a_reverse_proxy():
+    """main() is too big to run here, so how it gets to the port is read in its source."""
+    src = inspect.getsource(app_mod.main)
+    block = src[src.index('_resolve_http_redirect_port(') - 200:src.index('target=_start_http_redirect')]
+    assert 'if ssl_context and not reverse_proxy:' in block
+    assert 'PEGAPROX_HTTP_PORT' not in src

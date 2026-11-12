@@ -1940,13 +1940,13 @@ def main(debug_mode=False):
     # to warn and fall through to plain HTTP on the port that was supposed to be TLS.
     ssl_context = _resolve_ssl_context(reverse_proxy, domain, app_name)
 
-    # Start HTTP redirect server if SSL is enabled (not needed behind reverse proxy)
-    http_redirect_port = server_settings.get('http_redirect_port', 0)
-    if http_redirect_port == 0:
-        http_redirect_port = 80 if os.geteuid() == 0 else -1
-    http_redirect_port = int(os.environ.get('PEGAPROX_HTTP_PORT', http_redirect_port))
+    # Start the extra HTTP redirect port if SSL is enabled (not needed behind reverse proxy).
+    # Plain HTTP on the TLS port itself is redirected whatever this says.
+    http_redirect_port = -1
+    if ssl_context and not reverse_proxy:
+        http_redirect_port = _resolve_http_redirect_port(server_settings.get('http_redirect_port'), port)
 
-    if ssl_context and http_redirect_port > 0 and not reverse_proxy:
+    if http_redirect_port > 0:
         redirect_thread = threading.Thread(
             target=_start_http_redirect,
             args=(bind_host, http_redirect_port, port, domain),
@@ -2084,6 +2084,74 @@ def _host_for_location(host_value):
                 pass
         return ''
     return hv.rsplit(':', 1)[0] if ':' in hv else hv
+
+
+# where _may_bind_port80 looks; tests point these at files of their own
+_PROC_STATUS = '/proc/self/status'
+_UNPRIVILEGED_PORT_START = '/proc/sys/net/ipv4/ip_unprivileged_port_start'
+_CAP_NET_BIND_SERVICE = 10
+
+
+def _may_bind_port80():
+    """Whether this process may open port 80: as root, with CAP_NET_BIND_SERVICE in its
+    effective set (the systemd units of the deb, deploy.sh and the appliances hand it over
+    as an ambient capability), or where the kernel lets anyone have it (Docker sets
+    ip_unprivileged_port_start to 0 inside a container)."""
+    if os.geteuid() == 0:
+        return True
+    try:
+        with open(_PROC_STATUS) as fh:
+            for line in fh:
+                if line.startswith('CapEff:'):
+                    if int(line.split()[1], 16) >> _CAP_NET_BIND_SERVICE & 1:
+                        return True
+                    break
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        with open(_UNPRIVILEGED_PORT_START) as fh:
+            return int(fh.read().strip()) <= 80
+    except (OSError, ValueError):
+        return False
+
+
+def _resolve_http_redirect_port(setting, https_port):
+    """The extra plain-HTTP port to open next to the TLS one, or -1 for none.
+
+    -1 or nothing stored: none. 0 (auto): 80 where _may_bind_port80() says it can be
+    opened, otherwise none and one line in the log. Anything above: that port.
+    PEGAPROX_HTTP_PORT, when set, wins over the setting.
+
+    MK Nov 2026 - auto looked at the uid only, and the deb, deploy.sh, the appliances
+    and the Docker image all run as the pegaprox user, so 0 meant the same as -1
+    there although the units allow port 80. A PEGAPROX_HTTP_PORT that is no number
+    stopped the start.
+    """
+    raw = os.environ.get('PEGAPROX_HTTP_PORT', '').strip()
+    if raw:
+        try:
+            setting = int(raw)
+        except ValueError:
+            print(f"WARNING: PEGAPROX_HTTP_PORT={raw!r} is not a port number, ignoring it")
+    try:
+        wanted = -1 if setting is None else int(setting)
+    except (TypeError, ValueError):
+        wanted = -1
+    if wanted == 0:
+        if _may_bind_port80():
+            return 80
+        try:
+            import pwd
+            user = pwd.getpwuid(os.geteuid()).pw_name
+        except Exception:
+            user = f'uid {os.geteuid()}'
+        print(f"HTTP redirect auto: port 80 not available for user {user} (needs root or "
+              f"CAP_NET_BIND_SERVICE), HTTP on port {https_port} still redirects")
+        return -1
+    if wanted > 65535:
+        print(f"WARNING: HTTP redirect port {wanted} is out of range, no extra port opened")
+        return -1
+    return wanted if wanted > 0 else -1
 
 
 def _start_http_redirect(bind_host, http_redirect_port, https_port, domain):
