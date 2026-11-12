@@ -5941,6 +5941,17 @@ def get_vm_config_api(cluster_id, node, vm_type, vmid):
 # PVE masks it in its own answer; masked here too, whatever the version sends
 _PENDING_MASKED = ('cipassword',)
 
+# the config keys of the qemu-server and pve-container schemas whose value is a secret:
+# the cloud-init password, and the root password a container is created with
+_SECRET_CONFIG_KEYS = frozenset({'cipassword', 'password'})
+
+
+def _config_changes_text(updates, shown=5):
+    """The first keys of a config change as key=value for its audit line. The trail is
+    read with cluster.view, so a secret key is named with *** for its value."""
+    return ', '.join(f"{k}={'***' if str(k).lower() in _SECRET_CONFIG_KEYS else v}"
+                     for k, v in list(updates.items())[:shown])
+
 
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/qemu/<int:vmid>/pending', methods=['GET'])
 @require_auth(perms=['vm.view'])
@@ -6545,7 +6556,7 @@ def update_vm_config_api(cluster_id, node, vm_type, vmid):
 
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'system')
-        changes = ', '.join([f"{k}={v}" for k, v in config_updates.items()][:5])
+        changes = _config_changes_text(config_updates)
         log_audit(user, 'vm.config_changed', f"{vm_type.upper()} {vmid} config updated: {changes}", cluster=manager.config.name)
         return jsonify({'message': result['message'], **({'quota_warning': _qwarn} if _qwarn else {})})
     else:
