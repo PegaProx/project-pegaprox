@@ -1014,6 +1014,8 @@
             const isOffline = !metrics || metrics.status === 'offline';
             const cpuPercent = metrics?.cpu_percent?.toFixed(1) || (metrics?.cpu ? (metrics.cpu * 100).toFixed(1) : '0');
             const ramPercent = metrics?.mem_percent?.toFixed(1) || (metrics?.memory ? ((metrics.memory.used / metrics.memory.total) * 100).toFixed(1) : '0');
+            // an HA cache entry sends 0 for what nobody could read: '-' as in NodeCard
+            const unread = !!metrics?.from_ha_cache;
             const isInMaintenance = metrics?.maintenance_mode;
             const maintenanceTask = metrics?.maintenance_task;
             const isUpdating = metrics?.is_updating;
@@ -1060,17 +1062,17 @@
                                 )}
                                 <span className="w-8" style={{color: '#728b9a'}}>CPU</span>
                                 <div className="w-20 h-1.5 flex-shrink-0 overflow-hidden" style={{background: 'var(--corp-bar-track)', borderRadius: '1px'}}>
-                                    <div className="h-full" style={{width: `${Math.min(cpuPercent, 100)}%`, background: '#49afd9', borderRadius: '1px'}}></div>
+                                    <div className="h-full" style={{width: `${unread ? 0 : Math.min(cpuPercent, 100)}%`, background: '#49afd9', borderRadius: '1px'}}></div>
                                 </div>
-                                <span className="w-12 text-right" style={{color: '#adbbc4'}}>{cpuPercent}%</span>
+                                <span className="w-12 text-right" style={{color: '#adbbc4'}}>{unread ? '-' : `${cpuPercent}%`}</span>
                                 {(() => { const d = histRef.current.cpu; const mx = Math.max(...d, 1); const pts = d.map((v,i) => `${(i/19)*40},${12-((v/mx)*12)}`).join(' '); return <svg width="40" height="12" className="corp-sparkline-inline"><polyline fill="none" stroke="#49afd9" strokeWidth="1" points={pts} /><circle cx="40" cy={12-((d[19]/mx)*12)} r="1.5" fill="#49afd9" /></svg>; })()}
                                 <span className="w-8 ml-2" style={{color: '#728b9a'}}>RAM</span>
                                 <div className="w-20 h-1.5 flex-shrink-0 overflow-hidden" style={{background: 'var(--corp-bar-track)', borderRadius: '1px'}}>
-                                    <div className="h-full" style={{width: `${Math.min(ramPercent, 100)}%`, background: '#9b59b6', borderRadius: '1px'}}></div>
+                                    <div className="h-full" style={{width: `${unread ? 0 : Math.min(ramPercent, 100)}%`, background: '#9b59b6', borderRadius: '1px'}}></div>
                                 </div>
-                                <span className="w-12 text-right" style={{color: '#adbbc4'}}>{ramPercent}%</span>
+                                <span className="w-12 text-right" style={{color: '#adbbc4'}}>{unread ? '-' : `${ramPercent}%`}</span>
                                 {(() => { const d = histRef.current.mem; const mx = Math.max(...d, 1); const pts = d.map((v,i) => `${(i/19)*40},${12-((v/mx)*12)}`).join(' '); return <svg width="40" height="12" className="corp-sparkline-inline"><polyline fill="none" stroke="#9b59b6" strokeWidth="1" points={pts} /><circle cx="40" cy={12-((d[19]/mx)*12)} r="1.5" fill="#9b59b6" /></svg>; })()}
-                                {metrics.score != null && <span className="ml-3 w-16" style={{color: '#728b9a'}}>{t('score')}: <span style={{color: '#adbbc4'}}>{Number(metrics.score).toFixed(1)}</span></span>}
+                                {metrics.score != null && !unread && <span className="ml-3 w-16" style={{color: '#728b9a'}}>{t('score')}: <span style={{color: '#adbbc4'}}>{Number(metrics.score).toFixed(1)}</span></span>}
                                 <span className="ml-3" style={{color: '#728b9a'}}>{formatUptime(metrics.uptime)}</span>
                                 <span className="flex-1"></span>
                                 {isInMaintenance && maintenanceTask && maintenanceTask.status === 'running' && (
@@ -1186,7 +1188,7 @@
                             <div className="corp-node-detail-grid">
                                 <div className="corp-node-detail-card">
                                     <div className="corp-node-detail-label">{t('disk')}</div>
-                                    <div className="corp-node-detail-value">{metrics.disk_percent?.toFixed(1) || '-'}%</div>
+                                    <div className="corp-node-detail-value">{unread ? '-' : `${metrics.disk_percent?.toFixed(1) || '-'}%`}</div>
                                     <div className="corp-node-detail-sub">{metrics.disk_total ? `${formatBytes(metrics.disk_used || 0)} / ${formatBytes(metrics.disk_total)}` : '-'}</div>
                                 </div>
                                 <div className="corp-node-detail-card">

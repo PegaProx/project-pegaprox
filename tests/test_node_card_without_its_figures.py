@@ -6,11 +6,12 @@ shows '-' for a missing score and the gauge an empty ring with '-'.
 
 The HA cache entries /metrics hands out now carry 0 for the score, CPU, RAM, disk and
 network, which the card drew as a measured idle node. An entry marked from_ha_cache shows
-'-' there too and leaves the disk lines out; a live node at 0 still reads 0.
+'-' there too and leaves the disk lines out; a live node at 0 still reads 0. The node
+row of classic Corporate (NodeCompactRow) reads the same mark.
 
 ui.js and tables.js are compiled with the Babel the repo ships (static/js/babel.min.js) and
-NodeCard is drawn through a small hook runtime in node, the components it uses (Gauge,
-Sparkline) with it: hooks keep their slots, each child gets its own.
+NodeCard and NodeCompactRow are drawn through a small hook runtime in node, the components
+they use (Gauge, Sparkline) with them: hooks keep their slots, each child gets its own.
 """
 import json
 import os
@@ -69,7 +70,7 @@ const scope = new Proxy({}, {
     get: (t, k) => (k === Symbol.unscopables ? undefined : (k in provided ? provided[k] : stub)),
     set: (t, k, v) => { provided[k] = v; return true; },
 });
-const { NodeCard } = new Function('__scope', 'with (__scope) {\n' + code + '\n;return { NodeCard };\n}')(scope);
+const { NodeCard, NodeCompactRow } = new Function('__scope', 'with (__scope) {\n' + code + '\n;return { NodeCard, NodeCompactRow };\n}')(scope);
 
 // the bundle's own components are drawn too, each with its own hooks
 function deep(n) {
@@ -126,6 +127,35 @@ const draw = (metrics, expand) => {
     });
     return { score, gauges, rows };
 };
+// the classic Corporate row, opened like a click on it does
+const drawRow = metrics => {
+    hooks = hookRuntime();
+    const row = hooks;
+    const props = { name: 'pve1', metrics, clusterId: 'c1' };
+    let tree;
+    try {
+        tree = deep(NodeCompactRow(props));
+        let head = null;
+        walk(tree, n => { if (!head && n.type === 'div' && typeof n.props.onClick === 'function') head = n; });
+        head.props.onClick();
+        hooks = row; row.reset();
+        tree = deep(NodeCompactRow(props));
+    }
+    catch (e) { return { threw: e.message }; }
+    const out = { percents: [], bars: [], score: null, disk: null };
+    walk(tree, n => {
+        const cls = typeof n.props.className === 'string' ? n.props.className : '';
+        const style = n.props.style || {};
+        if (n.type === 'span' && cls === 'w-12 text-right') out.percents.push(allText(n).trim());
+        if (n.type === 'div' && cls === 'h-full' && ['#49afd9', '#9b59b6'].includes(style.background)) out.bars.push(style.width);
+        if (n.type === 'span' && cls === 'ml-3 w-16') out.score = allText(n).trim();
+        if (cls === 'corp-node-detail-card') {
+            const parts = (n.props.children || []).filter(c => c && typeof c === 'object' && c.props);
+            if (allText(parts[0]).trim() === 'disk') out.disk = allText(parts[1]).trim();
+        }
+    });
+    return out;
+};
 const live = { status: 'online', cpu_percent: 12, mem_percent: 40, mem_used: 4, mem_total: 10, disk_percent: 5,
     disk_used: 1, disk_total: 20, netin: 0, netout: 0, uptime: 100, offline: false };
 console.log(JSON.stringify({
@@ -143,6 +173,10 @@ console.log(JSON.stringify({
     mid: draw(Object.assign({}, live, { score: 123.4 }), true),
     high: draw(Object.assign({}, live, { score: 170 })),
     text: draw(Object.assign({}, live, { score: '42.6' })),
+    rowLive: drawRow(Object.assign({}, live, { score: 123.4 })),
+    rowIdle: drawRow(Object.assign({}, live, { cpu_percent: 0, mem_percent: 0, score: 0, disk_percent: 0 })),
+    rowHa: drawRow(Object.assign({}, live, { cpu_percent: 0, mem_percent: 0, mem_used: 0, mem_total: 0, score: 0,
+                                            disk_percent: 0, disk_used: 0, disk_total: 0, from_ha_cache: true })),
 }));
 """
 
@@ -203,3 +237,16 @@ def test_no_score_is_not_coloured_as_a_load(cards):
     for case in ('haRoute', 'haManager', 'nullScore'):
         cls = cards[case]['score']['cls']
         assert not any(c in cls for c in ('text-green-400', 'text-yellow-400', 'text-red-400')), (case, cls)
+
+
+def test_the_classic_corporate_row_of_a_live_node_reads_as_before(cards):
+    got = cards['rowLive']
+    assert got == {'percents': ['12.0%', '40.0%'], 'bars': ['12%', '40%'], 'score': 'score: 123.4', 'disk': '5.0%'}, got
+    got = cards['rowIdle']
+    assert got == {'percents': ['0.0%', '0.0%'], 'bars': ['0%', '0%'], 'score': 'score: 0.0', 'disk': '0.0%'}, got
+
+
+def test_the_classic_corporate_row_of_an_ha_cache_entry_shows_no_figures(cards):
+    got = cards['rowHa']
+    assert 'threw' not in got, got
+    assert got == {'percents': ['-', '-'], 'bars': ['0%', '0%'], 'score': None, 'disk': '-'}, got
