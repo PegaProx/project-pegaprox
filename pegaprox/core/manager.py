@@ -18,7 +18,7 @@ import subprocess
 import re
 import shlex
 from pegaprox.utils.ssh_security import cli_hostkey_opts  # secure host-key opts for subprocess ssh/scp
-from pegaprox.utils.sanitization import validate_snapshot_name, validate_hostname, validate_ssh_user
+from pegaprox.utils.sanitization import validate_snapshot_name, validate_hostname, validate_ssh_user, redact_secrets
 import requests
 import urllib3
 from datetime import datetime, timedelta
@@ -17305,7 +17305,8 @@ echo "AGENT_INSTALLED_OK"
                                 del config_updates['boot']
                                 self.logger.warning(f"No valid boot devices found, skipping boot order update")
             
-            self.logger.info(f"Updating {vm_type}/{vmid} config: {config_updates}")
+            # PVE gets a cloud-init or root password as sent, the log line its key only
+            self.logger.info(f"Updating {vm_type}/{vmid} config: {redact_secrets(config_updates)}")
             
             response = self._api_put(url, data=config_updates)
             

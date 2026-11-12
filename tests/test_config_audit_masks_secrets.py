@@ -147,3 +147,24 @@ def test_the_other_keys_keep_their_values(env, api, seed):
     rows = _rows(admin.get('/api/audit?limit=50').get_json())
     assert rows and rows[0]['details'] == ('QEMU 100 config updated: cores=4, cipassword=***, '
                                            'ciuser=deploy, memory=2048, name=web01 [lab]')
+
+
+@pytest.mark.parametrize('vm_type,key', [('qemu', 'cipassword'), ('lxc', 'password')])
+def test_the_manager_log_line_leaves_the_password_out(caplog, vm_type, key):
+    """PegaProxManager.update_vm_config logs the whole body before the PUT, all keys and
+    whatever PVE then answers. PVE gets the password, the log line does not."""
+    from unittest.mock import MagicMock
+    from pegaprox.core.manager import PegaProxManager
+    me = MagicMock()
+    me.is_connected = True
+    me.host, me.api_port = '10.0.0.1', 8006
+    me.logger = logging.getLogger('test.config_audit.manager')
+    me._api_put.return_value = MagicMock(status_code=200)
+    caplog.set_level(logging.INFO, logger='test.config_audit.manager')
+    body = {'cores': 4, 'memory': 2048, 'name': 'web01', 'onboot': 1, 'ciuser': 'deploy', key: SECRET}
+    assert PegaProxManager.update_vm_config(me, 'pve1', 100, vm_type, dict(body))['success']
+    assert me._api_put.call_args.kwargs['data'] == body
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith('Updating ')]
+    assert lines, 'no Updating ... config line'
+    assert 'Cl0ud-1nit' not in lines[0], lines[0]
+    assert f"'{key}': " in lines[0] and "'cores': 4" in lines[0] and "'ciuser': 'deploy'" in lines[0]
