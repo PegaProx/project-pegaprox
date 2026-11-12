@@ -151,6 +151,22 @@ def _audit_cluster_id(cluster):
     return hits[0] if len(hits) == 1 else ''
 
 
+# MK Nov 2026 - the names entries are written under when no account acted: the background
+# jobs ('system', 'scheduler'), the auto installer, and the session fallbacks of the routes
+# ('system', 'unknown'), which is also the name of a failed login that gave none. The audit
+# scope matches a caller's own rows by name, so an account called one of these read every
+# such row of every tenant. They are nobody's own rows, and no new account may take one.
+AUDIT_PSEUDO_ACTORS = frozenset({'system', 'scheduler', 'installer', 'unknown'})
+
+
+def is_audit_pseudo_actor(name) -> bool:
+    """Whether `name`, normalised as a username is, is one of AUDIT_PSEUDO_ACTORS."""
+    if not isinstance(name, str):
+        return False
+    from pegaprox.utils.sanitization import sanitize_username
+    return sanitize_username(name.strip().lower()) in AUDIT_PSEUDO_ACTORS
+
+
 def log_audit(user: str, action: str, details: str = None, ip_address: str = None, cluster: str = None,
               cluster_id: str = None):
     """Add an entry to the audit log

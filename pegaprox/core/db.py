@@ -5237,8 +5237,14 @@ class PegaProxDB:
     @staticmethod
     def _audit_scope_cond(scope, params) -> str:
         """WHERE part for scope=(cluster_ids, username): the rows of those clusters plus the
-        user's own, no row at all when both are empty. Appends its values to params."""
+        user's own, no row at all when both are empty. Appends its values to params.
+
+        A name the background jobs and the session fallbacks write under has no own rows:
+        those rows belong to every tenant (audit.AUDIT_PSEUDO_ACTORS)."""
+        from pegaprox.utils.audit import is_audit_pseudo_actor
         cids, own = list(scope[0] or []), scope[1] or ''
+        if is_audit_pseudo_actor(own):
+            own = ''
         parts = []
         if cids:
             parts.append(f"cluster_id IN ({','.join('?' * len(cids))})")
