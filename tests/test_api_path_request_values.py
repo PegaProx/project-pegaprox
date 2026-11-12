@@ -164,3 +164,41 @@ def test_a_volid_stays_one_path_segment(api, seed, pve):
     assert r.status_code == 200, r.get_data(as_text=True)
     deletes = [p for (meth, p) in pve.rec.sent if meth == 'DELETE']
     assert deletes == ['/api2/json/nodes/n1/storage/local/content/local%3Aiso%2Fx.iso%3Fdelay%3D0']
+
+
+# --- the storage part of the volid of a backup delete ---------------------------------------
+
+def _backup_user(api, seed):
+    """Confined to pool_1 = VM 100, with backup rights there and nowhere else."""
+    u = _pool_user(seed)
+    seed.db.save_user('mallory', dict(seed.db.get_user('mallory'), permissions=[
+        'backup.view', 'backup.delete', 'cluster.view', 'node.view', 'storage.view']))
+    seed.pool('cluster_1', 'pool_1', 'mallory', ['pool.view', 'vm.view', 'vm.backup'])
+    return api.as_user(u)
+
+
+OWN = 'backup/vzdump-qemu-100-2026_01_01-00_00_00.vma.zst'
+OTHER = 'local%253Abackup%252Fvzdump-qemu-200-2026_01_01-00_00_00.vma.zst'
+
+
+@pytest.mark.parametrize('volid', [
+    # every guest's backups on the storage pruned
+    f'local/prunebackups%3Fprune-backups=keep-last=1%23:{OWN}',
+    f'local/prunebackups%3Fprune-backups=keep-last=1&x=:{OWN}',
+    # another tenant's backup, the guard's '/vm/100/' behind the cut
+    f'local/content/{OTHER}%23/vm/100/:x',
+])
+def test_a_backup_delete_with_a_storage_that_is_no_name_sends_nothing(api, seed, pve, volid):
+    c = _backup_user(api, seed)
+    r = c.delete('/api/clusters/cluster_1/vms/n1/qemu/100/backups/' + volid)
+    _refused(r, 'Invalid storage name')
+    assert pve.rec.sent == []
+    # counterproof: the caller's own backups, a vzdump file and a PBS snapshot, still go
+    for own in (f'local:{OWN}', 'pbs-store.1:backup/vm/100/2026-11-01T00:00:00Z'):
+        r = c.delete('/api/clusters/cluster_1/vms/n1/qemu/100/backups/' + own)
+        assert r.status_code == 200, r.get_data(as_text=True)
+    assert pve.rec.sent == [
+        ('DELETE', '/api2/json/nodes/n1/storage/local/content/'
+                   'local%3Abackup%2Fvzdump-qemu-100-2026_01_01-00_00_00.vma.zst'),
+        ('DELETE', '/api2/json/nodes/n1/storage/pbs-store.1/content/'
+                   'pbs-store.1%3Abackup%2Fvm%2F100%2F2026-11-01T00%3A00%3A00Z')]

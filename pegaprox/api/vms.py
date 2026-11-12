@@ -2319,6 +2319,10 @@ def delete_vm_backup(cluster_id, node, vm_type, vmid, volid):
             storage = volid.split(':')[0]
         else:
             return jsonify({'error': 'Invalid volume ID format'}), 400
+        # MK Nov 2026 - the storage part goes into the path as it is: a name, or nothing is sent
+        _bad = _bad_node_or_storage(node, storage)
+        if _bad:
+            return _bad
         
         # URL encode the volid for the path
         encoded_volid = url_quote(volid, safe='')
