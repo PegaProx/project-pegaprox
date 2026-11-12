@@ -2600,6 +2600,31 @@ def _keep_guarded_ha_settings(cluster, existing):
     cluster['ha_settings'] = merged
 
 
+def _ha_secrets_left_empty(cluster, existing):
+    """What of a cluster's HA secrets the restore of its row leaves empty: whether the key
+    the self-fence agents sign with goes, and the nodes whose fence loses its BMC password.
+
+    A merge keeps both (above). An overwrite writes the backup's HA settings as they are,
+    and a backup without secrets has neither: every installed agent is then answered 403
+    and the fence has nothing to log in with. A fence the backup does not have is gone
+    as a whole and needs no password. Returns (token, [node])."""
+    held = existing.get('ha_settings') if isinstance(existing.get('ha_settings'), dict) else {}
+    sent = cluster.get('ha_settings') if isinstance(cluster.get('ha_settings'), dict) else {}
+    token = bool(held.get('agent_token')) and _blank_secret(sent.get('agent_token'))
+    held_fences = held.get('fencing') if isinstance(held.get('fencing'), dict) else {}
+    sent_fences = sent.get('fencing') if isinstance(sent.get('fencing'), dict) else {}
+    fences = []
+    for node, fence in held_fences.items():
+        new = sent_fences.get(node)
+        if not (isinstance(fence, dict) and isinstance(new, dict)):
+            continue
+        # what the export without secrets leaves out of a fence
+        secret = set(fence) - set(_strip_secret_fields(dict(fence)))
+        if any(fence[k] and _blank_secret(new.get(k)) for k in secret):
+            fences.append(str(node))
+    return token, sorted(fences)
+
+
 # The sealed secrets of the server settings: the settings that name the server each one is
 # sent to, and whether the settings send it at all
 _RESTORE_SECRETS = {
@@ -3249,6 +3274,14 @@ def restore_config():
                         if _lose:
                             results.setdefault('secrets_to_enter', []).append(
                                 {'cluster': cluster_name, 'nodes': _lose})
+                    if existing:
+                        _token, _fences = _ha_secrets_left_empty(cluster, existing)
+                        if _token:
+                            results.setdefault('secrets_to_enter', []).append(
+                                {'cluster': cluster_name, 'agent_token': True})
+                        if _fences:
+                            results.setdefault('secrets_to_enter', []).append(
+                                {'cluster': cluster_name, 'fences': _fences})
 
                     # NS Oct 2026 - it goes onto the ssh command line; a bad one is not restored
                     from pegaprox.utils.sanitization import validate_ssh_user
