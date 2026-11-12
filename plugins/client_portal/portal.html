@@ -146,6 +146,10 @@
 // MK Nov 2026 - a text node serialises without escaping quotes, so a name with a " closed
 // the attribute it was put in. Quotes are escaped here now, same as escapeHtml in status.html.
 const esc = (s) => { const d = document.createElement('div'); d.textContent = String(s || ''); return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
+// MK Nov 2026 - for a string argument of an inline onclick. The parser turns &#39; back into '
+// before the handler is compiled, so esc() inside '...' does not keep the value a string.
+// This writes a JSON string literal (" and \ escaped) and then escapes that for the attribute.
+const jsArg = (v) => esc(JSON.stringify(String(v == null ? '' : v)));
 
 // NS May 2026: single audit point for HTML insertion. Detached <template>
 // parses the string, then replaceChildren swaps the live DOM. Same effect as
@@ -620,21 +624,22 @@ function renderDash(){
         const ips=(v.ips||[]).map(ip=>esc(ip)).join(', ')||'No IP';
         const uptime=on?formatUptime(v.uptime):'';
         // NS: escape cluster_id + name for onclick attrs
-        const escCid = esc(v.cluster_id);
+        // MK Nov 2026 - as jsArg string literals, so a quote in the name stays part of the name
+        const jCid = jsArg(v.cluster_id), jName = jsArg(v.name);
         const escName = esc(v.name);
         let acts='';
         if(on){
-            if(al.includes('vm.console'))acts+=`<button class="btn btn-ghost text-xs" onclick="pConsole('${escCid}',${v.vmid})">&#x1f5a5; Console</button>`;
-            if(al.includes('vm.stop'))acts+=`<button class="btn btn-danger text-xs" onclick="pAction('${escCid}',${v.vmid},'shutdown','${escName}')">&#x23FB; Shutdown</button>`;
-            if(al.includes('vm.stop'))acts+=`<button class="btn btn-danger text-xs" style="opacity:0.7" onclick="pAction('${escCid}',${v.vmid},'stop','${escName}')">&#x26A0; Force Stop</button>`;
+            if(al.includes('vm.console'))acts+=`<button class="btn btn-ghost text-xs" onclick="pConsole(${jCid},${v.vmid})">&#x1f5a5; Console</button>`;
+            if(al.includes('vm.stop'))acts+=`<button class="btn btn-danger text-xs" onclick="pAction(${jCid},${v.vmid},'shutdown',${jName})">&#x23FB; Shutdown</button>`;
+            if(al.includes('vm.stop'))acts+=`<button class="btn btn-danger text-xs" style="opacity:0.7" onclick="pAction(${jCid},${v.vmid},'stop',${jName})">&#x26A0; Force Stop</button>`;
             // MK Nov 2026 (#1239) - reboot is vm.restart on the server, so the button asks the same
-            if(al.includes('vm.restart'))acts+=`<button class="btn btn-ghost text-xs" onclick="pAction('${escCid}',${v.vmid},'reboot','${escName}')">&#8635; Reboot</button>`;
+            if(al.includes('vm.restart'))acts+=`<button class="btn btn-ghost text-xs" onclick="pAction(${jCid},${v.vmid},'reboot',${jName})">&#8635; Reboot</button>`;
         }else{
-            if(al.includes('vm.start'))acts+=`<button class="btn btn-accent text-xs" onclick="pAction('${escCid}',${v.vmid},'start','${escName}')">&#x25B6; Start</button>`;
+            if(al.includes('vm.start'))acts+=`<button class="btn btn-accent text-xs" onclick="pAction(${jCid},${v.vmid},'start',${jName})">&#x25B6; Start</button>`;
         }
-        if(c.allow_snapshots)acts+=`<button class="btn btn-ghost text-xs" onclick="pSnaps('${escCid}',${v.vmid})">&#x1f4f8; Snapshots</button>`;
-        if(c.allow_iso_mount&&v.type==='qemu')acts+=`<button class="btn btn-ghost text-xs" onclick="pIso('${escCid}',${v.vmid})">&#x1f4bf; ISO</button>`;
-        if(S.destroyOpts&&S.destroyOpts.enabled)acts+=`<button class="btn btn-danger text-xs" style="opacity:0.85" onclick="pDestroy('${escCid}',${v.vmid})">&#x1f5d1; Destroy</button>`;
+        if(c.allow_snapshots)acts+=`<button class="btn btn-ghost text-xs" onclick="pSnaps(${jCid},${v.vmid})">&#x1f4f8; Snapshots</button>`;
+        if(c.allow_iso_mount&&v.type==='qemu')acts+=`<button class="btn btn-ghost text-xs" onclick="pIso(${jCid},${v.vmid})">&#x1f4bf; ISO</button>`;
+        if(S.destroyOpts&&S.destroyOpts.enabled)acts+=`<button class="btn btn-danger text-xs" style="opacity:0.85" onclick="pDestroy(${jCid},${v.vmid})">&#x1f5d1; Destroy</button>`;
 
         return`<div class="card ${on?'card-running':''}" style="padding:16px">
             <div class="vm-header">
@@ -770,7 +775,7 @@ function renderIsoModal(){
     const m=S.modal;
     const vm=m.vm;
     const isos=m.isos||[];
-    const escCid=esc(vm.cluster_id);
+    const jCid=jsArg(vm.cluster_id);
     return`<div class="modal-backdrop" onclick="closeModal()">
     <div class="card modal-card" onclick="event.stopPropagation()" style="max-width:500px;width:100%">
         <div class="flex items-center justify-between mb-4">
@@ -788,12 +793,12 @@ function renderIsoModal(){
                         <div class="text-sm font-medium">${esc(iso.name)}</div>
                         <div class="text-xs" style="color:var(--muted)">${iso.size>0?`${(iso.size/1048576).toFixed(0)} MB`:'—'}</div>
                     </div>
-                    <button class="btn btn-accent text-xs" onclick="pMountIso('${escCid}',${vm.vmid},'${esc(iso.volid)}')">Mount</button>
+                    <button class="btn btn-accent text-xs" onclick="pMountIso(${jCid},${vm.vmid},${jsArg(iso.volid)})">Mount</button>
                 </div>
             `).join('')}
         </div>
         <div class="mt-3 pt-3" style="border-top:1px solid var(--border)">
-            <button class="btn btn-ghost text-xs w-full" style="justify-content:center" onclick="pUnmountIso('${escCid}',${vm.vmid})">Eject / Unmount CD-ROM</button>
+            <button class="btn btn-ghost text-xs w-full" style="justify-content:center" onclick="pUnmountIso(${jCid},${vm.vmid})">Eject / Unmount CD-ROM</button>
         </div>
         `}
     </div></div>`;
@@ -842,7 +847,7 @@ function renderSnapshotsModal(){
     const snaps=m.snapshots||[];
     const max=m.max||5;
     const canCreate=snaps.length<max;
-    const escCid = esc(m.vm.cluster_id);
+    const jCid = jsArg(m.vm.cluster_id);
     return`<div class="modal-bg" onclick="closeModal()">
         <div class="card" style="width:100%;max-width:32rem;margin:0 16px;padding:20px" onclick="event.stopPropagation()">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
@@ -855,15 +860,15 @@ function renderSnapshotsModal(){
                     <div style="flex:1;min-width:0"><div class="text-sm font-medium">${esc(s.name)}</div><div class="text-xs" style="color:var(--muted)">${esc(s.description||'')}</div></div>
                     <div style="display:flex;align-items:center;gap:8px;margin-left:12px;flex-shrink:0">
                         <span class="text-xs" style="color:var(--muted)">${s.snaptime?new Date(s.snaptime*1000).toLocaleDateString():''}</span>
-                        <button class="btn btn-ghost text-xs" style="padding:2px 8px" onclick="pRollback('${escCid}',${m.vm.vmid},'${esc(s.name)}')" title="Rollback to this snapshot">&#x21A9; Revert</button>
-                        <button class="btn btn-ghost text-xs" style="padding:2px 8px;color:#da3633" onclick="pDeleteSnap('${escCid}',${m.vm.vmid},'${esc(s.name)}')" title="Delete snapshot">&#x2715;</button>
+                        <button class="btn btn-ghost text-xs" style="padding:2px 8px" onclick="pRollback(${jCid},${m.vm.vmid},${jsArg(s.name)})" title="Rollback to this snapshot">&#x21A9; Revert</button>
+                        <button class="btn btn-ghost text-xs" style="padding:2px 8px;color:#da3633" onclick="pDeleteSnap(${jCid},${m.vm.vmid},${jsArg(s.name)})" title="Delete snapshot">&#x2715;</button>
                     </div>
                 </div>`).join('')}</div>`:`<p class="text-sm mb-4" style="color:var(--muted)">No snapshots yet.</p>`}
             ${canCreate?`<div style="border-top:1px solid var(--border);padding-top:12px">
                 <div class="text-xs font-medium mb-2">Create Snapshot</div>
                 <div style="display:flex;gap:8px">
                     <input id="snap-name" class="input text-sm" style="flex:1;padding:6px 10px" placeholder="Name (optional)">
-                    <button class="btn btn-accent text-xs" onclick="pCreateSnap('${escCid}',${m.vm.vmid})">Create</button>
+                    <button class="btn btn-accent text-xs" onclick="pCreateSnap(${jCid},${m.vm.vmid})">Create</button>
                 </div>
             </div>`:`<p class="text-xs text-center p-2 rounded-lg" style="background:rgba(218,54,51,0.1);color:#f85149">Snapshot limit reached (${max} max)</p>`}
         </div>
