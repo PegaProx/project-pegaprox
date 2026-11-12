@@ -524,6 +524,25 @@ def redact_url(value):
         _one, text)
 
 
+def url_without_login(url):
+    """A single URL (not a log text) with its user:password@ taken off.
+
+    redact_url() reads free text, so a login there ends at the first '@' or blank. A
+    typed URL is split the way the fetcher splits it: the netloc runs to the first '/',
+    '?' or '#', the host is what follows its last '@'. Pass the result on to
+    redact_url() for the path and the query."""
+    if not url:
+        return url
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        p = urlsplit(str(url))
+    except ValueError:
+        return '[REDACTED]'
+    if '@' not in p.netloc:
+        return str(url)
+    return urlunsplit(p._replace(netloc=p.netloc.rpartition('@')[2]))
+
+
 def redact_request_line(line):
     """An access-log line with credential-looking query values blanked.
 

@@ -65,7 +65,7 @@ from pegaprox.core import transfer_net, preflight
 from pegaprox.core.transfer_net import transfer_ssh_address
 from pegaprox.background import guest_index
 from pegaprox.utils.ssh import get_paramiko, ssh_password_for, ssh_password_to, ssh_blocked_for, bare_host, node_login
-from pegaprox.utils.sanitization import sanitize_int, validate_snapshot_name
+from pegaprox.utils.sanitization import sanitize_int, validate_snapshot_name, redact_url, url_without_login
 from urllib.parse import urlencode, quote as url_quote
 import signal
 import requests.exceptions
@@ -1627,7 +1627,12 @@ def download_iso_from_url(cluster_id, storage_name):
             threading.Thread(target=poll_download_status, daemon=True).start()
             
             user = request.session.get('user', 'unknown')
-            log_audit(user, 'storage.download', f"Started download: {filename} from {url[:50]}...", cluster=manager.config.name)
+            # a mirror login in the URL (user:pass@host) or a token in its query goes to the
+            # node only; the trail, read with cluster.view, gets the host. The login may hold
+            # an '@' or a blank, so it comes off by structure first
+            log_audit(user, 'storage.download',
+                      f"Started download: {filename} from {redact_url(url_without_login(url))}",
+                      cluster=manager.config.name)
             
             return jsonify({
                 'success': True,
