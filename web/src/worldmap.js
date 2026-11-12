@@ -189,12 +189,15 @@
                 dragRef.current = { startX: e.clientX, startY: e.clientY, panX: view.panX, panY: view.panY };
             };
             const handleMouseMove = (e) => {
-                if (!dragRef.current) return;
+                // LW Nov 2026 - a deferred render can run the updater after mouseup cleared the ref,
+                // so the start is read here once and the updater only uses that
+                const start = dragRef.current;
+                if (!start) return;
                 const rect = containerRef.current?.getBoundingClientRect();
                 if (!rect) return;
-                const dx = ((e.clientX - dragRef.current.startX) / rect.width) * vbW;
-                const dy = ((e.clientY - dragRef.current.startY) / rect.height) * vbH;
-                setView(v => _wm_clampView({ ...v, panX: dragRef.current.panX - dx, panY: dragRef.current.panY - dy }));
+                const dx = ((e.clientX - start.startX) / rect.width) * vbW;
+                const dy = ((e.clientY - start.startY) / rect.height) * vbH;
+                setView(v => _wm_clampView({ ...v, panX: start.panX - dx, panY: start.panY - dy }));
             };
             const handleMouseUp = () => { dragRef.current = null; };
 
