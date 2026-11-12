@@ -18,14 +18,18 @@ from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.background.scheduler import (load_scheduled_tasks, save_scheduled_tasks, execute_scheduled_task,
                                             task_refusal)
+from pegaprox.utils.sanitization import validate_storage_name
 from pegaprox.api.helpers import bounded_limit, get_connected_manager, check_cluster_access
 
 bp = Blueprint('history', __name__)
 
 
-def _task_refused(task):
-    """The 400 answer for a task the cluster's tasks cannot run, None for one they can.
-    MK Nov 2026 - said here instead of failing every night (scheduler.task_refusal)."""
+def _task_refused(task, storage_given=True):
+    """The 400 answer for a task that cannot be stored as it is, None for one that can.
+    MK Nov 2026 - the storage goes into the backup call, and an action the cluster's tasks
+    cannot run is said here instead of failing every night (scheduler.task_refusal)."""
+    if storage_given and not validate_storage_name(task.get('backup_storage') or 'local'):
+        return jsonify({'error': 'Invalid backup storage name'}), 400
     why = task_refusal(task.get('cluster_id', ''), task.get('action', ''))
     if why:
         return jsonify({'error': why}), 400
@@ -96,7 +100,7 @@ def create_scheduled_task():
         'schedule_type': data.get('schedule_type', 'daily'),  # hourly, daily, weekly, monthly
         'schedule_time': data.get('schedule_time', '02:00'),
         'schedule_day': data.get('schedule_day', 0),
-        'backup_storage': data.get('backup_storage', 'local'),
+        'backup_storage': data.get('backup_storage') or 'local',
         'enabled': data.get('enabled', True),
         'last_run': None,
         'created': datetime.now().isoformat()
@@ -137,8 +141,8 @@ def update_scheduled_task(task_id):
                 'enabled': data.get('enabled', task['enabled']),
             })
             # a stored row stays as it is until it is edited; the edit is held to the rules
-            # of a new task
-            refused = _task_refused(changed)
+            # of a new task (a storage only when it is set)
+            refused = _task_refused(changed, storage_given='backup_storage' in data)
             if refused:
                 return refused
             task.update(changed)

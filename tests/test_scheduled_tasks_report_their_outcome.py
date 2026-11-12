@@ -10,8 +10,9 @@ Those actions are refused on Proxmox VE now, with a reason that names what to us
 at create and update, and for a row stored long ago at run time, where the scheduler logs
 it at warning and audits the failure, and the run route answers 400. They are not made to
 run, or tasks saved long ago would start acting after the update. A snapshot works as
-before and its failure is reported; XCP-ng keeps its power actions. The managers here are
-doubles of the real ones, so a method they lack fails the test.
+before and its failure is reported; XCP-ng keeps its power actions. The storage a task
+names goes into the backup call, and is checked as a storage name before it is stored. The
+managers here are doubles of the real ones, so a method they lack fails the test.
 
 MK Nov 2026
 """
@@ -194,6 +195,24 @@ def test_a_task_whose_cluster_is_gone_answers_404(root, db):
     _stored_row(db, 'old1', 'gone', 'snapshot')
     r = root.post('/api/scheduled-tasks/old1/run')
     assert r.status_code == 404 and r.get_json()['error'] == 'Cluster not found'
+
+
+# --- the storage name -------------------------------------------------------------------
+
+@pytest.mark.parametrize('storage', ['../etc', 'local;rm -rf /', '-x', 'a b', 5])
+def test_a_storage_name_is_checked_before_it_is_stored(root, xcp, storage):
+    r = root.post('/api/scheduled-tasks', json=_body(XCP, 'backup', backup_storage=storage))
+    assert r.status_code == 400 and r.get_json()['error'] == 'Invalid backup storage name'
+    assert _tasks() == []
+    task = _create(root, XCP, 'backup', backup_storage='pbs-x')
+    r = root.put(f"/api/scheduled-tasks/{task['id']}", json={'backup_storage': storage})
+    assert r.status_code == 400, r.get_data(as_text=True)
+    assert next(t for t in _tasks() if t['id'] == task['id'])['backup_storage'] == 'pbs-x'
+
+
+def test_no_storage_given_is_local(root, xcp):
+    assert _create(root, XCP, 'backup', backup_storage='')['backup_storage'] == 'local'
+    assert _create(root, XCP, 'snapshot')['backup_storage'] == 'local'
 
 
 # --- XCP-ng keeps what it has -----------------------------------------------------------
