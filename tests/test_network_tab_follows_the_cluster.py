@@ -2,7 +2,9 @@
 
 After a cluster switch the load still saw the network picked on the cluster before and
 kept that name, so a cluster without a network of that name drew an empty detail pane. A
-refresh after the picked network went away did the same.
+refresh after the picked network went away did the same. And an answer that came in late
+filled the tab whatever it was for: the answer of the cluster before a switch, arriving
+after the new one, put that cluster's networks under the new one.
 
 networking.js is compiled with the Babel the repo ships (static/js/babel.min.js) and
 NetworkTab is drawn through a small hook runtime in node, with a /networks that answers
@@ -137,6 +139,16 @@ function tab(isCorporate) {
     t.refresh();
     await t.answer('c1', ['vmbr0', 'vmbr5']);
     out.refreshPickGone = t.state();
+
+    // the answer of the cluster before the switch comes in after the new one
+    for (const [layout, corp] of [['corporate', true], ['modern', false]]) {
+        t = tab(corp).show('c1');
+        t.show('c2');
+        await t.answer('c2', ['vmbr20', 'vmbr21']);
+        out['lateAnswer_' + layout] = t.state();
+        await t.answer('c1', ['vmbr10', 'vmbr11']);
+        out['lateAnswerAfter_' + layout] = t.state();
+    }
     console.log(JSON.stringify(out));
 })().catch(e => { console.error(e && e.stack || e); process.exit(3); });
 """
@@ -173,3 +185,13 @@ def test_a_refresh_keeps_the_pick_while_the_list_has_it(tabs):
     got = tabs['refreshPickGone']
     assert got['selected'] == 'vmbr0', got
 
+
+@pytest.mark.parametrize('layout', ['corporate', 'modern'])
+def test_a_late_answer_of_the_cluster_before_is_dropped(tabs, layout):
+    before = tabs['lateAnswer_' + layout]
+    after = tabs['lateAnswerAfter_' + layout]
+    assert 'vmbr20' in before['listed'], before
+    assert after['listed'] == before['listed'], (before, after)
+    assert not any(n.startswith('vmbr1') for n in after['listed']), after
+    if layout == 'corporate':
+        assert after['selected'] == 'vmbr20', after

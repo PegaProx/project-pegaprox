@@ -19,13 +19,21 @@
                 } catch { return null; }
             };
 
+            // LW Nov 2026 - only the latest load may fill the tab: an answer that comes in after
+            // a cluster switch or a newer refresh is dropped
+            const loadSeq = useRef(0);
+
             // load networks for this cluster
             const fetchNetworks = async () => {
+                const seq = ++loadSeq.current;
+                const stale = () => seq !== loadSeq.current;
                 setLoading(true);
                 try {
                     const resp = await authFetch(`${API_URL}/clusters/${clusterId}/networks`);
+                    if (stale()) return;
                     if (resp && resp.ok) {
                         const data = await resp.json();
+                        if (stale()) return;
                         // LW Nov 2026 - an XCP-ng pool used to answer the bare list, take either
                         const list = Array.isArray(data) ? data : (data?.networks || []);
                         setNetworks(list);
@@ -42,6 +50,7 @@
                         setNetworks([]);
                     }
                 } catch (err) {
+                    if (stale()) return;
                     console.error('fetch networks:', err);
                     setNetworks([]);
                 }
