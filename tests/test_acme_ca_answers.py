@@ -7,6 +7,9 @@
 # A badNonce refusal (RFC 8555 6.5) carries a fresh nonce for one more try, and some CAs
 # refuse a share of nonces on purpose: 2 of 8 orders failed on that against a test CA. The
 # request goes once more with the fresh nonce now.
+#
+# An authorization fetch the CA refused was searched for challenges all the same, and
+# the admin read "No HTTP-01 challenge offered by ACME server". It says the CA's reason.
 import base64
 import datetime
 import json as _json
@@ -254,3 +257,48 @@ def test_an_account_refused_for_its_nonce_is_registered_on_the_fresh_one(tmp_pat
     assert res['kid'] == 'https://ca.example/acct/1'
     assert posted == ['https://ca.example/acct', 'https://ca.example/acct',
                       'https://ca.example/order', 'https://ca.example/authz/1']
+
+
+def _order_with_authz(tmp_path, monkeypatch, *authz_answers):
+    directory = {'newNonce': 'https://ca.example/nonce', 'newAccount': 'https://ca.example/acct',
+                 'newOrder': 'https://ca.example/order'}
+    answers = {
+        'https://ca.example/acct': [_Resp(201, headers={'Replay-Nonce': 'n2', 'Location': 'https://ca.example/acct/1'})],
+        'https://ca.example/order': [_Resp(201, js={'authorizations': ['https://ca.example/authz/1'],
+                                                    'finalize': FINALIZE},
+                                           headers={'Replay-Nonce': 'n3', 'Location': 'https://ca.example/order/1'})],
+        'https://ca.example/authz/1': list(authz_answers),
+    }
+
+    def plain(method, url, json=None, **kw):
+        if method == 'GET':
+            return _Resp(200, js=directory)
+        if method == 'HEAD':
+            return _Resp(200, headers={'Replay-Nonce': 'n1'})
+        return answers[url].pop(0)
+
+    monkeypatch.setattr('pegaprox.utils.url_security.sanitize_outbound_url', lambda url, **kw: url)
+    monkeypatch.setattr(acme, '_guard_acme_url', lambda url: url)
+    monkeypatch.setattr(acme, '_acme_allow_private', lambda: False)
+    monkeypatch.setattr(acme, '_acme_request', plain)
+    return acme.request_certificate(DOMAIN, 'ops@example.com', str(tmp_path), directory_url='https://ca.example/dir')
+
+
+@pytest.mark.parametrize('answers,message', [
+    ([_refused(_BAD_NONCE, 'fresh-1'), _refused(_BAD_NONCE, 'fresh-2')],
+     f"Authorization fetch failed: {_BAD_NONCE['detail']} (HTTP 400)"),
+    ([_refused({'type': 'urn:ietf:params:acme:error:unauthorized', 'detail': 'account is not the owner'})],
+     'Authorization fetch failed: account is not the owner (HTTP 400)'),
+    ([_Resp(503, text='<html>maintenance</html>')], 'Authorization fetch failed: HTTP 503'),
+    ([_Resp(200, text='<html>sign in</html>')],
+     'Authorization fetch failed: the CA did not answer with an authorization'),
+])
+def test_a_refused_authorization_fetch_says_why(tmp_path, monkeypatch, answers, message):
+    res = _order_with_authz(tmp_path, monkeypatch, *answers)
+    assert res == {'success': False, 'message': message}
+
+
+def test_an_authorization_without_http01_still_says_so(tmp_path, monkeypatch):
+    res = _order_with_authz(tmp_path, monkeypatch, _Resp(200, js={
+        'status': 'pending', 'challenges': [{'type': 'dns-01', 'token': 't', 'url': 'https://ca.example/chall/1'}]}))
+    assert res == {'success': False, 'message': 'No HTTP-01 challenge offered by ACME server'}

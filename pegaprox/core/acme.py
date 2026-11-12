@@ -827,6 +827,16 @@ def _create_order(domain, email, ssl_dir, staging=False, directory_url=None):
     authz_url = order['authorizations'][0]
     authz_resp = _signed_request(authz_url, None, account_key, nonce, kid)
     nonce = authz_resp.headers.get('Replay-Nonce', nonce)
+    # a refusal here is a problem document without challenges, and looking for one in
+    # it said "No HTTP-01 challenge offered", which is not what went wrong
+    if authz_resp.status_code != 200:
+        return {'success': False, 'message': f"Authorization fetch failed: {_acme_problem(authz_resp)}"}
+    try:
+        authz = authz_resp.json()
+    except ValueError:
+        authz = None
+    if not isinstance(authz, dict):
+        return {'success': False, 'message': 'Authorization fetch failed: the CA did not answer with an authorization'}
 
     return {
         'success': True,
@@ -836,7 +846,7 @@ def _create_order(domain, email, ssl_dir, staging=False, directory_url=None):
         'order': order,
         'order_url': order_resp.headers.get('Location', ''),
         'authz_url': authz_url,
-        'authz': authz_resp.json(),
+        'authz': authz,
     }
 
 
