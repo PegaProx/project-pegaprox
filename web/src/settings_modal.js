@@ -9633,7 +9633,8 @@
                                                     ✓ Backup created: <code className="text-green-400">{updateInfo.backup_path}</code>
                                                 </p>
                                             )}
-                                            {updateInfo.download_url && (
+                                            {/* LW Nov 2026 - the url is from the version manifest, only an https page becomes the link */}
+                                            {typeof updateInfo.download_url === 'string' && /^https:\/\//i.test(updateInfo.download_url) && (
                                                 <a
                                                     href={updateInfo.download_url}
                                                     target="_blank"
