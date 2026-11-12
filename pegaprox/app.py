@@ -1990,7 +1990,7 @@ def main(debug_mode=False):
 
     if use_gevent == 'gevent' or (use_gevent == 'auto' and GEVENT_AVAILABLE):
         if GEVENT_AVAILABLE:
-            _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, http_redirect_port)
+            _start_gevent_server(app, bind_host, port, ssl_context, domain, workers)
             return
 
     # Fallback to Flask development server
@@ -2491,7 +2491,7 @@ def _should_bypass_gevent_upgrade(app, environ):
         return False
 
 
-def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, http_redirect_port=-1):
+def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
     """Start production server with Gevent."""
     from gevent.pywsgi import WSGIServer
 
@@ -2734,8 +2734,12 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
                 # #777 — bound the pre-request wait: a client that opens the socket but never
                 # sends a byte would otherwise park here holding a pool slot until TCP gives up.
                 # Drop it after the keep-alive idle window (None = disabled = old blocking behaviour).
+                # MK Nov 2026 - by the handshake timeout, as on a port without the check. Every
+                # TLS port runs it now, and the keep-alive window held a silent socket 75 s
+                # instead of 30. A real client sends its hello right after connecting.
                 import gevent as _gv
-                _pk = _KEEPALIVE_IDLE_TIMEOUT if _KEEPALIVE_IDLE_TIMEOUT > 0 else None
+                _pk = (_HANDSHAKE_TIMEOUT if _HANDSHAKE_TIMEOUT > 0
+                       else _KEEPALIVE_IDLE_TIMEOUT if _KEEPALIVE_IDLE_TIMEOUT > 0 else None)
                 try:
                     with _gv.Timeout(_pk):
                         first_byte = client_socket.recv(1, socket.MSG_PEEK)
@@ -2884,21 +2888,17 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ssl_ctx.load_cert_chain(ssl_context[0], ssl_context[1])
-        # NS: http_redirect_port == -1 disables ALL http→https redirect (#125)
-        # including the dual-protocol detection on the main port
-        if http_redirect_port < 0:
-            http_server = QuietWSGIServer(
-                _create_listener(bind_host, port), app,
-                ssl_context=ssl_ctx,
-                **server_kwargs
-            )
-        else:
-            http_server = DualProtocolWSGIServer(
-                _create_listener(bind_host, port), app,
-                ssl_context=ssl_ctx,
-                redirect_domain=domain,
-                **server_kwargs
-            )
+        # MK Nov 2026 - plain HTTP on this port is always answered with a redirect.
+        # http_redirect_port -1 used to switch this check off too, and with -1 being the
+        # default every plain request got a reset, a trusted proxy with X-Forwarded-Proto
+        # included. TLS clients see no difference: a Cloudflare tunnel of type HTTPS with
+        # No TLS Verify is served here as before. -1 now only means no extra port.
+        http_server = DualProtocolWSGIServer(
+            _create_listener(bind_host, port), app,
+            ssl_context=ssl_ctx,
+            redirect_domain=domain,
+            **server_kwargs
+        )
     else:
         print(f"HTTP on http://{bind_host}:{port}", flush=True)
         print("WARNING: Running without HTTPS - noVNC console may not work!", flush=True)

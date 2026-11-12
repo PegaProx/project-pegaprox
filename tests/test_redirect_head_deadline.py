@@ -45,7 +45,7 @@ def ping():
 
 
 app_mod._start_gevent_server(web, '127.0.0.1', int(sys.argv[1]), (sys.argv[2], sys.argv[3]),
-                             None, 2, http_redirect_port=0)
+                             None, 2)
 '''
 
 
