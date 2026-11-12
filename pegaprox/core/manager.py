@@ -17370,9 +17370,12 @@ echo "AGENT_INSTALLED_OK"
             # Update boot order
             if valid_devices:
                 new_boot = 'order=' + ';'.join(valid_devices)
+            elif vm_type == 'qemu' and 'net0' in config:
+                # No valid devices - network boot, the VM has a NIC
+                new_boot = 'order=net0'
             else:
-                # No valid devices - default to net0 for QEMU
-                new_boot = 'order=net0' if vm_type == 'qemu' else ''
+                # nothing left PVE would take: drop the order, PVE's default applies
+                new_boot = ''
             
             # Apply update
             if vm_type == 'qemu':
@@ -17380,7 +17383,7 @@ echo "AGENT_INSTALLED_OK"
             else:
                 url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/lxc/{vmid}/config"
             
-            response = self._api_put(url, data={'boot': new_boot})
+            response = self._api_put(url, data={'boot': new_boot} if new_boot else {'delete': 'boot'})
             
             if response.status_code == 200:
                 self.logger.info(f"[OK] Sanitized boot order for {vm_type}/{vmid}: removed {removed_devices}")
@@ -18407,8 +18410,11 @@ echo "AGENT_INSTALLED_OK"
                         if new_parts != parts:  # Boot order changed
                             if new_parts:
                                 new_boot = 'order=' + ';'.join(new_parts)
+                            elif vm_type == 'qemu' and 'net0' in raw_config:
+                                new_boot = 'order=net0'
                             else:
-                                new_boot = 'order=net0' if vm_type == 'qemu' else ''
+                                # PVE refuses an order naming a device the VM lacks: no order then
+                                new_boot = ''
                             
                             # Update boot order BEFORE removing disk
                             if vm_type == 'qemu':
@@ -18416,9 +18422,9 @@ echo "AGENT_INSTALLED_OK"
                             else:
                                 boot_url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/lxc/{vmid}/config"
                             
-                            boot_response = self._api_put(boot_url, data={'boot': new_boot})
+                            boot_response = self._api_put(boot_url, data={'boot': new_boot} if new_boot else {'delete': 'boot'})
                             if boot_response.status_code == 200:
-                                self.logger.info(f"[DISK] Updated boot order before removing {disk_id}: {new_boot}")
+                                self.logger.info(f"[DISK] Updated boot order before removing {disk_id}: {new_boot or 'default'}")
                             else:
                                 self.logger.warning(f"[DISK] Failed to update boot order: {boot_response.text}")
                     except Exception as e:

@@ -319,3 +319,25 @@ def test_a_guest_whose_status_cannot_be_read_is_treated_as_running():
     assert res == {'success': True,
                    'message': 'Disk sata1 is detached at the next start of guest 100 (volume kept)'}, res
     assert m._api_delete.call_args_list == []
+
+
+def test_removing_the_only_boot_disk_of_a_vm_without_a_nic_drops_the_boot_order():
+    """The order fell back to net0, which PVE refuses on a VM that has none."""
+    before = {'boot': 'order=scsi0', 'scsi0': 'local-lvm:vm-100-disk-0,size=4G'}
+    res, m = _remove([before], 'scsi0', delete_data=False)
+    assert res['success'] is True, res
+    assert m._api_put.call_args_list == [
+        call(_url(), data={'delete': 'boot'}),
+        call(_url(), data={'delete': 'scsi0'}),
+    ]
+
+
+def test_removing_the_only_boot_disk_of_a_vm_with_a_nic_boots_it_from_the_network():
+    before = {'boot': 'order=scsi0', 'scsi0': 'local-lvm:vm-100-disk-0,size=4G',
+              'net0': 'virtio=BC:24:11:00:00:01,bridge=vmbr0'}
+    res, m = _remove([before], 'scsi0', delete_data=False)
+    assert res['success'] is True, res
+    assert m._api_put.call_args_list == [
+        call(_url(), data={'boot': 'order=net0'}),
+        call(_url(), data={'delete': 'scsi0'}),
+    ]
