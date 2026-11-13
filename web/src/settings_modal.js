@@ -4791,6 +4791,19 @@
                                 <span>{t('pgHaTab')}</span>
                             </button>
                             )}
+                            {isAdmin && (
+                            <button
+                                onClick={() => setActiveTab('federation')}
+                                className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
+                                    activeTab === 'federation'
+                                        ? (isCorporate ? 'text-white border-b-2 border-[#49afd9] font-medium' : 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50')
+                                        : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
+                                }`}
+                            >
+                                <Icons.Globe className="w-4 h-4" />
+                                <span>{t('fedTab')}</span>
+                            </button>
+                            )}
                             <button
                                 onClick={() => setActiveTab('syslog')}
                                 className={`flex items-center gap-2 ${isCorporate ? 'px-3 py-1.5 text-[13px]' : 'px-4 py-2.5 text-sm'} font-medium transition-colors whitespace-nowrap ${
@@ -9491,6 +9504,11 @@
                                 <QnetdHostsPanel t={t} addToast={addToast} getAuthHeaders={getAuthHeaders} />
                             )}
 
+                            {/* MK Nov 2026 - the federation of instances: members, identities, leases, adoption */}
+                            {activeTab === 'federation' && isAdmin && (
+                                <FederationPanel t={t} addToast={addToast} getAuthHeaders={getAuthHeaders} />
+                            )}
+
                             {/* MK May 2026 — SIEM Forwarder Tab */}
                             {activeTab === 'siem' && (
                                 <SIEMTab addToast={addToast} t={t} getAuthHeaders={getAuthHeaders} />
@@ -10321,6 +10339,429 @@
                     </div>
                 </div>,
                 document.body
+            );
+        }
+
+        // MK Nov 2026 - the federation of instances (three leaders): members, identities,
+        // cluster leases and the disaster-recovery adoption, on the API the federation
+        // module serves (/api/federation/*). The panel polls two answers: the status
+        // (who is here, who answers) and the leases (who leads what).
+        function FederationPanel({ t, addToast, getAuthHeaders }) {
+            const { user, logout } = useAuth();
+            const [status, setStatus] = useState(null);
+            const [leases, setLeases] = useState(null);
+            const [clusters, setClusters] = useState(null);
+            const [loadError, setLoadError] = useState('');
+            const [busy, setBusy] = useState('');
+            const [now, setNow] = useState(Date.now());
+            const [ownUrl, setOwnUrl] = useState('');
+            const [ownSite, setOwnSite] = useState('');
+            const [code, setCode] = useState(null);            // {code, expires_at} shown once
+            const [joinCode, setJoinCode] = useState('');
+            const [joinUrl, setJoinUrl] = useState('');
+            const [joinSite, setJoinSite] = useState('');
+            const [passwords, setPasswords] = useState({ code: '', join: '', confirm: '' });
+            const [confirmBox, setConfirmBox] = useState(null); // {kind, id, name, word, needPw, force}
+            const [typed, setTyped] = useState('');
+            const [force, setForce] = useState(false);
+            const sso = ['oidc', 'entra'].includes(user?.auth_source);
+
+            async function fedSend(method, path, body, fallback) {
+                let r;
+                try {
+                    r = await fetch(`${API_URL}/federation/${path}`, {
+                        method, credentials: 'include',
+                        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body || {})
+                    });
+                } catch (_) {
+                    return { ok: false, error: fallback, code: '' };
+                }
+                const data = await r.json().catch(() => null);
+                if (!r.ok) {
+                    if (r.status === 401) { logout(); return { ok: false, error: fallback, code: 'AUTH' }; }
+                    return { ok: false, error: (data && data.error) || fallback, code: (data && data.code) || '' };
+                }
+                return { ok: true, data: data || {} };
+            }
+
+            async function refreshStatus() {
+                const r = await fedSend('GET', 'status', null, t('fedLoadFailed'));
+                if (r.ok) { setStatus(r.data); setLoadError(''); }
+                else if (r.code !== 'AUTH') setLoadError(r.error);
+            }
+            async function refreshLeases() {
+                const r = await fedSend('GET', 'leases', null, t('fedLoadFailed'));
+                if (r.ok) setLeases(r.data);
+            }
+            async function refreshClusters() {
+                let r;
+                try { r = await fetch(`${API_URL}/clusters`, { credentials: 'include', headers: getAuthHeaders() }); }
+                catch (_) { return; }
+                if (r.ok) { const d = await r.json().catch(() => null); if (Array.isArray(d)) setClusters(d); }
+            }
+
+            useEffect(() => {
+                let alive = true;
+                let timer = null;
+                // a chain, not an interval: a status answer with unreachable peers
+                // takes up to 3 s per member, and the next tick must wait for the
+                // last one instead of stacking requests behind it
+                const poll = async () => {
+                    if (!document.hidden) {
+                        await Promise.all([refreshStatus(), refreshLeases()]);
+                    }
+                    if (alive) timer = setTimeout(poll, 20000);
+                };
+                poll(); refreshClusters();
+                return () => { alive = false; clearTimeout(timer); };
+            }, []);
+            // the second tick drives the pairing-code countdown alone
+            useEffect(() => {
+                if (!code) return;
+                const tick = setInterval(() => setNow(Date.now()), 1000);
+                return () => clearInterval(tick);
+            }, [code]);
+
+            const members = (status && Array.isArray(status.members)) ? status.members : [];
+            const me = status ? status.instance_id : '';
+            const joined = members.length > 0;
+            const enrolled = (leases && leases.enrolled) || {};
+            const myLeases = (leases && leases.leases) || {};
+            const own = Object.entries(enrolled).filter(([, v]) => v.owner === me);
+            const shadows = Object.entries(enrolled).filter(([, v]) => v.owner && v.owner !== me);
+            const enrolledIds = new Set(Object.keys(enrolled));
+            const unenrolled = (clusters || []).filter(c => c && c.id && !enrolledIds.has(c.id));
+            const codeLeft = code ? Math.max(0, Math.floor((code.expires_at * 1000 - now) / 1000)) : 0;
+
+            async function act(what, path, body, doneToast) {
+                setBusy(what);
+                const r = await fedSend('POST', path, body, t('fedActionFailed'));
+                setBusy('');
+                // the password was for this one request - success or refusal
+                setPasswords(p => ({ ...p, confirm: '', code: '', join: '' }));
+                if (r.ok) {
+                    setConfirmBox(null); setTyped(''); setForce(false);
+                    addToast(doneToast, 'success');
+                    refreshStatus(); refreshLeases(); refreshClusters();
+                    return true;
+                }
+                addToast(r.error, 'error');
+                return false;
+            }
+
+            function confirmProps(kind, id, name, word, needPw) {
+                return { kind, id, name, word, needPw };
+            }
+
+            const confirmTitles = {
+                remove: t('fedRemoveTitle'), leave: t('fedLeaveTitle'),
+                release: t('fedReleaseTitle'), unenroll: t('fedUnenrollTitle'),
+                adopt: t('fedAdoptTitle'), enroll: t('fedEnrollTitle'),
+            };
+            const confirmWords = { remove: 'REMOVE', leave: 'LEAVE', release: 'RELEASE', unenroll: 'UNENROLL', adopt: 'ADOPT', enroll: 'ENROLL' };
+            const confirmNotes = {
+                remove: t('fedRemoveNote'), leave: t('fedLeaveNote'),
+                release: t('fedReleaseNote'), unenroll: t('fedUnenrollNote'),
+                adopt: t('fedAdoptNote'), enroll: t('fedEnrollNote'),
+            };
+
+            async function runConfirm() {
+                const c = confirmBox;
+                if (!c || typed !== confirmWords[c.kind]) return;
+                if (c.needPw && !sso && !passwords.confirm) return;
+                const pw = sso ? {} : { user_password: passwords.confirm };
+                if (c.kind === 'remove') return void await act('remove', `members/${c.id}/remove`, { confirm: 'REMOVE', ...pw }, t('fedRemoved'));
+                if (c.kind === 'leave') return void await act('leave', 'leave', { confirm: 'LEAVE', ...pw }, t('fedLeft'));
+                if (c.kind === 'release') return void await act('release', `clusters/${c.id}/release`, { confirm: 'RELEASE', ...pw }, t('fedReleased'));
+                if (c.kind === 'unenroll') return void await act('unenroll', `clusters/${c.id}/unenroll`, { confirm: 'UNENROLL', ...pw }, t('fedUnenrolled'));
+                if (c.kind === 'adopt') return void await act('adopt', `clusters/${c.id}/adopt`, { confirm: 'ADOPT', force: force, ...pw }, t('fedAdopted'));
+                if (c.kind === 'enroll') return void await act('enroll', `clusters/${c.id}/enroll`, { ...pw }, t('fedEnrolled'));
+            }
+
+            // ---- the confirm box: one for every word-and-password action
+            const box = confirmBox && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" data-fed-confirm={confirmBox.kind}>
+                    <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-5 w-full max-w-md space-y-4">
+                        <h4 className="font-medium text-white flex items-center gap-2">
+                            {confirmBox.kind === 'adopt' ? <Icons.LifeBuoy className="w-4 h-4 text-proxmox-orange" /> : <Icons.AlertTriangle className="w-4 h-4 text-yellow-400" />}
+                            {(confirmTitles[confirmBox.kind] || '').replace('{name}', confirmBox.name)}
+                        </h4>
+                        <p className="text-sm text-gray-400">{confirmNotes[confirmBox.kind] || ''}</p>
+                        {confirmBox.kind === 'adopt' && (
+                            <label className="flex items-start gap-2 text-sm text-gray-400">
+                                <input type="checkbox" checked={force} onChange={e => setForce(e.target.checked)} className="mt-1" />
+                                <span>{t('fedAdoptForce')} <span className="text-red-400">{t('fedAdoptForceWarn')}</span></span>
+                            </label>
+                        )}
+                        <div>
+                            <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-confirm-word">{t('fedConfirmType')} <code className="text-yellow-300">{confirmWords[confirmBox.kind]}</code></label>
+                            <input id="fed-confirm-word" value={typed} onChange={e => setTyped(e.target.value)}
+                                autoComplete="off" spellCheck="false" className={`w-full font-mono ${HA_GROUP_FIELD}`} />
+                        </div>
+                        {confirmBox.needPw && !sso && (
+                            <div>
+                                <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-confirm-pw">{t('fedPassword')}</label>
+                                <input id="fed-confirm-pw" type="password" autoComplete="current-password" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"
+                                    value={passwords.confirm} onChange={e => setPasswords(p => ({ ...p, confirm: e.target.value }))} className={`w-full ${HA_GROUP_FIELD}`} />
+                            </div>
+                        )}
+                        <div className="flex justify-end gap-2 pt-1">
+                            <button className={HA_GROUP_GHOST} onClick={() => { setConfirmBox(null); setTyped(''); setForce(false); setPasswords(p => ({ ...p, confirm: '' })); }} disabled={!!busy}>{t('cancel')}</button>
+                            <button className={`${HA_GROUP_BTN} bg-proxmox-orange hover:bg-proxmox-orange/90 text-white`}
+                                onClick={runConfirm} disabled={!!busy || typed !== confirmWords[confirmBox.kind] || (confirmBox.needPw && !sso && !passwords.confirm)}>
+                                {busy ? t('fedWorking') : (confirmBox.kind === 'adopt' ? t('fedAdoptGo') : t('confirm'))}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="space-y-4" data-fed-panel={joined ? 'joined' : 'empty'}>
+                    {box}
+                    {loadError && <div className="text-sm text-red-400">{loadError}</div>}
+
+                    {!joined && (
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                            {/* start: hand out a pairing code */}
+                            <div className={HA_GROUP_CARD} data-fed-pairing="issue">
+                                <h4 className="font-medium text-white flex items-center gap-2"><Icons.Key className="w-4 h-4 text-proxmox-orange" />{t('fedStartTitle')}</h4>
+                                <p className="text-sm text-gray-400">{t('fedStartDesc')}</p>
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-own-url">{t('fedOwnUrl')}</label>
+                                    <input id="fed-own-url" value={ownUrl} onChange={e => setOwnUrl(e.target.value)} placeholder="https://pegaprox-a.example:5000" className={`w-full font-mono ${HA_GROUP_FIELD}`} />
+                                    <div className="text-[11px] text-gray-500 mt-1">{t('fedOwnUrlHint')}</div>
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-own-site">{t('fedSite')}</label>
+                                    <input id="fed-own-site" value={ownSite} onChange={e => setOwnSite(e.target.value)} placeholder="berlin" className={`w-full ${HA_GROUP_FIELD}`} />
+                                </div>
+                                {!sso && (
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-code-pw">{t('fedPassword')}</label>
+                                        <input id="fed-code-pw" type="password" autoComplete="current-password" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"
+                                            value={passwords.code} onChange={e => setPasswords(p => ({ ...p, code: e.target.value }))} className={`w-full ${HA_GROUP_FIELD}`} />
+                                    </div>
+                                )}
+                                <button className={`${HA_GROUP_BTN} bg-proxmox-orange hover:bg-proxmox-orange/90 text-white`} data-fed-make-code
+                                    disabled={!!busy || !ownUrl || (!sso && !passwords.code)}
+                                    onClick={async () => {
+                                        setBusy('code');
+                                        const r = await fedSend('POST', 'pairing-code', sso ? { url: ownUrl, site: ownSite } : { url: ownUrl, site: ownSite, user_password: passwords.code }, t('fedCodeFailed'));
+                                        setBusy('');
+                                        if (r.ok) { setCode(r.data); addToast(t('fedCodeMade'), 'success'); refreshStatus(); }
+                                        else addToast(r.error, 'error');
+                                    }}>{busy === 'code' ? t('fedWorking') : t('fedMakeCode')}</button>
+                                {code && (
+                                    <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl p-3 space-y-2" data-fed-code={codeLeft > 0 ? 'open' : 'expired'}>
+                                        <div className="text-xs font-medium text-yellow-200 flex items-center gap-2"><Icons.AlertTriangle className="w-3.5 h-3.5" />{t('fedCodeOnce')}</div>
+                                        {codeLeft > 0 ? (
+                                            <>
+                                                <div className="flex items-start gap-2">
+                                                    <code className="flex-1 px-3 py-2 bg-black/40 rounded text-xs text-yellow-200 break-all font-mono select-all">{code.code}</code>
+                                                    <button className="flex items-center gap-1 text-xs text-gray-400 hover:text-white px-2" aria-label={t('copy')}
+                                                        onClick={() => { navigator.clipboard && navigator.clipboard.writeText(code.code).catch(() => {}); addToast(t('copiedToClipboard'), 'success'); }}>
+                                                        <Icons.Copy className="w-3.5 h-3.5" />{t('copy')}
+                                                    </button>
+                                                </div>
+                                                <div className="flex items-center gap-2 text-xs text-gray-400"><Icons.Clock className="w-3.5 h-3.5" />{t('fedCodeExpires').replace('{time}', `${Math.floor(codeLeft / 60)}:${String(codeLeft % 60).padStart(2, '0')}`)}</div>
+                                                <p className="text-xs text-gray-400">{t('fedCodeNext')}</p>
+                                            </>
+                                        ) : <p className="text-sm text-red-300">{t('fedCodeExpired')}</p>}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* join: the other side of the pairing */}
+                            <div className={HA_GROUP_CARD} data-fed-pairing="join">
+                                <h4 className="font-medium text-white flex items-center gap-2"><Icons.UserPlus className="w-4 h-4 text-proxmox-orange" />{t('fedJoinTitle')}</h4>
+                                <p className="text-sm text-gray-400">{t('fedJoinDesc')}</p>
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-join-code">{t('fedJoinCode')}</label>
+                                    <input id="fed-join-code" value={joinCode} onChange={e => setJoinCode(e.target.value)} placeholder="pgxfd1_…" spellCheck="false" className={`w-full font-mono ${HA_GROUP_FIELD}`} />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-join-url">{t('fedOwnUrl')}</label>
+                                    <input id="fed-join-url" value={joinUrl} onChange={e => setJoinUrl(e.target.value)} placeholder="https://pegaprox-b.example:5000" className={`w-full font-mono ${HA_GROUP_FIELD}`} />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-join-site">{t('fedSite')}</label>
+                                    <input id="fed-join-site" value={joinSite} onChange={e => setJoinSite(e.target.value)} placeholder="hamburg" className={`w-full ${HA_GROUP_FIELD}`} />
+                                </div>
+                                {!sso && (
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-join-pw">{t('fedPassword')}</label>
+                                        <input id="fed-join-pw" type="password" autoComplete="current-password" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"
+                                            value={passwords.join} onChange={e => setPasswords(p => ({ ...p, join: e.target.value }))} className={`w-full ${HA_GROUP_FIELD}`} />
+                                    </div>
+                                )}
+                                <button className={`${HA_GROUP_BTN} bg-proxmox-orange hover:bg-proxmox-orange/90 text-white`} data-fed-join
+                                    disabled={!!busy || !joinCode || !joinUrl || (!sso && !passwords.join)}
+                                    onClick={async () => {
+                                        setBusy('join');
+                                        const r = await fedSend('POST', 'join', sso ? { code: joinCode, own_url: joinUrl, site: joinSite } : { code: joinCode, own_url: joinUrl, site: joinSite, user_password: passwords.join }, t('fedJoinFailed'));
+                                        setBusy('');
+                                        if (r.ok) { addToast(t('fedJoined'), 'success'); refreshStatus(); refreshLeases(); }
+                                        else addToast(r.error, 'error');
+                                    }}>{busy === 'join' ? t('fedWorking') : t('fedJoinGo')}</button>
+                            </div>
+                        </div>
+                    )}
+
+                    {joined && status && (
+                        <>
+                            {/* this instance */}
+                            <div className={HA_GROUP_CARD} data-fed-self>
+                                <div className="flex items-center gap-3 flex-wrap">
+                                    <span className="w-2.5 h-2.5 rounded-full bg-green-500" aria-hidden="true"></span>
+                                    <span className="font-medium text-white">{status.site || t('fedSiteNone')}</span>
+                                    <code className="text-xs text-gray-400">ID {String(status.instance_id || '').slice(0, 8)}…</code>
+                                    <span className="text-xs text-gray-500">{t('fedMaxMembers').replace('{max}', String(status.max_members || 8))}</span>
+                                    <span className="flex-1"></span>
+                                    <button className={HA_GROUP_GHOST} data-fed-sync disabled={!!busy} onClick={() => act('sync', 'sync', {}, t('fedSynced'))}>
+                                        <Icons.RefreshCw className="w-3.5 h-3.5" />{t('fedSyncNow')}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* members */}
+                            <div className={HA_GROUP_CARD} data-fed-members>
+                                <h4 className="font-medium text-white flex items-center gap-2"><Icons.Users className="w-4 h-4 text-proxmox-orange" />{t('fedMembers').replace('{count}', String(members.length + 1))}</h4>
+                                <p className="text-sm text-gray-400">{t('fedMembersDesc')}</p>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-sm">
+                                        <thead><tr className="text-left text-xs text-gray-500 border-b border-proxmox-border">
+                                            <th className="py-2 pr-3">{t('fedInstance')}</th><th className="py-2 pr-3">{t('fedSite')}</th>
+                                            <th className="py-2 pr-3">{t('fedReachable')}</th><th className="py-2 pr-3">{t('fedIdSync')}</th><th className="py-2 text-right">{t('actions')}</th>
+                                        </tr></thead>
+                                        <tbody>
+                                            <tr className="border-b border-proxmox-border/50">
+                                                <td className="py-2 pr-3"><code className="text-xs">{String(me).slice(0, 8)}…</code></td>
+                                                <td className="py-2 pr-3">{status.site || '—'} <span className="text-[11px] text-gray-500">({t('fedMe')})</span></td>
+                                                <td className="py-2 pr-3"><span className="inline-flex items-center gap-1.5 text-green-400"><span className="w-2 h-2 rounded-full bg-green-500"></span>{t('fedOnline')}</span></td>
+                                                <td className="py-2 pr-3 text-gray-400">—</td><td className="py-2 text-right text-gray-500">—</td>
+                                            </tr>
+                                            {members.map(m => (
+                                                <tr key={m.instance_id} className="border-b border-proxmox-border/50" data-fed-member={m.instance_id.slice(0, 8)}>
+                                                    <td className="py-2 pr-3"><code className="text-xs">{String(m.instance_id).slice(0, 8)}…</code></td>
+                                                    <td className="py-2 pr-3">{m.site || '—'}</td>
+                                                    <td className="py-2 pr-3">{m.reachable
+                                                        ? <span className="inline-flex items-center gap-1.5 text-green-400"><span className="w-2 h-2 rounded-full bg-green-500"></span>{t('fedOnline')}</span>
+                                                        : <span className="inline-flex items-center gap-1.5 text-red-400"><Icons.WifiOff className="w-3 h-3" />{t('fedOffline')}</span>}</td>
+                                                    <td className="py-2 pr-3 text-gray-400">{m.identity_sync ? t('fedIdSyncAt').replace('{rows}', String(m.identity_sync.rows || 0)) : '—'}</td>
+                                                    <td className="py-2 text-right">
+                                                        <button className="text-xs text-red-400 hover:text-red-300" data-fed-remove={m.instance_id.slice(0, 8)}
+                                                            disabled={!!busy} onClick={() => setConfirmBox(confirmProps('remove', m.instance_id, m.site || m.instance_id.slice(0, 8), 'REMOVE', true))}>{t('fedRemove')}</button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <div className="flex items-center gap-2 pt-1 flex-wrap">
+                                    <span className="text-xs text-gray-500">{t('fedAddSiteHint')}</span>
+                                    <span className="flex-1"></span>
+                                    <button className={HA_GROUP_GHOST} data-fed-leave disabled={!!busy} onClick={() => setConfirmBox(confirmProps('leave', '', '', 'LEAVE', true))}>
+                                        <Icons.LogOut className="w-3.5 h-3.5" />{t('fedLeave')}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* own enrolled clusters */}
+                            <div className={HA_GROUP_CARD} data-fed-own-leases>
+                                <h4 className="font-medium text-white flex items-center gap-2"><Icons.Shield className="w-4 h-4 text-proxmox-orange" />{t('fedLeasesTitle')}</h4>
+                                <p className="text-sm text-gray-400">{t('fedLeasesDesc')}</p>
+                                {own.length === 0 && <p className="text-sm text-gray-500">{t('fedNoLeases')}</p>}
+                                {own.length > 0 && (
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-sm">
+                                            <thead><tr className="text-left text-xs text-gray-500 border-b border-proxmox-border">
+                                                <th className="py-2 pr-3">{t('fedCluster')}</th><th className="py-2 pr-3">{t('fedLease')}</th><th className="py-2 text-right">{t('actions')}</th>
+                                            </tr></thead>
+                                            <tbody>
+                                                {own.map(([cid, info]) => {
+                                                    const l = myLeases[cid] || {};
+                                                    return (
+                                                        <tr key={cid} className="border-b border-proxmox-border/50" data-fed-lease={cid}>
+                                                            <td className="py-2 pr-3"><code className="text-xs">{cid}</code> <span className="text-gray-400">{info.name}</span></td>
+                                                            <td className="py-2 pr-3">{l.valid
+                                                                ? <span className="inline-flex items-center gap-1.5 text-green-400"><span className="w-2 h-2 rounded-full bg-green-500"></span>{t('fedLeaseTerm').replace('{term}', String(l.term || 0)).replace('{votes}', String(l.votes || 0))}</span>
+                                                                : <span className="inline-flex items-center gap-1.5 text-red-400"><span className="w-2 h-2 rounded-full bg-red-500"></span>{t('fedLeaseNone')}</span>}</td>
+                                                            <td className="py-2 text-right">
+                                                                <div className="flex gap-3 justify-end">
+                                                                    <button className="text-xs text-gray-400 hover:text-white" disabled={!!busy} data-fed-renew={cid}
+                                                                        onClick={() => act('renew-' + cid, `clusters/${cid}/renew`, {}, t('fedRenewed'))}>{t('fedRenew')}</button>
+                                                                    <button className="text-xs text-gray-400 hover:text-white" disabled={!!busy} data-fed-release={cid}
+                                                                        onClick={() => setConfirmBox(confirmProps('release', cid, info.name || cid, 'RELEASE', true))}>{t('fedRelease')}</button>
+                                                                    <button className="text-xs text-gray-400 hover:text-white" disabled={!!busy} data-fed-unenroll={cid}
+                                                                        onClick={() => setConfirmBox(confirmProps('unenroll', cid, info.name || cid, 'UNENROLL', true))}>{t('fedUnenroll')}</button>
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* shadows of other members */}
+                            {shadows.length > 0 && (
+                                <div className={HA_GROUP_CARD} data-fed-shadows>
+                                    <h4 className="font-medium text-white flex items-center gap-2"><Icons.Database className="w-4 h-4 text-proxmox-orange" />{t('fedShadowsTitle')}</h4>
+                                    <p className="text-sm text-gray-400">{t('fedShadowsDesc')}</p>
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-sm">
+                                            <thead><tr className="text-left text-xs text-gray-500 border-b border-proxmox-border">
+                                                <th className="py-2 pr-3">{t('fedCluster')}</th><th className="py-2 pr-3">{t('fedShadowOf')}</th><th className="py-2 text-right">{t('actions')}</th>
+                                            </tr></thead>
+                                            <tbody>
+                                                {shadows.map(([cid, info]) => (
+                                                    <tr key={cid} className="border-b border-proxmox-border/50" data-fed-shadow={cid}>
+                                                        <td className="py-2 pr-3"><code className="text-xs">{cid}</code> <span className="text-gray-400">{info.name}</span></td>
+                                                        <td className="py-2 pr-3 text-gray-400"><code className="text-xs">{String(info.owner).slice(0, 8)}…</code></td>
+                                                        <td className="py-2 text-right">
+                                                            <button className="text-xs text-proxmox-orange hover:text-orange-300" disabled={!!busy} data-fed-adopt={cid}
+                                                                onClick={() => setConfirmBox(confirmProps('adopt', cid, info.name || cid, 'ADOPT', true))}>{t('fedAdopt')}</button>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* local clusters without federation rule */}
+                            {unenrolled.length > 0 && (
+                                <div className={HA_GROUP_CARD} data-fed-unenrolled>
+                                    <h4 className="font-medium text-white flex items-center gap-2"><Icons.Server className="w-4 h-4 text-proxmox-orange" />{t('fedUnenrolledTitle')}</h4>
+                                    <p className="text-sm text-gray-400">{t('fedUnenrolledDesc')}</p>
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-sm">
+                                            <thead><tr className="text-left text-xs text-gray-500 border-b border-proxmox-border">
+                                                <th className="py-2 pr-3">{t('fedCluster')}</th><th className="py-2 text-right">{t('actions')}</th>
+                                            </tr></thead>
+                                            <tbody>
+                                                {unenrolled.slice(0, 12).map(c => (
+                                                    <tr key={c.id} className="border-b border-proxmox-border/50" data-fed-enrollable={c.id}>
+                                                        <td className="py-2 pr-3"><code className="text-xs">{c.id}</code> <span className="text-gray-400">{c.name}</span></td>
+                                                        <td className="py-2 text-right">
+                                                            <button className="text-xs text-gray-400 hover:text-white" disabled={!!busy} data-fed-enroll={c.id}
+                                                                onClick={() => setConfirmBox(confirmProps('enroll', c.id, c.name || c.id, 'ENROLL', true))}>{t('fedEnroll')}</button>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+                        </>
+                    )}
+                </div>
             );
         }
 

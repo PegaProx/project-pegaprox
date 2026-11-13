@@ -753,9 +753,9 @@ def renew_cluster_lease(cluster_id):
     denied = _refuse_confined_admin()
     if denied:
         return denied
-    denied = _refuse_without_reauth('renewing a lease')
-    if denied:
-        return denied
+    # no re-auth: the worker asks the same round every ten seconds with no admin
+    # at the keyboard - a manual renew asks nothing the lease does not already
+    # back (it extends the caller's own lease, it takes nothing over)
     report = federation.renew_leases()
     return jsonify({'cluster': cluster_id,
                     'renewed': (report.get(cluster_id) or {}).get('renewed', False),
