@@ -6,6 +6,12 @@ switched the endpoint off or dropped the certificate check under the stored pass
 POST .../test sent the stored login to the BMC and answered with the host's health, which
 /hardware keeps from that caller. One BMC watches the whole host and every tenant on it, so
 both writes refuse a confined caller now, like the DELETE.
+
+The two reads beside them handed the same caller the BMC host and login name of every
+node, and the two consent switches, which turn the hardware reads on or off for the whole
+installation, took any holder of admin.settings. The reads refuse a confined caller like
+the writes; the switches take the bar of the interface lock and the banners: an account
+limited to a tenant or to some clusters is refused.
 MK Nov 2026
 """
 import inspect
@@ -19,6 +25,9 @@ from test_node_detail_and_datacenter_reads_confine import SCOPE_GATES
 CID = 'cluster_1'
 NODE = 'pve1'
 BMC = f'/api/clusters/{CID}/nodes/{NODE}/bmc-endpoint'
+ALL_BMC = f'/api/clusters/{CID}/bmc-endpoints'
+INBAND = '/api/hardware-monitoring/consent'
+REDFISH = '/api/hardware-monitoring/redfish-consent'
 
 
 @pytest.fixture
@@ -116,3 +125,62 @@ def test_every_node_write_of_a_cluster_has_a_scope_gate(api):
             missing.append(f'{rule.rule} ({rule.endpoint})')
     assert seen > 10
     assert not missing, '\n'.join(sorted(missing))
+
+
+# --- the two reads and the two consent switches -------------------------------------------
+
+@pytest.mark.parametrize('kind', ['pool', 'acl'])
+def test_a_confined_caller_cannot_read_the_endpoints(who, kind):
+    _refused(who[kind].get(BMC))
+    _refused(who[kind].get(ALL_BMC))
+    # counterproof: with the whole cluster the host is there and the password stays masked
+    for k in ('operator', 'admin'):
+        r = who[k].get(BMC)
+        assert r.status_code == 200, (k, r.get_data(as_text=True))
+        assert r.get_json()['host'] == '10.20.30.40' and r.get_json()['password'] == '********'
+        r = who[k].get(ALL_BMC)
+        assert r.status_code == 200, (k, r.get_data(as_text=True))
+        assert [e['host'] for e in r.get_json()['endpoints']] == ['10.20.30.40']
+        assert 'S3cret!' not in r.get_data(as_text=True)
+
+
+def _consent():
+    from pegaprox.api.helpers import load_server_settings
+    s = load_server_settings() or {}
+    return ((s.get('hardware_monitoring') or {}).get('enabled'),
+            (s.get('hardware_monitoring_redfish') or {}).get('enabled'))
+
+
+def _switch_refused(r):
+    assert r.status_code == 403 and 'not limited to a tenant' in r.get_data(as_text=True), \
+        (r.status_code, r.get_data(as_text=True))
+
+
+@pytest.mark.parametrize('kind', ['pool', 'acl', 'operator'])
+def test_a_confined_holder_of_admin_settings_cannot_flip_the_consent(who, kind):
+    """The operator sees the whole cluster but lives in a tenant limited to it: the
+    switches are one for every cluster, so they are refused too."""
+    before = _consent()
+    assert before == (None, True)
+    _switch_refused(who[kind].post(REDFISH, json={'enabled': False}))
+    _switch_refused(who[kind].post(INBAND, json={
+        'acknowledge': True, 'ack_version': bmc.HW_CONSENT_VERSION, 'lang': 'en'}))
+    _switch_refused(who[kind].post(INBAND, json={'enabled': False}))
+    assert _consent() == before
+
+    # counterproof: the admin of the installation switches both ways
+    admin = who['admin']
+    r = admin.post(INBAND, json={'acknowledge': True, 'ack_version': bmc.HW_CONSENT_VERSION, 'lang': 'en'})
+    assert r.status_code == 200 and r.get_json()['enabled'] is True, r.get_data(as_text=True)
+    r = admin.post(REDFISH, json={'enabled': False})
+    assert r.status_code == 200 and r.get_json() == {'enabled': False}, r.get_data(as_text=True)
+    assert _consent() == (True, False)
+
+
+def test_the_consent_switches_refuse_when_the_scope_cannot_be_read(who, monkeypatch):
+    def _broken(user):
+        raise RuntimeError('rbac store not readable')
+    monkeypatch.setattr('pegaprox.api.ha._unconfined', _broken)
+    _switch_refused(who['admin'].post(REDFISH, json={'enabled': False}))
+    _switch_refused(who['admin'].post(INBAND, json={'enabled': False}))
+    assert _consent() == (None, True)

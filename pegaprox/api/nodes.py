@@ -416,6 +416,22 @@ def get_hw_monitoring_consent():
     })
 
 
+def _refuse_confined_consent():
+    """403 unless the caller sees every cluster and no tenant override lowers them where
+    they live. Both opt-ins switch the hardware reads on for every node of every cluster,
+    so they take the bar of the interface lock and the banners. Fails closed."""
+    try:
+        from pegaprox.api.ha import _unconfined
+        from pegaprox.utils.auth import build_authz_user
+        session = getattr(request, 'session', None) or {}
+        if _unconfined(build_authz_user(session.get('user', ''), session)):
+            return None
+    except Exception as e:
+        logging.warning(f"[Hardware] could not resolve the caller's cluster scope: {e}")
+    return jsonify({'error': 'Hardware monitoring is switched on and off by administrators who '
+                             'are not limited to a tenant or to specific clusters'}), 403
+
+
 @bp.route('/api/hardware-monitoring/consent', methods=['POST'])
 @require_auth(perms=['admin.settings'])
 def set_hw_monitoring_consent():
@@ -425,6 +441,9 @@ def set_hw_monitoring_consent():
     version, so a stale UI cannot silently opt in under an old warning. The
     acknowledgement is persisted to the audit log with who/when/which-version.
     """
+    refused = _refuse_confined_consent()
+    if refused:
+        return refused
     from pegaprox.api.helpers import load_server_settings, save_server_settings
     from pegaprox.core import bmc
     data = request.get_json(silent=True) or {}
@@ -529,6 +548,9 @@ def get_redfish_consent():
 def set_redfish_consent():
     """Enable/disable out-of-band Redfish monitoring. Enabling requires the current
     warning version to be acknowledged; the acknowledgement + language are audited."""
+    refused = _refuse_confined_consent()
+    if refused:
+        return refused
     from pegaprox.api.helpers import load_server_settings, save_server_settings
     from pegaprox.core import bmc
     data = request.get_json(silent=True) or {}
@@ -585,6 +607,11 @@ def _require_redfish_consent():
 def list_bmc_endpoints_api(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - the BMC host and login name of every node: what the writes below keep
+    # from a caller confined to some guests here, they do not get to read either
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     return jsonify({'endpoints': get_db().list_bmc_endpoints(cluster_id)})
 
 
@@ -593,6 +620,9 @@ def list_bmc_endpoints_api(cluster_id):
 def get_bmc_endpoint_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     ep = get_db().get_bmc_endpoint(cluster_id, node, decrypt=False)

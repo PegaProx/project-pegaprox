@@ -317,8 +317,6 @@ OPEN_ON_PURPOSE = {
     'vms.get_next_vmid_for_node_api',
     # the SMBIOS strings PegaProx writes into new guests, no data of a host
     'nodes.get_smbios_autoconfig',
-    # admin.settings, which no tenant role template carries: the BMC endpoints of the nodes
-    'nodes.list_bmc_endpoints_api', 'nodes.get_bmc_endpoint_api',
 }
 
 
