@@ -51129,6 +51129,61 @@
         ]
       }
     },
+    "/api/federation/clusters/{cluster_id}/adopt": {
+      "post": {
+        "operationId": "federation.adopt_cluster_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Take over the cluster of a member that is gone for good. The voters hand the lease only past the old owner's promise (a live owner blocks this), and the mirrored credentials cross over under this instance's own key. ADOPT is the word; force adopts without the owner's field key, credentials and all.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
     "/api/federation/clusters/{cluster_id}/renew": {
       "post": {
         "operationId": "federation.renew_cluster_lease_post",
