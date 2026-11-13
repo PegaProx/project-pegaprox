@@ -6,6 +6,8 @@ recovery plans, the PBS backup diff and the bulk snapshot delete take a node, a 
 a VMID or a datastore in their body or query too, and put it into the API path of a
 cluster, at once or at every later run. Each of them takes a name only now, checked on the
 cluster that name belongs to: an XCP-ng host keeps its free name.
+
+An IP set entry of a guest firewall goes into its path as one segment.
 MK Nov 2026
 """
 import json
@@ -290,3 +292,17 @@ def test_a_bulk_snapshot_delete_names_each_snapshot(api, admin, field, value):
     r = admin.post('/api/snapshots/delete', json={'snapshots': [item]})
     assert r.get_json()['deleted'] == 1, r.get_data(as_text=True)
     assert m.rec.sent == [('DELETE', '/api2/json/nodes/n1/qemu/100/snapshot/s1')]
+
+
+# --- an IP set entry -------------------------------------------------------------------------
+
+@pytest.mark.parametrize('cidr,sent', [
+    ('10.0.0.0/24', '10.0.0.0%2F24'),
+    ('10.0.0.5', '10.0.0.5'),
+    ('10.0.0.5%3Fdigest=abc', '10.0.0.5%3Fdigest%3Dabc'),
+])
+def test_an_ip_set_entry_is_one_path_segment(api, admin, cidr, sent):
+    m = _pve(api, 'cluster_1')
+    r = admin.delete(f'/api/clusters/cluster_1/vms/n1/qemu/100/firewall/ipset/office/{cidr}')
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert m.rec.sent == [('DELETE', f'/api2/json/nodes/n1/qemu/100/firewall/ipset/office/{sent}')]

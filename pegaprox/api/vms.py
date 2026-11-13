@@ -3010,7 +3010,10 @@ def delete_vm_firewall_ipset_entry(cluster_id, node, vmtype, vmid, name, cidr):
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
-        r = manager._create_session().delete(_vm_fw_url(manager, node, vmtype, vmid, f'/ipset/{name}/{cidr}'), timeout=10)
+        # MK Nov 2026 - one path segment, as the SDN subnet routes send theirs: '10.0.0.0/24' is
+        # still one entry, a '?' in it no longer starts a query of its own
+        r = manager._create_session().delete(
+            _vm_fw_url(manager, node, vmtype, vmid, f"/ipset/{name}/{url_quote(cidr, safe='')}"), timeout=10)
         if r.status_code == 200:
             return jsonify({'success': True})
         return upstream_failure(r.status_code, r.text)
