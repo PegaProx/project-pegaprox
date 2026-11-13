@@ -3777,6 +3777,11 @@
                                                             {t('rollQuorumContinueAnyway')}
                                                         </button>
                                                     )}
+                                                    {/* LW Oct 2026 - no QDevice and an even node count: set one up from here, then Continue */}
+                                                    {rollingUpdate.paused_reason === 'quorum' && (
+                                                        <QdeviceQuorumButton clusterId={clusterId} clusterName={clusterName}
+                                                            held={rollingUpdate.paused_details} onChanged={() => getRollingStatus()} />
+                                                    )}
                                                     <button
                                                         onClick={cancelRollingUpdate}
                                                         data-testid="rolling-cancel"

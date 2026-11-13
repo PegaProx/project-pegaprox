@@ -9412,6 +9412,10 @@
                             {activeTab === 'ha' && isAdmin && (
                                 <HaPanel t={t} addToast={addToast} getAuthHeaders={getAuthHeaders} />
                             )}
+                            {/* LW Oct 2026 - the QNetd hosts the QDevices of the clusters vote through */}
+                            {activeTab === 'ha' && isAdmin && (
+                                <QnetdHostsPanel t={t} addToast={addToast} getAuthHeaders={getAuthHeaders} />
+                            )}
 
                             {/* MK May 2026 — SIEM Forwarder Tab */}
                             {activeTab === 'siem' && (

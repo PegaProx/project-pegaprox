@@ -270,10 +270,11 @@ def test_source_every_locale_call_of_the_cr_files_gets_the_ui_language():
     assert bad == [], bad
 
 
-# what node_modals.js formats in the browser's locale: all of it classic (QdeviceDetail, NodeModal
-# and the classic branches of CorporateNodeDetailView); a variant part has no call of its own
+# what node_modals.js formats in the browser's locale: all of it classic (the QDevice job log in a
+# classic layout, QdeviceDetail, NodeModal and the classic branches of CorporateNodeDetailView); a
+# variant part has no call of its own
 NODE_MODALS_CLASSIC = [
-    "readAt.toLocaleTimeString()", "(s.rx_packets || 0).toLocaleString()", "(s.tx_packets || 0).toLocaleString()",
+    "d.toLocaleTimeString()", "readAt.toLocaleTimeString()", "(s.rx_packets || 0).toLocaleString()", "(s.tx_packets || 0).toLocaleString()",
     "data.time?.localtime ? new Date(data.time", "new Date(c.notafter * 1000).toLocaleDateString()",
     "new Date(t.starttime*1000).toLocaleString()", "new Date(task.starttime * 1000).toLocaleString()",
     "new Date(data.time.localtime * 1000).toLocaleString(undefined, { timeZone: 'UTC' })",

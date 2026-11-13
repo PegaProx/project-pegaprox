@@ -1338,9 +1338,1939 @@
             );
         }
 
+        // LW Oct 2026 - the QDevice of a cluster set up and removed from here, and the QNetd hosts it
+        // votes through (api/qnetd.py). All of it runs as root on the nodes and on the QNetd host, so
+        // the server keeps it to administrators no tenant confines. The buttons only show where GET
+        // /qnetd/hosts answers (such an admin, on a server that has the routes) and this instance
+        // acts. A login goes out once and never comes back: the list only says has_password /
+        // has_ssh_key, and the fields start empty.
+        const QDEV_POLL_MS = 2000;
+        const QDEV_CARD = 'bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-3';
+        const QDEV_FIELD = 'w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded text-sm text-white disabled:opacity-50';
+        const QDEV_GHOST = 'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white hover:border-gray-500';
+        const QDEV_PRIMARY = 'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed bg-proxmox-orange hover:bg-orange-600 text-white';
+        const QDEV_DANGER = 'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed bg-red-600 hover:bg-red-700 text-white';
+        const QDEV_NOTE = {
+            ok: 'rounded-lg p-3 text-sm border bg-green-500/10 border-green-500/30 text-green-300',
+            bad: 'rounded-lg p-3 text-sm border bg-red-500/10 border-red-500/30 text-red-300',
+            warn: 'rounded-lg p-3 text-sm border bg-yellow-500/10 border-yellow-500/40 text-yellow-200',
+            info: 'rounded-lg p-3 text-sm border bg-blue-500/10 border-blue-500/30 text-gray-300',
+        };
+        // the same allowlists the server has; it checks again whatever is sent
+        const QDEV_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/;
+        const QDEV_USER_RE = /^[a-z_][a-z0-9_.-]{0,31}$/;
+        const QDEV_HOST_ID_RE = /^[0-9a-f]{12}$/;
+        const QDEV_JOB_RE = /^[0-9a-f]{16}$/;
+
+        // one request: {ok, status, data, error}, error being the server's own sentence
+        async function qdevApi(getAuthHeaders, method, path, body, timeoutMs = 30000) {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+            try {
+                const res = await fetch(`${API_URL}${path}`, {
+                    method, credentials: 'include', signal: ctrl.signal,
+                    headers: { ...getAuthHeaders(), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+                    body: body !== undefined ? JSON.stringify(body) : undefined,
+                });
+                const data = await res.json().catch(() => null);
+                const said = data && typeof data.error === 'string' ? data.error.trim() : '';
+                return { ok: res.ok, status: res.status, data, error: said };
+            } catch (e) {
+                return { ok: false, status: 0, data: null, error: '', timedOut: !!(e && e.name === 'AbortError') };
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+        const qdevFailText = (t, r) => r.error || (r.timedOut ? t('qdevTimedOut') : t('qdevRequestFailed'));
+        // a host with its port, an IPv6 address in brackets
+        const qdevHostPort = (h, p) => `${String(h || '').includes(':') ? `[${h}]` : (h || '-')}:${p}`;
+        // the classic layouts write a time in the browser's locale, the redesign in the UI language
+        const qdevTime = (iso, redesigned) => {
+            if (redesigned) return iso ? crFmtTime(iso) : '';
+            const d = iso ? new Date(iso) : null;
+            return d && !isNaN(d.getTime()) ? d.toLocaleTimeString() : '';
+        };
+
+        // whether this account may use the QNetd routes, asked once for every button on the page and
+        // kept half a minute. 403 (an admin a tenant confines) and 404 (a server without the routes)
+        // are a no; anything else is asked again the next time
+        const qnetdAccess = { at: 0, value: null, pending: null };
+        function qnetdProbe(getAuthHeaders) {
+            if (qnetdAccess.value && Date.now() - qnetdAccess.at < 30000) return Promise.resolve(qnetdAccess.value);
+            if (qnetdAccess.pending) return qnetdAccess.pending;
+            qnetdAccess.pending = qdevApi(getAuthHeaders, 'GET', '/qnetd/hosts', undefined, 20000).then(r => {
+                const value = { ok: r.ok, hosts: r.ok && Array.isArray(r.data?.hosts) ? r.data.hosts : [] };
+                if (r.ok || r.status === 403 || r.status === 404) {
+                    qnetdAccess.value = value;
+                    qnetdAccess.at = Date.now();
+                }
+                qnetdAccess.pending = null;
+                return value;
+            });
+            return qnetdAccess.pending;
+        }
+        function useQnetdAccess() {
+            const { isAdmin, haReadOnly, getAuthHeaders } = useAuth();
+            const [value, setValue] = useState(null);
+            useEffect(() => {
+                if (!isAdmin) return;
+                let gone = false;
+                qnetdProbe(getAuthHeaders).then(v => { if (!gone) setValue(v); });
+                return () => { gone = true; };
+            }, [isAdmin]);
+            return isAdmin && !haReadOnly && value && value.ok ? value : null;
+        }
+
+        // a QDevice job, read every two seconds while it runs. lost: this instance forgot it (it
+        // restarted, or the job aged out); stale: the last read got no answer
+        function useQdevJob(getAuthHeaders, jobId) {
+            const [view, setView] = useState({ job: null, lost: false, stale: false });
+            useEffect(() => {
+                setView({ job: null, lost: false, stale: false });
+                if (!jobId || !QDEV_JOB_RE.test(jobId)) return;
+                let gone = false, timer = null;
+                const round = async () => {
+                    const r = await qdevApi(getAuthHeaders, 'GET', `/qnetd/jobs/${jobId}`, undefined, 15000);
+                    if (gone) return;
+                    if (r.ok && r.data && typeof r.data === 'object' && r.data.id === jobId) {
+                        setView({ job: r.data, lost: false, stale: false });
+                        if (r.data.state !== 'running') return;
+                    } else if (r.status === 404) {
+                        setView(v => ({ ...v, lost: true, stale: false }));
+                        return;
+                    } else {
+                        setView(v => ({ ...v, stale: true }));
+                    }
+                    timer = setTimeout(round, r.ok ? QDEV_POLL_MS : QDEV_POLL_MS * 3);
+                };
+                round();
+                return () => { gone = true; clearTimeout(timer); };
+            }, [jobId]);
+            return view;
+        }
+
+        const QDEV_CHECK_KEYS = {
+            busy: 'qdevChkBusy', cluster_type: 'cluster', cluster_connected: 'cluster', cluster_status: 'cluster',
+            node_count_even: 'qdevChkEven', nodes_online: 'qdevChkOnline', quorate: 'qdevChkQuorate',
+            not_a_node: 'qdevChkNotANode', qnetd_ready: 'qdevChkQnetd', node_access: 'qdevChkNodeAccess',
+            packages: 'qdevChkPackages', qnetd_port: 'qdevChkPort', old_store: 'qdevChkOldStore',
+            corosync_conf: 'qdevChkConf', cluster_name: 'qdevChkName', no_qdevice: 'qdevChkNoQdevice',
+            two_node: 'qdevChkTwoNode', name_unique: 'qdevChkNameUnique', not_own_vm: 'qdevChkNotOwnVm',
+            firewall: 'qdevChkFirewall', cert_on_file: 'qdevChkCertOnFile',
+        };
+        const QDEV_STEP_KEYS = {
+            preflight: 'qdevStepPreflight', packages: 'qdevStepPackages', qnetd_init: 'qdevStepQnetdInit',
+            qnetd_ca: 'qdevStepQnetdCa', node_store_reset: 'qdevStepStoreReset', node_ca: 'qdevStepNodeCa',
+            node_crq: 'qdevStepNodeCrq', qnetd_sign: 'qdevStepSign', node_crt: 'qdevStepNodeCrt',
+            node_p12: 'qdevStepNodeP12', corosync_conf: 'qdevStepConf', qdevice_start: 'qdevStepStart',
+            corosync_reload: 'qdevStepReload', rollback: 'qdevStepRollback', remove: 'qdevStepRemove',
+            plan: 'qdevStepPlan', qnetd_host: 'qdevStepQnetdHost', firewall: 'qdevStepFirewall',
+        };
+        const qdevStep = (t, step) => QDEV_STEP_KEYS[step] ? t(QDEV_STEP_KEYS[step]) : String(step || '-');
+        // the states of a job, of one cluster in it and of a logged step
+        const QDEV_STATES = {
+            running: ['running', 'text-blue-300'], ok: ['done', 'text-green-400'], done: ['done', 'text-green-400'],
+            failed: ['failed', 'text-red-400'], partial: ['qdevPartial', 'text-yellow-300'],
+            waiting: ['qdevWaiting', 'text-gray-400'], skipped: ['qdevSkipped', 'text-gray-400'],
+            warning: ['warning', 'text-yellow-300'],
+        };
+        function QdevState({ state }) {
+            const { t } = useTranslation();
+            const [key, cls] = QDEV_STATES[state] || [null, 'text-gray-400'];
+            return <span data-qdev-state={state} className={cls}>{key ? t(key) : String(state || '-')}</span>;
+        }
+
+        // the guest check could not tell (no SMBIOS uuid, the configs unreadable): the one thing an
+        // admin may confirm. Read from the checks themselves, not from needs_confirmation: a guest
+        // check that failed (the QNetd host is a VM of the cluster, or has a node's uuid) is never
+        // offered, whatever else the report says, and neither is one a plan leaves to the run
+        // (deferred: the helper is not on the QNetd host yet)
+        function qdevMayConfirm(report) {
+            const guest = (report && Array.isArray(report.checks) ? report.checks : []).filter(c => c && c.id === 'not_own_vm');
+            return guest.length > 0 && guest.every(c => c.ok === null && !c.deferred);
+        }
+        // every blocking check passed; one that could not tell whether the QNetd host is a guest of
+        // the cluster only once the admin confirmed it is not. The server decides the same again.
+        function qdevPasses(report, confirmed) {
+            const checks = report && Array.isArray(report.checks) ? report.checks : [];
+            const mayConfirm = qdevMayConfirm(report);
+            return checks.length > 0 && checks.every(c => c && (c.ok === true || c.blocking === false
+                || (c.id === 'not_own_vm' && c.ok === null && mayConfirm && !!confirmed)));
+        }
+        // the QNetd host holds a certificate for the cluster's name from an earlier setup: the sign
+        // step would refuse it half way through the run, so the plan says so first
+        const qdevCertHeld = (report) => (report && Array.isArray(report.checks) ? report.checks : [])
+            .some(c => c && c.id === 'cert_on_file' && c.ok === false);
+        // what that means, and the way out: the replace option, which reads the plan again (and so
+        // takes the agreement back, as every option does)
+        function QdevCertHeld({ onReplace, disabled }) {
+            const { t } = useTranslation();
+            return (
+                <div className="space-y-2 mt-1" data-qdev-cert-held="">
+                    <div className="text-xs text-yellow-200" style={{ overflowWrap: 'anywhere' }}>{t('qdevCertOnFile')}</div>
+                    {onReplace && (
+                        <button type="button" className={QDEV_GHOST} disabled={disabled} onClick={onReplace} data-qdev-cert-replace="">
+                            <Icons.RefreshCw />{t('qdevCertReplace')}
+                        </button>
+                    )}
+                </div>
+            );
+        }
+
+        // over everything, the settings and the QDevice view it opens from included. Through a portal:
+        // a fixed box inside a transformed parent would be placed by that parent
+        function QdevDialog({ title, sub, wide = false, onClose, footer, data, children }) {
+            const { t } = useTranslation();
+            return ReactDOM.createPortal(
+                <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-4" onClick={e => e.stopPropagation()}>
+                    <div {...(data || {})} role="dialog" aria-modal="true"
+                        className={`bg-proxmox-card border border-proxmox-border rounded-xl w-full ${wide ? 'max-w-4xl' : 'max-w-3xl'} max-h-[90vh] overflow-hidden flex flex-col`}>
+                        <div className="p-4 border-b border-proxmox-border flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                                <h3 className="font-medium text-white flex items-center gap-2"><Icons.Scale />{title}</h3>
+                                {sub && <div className="text-xs text-gray-500 mt-1 truncate">{sub}</div>}
+                            </div>
+                            <button type="button" onClick={onClose} title={t('close')} className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"><Icons.X /></button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">{children}</div>
+                        {footer && <div className="p-4 border-t border-proxmox-border flex flex-wrap items-center justify-end gap-2">{footer}</div>}
+                    </div>
+                </div>,
+                document.body
+            );
+        }
+
+        function QdevSpinner() {
+            return <span className="animate-spin inline-flex"><Icons.Loader /></span>;
+        }
+
+        // what the checks of a setup found, each with the server's reason, and the nodes one by one.
+        // passes: the verdict of a plan, where what the run fixes itself is no failure
+        function QdevPreflight({ report, confirmed, onConfirm, onReplaceCert, disabled, passes: verdict }) {
+            const { t } = useTranslation();
+            const checks = Array.isArray(report?.checks) ? report.checks : [];
+            const nodes = Array.isArray(report?.nodes) ? report.nodes : [];
+            const passes = typeof verdict === 'boolean' ? verdict : qdevPasses(report, confirmed);
+            const yesNo = (v) => v === true ? <span className="text-green-400">{t('yes')}</span>
+                : v === false ? <span className="text-red-400">{t('no')}</span> : <span className="text-gray-500">-</span>;
+            return (
+                <div className="space-y-3" data-qdev-preflight={passes ? 'pass' : 'fail'}>
+                    <div className={passes ? QDEV_NOTE.ok : QDEV_NOTE.bad}>{t(passes ? 'qdevPassed' : 'qdevNotPassed')}</div>
+                    <ul className="space-y-1.5">
+                        {checks.map((c, i) => {
+                            // deferred: a plan leaves the check to the run, which makes it once the QNetd host is set up
+                            const tone = c.ok === true ? 'ok' : c.deferred === true ? 'deferred' : c.blocking === false ? 'info' : c.ok === null ? 'unknown' : 'bad';
+                            const color = { ok: 'text-green-400', bad: 'text-red-400', unknown: 'text-yellow-300', info: 'text-blue-300', deferred: 'text-gray-400' }[tone];
+                            return (
+                                <li key={`${c.id}-${i}`} data-qdev-check={c.id} data-qdev-check-tone={tone} className="flex items-start gap-2">
+                                    <span className={`mt-0.5 flex-shrink-0 ${color}`}>
+                                        {tone === 'ok' ? <Icons.CheckCircle /> : tone === 'bad' ? <Icons.XCircle /> : tone === 'unknown' ? <Icons.AlertTriangle />
+                                            : tone === 'deferred' ? <Icons.Clock /> : <Icons.Info />}
+                                    </span>
+                                    <div className="min-w-0">
+                                        <div className="text-gray-200">
+                                            {QDEV_CHECK_KEYS[c.id] ? t(QDEV_CHECK_KEYS[c.id]) : String(c.id || '')}
+                                            {tone === 'deferred' && <span className="ml-2 text-xs text-gray-500">{t('qdevChkDeferred')}</span>}
+                                        </div>
+                                        {c.id === 'cert_on_file' && c.ok === false ? <QdevCertHeld onReplace={onReplaceCert} disabled={disabled} />
+                                            : c.message && <div className="text-xs text-gray-400" style={{ overflowWrap: 'anywhere' }}>{String(c.message)}</div>}
+                                        {c.id === 'node_count_even' && c.ok === false && (
+                                            <div data-qdev-odd="" className="text-xs text-red-300 mt-1">{t('qdevOddExplain')}</div>
+                                        )}
+                                    </div>
+                                </li>
+                            );
+                        })}
+                    </ul>
+                    {qdevMayConfirm(report) && (
+                        <label className="flex items-start gap-2 text-sm text-yellow-200 cursor-pointer">
+                            <input type="checkbox" className="w-4 h-4 mt-0.5" checked={!!confirmed} disabled={disabled}
+                                onChange={e => onConfirm(e.target.checked)} data-qdev-confirm-guest="" />
+                            <span>{t('qdevConfirmNotGuest')}</span>
+                        </label>
+                    )}
+                    {nodes.length > 0 && (
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-xs">
+                                <thead className="bg-proxmox-dark text-gray-400">
+                                    <tr>
+                                        <th className="text-left p-2">{t('node')}</th>
+                                        <th className="text-left p-2">{t('online')}</th>
+                                        <th className="text-left p-2">{t('qdevColSsh')}</th>
+                                        <th className="text-left p-2">{t('qdevColPackage')}</th>
+                                        <th className="text-left p-2">{t('qdevColPort')}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {nodes.map(n => (
+                                        <React.Fragment key={n.node}>
+                                            <tr data-qdev-node={n.node} className="border-t border-proxmox-border">
+                                                <td className="p-2 text-gray-200">{n.node}</td>
+                                                <td className="p-2">{yesNo(n.online)}</td>
+                                                <td className="p-2">{yesNo(n.ssh)}</td>
+                                                <td className="p-2">{yesNo(n.packages)}</td>
+                                                <td className="p-2">{yesNo(n.port_open)}</td>
+                                            </tr>
+                                            {n.error && (
+                                                <tr><td colSpan={5} className="px-2 pb-2 text-red-300" style={{ overflowWrap: 'anywhere' }}>{String(n.error)}</td></tr>
+                                            )}
+                                        </React.Fragment>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // the step log of a job as the server keeps it (no secrets in it); names: cluster id -> label
+        function QdevJobLog({ job, names }) {
+            const { t } = useTranslation();
+            const { isCorpRedesigned } = useLayout();
+            const box = useRef(null);
+            const steps = job && Array.isArray(job.steps) ? job.steps : [];
+            const many = !!job && Array.isArray(job.cluster_ids) && job.cluster_ids.length > 1;
+            useEffect(() => { if (box.current) box.current.scrollTop = box.current.scrollHeight; }, [steps.length]);
+            return (
+                <div ref={box} data-qdev-log="" className="max-h-64 overflow-y-auto rounded-lg border border-proxmox-border bg-black/30 p-2 font-mono text-xs space-y-1">
+                    {steps.length === 0 && <div className="text-gray-500">{t('qdevLogEmpty')}</div>}
+                    {steps.map((s, i) => (
+                        <div key={i} data-qdev-step={s.step} data-qdev-step-state={s.state} className="flex flex-wrap gap-2">
+                            <span className="text-gray-500">{qdevTime(s.at, isCorpRedesigned)}</span>
+                            {many && <span className="text-gray-400">{(names && names[s.cluster_id]) || s.cluster_id}</span>}
+                            <span className="text-gray-200">{qdevStep(t, s.step)}</span>
+                            <QdevState state={s.state} />
+                            {s.message && <span className="text-gray-400" style={{ overflowWrap: 'anywhere' }}>{String(s.message)}</span>}
+                        </div>
+                    ))}
+                </div>
+            );
+        }
+
+        // how one cluster came out of a job: done, or the step that failed and whether the nodes were
+        // put back. name_exists: the QNetd host holds a certificate of that name from an earlier setup
+        function QdevOutcome({ row, kind, hostName, onReplace, busy }) {
+            const { t } = useTranslation();
+            if (!row || row.state === 'running' || row.state === 'waiting') return null;
+            if (row.state === 'done') return (
+                <div className={QDEV_NOTE.ok} data-qdev-outcome="done">
+                    {kind === 'remove' ? t('qdevRemoveDone') : t('qdevSetupDone').replace('{host}', () => hostName || '-')}
+                </div>
+            );
+            if (row.state === 'skipped') return (
+                <div className={QDEV_NOTE.warn} data-qdev-outcome="skipped">{t('qdevSkipped')}{row.error ? `: ${row.error}` : ''}</div>
+            );
+            return (
+                <div className={`${QDEV_NOTE.bad} space-y-2`} data-qdev-outcome="failed" style={{ overflowWrap: 'anywhere' }}>
+                    <div>{t('qdevFailedAt').replace('{step}', () => qdevStep(t, row.failed_step)).replace('{error}', () => row.error || '-')}</div>
+                    {kind !== 'remove' && (row.rolled_back === true ? <div className="text-gray-300" data-qdev-rolled-back="">{t('qdevRolledBack')}</div>
+                        : row.rolled_back === false ? <div className="text-yellow-200" data-qdev-rollback-incomplete="">{t('qdevRollbackIncomplete')}</div>
+                        : <div className="text-gray-300" data-qdev-unchanged="">{t('qdevNothingChanged')}</div>)}
+                    {row.code === 'plan_changed' && <div className="text-yellow-200" data-qdev-plan-changed="">{t('qdevPlanChanged')}</div>}
+                    {row.code === 'name_exists' && onReplace && (
+                        <div className="space-y-2" data-qdev-name-exists="">
+                            <div className="text-gray-300">{t('qdevNameExists')}</div>
+                            <button type="button" className={QDEV_GHOST} disabled={busy} onClick={onReplace} data-qdev-replace="">
+                                <Icons.RefreshCw />{t('qdevReplaceCert')}
+                            </button>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // the state line of a job that runs or ran in a dialog
+        function QdevJobState({ job, lost, stale, running }) {
+            const { t } = useTranslation();
+            return (
+                <>
+                    <div className="flex items-center gap-2" data-qdev-job={job ? job.state : 'loading'}>
+                        {running && <span className="text-blue-300"><QdevSpinner /></span>}
+                        <span className="text-gray-400">{t('status')}:</span>
+                        {job ? <QdevState state={job.state} /> : <span className="text-gray-500">{t('loading')}</span>}
+                    </div>
+                    {lost && <div className={QDEV_NOTE.warn} data-qdev-lost="">{t('qdevJobLost')}</div>}
+                    {stale && !lost && <div className="text-xs text-yellow-300">{t('qdevJobStale')}</div>}
+                </>
+            );
+        }
+
+        // LW Oct 2026 - the plan of a setup (GET /clusters/<id>/qdevice/plan): what the server will do
+        // for exactly the options on screen, item by item, and the digest of it. The admin agrees to
+        // that plan per cluster and Start sends its digest; the server refuses a setup without one and
+        // stops one whose plan changed in between. The plan read itself changes nothing anywhere.
+        const QDEV_DIGEST_RE = /^[0-9a-f]{64}$/;
+        // the firewalls PegaProx opens the QNetd port with itself; any other one it only reads
+        const QDEV_FW_MANAGED = ['ufw', 'firewalld'];
+        const QDEV_ITEM_KEYS = {
+            qnetd_helper_install: 'qdevItemHelperInstall', qnetd_helper_update: 'qdevItemHelperUpdate',
+            qnetd_packages: 'qdevItemQnetdPackages', qnetd_ca: 'qdevItemQnetdCa', qnetd_tls: 'qdevItemQnetdTls',
+            qnetd_start: 'qdevItemQnetdStart', firewall_open: 'qdevItemFirewallOpen', node_packages: 'qdevItemNodePackages',
+            node_certs: 'qdevItemNodeCerts', corosync_conf: 'qdevItemConf', qdevice_service: 'qdevItemService',
+            corosync_reload: 'qdevItemReload', votes: 'qdevItemVotes', cert_replace: 'qdevItemCertReplace',
+            node_store_reset: 'qdevItemStoreReset',
+        };
+        // the helper is not on the QNetd host yet: what its init does there, each only where needed
+        const QDEV_ITEM_IF_NEEDED = {
+            qnetd_packages: 'qdevItemQnetdPackagesIfNeeded', qnetd_ca: 'qdevItemQnetdCaIfNeeded',
+            qnetd_tls: 'qdevItemQnetdTlsIfNeeded', qnetd_start: 'qdevItemQnetdStartIfNeeded',
+        };
+        function qdevItemKey(entry) {
+            const p = entry.params && typeof entry.params === 'object' ? entry.params : {};
+            if (p.if_needed === true && QDEV_ITEM_IF_NEEDED[entry.id]) return QDEV_ITEM_IF_NEEDED[entry.id];
+            // which of ufw and firewalld is known once the helper answers there
+            if (entry.id === 'firewall_open' && !p.backend) return 'qdevItemFirewallOpenAny';
+            return QDEV_ITEM_KEYS[entry.id];
+        }
+        const QDEV_WARN_KEYS = {
+            ha_group_local: 'qdevWarnHaLocal', unverified_host: 'qdevWarnUnverified',
+            firewall_manual: 'qdevFwUnmanaged', ha_resources: 'qdevWarnHaResources',
+        };
+        const qdevPlanOk = (d) => !!d && typeof d === 'object' && !!d.plan && typeof d.plan === 'object'
+            && Array.isArray(d.plan.items) && QDEV_DIGEST_RE.test(String(d.plan.digest || ''));
+        // a plan parameter as text: a list joined, anything that is no plain value left out
+        const qdevParam = (v) => Array.isArray(v) ? v.filter(x => typeof x === 'string' || typeof x === 'number').join(', ')
+            : (typeof v === 'string' || typeof v === 'number') ? String(v) : '';
+        // an item or a warning in this language, its params put in. The server's English sentence
+        // where the id is one this page does not know, or a param the sentence needs is missing
+        function qdevPlanText(t, key, entry) {
+            const fallback = typeof entry.text === 'string' && entry.text ? entry.text : String(entry.id || '');
+            if (!key) return fallback;
+            const params = entry.params && typeof entry.params === 'object' ? entry.params : {};
+            let missing = false;
+            const out = t(key).replace(/\{([a-z_]+)\}/g, (mark, name) => {
+                const v = qdevParam(params[name]);
+                if (!v) missing = true;
+                return v;
+            });
+            return missing ? fallback : out;
+        }
+        // what the firewall of the QNetd host means for Open port: sidecar (Docker publishes the port),
+        // managed (ufw or firewalld, PegaProx adds the rules), unmanaged (another one, opened by hand),
+        // none (nothing active) or unknown (the helper there cannot tell yet)
+        function qdevFirewallState(kind, fw) {
+            if (kind === 'sidecar') return 'sidecar';
+            if (!fw || typeof fw !== 'object' || typeof fw.backend !== 'string' || !fw.backend) return 'unknown';
+            if (fw.backend === 'none') return 'none';
+            return fw.managed === true && QDEV_FW_MANAGED.includes(fw.backend) ? 'managed' : 'unmanaged';
+        }
+        // opened by default only where PegaProx opens it itself and the firewall is known to block it
+        const qdevFirewallDefault = (kind, fw) => qdevFirewallState(kind, fw) === 'managed' && fw.blocking === true;
+        const qdevPlanQuery = (o) => {
+            const q = new URLSearchParams({ qnetd_id: o.qnetd_id });
+            ['install_packages', 'open_firewall', 'confirm_unverified_host', 'replace_certificate'].forEach(k => { if (o[k]) q.set(k, '1'); });
+            return q.toString();
+        };
+
+        // the lines an admin runs (or puts into host.fw) on the QNetd host, with a copy button
+        function QdevManual({ text }) {
+            const { t } = useTranslation();
+            const lines = typeof text === 'string' ? text.trim().slice(0, 8000) : '';
+            if (!lines) return null;
+            return (
+                <div className="rounded-lg border border-proxmox-border bg-black/30" data-qdev-manual="">
+                    <div className="flex items-center justify-between gap-2 px-2 py-1 border-b border-proxmox-border">
+                        <span className="text-xs text-gray-400">{t('qdevManualTitle')}</span>
+                        <span className="flex items-center gap-1 text-xs text-gray-400" data-qdev-copy="">
+                            <CopyButton value={lines} title={t('qdevCopy')} />{t('qdevCopy')}
+                        </span>
+                    </div>
+                    <pre className="p-2 text-xs text-gray-200 font-mono whitespace-pre-wrap" style={{ overflowWrap: 'anywhere' }}>{lines}</pre>
+                </div>
+            );
+        }
+
+        // Open port on the QNetd host for the cluster nodes, and why it is ticked or not. fw is the
+        // firewall of the plan: undefined while none was read, null where the server could not tell
+        function QdevFirewall({ kind, fw, port, value, onChange, disabled }) {
+            const { t } = useTranslation();
+            const state = qdevFirewallState(kind, fw);
+            if (state === 'sidecar') return <div className={QDEV_NOTE.info} data-qdev-fw="sidecar">{t('qdevFwSidecar')}</div>;
+            const backend = fw && typeof fw.backend === 'string' ? fw.backend : '';
+            const shown = fw && Number.isInteger(fw.port) ? fw.port : (port || 5403);
+            const sources = fw && Array.isArray(fw.sources) ? fw.sources.filter(s => typeof s === 'string') : [];
+            const say = (key) => t(key).replace('{backend}', () => backend);
+            const why = fw === undefined ? ''
+                : state === 'managed' ? say(fw.blocking === true ? 'qdevFwBlocks' : fw.blocking === false ? 'qdevFwPasses' : 'qdevFwMaybe')
+                : state === 'none' ? t('qdevFwNone') : state === 'unmanaged' ? say('qdevFwUnmanaged') : t('qdevFwUnknown');
+            const can = state === 'managed' || state === 'unknown';
+            return (
+                <div className="space-y-2" data-qdev-fw={fw === undefined ? 'unread' : state}>
+                    <label className="flex items-start gap-2 cursor-pointer">
+                        <input type="checkbox" className="w-4 h-4 mt-0.5" checked={can && !!value} disabled={disabled || !can}
+                            onChange={e => onChange(e.target.checked)} data-qdev-firewall="" />
+                        <span>
+                            <span className="text-gray-200 flex items-center gap-2"><Icons.Shield />{t('qdevFwOpen').replace('{port}', () => String(shown))}</span>
+                            {why && <span className="block text-xs text-gray-400 mt-1" data-qdev-fw-why="">{why}</span>}
+                            {can && sources.length > 0 && (
+                                <span className="block text-xs text-gray-500 mt-1 font-mono" data-qdev-fw-sources="" style={{ overflowWrap: 'anywhere' }}>
+                                    {t('qdevFwSources').replace('{sources}', () => sources.join(', '))}
+                                </span>
+                            )}
+                        </span>
+                    </label>
+                    {state === 'unmanaged' && <QdevManual text={fw.manual} />}
+                </div>
+            );
+        }
+
+        // what a setup is going to do, grouped by where: the QNetd host, each node, the cluster; then
+        // what the admin should know before agreeing
+        const QDEV_WHERE_RANK = { qnetd: 0, node: 1, nodes: 2, cluster: 3 };
+        function QdevPlan({ data, hostName, clusterName }) {
+            const { t } = useTranslation();
+            const items = (Array.isArray(data?.plan?.items) ? data.plan.items : []).filter(i => i && typeof i === 'object' && typeof i.id === 'string');
+            const warnings = (Array.isArray(data?.warnings) ? data.warnings : []).filter(w => w && typeof w === 'object' && typeof w.id === 'string');
+            const groups = [];
+            items.forEach(i => {
+                const node = i.where === 'node' && typeof i.node === 'string' && i.node ? i.node : '';
+                const key = i.where === 'qnetd' ? 'qnetd' : i.where === 'node' ? (node ? `node:${node}` : 'nodes') : 'cluster';
+                let g = groups.find(x => x.key === key);
+                if (!g) {
+                    g = { key, rank: QDEV_WHERE_RANK[node ? 'node' : key], items: [],
+                          title: key === 'qnetd' ? t('qdevWhereQnetd').replace('{host}', () => hostName || '-')
+                              : node ? t('qdevWhereNode').replace('{node}', () => node)
+                              : key === 'nodes' ? t('qdevWhereNodes') : t('qdevWhereCluster').replace('{cluster}', () => clusterName || '-') };
+                    groups.push(g);
+                }
+                g.items.push(i);
+            });
+            // the QNetd host first, the cluster last; within each the order of the server
+            groups.sort((a, b) => a.rank - b.rank);
+            return (
+                <div className="space-y-3" data-qdev-plan={data?.plan?.digest || ''}>
+                    <div className="text-gray-200 font-medium">{t('qdevPlanTitle')}</div>
+                    {groups.length === 0 && <div className="text-gray-500">{t('qdevPlanEmpty')}</div>}
+                    {groups.map(g => (
+                        <div key={g.key} className="rounded-lg border border-proxmox-border bg-proxmox-dark p-3" data-qdev-plan-group={g.key}>
+                            <div className="text-xs text-gray-400 mb-1 flex items-center gap-2">{g.key === 'cluster' ? <Icons.Database /> : <Icons.Server />}{g.title}</div>
+                            <ul className="space-y-1">
+                                {g.items.map((i, n) => (
+                                    <li key={`${i.id}-${n}`} data-qdev-item={i.id} className="flex items-start gap-2 text-gray-200" style={{ overflowWrap: 'anywhere' }}>
+                                        <span className="mt-0.5 flex-shrink-0 text-proxmox-orange"><Icons.ChevronRight /></span>
+                                        <span>{qdevPlanText(t, qdevItemKey(i), i)}</span>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    ))}
+                    {warnings.map((w, n) => (
+                        <div key={`${w.id}-${n}`} data-qdev-warning={w.id} className={`${QDEV_NOTE.warn} space-y-2`} style={{ overflowWrap: 'anywhere' }}>
+                            <div className="flex items-start gap-2"><span className="flex-shrink-0"><Icons.AlertTriangle /></span><span>{qdevPlanText(t, QDEV_WARN_KEYS[w.id], w)}</span></div>
+                            {w.id === 'firewall_manual' && <QdevManual text={w.params && w.params.manual} />}
+                        </div>
+                    ))}
+                </div>
+            );
+        }
+
+        const QDEV_WIZARD = [['where', 'qdevWizWhere'], ['options', 'qdevWizOptions'], ['review', 'qdevWizReview']];
+        function QdevSteps({ step }) {
+            const { t } = useTranslation();
+            const at = QDEV_WIZARD.findIndex(([s]) => s === step);
+            return (
+                <ol className="flex flex-wrap items-center gap-2 text-xs" data-qdev-steps={step}>
+                    {QDEV_WIZARD.map(([s, key], i) => (
+                        <li key={s} className="flex items-center gap-2">
+                            {i > 0 && <span className="text-gray-500"><Icons.ChevronRight /></span>}
+                            <span className={`px-2 py-0.5 rounded-full border ${i === at ? 'bg-proxmox-orange border-proxmox-orange text-white'
+                                : i < at ? 'border-green-500/30 text-green-400' : 'border-proxmox-border text-gray-500'}`}>{`${i + 1}. ${t(key)}`}</span>
+                        </li>
+                    ))}
+                </ol>
+            );
+        }
+
+        // Set up QDevice for one cluster: Where (a QNetd host PegaProx knows, or a new one saved here
+        // first, as a record only), Options, Review (the plan, the checks and the admin's yes for this
+        // cluster), then the job with its log. Every option change asks for the plan again and takes
+        // the yes back. Closing the window leaves the job running; opening it again follows it.
+        function QdeviceSetupDialog({ clusterId, clusterName, nodeCount, onClose }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders } = useAuth();
+            const [hosts, setHosts] = useState(null);
+            const [meta, setMeta] = useState({});
+            const [loadError, setLoadError] = useState('');
+            const [step, setStep] = useState('where');
+            const [choice, setChoice] = useState('');          // a host id, or new:ssh / new:local / new:sidecar
+            const [install, setInstall] = useState(true);
+            const [openFw, setOpenFw] = useState(false);
+            const [confirmed, setConfirmed] = useState(false);
+            const [replace, setReplace] = useState(false);
+            const [plan, setPlan] = useState(null);            // {opts, data, last, error, loading}
+            const [consent, setConsent] = useState(false);
+            const [refused, setRefused] = useState('');
+            const [starting, setStarting] = useState(false);
+            const [jobId, setJobId] = useState(null);
+            const { job, lost, stale } = useQdevJob(getAuthHeaders, jobId);
+            const seq = useRef(0);
+            // the host whose firewall default is decided: once per host, never over the admin's own tick
+            const fwSettled = useRef('');
+            const odd = Number.isInteger(nodeCount) && nodeCount % 2 === 1;
+            const cid = encodeURIComponent(clusterId);
+            const hostId = QDEV_HOST_ID_RE.test(choice) ? choice : '';
+            const host = (hosts || []).find(h => h.id === (job ? job.qnetd_id : hostId)) || null;
+            const kind = host ? host.kind : choice.startsWith('new:') ? choice.slice(4) : '';
+            const opts = { qnetd_id: hostId, install_packages: install, open_firewall: kind !== 'sidecar' && openFw,
+                           confirm_unverified_host: confirmed, replace_certificate: replace };
+
+            const takeHosts = (h) => {
+                if (!h.ok) { setLoadError(qdevFailText(t, h)); setHosts(prev => prev || []); return null; }
+                const list = (Array.isArray(h.data?.hosts) ? h.data.hosts : []).filter(x => x && QDEV_HOST_ID_RE.test(x.id || ''));
+                setLoadError('');
+                setHosts(list);
+                setMeta({ transports: h.data.transports, port: h.data.default_port,
+                          members: Number.isInteger(h.data.ha_members) ? h.data.ha_members : 1 });
+                return list;
+            };
+            useEffect(() => {
+                let gone = false;
+                (async () => {
+                    const [h, j] = await Promise.all([qdevApi(getAuthHeaders, 'GET', '/qnetd/hosts'),
+                                                      qdevApi(getAuthHeaders, 'GET', '/qnetd/jobs')]);
+                    if (gone) return;
+                    // a setup of this cluster that still runs (the window was closed meanwhile): follow it
+                    const runs = j.ok && Array.isArray(j.data?.jobs) ? j.data.jobs : [];
+                    const run = runs.find(x => x && x.state === 'running' && x.kind !== 'remove'
+                        && Array.isArray(x.cluster_ids) && x.cluster_ids.includes(clusterId) && QDEV_JOB_RE.test(x.id || ''));
+                    if (run) {
+                        setJobId(run.id);
+                        if (QDEV_HOST_ID_RE.test(run.qnetd_id || '')) setChoice(run.qnetd_id);
+                    }
+                    const list = takeHosts(h);
+                    if (!run && list && list.length === 1) setChoice(list[0].id);
+                })();
+                return () => { gone = true; };
+            }, [clusterId]);
+
+            const fetchPlan = async (o) => {
+                const mine = ++seq.current;
+                setConsent(false);
+                if (!QDEV_HOST_ID_RE.test(o.qnetd_id || '')) { setPlan(null); return; }
+                // what was read for this host stays on screen (the firewall above all) until the new answer
+                setPlan(prev => ({ opts: o, data: null, error: '', loading: true,
+                                   last: prev && prev.opts.qnetd_id === o.qnetd_id ? (prev.data || prev.last) : null }));
+                // read-only, but it asks the QNetd host and logs in to every node: minutes on a slow cluster
+                const r = await qdevApi(getAuthHeaders, 'GET', `/clusters/${cid}/qdevice/plan?${qdevPlanQuery(o)}`, undefined, 240000);
+                if (mine !== seq.current) return;
+                const good = r.ok && qdevPlanOk(r.data);
+                if (good && fwSettled.current !== o.qnetd_id) {
+                    fwSettled.current = o.qnetd_id;
+                    const k = ((hosts || []).find(h => h.id === o.qnetd_id) || {}).kind;
+                    if (!o.open_firewall && qdevFirewallDefault(k, r.data.firewall)) {
+                        // the plan with the port opened comes next; this one is never shown
+                        setPlan(prev => ({ ...prev, last: r.data }));
+                        setOpenFw(true);
+                        return;
+                    }
+                }
+                setPlan(prev => ({ opts: o, data: good ? r.data : null, last: prev ? prev.last : null,
+                                   error: good ? '' : qdevFailText(t, r), loading: false }));
+            };
+            useEffect(() => { if (!jobId) fetchPlan(opts); }, [hostId, install, openFw, confirmed, replace, jobId]);
+
+            const pick = (next) => {
+                setChoice(next);
+                setOpenFw(false);
+                setConfirmed(false);
+                setReplace(false);
+                setRefused('');
+            };
+            // a host saved from the form here: a record only, nothing ran on it yet
+            const created = async (rec) => {
+                qnetdAccess.at = 0;
+                const id = rec && QDEV_HOST_ID_RE.test(rec.id || '') ? rec.id : '';
+                const list = takeHosts(await qdevApi(getAuthHeaders, 'GET', '/qnetd/hosts')) || [];
+                if (!id) return;
+                if (!list.some(h => h.id === id)) setHosts(prev => [...(prev || []), rec]);
+                pick(id);
+                setStep('options');
+            };
+            const start = async () => {
+                const p = plan;
+                if (!p || p.loading || !p.data || p.data.ok !== true || !consent || !QDEV_HOST_ID_RE.test(p.opts.qnetd_id)) return;
+                setStarting(true);
+                setRefused('');
+                // the options this plan was made with, and its digest: what the admin agreed to
+                const r = await qdevApi(getAuthHeaders, 'POST', `/clusters/${cid}/qdevice/setup`, {
+                    ...p.opts, consent: { accepted: true, digest: p.data.plan.digest } });
+                setStarting(false);
+                if (!r.ok || !QDEV_JOB_RE.test(r.data?.job_id || '')) {
+                    setRefused(qdevFailText(t, r));
+                    if (r.data && r.data.code === 'consent_required') fetchPlan(p.opts);
+                    return;
+                }
+                setJobId(r.data.job_id);
+            };
+            const again = (withReplace) => {
+                if (withReplace) setReplace(true);
+                setRefused('');
+                setStep('review');
+                setJobId(null);
+            };
+
+            const row = job && job.clusters ? job.clusters[clusterId] : null;
+            const finished = !!job && job.state !== 'running';
+            const running = !!jobId && !lost && !finished;
+            const loading = !!plan && plan.loading;
+            const data = plan ? plan.data : null;
+            const fw = data ? data.firewall : plan && plan.last ? plan.last.firewall : undefined;
+            const busy = loading || starting;
+            const canNext = step === 'where' ? !!hostId : !!data && !loading;
+            const canAgree = !!data && !loading && data.ok === true;
+            const canStart = !jobId && !starting && canAgree && consent;
+            const newKinds = ['ssh', 'local', 'sidecar'].filter(k => k === 'ssh' || (meta.transports && meta.transports[k]
+                && meta.transports[k].available === true && !(hosts || []).some(h => h.kind === k)));
+            const planState = (
+                <>
+                    {loading && <div className="flex items-center gap-2 text-gray-400" data-qdev-checking=""><QdevSpinner />{t('qdevChecking')}</div>}
+                    {plan && plan.error && <div role="alert" className={QDEV_NOTE.bad} data-qdev-plan-error="" style={{ overflowWrap: 'anywhere' }}>{plan.error}</div>}
+                </>
+            );
+            return (
+                <QdevDialog data={{ 'data-qdev-setup': clusterId, 'data-qdev-step': jobId ? 'job' : step }} title={t('qdevSetup')} sub={clusterName} onClose={onClose}
+                    footer={<>
+                        {running && <span className="text-xs text-gray-400 mr-auto">{t('qdevRunsInBackground')}</span>}
+                        {!jobId && step !== 'where' && (
+                            <button type="button" className={QDEV_GHOST} disabled={starting} onClick={() => setStep(step === 'review' ? 'options' : 'where')} data-qdev-back="">
+                                <Icons.ChevronLeft />{t('back')}
+                            </button>
+                        )}
+                        {!jobId && step !== 'where' && hostId && (
+                            <button type="button" className={QDEV_GHOST} disabled={busy} onClick={() => fetchPlan(opts)} data-qdev-recheck="">
+                                <Icons.RefreshCw />{t('qdevCheckAgain')}
+                            </button>
+                        )}
+                        {finished && row && row.state !== 'done' && (
+                            <button type="button" className={QDEV_GHOST} disabled={starting} onClick={() => again(false)} data-qdev-again="">
+                                <Icons.RefreshCw />{t('qdevCheckAgain')}
+                            </button>
+                        )}
+                        {!jobId && step !== 'review' && (
+                            <button type="button" className={QDEV_PRIMARY} disabled={!canNext} onClick={() => setStep(step === 'where' ? 'options' : 'review')} data-qdev-next="">
+                                {t('qdevNext')}<Icons.ChevronRight />
+                            </button>
+                        )}
+                        {!jobId && step === 'review' && (
+                            <button type="button" className={QDEV_PRIMARY} disabled={!canStart} onClick={start} data-qdev-start="">
+                                {starting ? <QdevSpinner /> : <Icons.Play />}{t('qdevStart')}
+                            </button>
+                        )}
+                        <button type="button" className={QDEV_GHOST} onClick={onClose}>{t('close')}</button>
+                    </>}>
+                    {!jobId && <QdevSteps step={step} />}
+                    {odd && (
+                        <div data-qdev-odd-hint="" className={QDEV_NOTE.warn}>
+                            {t('qdevOddNodes').replace('{n}', () => String(nodeCount))} {t('qdevOddExplain')}
+                        </div>
+                    )}
+                    {!jobId && step === 'where' && (hosts === null ? <div className="text-gray-400">{t('loading')}</div> : (
+                        <div className="space-y-2" data-qdev-where="">
+                            <div className="text-xs text-gray-400">{t('qdevPickHost')}</div>
+                            {loadError && <div className={QDEV_NOTE.bad} role="alert">{loadError}</div>}
+                            {hosts.length === 0 && !loadError && <div className="text-gray-500" data-qdev-no-hosts="">{t('qnetdNoHosts')}</div>}
+                            {hosts.map(h => {
+                                const st = qnetdHostState(h.status);
+                                const [stKey, stCls] = QNETD_STATE[st];
+                                return (
+                                    <label key={h.id} data-qdev-where-host={h.id}
+                                        className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer ${choice === h.id ? 'border-proxmox-orange bg-proxmox-dark' : 'border-proxmox-border'}`}>
+                                        <input type="radio" name="qdev-where" className="mt-1" checked={choice === h.id} disabled={starting} onChange={() => pick(h.id)} />
+                                        <span className="min-w-0 flex-1">
+                                            <span className="flex flex-wrap items-center gap-2">
+                                                <span className="text-white font-medium">{h.name}</span>
+                                                <span className="px-2 py-0.5 rounded-full border text-xs bg-proxmox-card border-proxmox-border text-gray-300">
+                                                    {QNETD_KIND_KEYS[h.kind] ? t(QNETD_KIND_KEYS[h.kind]) : String(h.kind || '-')}
+                                                </span>
+                                                <span className={`px-2 py-0.5 rounded-full border text-xs ${stCls}`} data-qdev-where-state={st}>{t(stKey)}</span>
+                                            </span>
+                                            <span className="block text-xs text-gray-400 font-mono mt-1">{qdevHostPort(h.address, h.port)}</span>
+                                        </span>
+                                    </label>
+                                );
+                            })}
+                            {newKinds.map(k => (
+                                <label key={k} data-qdev-where-new={k}
+                                    className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer ${choice === `new:${k}` ? 'border-proxmox-orange bg-proxmox-dark' : 'border-proxmox-border'}`}>
+                                    <input type="radio" name="qdev-where" className="mt-1" checked={choice === `new:${k}`} disabled={starting} onChange={() => pick(`new:${k}`)} />
+                                    <span className="min-w-0 flex-1">
+                                        <span className="flex items-center gap-2 text-white"><Icons.Plus />{t(k === 'ssh' ? 'qdevWizNewSsh' : QNETD_KIND_KEYS[k])}</span>
+                                        <span className="block text-xs text-gray-400 mt-1">{t(QNETD_KIND_DESC[k])}</span>
+                                    </span>
+                                </label>
+                            ))}
+                            {(kind === 'local' || kind === 'sidecar') && meta.members > 1 && (
+                                <div className={QDEV_NOTE.warn} data-qdev-ha-warn="">{t('qdevWarnHaLocal')}</div>
+                            )}
+                            {choice.startsWith('new:') && (
+                                <div className="space-y-2">
+                                    <p className="text-xs text-gray-400">{t('qdevWizNewHint')}</p>
+                                    <QnetdHostForm key={choice} fixedKind={kind} transports={meta.transports} defaultPort={meta.port}
+                                        onCancel={() => pick('')} onDone={(_edited, rec) => created(rec)} />
+                                </div>
+                            )}
+                        </div>
+                    ))}
+                    {!jobId && step === 'options' && (
+                        <div className="space-y-4" data-qdev-options="">
+                            <div className="text-gray-400" data-qdev-wiz-host="">
+                                {t('qdevWizHost').replace('{host}', () => host ? `${host.name} (${qdevHostPort(host.address, host.port)})` : '-')}
+                            </div>
+                            <label className="flex items-start gap-2 cursor-pointer">
+                                <input type="checkbox" className="w-4 h-4 mt-0.5" checked={install} disabled={busy}
+                                    onChange={e => setInstall(e.target.checked)} data-qdev-install="" />
+                                <span>
+                                    <span className="text-gray-200">{t('qdevInstallPackages')}</span>
+                                    <span className="block text-xs text-gray-500">{t('qdevInstallHint')}</span>
+                                </span>
+                            </label>
+                            <QdevFirewall kind={kind} fw={fw} port={host ? host.port : null} value={openFw} disabled={busy || !plan}
+                                onChange={v => { fwSettled.current = hostId; setOpenFw(v); }} />
+                            {planState}
+                        </div>
+                    )}
+                    {!jobId && step === 'review' && (
+                        <div className="space-y-4" data-qdev-review="">
+                            <p className="text-gray-400">{t('qdevSetupIntro')}</p>
+                            {planState}
+                            {data && !loading && (
+                                <>
+                                    <QdevPlan data={data} hostName={host ? host.name : ''} clusterName={clusterName || clusterId} />
+                                    <div>
+                                        <div className="text-xs text-gray-400 mb-1">{t('qdevShowChecks')}</div>
+                                        <QdevPreflight report={data.preflight} confirmed={confirmed} onConfirm={setConfirmed} disabled={busy} passes={data.ok === true}
+                                            onReplaceCert={() => { setRefused(''); setReplace(true); }} />
+                                    </div>
+                                    <label className={`flex items-start gap-2 rounded-lg border p-3 ${canAgree ? 'cursor-pointer border-proxmox-orange' : 'border-proxmox-border opacity-50'}`}>
+                                        <input type="checkbox" className="w-4 h-4 mt-0.5" checked={consent} disabled={!canAgree || starting}
+                                            onChange={e => setConsent(e.target.checked)} data-qdev-consent="" />
+                                        <span>
+                                            <span className="text-white font-medium">{t('qdevConsent').replace('{cluster}', () => clusterName || clusterId)}</span>
+                                            <span className="block text-xs text-gray-400 mt-1">{t('qdevConsentHint')}</span>
+                                        </span>
+                                    </label>
+                                </>
+                            )}
+                        </div>
+                    )}
+                    {refused && <div role="alert" className={QDEV_NOTE.bad} data-qdev-refused="" style={{ overflowWrap: 'anywhere' }}>{refused}</div>}
+                    {jobId && (
+                        <div className="space-y-3">
+                            <QdevJobState job={job} lost={lost} stale={stale} running={running} />
+                            <QdevOutcome row={row} kind="setup" hostName={host ? host.name : ''} busy={starting}
+                                onReplace={finished ? () => again(true) : null} />
+                            <div>
+                                <div className="text-xs text-gray-400 mb-1">{t('qdevLog')}</div>
+                                <QdevJobLog job={job} />
+                            </div>
+                        </div>
+                    )}
+                </QdevDialog>
+            );
+        }
+
+        // Remove QDevice: pvecm qdevice remove on one node, after the admin typed the word
+        function QdeviceRemoveDialog({ clusterId, clusterName, attachment, onClose }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders } = useAuth();
+            const [typed, setTyped] = useState('');
+            const [busy, setBusy] = useState(false);
+            const [refused, setRefused] = useState('');
+            const [jobId, setJobId] = useState(null);
+            const { job, lost, stale } = useQdevJob(getAuthHeaders, jobId);
+            useEffect(() => {
+                let gone = false;
+                qdevApi(getAuthHeaders, 'GET', '/qnetd/jobs').then(r => {
+                    if (gone || !r.ok || !Array.isArray(r.data?.jobs)) return;
+                    const run = r.data.jobs.find(x => x && x.state === 'running' && x.kind === 'remove'
+                        && Array.isArray(x.cluster_ids) && x.cluster_ids.includes(clusterId) && QDEV_JOB_RE.test(x.id || ''));
+                    if (run) setJobId(run.id);
+                });
+                return () => { gone = true; };
+            }, [clusterId]);
+            const remove = async () => {
+                if (typed !== 'REMOVE') return;
+                setBusy(true);
+                setRefused('');
+                const r = await qdevApi(getAuthHeaders, 'POST', `/clusters/${encodeURIComponent(clusterId)}/qdevice/remove`, {});
+                setBusy(false);
+                if (!r.ok || !QDEV_JOB_RE.test(r.data?.job_id || '')) { setRefused(qdevFailText(t, r)); return; }
+                setTyped('');
+                setJobId(r.data.job_id);
+            };
+            const row = job && job.clusters ? job.clusters[clusterId] : null;
+            const running = !!jobId && !lost && (!job || job.state === 'running');
+            return (
+                <QdevDialog data={{ 'data-qdev-remove': clusterId }} title={t('qdevRemove')} sub={clusterName} onClose={onClose}
+                    footer={<>
+                        {running && <span className="text-xs text-gray-400 mr-auto">{t('qdevRunsInBackground')}</span>}
+                        {!jobId && (
+                            <button type="button" className={QDEV_DANGER} disabled={typed !== 'REMOVE' || busy} onClick={remove} data-qdev-remove-go="">
+                                {busy ? <QdevSpinner /> : <Icons.Trash />}{t('qdevRemove')}
+                            </button>
+                        )}
+                        <button type="button" className={QDEV_GHOST} onClick={onClose}>{jobId ? t('close') : t('cancel')}</button>
+                    </>}>
+                    <div className={QDEV_NOTE.warn}>{t('qdevRemoveDesc')}</div>
+                    {attachment && (
+                        <div className="text-gray-400" data-qdev-attached-to="">{t('qdevRemoveVia').replace('{host}', () => attachment.host || '-')}</div>
+                    )}
+                    {attachment && <div className="text-gray-400" data-qdev-remove-firewall="">{t('qdevRemoveFirewall')}</div>}
+                    {!jobId && (
+                        <div>
+                            <label className="block text-xs text-gray-400 mb-1" htmlFor={`qdev-remove-${clusterId}`}>
+                                {t('pgHaTypeToConfirm').replace('{word}', 'REMOVE')}
+                            </label>
+                            <input id={`qdev-remove-${clusterId}`} value={typed} onChange={e => setTyped(e.target.value)} autoComplete="off"
+                                spellCheck={false} placeholder="REMOVE" className={`${QDEV_FIELD} font-mono`} data-qdev-remove-typed="" />
+                        </div>
+                    )}
+                    {refused && <div role="alert" className={QDEV_NOTE.bad} data-qdev-refused="" style={{ overflowWrap: 'anywhere' }}>{refused}</div>}
+                    {jobId && (
+                        <div className="space-y-3">
+                            <QdevJobState job={job} lost={lost} stale={stale} running={running} />
+                            <QdevOutcome row={row} kind="remove" />
+                            <div>
+                                <div className="text-xs text-gray-400 mb-1">{t('qdevLog')}</div>
+                                <QdevJobLog job={job} />
+                            </div>
+                        </div>
+                    )}
+                </QdevDialog>
+            );
+        }
+
+        // the Set up button next to the nodes of a cluster without a QDevice (q is what /qdevice
+        // said). It stays while its window is open, also once the cluster has its QDevice; the
+        // cluster's QDevice is read again when the window closes. While the notice of the cluster
+        // shows (QdeviceHint, with a Set up button of its own) it gives way, and is back once the
+        // notice is hidden.
+        function QdeviceSetupButton({ clusterId, clusterName, q, nodeCount, corporate = false, onChanged }) {
+            const { t } = useTranslation();
+            const access = useQnetdAccess();
+            const [open, setOpen] = useState(false);
+            const hintHidden = useQdevHintHidden(clusterId);
+            const absent = !!q && q.present === false && !q.refused;
+            const hinted = qdevHintShows(access, q, nodeCount, hintHidden);
+            if (!clusterId || (!open && (!access || !absent || hinted))) return null;
+            const odd = Number.isInteger(nodeCount) && nodeCount % 2 === 1;
+            const close = () => { setOpen(false); qnetdAccess.at = 0; if (onChanged) onChanged(); };
+            return (
+                <>
+                    {(access && absent && !hinted) && (
+                        <button type="button" data-qdev-setup-open={clusterId} onClick={() => setOpen(true)}
+                            title={odd ? t('qdevOddNodes').replace('{n}', () => String(nodeCount)) : t('qdevSetupHint')}
+                            className={corporate ? 'px-2 py-0.5 text-[11px] flex items-center gap-1'
+                                : 'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-gray-300 border border-proxmox-border hover:text-white hover:border-gray-500'}
+                            style={corporate ? { color: '#49afd9', border: '1px solid #485764' } : undefined}>
+                            <Icons.Scale className="w-3.5 h-3.5" />{t('qdevSetup')}
+                        </button>
+                    )}
+                    {open && <QdeviceSetupDialog clusterId={clusterId} clusterName={clusterName} nodeCount={nodeCount} onClose={close} />}
+                </>
+            );
+        }
+
+        // the Remove button of the QDevice view, both layouts. It names the QNetd host where PegaProx
+        // set the QDevice up; one set up by hand (pvecm) is removed the same way.
+        function QdeviceRemoveButton({ clusterId, clusterName, present, corporate = false, onChanged }) {
+            const { t } = useTranslation();
+            const access = useQnetdAccess();
+            const [open, setOpen] = useState(false);
+            if (!clusterId || (!open && (!access || !present))) return null;
+            let attachment = null;
+            for (const h of (access ? access.hosts : [])) {
+                const a = (Array.isArray(h.attachments) ? h.attachments : []).find(x => x && x.cluster_id === clusterId);
+                if (a) { attachment = { ...a, host: h.name }; break; }
+            }
+            const close = () => { setOpen(false); qnetdAccess.at = 0; if (onChanged) onChanged(); };
+            return (
+                <>
+                    {(access && present) && (
+                        <button type="button" data-qdev-remove-open={clusterId} onClick={() => setOpen(true)}
+                            className={corporate ? 'px-2 py-1 text-[11px] flex items-center gap-1'
+                                : 'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs text-red-300 border border-red-500/30 hover:bg-red-500/10'}
+                            style={corporate ? { color: '#f54f47', border: '1px solid #485764' } : undefined}>
+                            <Icons.Trash />{t('qdevRemove')}
+                        </button>
+                    )}
+                    {open && <QdeviceRemoveDialog clusterId={clusterId} clusterName={clusterName} attachment={attachment} onClose={close} />}
+                </>
+            );
+        }
+
+        // LW Oct 2026 - the notice on the overview of a cluster with an even node count and no QDevice,
+        // for an admin who may set one up. Hidden per cluster for 30 days in this browser: only the
+        // time of the click is kept, under a key of its own
+        const QDEV_HINT_DAYS = 30;
+        const qdevHintKey = (cid) => `pegaprox-qdev-hint:${cid}`;
+        // the Hide clicks of this page, which count also where the browser refuses the storage, and
+        // the components that show or give way by them (the notice, the small Set up button)
+        const qdevHintSeen = { at: {}, subs: new Set() };
+        function qdevHintHidden(cid) {
+            let at = Number(qdevHintSeen.at[cid]) || 0;
+            try {
+                at = Math.max(at, Number(window.localStorage.getItem(qdevHintKey(cid))) || 0);
+            } catch (e) {
+                /* storage refused: a click on this page still counts */
+            }
+            return Number.isFinite(at) && at > 0 && at <= Date.now() && Date.now() - at < QDEV_HINT_DAYS * 86400000;
+        }
+        function qdevHintHide(cid) {
+            qdevHintSeen.at[cid] = Date.now();
+            try { window.localStorage.setItem(qdevHintKey(cid), String(Date.now())); } catch (e) { /* storage refused: hidden for this view only */ }
+            qdevHintSeen.subs.forEach(fn => fn());
+        }
+        // whether the notice of a cluster is hidden here, read again when Hide is pressed anywhere
+        function useQdevHintHidden(cid) {
+            const [hidden, setHidden] = useState(() => qdevHintHidden(cid));
+            useEffect(() => {
+                const sync = () => setHidden(qdevHintHidden(cid));
+                sync();
+                qdevHintSeen.subs.add(sync);
+                return () => { qdevHintSeen.subs.delete(sync); };
+            }, [cid]);
+            return hidden;
+        }
+        // the notice shows to an admin who may manage QNetd hosts, on a cluster of an even node count
+        // whose QDevice was read as absent, unless hidden here
+        function qdevHintShows(access, q, nodeCount, hidden) {
+            const even = Number.isInteger(nodeCount) && nodeCount >= 2 && nodeCount % 2 === 0;
+            const absent = !!q && q.present === false && !q.refused && !q.stale;
+            return !!access && absent && even && !hidden;
+        }
+
+        function QdeviceHint({ clusterId, clusterName, q, nodeCount, corporate = false, onChanged }) {
+            const { t } = useTranslation();
+            const access = useQnetdAccess();
+            const hidden = useQdevHintHidden(clusterId);
+            const [open, setOpen] = useState(false);
+            const show = qdevHintShows(access, q, nodeCount, hidden);
+            // the wizard stays while it is open, also once the cluster has its QDevice
+            if (!clusterId || (!open && !show)) return null;
+            const close = () => { setOpen(false); qnetdAccess.at = 0; if (onChanged) onChanged(); };
+            const dialog = open ? <QdeviceSetupDialog clusterId={clusterId} clusterName={clusterName} nodeCount={nodeCount} onClose={close} /> : null;
+            if (!show) return dialog;
+            const text = nodeCount === 2 ? t('qdevHintTwo') : t('qdevHintEven').replace('{n}', () => String(nodeCount));
+            const hide = () => qdevHintHide(clusterId);
+            if (corporate) return (
+                <div data-qdev-hint={clusterId} className="flex flex-wrap items-start gap-3 p-2 mb-2 text-[12px]"
+                    style={{ border: '1px solid var(--corp-border-medium)', color: 'var(--corp-text-secondary)' }}>
+                    <span className="flex flex-shrink-0 mt-0.5" style={{ color: '#49afd9' }}><Icons.Scale /></span>
+                    <span className="min-w-0 flex-1">
+                        <span className="block font-medium" style={{ color: 'var(--color-text)' }}>{t('qdevHintTitle')}</span>
+                        <span className="block">{text}</span>
+                    </span>
+                    <span className="flex items-center gap-2">
+                        <button type="button" onClick={() => setOpen(true)} data-qdev-hint-setup={clusterId}
+                            className="px-2 py-0.5 text-[11px] flex items-center gap-1" style={{ color: '#49afd9', border: '1px solid #485764' }}>
+                            <Icons.Scale />{t('qdevSetup')}
+                        </button>
+                        <button type="button" onClick={hide} data-qdev-hint-hide={clusterId}
+                            className="px-2 py-0.5 text-[11px]" style={{ color: 'var(--corp-text-muted)', border: '1px solid #485764' }}>
+                            {t('qdevHintHide')}
+                        </button>
+                    </span>
+                    {dialog}
+                </div>
+            );
+            return (
+                <div data-qdev-hint={clusterId} className="flex flex-wrap items-start gap-3 mb-4 rounded-xl p-4 text-sm border bg-blue-500/10 border-blue-500/30 text-gray-300">
+                    <span className="flex-shrink-0 mt-0.5 text-blue-300"><Icons.Scale /></span>
+                    <span className="min-w-0 flex-1">
+                        <span className="block text-white font-medium">{t('qdevHintTitle')}</span>
+                        <span className="block mt-1">{text}</span>
+                    </span>
+                    <span className="flex items-center gap-2">
+                        <button type="button" className={QDEV_PRIMARY} onClick={() => setOpen(true)} data-qdev-hint-setup={clusterId}>
+                            <Icons.Scale />{t('qdevSetup')}
+                        </button>
+                        <button type="button" className={QDEV_GHOST} onClick={hide} data-qdev-hint-hide={clusterId}>{t('qdevHintHide')}</button>
+                    </span>
+                    {dialog}
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - Set up QDevice next to Continue anyway of a rolling update held for its quorum,
+        // where the cluster has no QDevice and an even node count. The gate counts the vote of a
+        // connected QDevice, so the plain Continue goes on once it is set up.
+        function QdeviceQuorumButton({ clusterId, clusterName, held, onChanged }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders } = useAuth();
+            const access = useQnetdAccess();
+            const [nodes, setNodes] = useState(null);
+            const [open, setOpen] = useState(false);
+            const absent = !!held && !!held.qdevice && typeof held.qdevice === 'object' && held.qdevice.present === false;
+            useEffect(() => {
+                if (!access || !absent || !clusterId) return;
+                let gone = false;
+                qdevApi(getAuthHeaders, 'GET', `/clusters/${encodeURIComponent(clusterId)}/nodes`, undefined, 20000).then(r => {
+                    if (!gone) setNodes(r.ok && Array.isArray(r.data) ? r.data.length : null);
+                });
+                return () => { gone = true; };
+            }, [clusterId, !!access, absent]);
+            const even = Number.isInteger(nodes) && nodes >= 2 && nodes % 2 === 0;
+            if (!clusterId || (!open && (!access || !absent || !even))) return null;
+            const close = () => { setOpen(false); qnetdAccess.at = 0; if (onChanged) onChanged(); };
+            return (
+                <>
+                    {access && absent && even && (
+                        <button type="button" onClick={() => setOpen(true)} data-testid="rolling-qdevice-setup" title={t('qdevQuorumHint')}
+                            className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition-colors">
+                            <Icons.Scale />{t('qdevSetup')}
+                        </button>
+                    )}
+                    {open && <QdeviceSetupDialog clusterId={clusterId} clusterName={clusterName} nodeCount={nodes} onClose={close} />}
+                </>
+            );
+        }
+
+        // Several clusters against one QNetd host: pick them (an odd node count, a cluster that votes
+        // through a QNetd host already and one that is not connected cannot be picked, each says why),
+        // check each, which reads its plan, agree to the plan of every picked cluster, then one job
+        // sets them up one after the other. Any option change makes the plans anew.
+        function QdeviceBulkDialog({ host, onClose, onChanged }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders } = useAuth();
+            const [rows, setRows] = useState(null);
+            const [loadError, setLoadError] = useState('');
+            const [picked, setPicked] = useState({});
+            const [reports, setReports] = useState({});      // cluster id -> its plan, or {error}
+            const [planned, setPlanned] = useState(null);    // the options those plans were made with
+            const [consents, setConsents] = useState({});    // cluster id -> the digest agreed to
+            const [checking, setChecking] = useState(false);
+            const [install, setInstall] = useState(false);
+            const [openFw, setOpenFw] = useState(false);
+            const [confirmed, setConfirmed] = useState(false);
+            const [replace, setReplace] = useState(false);
+            const [refused, setRefused] = useState('');
+            const [starting, setStarting] = useState(false);
+            const [jobId, setJobId] = useState(null);
+            const [shown, setShown] = useState({});
+            const { job, lost, stale } = useQdevJob(getAuthHeaders, jobId);
+            const seq = useRef(0);
+            const told = useRef(null);
+            // the firewall default is decided once, from the first plan, and never over the admin's tick
+            const fwSettled = useRef(false);
+
+            useEffect(() => {
+                let gone = false;
+                (async () => {
+                    const [c, h, j] = await Promise.all([qdevApi(getAuthHeaders, 'GET', '/clusters'),
+                                                         qdevApi(getAuthHeaders, 'GET', '/qnetd/hosts'),
+                                                         qdevApi(getAuthHeaders, 'GET', '/qnetd/jobs')]);
+                    if (gone) return;
+                    const run = (j.ok && Array.isArray(j.data?.jobs) ? j.data.jobs : []).find(x => x && x.state === 'running'
+                        && x.kind === 'bulk' && x.qnetd_id === host.id && QDEV_JOB_RE.test(x.id || ''));
+                    if (run) setJobId(run.id);
+                    if (!c.ok || !Array.isArray(c.data)) { setLoadError(qdevFailText(t, c)); setRows([]); return; }
+                    const attached = {};
+                    (h.ok && Array.isArray(h.data?.hosts) ? h.data.hosts : []).forEach(x =>
+                        (Array.isArray(x.attachments) ? x.attachments : []).forEach(a => { if (a) attached[a.cluster_id] = x.name; }));
+                    const list = c.data
+                        .filter(x => x && typeof x.id === 'string' && (x.cluster_type || 'proxmox') === 'proxmox')
+                        .map(x => ({ id: x.id, name: x.display_name || x.name || x.id, connected: x.connected !== false,
+                                     nodes: null, attachedTo: attached[x.id] || null }))
+                        .sort((a, b) => a.name.localeCompare(b.name));
+                    setRows(list);
+                    // how many nodes each has, four clusters at a time, one /nodes read each
+                    const todo = list.filter(r => r.connected && !r.attachedTo);
+                    let at = 0;
+                    const worker = async () => {
+                        while (!gone && at < todo.length) {
+                            const r = todo[at++];
+                            const res = await qdevApi(getAuthHeaders, 'GET', `/clusters/${encodeURIComponent(r.id)}/nodes`, undefined, 20000);
+                            if (gone) return;
+                            const n = res.ok && Array.isArray(res.data) ? res.data.length : null;
+                            setRows(prev => (prev || []).map(x => x.id === r.id ? { ...x, nodes: n } : x));
+                        }
+                    };
+                    await Promise.all([worker(), worker(), worker(), worker()]);
+                })();
+                return () => { gone = true; };
+            }, [host.id]);
+
+            const why = (r) => !r.connected ? t('qdevBulkOffline')
+                : r.attachedTo ? t('qdevBulkAttached').replace('{host}', () => r.attachedTo)
+                : (Number.isInteger(r.nodes) && r.nodes % 2 === 1) ? t('qdevBulkOdd').replace('{n}', () => String(r.nodes))
+                : '';
+            const names = Object.fromEntries((rows || []).map(r => [r.id, r.name]));
+            const ids = (rows || []).filter(r => picked[r.id] && !why(r)).map(r => r.id);
+            const opts = { qnetd_id: host.id, install_packages: install, open_firewall: host.kind !== 'sidecar' && openFw,
+                           confirm_unverified_host: confirmed, replace_certificate: replace };
+            const good = (id) => !!reports[id] && !reports[id].error && reports[id].ok === true;
+            const agreed = (id) => good(id) && consents[id] === reports[id].plan.digest;
+            // Start only once the plan of every picked cluster was agreed to
+            const allAgreed = !!planned && ids.length > 0 && ids.every(agreed);
+            const askConfirm = confirmed || ids.some(id => reports[id] && !reports[id].error && qdevMayConfirm(reports[id].preflight));
+            const fw = Object.values(reports).map(r => r && !r.error ? r.firewall : undefined).find(x => x !== undefined);
+            const finished = !!job && job.state !== 'running';
+            const running = !!jobId && !lost && !finished;
+            const locked = !!jobId || checking || starting;
+
+            useEffect(() => {
+                if (finished && told.current !== job.id) { told.current = job.id; qnetdAccess.at = 0; if (onChanged) onChanged(); }
+            }, [finished, job && job.id]);
+
+            const planOf = async (id, o) => {
+                const r = await qdevApi(getAuthHeaders, 'GET', `/clusters/${encodeURIComponent(id)}/qdevice/plan?${qdevPlanQuery(o)}`, undefined, 240000);
+                return r.ok && qdevPlanOk(r.data) ? r.data : { error: qdevFailText(t, r) };
+            };
+            const check = async (list, base) => {
+                const mine = ++seq.current;
+                let o = { ...base };
+                setChecking(true);
+                setRefused('');
+                setReports({});
+                setConsents({});
+                setPlanned(null);
+                if (!list.length) { setChecking(false); return; }
+                // the first plan says which firewall the QNetd host runs, and so the default of Open port
+                let first = await planOf(list[0], o);
+                if (mine !== seq.current) return;
+                if (!fwSettled.current && !first.error) {
+                    fwSettled.current = true;
+                    if (!o.open_firewall && qdevFirewallDefault(host.kind, first.firewall)) {
+                        o = { ...o, open_firewall: true };
+                        setOpenFw(true);
+                        first = await planOf(list[0], o);
+                        if (mine !== seq.current) return;
+                    }
+                }
+                setPlanned(o);
+                setReports({ [list[0]]: first });
+                let at = 1;
+                // two at a time: each logs in to every node of its cluster and asks the QNetd host
+                const worker = async () => {
+                    while (at < list.length && mine === seq.current) {
+                        const id = list[at++];
+                        const rep = await planOf(id, o);
+                        if (mine !== seq.current) return;
+                        setReports(prev => ({ ...prev, [id]: rep }));
+                    }
+                };
+                await Promise.all([worker(), worker()]);
+                if (mine === seq.current) setChecking(false);
+            };
+            // an option changed: plans made before say nothing about it, the agreements go with them
+            const change = (patch, apply) => {
+                apply();
+                if (planned) { check(ids, { ...opts, ...patch }); return; }
+                seq.current++;
+                setReports({});
+                setConsents({});
+            };
+            // the plan of a cluster does not depend on the others picked: they stay, a newly picked one
+            // has none until Check. Plans made to replace certificates go with the retry they were for
+            const repick = (next) => {
+                setPicked(next);
+                if (!replace) return;
+                setReplace(false);
+                seq.current++;
+                setReports({});
+                setConsents({});
+                setPlanned(null);
+                setChecking(false);
+            };
+            const start = async () => {
+                if (!allAgreed || !QDEV_HOST_ID_RE.test(host.id)) return;
+                const list = ids.slice();
+                setStarting(true);
+                setRefused('');
+                const r = await qdevApi(getAuthHeaders, 'POST', `/qnetd/hosts/${host.id}/bulk-setup`, {
+                    cluster_ids: list, install_packages: planned.install_packages, open_firewall: planned.open_firewall,
+                    confirm_unverified_host: planned.confirm_unverified_host, replace_certificate: planned.replace_certificate,
+                    consents: Object.fromEntries(list.map(id => [id, reports[id].plan.digest])),
+                });
+                setStarting(false);
+                if (!r.ok || !QDEV_JOB_RE.test(r.data?.job_id || '')) { setRefused(qdevFailText(t, r)); return; }
+                setJobId(r.data.job_id);
+            };
+            // a plan found a certificate of an earlier setup for the name of its cluster: every plan again
+            // with the replace option. The server replaces only where a plan lists it, and every
+            // agreement goes, as for any option
+            const replaceCert = () => change({ replace_certificate: true }, () => setReplace(true));
+            // the ones whose name the QNetd host still holds: their plans again with a new certificate,
+            // and the admin agrees to those before anything runs
+            const retryReplace = (list) => {
+                setPicked(Object.fromEntries(list.map(id => [id, true])));
+                setReplace(true);
+                setJobId(null);
+                check(list, { ...opts, replace_certificate: true });
+            };
+            const pickEven = () => {
+                const next = { ...picked };
+                (rows || []).forEach(r => { if (!why(r) && Number.isInteger(r.nodes) && r.nodes % 2 === 0) next[r.id] = true; });
+                repick(next);
+            };
+            const jobRows = job && job.clusters && Array.isArray(job.cluster_ids) ? job.cluster_ids.filter(id => job.clusters[id]).map(id => [id, job.clusters[id]]) : [];
+            const doneCount = jobRows.filter(([, v]) => v.state === 'done').length;
+            const sameName = finished ? jobRows.filter(([, v]) => v.state === 'failed' && v.code === 'name_exists').map(([id]) => id) : [];
+            const changed = finished && jobRows.some(([, v]) => v.code === 'plan_changed');
+
+            return (
+                <QdevDialog wide data={{ 'data-qdev-bulk': host.id }} title={t('qdevBulkTitle').replace('{host}', () => host.name)}
+                    sub={qdevHostPort(host.address, host.port)} onClose={onClose}
+                    footer={<>
+                        {running && <span className="text-xs text-gray-400 mr-auto">{t('qdevRunsInBackground')}</span>}
+                        {!jobId && (
+                            <button type="button" className={QDEV_GHOST} disabled={locked || !ids.length} onClick={() => check(ids, opts)} data-qdev-bulk-check="">
+                                {checking ? <QdevSpinner /> : <Icons.RefreshCw />}{t('qdevBulkCheck').replace('{n}', () => String(ids.length))}
+                            </button>
+                        )}
+                        {!jobId && (
+                            <button type="button" className={QDEV_PRIMARY} disabled={locked || !allAgreed} onClick={start} data-qdev-bulk-start="">
+                                <Icons.Play />{t('qdevBulkStart').replace('{n}', () => String(ids.length))}
+                            </button>
+                        )}
+                        {finished && (
+                            <button type="button" className={QDEV_GHOST} onClick={() => { setJobId(null); setReports({}); setConsents({}); setPlanned(null); }} data-qdev-bulk-back="">
+                                <Icons.ChevronLeft />{t('back')}
+                            </button>
+                        )}
+                        <button type="button" className={QDEV_GHOST} onClick={onClose}>{t('close')}</button>
+                    </>}>
+                    <p className="text-gray-400">{t('qdevBulkIntro')}</p>
+                    {!jobId && (
+                        <>
+                            {rows === null ? <div className="text-gray-400">{t('loading')}</div>
+                                : loadError ? <div className={QDEV_NOTE.bad} role="alert">{loadError}</div>
+                                : rows.length === 0 ? <div className="text-gray-500">{t('qdevBulkNoClusters')}</div>
+                                : (
+                                    <div className="space-y-2">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <button type="button" className={QDEV_GHOST} disabled={locked} onClick={pickEven} data-qdev-bulk-even="">
+                                                <Icons.Check />{t('qdevBulkPickEven')}
+                                            </button>
+                                            <label className="flex items-center gap-2 cursor-pointer text-gray-200">
+                                                <input type="checkbox" className="w-4 h-4" checked={install} disabled={locked}
+                                                    onChange={e => { const v = e.target.checked; change({ install_packages: v }, () => setInstall(v)); }} data-qdev-install="" />
+                                                {t('qdevInstallPackages')}
+                                            </label>
+                                        </div>
+                                        <QdevFirewall kind={host.kind} fw={fw} port={host.port} value={openFw} disabled={locked}
+                                            onChange={v => { fwSettled.current = true; change({ open_firewall: v }, () => setOpenFw(v)); }} />
+                                        <div className="max-h-96 overflow-y-auto rounded-lg border border-proxmox-border divide-y divide-proxmox-border">
+                                            {rows.map(r => {
+                                                const reason = why(r);
+                                                const rep = reports[r.id];
+                                                const verdict = !rep ? null : rep.error ? 'error' : rep.ok === true ? 'pass' : 'fail';
+                                                const sel = !!picked[r.id] && !reason;
+                                                const yes = agreed(r.id);
+                                                const held = verdict === 'fail' && qdevCertHeld(rep.preflight);
+                                                return (
+                                                    <div key={r.id} data-qdev-bulk-row={r.id} data-qdev-bulk-verdict={verdict || ''} data-qdev-bulk-agreed={yes ? 'yes' : ''} className="p-2 space-y-2">
+                                                        <div className="flex flex-wrap items-center gap-2">
+                                                            <input type="checkbox" className="w-4 h-4" checked={sel} disabled={locked || !!reason}
+                                                                onChange={e => repick({ ...picked, [r.id]: e.target.checked })} aria-label={r.name} />
+                                                            <span className="text-gray-200 font-medium">{r.name}</span>
+                                                            {Number.isInteger(r.nodes) && !reason && <span className="text-xs text-gray-500">{t('qdevBulkNodes').replace('{n}', () => String(r.nodes))}</span>}
+                                                            {reason && <span className="text-xs text-yellow-300" data-qdev-bulk-why="">{reason}</span>}
+                                                            {verdict && (
+                                                                <span className="ml-auto flex items-center gap-2">
+                                                                    {verdict === 'pass' ? <span className="text-xs text-green-400">{t('qdevPassed')}</span>
+                                                                        : verdict === 'fail' ? <span className="text-xs text-red-300">{t('qdevNotPassed')}</span>
+                                                                        : <span className="text-xs text-red-300" style={{ overflowWrap: 'anywhere' }}>{rep.error}</span>}
+                                                                    {verdict !== 'error' && (
+                                                                        <button type="button" className="text-xs text-gray-400 hover:text-white flex items-center gap-1" data-qdev-bulk-show={r.id}
+                                                                            onClick={() => setShown(prev => ({ ...prev, [r.id]: !prev[r.id] }))}>
+                                                                            {shown[r.id] ? <Icons.ChevronDown /> : <Icons.ChevronRight />}{t('qdevShowPlan')}
+                                                                        </button>
+                                                                    )}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        {held && !shown[r.id] && (
+                                                            <div className="pl-5"><QdevCertHeld onReplace={replaceCert} disabled={locked} /></div>
+                                                        )}
+                                                        {verdict && verdict !== 'error' && shown[r.id] && (
+                                                            <div className="pl-5 space-y-3">
+                                                                <QdevPlan data={rep} hostName={host.name} clusterName={r.name} />
+                                                                <QdevPreflight report={rep.preflight} confirmed={confirmed} disabled={locked} passes={rep.ok === true}
+                                                                    onConfirm={v => change({ confirm_unverified_host: v }, () => setConfirmed(v))}
+                                                                    onReplaceCert={held ? replaceCert : undefined} />
+                                                            </div>
+                                                        )}
+                                                        {verdict && verdict !== 'error' && sel && (
+                                                            <label className={`flex items-start gap-2 pl-5 ${verdict === 'pass' ? 'cursor-pointer' : 'opacity-50'}`}>
+                                                                <input type="checkbox" className="w-4 h-4 mt-0.5" checked={yes} disabled={locked || verdict !== 'pass'}
+                                                                    onChange={e => {
+                                                                        const on = e.target.checked;
+                                                                        setConsents(prev => {
+                                                                            const next = { ...prev };
+                                                                            if (on) next[r.id] = rep.plan.digest; else delete next[r.id];
+                                                                            return next;
+                                                                        });
+                                                                    }} data-qdev-bulk-consent={r.id} />
+                                                                <span className="text-gray-200">{t('qdevConsent').replace('{cluster}', () => r.name)}</span>
+                                                            </label>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                        {askConfirm && (
+                                            <label className="flex items-start gap-2 text-sm text-yellow-200 cursor-pointer">
+                                                <input type="checkbox" className="w-4 h-4 mt-0.5" checked={confirmed} disabled={locked}
+                                                    onChange={e => { const v = e.target.checked; change({ confirm_unverified_host: v }, () => setConfirmed(v)); }} data-qdev-confirm-guest="" />
+                                                <span>{t('qdevConfirmNotGuest')}</span>
+                                            </label>
+                                        )}
+                                        {planned && ids.length > 0 && !allAgreed && !checking && (
+                                            <div className="text-xs text-gray-400" data-qdev-bulk-agree-all="">{t('qdevBulkAgreeAll')}</div>
+                                        )}
+                                    </div>
+                                )}
+                            {checking && <div className="flex items-center gap-2 text-gray-400" data-qdev-checking=""><QdevSpinner />{t('qdevChecking')}</div>}
+                        </>
+                    )}
+                    {refused && <div role="alert" className={QDEV_NOTE.bad} data-qdev-refused="" style={{ overflowWrap: 'anywhere' }}>{refused}</div>}
+                    {jobId && (
+                        <div className="space-y-3">
+                            <QdevJobState job={job} lost={lost} stale={stale} running={running} />
+                            {jobRows.length > 0 && (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-xs" data-qdev-bulk-results="">
+                                        <thead className="bg-proxmox-dark text-gray-400">
+                                            <tr>
+                                                <th className="text-left p-2">{t('cluster')}</th>
+                                                <th className="text-left p-2">{t('status')}</th>
+                                                <th className="text-left p-2">{t('details')}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {jobRows.map(([id, v]) => (
+                                                <tr key={id} data-qdev-bulk-result={id} className="border-t border-proxmox-border">
+                                                    <td className="p-2 text-gray-200">{names[id] || v.cluster_name || id}</td>
+                                                    <td className="p-2"><QdevState state={v.state} /></td>
+                                                    <td className="p-2 text-gray-400" style={{ overflowWrap: 'anywhere' }}>
+                                                        {v.state === 'failed' && t('qdevFailedAt').replace('{step}', () => qdevStep(t, v.failed_step)).replace('{error}', () => v.error || '-')}
+                                                        {v.state === 'failed' && v.rolled_back === true && <div>{t('qdevRolledBack')}</div>}
+                                                        {v.state === 'failed' && v.rolled_back === false && <div className="text-yellow-200">{t('qdevRollbackIncomplete')}</div>}
+                                                        {v.state === 'skipped' && (v.error || '')}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                            {finished && <div className="text-gray-300" data-qdev-bulk-done={doneCount}>{t('qdevBulkResult').replace('{done}', () => String(doneCount)).replace('{n}', () => String(jobRows.length))}</div>}
+                            {changed && <div className={QDEV_NOTE.warn} data-qdev-plan-changed="">{t('qdevPlanChanged')}</div>}
+                            {sameName.length > 0 && (
+                                <div className={`${QDEV_NOTE.warn} space-y-2`} data-qdev-name-exists="">
+                                    <div>{t('qdevNameExists')}</div>
+                                    <div className="text-xs">{sameName.map(id => names[id] || id).join(', ')}</div>
+                                    <button type="button" className={QDEV_GHOST} disabled={starting} onClick={() => retryReplace(sameName)} data-qdev-replace="">
+                                        <Icons.RefreshCw />{t('qdevBulkRetry')}
+                                    </button>
+                                </div>
+                            )}
+                            <div>
+                                <div className="text-xs text-gray-400 mb-1">{t('qdevLog')}</div>
+                                <QdevJobLog job={job} names={names} />
+                            </div>
+                        </div>
+                    )}
+                </QdevDialog>
+            );
+        }
+
+        const QNETD_KINDS = ['local', 'ssh', 'sidecar'];
+        const QNETD_KIND_KEYS = { local: 'qnetdKindLocal', ssh: 'qnetdKindSsh', sidecar: 'qnetdKindSidecar' };
+        const QNETD_KIND_DESC = { local: 'qnetdKindLocalDesc', ssh: 'qnetdKindSshDesc', sidecar: 'qnetdKindSidecarDesc' };
+        // what the last status read of a host says
+        function qnetdHostState(st) {
+            if (!st) return 'unknown';
+            if (st.outdated) return 'outdated';
+            if (st.ok && st.active) return 'ok';
+            return st.ok ? 'inactive' : 'down';
+        }
+        const QNETD_STATE = {
+            ok: ['running', 'bg-green-500/10 text-green-400 border-green-500/30'],
+            inactive: ['qnetdStatusInactive', 'bg-yellow-500/10 text-yellow-300 border-yellow-500/30'],
+            outdated: ['qnetdStatusOutdated', 'bg-yellow-500/10 text-yellow-300 border-yellow-500/30'],
+            down: ['qnetdStatusDown', 'bg-red-500/10 text-red-300 border-red-500/30'],
+            unknown: ['qnetdStatusUnknown', 'bg-gray-500/20 text-gray-400 border-gray-500/30'],
+        };
+
+        // add or change a QNetd host. Password and key are typed, sent once and never shown again;
+        // left empty on a change, the stored one stays. fixedKind: a new host of that kind only (the
+        // setup wizard picked it already); onDone gets the saved record too
+        function QnetdHostForm({ host, transports, defaultPort, fixedKind, onDone, onCancel }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders } = useAuth();
+            const editing = !!host;
+            const attached = editing && Array.isArray(host.attachments) && host.attachments.length > 0;
+            const wasSsh = editing && host.kind === 'ssh';
+            const [name, setName] = useState(editing ? host.name || '' : '');
+            const [kind, setKind] = useState(editing ? host.kind : (QNETD_KINDS.includes(fixedKind) ? fixedKind : 'ssh'));
+            const [address, setAddress] = useState(editing ? host.address || '' : '');
+            const [port, setPort] = useState(String((editing && host.port) || defaultPort || 5403));
+            const [sshHost, setSshHost] = useState(wasSsh && host.ssh_host && host.ssh_host !== host.address ? host.ssh_host : '');
+            const [sshPort, setSshPort] = useState(String((wasSsh && host.ssh_port) || 22));
+            const [sshUser, setSshUser] = useState((wasSsh && host.ssh_user) || 'root');
+            const [auth, setAuth] = useState(wasSsh && host.has_ssh_key ? 'key' : 'password');
+            const [password, setPassword] = useState('');
+            const [sshKey, setSshKey] = useState('');
+            const [resetPin, setResetPin] = useState(false);
+            const [busy, setBusy] = useState(false);
+            const [refused, setRefused] = useState('');
+            const keptPw = wasSsh && !!host.has_password;
+            const keptKey = wasSsh && !!host.has_ssh_key;
+            // the stored login goes wherever SSH host and port point next: moved, the server wants
+            // the password or key typed again (400 'stale'), so it never follows a new address alone
+            const moved = () => {
+                if (!wasSsh || kind !== 'ssh') return false;
+                const to = (sshHost.trim() || address.trim()).replace(/^\[(.*)\]$/, '$1');
+                return to !== String(host.ssh_host || host.address || '') || Number(sshPort) !== Number(host.ssh_port || 22);
+            };
+
+            const problem = () => {
+                if (!QDEV_NAME_RE.test(name.trim())) return t('qnetdInvalidName');
+                if (!address.trim() || /\s/.test(address.trim())) return t('qnetdNeedAddress');
+                const p = Number(port);
+                if (!Number.isInteger(p) || p < 1 || p > 65535) return t('qnetdInvalidPort');
+                if (kind !== 'ssh') return '';
+                const sp = Number(sshPort);
+                if (!Number.isInteger(sp) || sp < 1 || sp > 65535) return t('qnetdInvalidPort');
+                if (/\s/.test(sshHost.trim())) return t('qnetdNeedAddress');
+                if (!QDEV_USER_RE.test(sshUser.trim())) return t('qnetdInvalidUser');
+                if (auth === 'password' && !password && !keptPw) return t('qnetdNeedSecret');
+                if (auth === 'key') {
+                    const k = sshKey.trim();
+                    if (!k && !keptKey) return t('qnetdNeedSecret');
+                    if (k && (!k.includes('PRIVATE KEY-----') || k.length > 16384)) return t('qnetdInvalidKey');
+                }
+                if (moved() && !(auth === 'password' ? password : sshKey.trim())) return t('qnetdRetypeOnMove');
+                return '';
+            };
+
+            const submit = async (e) => {
+                e.preventDefault();
+                const bad = problem();
+                if (bad) { setRefused(bad); return; }
+                const body = { name: name.trim(), kind, address: address.trim(), port: Number(port) };
+                if (kind === 'ssh') {
+                    body.ssh_host = sshHost.trim() || address.trim();
+                    body.ssh_port = Number(sshPort);
+                    body.ssh_user = sshUser.trim();
+                    // only what was typed goes out; the other way of logging in is dropped once this one is set
+                    const k = sshKey.trim();
+                    if (auth === 'password') {
+                        if (password) body.password = password;
+                        if (keptKey) body.ssh_key = '';
+                    } else {
+                        if (k) body.ssh_key = `${k}\n`;
+                        if (keptPw) body.password = '';
+                    }
+                }
+                if (editing && resetPin) body.reset_ca_pin = true;
+                setBusy(true);
+                setRefused('');
+                const r = await qdevApi(getAuthHeaders, editing ? 'PUT' : 'POST', editing ? `/qnetd/hosts/${host.id}` : '/qnetd/hosts', body);
+                setBusy(false);
+                if (!r.ok) {
+                    if (r.status === 400 && Array.isArray(r.data?.stale)) { setRefused(t('qnetdRetypeOnMove')); return; }
+                    const clusters = Array.isArray(r.data?.clusters) ? r.data.clusters.filter(x => typeof x === 'string').join(', ') : '';
+                    setRefused(qdevFailText(t, r) + (clusters ? ` (${clusters})` : ''));
+                    return;
+                }
+                setPassword('');
+                setSshKey('');
+                onDone(editing, r.data && typeof r.data.host === 'object' ? r.data.host : null);
+            };
+
+            const field = (id, label, input, hint) => (
+                <div>
+                    <label className="block text-xs text-gray-400 mb-1" htmlFor={id}>{label}</label>
+                    {input}
+                    {hint && <p className="text-xs text-gray-500 mt-1">{hint}</p>}
+                </div>
+            );
+            return (
+                <form onSubmit={submit} className="rounded-lg border border-proxmox-border bg-proxmox-card p-4 space-y-4" data-qnetd-form={editing ? 'edit' : 'add'} autoComplete="off">
+                    <h5 className="font-medium text-white">{t(editing ? 'qnetdEditHost' : 'qnetdAddHost')}</h5>
+                    {!(fixedKind && !editing) && <div>
+                        <div className="text-xs text-gray-400 mb-1">{t('qnetdKind')}</div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                            {QNETD_KINDS.map(k => {
+                                const avail = k !== 'ssh' && transports && transports[k] && typeof transports[k] === 'object' ? transports[k] : null;
+                                return (
+                                    <label key={k} data-qnetd-kind-option={k}
+                                        className={`rounded-lg border p-3 cursor-pointer ${kind === k ? 'border-proxmox-orange bg-proxmox-dark' : 'border-proxmox-border'}`}>
+                                        <span className="flex items-center gap-2">
+                                            <input type="radio" name="qnetd-kind" value={k} checked={kind === k} disabled={busy || attached}
+                                                onChange={() => setKind(k)} />
+                                            <span className="text-sm text-white">{t(QNETD_KIND_KEYS[k])}</span>
+                                        </span>
+                                        <span className="block text-xs text-gray-400 mt-1">{t(QNETD_KIND_DESC[k])}</span>
+                                        {k === 'local' && <span className="block text-xs text-gray-500 mt-1" data-qnetd-local-ha="">{t('qnetdKindLocalHa')}</span>}
+                                        {avail && (avail.available
+                                            ? <span className="block text-xs text-green-400 mt-1" data-qnetd-available="">{t('qnetdAvailable')}</span>
+                                            : <span className="block text-xs text-yellow-300 mt-1" data-qnetd-unavailable="" style={{ overflowWrap: 'anywhere' }}>
+                                                {t('qnetdNotAvailable').replace('{reason}', () => avail.reason || '-')}
+                                            </span>)}
+                                    </label>
+                                );
+                            })}
+                        </div>
+                        {attached && <p className="text-xs text-yellow-300 mt-1">{t('qnetdLockedAttached')}</p>}
+                    </div>}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        {field('qnetd-name', t('name'), (
+                            <input id="qnetd-name" className={QDEV_FIELD} value={name} maxLength={64} disabled={busy}
+                                onChange={e => setName(e.target.value)} placeholder="witness" />
+                        ))}
+                        {field('qnetd-address', t('qnetdAddress'), (
+                            <input id="qnetd-address" className={`${QDEV_FIELD} font-mono`} value={address} maxLength={253} disabled={busy || attached}
+                                onChange={e => setAddress(e.target.value)} placeholder="10.0.0.9" spellCheck={false} />
+                        ), t('qnetdAddressHint'))}
+                        {field('qnetd-port', t('port'), (
+                            <input id="qnetd-port" type="number" min={1} max={65535} className={QDEV_FIELD} value={port} disabled={busy || attached}
+                                onChange={e => setPort(e.target.value)} />
+                        ))}
+                    </div>
+                    {kind === 'ssh' && (
+                        <div className="space-y-3" data-qnetd-ssh="">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                {field('qnetd-ssh-host', t('qnetdSshHost'), (
+                                    <input id="qnetd-ssh-host" className={`${QDEV_FIELD} font-mono`} value={sshHost} maxLength={253} disabled={busy}
+                                        onChange={e => setSshHost(e.target.value)} placeholder={address || ''} spellCheck={false} />
+                                ), t('qnetdSshHostHint'))}
+                                {field('qnetd-ssh-port', t('sshPort'), (
+                                    <input id="qnetd-ssh-port" type="number" min={1} max={65535} className={QDEV_FIELD} value={sshPort} disabled={busy}
+                                        onChange={e => setSshPort(e.target.value)} />
+                                ))}
+                                {field('qnetd-ssh-user', t('sshUser'), (
+                                    <input id="qnetd-ssh-user" className={`${QDEV_FIELD} font-mono`} value={sshUser} maxLength={32} disabled={busy}
+                                        onChange={e => setSshUser(e.target.value)} spellCheck={false} autoComplete="off" />
+                                ), t('qnetdSshUserHint'))}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-4 text-sm">
+                                <span className="text-xs text-gray-400">{t('qnetdAuth')}</span>
+                                <label className="flex items-center gap-2 cursor-pointer text-gray-200">
+                                    <input type="radio" name="qnetd-auth" checked={auth === 'password'} disabled={busy} onChange={() => setAuth('password')} />
+                                    {t('password')}
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer text-gray-200">
+                                    <input type="radio" name="qnetd-auth" checked={auth === 'key'} disabled={busy} onChange={() => setAuth('key')} />
+                                    {t('sshPrivateKey')}
+                                </label>
+                            </div>
+                            {auth === 'password' ? field('qnetd-password', t('password'), (
+                                <input id="qnetd-password" type="password" className={QDEV_FIELD} value={password} maxLength={512} disabled={busy}
+                                    autoComplete="new-password" onChange={e => setPassword(e.target.value)}
+                                    placeholder={keptPw ? t('qnetdSecretKept') : ''} data-qnetd-secret="password" />
+                            )) : field('qnetd-key', t('sshPrivateKey'), (
+                                <textarea id="qnetd-key" rows={6} className={`${QDEV_FIELD} font-mono text-xs`} value={sshKey} disabled={busy}
+                                    autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+                                    onChange={e => setSshKey(e.target.value)} data-qnetd-secret="key"
+                                    placeholder={keptKey ? t('qnetdSecretKept') : '-----BEGIN OPENSSH PRIVATE KEY-----'} />
+                            ), t('qnetdKeyHint'))}
+                            <p className="text-xs text-gray-500 flex items-center gap-2"><Icons.Lock className="w-3.5 h-3.5" />{t('qnetdSecretNote')}</p>
+                            {wasSsh && <p className="text-xs text-yellow-300" data-qnetd-retype="">{t('qnetdRetypeOnMove')}</p>}
+                        </div>
+                    )}
+                    {editing && host.ca_sha256 && (
+                        <label className="flex items-start gap-2 cursor-pointer">
+                            <input type="checkbox" className="w-4 h-4 mt-0.5" checked={resetPin} disabled={busy} onChange={e => setResetPin(e.target.checked)} data-qnetd-reset-pin="" />
+                            <span>
+                                <span className="text-sm text-gray-200">{t('qnetdResetCaPin')}</span>
+                                <span className="block text-xs text-gray-500">{t('qnetdResetCaPinHint')}</span>
+                            </span>
+                        </label>
+                    )}
+                    {refused && <div role="alert" className={QDEV_NOTE.bad} data-qnetd-refused="" style={{ overflowWrap: 'anywhere' }}>{refused}</div>}
+                    <div className="flex flex-wrap items-center gap-2">
+                        <button type="submit" className={QDEV_PRIMARY} disabled={busy} data-qnetd-save="">
+                            {busy ? <QdevSpinner /> : <Icons.Check />}{editing ? t('save') : t('add')}
+                        </button>
+                        <button type="button" className={QDEV_GHOST} disabled={busy} onClick={onCancel}>{t('cancel')}</button>
+                    </div>
+                </form>
+            );
+        }
+
+        // one QNetd host: kind, address, helper protocol, whether corosync-qnetd runs, the clusters
+        // that vote through it with the nodes the QNetd sees connected, and what an admin can do
+        function QnetdHostCard({ host, protocol, readOnly, addToast, onChanged, onEdit, onBulk }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders } = useAuth();
+            const [own, setOwn] = useState(null);         // a status this card read itself, with the raw text
+            const [showRaw, setShowRaw] = useState(false);
+            const [busy, setBusy] = useState('');
+            const [checked, setChecked] = useState(null);
+            const [deleting, setDeleting] = useState(false);
+            const [asking, setAsking] = useState(false);
+            const [refused, setRefused] = useState('');
+            const spoke = useRef(false);
+            const attachments = Array.isArray(host.attachments) ? host.attachments.filter(a => a && typeof a === 'object') : [];
+            const listed = host.status && typeof host.status === 'object' ? host.status : null;
+            // the newer of the two reads
+            const st = own && (!listed || String(own.read_at || '') >= String(listed.read_at || '')) ? own : listed;
+
+            const readStatus = async () => {
+                setBusy('status');
+                setRefused('');
+                const r = await qdevApi(getAuthHeaders, 'GET', `/qnetd/hosts/${host.id}/status`, undefined, 120000);
+                setBusy('');
+                if (r.ok && r.data && r.data.status && typeof r.data.status === 'object') setOwn(r.data.status);
+                else if (!r.ok) setRefused(qdevFailText(t, r));
+            };
+            // a host nobody read yet is read once when the list shows it (a standby that does not
+            // forward refuses that read, it shows what it has)
+            useEffect(() => { if (!listed && !readOnly) readStatus(); }, [host.id]);
+
+            const check = async () => {
+                setBusy('check');
+                setRefused('');
+                setChecked(null);
+                // installing corosync-qnetd with apt can take minutes
+                const r = await qdevApi(getAuthHeaders, 'POST', `/qnetd/hosts/${host.id}/check`, {}, 720000);
+                setBusy('');
+                if (!r.ok || !r.data) { setRefused(qdevFailText(t, r)); return; }
+                if (r.data.ok && Number.isInteger(r.data.protocol) && r.data.protocol >= 2) spoke.current = true;
+                setChecked(r.data);
+                onChanged();
+                readStatus();
+            };
+            // LW Oct 2026 - Check installs and starts things as root there. A host that never answered
+            // with helper protocol 2 (or was never read) gets the list of what it does first
+            const known = spoke.current || (!!st && st.ok === true && Number.isInteger(st.protocol) && st.protocol >= Math.max(2, Number(protocol) || 0));
+            const askCheck = () => {
+                setRefused('');
+                if (known) { check(); return; }
+                setAsking(true);
+            };
+            const checkDoes = [
+                host.kind === 'ssh' && 'qnetdCheckDoesHelper',
+                host.kind !== 'sidecar' && 'qnetdCheckDoesPackages',
+                'qnetdCheckDoesCa', 'qnetdCheckDoesTls', 'qnetdCheckDoesStart',
+            ].filter(Boolean);
+            const remove = async () => {
+                setBusy('delete');
+                setRefused('');
+                const r = await qdevApi(getAuthHeaders, 'DELETE', `/qnetd/hosts/${host.id}`);
+                setBusy('');
+                setDeleting(false);
+                if (r.ok) { if (addToast) addToast(t('qnetdDeleted'), 'success'); onChanged(); return; }
+                const clusters = Array.isArray(r.data?.clusters) ? r.data.clusters.filter(x => typeof x === 'string').join(', ') : '';
+                setRefused(qdevFailText(t, r) + (clusters ? ` (${clusters})` : ''));
+            };
+            const askDelete = () => {
+                setRefused('');
+                if (attachments.length) {
+                    setRefused(t('qnetdDeleteAttached').replace('{clusters}', () => attachments.map(a => a.cluster_name).join(', ')));
+                    return;
+                }
+                setDeleting(true);
+            };
+
+            const state = qnetdHostState(st);
+            const [stateKey, stateCls] = QNETD_STATE[state];
+            const onHost = st && st.ok && Array.isArray(st.clusters) ? st.clusters : null;
+            const ours = new Set(attachments.map(a => a.cluster_name));
+            const others = onHost ? onHost.filter(c => c && !ours.has(c.name)).map(c => c.name) : [];
+            const row = (label, value, key) => (
+                <div className="flex items-start justify-between gap-4 text-sm" data-qnetd-field={key}>
+                    <span className="text-gray-400 whitespace-nowrap">{label}</span>
+                    <span className="text-gray-200 text-right min-w-0 break-all">{value}</span>
+                </div>
+            );
+            return (
+                <div className={QDEV_CARD} data-qnetd-host={host.id}>
+                    <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-gray-300"><Icons.Server /></span>
+                        <span className="font-medium text-white">{host.name}</span>
+                        <span className="px-2 py-0.5 rounded-full border text-xs bg-proxmox-card border-proxmox-border text-gray-300" data-qnetd-kind={host.kind}>
+                            {QNETD_KIND_KEYS[host.kind] ? t(QNETD_KIND_KEYS[host.kind]) : String(host.kind || '-')}
+                        </span>
+                        <span className={`px-2 py-0.5 rounded-full border text-xs ${stateCls}`} data-qnetd-state={state}>{t(stateKey)}</span>
+                        {st && typeof st.age === 'number' && (
+                            <span className="ml-auto text-xs text-gray-500">{t('qnetdReadAgo').replace('{n}', () => String(st.age))}</span>
+                        )}
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        {row(t('qnetdAddress'), <span className="font-mono text-xs">{qdevHostPort(host.address, host.port)}</span>, 'address')}
+                        {host.kind === 'ssh' && row(t('qnetdSshLogin'), (
+                            <span className="font-mono text-xs">{`${host.ssh_user || 'root'}@${qdevHostPort(host.ssh_host || host.address, host.ssh_port || 22)}`}
+                                <span className="text-gray-500">{` (${host.has_ssh_key ? t('sshPrivateKey') : host.has_password ? t('password') : '-'})`}</span>
+                            </span>
+                        ), 'ssh')}
+                        {row(t('qnetdProtocol'), st && Number.isInteger(st.protocol)
+                            ? <span className={st.outdated ? 'text-yellow-300' : undefined}>{t('qnetdProtocolOf').replace('{have}', () => String(st.protocol)).replace('{want}', () => String(protocol))}</span>
+                            : '-', 'protocol')}
+                        {row(t('qnetdCaPin'), host.ca_sha256
+                            ? <span className="font-mono text-xs" title={host.ca_sha256}>{`${String(host.ca_sha256).slice(0, 16)}...`}</span>
+                            : '-', 'ca')}
+                        {st && typeof st.tls_required === 'boolean' && row(t('qnetdTls'), st.tls_required
+                            ? <span className="text-green-400">{t('qnetdTlsRequired')}</span>
+                            : <span className="text-yellow-300">{t('qnetdTlsNotRequired')}</span>, 'tls')}
+                    </div>
+                    {st && st.tls_required === false && (
+                        <div className={QDEV_NOTE.warn} data-qnetd-tls-warn="" style={{ overflowWrap: 'anywhere' }}>{t('qnetdTlsWarn')}</div>
+                    )}
+                    {st && st.error && <div className="text-xs text-red-300" data-qnetd-error="" style={{ overflowWrap: 'anywhere' }}>{st.error}</div>}
+                    <div className="space-y-1.5" data-qnetd-attachments={attachments.length}>
+                        <div className="text-xs text-gray-400">{t('qnetdAttached')}</div>
+                        {attachments.length === 0 && <div className="text-xs text-gray-500">{t('qnetdNoneAttached')}</div>}
+                        {attachments.map(a => {
+                            const seen = onHost ? onHost.find(c => c && c.name === a.cluster_name) : null;
+                            const nodes = seen && Array.isArray(seen.nodes) ? seen.nodes : [];
+                            return (
+                                <div key={a.cluster_id} data-qnetd-attachment={a.cluster_id} className="rounded-lg border border-proxmox-border bg-proxmox-card p-2">
+                                    <div className="flex flex-wrap items-center gap-2 text-sm">
+                                        <span className="text-gray-200 font-medium">{a.cluster_name}</span>
+                                        {!onHost ? <span className="text-xs text-gray-500" data-qnetd-connected="">-</span>
+                                            : nodes.length ? <span className="text-xs text-green-400" data-qnetd-connected={nodes.length}>{t('qnetdNodesConnected').replace('{n}', () => String(nodes.length))}</span>
+                                            : <span className="text-xs text-red-300" data-qnetd-connected="0">{t('qnetdNoNodeConnected')}</span>}
+                                    </div>
+                                    {nodes.length > 0 && (
+                                        <ul className="mt-1 space-y-0.5 text-xs text-gray-400">
+                                            {nodes.map((n, i) => (
+                                                <li key={i} data-qnetd-node={n.node_id}>
+                                                    {`${t('qnetdNodeId').replace('{id}', () => String(n.node_id ?? '?'))} - ${n.addr || '-'} - ${t('qnetdVote')}: ${n.vote || '-'}`}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    )}
+                                </div>
+                            );
+                        })}
+                        {others.length > 0 && (
+                            <div className="text-xs text-gray-500" data-qnetd-others="">{t('qnetdOtherClusters').replace('{names}', () => others.join(', '))}</div>
+                        )}
+                    </div>
+                    {checked && (checked.ok
+                        ? <div className={QDEV_NOTE.ok} data-qnetd-checked="ok">{t('qnetdCheckOk')}{checked.helper_installed ? ` - ${t('qnetdHelperInstalled')}` : ''}</div>
+                        : <div className={QDEV_NOTE.bad} data-qnetd-checked="failed" style={{ overflowWrap: 'anywhere' }}>{t('qnetdCheckFailed').replace('{error}', () => checked.error || '-')}</div>)}
+                    {busy === 'check' && <div className="flex items-center gap-2 text-sm text-gray-400"><QdevSpinner />{t('qnetdChecking')}</div>}
+                    {refused && <div role="alert" className={QDEV_NOTE.bad} data-qnetd-refused="" style={{ overflowWrap: 'anywhere' }}>{refused}</div>}
+                    {own && typeof own.raw === 'string' && (
+                        <div>
+                            <button type="button" className="text-xs text-gray-400 hover:text-white flex items-center gap-1" onClick={() => setShowRaw(v => !v)}>
+                                {showRaw ? <Icons.ChevronDown /> : <Icons.ChevronRight />}{t('qnetdRaw')}
+                            </button>
+                            {showRaw && <pre className="mt-1 max-h-64 overflow-y-auto rounded bg-black/40 p-2 text-xs text-gray-300 whitespace-pre-wrap font-mono">{own.raw || '-'}</pre>}
+                        </div>
+                    )}
+                    {!readOnly && !deleting && (
+                        <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <button type="button" className={QDEV_GHOST} disabled={!!busy || asking} onClick={askCheck} title={t('qnetdCheckHint')} data-qnetd-check="">
+                                {busy === 'check' ? <QdevSpinner /> : <Icons.Check />}{t('qnetdCheck')}
+                            </button>
+                            <button type="button" className={QDEV_GHOST} disabled={!!busy} onClick={readStatus} data-qnetd-read="">
+                                {busy === 'status' ? <QdevSpinner /> : <Icons.RefreshCw />}{t('qnetdReadStatus')}
+                            </button>
+                            <button type="button" className={QDEV_GHOST} disabled={!!busy} onClick={onBulk} data-qnetd-bulk="">
+                                <Icons.Layers />{t('qnetdBulkSetup')}
+                            </button>
+                            <button type="button" className={QDEV_GHOST} disabled={!!busy} onClick={onEdit} data-qnetd-edit="">
+                                <Icons.Edit />{t('edit')}
+                            </button>
+                            <button type="button" className={QDEV_GHOST} disabled={!!busy} onClick={askDelete} data-qnetd-delete="">
+                                <Icons.Trash />{t('delete')}
+                            </button>
+                        </div>
+                    )}
+                    {!readOnly && asking && (
+                        <div className={`${QDEV_NOTE.info} space-y-3`} data-qnetd-check-confirm="">
+                            <p className="text-gray-200">{t('qnetdCheckConfirm')}</p>
+                            <ul className="list-disc pl-5 space-y-1 text-gray-300">
+                                {checkDoes.map(key => <li key={key} data-qnetd-check-does={key}>{t(key)}</li>)}
+                            </ul>
+                            <div className="flex flex-wrap items-center gap-2">
+                                <button type="button" className={QDEV_PRIMARY} disabled={!!busy} onClick={() => { setAsking(false); check(); }} data-qnetd-check-go="">
+                                    <Icons.Check />{t('qnetdCheck')}
+                                </button>
+                                <button type="button" className={QDEV_GHOST} disabled={!!busy} onClick={() => setAsking(false)}>{t('cancel')}</button>
+                            </div>
+                        </div>
+                    )}
+                    {!readOnly && deleting && (
+                        <div className="rounded-lg p-3 space-y-3 border bg-red-500/10 border-red-500/30" data-qnetd-delete-confirm="">
+                            <p className="text-sm text-red-300">{t('qnetdDeleteConfirm')}</p>
+                            <div className="flex flex-wrap items-center gap-2">
+                                <button type="button" className={QDEV_DANGER} disabled={!!busy} onClick={remove} data-qnetd-delete-go="">
+                                    {busy === 'delete' ? <QdevSpinner /> : <Icons.Trash />}{t('delete')}
+                                </button>
+                                <button type="button" className={QDEV_GHOST} disabled={!!busy} onClick={() => setDeleting(false)}>{t('cancel')}</button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // Settings > High Availability: the QNetd hosts. Nothing at all where the list is refused
+        // (an admin a tenant confines) or the server has no such routes.
+        function QnetdHostsPanel({ t, addToast, getAuthHeaders }) {
+            const { haReadOnly } = useAuth();
+            const [data, setData] = useState(null);
+            const [state, setState] = useState('loading');   // loading | ok | error | absent
+            const [error, setError] = useState('');
+            const [form, setForm] = useState(null);          // {} to add, {host} to change one
+            const [bulkFor, setBulkFor] = useState(null);
+            const load = useCallback(async () => {
+                const r = await qdevApi(getAuthHeaders, 'GET', '/qnetd/hosts');
+                if (r.ok && r.data && Array.isArray(r.data.hosts)) {
+                    setData(r.data);
+                    setState('ok');
+                    setError('');
+                    qnetdAccess.value = { ok: true, hosts: r.data.hosts };
+                    qnetdAccess.at = Date.now();
+                } else if (r.status === 403 || r.status === 404) {
+                    setState('absent');
+                } else {
+                    setState(s => s === 'ok' ? s : 'error');
+                    setError(qdevFailText(t, r));
+                }
+            }, [getAuthHeaders]);
+            useEffect(() => {
+                load();
+                const iv = setInterval(load, 30000);
+                return () => clearInterval(iv);
+            }, [load]);
+            if (state === 'absent') return null;
+            const hosts = state === 'ok' && Array.isArray(data?.hosts) ? data.hosts.filter(h => h && QDEV_HOST_ID_RE.test(h.id || '')) : [];
+            return (
+                <div className={`${QDEV_CARD} mt-6`} data-qnetd-panel="">
+                    <div className="flex flex-wrap items-center gap-2">
+                        <h4 className="font-medium text-white flex items-center gap-2"><Icons.Scale />{t('qnetdHostsTitle')}</h4>
+                        <div className="ml-auto flex items-center gap-2">
+                            <button type="button" className={QDEV_GHOST} onClick={load} title={t('refresh')}><Icons.RefreshCw /></button>
+                            {!haReadOnly && !form && state === 'ok' && (
+                                <button type="button" className={QDEV_PRIMARY} onClick={() => setForm({})} data-qnetd-add="">
+                                    <Icons.Plus />{t('qnetdAddHost')}
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                    <p className="text-sm text-gray-400">{t('qnetdHostsIntro')}</p>
+                    {haReadOnly && <HaSettingsOnActive />}
+                    {state === 'loading' && <div className="text-sm text-gray-400">{t('loading')}</div>}
+                    {state === 'error' && <div className={QDEV_NOTE.bad} role="alert">{error}</div>}
+                    {form && !haReadOnly && (
+                        <QnetdHostForm key={form.host ? form.host.id : 'new'} host={form.host || null} transports={data?.transports}
+                            defaultPort={data?.default_port} onCancel={() => setForm(null)}
+                            onDone={(edited) => { setForm(null); if (addToast) addToast(t(edited ? 'qnetdSaved' : 'qnetdAdded'), 'success'); load(); }} />
+                    )}
+                    {state === 'ok' && hosts.length === 0 && !form && <div className="text-sm text-gray-500" data-qnetd-empty="">{t('qnetdNoHosts')}</div>}
+                    {hosts.map(h => (
+                        <QnetdHostCard key={h.id} host={h} protocol={data.protocol} readOnly={haReadOnly} addToast={addToast}
+                            onChanged={load} onEdit={() => setForm({ host: h })} onBulk={() => setBulkFor(h)} />
+                    ))}
+                    {bulkFor && !haReadOnly && <QdeviceBulkDialog host={bulkFor} onClose={() => setBulkFor(null)} onChanged={load} />}
+                </div>
+            );
+        }
+
         // LW Oct 2026 (#1137) - the QDevice of a cluster as GET /clusters/<id>/qdevice has it: what
-        // the QDevice daemon of each node PegaProx reaches says. Shows only, on every instance; the
-        // QNetd host is no Proxmox node, there is nothing of it to act on from here.
+        // the QDevice daemon of each node PegaProx reaches says. It shows, on every instance; its one
+        // action, Remove, is QdeviceRemoveButton's above, for an admin on an instance that acts.
         function qdeviceTone(q) {
             const answered = ((q && q.nodes) || []).filter(n => n.answered);
             // stale: the last read failed, what is kept says nothing about now
@@ -1362,10 +3292,13 @@
             return <span data-qdevice-dot={tone} title={qdeviceConnectedText(q, t)} className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: QDEVICE_TONES[tone] }} />;
         }
 
-        function QdeviceDetail({ q, clusterName, corporate = false, onClose }) {
+        function QdeviceDetail({ q, clusterName, clusterId, corporate = false, onClose, onChanged }) {
             const { t } = useTranslation();
             const d = q && q.present ? q : null;
             const muted = corporate ? { color: 'var(--corp-text-secondary)' } : undefined;
+            const remove = (
+                <QdeviceRemoveButton clusterId={clusterId} clusterName={clusterName} present={!!d} corporate={corporate} onChanged={onChanged} />
+            );
             const nodeState = (n) => {
                 if (!n.asked) return { tone: 'none', text: n.online ? t('qdeviceNotAsked') : t('offline') };
                 if (!n.answered) return { tone: 'none', text: n.error ? `${t('qdeviceNoAnswer')} (${n.error})` : t('qdeviceNoAnswer') };
@@ -1444,7 +3377,10 @@
                             <span className="text-[12px]" style={muted}>{clusterName}</span>
                             <QdeviceDot q={q} />
                         </div>
-                        <span className="text-[11px]" style={{ color: 'var(--corp-text-muted)' }}>{readText}</span>
+                        <div className="flex items-center gap-3">
+                            <span className="text-[11px]" style={{ color: 'var(--corp-text-muted)' }}>{readText}</span>
+                            {remove}
+                        </div>
                     </div>
                     <div className="p-4 space-y-4">
                         {note}
@@ -1485,7 +3421,10 @@
                                 </h3>
                                 <div className="text-xs text-gray-500 mt-1">{clusterName}{readText ? ` - ${readText}` : ''}</div>
                             </div>
-                            <button onClick={onClose} title={t('close')} className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"><Icons.X /></button>
+                            <div className="flex items-center gap-2">
+                                {remove}
+                                <button onClick={onClose} title={t('close')} className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"><Icons.X /></button>
+                            </div>
                         </div>
                         <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
                             {note}

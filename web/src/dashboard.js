@@ -2105,6 +2105,624 @@
             );
         }
 
+        // LW Oct 2026 - ESXi bulk migration: the settings every guest shares, a NIC and disk
+        // row per guest, a review that is a dry run of exactly the request Start sends, and the
+        // run with a line per guest. The run lives on the server (core/esxi_bulk.py), closing
+        // this window does not stop it.
+        const ESXI_BULK_MODES = [
+            ['vmkfstools_clone', 'transferModeVmkClone'], ['auto', 'transferModeAuto'],
+            ['sshfs_boot', 'transferModeSshfsBoot'], ['snapshot_zero', 'transferModeSnapshotZero'],
+            ['offline', 'transferModeOffline'],
+        ];
+        const ESXI_BULK_ITEM_STYLE = {
+            wait: 'bg-proxmox-dark text-gray-400', starting: 'bg-blue-500/20 text-blue-400',
+            migrating: 'bg-blue-500/20 text-blue-400', done: 'bg-green-500/20 text-green-400',
+            failed: 'bg-red-500/20 text-red-400', skipped: 'bg-yellow-500/10 text-yellow-300',
+            cancelled: 'bg-gray-500/20 text-gray-400', unknown: 'bg-gray-500/20 text-gray-400',
+        };
+
+        function esxiBulkGib(b, t) {
+            return (b === null || b === undefined) ? t('v2pReviewUnknown') : `${(b / 1073741824).toFixed(1)} GiB`;
+        }
+
+        function esxiBulkStateLabel(t, state) {
+            const key = {wait: 'esxiBulkStateWait', starting: 'esxiBulkStateStarting', migrating: 'esxiBulkStateMigrating',
+                         done: 'esxiBulkStateDone', failed: 'esxiBulkStateFailed', skipped: 'esxiBulkStateSkipped',
+                         cancelled: 'esxiBulkStateCancelled', unknown: 'esxiBulkStateUnknown'}[state];
+            return key ? t(key) : state;
+        }
+
+        function esxiBulkRunLabel(t, state) {
+            const key = {running: 'esxiBulkRunRunning', done: 'esxiBulkRunDone', cancelled: 'esxiBulkRunCancelled',
+                         stopped: 'esxiBulkRunStopped'}[state];
+            return key ? t(key) : state;
+        }
+
+        function EsxiBulkMigrate({ server, vms, runId, onClose, onStarted, authFetch, addToast, t, haReadOnly }) {
+            const [step, setStep] = React.useState(runId ? 'run' : 'settings');
+            const [guests, setGuests] = React.useState(vms || []);
+            const [targets, setTargets] = React.useState(null);
+            const [targetsError, setTargetsError] = React.useState('');
+            const [form, setForm] = React.useState({
+                target_cluster: '', target_node: '', target_storage: '', network_bridge: 'vmbr0', net_vlan_tag: '',
+                transfer_mode: 'vmkfstools_clone', verify: 'sample', start_after: true, remove_source: false,
+                wait_for_confirmation: false, preserve_mac: true, esxi_user: 'root', width: 2,
+            });
+            const [password, setPassword] = React.useState('');
+            const [rows, setRows] = React.useState({});
+            const [openGuest, setOpenGuest] = React.useState(null);
+            const [check, setCheck] = React.useState(null);
+            const [checkKey, setCheckKey] = React.useState('');
+            const [checking, setChecking] = React.useState(false);
+            const [starting, setStarting] = React.useState(false);
+            const [currentRun, setCurrentRun] = React.useState(runId || null);
+            const [run, setRun] = React.useState(null);
+            const [runError, setRunError] = React.useState('');
+            const set = (patch) => setForm(f => ({...f, ...patch}));
+            const base = `${API_URL}/vmware/${encodeURIComponent(server.id)}`;
+
+            // the clusters, nodes and storages to pick from: what the plan of the first guest lists
+            React.useEffect(() => {
+                if (runId || !guests.length) return undefined;
+                let live = true;
+                (async () => {
+                    const r = await authFetch(`${base}/vms/${encodeURIComponent(guests[0].id)}/migration-plan`);
+                    const d = r ? await r.json().catch(() => null) : null;
+                    if (!live) return;
+                    if (r && r.ok && d) setTargets(d.targets || []);
+                    else setTargetsError((d && d.error) || t('esxiBulkError'));
+                })();
+                return () => { live = false; };
+            }, []);
+
+            React.useEffect(() => {
+                if (!currentRun) return undefined;
+                let live = true, timer = null;
+                const load = async () => {
+                    const r = await authFetch(`${API_URL}/vmware/bulk-migrate/${encodeURIComponent(currentRun)}`);
+                    const d = r ? await r.json().catch(() => null) : null;
+                    if (!live) return;
+                    if (r && r.ok && d && d.run) {
+                        setRun(d.run);
+                        setRunError('');
+                        if (d.run.state === 'running') timer = setTimeout(load, 4000);
+                    } else if (r && r.status === 404) {
+                        setRunError(t('esxiBulkRunGone'));
+                    } else {
+                        timer = setTimeout(load, 8000);
+                    }
+                };
+                load();
+                return () => { live = false; clearTimeout(timer); };
+            }, [currentRun]);
+
+            const target = (targets || []).find(x => x.cluster_id === form.target_cluster);
+            const nodeStorages = (target?.storages || {})[form.target_node] || [];
+
+            // a guest's own NICs and disks go along only where something differs from the settings
+            const mapsOf = (id) => {
+                const r = rows[id];
+                const out = {};
+                if (r && r.nics.some(n => n.bridge || String(n.vlan ?? '').trim() !== '' || n.skip)) {
+                    out.nic_map = r.nics.map(n => {
+                        const row = {index: n.index, skip: !!n.skip};
+                        if (n.bridge) row.bridge = n.bridge;
+                        if (String(n.vlan ?? '').trim() !== '') row.vlan = String(n.vlan).trim();
+                        return row;
+                    });
+                }
+                if (r && r.disks.some(x => x.storage || x.skip)) {
+                    out.disk_map = r.disks.map(x => {
+                        const row = {index: x.index, skip: x.index === 0 ? false : !!x.skip};
+                        if (x.storage) row.storage = x.storage;
+                        return row;
+                    });
+                }
+                return out;
+            };
+            const buildBody = (dryRun) => {
+                const body = {...form, width: Number(form.width) || 1,
+                    vms: guests.map(g => {
+                        const m = mapsOf(g.id);
+                        return Object.keys(m).length ? {vm_id: g.id, ...m} : g.id;
+                    })};
+                if (String(form.net_vlan_tag ?? '').trim() === '') delete body.net_vlan_tag;
+                else body.net_vlan_tag = String(form.net_vlan_tag).trim();
+                if (!form.esxi_user) delete body.esxi_user;
+                if (dryRun) body.dry_run = true;
+                else body.esxi_password = password;
+                return body;
+            };
+            const current = !!check && checkKey === JSON.stringify(buildBody(true));
+            const canCheck = !!(form.target_cluster && form.target_node && form.target_storage && guests.length);
+
+            const runCheck = async (next) => {
+                const key = JSON.stringify(buildBody(true));
+                setChecking(true);
+                try {
+                    const r = await authFetch(`${base}/bulk-migrate`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'}, body: key
+                    });
+                    const d = r ? await r.json().catch(() => ({})) : {};
+                    if (r && r.ok) {
+                        setCheck(d);
+                        // a row per NIC and disk of each guest, seeded once from what the check found
+                        setRows(prev => {
+                            const out = {...prev};
+                            for (const it of (d.items || [])) {
+                                if (out[it.vm_id] || !((it.nics || []).length || (it.disks || []).length)) continue;
+                                out[it.vm_id] = {
+                                    nics: (it.nics || []).map(n => ({index: n.index, bridge: '', vlan: '', skip: false})),
+                                    disks: (it.disks || []).map(x => ({index: x.index, storage: '', skip: false})),
+                                };
+                            }
+                            return out;
+                        });
+                    } else {
+                        setCheck({ok: false, errors: [(d && d.error) || t('esxiBulkError')], warnings: [],
+                                  items: (d && d.items) || [], storages: []});
+                    }
+                } catch (e) {
+                    setCheck({ok: false, errors: [`${t('esxiBulkError')}: ${e.message}`], warnings: [], items: [], storages: []});
+                } finally {
+                    setCheckKey(key);
+                    setChecking(false);
+                    if (next) setStep(next);
+                }
+            };
+
+            const start = async () => {
+                if (haReadOnly || !current || !check?.ok || !password) return;
+                setStarting(true);
+                try {
+                    const r = await authFetch(`${base}/bulk-migrate`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildBody(false))
+                    });
+                    const d = r ? await r.json().catch(() => ({})) : {};
+                    if (r && r.status === 202 && d.run) {
+                        setPassword('');
+                        setRun(d.run);
+                        setCurrentRun(d.run.id);
+                        setStep('run');
+                        addToast(t('esxiBulkStartedToast'), 'success');
+                        if (onStarted) onStarted(d.run);
+                    } else {
+                        if (d && d.items) setCheck({...d, ok: false, errors: [d.error, ...(d.errors || [])].filter(Boolean)});
+                        addToast((d && d.error) || t('esxiBulkError'), 'error');
+                    }
+                } catch (e) {
+                    addToast(`${t('esxiBulkError')}: ${e.message}`, 'error');
+                } finally {
+                    setStarting(false);
+                }
+            };
+
+            const cancelRun = async () => {
+                if (haReadOnly || !run || !confirm(t('esxiBulkCancelConfirm'))) return;
+                const r = await authFetch(`${API_URL}/vmware/bulk-migrate/${encodeURIComponent(run.id)}/cancel`, {method: 'POST'});
+                const d = r ? await r.json().catch(() => ({})) : {};
+                if (r && r.ok && d.run) {
+                    setRun(d.run);
+                    addToast(t('esxiBulkCancelled'), 'success');
+                } else {
+                    addToast((d && d.error) || t('esxiBulkError'), 'error');
+                }
+            };
+
+            const cutover = async (mid, what) => {
+                if (haReadOnly) return;
+                const r = await authFetch(`${API_URL}/vmware/migrations/${encodeURIComponent(mid)}/${what}`, {method: 'POST'});
+                const d = r ? await r.json().catch(() => ({})) : {};
+                addToast(r && r.ok ? (what === 'confirm-cutover' ? t('commitSwitchover') : t('cancelMigration'))
+                    : ((d && d.error) || t('esxiBulkError')), r && r.ok ? 'success' : 'error');
+            };
+
+            const setNic = (id, i, patch) => setRows(prev => ({...prev, [id]: {...prev[id], nics: prev[id].nics.map((n, j) => j === i ? {...n, ...patch} : n)}}));
+            const setDisk = (id, i, patch) => setRows(prev => ({...prev, [id]: {...prev[id], disks: prev[id].disks.map((x, j) => j === i ? {...x, ...patch} : x)}}));
+            const checkItems = Object.fromEntries(((check && check.items) || []).map(it => [it.vm_id, it]));
+            const bridges = (check && check.available && check.available.bridges) || [];
+            const storages = (check && check.available && check.available.storages) || [];
+            const fullHere = !['sshfs_boot', 'snapshot_zero'].includes(form.transfer_mode);
+            const input = 'w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm';
+            const small = 'px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-xs disabled:opacity-40';
+            const tabs = [['settings', t('esxiBulkStepSettings')], ['guests', t('esxiBulkStepGuests')],
+                          ['review', t('v2pReview')], ['run', t('esxiBulkStepRun')]];
+
+            const guestLine = (g) => {
+                const it = checkItems[g.id];
+                const errs = (it && it.errors) || [];
+                return (
+                    <span className={`text-xs px-1.5 py-0.5 rounded ${!it ? 'bg-proxmox-dark text-gray-400' : errs.length ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'}`}>
+                        {!it ? '-' : errs.length ? t('esxiBulkGuestProblems').replace('{n}', errs.length) : t('esxiBulkGuestOk')}
+                    </span>
+                );
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+                    <div className="bg-proxmox-card border border-emerald-500/30 rounded-2xl p-6 w-full max-w-3xl max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()} data-esxi-bulk>
+                        <div className="flex items-start justify-between gap-3 mb-1">
+                            <h3 className="text-lg font-bold text-white">{t('esxiBulkTitle')}</h3>
+                            <button onClick={onClose} className="text-gray-500 hover:text-white" title={t('close')}><Icons.X className="w-4 h-4" /></button>
+                        </div>
+                        <p className="text-xs text-gray-500 mb-3">
+                            {t('esxiBulkGuests').replace('{n}', runId ? (run ? run.total : '...') : guests.length).replace('{server}', server.name || server.host || server.id)}
+                        </p>
+                        <div className="flex gap-1 mb-4 border-b border-proxmox-border pb-2">
+                            {tabs.map(([id, label]) => {
+                                const off = id === 'run' ? !currentRun : (!!currentRun || ((id === 'guests' || id === 'review') && !check));
+                                return (
+                                    <button key={id} disabled={off} onClick={() => {
+                                        setStep(id);
+                                        if (id === 'review' && !current && canCheck) runCheck();
+                                    }} className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all disabled:opacity-40 ${step === id ? 'bg-emerald-500/20 text-emerald-400' : 'text-gray-500 hover:text-gray-300'}`}>{label}</button>
+                                );
+                            })}
+                        </div>
+
+                        {step === 'settings' && (
+                            <div className="space-y-3">
+                                <div className="flex flex-wrap gap-1">
+                                    {guests.map(g => (
+                                        <span key={g.id} className="text-xs px-2 py-0.5 rounded bg-proxmox-dark text-gray-300">{g.name || g.id}</span>
+                                    ))}
+                                </div>
+                                {targetsError && <div className="text-xs text-red-400">{targetsError}</div>}
+                                {!targets && !targetsError && <div className="text-xs text-gray-400">{t('esxiBulkLoadingTargets')}</div>}
+                                {targets && (
+                                    <div className="grid grid-cols-3 gap-3">
+                                        <div>
+                                            <label className="text-xs text-gray-500 mb-1 block">{t('targetCluster')}</label>
+                                            <select value={form.target_cluster} onChange={e => set({target_cluster: e.target.value, target_node: '', target_storage: ''})} className={input}>
+                                                <option value="">{t('esxiBulkPick')}</option>
+                                                {targets.map(x => <option key={x.cluster_id} value={x.cluster_id}>{x.cluster_name}</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-gray-500 mb-1 block">{t('targetNode')}</label>
+                                            <select value={form.target_node} disabled={!target} onChange={e => set({target_node: e.target.value, target_storage: ''})} className={input}>
+                                                <option value="">{t('esxiBulkPick')}</option>
+                                                {(target?.nodes || []).map(n => <option key={n} value={n}>{n}</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-gray-500 mb-1 block">{t('targetStorage')}</label>
+                                            <select value={form.target_storage} disabled={!form.target_node} onChange={e => set({target_storage: e.target.value})} className={input}>
+                                                <option value="">{t('esxiBulkPick')}</option>
+                                                {nodeStorages.map(s => <option key={s} value={s}>{s}</option>)}
+                                            </select>
+                                        </div>
+                                    </div>
+                                )}
+                                <div className="grid grid-cols-3 gap-3">
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('esxiBulkBridge')}</label>
+                                        <input value={form.network_bridge} onChange={e => set({network_bridge: e.target.value.trim()})} className={input} />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('esxiBulkVlan')}</label>
+                                        <input type="number" min="1" max="4094" value={form.net_vlan_tag} onChange={e => set({net_vlan_tag: e.target.value})} placeholder="-" className={input} />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('esxiBulkWidth')}</label>
+                                        <select value={form.width} onChange={e => set({width: Number(e.target.value)})} className={input}>
+                                            {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}</option>)}
+                                        </select>
+                                    </div>
+                                </div>
+                                <p className="text-xs text-gray-500">{t('esxiBulkWidthHint')}</p>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('transferMode')}</label>
+                                        <select value={form.transfer_mode} onChange={e => set({transfer_mode: e.target.value, verify: form.verify === 'full' && ['sshfs_boot', 'snapshot_zero'].includes(e.target.value) ? 'sample' : form.verify})} className={input}>
+                                            {ESXI_BULK_MODES.map(([v, k]) => <option key={v} value={v}>{t(k)}</option>)}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('v2pVerify')}</label>
+                                        <select value={form.verify} onChange={e => set({verify: e.target.value})} className={input}>
+                                            {fullHere && <option value="full">{t('v2pVerifyFull')}</option>}
+                                            <option value="sample">{t('v2pVerifySample')}</option>
+                                            <option value="off">{t('v2pVerifyOff')}</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                {!fullHere && <p className="text-xs text-gray-500">{t('v2pVerifyFullNotHere')}</p>}
+                                <div className="flex flex-wrap items-center gap-4">
+                                    <label className="flex items-center gap-2 text-sm text-gray-400">
+                                        <input type="checkbox" checked={form.start_after} onChange={e => set({start_after: e.target.checked})} className="rounded" />
+                                        {t('xhmStartAfter')}
+                                    </label>
+                                    <label className="flex items-center gap-2 text-sm text-gray-400">
+                                        <input type="checkbox" checked={form.preserve_mac} onChange={e => set({preserve_mac: e.target.checked})} className="rounded" />
+                                        {t('esxiBulkPreserveMac')}
+                                    </label>
+                                    <label className="flex items-center gap-2 text-sm text-gray-400">
+                                        <input type="checkbox" checked={form.remove_source} onChange={e => set({remove_source: e.target.checked})} className="rounded" />
+                                        {t('esxiBulkRemoveSource')}
+                                    </label>
+                                </div>
+                                <label className="flex items-start gap-2 text-sm text-gray-400 bg-proxmox-dark border border-proxmox-border rounded-lg p-3 cursor-pointer">
+                                    <input type="checkbox" checked={form.wait_for_confirmation} onChange={e => set({wait_for_confirmation: e.target.checked})} className="rounded mt-0.5" />
+                                    <span>
+                                        <span className="text-gray-200">{t('waitForConfirmation')}</span>
+                                        <span className="block text-xs text-gray-500 mt-0.5">{t('esxiBulkWaitHint')}</span>
+                                    </span>
+                                </label>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('esxiBulkSshUser')}</label>
+                                        <input value={form.esxi_user} onChange={e => set({esxi_user: e.target.value.trim()})} placeholder="root" className={input} />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('esxiBulkPassword')}</label>
+                                        <input type="password" autoComplete="new-password" value={password} onChange={e => setPassword(e.target.value)} placeholder="ESXi password" className={input} />
+                                    </div>
+                                </div>
+                                <p className="text-xs text-gray-500">{t('esxiBulkPasswordHint')}</p>
+                                <div className="flex justify-end">
+                                    <button onClick={() => runCheck('guests')} disabled={!canCheck || checking}
+                                        className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
+                                        {checking ? t('esxiBulkChecking') : t('esxiBulkCheck')}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {step === 'guests' && (
+                            <div className="space-y-2">
+                                <p className="text-xs text-gray-500">{t('esxiBulkGuestsIntro')}</p>
+                                {guests.map(g => {
+                                    const it = checkItems[g.id] || {};
+                                    const r = rows[g.id];
+                                    const open = openGuest === g.id;
+                                    const own = Object.keys(mapsOf(g.id)).length > 0;
+                                    return (
+                                        <div key={g.id} className="border border-proxmox-border rounded-lg" data-esxi-bulk-guest={g.id}>
+                                            <button onClick={() => setOpenGuest(open ? null : g.id)} className="w-full flex items-center gap-2 p-2 text-left">
+                                                <Icons.ChevronRight className="w-3.5 h-3.5 text-gray-500" style={open ? {transform: 'rotate(90deg)'} : {}} />
+                                                <span className="text-sm text-white truncate min-w-0">{it.name || g.name || g.id}</span>
+                                                {own && <span className="text-xs text-emerald-400">{t('esxiBulkOwnChoices')}</span>}
+                                                <span className="ml-auto">{guestLine(g)}</span>
+                                            </button>
+                                            {open && (
+                                                <div className="p-2 pt-0 space-y-2">
+                                                    {(it.errors || []).map((e, i) => <div key={i} className="text-xs text-red-400">- {e}</div>)}
+                                                    {r && r.nics.length > 0 && (
+                                                        <div>
+                                                            <div className="text-xs text-gray-500 mb-1">{t('v2pNetworkPerNic')}</div>
+                                                            {r.nics.map((n, i) => {
+                                                                const src = (it.nics || [])[i] || {};
+                                                                return (
+                                                                    <div key={n.index} className="flex flex-wrap items-center gap-2 text-xs text-gray-300 py-1">
+                                                                        <span className="font-mono">net{n.index}</span>
+                                                                        <span className="text-gray-400 truncate min-w-0">{src.source_network || src.label || ''}</span>
+                                                                        <span className="flex-1" />
+                                                                        <select value={n.bridge} disabled={n.skip} onChange={e => setNic(g.id, i, {bridge: e.target.value})} className={small}>
+                                                                            <option value="">{t('v2pJobBridge')} ({form.network_bridge || 'vmbr0'})</option>
+                                                                            {bridges.map(b => <option key={b.name} value={b.name}>{b.name}{b.kind === 'bridge' ? '' : ` (${b.kind})`}</option>)}
+                                                                        </select>
+                                                                        <input type="number" min="1" max="4094" value={n.vlan} disabled={n.skip} onChange={e => setNic(g.id, i, {vlan: e.target.value})}
+                                                                            placeholder={form.net_vlan_tag ? String(form.net_vlan_tag) : 'VLAN'} className={`w-20 ${small}`} />
+                                                                        <label className="flex items-center gap-1 text-gray-400">
+                                                                            <input type="checkbox" checked={n.skip} onChange={e => setNic(g.id, i, {skip: e.target.checked})} className="rounded" />
+                                                                            {t('v2pSkip')}
+                                                                        </label>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                    {r && r.disks.length > 0 && (
+                                                        <div>
+                                                            <div className="text-xs text-gray-500 mb-1">{t('v2pStoragePerDisk')}</div>
+                                                            {r.disks.map((x, i) => {
+                                                                const src = (it.disks || [])[i] || {};
+                                                                return (
+                                                                    <div key={x.index} className="flex flex-wrap items-center gap-2 text-xs text-gray-300 py-1">
+                                                                        <span className="truncate min-w-0">{src.label || `Disk ${x.index + 1}`} <span className="text-gray-500">({esxiBulkGib(src.size_bytes, t)}{x.index === 0 ? `, ${t('v2pBootDisk')}` : ''})</span></span>
+                                                                        <span className="flex-1" />
+                                                                        <select value={x.storage} disabled={x.skip} onChange={e => setDisk(g.id, i, {storage: e.target.value})} className={small}>
+                                                                            <option value="">{t('v2pJobBridge')} ({form.target_storage})</option>
+                                                                            {storages.filter(s => s.storage !== form.target_storage).map(s => <option key={s.storage} value={s.storage}>{s.storage}</option>)}
+                                                                        </select>
+                                                                        {x.index !== 0 && (
+                                                                            <label className="flex items-center gap-1 text-gray-400">
+                                                                                <input type="checkbox" checked={x.skip} onChange={e => setDisk(g.id, i, {skip: e.target.checked})} className="rounded" />
+                                                                                {t('v2pSkip')}
+                                                                            </label>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                                <div className="flex justify-end">
+                                    <button onClick={() => { setStep('review'); if (!current) runCheck(); }} disabled={!canCheck || checking}
+                                        className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
+                                        {t('v2pReviewToStart')}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {step === 'review' && (
+                            <div className="space-y-3">
+                                <p className="text-xs text-gray-500">{t('esxiBulkReviewIntro')}</p>
+                                {checking && <div className="text-xs text-gray-400">{t('esxiBulkChecking')}</div>}
+                                {!checking && check && (
+                                    <div className="space-y-3">
+                                        {!current && (
+                                            <div className="p-2 rounded border border-yellow-500/30 bg-yellow-500/10 text-xs text-yellow-300">{t('v2pReviewStale')}</div>
+                                        )}
+                                        {check.ok ? (
+                                            <div className="p-2 rounded border border-emerald-500/40 text-xs text-emerald-400">{t('esxiBulkReviewOk')}</div>
+                                        ) : (
+                                            <div className="p-2 rounded border border-proxmox-border bg-red-500/10 text-xs text-red-300">
+                                                <div className="font-semibold mb-1">{t('esxiBulkReviewFailed')}</div>
+                                                {(check.errors || []).map((e, i) => <div key={i}>- {e}</div>)}
+                                            </div>
+                                        )}
+                                        {(check.warnings || []).length > 0 && (
+                                            <div className="p-2 rounded border border-yellow-500/30 text-xs text-yellow-300">
+                                                <div className="font-semibold mb-1">{t('v2pReviewWarnings')}</div>
+                                                {check.warnings.map((w, i) => <div key={i}>- {w}</div>)}
+                                            </div>
+                                        )}
+                                        <div className="divide-y divide-proxmox-border/50 border border-proxmox-border rounded-lg">
+                                            {(check.items || []).map(it => (
+                                                <div key={it.vm_id} className="p-2 text-xs" data-esxi-bulk-review={it.vm_id}>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-sm text-white truncate min-w-0">{it.name || (guests.find(g => g.id === it.vm_id) || {}).name || it.vm_id}</span>
+                                                        <span className={`px-1.5 py-0.5 rounded ${it.ok ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>{it.ok ? t('esxiBulkGuestOk') : t('esxiBulkGuestProblems').replace('{n}', (it.errors || []).length)}</span>
+                                                        {!it.ok && guests.length > 1 && (
+                                                            <button onClick={() => setGuests(gs => gs.filter(g => g.id !== it.vm_id))} className="ml-auto text-gray-400 hover:text-white underline">{t('esxiBulkLeaveOut')}</button>
+                                                        )}
+                                                    </div>
+                                                    {(it.errors || []).map((e, i) => <div key={i} className="text-red-300">- {e}</div>)}
+                                                    {(it.warnings || []).map((w, i) => <div key={i} className="text-yellow-300">- {w}</div>)}
+                                                    {(it.nics || []).length > 0 && (
+                                                        <div className="text-gray-400 mt-1">{t('v2pReviewNics')}: {it.nics.map(n => n.skip ? `${n.net} ${t('v2pSkipped')}` : `${n.net} ${n.bridge}${n.vlan ? ` tag ${n.vlan}` : ''}`).join(', ')}</div>
+                                                    )}
+                                                    {(it.disks || []).length > 0 && (
+                                                        <div className="text-gray-400">{t('v2pReviewDisks')}: {it.disks.map(x => `${x.label} ${esxiBulkGib(x.size_bytes, t)} ${x.skip ? t('v2pSkipped') : x.storage}`).join(', ')}</div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                        {(check.storages || []).length > 0 && (
+                                            <div>
+                                                <div className="text-xs text-gray-400 font-semibold mb-1">{t('esxiBulkStorageTogether')}</div>
+                                                {check.storages.map(st => (
+                                                    <div key={st.storage} className={`flex flex-wrap gap-2 text-xs ${st.ok ? 'text-gray-300' : 'text-red-300'}`}>
+                                                        <span className="font-mono">{st.storage}</span>
+                                                        <span className="text-gray-500">{t('esxiBulkGuestsCount').replace('{n}', st.guests)}</span>
+                                                        <span className="ml-auto">{esxiBulkGib(st.needed_bytes, t)} {t('v2pReviewNeeded')} / {esxiBulkGib(st.avail_bytes, t)} {t('v2pReviewFree')}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                                {!password && <p className="text-xs text-yellow-300">{t('esxiBulkNeedPassword')}</p>}
+                                <div className="flex items-center gap-2">
+                                    <button onClick={() => runCheck()} disabled={checking || !canCheck}
+                                        className="px-3 py-1.5 rounded-lg bg-proxmox-dark border border-proxmox-border text-gray-300 text-xs disabled:opacity-50">
+                                        {t('v2pReviewCheckAgain')}
+                                    </button>
+                                    <span className="flex-1" />
+                                    {!haReadOnly && (
+                                        <button onClick={start} disabled={starting || checking || !current || !check?.ok || !password}
+                                            className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50" data-esxi-bulk-start>
+                                            {starting ? t('esxiBulkStarting') : t('esxiBulkStart').replace('{n}', guests.length)}
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {step === 'run' && (
+                            <div className="space-y-3">
+                                <p className="text-xs text-gray-500">{t('esxiBulkRunIntro')}</p>
+                                {runError && <div className="text-xs text-red-400">{runError}</div>}
+                                {!run && !runError && <div className="text-xs text-gray-400">...</div>}
+                                {run && (
+                                    <div className="space-y-3">
+                                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                                            <span className={`px-2 py-0.5 rounded font-semibold ${run.state === 'running' ? 'bg-blue-500/20 text-blue-400' : run.state === 'done' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>{esxiBulkRunLabel(t, run.state)}</span>
+                                            {Object.entries(run.counts || {}).map(([s, n]) => (
+                                                <span key={s} className="text-gray-400">{esxiBulkStateLabel(t, s)}: {n}</span>
+                                            ))}
+                                            <span className="text-gray-500">{run.settings?.target_cluster}/{run.settings?.target_node}/{run.settings?.target_storage}</span>
+                                            {run.cancelled_by && <span className="text-yellow-300">{t('esxiBulkCancelledBy').replace('{user}', run.cancelled_by)}</span>}
+                                            {run.reason && <span className="text-red-300">{run.reason}</span>}
+                                        </div>
+                                        {run.state === 'running' && !run.holds_password && <p className="text-xs text-gray-500">{t('esxiBulkPasswordDropped')}</p>}
+                                        <div className="divide-y divide-proxmox-border/50 border border-proxmox-border rounded-lg">
+                                            {(run.items || []).map(it => (
+                                                <div key={it.vm_id} className="p-2 text-xs" data-esxi-bulk-item={it.vm_id}>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-sm text-white truncate min-w-0">{it.name || it.vm_id}</span>
+                                                        <span className={`px-1.5 py-0.5 rounded ${ESXI_BULK_ITEM_STYLE[it.state] || 'bg-proxmox-dark text-gray-400'}`}>{esxiBulkStateLabel(t, it.state)}</span>
+                                                        {it.state === 'migrating' && it.phase && <span className="text-gray-400">{it.phase === 'awaiting_confirmation' ? t('phaseAwaitingConfirmation') : it.phase}</span>}
+                                                        {it.migration_id && <span className="ml-auto font-mono text-gray-500">{t('esxiBulkMigrationId').replace('{id}', it.migration_id)}{it.proxmox_vmid ? ` / VM ${it.proxmox_vmid}` : ''}</span>}
+                                                    </div>
+                                                    {it.state === 'migrating' && (
+                                                        <div className="flex items-center gap-2 mt-1">
+                                                            <div className="flex-1 h-1.5 bg-proxmox-dark rounded-full overflow-hidden">
+                                                                <div className="h-full rounded-full bg-emerald-400 transition-all" style={{width: `${it.progress || 0}%`}} />
+                                                            </div>
+                                                            <span className="text-gray-500 w-8 text-right">{it.progress || 0}%</span>
+                                                        </div>
+                                                    )}
+                                                    {it.note && <div className={it.state === 'failed' ? 'text-red-300 mt-1' : 'text-gray-400 mt-1'}>{it.note}</div>}
+                                                    {it.state === 'migrating' && it.phase === 'awaiting_confirmation' && !haReadOnly && (
+                                                        <div className="flex items-center gap-2 mt-2">
+                                                            <button onClick={() => cutover(it.migration_id, 'confirm-cutover')} className="px-2 py-1 rounded bg-emerald-500/20 text-emerald-400 text-xs">{t('commitSwitchover')}</button>
+                                                            <button onClick={() => cutover(it.migration_id, 'cancel-cutover')} className="px-2 py-1 rounded bg-red-500/10 text-red-300 text-xs">{t('cancelMigration')}</button>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                        {run.may_cancel && !haReadOnly && (
+                                            <div className="flex items-center gap-3">
+                                                <button onClick={cancelRun} className="px-3 py-1.5 rounded-lg bg-red-500/10 text-red-300 text-xs font-medium" data-esxi-bulk-cancel>{t('esxiBulkCancelRest')}</button>
+                                                <span className="text-xs text-gray-500">{t('esxiBulkCancelHint')}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // the bulk runs of one ESXi server, on its Tasks tab
+        function EsxiBulkRuns({ serverId, authFetch, t, onOpen }) {
+            const [runs, setRuns] = React.useState(null);
+            React.useEffect(() => {
+                let live = true, timer = null;
+                const load = async () => {
+                    const r = await authFetch(`${API_URL}/vmware/bulk-migrate?vmware_id=${encodeURIComponent(serverId)}`);
+                    const d = r && r.ok ? await r.json().catch(() => null) : null;
+                    if (!live) return;
+                    if (d && Array.isArray(d.runs)) setRuns(d.runs);
+                    timer = setTimeout(load, 30000);
+                };
+                load();
+                return () => { live = false; clearTimeout(timer); };
+            }, [serverId]);
+            if (!runs || !runs.length) return null;
+            return (
+                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden" data-esxi-bulk-runs>
+                    <div className="p-4 border-b border-proxmox-border">
+                        <h3 className="text-sm font-semibold text-gray-400 uppercase flex items-center gap-2">
+                            <Icons.FolderInput className="w-4 h-4 text-emerald-400" /> {t('esxiBulkRuns')} ({runs.length})
+                        </h3>
+                    </div>
+                    <div className="divide-y divide-proxmox-border/50">
+                        {runs.map(run => (
+                            <button key={run.id} onClick={() => onOpen(run.id)} className="w-full p-3 flex flex-wrap items-center gap-3 text-left hover:bg-proxmox-hover/30">
+                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${run.state === 'running' ? 'bg-blue-500/20 text-blue-400' : run.state === 'done' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>{esxiBulkRunLabel(t, run.state)}</span>
+                                <span className="text-sm text-white">{t('esxiBulkGuestsCount').replace('{n}', run.total)}</span>
+                                <span className="text-xs text-gray-500">{run.settings?.target_cluster}/{run.settings?.target_node}</span>
+                                <span className="text-xs text-gray-400">{Object.entries(run.counts || {}).map(([s, n]) => `${esxiBulkStateLabel(t, s)}: ${n}`).join(', ')}</span>
+                                <span className="ml-auto text-xs text-gray-500">{run.user} {new Date(run.created * 1000).toLocaleString()}</span>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
         // NS: Mar 2026 - Topology View redesign (#142)
         // SVG bezier connectors, donut gauges, card elevation
         // MK: added diagram view with pan/zoom + export capability
@@ -14114,8 +14732,20 @@
                 // /var/lib/vz/template/iso/.
                 install_virtio_drivers:false, virtio_iso_path:'',
             });
-            const [migrateWizardStep, setMigrateWizardStep] = useState('target'); // target, hardware, advanced
+            const [migrateWizardStep, setMigrateWizardStep] = useState('target'); // target, hardware, advanced, review
             const [vmwareMigrateLoading, setVmwareMigrateLoading] = useState(false);
+            // LW Oct 2026 - per NIC / per disk rows of the ESXi wizard and its review step. The
+            // review is a dry run of the same request; Start sends exactly what it checked.
+            const [v2pNicRows, setV2pNicRows] = useState([]);
+            const [v2pDiskRows, setV2pDiskRows] = useState([]);
+            const [v2pReview, setV2pReview] = useState(null);
+            const [v2pReviewKey, setV2pReviewKey] = useState('');
+            const [v2pReviewLoading, setV2pReviewLoading] = useState(false);
+            const [v2pInventory, setV2pInventory] = useState(null);
+            // LW Oct 2026 - the guests ticked in the ESXi VM list, and the bulk dialog: {vms} to
+            // set one up, {runId} to follow one
+            const [esxiBulkSel, setEsxiBulkSel] = useState([]);
+            const [esxiBulk, setEsxiBulk] = useState(null);
             const [vmwareConsoleUrl, setVmwareConsoleUrl] = useState(null);
             const [showVmwareConsole, setShowVmwareConsole] = useState(false);
             const [vmwareHealthData, setVmwareHealthData] = useState(null);
@@ -14571,6 +15201,8 @@
             const EVENT_ALERT_METRICS = ['task_failed', 'ceph_health', 'ceph_osd_latency', 'replication', 'replication_rpo', 'snapshot_age', 'backup_coverage', 'zfs_health', 'clock_drift', 'restart_loop', 'qdevice'];
             // LW Oct 2026 - a guest without a restore test that passed within so many days
             EVENT_ALERT_METRICS.push('restore_test_age');
+            // one alert per QNetd host the cluster votes through, for the cluster as a whole
+            EVENT_ALERT_METRICS.push('qnetd');
             const [sessionExpired, setSessionExpired] = useState(false);  // our own 401 -> clear "session expired" overlay instead of silent failure
             const [clusterAffinityRules, setClusterAffinityRules] = useState([]);
             const [showAffinityModal, setShowAffinityModal] = useState(false);
@@ -16594,6 +17226,7 @@
                 if (alert.metric === 'clock_drift') return t('clockDriftSummary').replace('{n}', n);
                 if (alert.metric === 'restart_loop') return t('restartLoopSummary').replace('{n}', n).replace('{m}', alert.restart_window_minutes || 15);
                 if (alert.metric === 'qdevice') return t('qdeviceAlertSummary');
+                if (alert.metric === 'qnetd') return t('qnetdAlertSummary');
                 if (alert.metric === 'ceph_osd_latency') return t('cephOsdLatencySummary').replace('{n}', n);
                 if (alert.metric === 'replication_rpo') return Number(n) > 0 ? t('replicationRpoSummary').replace('{n}', n) : t('replicationRpoSummaryAuto');
                 if (alert.metric === 'restore_test_age') {
@@ -18917,6 +19550,14 @@
                     const resp = await authFetch(`${API_URL}/vmware/${selectedVMware.id}/vms/${vmId}/migration-plan`);
                     if (resp?.ok) {
                         const data = await resp.json();
+                        const src = data.source || {};
+                        setV2pNicRows((src.nics || []).map((n, i) => ({index: i, bridge: '', vlan: '', skip: false})));
+                        setV2pDiskRows((src.disks || []).map((d, i) => ({index: i, storage: '', skip: false})));
+                        setV2pReview(null);
+                        setV2pReviewKey('');
+                        setV2pInventory(null);
+                        setMigrateWizardStep('target');
+                        setVmwareMigrateForm(f => ({...f, verify: ''}));
                         setVmwareMigrationPlan(data);
                         setShowVmwareMigrate(true);
                     } else {
@@ -18927,13 +19568,106 @@
                 finally { setVmwareMigrateLoading(false); }
             };
             
-            // Start VMware Migration
+            // another server, another set of guests
+            useEffect(() => { setEsxiBulkSel([]); setEsxiBulk(null); }, [selectedVMware?.id]);
+            const esxiVmId = (vm) => vm.vm || vm.vm_id || vm.id;
+            // what the VM list shows right now (filter and search), for "select all"
+            const esxiShownVmIds = () => vmwareVms
+                .filter(vm => vmwareFilter === 'running' ? vm.power_state === 'POWERED_ON'
+                    : vmwareFilter === 'stopped' ? vm.power_state !== 'POWERED_ON' : true)
+                .filter(vm => !vmwareSearch || (vm.name || '').toLowerCase().includes(vmwareSearch.toLowerCase())
+                    || (vm.guest_os || '').toLowerCase().includes(vmwareSearch.toLowerCase()))
+                .map(esxiVmId);
+            const openEsxiBulk = () => setEsxiBulk({vms: esxiBulkSel.map(id => {
+                const vm = vmwareVms.find(v => esxiVmId(v) === id) || {};
+                return {id, name: vm.name || id};
+            })});
+
+            // verify: full by default for a cold migration (offline copy, or a VM
+            // that is off) where the mode can do it, the spot check otherwise; a pick wins
+            const v2pVerifyFor = (form, plan) => {
+                const fullOk = !['sshfs_boot', 'snapshot_zero'].includes(form.transfer_mode);
+                const cold = form.transfer_mode === 'offline' || plan?.source?.power_state === 'POWERED_OFF';
+                return form.verify || (cold && fullOk ? 'full' : 'sample');
+            };
+            const buildVmwareMigrateBody = (dryRun) => {
+                const body = {...vmwareMigrateForm, verify: v2pVerifyFor(vmwareMigrateForm, vmwareMigrationPlan)};
+                // the support note is the page's business; ticking it must not make a review stale
+                delete body.oc_acknowledge;
+                if (v2pNicRows.length) body.nic_map = v2pNicRows.map(r => {
+                    const row = {index: r.index, skip: !!r.skip};
+                    if (r.bridge) row.bridge = r.bridge;
+                    // no vlan key = the default tag above; the server checks the value
+                    if (String(r.vlan ?? '').trim() !== '') row.vlan = String(r.vlan).trim();
+                    return row;
+                });
+                if (v2pDiskRows.length) body.disk_map = v2pDiskRows.map(r => {
+                    const row = {index: r.index, skip: r.index === 0 ? false : !!r.skip};
+                    if (r.storage) row.storage = r.storage;
+                    return row;
+                });
+                if (dryRun) {
+                    body.dry_run = true;
+                    delete body.esxi_password;
+                }
+                return body;
+            };
+            const v2pReviewIsCurrent = () => !!v2pReview && v2pReviewKey === JSON.stringify(buildVmwareMigrateBody(true));
+            const reviewVmwareMigration = async (vmId) => {
+                const key = JSON.stringify(buildVmwareMigrateBody(true));
+                setV2pReviewLoading(true);
+                try {
+                    const resp = await authFetch(`${API_URL}/vmware/${selectedVMware.id}/vms/${vmId}/migrate`, {
+                        method: 'POST', headers: {'Content-Type':'application/json'}, body: key
+                    });
+                    const data = await resp?.json().catch(() => ({})) || {};
+                    if (resp?.ok) {
+                        setV2pReview(data);
+                        if (data.available) setV2pInventory(data.available);
+                    } else {
+                        setV2pReview({ok: false, errors: [data.error || t('v2pReviewError')], warnings: [],
+                                      nics: [], disks: [], storages: []});
+                    }
+                } catch(e) {
+                    setV2pReview({ok: false, errors: [`${t('v2pReviewError')}: ${e.message}`], warnings: [],
+                                  nics: [], disks: [], storages: []});
+                } finally {
+                    setV2pReviewKey(key);
+                    setV2pReviewLoading(false);
+                }
+            };
+            // the bridges and storages the target node offers, for the NIC and disk rows: a dry
+            // run without maps answers with them (the same list the server checks against)
+            useEffect(() => {
+                const f = vmwareMigrateForm;
+                if (!showVmwareMigrate || !selectedVMware || !vmwareSelectedVm || !f.target_cluster || !f.target_node || !f.target_storage) {
+                    setV2pInventory(null);
+                    return;
+                }
+                let gone = false;
+                (async () => {
+                    try {
+                        const resp = await authFetch(`${API_URL}/vmware/${selectedVMware.id}/vms/${vmwareSelectedVm}/migrate`, {
+                            method: 'POST', headers: {'Content-Type':'application/json'},
+                            body: JSON.stringify({target_cluster: f.target_cluster, target_node: f.target_node,
+                                                  target_storage: f.target_storage, dry_run: true})
+                        });
+                        const data = resp?.ok ? await resp.json().catch(() => null) : null;
+                        if (!gone) setV2pInventory(data?.available || null);
+                    } catch(e) {
+                        if (!gone) setV2pInventory(null);
+                    }
+                })();
+                return () => { gone = true; };
+            }, [showVmwareMigrate, vmwareSelectedVm, vmwareMigrateForm.target_cluster, vmwareMigrateForm.target_node, vmwareMigrateForm.target_storage]);
+
+            // Start the ESXi migration - only from the review step, with the body it checked
             const startVmwareMigration = async (vmId) => {
                 try {
                     setVmwareMigrateLoading(true);
                     const resp = await authFetch(`${API_URL}/vmware/${selectedVMware.id}/vms/${vmId}/migrate`, {
                         method: 'POST', headers: {'Content-Type':'application/json'},
-                        body: JSON.stringify(vmwareMigrateForm)
+                        body: JSON.stringify(buildVmwareMigrateBody(false))
                     });
                     if (resp?.ok) {
                         const data = await resp.json();
@@ -22649,8 +23383,10 @@
                                             <QdeviceDetail
                                                 corporate
                                                 q={qdeviceByCluster[selectedSidebarQdevice]}
+                                                clusterId={selectedSidebarQdevice}
                                                 clusterName={(clusters.find(c => c.id === selectedSidebarQdevice) || {}).display_name || (clusters.find(c => c.id === selectedSidebarQdevice) || {}).name || ''}
                                                 onClose={() => setSelectedSidebarQdevice(null)}
+                                                onChanged={() => fetchQdevice(selectedSidebarQdevice)}
                                             />
                                             ) : (
                                             <div className={isCorporate ? 'space-y-3' : 'grid grid-cols-1 xl:grid-cols-3 gap-6'}>
@@ -22834,7 +23570,27 @@
                                                 <div className={isCorporate ? '' : 'xl:col-span-2 space-y-6'}>
                                                     {/* LW: Feb 2026 - corporate uses compact node rows */}
                                                     <div>
-                                                        <h2 className={`font-semibold text-gray-400 uppercase tracking-wider ${isCorporate ? 'text-xs mb-2' : 'text-sm mb-4'}`}>{t('nodes')}</h2>
+                                                        <div className={`flex items-center justify-between gap-2 ${isCorporate ? 'mb-2' : 'mb-4'}`}>
+                                                            <h2 className={`font-semibold text-gray-400 uppercase tracking-wider ${isCorporate ? 'text-xs' : 'text-sm'}`}>{t('nodes')}</h2>
+                                                            {/* LW Oct 2026 - a cluster without a QDevice can get one here (an admin, the QNetd routes answer) */}
+                                                            <QdeviceSetupButton
+                                                                clusterId={selectedCluster.id}
+                                                                clusterName={selectedCluster.display_name || selectedCluster.name || ''}
+                                                                q={selectedCluster.cluster_type === 'xcpng' ? null : qdeviceByCluster[selectedCluster.id]}
+                                                                nodeCount={(Object.keys(clusterMetrics).length + Object.entries(knownNodes).filter(([n, d]) => d && d.status === 'offline' && !clusterMetrics[n]).length) || null}
+                                                                corporate={isCorporate}
+                                                                onChanged={() => fetchQdevice(selectedCluster.id)}
+                                                            />
+                                                        </div>
+                                                        {/* LW Oct 2026 - what a QDevice gives a cluster of an even node count that has none, until hidden */}
+                                                        <QdeviceHint
+                                                            clusterId={selectedCluster.id}
+                                                            clusterName={selectedCluster.display_name || selectedCluster.name || ''}
+                                                            q={selectedCluster.cluster_type === 'xcpng' ? null : qdeviceByCluster[selectedCluster.id]}
+                                                            nodeCount={(Object.keys(clusterMetrics).length + Object.entries(knownNodes).filter(([n, d]) => d && d.status === 'offline' && !clusterMetrics[n]).length) || null}
+                                                            corporate={isCorporate}
+                                                            onChanged={() => fetchQdevice(selectedCluster.id)}
+                                                        />
                                                         {isCorporate ? (
                                                         <div className="border border-proxmox-border bg-proxmox-card">
                                                             {/* Corporate: compact node rows */}
@@ -23012,8 +23768,10 @@
                                                         {!isCorporate && qdeviceOpen && (
                                                             <QdeviceDetail
                                                                 q={qdeviceByCluster[qdeviceOpen]}
+                                                                clusterId={qdeviceOpen}
                                                                 clusterName={(clusters.find(c => c.id === qdeviceOpen) || {}).display_name || (clusters.find(c => c.id === qdeviceOpen) || {}).name || ''}
                                                                 onClose={() => setQdeviceOpen(null)}
+                                                                onChanged={() => fetchQdevice(qdeviceOpen)}
                                                             />
                                                         )}
                                                         {Object.keys(clusterMetrics).length === 0 && Object.keys(nodeAlerts).length === 0 && (
@@ -28222,6 +28980,12 @@
                                             </div>
                                         )}
                                         
+                                        {esxiBulk && (
+                                            <EsxiBulkMigrate key={esxiBulk.runId || 'new'} server={selectedVMware} vms={esxiBulk.vms || []} runId={esxiBulk.runId || null}
+                                                onClose={() => setEsxiBulk(null)} onStarted={() => { setEsxiBulkSel([]); fetchVmwareMigrations(); }}
+                                                authFetch={authFetch} addToast={addToast} t={t} haReadOnly={haReadOnly} />
+                                        )}
+
                                         {vmwareActiveTab === 'vms' && !vmwareSelectedVm && (
                                             <div className="space-y-4">
                                                 {/* LW: search + filter */}
@@ -28251,6 +29015,19 @@
                                                     </div>
                                                 </div>
                                                 
+                                                {/* LW Oct 2026 - what is ticked goes into one bulk migration */}
+                                                {!haReadOnly && esxiBulkSel.length > 0 && (
+                                                    <div className="flex flex-wrap items-center gap-3 p-2 bg-proxmox-card border border-emerald-500/30 rounded-lg" data-esxi-bulk-bar>
+                                                        <span className="text-sm text-white">{t('esxiBulkSelected').replace('{n}', esxiBulkSel.length)}</span>
+                                                        <button onClick={openEsxiBulk} disabled={esxiBulkSel.length > 200}
+                                                            className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-xs font-medium disabled:opacity-50">
+                                                            {t('esxiBulkMigrate')}
+                                                        </button>
+                                                        <button onClick={() => setEsxiBulkSel([])} className="text-xs text-gray-400 hover:text-white">{t('esxiBulkClear')}</button>
+                                                        {esxiBulkSel.length > 200 && <span className="text-xs text-yellow-300">{t('esxiBulkTooMany')}</span>}
+                                                    </div>
+                                                )}
+
                                                 {/* VM Table */}
                                                 {vmwareLoading && vmwareVms.length === 0 ? (
                                                     <div className="text-center py-12 text-gray-500">{t('esxiLoadingVms')}</div>
@@ -28259,6 +29036,18 @@
                                                         <table className={isCorporate ? 'corp-datagrid' : 'w-full'}>
                                                             <thead>
                                                                 <tr className={isCorporate ? '' : 'border-b border-proxmox-border'}>
+                                                                    {!haReadOnly && (() => {
+                                                                        const shown = esxiShownVmIds();
+                                                                        const all = shown.length > 0 && shown.every(id => esxiBulkSel.includes(id));
+                                                                        return (
+                                                                            <th className={isCorporate ? 'text-left' : 'text-left p-3'} style={{width: 36}}>
+                                                                                <input type="checkbox" checked={all} title={t('esxiBulkSelectAll')} data-esxi-bulk-all
+                                                                                    onChange={e => setEsxiBulkSel(sel => e.target.checked
+                                                                                        ? [...sel, ...shown.filter(id => !sel.includes(id))]
+                                                                                        : sel.filter(id => !shown.includes(id)))} className="rounded" />
+                                                                            </th>
+                                                                        );
+                                                                    })()}
                                                                     <th className={isCorporate ? 'text-left' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('status')}</th>
                                                                     <th className={isCorporate ? 'text-left' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('name')}</th>
                                                                     <th className={isCorporate ? 'text-left' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('esxiGuestOs')}</th>
@@ -28290,6 +29079,12 @@
                                                                         
                                                                         return (
                                                                             <tr key={vm.vm || vm.vm_id || vm.id} className="border-b border-proxmox-border/50 hover:bg-proxmox-hover/50 cursor-pointer transition-colors" onClick={() => setVmwareSelectedVm(vm.vm || vm.vm_id || vm.id)}>
+                                                                                {!haReadOnly && (
+                                                                                    <td className="p-3" onClick={e => e.stopPropagation()}>
+                                                                                        <input type="checkbox" checked={esxiBulkSel.includes(esxiVmId(vm))} title={t('esxiBulkSelectVm')} data-esxi-bulk-pick={esxiVmId(vm)}
+                                                                                            onChange={e => setEsxiBulkSel(sel => e.target.checked ? [...sel, esxiVmId(vm)] : sel.filter(id => id !== esxiVmId(vm)))} className="rounded" />
+                                                                                    </td>
+                                                                                )}
                                                                                 <td className="p-3">
                                                                                     <div className={`w-3 h-3 rounded-full ${isOn ? 'bg-green-400 shadow-lg shadow-green-400/30' : isSuspended ? 'bg-yellow-400' : 'bg-gray-500'}`} title={vm.power_state} />
                                                                                 </td>
@@ -29081,8 +29876,11 @@
 
                                                             {/* LW: 3-step wizard tabs */}
                                                             <div className="flex gap-1 mb-4 border-b border-proxmox-border pb-2">
-                                                                {[{id:'target',label:t('target'),icon:'🎯'},{id:'hardware',label:t('hardware'),icon:'🔧'},{id:'advanced',label: t('advanced'),icon:'⚙️'}].map(tab => (
-                                                                    <button key={tab.id} onClick={() => setMigrateWizardStep(tab.id)}
+                                                                {[{id:'target',label:t('target'),icon:'🎯'},{id:'hardware',label:t('hardware'),icon:'🔧'},{id:'advanced',label: t('advanced'),icon:'⚙️'},{id:'review',label: t('v2pReview'),icon:'🔎'}].map(tab => (
+                                                                    <button key={tab.id} onClick={() => {
+                                                                        setMigrateWizardStep(tab.id);
+                                                                        if (tab.id === 'review' && !v2pReviewIsCurrent() && vmwareMigrateForm.target_storage) reviewVmwareMigration(vmwareSelectedVm);
+                                                                    }}
                                                                         className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${migrateWizardStep === tab.id ? 'bg-emerald-500/20 text-emerald-400' : 'text-gray-500 hover:text-gray-300'}`}
                                                                     >{tab.icon} {tab.label}</button>
                                                                 ))}
@@ -29131,6 +29929,40 @@
                                                                         </select>
                                                                     </div>
                                                                 )}
+
+                                                                {/* storage per disk; empty = the target storage above */}
+                                                                {vmwareMigrateForm.target_storage && v2pDiskRows.length > 0 && (
+                                                                    <div>
+                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('v2pStoragePerDisk')}</label>
+                                                                        <div className="space-y-1 p-2 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                                            {v2pDiskRows.map((row, i) => {
+                                                                                const d = (vmwareMigrationPlan?.source?.disks || [])[row.index] || {};
+                                                                                const opts = v2pInventory?.storages?.map(st => st.storage)
+                                                                                    || ((vmwareMigrationPlan.targets || []).find(tg => tg.cluster_id === vmwareMigrateForm.target_cluster)?.storages?.[vmwareMigrateForm.target_node] || []);
+                                                                                const setRow = (patch) => setV2pDiskRows(rows => rows.map((r, j) => j === i ? {...r, ...patch} : r));
+                                                                                return (
+                                                                                    <div key={row.index} className="flex flex-wrap items-center gap-2 text-xs text-gray-300 py-1">
+                                                                                        <span className="min-w-0 flex-1 truncate" title={d.vmdk_file || ''}>
+                                                                                            {d.label || `Disk ${row.index + 1}`} <span className="text-gray-500">({d.capacity_gb ?? '?'} GB{row.index === 0 ? `, ${t('v2pBootDisk')}` : ''})</span>
+                                                                                        </span>
+                                                                                        <select value={row.storage} disabled={row.skip} onChange={e => setRow({storage: e.target.value})}
+                                                                                            className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-xs disabled:opacity-40">
+                                                                                            <option value="">{t('v2pJobBridge')} ({vmwareMigrateForm.target_storage})</option>
+                                                                                            {opts.filter(n => n !== vmwareMigrateForm.target_storage).map(n => <option key={n} value={n}>{n}</option>)}
+                                                                                        </select>
+                                                                                        {row.index !== 0 && (
+                                                                                            <label className="flex items-center gap-1 text-gray-400">
+                                                                                                <input type="checkbox" checked={row.skip} onChange={e => setRow({skip: e.target.checked})} className="rounded" />
+                                                                                                {t('v2pSkip')}
+                                                                                            </label>
+                                                                                        )}
+                                                                                    </div>
+                                                                                );
+                                                                            })}
+                                                                        </div>
+                                                                        <p className="text-[11px] text-gray-500 mt-1">{t('v2pStoragePerDiskHint')}</p>
+                                                                    </div>
+                                                                )}
                                                                 
                                                                 {/* ESXi SSH User (#602: hosters like LiquidWeb don't hand out root — the
                                                                     backend already honours esxi_user, this just exposes it in the wizard) */}
@@ -29167,26 +29999,53 @@
                                                                     </select>
                                                                 </div>
 
-                                                                {/* NICs from VMware */}
+                                                                {/* NICs of the ESXi VM: bridge, VLAN and skip per NIC */}
                                                                 {vmwareMigrationPlan?.source?.nics?.length > 0 && (
                                                                     <div>
-                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('networkInterfaces')} ({vmwareMigrationPlan.source.nics.length} detected)</label>
-                                                                        <div className="space-y-1 p-2 bg-proxmox-dark rounded-lg border border-proxmox-border max-h-32 overflow-y-auto">
-                                                                            {vmwareMigrationPlan.source.nics.map((nic, i) => (
-                                                                                <div key={i} className="flex items-center gap-2 text-xs text-gray-300 py-1">
-                                                                                    <span className="text-green-400">●</span>
-                                                                                    <span className="font-mono">{nic.pve_model || nic.type}</span>
-                                                                                    <span className="text-gray-500">—</span>
-                                                                                    <span className="text-gray-400">{nic.network || 'N/A'}</span>
-                                                                                    {nic.mac_address && <span className="text-gray-600 font-mono ml-auto">{nic.mac_address}</span>}
-                                                                                </div>
-                                                                            ))}
+                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('v2pNetworkPerNic')} ({vmwareMigrationPlan.source.nics.length})</label>
+                                                                        <div className="space-y-1 p-2 bg-proxmox-dark rounded-lg border border-proxmox-border max-h-60 overflow-y-auto">
+                                                                            {v2pNicRows.map((row, i) => {
+                                                                                const nic = vmwareMigrationPlan.source.nics[row.index] || {};
+                                                                                const setRow = (patch) => setV2pNicRows(rows => rows.map((r, j) => j === i ? {...r, ...patch} : r));
+                                                                                return (
+                                                                                    <div key={row.index} className="flex flex-wrap items-center gap-2 text-xs text-gray-300 py-1">
+                                                                                        <span className={row.skip ? 'text-gray-600' : 'text-green-400'}>●</span>
+                                                                                        <span className="font-mono">net{row.index}</span>
+                                                                                        <span className="text-gray-400 truncate max-w-[150px]" title={nic.network || ''}>{nic.network || 'N/A'}</span>
+                                                                                        {nic.mac_address && <span className="text-gray-600 font-mono">{nic.mac_address}</span>}
+                                                                                        <span className="flex-1" />
+                                                                                        {v2pInventory?.bridges ? (
+                                                                                            <select value={row.bridge} disabled={row.skip} onChange={e => setRow({bridge: e.target.value})}
+                                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-xs disabled:opacity-40">
+                                                                                                <option value="">{t('v2pJobBridge')} ({vmwareMigrateForm.network_bridge || 'vmbr0'})</option>
+                                                                                                {v2pInventory.bridges.map(b => <option key={b.name} value={b.name}>{b.name}{b.kind === 'bridge' ? '' : ` (${b.kind})`}</option>)}
+                                                                                            </select>
+                                                                                        ) : (
+                                                                                            <input value={row.bridge} disabled={row.skip} onChange={e => setRow({bridge: e.target.value.trim()})}
+                                                                                                placeholder={vmwareMigrateForm.network_bridge || 'vmbr0'}
+                                                                                                className="w-24 px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-xs disabled:opacity-40" />
+                                                                                        )}
+                                                                                        <input type="number" min="1" max="4094" value={row.vlan} disabled={row.skip} onChange={e => setRow({vlan: e.target.value})}
+                                                                                            placeholder={vmwareMigrateForm.net_vlan_tag ? String(vmwareMigrateForm.net_vlan_tag) : 'VLAN'}
+                                                                                            className="w-20 px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-xs disabled:opacity-40" />
+                                                                                        <label className="flex items-center gap-1 text-gray-400">
+                                                                                            <input type="checkbox" checked={row.skip} onChange={e => setRow({skip: e.target.checked})} className="rounded" />
+                                                                                            {t('v2pSkip')}
+                                                                                        </label>
+                                                                                    </div>
+                                                                                );
+                                                                            })}
                                                                         </div>
+                                                                        <p className="text-[11px] text-gray-500 mt-1">{t('v2pNetworkPerNicHint')}</p>
                                                                         <label className="flex items-center gap-2 text-xs text-gray-400 mt-2">
                                                                             <input type="checkbox" checked={vmwareMigrateForm.preserve_mac} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, preserve_mac: e.target.checked})} className="rounded" />
                                                                             Preserve MAC addresses
                                                                         </label>
                                                                     </div>
+                                                                )}
+
+                                                                {vmwareMigrationPlan?.source && !(vmwareMigrationPlan.source.nics || []).length && (
+                                                                    <p className="text-xs text-gray-500">{t('v2pNoNicsOnSource')}</p>
                                                                 )}
 
                                                                 {/* Transfer Mode — NS Apr 2026: added 'sshfs_boot' as recommended default
@@ -29208,6 +30067,22 @@
                                                                         {vmwareMigrateForm.transfer_mode === 'snapshot_zero' && (t('transferModeSnapshotZeroDesc') || 'ESXi snapshot rotation — VM stays running through pre-sync + iterative delta sync, only ~10s downtime at cutover. ⚠️ May not work on your system (e.g. ESXi 6.x or VMFS6 with strict locking) — requires ESXi setup that releases base-VMDK lock after snapshot.')}
                                                                         {vmwareMigrateForm.transfer_mode === 'offline' && (t('transferModeOfflineDesc') || 'Stops ESXi VM, copies disks via SSH dd, then starts on Proxmox (full downtime ~ disk-size / network-speed)')}
                                                                     </p>
+                                                                </div>
+
+                                                                {/* verify mode: full compares every block before the start */}
+                                                                <div>
+                                                                    <label className="text-xs text-gray-500 mb-1 block">{t('v2pVerify')}</label>
+                                                                    <select value={v2pVerifyFor(vmwareMigrateForm, vmwareMigrationPlan)} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, verify: e.target.value})}
+                                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
+                                                                        <option value="full">{t('v2pVerifyFull')}</option>
+                                                                        <option value="sample">{t('v2pVerifySample')}</option>
+                                                                        <option value="off">{t('v2pVerifyOff')}</option>
+                                                                    </select>
+                                                                    {v2pVerifyFor(vmwareMigrateForm, vmwareMigrationPlan) === 'full' && (
+                                                                        ['sshfs_boot', 'snapshot_zero'].includes(vmwareMigrateForm.transfer_mode)
+                                                                            ? <p className="text-xs text-red-400 mt-1">{t('v2pVerifyFullNotHere')}</p>
+                                                                            : <p className="text-xs text-gray-400 mt-1 leading-relaxed">{t('v2pVerifyFullDesc')}</p>
+                                                                    )}
                                                                 </div>
                                                                 
                                                                 {/* Options */}
@@ -29247,6 +30122,11 @@
                                                             {migrateWizardStep === 'hardware' && (
                                                             <div className="space-y-3">
                                                                 <p className="text-xs text-gray-500 mb-2">Auto-detected from ESXi. Override if needed.</p>
+                                                                {/* LW Oct 2026 - who may migrate the guest but not view it gets no hardware
+                                                                    with the plan; Auto still reads it from ESXi when the migration starts */}
+                                                                {vmwareMigrationPlan.source?.details === false && (
+                                                                    <p className="text-xs text-yellow-300 mb-2" data-v2p-details-hidden>{t('v2pSourceDetailsHidden')}</p>
+                                                                )}
                                                                 <div className="grid grid-cols-2 gap-3">
                                                                     <div>
                                                                         <label className="text-xs text-gray-500 mb-1 block">BIOS / Firmware</label>
@@ -29332,7 +30212,7 @@
                                                                     </div>
                                                                     <div>
                                                                         <label className="text-xs text-gray-500 mb-1 block">Memory (MB)</label>
-                                                                        <input type="number" min="128" value={vmwareMigrateForm.memory || vmwareMigrationPlan.source?.memory?.size_MiB || 2048}
+                                                                        <input type="number" min="128" value={vmwareMigrateForm.memory || vmwareMigrationPlan.source?.memory?.size_MiB || vmwareMigrationPlan.source?.memory_mb || 2048}
                                                                             onChange={e => setVmwareMigrateForm(f => ({...f, memory: parseInt(e.target.value)||2048}))}
                                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white" />
                                                                     </div>
@@ -29481,6 +30361,89 @@
                                                             </div>
                                                             )}
                                                             
+                                                            {/* === STEP 4: REVIEW === LW Oct 2026 - a dry run of the request, Start only from here */}
+                                                            {migrateWizardStep === 'review' && (() => {
+                                                                const rv = v2pReview;
+                                                                const gib = (b) => (b === null || b === undefined) ? t('v2pReviewUnknown') : `${(b / 1073741824).toFixed(1)} GiB`;
+                                                                const current = v2pReviewIsCurrent();
+                                                                return (
+                                                                <div className="space-y-3">
+                                                                    <p className="text-xs text-gray-500">{t('v2pReviewIntro')}</p>
+                                                                    {v2pReviewLoading && <div className="text-xs text-gray-400">{t('v2pReviewChecking')}</div>}
+                                                                    {!v2pReviewLoading && rv && (
+                                                                        <div className="space-y-3">
+                                                                            {!current && (
+                                                                                <div className="p-2 rounded border border-yellow-500/40 text-xs text-yellow-300" style={{background:'rgba(234,179,8,0.07)'}}>{t('v2pReviewStale')}</div>
+                                                                            )}
+                                                                            {rv.ok ? (
+                                                                                <div className="p-2 rounded border border-emerald-500/40 text-xs text-emerald-400" style={{background:'rgba(16,185,129,0.07)'}}>{t('v2pReviewOk')}</div>
+                                                                            ) : (
+                                                                                <div className="p-2 rounded border border-red-500/30 text-xs text-red-300" style={{background:'rgba(239,68,68,0.07)'}}>
+                                                                                    <div className="font-semibold mb-1">{t('v2pReviewFailed')}</div>
+                                                                                    {(rv.errors || []).map((e, i) => <div key={i}>- {e}</div>)}
+                                                                                </div>
+                                                                            )}
+                                                                            {(rv.warnings || []).length > 0 && (
+                                                                                <div className="p-2 rounded border border-yellow-500/30 text-xs text-yellow-200/80">
+                                                                                    <div className="font-semibold mb-1">{t('v2pReviewWarnings')}</div>
+                                                                                    {rv.warnings.map((w, i) => <div key={i}>- {w}</div>)}
+                                                                                </div>
+                                                                            )}
+                                                                            {(rv.nics || []).length > 0 && (
+                                                                                <div>
+                                                                                    <div className="text-xs text-gray-400 font-semibold mb-1">{t('v2pReviewNics')}</div>
+                                                                                    <div className="space-y-0.5 text-xs">
+                                                                                        {rv.nics.map(n => (
+                                                                                            <div key={n.index} className={`flex flex-wrap gap-2 ${n.skip ? 'text-gray-600 line-through' : 'text-gray-300'}`}>
+                                                                                                <span className="font-mono">{n.net}</span>
+                                                                                                <span className="text-gray-500">{n.source_network || n.label}</span>
+                                                                                                <span className="ml-auto font-mono">{n.skip ? t('v2pSkipped') : `${n.bridge}${n.vlan ? ` tag ${n.vlan}` : ` (${t('v2pReviewNoTag')})`}`}</span>
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                </div>
+                                                                            )}
+                                                                            {(rv.disks || []).length > 0 && (
+                                                                                <div>
+                                                                                    <div className="text-xs text-gray-400 font-semibold mb-1">{t('v2pReviewDisks')}</div>
+                                                                                    <div className="space-y-0.5 text-xs">
+                                                                                        {rv.disks.map(d => (
+                                                                                            <div key={d.index} className={`flex flex-wrap gap-2 ${d.skip ? 'text-gray-600 line-through' : 'text-gray-300'}`}>
+                                                                                                <span>{d.label}{d.boot ? ` (${t('v2pBootDisk')})` : ''}</span>
+                                                                                                <span className="text-gray-500">{gib(d.size_bytes)}</span>
+                                                                                                <span className="ml-auto font-mono">{d.skip ? t('v2pSkipped') : d.storage}</span>
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                </div>
+                                                                            )}
+                                                                            {(rv.storages || []).length > 0 && (
+                                                                                <div>
+                                                                                    <div className="text-xs text-gray-400 font-semibold mb-1">{t('v2pReviewStorages')}</div>
+                                                                                    <div className="space-y-0.5 text-xs">
+                                                                                        {rv.storages.map(st => (
+                                                                                            <div key={st.storage} className={`flex flex-wrap gap-2 ${st.ok ? 'text-gray-300' : 'text-red-300'}`}>
+                                                                                                <span className="font-mono">{st.storage}</span>
+                                                                                                <span className="text-gray-500">{st.type}</span>
+                                                                                                <span className="ml-auto">{gib(st.needed_bytes)} {t('v2pReviewNeeded')} / {gib(st.avail_bytes)} {t('v2pReviewFree')}</span>
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                </div>
+                                                                            )}
+                                                                            {rv.verify && (
+                                                                                <div className="text-xs text-gray-400">{t('v2pVerify')}: <span className="text-gray-200">{rv.verify === 'full' ? t('v2pVerifyFull') : rv.verify === 'off' ? t('v2pVerifyOff') : t('v2pVerifySample')}</span></div>
+                                                                            )}
+                                                                        </div>
+                                                                    )}
+                                                                    <button onClick={() => reviewVmwareMigration(vmwareSelectedVm)} disabled={v2pReviewLoading || !vmwareMigrateForm.target_storage}
+                                                                        className="px-3 py-1.5 rounded-lg bg-proxmox-dark border border-proxmox-border text-gray-300 text-xs disabled:opacity-50">
+                                                                        {t('v2pReviewCheckAgain')}
+                                                                    </button>
+                                                                </div>
+                                                                );
+                                                            })()}
+
                                                             {/* NS Apr 2026, MK May 2026 — VirtIO MSI bulk install (opt-in). Off by default.
                                                                 Checks for virtio-win.iso on the Proxmox node, copies the official
                                                                 virtio-win-gt-x64.msi onto the disk and registers a SYSTEM-context
@@ -29567,13 +30530,23 @@
 
                                                             <div className="flex gap-2 justify-end mt-4">
                                                                 <button onClick={() => setShowVmwareMigrate(false)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 text-sm">{t('cancel')}</button>
-                                                                <button
-                                                                    onClick={() => startVmwareMigration(vmwareSelectedVm)}
-                                                                    disabled={!vmwareMigrateForm.target_cluster || !vmwareMigrateForm.target_node || !vmwareMigrateForm.target_storage || !vmwareMigrateForm.esxi_password || !vmwareMigrateForm.oc_acknowledge || vmwareMigrateLoading}
-                                                                    title={!vmwareMigrateForm.oc_acknowledge ? (t('v2pSupportAckRequired') || 'Bitte den Hinweis kurz bestätigen') : ''}
-                                                                    className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
-                                                                    {vmwareMigrateLoading ? t('starting') : t('xhmStartMigration')}
-                                                                </button>
+                                                                {migrateWizardStep !== 'review' ? (
+                                                                    <button
+                                                                        onClick={() => { setMigrateWizardStep('review'); if (!v2pReviewIsCurrent()) reviewVmwareMigration(vmwareSelectedVm); }}
+                                                                        disabled={!vmwareMigrateForm.target_cluster || !vmwareMigrateForm.target_node || !vmwareMigrateForm.target_storage || v2pReviewLoading}
+                                                                        title={t('v2pReviewStartHint')}
+                                                                        className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
+                                                                        {t('v2pReviewToStart')}
+                                                                    </button>
+                                                                ) : (
+                                                                    <button
+                                                                        onClick={() => startVmwareMigration(vmwareSelectedVm)}
+                                                                        disabled={!vmwareMigrateForm.target_cluster || !vmwareMigrateForm.target_node || !vmwareMigrateForm.target_storage || !vmwareMigrateForm.esxi_password || !vmwareMigrateForm.oc_acknowledge || vmwareMigrateLoading || v2pReviewLoading || !v2pReview?.ok || !v2pReviewIsCurrent()}
+                                                                        title={!vmwareMigrateForm.oc_acknowledge ? (t('v2pSupportAckRequired') || 'Bitte den Hinweis kurz bestätigen') : (!v2pReviewIsCurrent() ? t('v2pReviewStale') : '')}
+                                                                        className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
+                                                                        {vmwareMigrateLoading ? t('starting') : t('xhmStartMigration')}
+                                                                    </button>
+                                                                )}
                                                             </div>
                                                         </div>
                                                     </div>
@@ -29926,6 +30899,7 @@
                                         {/* Tasks & Events Tab */}
                                         {vmwareActiveTab === 'tasks' && (
                                             <div className="space-y-4">
+                                                <EsxiBulkRuns serverId={selectedVMware.id} authFetch={authFetch} t={t} onOpen={id => setEsxiBulk({runId: id})} />
                                                 {/* Active Migrations */}
                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                     <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
@@ -32031,7 +33005,7 @@
                                     </div>
                                     
                                     {/* Target Type Selection */}
-                                    {alertMetricSel !== 'ceph_health' && (
+                                    {alertMetricSel !== 'ceph_health' && alertMetricSel !== 'qnetd' && (
                                     <div className="grid grid-cols-2 gap-3">
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">{t('targetType') || 'Apply to'}</label>
@@ -32072,6 +33046,8 @@
                                                 <option value="restart_loop">{t('restartLoopTitle')}</option>
                                                 <option value="qdevice">{t('qdeviceAlertTitle')}</option>
                                                 <option value="restore_test_age">{t('restoreTestAgeTitle')}</option>
+                                                {/* LW Oct 2026 - an administrator's rule, like the QNetd hosts it watches */}
+                                                {(isAdmin || alertMetricSel === 'qnetd') && <option value="qnetd">{t('qnetdAlertTitle')}</option>}
                                             </select>
                                         </div>
                                         {alertMetricSel === 'rolling_update' ? (
@@ -32091,6 +33067,7 @@
                                                     : alertMetricSel === 'ceph_osd_latency' ? t('cephOsdLatencyHelp')
                                                     : alertMetricSel === 'replication_rpo' ? t('replicationRpoHelp')
                                                     : alertMetricSel === 'restore_test_age' ? t('restoreTestAgeHelp')
+                                                    : alertMetricSel === 'qnetd' ? `${t('qnetdAlertHelp')} ${t('qnetdAlertAdminNote')}`
                                                     : t('alertSnapHelp')}
                                             </div>
                                         ) : <>
