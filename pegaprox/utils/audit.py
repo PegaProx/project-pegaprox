@@ -219,15 +219,37 @@ _CLEAR_CIPASSWORD = re.compile(r'(\bcipassword=)(?!\*\*\*(?:,|\s|$))[\s\S]*')
 # line named the host only, a mirror login (user:pass@) in them included. The login runs
 # to the last '@' of the netloc; a URL cut off before its path has no host to tell it by
 # and goes whole. The rest is shown as a new row shows it, through redact_url.
-_OLD_DOWNLOAD = re.compile(r'(Started download: [\s\S]*? from )(https?://)([\s\S]*)(\.\.\.)')
+# MK Nov 2026 - found by plain string search, not by a regex: the pattern this was before
+# backtracked over every ' from http' in a row without a '...', and a long alert name in
+# the details took seconds per row on every audit read, the gevent hub standing still
+_DOWNLOAD_LEAD = 'Started download: '
 
 
-def _old_download_url(m):
-    lead, scheme, cut, dots = m.groups()
+def _old_download_url(lead, scheme, cut, dots):
     netloc = re.split(r'[/?#]', cut, maxsplit=1)[0]
     if netloc == cut:
         return f'{lead}{scheme}[REDACTED]{dots}'
     return lead + redact_url(scheme + netloc.rpartition('@')[2] + cut[len(netloc):]) + dots
+
+
+def _mask_old_download(details):
+    start = details.find(_DOWNLOAD_LEAD)
+    dots = details.rfind('...')
+    if start < 0 or dots < 0:
+        return details
+    # the first ' from ' after the lead that a scheme follows, its URL up to the last '...'
+    at = start + len(_DOWNLOAD_LEAD)
+    while True:
+        at = details.find(' from http', at, dots)
+        if at < 0:
+            return details
+        url = at + len(' from ')
+        scheme = next((s for s in ('http://', 'https://') if details.startswith(s, url)), None)
+        if scheme and url + len(scheme) <= dots:
+            break
+        at += 1
+    masked = _old_download_url(details[start:url], scheme, details[url + len(scheme):dots], '...')
+    return details[:start] + masked + details[dots + 3:]
 
 
 def masked_details(details, cluster=''):
@@ -235,8 +257,8 @@ def masked_details(details, cluster=''):
     and the URL of an older download row without its login."""
     if not isinstance(details, str):
         return details
-    if 'Started download: ' in details:
-        details = _OLD_DOWNLOAD.sub(_old_download_url, details, count=1)
+    if _DOWNLOAD_LEAD in details:
+        details = _mask_old_download(details)
     if 'cipassword=' not in details:
         return details
     tail = f' [{cluster}]' if cluster and details.endswith(f' [{cluster}]') else ''
