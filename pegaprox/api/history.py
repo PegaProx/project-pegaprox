@@ -543,29 +543,15 @@ def check_affinity_violation(cluster_id: str, vmid: int, target_node: str, vm_no
 def get_affinity_rules(cluster_id=None):
     """Get affinity rules, optionally filtered by cluster"""
     config = load_affinity_rules()
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.api.helpers import affinity_rules_in_view
     if cluster_id:
         # NS Jul 2026 (CodeAnt IDOR) — path-scoped alias: enforce cluster access.
+        # (the GET of this path is served by alerts.get_cluster_affinity_rules, registered first)
         ok, err = check_cluster_access(cluster_id)
         if not ok:
             return err
         config['rules'] = [r for r in config['rules'] if r.get('cluster_id') == cluster_id]
-        # sec (audit): a rule names every VM it groups, so this listed guests the caller cannot
-        # see. Show a confined caller only the rules whose members they may all view.
-        from pegaprox.utils.auth import build_authz_user
-        from pegaprox.utils.rbac import user_can_access_vm
-        from pegaprox.api.helpers import caller_is_scoped
-        _au = build_authz_user(request.session.get('user', ''), request.session)
-        if caller_is_scoped(_au, cluster_id):
-            def _visible(rule):
-                members = rule.get('vm_ids') or rule.get('vms') or []
-                if not members:
-                    return False
-                try:
-                    return all(user_can_access_vm(_au, cluster_id, int(v), 'vm.view') for v in members)
-                except (TypeError, ValueError):
-                    return False
-            config = dict(config)
-            config['rules'] = [r for r in config['rules'] if _visible(r)]
     else:
         # NS Jul 2026 (CodeAnt IDOR) — scope the unfiltered list to reachable clusters.
         from pegaprox.utils.rbac import get_user_clusters
@@ -578,6 +564,10 @@ def get_affinity_rules(cluster_id=None):
         if _allowed is not None:
             config = dict(config)
             config['rules'] = [r for r in config.get('rules', []) if r.get('cluster_id') in _allowed]
+    # a rule names every guest it groups: a confined caller gets the same rules here as on
+    # the cluster route, not every rule of the clusters it reaches
+    _au = build_authz_user(request.session.get('user', ''), request.session)
+    config['rules'] = affinity_rules_in_view(_au, config.get('rules', []), cluster_id)
     return jsonify(config)
 
 @bp.route('/api/affinity-rules', methods=['POST'])
@@ -673,6 +663,11 @@ def check_vm_affinity(cluster_id, vmid, target_node):
         return jsonify({'error': 'Permission denied'}), 403
 
     result = check_affinity_violation(cluster_id, vmid, target_node)
+    # the message names the rule's other guests and their node; a confined caller gets the
+    # rule name only, as in the migration preflight
+    from pegaprox.api.helpers import caller_is_scoped
+    if result.get('violation') and caller_is_scoped(_u, cluster_id):
+        result = dict(result, message='')
     return jsonify(result)
 
 

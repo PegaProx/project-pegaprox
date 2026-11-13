@@ -825,19 +825,9 @@ def get_cluster_affinity_rules(cluster_id):
         # cluster's inventory to a pool/ACL-scoped caller (check_cluster_access lets them in by
         # design). Show a confined caller only the rules whose every member VM they may view.
         from pegaprox.utils.auth import build_authz_user
-        from pegaprox.utils.rbac import user_can_access_vm
-        from pegaprox.api.helpers import caller_is_scoped
+        from pegaprox.api.helpers import affinity_rules_in_view
         _au = build_authz_user(request.session.get('user', ''), request.session)
-        if caller_is_scoped(_au, cluster_id):
-            def _visible(rule):
-                members = rule.get('vm_ids') or rule.get('vms') or []
-                if not members:
-                    return False
-                try:
-                    return all(user_can_access_vm(_au, cluster_id, int(v), 'vm.view') for v in members)
-                except (TypeError, ValueError):
-                    return False
-            cluster_rules = [r for r in cluster_rules if _visible(r)]
+        cluster_rules = affinity_rules_in_view(_au, cluster_rules, cluster_id)
         return jsonify({'rules': cluster_rules})
     except Exception as e:
         logging.error(f"Error getting affinity rules: {e}")

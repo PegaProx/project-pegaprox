@@ -616,6 +616,37 @@ def caller_is_scoped(user, cluster_id):
     return False
 
 
+def affinity_rules_in_view(user, rules, cluster_id=None):
+    """The affinity rules `user` may read. A rule names every guest it groups, so a caller
+    confined in the rule's cluster (caller_is_scoped) only gets the rules whose members it
+    may all view; a rule without members or with a member that is no vmid stays out.
+
+    MK Nov 2026 - one place for the cluster route and the flat /api/affinity-rules list,
+    which had only filtered by cluster and so named the other pools' guests. The cluster
+    is `cluster_id`, else the rule's own cluster_id (the flat list mixes clusters)."""
+    from pegaprox.utils.rbac import user_can_access_vm, acts_as_admin
+    scoped = {}
+
+    def _visible(rule):
+        cid = cluster_id or rule.get('cluster_id')
+        if not cid:
+            # a row without a cluster belongs to no tenant
+            return acts_as_admin(user)
+        if cid not in scoped:
+            scoped[cid] = caller_is_scoped(user, cid)
+        if not scoped[cid]:
+            return True
+        members = rule.get('vm_ids') or rule.get('vms') or []
+        if not members:
+            return False
+        try:
+            return all(user_can_access_vm(user, cid, int(v), 'vm.view') for v in members)
+        except (TypeError, ValueError):
+            return False
+
+    return [r for r in rules if _visible(r)]
+
+
 def alert_scope(user, cluster_id):
     """Which alerts of `cluster_id` `user` may read: a predicate over what an alert is
     about (target_type, target_id), or None for all of them.

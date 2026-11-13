@@ -14162,8 +14162,12 @@ def migrate_vm_api(cluster_id, node, vm_type, vmid):
             aff = check_affinity_violation(cluster_id, vmid, target_node)
             if aff.get('violation'):
                 if aff.get('enforce'):
+                    # the message names the rule's other guests, a confined caller gets the rule only
+                    why = f"Migration blocked by affinity rule '{aff['rule']}'"
+                    if not caller_is_scoped(user, cluster_id):
+                        why += f": {aff['message']}"
                     return jsonify({
-                        'error': f"Migration blocked by affinity rule '{aff['rule']}': {aff['message']}",
+                        'error': why,
                         'affinity_violation': True, 'rule': aff['rule']
                     }), 409
                 else:
