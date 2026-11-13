@@ -141,7 +141,7 @@ def load_server_settings():
         'ldap_server': '',
         'ldap_port': 389,
         'ldap_use_ssl': False,
-        'ldap_use_starttls': False,
+        'ldap_use_starttls': True,  # MK Nov 2026 - a new setup starts encrypted and checked (see below for older ones)
         'ldap_bind_dn': '',
         'ldap_bind_password': '',
         'ldap_base_dn': '',
@@ -157,6 +157,7 @@ def load_server_settings():
         'ldap_default_role': 'viewer',
         'ldap_auto_create_users': True,
         'ldap_group_mappings': [],
+        'ldap_verify_tls': True,
         'ldap_ca_cert': '',  # PEM, one or more CA certificates the directory's certificate is checked against
         # NS: Mar 2026 - reverse proxy support (nginx/haproxy)
         'reverse_proxy_enabled': False,
@@ -210,6 +211,18 @@ def load_server_settings():
             # it until an admin turns it on; a new setup gets the check
             if 'smtp_verify_tls' not in saved:
                 merged['smtp_verify_tls'] = not str(saved.get('smtp_host') or '').strip()
+            # MK Nov 2026 - the same for LDAP. A directory that has a server keeps running the
+            # way it did, a TLS key it never stored is the old default (off). Without a server
+            # nothing was set up, and the new defaults win over a stored off as well: every save
+            # writes back all keys it read, so an install that saved anything holds the old
+            # defaults without anyone having chosen them
+            if str(saved.get('ldap_server') or '').strip():
+                for _k in ('ldap_use_starttls', 'ldap_verify_tls'):
+                    if _k not in saved:
+                        merged[_k] = False
+            else:
+                merged['ldap_use_starttls'] = not merged.get('ldap_use_ssl')
+                merged['ldap_verify_tls'] = True
             return merged
     except Exception as e:
         logging.error(f"Error loading server settings from database: {e}")

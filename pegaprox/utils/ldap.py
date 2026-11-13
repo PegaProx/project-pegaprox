@@ -40,8 +40,11 @@ def get_ldap_settings() -> dict:
         'viewer_group': settings.get('ldap_viewer_group', ''),
         'default_role': settings.get('ldap_default_role', ROLE_VIEWER),
         'auto_create_users': settings.get('ldap_auto_create_users', True),
-        'verify_tls': settings.get('ldap_verify_tls', False),  # NS: Mar 2026 - default off, most AD envs use internal CAs not in system trust store (#108)
-        'ca_cert': settings.get('ldap_ca_cert', '') or '',  # MK Nov 2026 - such an internal CA, as PEM
+        # NS: Mar 2026 - default off, most AD envs use internal CAs not in system trust store (#108)
+        # MK Nov 2026 - on for a new setup, and such a CA goes into ldap_ca_cert now
+        # (load_server_settings keeps an older directory on what it had)
+        'verify_tls': settings.get('ldap_verify_tls', False),
+        'ca_cert': settings.get('ldap_ca_cert', '') or '',
         # MK: Feb 2026 - Custom group→role mappings for custom roles & tenants
         # Format: [{"group_dn": "CN=...", "role": "custom_role_name", "tenant": "tenant_id", "permissions": [...]}]
         'group_mappings': settings.get('ldap_group_mappings', []),
@@ -307,8 +310,9 @@ def ldap_authenticate(username: str, password: str) -> dict:
         else:
             # MK Sep 2026 - the warning above only fires INSIDE the TLS branch, so the one
             # configuration that has no protection at all was the only one that said nothing.
-            # Both toggles default to off, which makes this the state an operator lands in by
-            # filling in a server and a bind DN and touching nothing else. Three binds follow
+            # Both toggles defaulted to off, which made this the state an operator landed in by
+            # filling in a server and a bind DN and touching nothing else (a setup from before
+            # Nov 2026 still runs on those defaults, see load_server_settings). Three binds follow
             # on this connection and the middle one carries the END USER'S password, not just
             # ours. Refusing outright would break installs that run LDAP on a trusted segment
             # on purpose, so this says it loudly instead and leaves that call to a release.
