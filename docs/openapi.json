@@ -35226,7 +35226,7 @@
           }
         },
         "summary": "Serve the web interface",
-        "description": "NS May 2026 — when air-gap mode is on, inject the localStorage flag\n*before* the boot loader runs. Otherwise the very first page load on\na fresh browser (no localStorage yet) hits cdn.jsdelivr while waiting\nfor /auth/check to come back. We rewrite a tiny prelude into <head>\nso the loader sees the flag synchronously on its first read.",
+        "description": "NS May 2026 — when air-gap mode is on, inject the localStorage flag\n*before* the boot loader runs. Otherwise the very first page load on\na fresh browser (no localStorage yet) hits cdn.jsdelivr while waiting\nfor /auth/check to come back. We rewrite a tiny prelude into <head>\nso the loader sees the flag synchronously on its first read.\n\nMK Nov 2026 - read once, each coding compressed once, a reload gets its 304 and the\nflag changes the ETag (utils/index_page.py). Every route that sends the page goes there.",
         "x-pegaprox-auth": "public"
       }
     },
