@@ -580,8 +580,20 @@ def start_sync_worker():
 # --- partition leases (Phase 3) ----------------------------------------------------------
 
 # lease votes per member: a renewal asks one a round, a flood of terms is no
-# renewal - the budget keeps a member from writing this disk raw (F4)
-_lease_votes = SlidingWindow(limit=20, window=30, max_keys=256, name='fed-lease-vote')
+# renewal - the budget keeps a member from writing this disk raw (F4). It grows
+# with the leases the member holds (a renewal round asks every member once per
+# lease, every ten seconds), so a site leading many clusters is not starved by
+# its own renewals; the flood of a stranger still hits the floor.
+def _lease_vote_budget():
+    try:
+        leases = max(1, len(federation.my_leases()))
+    except Exception:
+        leases = 1
+    return max(60, 3 * leases * (30 // max(1, federation.LEASE_RENEW_AFTER)) + 20)
+
+
+_lease_votes = SlidingWindow(limit=_lease_vote_budget(), window=30, max_keys=256,
+                             name='fed-lease-vote')
 
 
 @bp.route('/api/federation/peer/lease-vote', methods=['POST'])

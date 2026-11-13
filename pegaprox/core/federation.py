@@ -1733,13 +1733,25 @@ def enroll_cluster(cluster_id):
 # what travels of a cluster row: everything but the home marker itself
 CLUSTER_SYNC_COLUMNS = ('id', 'name', 'host', 'user', 'pass_encrypted',
                         'ssl_verification', 'migration_threshold',
-                        'migration_tolerance', 'check_interval', 'auto_migrate',
+                        'migration_tolerance', 'migration_cooldown',
+                        'check_interval', 'auto_migrate',
                         'balance_containers', 'balance_local_disks', 'dry_run',
                         'enabled', 'ha_enabled', 'fallback_hosts', 'ssh_user',
                         'ssh_key_encrypted', 'ssh_port', 'api_port', 'ha_settings',
                         'created_at', 'updated_at', 'cluster_type',
                         'transfer_network', 'api_token_user',
-                        'api_token_secret_encrypted')
+                        'api_token_secret_encrypted',
+                        # the workbench settings of the row travel too: an adopted
+                        # cluster keeps its grouping, its place on the map and its
+                        # balancing policy instead of standing there reset
+                        'group_id', 'display_name', 'sort_order',
+                        'latitude', 'longitude', 'location_label', 'node_ui_suffix',
+                        'excluded_nodes', 'smbios_autoconfig',
+                        'proxlb_tags_enabled', 'proxlb_pins_auto_migrate',
+                        'proxlb_pins_strict', 'predictive_balancing',
+                        'predictive_threshold', 'balance_cpu_weight',
+                        'balance_mem_weight', 'balance_io_weight', 'cpu_baseline',
+                        'vnc_tunnel', 'ssh_disabled', 'backup_sla_max_age_hours')
 
 
 def enrolled_cluster_rows():
@@ -1868,8 +1880,6 @@ def _remember_field_keys(keys, only_self_of=None):
             if iid not in known or not isinstance(key, str):
                 continue
             if only_self_of is not None and iid != only_self_of:
-                continue
-            if iid in held and only_self_of is not None and iid != only_self_of:
                 continue
             try:
                 if base64.b64decode(key, validate=True).__len__() == 32:

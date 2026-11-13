@@ -141,22 +141,6 @@ def create_app():
             return response, 200, {'Content-Type': 'text/plain'}
         return '', 404
 
-    @app.before_request
-    def federation_cluster_write_gate():
-        """Phase 3: a write on any cluster-scoped path (/api/clusters/<id>/...)
-        goes through the lease gate - one hook for every blueprint that writes
-        there, the VM and storage and Ceph routes included. Reads pass; an
-        unenrolled cluster is this instance's own and passes too; the path piece
-        after /api/clusters/ that is no id ('reorder') passes. Runs after the CSRF
-        gate, which answers first."""
-        if request.method in ('GET', 'HEAD', 'OPTIONS'):
-            return None
-        import re as _re
-        m = _re.match(r'^/api/clusters/([^/?]+)', request.path)
-        if not m or m.group(1) == 'reorder':
-            return None
-        from pegaprox.api.federation import refuse_unleased
-        return refuse_unleased(m.group(1), f'Cluster {m.group(1)}')
 
     @app.before_request
     def validate_request():
@@ -521,6 +505,23 @@ def create_app():
             if isinstance(body, dict):
                 out.append(body)
         return out
+    @app.before_request
+    def federation_cluster_write_gate():
+        """Phase 3: a write on any cluster-scoped path (/api/clusters/<id>/...)
+        goes through the lease gate - one hook for every blueprint that writes
+        there, the VM and storage and Ceph routes included. Reads pass; an
+        unenrolled cluster is this instance's own and passes too; the path piece
+        after /api/clusters/ that is no id ('reorder') passes. Runs after the CSRF
+        gate, which answers first."""
+        if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            return None
+        import re as _re
+        m = _re.match(r'^/api/clusters/([^/?]+)', request.path)
+        if not m or m.group(1) == 'reorder':
+            return None
+        from pegaprox.api.federation import refuse_unleased
+        return refuse_unleased(m.group(1), f'Cluster {m.group(1)}')
+
 
     @app.before_request
     def refuse_odd_route_arguments():
