@@ -159,13 +159,21 @@ def _mutate(fn):
 # --- who we are ----------------------------------------------------------------------
 
 def instance_id():
-    """This instance's id in the federation, drawn once and kept in the state file."""
+    """This instance's id in the federation, drawn once and kept in the state
+    file. The hot paths (the cluster getters ask on every read) take it from a
+    process-local cache - the id does not change while the process lives."""
+    held = _runtime.get('instance_id_cache')
+    if held:
+        return held
+
     def go(state):
         if isinstance(state.get('instance_id'), str) and state['instance_id']:
             return False
         state['instance_id'] = secrets.token_hex(16)
         return True
-    return _mutate(go)['instance_id']
+    mine = _mutate(go)['instance_id']
+    _runtime['instance_id_cache'] = mine
+    return mine
 
 
 def _private():
@@ -493,8 +501,8 @@ def join(code, own_url, site=''):
     listed = opened.get('members') if isinstance(opened, dict) else None
     if not isinstance(listed, dict) or parts['instance_id'] not in listed:
         raise FederationError('The answer of the other instance carries no member list')
-    # Phase 4: the field keys came sealed with the member list
-    _remember_field_keys(opened.get('field_keys'))
+    # Phase 4: the field keys came sealed with the member list; they are taken
+    # once the members they belong to are in the registry (below)
 
     def go(state):
         # a member the issuer lists that this instance had removed is back: the
@@ -523,6 +531,7 @@ def join(code, own_url, site=''):
         return True
     out = {}
     _mutate(go)
+    _remember_field_keys(opened.get('field_keys'))
     if out.get('capped'):
         logging.warning(f"[FED] the member list of {parts['instance_id']} was cut at "
                         f"{MAX_MEMBERS} members")
@@ -1212,6 +1221,10 @@ def apply_identity_snapshot(body, sender=None):
                 if key_vals not in keep:
                     _drop_row(conn, table, keys, raw, home, dropped_users, key_vals)
                     report['deleted'] += 1
+        # Phase 4: the clusters the home leads become mirrors in the same
+        # transaction - one snapshot, one commit, and the etag below only says
+        # 'pulled' when both halves went in
+        _apply_cluster_mirrors(home, body.get('clusters'), report)
         conn.commit()
     except Exception:
         try:
@@ -1219,17 +1232,6 @@ def apply_identity_snapshot(body, sender=None):
         except Exception:
             pass
         raise
-    # Phase 4: the clusters the home leads become mirrors here - credentials as
-    # ciphertext under the home's field key, opened only at an adoption
-    try:
-        _apply_cluster_mirrors(home, body.get('clusters'), report)
-        conn.commit()
-    except Exception as e:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        logging.warning(f"[FED] cluster mirrors of {home} not applied: {e}")
     # what a mirror lost or had changed on it ends the sessions it opened here: a
     # disabled or re-passworded account does not keep a sign-in at this site
     for name in sorted(changed_users | dropped_users):
@@ -1736,7 +1738,8 @@ CLUSTER_SYNC_COLUMNS = ('id', 'name', 'host', 'user', 'pass_encrypted',
                         'enabled', 'ha_enabled', 'fallback_hosts', 'ssh_user',
                         'ssh_key_encrypted', 'ssh_port', 'api_port', 'ha_settings',
                         'created_at', 'updated_at', 'cluster_type',
-                        'transfer_network')
+                        'transfer_network', 'api_token_user',
+                        'api_token_secret_encrypted')
 
 
 def enrolled_cluster_rows():
@@ -1810,7 +1813,8 @@ def _cluster_mirror_body():
 # already here, and its credentials open under the owner's field key, exchanged
 # sealed at the pairing, and seal again under this instance's own key.
 
-CLUSTER_ENCRYPTED_COLUMNS = ('pass_encrypted', 'ssh_key_encrypted', 'ha_settings')
+CLUSTER_ENCRYPTED_COLUMNS = ('pass_encrypted', 'ssh_key_encrypted', 'ha_settings',
+                             'api_token_secret_encrypted')
 
 
 def _field_key_file():
@@ -1845,22 +1849,35 @@ def peer_field_keys():
     return dict(keys) if isinstance(keys, dict) else {}
 
 
-def _remember_field_keys(keys):
-    """Take {instance_id: base64} into the state; only members we know keep
-    theirs, and an empty key never overwrites one already held."""
+MAX_FIELD_KEYS = 64
+
+
+def _remember_field_keys(keys, only_self_of=None):
+    """Take {instance_id: base64} into the state. Only members this registry
+    knows keep theirs; a key already held is overwritten by its own member alone
+    (`only_self_of` names the member whose key this call speaks for - the sealed
+    join answer sets many at once, a member-added speaks for its sender only),
+    and the table is bounded like every other note a peer can grow."""
     if not isinstance(keys, dict):
         return
 
     def go(state):
+        known = state.get('members') or {}
         held = state.setdefault('field_keys', {})
         for iid, key in keys.items():
-            if not ha_wire.ID_RE.fullmatch(iid or '') or not isinstance(key, str):
+            if iid not in known or not isinstance(key, str):
+                continue
+            if only_self_of is not None and iid != only_self_of:
+                continue
+            if iid in held and only_self_of is not None and iid != only_self_of:
                 continue
             try:
                 if base64.b64decode(key, validate=True).__len__() == 32:
                     held[iid] = key
             except Exception:
                 continue
+        while len(held) > MAX_FIELD_KEYS:
+            held.pop(next(iter(held)))
         return True
     _mutate(go)
 
@@ -1903,8 +1920,10 @@ def adopt_cluster(cluster_id, force=False):
 
 def _reseat_credentials(cluster_id, owner, key_b64, force):
     """Open the mirrored credential columns under the owner's field key and seal
-    them under this instance's own. Without the key (force), the columns carry
-    what they carried - the admin re-enters them at the cluster."""
+    them under this instance's own. A column that does not open - no key (force),
+    a value that is no aes256 ciphertext of the owner's - is CLEARED, never kept:
+    a foreign ciphertext under this instance's owner would break every reader of
+    the table the moment the row counts as this instance's own."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     conn = _identities_conn()
     cols = ', '.join(f'"{c}"' for c in CLUSTER_ENCRYPTED_COLUMNS)
@@ -1912,32 +1931,41 @@ def _reseat_credentials(cluster_id, owner, key_b64, force):
                        (cluster_id,)).fetchone()
     if row is None:
         return
-    updates, params = [], []
+    updates, params, cleared = [], [], []
     aesgcm_own = None
+    db = None
     try:
         from pegaprox.core.db import get_db
-        aesgcm_own = get_db().aesgcm
+        db = get_db()
+        aesgcm_own = db.aesgcm
     except Exception:
         pass
-    if key_b64:
+    for col in CLUSTER_ENCRYPTED_COLUMNS:
+        value = row[col]
+        if not value:
+            continue
+        # only what the owner sealed itself opens here; anything else (a legacy
+        # format, a poisoned plain value) is not a credential to carry over
+        if not key_b64 or not value.startswith('aes256:'):
+            cleared.append(col)
+            continue
         try:
-            aesgcm_old = AESGCM(base64.b64decode(key_b64))
-            from pegaprox.core.db import get_db
-            db = get_db()
-            for col in CLUSTER_ENCRYPTED_COLUMNS:
-                value = row[col]
-                if not value:
-                    continue
-                plain = db._decrypt_with_key(value, aesgcm_old)
-                updates.append(f'"{col}" = ?')
-                params.append(db._encrypt_with_key(plain, aesgcm_own)
-                              if aesgcm_own is not None else db._encrypt(plain))
+            plain = db._decrypt_with_key(value, AESGCM(base64.b64decode(key_b64)))
+            updates.append(f'"{col}" = ?')
+            params.append(db._encrypt_with_key(plain, aesgcm_own)
+                          if aesgcm_own is not None else db._encrypt(plain))
         except Exception as e:
             if not force:
                 raise FederationError(f'The credentials did not open under the '
                                       f'owner\'s key: {e}')
-            logging.warning(f"[FED] adoption of {cluster_id} keeps the mirrored "
-                            f"ciphertext ({e})")
+            logging.warning(f"[FED] adoption of {cluster_id} clears {col} "
+                            f"(did not open: {e})")
+            cleared.append(col)
+    # force without a key: everything that never opened is empty, the admin
+    # enters the credentials at the cluster again
+    for col in cleared:
+        updates.append(f'"{col}" = ?')
+        params.append('')
     if updates:
         params.append(cluster_id)
         conn.execute(f'UPDATE clusters SET {", ".join(updates)} WHERE id = ?',

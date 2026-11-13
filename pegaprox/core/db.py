@@ -4086,7 +4086,10 @@ class PegaProxDB:
                 "SELECT * FROM clusters WHERE fed_owner IN ('', ?)",
                 (_fed.instance_id(),))
         except Exception:
-            cursor.execute('SELECT * FROM clusters')
+            # fail closed: a federation state that cannot say who we are hides
+            # the mirrors (never lists them - their credentials are not ours to
+            # read), at the price of pausing the enrolled ones until it is fixed
+            cursor.execute("SELECT * FROM clusters WHERE fed_owner = ''")
         
         clusters = {}
         for row in cursor.fetchall():
@@ -4148,14 +4151,16 @@ class PegaProxDB:
         if not row:
             return None
         # Federation Phase 4: a mirror of another member's cluster is not this
-        # instance's to read - its credentials open under that member's key alone
+        # instance's to read - its credentials open under that member's key alone.
+        # A federation state that cannot say who we are hides mirrors the same way.
         try:
             if row['fed_owner']:
                 from pegaprox.core import federation as _fed
                 if row['fed_owner'] != _fed.instance_id():
                     return None
         except Exception:
-            pass
+            if row['fed_owner']:
+                return None
         
         # NS: Auto-migrate encrypted fields to AES-256-GCM if needed - Jan 2026
         pass_encrypted = row['pass_encrypted']
@@ -4287,10 +4292,10 @@ class PegaProxDB:
              node_ui_suffix,
              proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict,
              transfer_network,
-             created_at, updated_at)
+             created_at, updated_at, fed_owner)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?)
+                    ?, COALESCE((SELECT fed_owner FROM clusters WHERE id = ?), ''))
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -4349,7 +4354,8 @@ class PegaProxDB:
             1 if data.get('proxlb_pins_strict', existing['proxlb_pins_strict'] if existing else False) else 0,
             str(data.get('transfer_network', existing['transfer_network'] if existing else '') or '').strip(),
             existing['created_at'] if existing else now,
-            now
+            now,
+        cluster_id
         ))
         self.conn.commit()
     

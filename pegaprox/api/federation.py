@@ -184,11 +184,6 @@ def peer_member_added():
     if refused:
         return refused
     rec = _body().get('member')
-    # Phase 4: the notice carries the new member's field key (signed on the wire,
-    # sealed only where TLS seals it) - what a later adoption of its clusters opens
-    key = _body().get('field_key')
-    if isinstance(key, str) and key:
-        federation._remember_field_keys({(rec or {}).get('instance_id') or '': key})
     kept = federation.add_member(rec, origin=peer['instance_id'])
     if kept is None:
         full = len(federation.members()) >= federation.MAX_MEMBERS
@@ -196,6 +191,14 @@ def peer_member_added():
                                  f'{federation.MAX_MEMBERS} members already'
                                  if full else 'No member in that notice',
                         'code': 'FED_FULL' if full else 'FED_NO_MEMBER'}), 409
+    # Phase 4: the notice may carry the sender's OWN field key - what a later
+    # adoption of its clusters opens. It binds to the signature: nobody hands a
+    # key over another member's name (H1), and only the member itself replaces
+    # the key its peers already hold of it.
+    key = _body().get('field_key')
+    if isinstance(key, str) and key:
+        federation._remember_field_keys({peer['instance_id']: key},
+                                        only_self_of=peer['instance_id'])
     log_audit('system', 'federation.member_added',
               f"member {kept['instance_id']} ({kept['url']}) told by "
               f"{peer['instance_id']}", ip_address=get_client_ip())
