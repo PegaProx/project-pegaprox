@@ -59,6 +59,10 @@ def _prepared_update(app):
     page = app.page
     page.on('dialog', lambda d: d.accept())
     page.evaluate('() => { window.__ran = 0; }')
+    # the dashboard tells an admin about the update 2 s after the login, over everything
+    # else; on a busy machine that lands on the settings and takes the click below
+    page.get_by_text('New Version Available!').wait_for(timeout=15000)
+    page.get_by_role('button', name='Later').click()
     app.open_settings()
     page.locator('button', has_text=re.compile(r'^\s*Updates(\s*NEW)?\s*$')).first.click()
     page.get_by_role('button', name='Install Update').click()
