@@ -4073,9 +4073,20 @@ class PegaProxDB:
     # ========================================
     
     def get_all_clusters(self) -> dict:
-        """Get all clusters (returns dict like legacy format)"""
+        """Get all clusters (returns dict like legacy format).
+
+        Federation Phase 4: rows mirrored from another member (their credentials
+        are ciphertext under that member's field key) stay out - a mirror is a
+        disaster-recovery copy, not a cluster this instance manages, and reading
+        it would fail on the foreign key anyway."""
         cursor = self.conn.cursor()
-        cursor.execute('SELECT * FROM clusters')
+        try:
+            from pegaprox.core import federation as _fed
+            cursor.execute(
+                "SELECT * FROM clusters WHERE fed_owner IN ('', ?)",
+                (_fed.instance_id(),))
+        except Exception:
+            cursor.execute('SELECT * FROM clusters')
         
         clusters = {}
         for row in cursor.fetchall():
@@ -4136,6 +4147,15 @@ class PegaProxDB:
         
         if not row:
             return None
+        # Federation Phase 4: a mirror of another member's cluster is not this
+        # instance's to read - its credentials open under that member's key alone
+        try:
+            if row['fed_owner']:
+                from pegaprox.core import federation as _fed
+                if row['fed_owner'] != _fed.instance_id():
+                    return None
+        except Exception:
+            pass
         
         # NS: Auto-migrate encrypted fields to AES-256-GCM if needed - Jan 2026
         pass_encrypted = row['pass_encrypted']

@@ -646,11 +646,22 @@ def paired_side(sides):
 def _db_of(side):
     """A side's own database, built once: PegaProxDB is a hard singleton (its
     __new__ hands out one object however often it is called), so both the module
-    global and the class instance step aside while this one is made."""
+    global and the class instance step aside while this one is made. Each side
+    gets its own field key as well - an instance's credentials are sealed under
+    its key alone, which is the whole point of the adoption."""
     if getattr(side, 'db', None) is None:
+        import os as _os
         from pegaprox.core import db as db_mod
-        old_path = db_mod.DATABASE_FILE
+        keys_dir = _os.path.join(_os.path.dirname(side.file),
+                                 f'keys-{side.name}')
+        _os.makedirs(keys_dir, exist_ok=True)
+        key_file = _os.path.join(keys_dir, '.pegaprox_aes256.key')
+        if not _os.path.exists(key_file) or _os.path.getsize(key_file) != 32:
+            with open(key_file, 'wb') as fh:
+                fh.write(_os.urandom(32))
+        old_path, old_cfg = db_mod.DATABASE_FILE, db_mod.CONFIG_DIR
         db_mod.DATABASE_FILE = side.file.replace('fed-', 'db-').replace('.json', '.db')
+        db_mod.CONFIG_DIR = keys_dir
         saved_db, saved_inst = db_mod._db, db_mod.PegaProxDB._instance
         db_mod._db = None
         db_mod.PegaProxDB._instance = None
@@ -658,6 +669,7 @@ def _db_of(side):
             side.db = db_mod.get_db()
         finally:
             db_mod.DATABASE_FILE = old_path
+            db_mod.CONFIG_DIR = old_cfg
             db_mod._db = saved_db
             db_mod.PegaProxDB._instance = saved_inst
     return side.db
@@ -1086,3 +1098,152 @@ def test_the_vote_lands_on_disk_before_the_grant(tmp_path):
                                     'candidate': federation_ref_id(b),
                                     'term': 1, 'lease_s': 30})
         assert v2.get('granted') is False
+
+
+# --- the adoption (Phase 4) ------------------------------------------------------------
+
+def _blackhole_for(side, victim):
+    """A transport that answers nothing for the victim's address - a site gone."""
+    victim_url = URL[victim.name]
+    inner = side.runtime['transport']
+
+    def transport(url, method, path, body, fingerprint, timeout):
+        if url == victim_url:
+            return 0, None
+        return inner(url, method, path, body, fingerprint, timeout)
+    return transport
+
+
+def _expire_promises(side):
+    with at_db(side):
+        def expire(state):
+            for rec in (state.get('lease_promises') or {}).values():
+                rec['until'] = federation._lease_now() - 60
+            return True
+        federation._mutate(expire)
+
+
+def test_a_cluster_mirror_reaches_the_others(tmp_path):
+    a, b, c = _three(tmp_path)
+    _add_cluster(a, 'pve-1')
+    with at_db(a):
+        from pegaprox.core.db import get_db
+        secret = get_db()._encrypt('the-password')
+        conn = _db_of(a).conn
+        conn.execute("UPDATE clusters SET pass_encrypted = ? WHERE id = 'pve-1'",
+                     (secret,))
+        conn.commit()
+        federation.enroll_cluster('pve-1')
+    with at_db(b):
+        report = federation.sync_identities()
+        row = _db_of(b).conn.execute(
+            "SELECT fed_owner, pass_encrypted FROM clusters WHERE id = 'pve-1'").fetchone()
+        assert row['fed_owner'] == federation_ref_id(a)
+        # the ciphertext travelled as it was - sealed under the OWNER's key
+        assert row['pass_encrypted'] == secret
+        # and the readers of the table neither list the mirror nor break on it
+        from pegaprox.core.db import get_db
+        assert 'pve-1' not in get_db().get_all_clusters()
+        assert get_db().get_cluster('pve-1') is None
+
+
+def test_the_field_keys_travel_sealed(tmp_path):
+    a, b, c = _three(tmp_path)
+    a_id, b_id, c_id = federation_ref_id(a), federation_ref_id(b), federation_ref_id(c)
+    with at_db(a):
+        assert federation.peer_field_keys().get(b_id)
+        assert federation.peer_field_keys().get(c_id)
+    with at_db(b):
+        assert federation.peer_field_keys().get(a_id)
+        assert federation.peer_field_keys().get(c_id)
+    with at_db(c):
+        keys = federation.peer_field_keys()
+        assert keys.get(a_id) and keys.get(b_id)
+        assert keys[a_id] == federation_ref_key(a)
+        assert keys[a_id] != keys[b_id]
+
+
+def federation_ref_key(side):
+    with at_db(side):
+        return federation.field_key_b64()
+
+
+def test_an_adoption_needs_the_owner_gone(tmp_path):
+    a, b, c = _three(tmp_path)
+    _add_cluster(a, 'pve-2')
+    with at_db(a):
+        federation.enroll_cluster('pve-2')
+    with at_db(b):
+        federation.sync_identities()
+        # the owner answers, its lease stands: no takeover
+        with pytest.raises(federation.FederationError) as err:
+            federation.adopt_cluster('pve-2')
+        assert 'answered' in str(err.value)
+
+
+def test_an_adoption_takes_the_cluster_over(tmp_path):
+    a, b, c = _three(tmp_path)
+    _add_cluster(a, 'pve-3')
+    with at_db(a):
+        from pegaprox.core.db import get_db
+        get_db().conn.execute("UPDATE clusters SET pass_encrypted = ? "
+                              "WHERE id = 'pve-3'",
+                              (get_db()._encrypt('berlin-secret'),))
+        get_db().conn.commit()
+        federation.enroll_cluster('pve-3')
+    with at_db(b):
+        federation.sync_identities()
+    # the site dies and its lease runs out everywhere
+    b.runtime['transport'] = _blackhole_for(b, a)
+    c.runtime['transport'] = _blackhole_for(c, a)
+    for s in (a, b, c):
+        _expire_promises(s)
+    with at_db(b):
+        lease = federation.adopt_cluster('pve-3')
+        assert lease.get('term', 0) >= 2
+        assert federation.cluster_owner('pve-3') == federation.instance_id()
+        assert federation.takes_writes_for('pve-3') is True
+        # the credential crossed over: sealed under B's own key now, and readable
+        from pegaprox.core.db import get_db
+        row = _db_of(b).conn.execute(
+            "SELECT pass_encrypted FROM clusters WHERE id = 'pve-3'").fetchone()
+        assert get_db()._decrypt(row['pass_encrypted']) == 'berlin-secret'
+
+
+def test_an_adoption_without_the_key_needs_force(tmp_path):
+    a, b, c = _three(tmp_path)
+    _add_cluster(a, 'pve-4')
+    with at_db(a):
+        federation.enroll_cluster('pve-4')
+    with at_db(b):
+        federation.sync_identities()
+
+        def forget(state):
+            state['field_keys'] = {}
+            return True
+        federation._mutate(forget)
+    b.runtime['transport'] = _blackhole_for(b, a)
+    c.runtime['transport'] = _blackhole_for(c, a)
+    for s in (a, b, c):
+        _expire_promises(s)
+    with at_db(b):
+        with pytest.raises(federation.FederationError) as err:
+            federation.adopt_cluster('pve-4')
+        assert 'field key' in str(err.value)
+        lease = federation.adopt_cluster('pve-4', force=True)
+        assert lease.get('term', 0) >= 2
+
+
+def test_a_local_cluster_is_never_overwritten_by_a_mirror(tmp_path):
+    a, b, c = _three(tmp_path)
+    _add_cluster(a, 'pve-5', name='theirs')
+    _add_cluster(b, 'pve-5', name='ours')
+    with at_db(a):
+        federation.enroll_cluster('pve-5')
+    with at_db(b):
+        report = federation.sync_identities()
+        row = _db_of(b).conn.execute(
+            "SELECT name FROM clusters WHERE id = 'pve-5'").fetchone()
+        assert row['name'] == 'ours'
+        assert any('pve-5' in c_ for c_ in
+                   report[federation_ref_id(a)]['conflicts'])

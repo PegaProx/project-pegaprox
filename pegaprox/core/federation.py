@@ -85,7 +85,10 @@ def _default_state():
             # Phase 3: the leases held here and the promises given - state like the
             # rest, persisted and read back (a key not named here is dropped on
             # load, as _load takes only what the default knows)
-            'my_leases': {}, 'lease_promises': {}}
+            'my_leases': {}, 'lease_promises': {},
+            # Phase 4: the field keys the members handed over, sealed at the
+            # pairing - what an adoption opens the mirrored credentials with
+            'field_keys': {}}
 
 
 def _read(path):
@@ -435,6 +438,12 @@ def accept_join(code, url, joiner_id, joiner_key, site):
     own = {'url': parts['url'], 'public_key': public_key(), 'site': state.get('site') or '',
            'fingerprint': parts['fingerprint'], 'paired_at': 0, 'last_seen': 0}
     body = {'members': {instance_id(): own, **others}}
+    # Phase 4: the field keys travel sealed with the member list - the issuer
+    # introduces every key it holds, its own first. What a member holds, an
+    # adoption can open; the state file keeps them beside the signing key.
+    held_keys = peer_field_keys()
+    body['field_keys'] = {instance_id(): field_key_b64(),
+                          **{iid: k for iid, k in held_keys.items() if iid != joiner_id}}
     sealed = ha_wire.seal(parts['secret'], body,
                           f'federation-join:{instance_id()}:{joiner_id}')
     notice = {'member': {'instance_id': joiner_id, **rec}}
@@ -484,6 +493,8 @@ def join(code, own_url, site=''):
     listed = opened.get('members') if isinstance(opened, dict) else None
     if not isinstance(listed, dict) or parts['instance_id'] not in listed:
         raise FederationError('The answer of the other instance carries no member list')
+    # Phase 4: the field keys came sealed with the member list
+    _remember_field_keys(opened.get('field_keys'))
 
     def go(state):
         # a member the issuer lists that this instance had removed is back: the
@@ -515,6 +526,16 @@ def join(code, own_url, site=''):
     if out.get('capped'):
         logging.warning(f"[FED] the member list of {parts['instance_id']} was cut at "
                         f"{MAX_MEMBERS} members")
+    # the joiner says itself hello to the members the answer listed, its field key
+    # with it: what a later adoption of ITS clusters opens, at theirs (signed on
+    # the wire, sealed only where TLS seals it - the trust every member-added has)
+    hello = {'member': {'instance_id': me, 'url': own_url, 'public_key': public_key(),
+                        'site': site, 'fingerprint': parts['fingerprint'],
+                        'paired_at': int(time.time()), 'last_seen': 0},
+             'field_key': field_key_b64()}
+    for iid in listed:
+        if iid != me:
+            push(iid, 'member-added', hello)
     # the identities of the issuer come along at once, so a joined member can serve
     # the users of the federation from the first minute - best effort, the admin
     # sync route and the reconcile cover what this misses
@@ -1036,8 +1057,10 @@ def identity_snapshot_body():
     body['tombstones'] = [t for t in identity_tombstones()
                           if (t.get('kind'), t.get('key')) not in present]
     canon = json.dumps(body['tombstones'], separators=(',', ':'), sort_keys=True) + canon
-    body['etag'] = hashlib.sha256(canon.encode()).hexdigest()
-    body['etag'] = hashlib.sha256(canon.encode()).hexdigest()
+    # Phase 4: the clusters this instance leads travel with the same answer
+    c_rows, c_canon = _cluster_mirror_body()
+    body['clusters'] = c_rows
+    body['etag'] = hashlib.sha256((canon + c_canon).encode()).hexdigest()
     return body
 
 
@@ -1196,6 +1219,17 @@ def apply_identity_snapshot(body, sender=None):
         except Exception:
             pass
         raise
+    # Phase 4: the clusters the home leads become mirrors here - credentials as
+    # ciphertext under the home's field key, opened only at an adoption
+    try:
+        _apply_cluster_mirrors(home, body.get('clusters'), report)
+        conn.commit()
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logging.warning(f"[FED] cluster mirrors of {home} not applied: {e}")
     # what a mirror lost or had changed on it ends the sessions it opened here: a
     # disabled or re-passworded account does not keep a sign-in at this site
     for name in sorted(changed_users | dropped_users):
@@ -1680,3 +1714,232 @@ def enroll_cluster(cluster_id):
         _mutate(drop)
         raise FederationError('The cluster row did not hold its owner - try again')
     return lease
+
+
+# --- cluster replication (Phase 4) -------------------------------------------------------
+#
+# What a federation member leads, the others shadow: an enrolled cluster's row -
+# credentials included, as ciphertext under the owner's field key - mirrors to every
+# member with the identity sync. A mirror is not managed here (no manager, no
+# listing, no writes: the Phase 3 gate answers FED_FOREIGN for it), it is the
+# disaster-recovery copy. When the owner is gone for good, a member adopts the
+# cluster: the voters hand it the lease (their promises enforce the old owner's
+# lease having run out - the protocol fence), and the mirrored credentials open
+# under the owner's field key, exchanged sealed at the pairing, and re-encrypt
+# under this instance's own key.
+
+# what travels of a cluster row: everything but the home marker itself
+CLUSTER_SYNC_COLUMNS = ('id', 'name', 'host', 'user', 'pass_encrypted',
+                        'ssl_verification', 'migration_threshold',
+                        'migration_tolerance', 'check_interval', 'auto_migrate',
+                        'balance_containers', 'balance_local_disks', 'dry_run',
+                        'enabled', 'ha_enabled', 'fallback_hosts', 'ssh_user',
+                        'ssh_key_encrypted', 'ssh_port', 'api_port', 'ha_settings',
+                        'created_at', 'updated_at', 'cluster_type',
+                        'transfer_network')
+
+
+def enrolled_cluster_rows():
+    """The cluster rows this instance leads (enrolled: fed_owner names this
+    instance) - what the snapshot carries to the other members."""
+    try:
+        cur = _identities_conn().execute(
+            'SELECT %s FROM clusters WHERE fed_owner = ? ORDER BY id'
+            % ', '.join(f'"{c}"' for c in CLUSTER_SYNC_COLUMNS), (instance_id(),))
+        return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        logging.warning(f"[FED] could not read the enrolled clusters: {e}")
+        return []
+
+
+def _apply_cluster_mirrors(home, rows_in, report):
+    """The mirror half of the cluster sync: rows the home leads become mirrors
+    here. A local cluster (unenrolled, '') or one this instance leads is never
+    touched - an id that collides goes to the report, not over the local row."""
+    if not isinstance(rows_in, list):
+        return
+    conn = _identities_conn()
+    cols = CLUSTER_SYNC_COLUMNS
+    keep = set()
+    for row in rows_in:
+        if not isinstance(row, dict):
+            continue
+        cid = row.get('id')
+        if not isinstance(cid, str) or not CLUSTER_ID_RE.fullmatch(cid):
+            continue
+        keep.add(cid)
+        held = conn.execute('SELECT fed_owner FROM clusters WHERE id = ?',
+                            (cid,)).fetchone()
+        if held is not None and held['fed_owner'] != home:
+            report['conflicts'].append(f'cluster "{cid}" homed here')
+            continue
+        values = [row.get(c) for c in cols if c != 'id']
+        if held is None:
+            fields = ', '.join(f'"{c}"' for c in cols) + ', fed_owner'
+            marks = ', '.join('?' * (len(cols) + 1))
+            conn.execute(f'INSERT INTO clusters ({fields}) VALUES ({marks})',
+                         [cid] + values + [home])
+            report['applied'] += 1
+        else:
+            sets = ', '.join(f'"{c}" = ?' for c in cols if c != 'id')
+            conn.execute(f'UPDATE clusters SET {sets} WHERE id = ?',
+                         values + [cid])
+            report['updated'] += 1
+    # a mirror of the home that the snapshot no longer lists is gone at the home:
+    # gone here too. Local rows and this instance's own are not in the WHERE.
+    for held_row in conn.execute('SELECT id FROM clusters WHERE fed_owner = ?',
+                                 (home,)).fetchall():
+        if held_row['id'] not in keep:
+            conn.execute('DELETE FROM clusters WHERE id = ? AND fed_owner = ?',
+                         (held_row['id'], home))
+            report['deleted'] += 1
+
+
+def _cluster_mirror_body():
+    """The clusters section of the snapshot, with the etag over it."""
+    rows = enrolled_cluster_rows()
+    canon = json.dumps(rows, separators=(',', ':'), sort_keys=True)
+    return rows, canon
+
+
+# --- the adoption (Phase 4) ---------------------------------------------------------------
+#
+# A member that is gone for good has its clusters taken over by another: the
+# voters hand out the lease only past the old promise (the protocol fence - a
+# live owner's lease blocks the adoption at every voter), the mirrored row is
+# already here, and its credentials open under the owner's field key, exchanged
+# sealed at the pairing, and seal again under this instance's own key.
+
+CLUSTER_ENCRYPTED_COLUMNS = ('pass_encrypted', 'ssh_key_encrypted', 'ha_settings')
+
+
+def _field_key_file():
+    return os.path.join(CONFIG_DIR, '.pegaprox_aes256.key')
+
+
+def field_key_b64():
+    """This instance's field key (the AES-256 key the credential columns are
+    sealed under), as base64 - what the sealed join answer carries. The living
+    database holds its raw bytes; the file is the fallback."""
+    try:
+        from pegaprox.core.db import get_db
+        raw = getattr(get_db(), 'aes_key', None)
+        if isinstance(raw, (bytes, bytearray)) and len(raw) == 32:
+            return base64.b64encode(bytes(raw)).decode()
+    except Exception:
+        pass
+    try:
+        with open(_field_key_file(), 'rb') as fh:
+            raw = fh.read()
+        if len(raw) == 32:
+            return base64.b64encode(raw).decode()
+    except Exception:
+        pass
+    return ''
+
+
+def peer_field_keys():
+    """The field keys the members handed over, {instance_id: base64 key}. Sealed
+    at the pairing, kept in the state file beside the signing key."""
+    keys = _load().get('field_keys') or {}
+    return dict(keys) if isinstance(keys, dict) else {}
+
+
+def _remember_field_keys(keys):
+    """Take {instance_id: base64} into the state; only members we know keep
+    theirs, and an empty key never overwrites one already held."""
+    if not isinstance(keys, dict):
+        return
+
+    def go(state):
+        held = state.setdefault('field_keys', {})
+        for iid, key in keys.items():
+            if not ha_wire.ID_RE.fullmatch(iid or '') or not isinstance(key, str):
+                continue
+            try:
+                if base64.b64decode(key, validate=True).__len__() == 32:
+                    held[iid] = key
+            except Exception:
+                continue
+        return True
+    _mutate(go)
+
+
+def adopt_cluster(cluster_id, force=False):
+    """Take over the cluster of a member that is gone for good. The lease is the
+    fence: the voters grant it only past the old owner's promise, so a live
+    owner (or a partitioned one, until its lease runs out) blocks the adoption.
+    The mirrored credentials open under the owner's field key and seal under
+    this instance's own. Raises FederationError with what stands in the way."""
+    if not CLUSTER_ID_RE.fullmatch(cluster_id or ''):
+        raise FederationError('That cluster id cannot be adopted')
+    owner = cluster_owner(cluster_id)
+    if owner is None:
+        raise FederationError('No such cluster here - sync first, the mirror '
+                              'must exist')
+    if not owner:
+        raise FederationError('That cluster is this instance\'s own already')
+    if owner == instance_id():
+        raise FederationError('That cluster is already led here')
+    # the belt before the fence: an owner that answers is not gone
+    status, _ = call_peer(owner, 'GET', STATUS_PATH, timeout=5)
+    if status == 200:
+        raise FederationError('The owner answered - it is not gone. Take the '
+                              'cluster over there, or remove the member first')
+    keys = peer_field_keys()
+    key = keys.get(owner)
+    if not key and not force:
+        raise FederationError(f'The field key of the owner is not held here - '
+                              f'without it the credentials cannot cross over')
+    lease = acquire_lease(cluster_id)
+    if lease.get('failed'):
+        raise FederationError(f'The federation did not back the takeover '
+                              f'({lease.get("votes")}/{lease.get("needed")} votes) '
+                              f'- the owner\'s lease may still stand')
+    _reseat_credentials(cluster_id, owner, key, force)
+    _set_cluster_owner(cluster_id, instance_id())
+    return lease
+
+
+def _reseat_credentials(cluster_id, owner, key_b64, force):
+    """Open the mirrored credential columns under the owner's field key and seal
+    them under this instance's own. Without the key (force), the columns carry
+    what they carried - the admin re-enters them at the cluster."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    conn = _identities_conn()
+    cols = ', '.join(f'"{c}"' for c in CLUSTER_ENCRYPTED_COLUMNS)
+    row = conn.execute(f'SELECT {cols} FROM clusters WHERE id = ?',
+                       (cluster_id,)).fetchone()
+    if row is None:
+        return
+    updates, params = [], []
+    aesgcm_own = None
+    try:
+        from pegaprox.core.db import get_db
+        aesgcm_own = get_db().aesgcm
+    except Exception:
+        pass
+    if key_b64:
+        try:
+            aesgcm_old = AESGCM(base64.b64decode(key_b64))
+            from pegaprox.core.db import get_db
+            db = get_db()
+            for col in CLUSTER_ENCRYPTED_COLUMNS:
+                value = row[col]
+                if not value:
+                    continue
+                plain = db._decrypt_with_key(value, aesgcm_old)
+                updates.append(f'"{col}" = ?')
+                params.append(db._encrypt_with_key(plain, aesgcm_own)
+                              if aesgcm_own is not None else db._encrypt(plain))
+        except Exception as e:
+            if not force:
+                raise FederationError(f'The credentials did not open under the '
+                                      f'owner\'s key: {e}')
+            logging.warning(f"[FED] adoption of {cluster_id} keeps the mirrored "
+                            f"ciphertext ({e})")
+    if updates:
+        params.append(cluster_id)
+        conn.execute(f'UPDATE clusters SET {", ".join(updates)} WHERE id = ?',
+                     params)
+        conn.commit()

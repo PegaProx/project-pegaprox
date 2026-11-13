@@ -184,6 +184,11 @@ def peer_member_added():
     if refused:
         return refused
     rec = _body().get('member')
+    # Phase 4: the notice carries the new member's field key (signed on the wire,
+    # sealed only where TLS seals it) - what a later adoption of its clusters opens
+    key = _body().get('field_key')
+    if isinstance(key, str) and key:
+        federation._remember_field_keys({(rec or {}).get('instance_id') or '': key})
     kept = federation.add_member(rec, origin=peer['instance_id'])
     if kept is None:
         full = len(federation.members()) >= federation.MAX_MEMBERS
@@ -682,6 +687,49 @@ def unenroll_cluster(cluster_id):
               f'cluster {cluster_id} taken out of the federation',
               ip_address=get_client_ip())
     return jsonify({'unenrolled': cluster_id})
+
+
+@bp.route('/api/federation/clusters/<cluster_id>/adopt', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN])
+def adopt_cluster(cluster_id):
+    """Take over the cluster of a member that is gone for good. The voters hand
+    the lease only past the old owner's promise (a live owner blocks this), and
+    the mirrored credentials cross over under this instance's own key. ADOPT is
+    the word; force adopts without the owner's field key, credentials and all."""
+    denied = _refuse_confined_admin()
+    if denied:
+        return denied
+    denied = _refuse_without_reauth('adopting a cluster')
+    if denied:
+        return denied
+    data = _body()
+    if data.get('confirm') != 'ADOPT':
+        return jsonify({'error': 'Type ADOPT to take the cluster over'}), 400
+    try:
+        lease = federation.adopt_cluster(cluster_id, force=data.get('force') is True)
+    except federation.FederationError as e:
+        return jsonify({'error': str(e)}), 409
+    # the adopted cluster is this instance's now: its manager starts the way a
+    # standby's rebuild starts one - and if the cluster is unreachable, the
+    # adoption stands and the manager retries at the next boot
+    started = False
+    try:
+        from pegaprox.core.db import get_db
+        cluster = get_db().get_cluster(cluster_id)
+        if cluster:
+            from pegaprox import globals as g
+            from pegaprox.app import _start_managers
+            _start_managers({cluster_id: cluster}, only=())
+            started = cluster_id in getattr(g, 'cluster_managers', {})
+    except Exception as e:
+        logging.warning(f"[FED] the adopted cluster {cluster_id} did not start "
+                        f"its manager yet: {e}")
+    log_audit(_user(), 'federation.cluster_adopted',
+              f'cluster {cluster_id} adopted (lease term {lease.get("term")}, '
+              f'{lease.get("votes")} votes, manager '
+              f'{"started" if started else "pending"})',
+              ip_address=get_client_ip())
+    return jsonify({'adopted': cluster_id, 'lease': lease, 'manager': started})
 
 
 @bp.route('/api/federation/clusters/<cluster_id>/renew', methods=['POST'])
