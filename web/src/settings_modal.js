@@ -10369,10 +10369,12 @@
             async function fedSend(method, path, body, fallback) {
                 let r;
                 try {
+                    // a GET carries no body - a browser throws on the spot and the
+                    // request never leaves, which left the panel reading as broken
                     r = await fetch(`${API_URL}/federation/${path}`, {
                         method, credentials: 'include',
                         headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body || {})
+                        ...(method !== 'GET' ? { body: JSON.stringify(body || {}) } : {})
                     });
                 } catch (_) {
                     return { ok: false, error: fallback, code: '' };
@@ -10660,7 +10662,7 @@
                                     </table>
                                 </div>
                                 <div className="flex items-center gap-2 pt-1 flex-wrap">
-                                    <span className="text-xs text-gray-500">{t('fedAddSiteHint')}</span>
+                                    <span className="text-xs text-gray-500">{t('fedAddSiteHintJoined')}</span>
                                     <span className="flex-1"></span>
                                     <button className={HA_GROUP_GHOST} data-fed-leave disabled={!!busy} onClick={() => setConfirmBox(confirmProps('leave', '', '', 'LEAVE', true))}>
                                         <Icons.LogOut className="w-3.5 h-3.5" />{t('fedLeave')}
