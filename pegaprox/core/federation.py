@@ -1570,8 +1570,14 @@ def acquire_lease(cluster_id, lease_s=None):
     lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= 300 \
         else LEASE_SECONDS
     me = instance_id()
+    # the term this instance already knows on the cluster: its lease, and its own
+    # word as a voter (which outlives the lease). Asking below that refuses at
+    # home - and a round that half-grants plants a live promise at the peers that
+    # blocks the corrected retry for a whole lease span
+    with _lock:
+        promised = (( _load().get('lease_promises') or {}).get(cluster_id) or {})
     held = my_leases().get(cluster_id) or {}
-    term = int(held.get('term') or 0) + 1
+    term = max(int(held.get('term') or 0), int(promised.get('term') or 0)) + 1
     granted, held_high = _vote_round(cluster_id, me, term, lease_s)
     if granted < _needed_votes() and held_high >= term:
         # somebody holds a newer word on this cluster: ask again past its end
