@@ -524,7 +524,8 @@ def test_with_the_check_on_a_referral_takes_no_bind_elsewhere(request, db, direc
 @pytest.mark.parametrize('ldaps,starttls', [(False, True), (False, False)], ids=['starttls', 'plain'])
 def test_without_the_check_a_referral_is_followed_as_before(db, directory, pki, ldaps, starttls):
     """Installs that rely on referrals (a base DN at the forest root) and do not check the
-    certificate keep following them: nothing the check would protect is lost there."""
+    certificate keep following them, as before. Not free of cost: from LDAPS an ldap://
+    referral still gets its binds in plain text, which is what the check on prevents."""
     from pegaprox.utils.ldap import ldap_authenticate
     elsewhere = directory(False)
     d = directory(ldaps, groups=(), refer=f'ldap://localhost:{elsewhere.port}/{BASE_DN}')

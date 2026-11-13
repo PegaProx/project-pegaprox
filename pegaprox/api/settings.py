@@ -7247,7 +7247,8 @@ def test_ldap():
         # Step 2: Bind with service account
         # NS: same fix as ldap_authenticate - starttls before bind!!
         use_starttls = config['use_starttls'] and not config['use_ssl']
-        # no referrals followed with the check on, as in ldap_authenticate
+        # no referrals followed with the check on, as in ldap_authenticate; without it they
+        # are, also from LDAPS to a plain ldap:// one, as the login does
         follow = not ldap_transport(config['server'], config['use_ssl'], config['use_starttls'],
                                     config['verify_tls'])[1]
         

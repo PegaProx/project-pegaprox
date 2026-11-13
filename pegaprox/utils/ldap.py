@@ -311,8 +311,9 @@ def ldap_authenticate(username: str, password: str) -> dict:
     # MK Nov 2026 - ldap3 follows a referral on a connection of its own, built without the
     # CA and the check: from LDAPS an ldap:// referral binds in plain text, after STARTTLS it
     # runs STARTTLS checking nothing. With the check on that would undo it, so referrals are
-    # not followed then. Without the check nothing is lost by following them, and installs
-    # that rely on them (a base DN at the forest root) keep doing so
+    # not followed then. Without the check they still are, so installs that rely on them (a
+    # base DN at the forest root) keep working. That is not free: LDAPS without the check
+    # only keeps out someone who listens, and an ldap:// referral gives up even that
     follow = not ldap_transport(server_url, ldap_config['use_ssl'], ldap_config['use_starttls'],
                                 ldap_config.get('verify_tls', False))[1]
     
