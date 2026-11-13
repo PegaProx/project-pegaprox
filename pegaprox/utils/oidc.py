@@ -800,7 +800,7 @@ def oidc_name_from_id_token(user_info: dict, id_claims: dict) -> dict:
     unverified decode, and only for the same subject (OIDC Core 5.3.2).
     """
     if user_info.get('preferred_username') or user_info.get('email'):
-        return user_info
+        return _with_token_email_flag(user_info, id_claims)
     if not oidc_id_token_verified(id_claims):
         return user_info
     sub = user_info.get('sub')
@@ -811,6 +811,9 @@ def oidc_name_from_id_token(user_info: dict, id_claims: dict) -> dict:
         value = id_claims.get(claim)
         if isinstance(value, str) and value:
             named[claim] = value
+    # the flag travels with the address it is about, oidc_derive_username reads it
+    if named.get('email') and 'email_verified' in id_claims:
+        named['email_verified'] = id_claims['email_verified']
     return named
 
 
@@ -819,9 +822,36 @@ def _claim_text(value):
     return value if isinstance(value, str) and value.strip() else None
 
 
+# MK Nov 2026 - how the IdPs write "no": a JSON false, a 0, or one of these words in any case
+_EMAIL_FLAG_NO = frozenset(('false', '0', 'no', 'n', 'off'))
+
+
 def _email_unverified(source):
     flag = source.get('email_verified')
-    return flag is False or (isinstance(flag, str) and flag.strip().lower() == 'false')
+    if isinstance(flag, bool):
+        return flag is False
+    if isinstance(flag, (int, float)):
+        return flag == 0
+    return isinstance(flag, str) and flag.strip().lower() in _EMAIL_FLAG_NO
+
+
+def _with_token_email_flag(userinfo: dict, id_claims) -> dict:
+    """userinfo, with the email_verified of the verified ID token when it carries the same
+    address without a flag of its own.
+
+    MK Nov 2026 - a userinfo answer that leaves the flag out says nothing about the address,
+    the token of the same subject may. Only ever turns a name off, so a userinfo answer
+    without a sub counts as the token's subject here.
+    """
+    if 'email_verified' in userinfo or not oidc_id_token_verified(id_claims) \
+            or 'email_verified' not in id_claims:
+        return userinfo
+    email, token_email, sub = userinfo.get('email'), id_claims.get('email'), userinfo.get('sub')
+    if (not isinstance(email, str) or not isinstance(token_email, str)
+            or email.strip().lower() != token_email.strip().lower()
+            or (sub and sub != id_claims.get('sub'))):
+        return userinfo
+    return dict(userinfo, email_verified=id_claims['email_verified'])
 
 
 def oidc_username_claim_value(userinfo: dict, id_claims: dict, claim: str):
@@ -838,7 +868,8 @@ def oidc_username_claim_value(userinfo: dict, id_claims: dict, claim: str):
     userinfo = userinfo if isinstance(userinfo, dict) else {}
     value = _claim_text(userinfo.get(claim))
     if value:
-        return None if claim == 'email' and _email_unverified(userinfo) else value
+        unverified = claim == 'email' and _email_unverified(_with_token_email_flag(userinfo, id_claims))
+        return None if unverified else value
     if not isinstance(id_claims, dict) or not oidc_id_token_verified(id_claims):
         return None
     if userinfo:
@@ -1210,6 +1241,14 @@ def oidc_derive_username(user_info: dict, users: dict = None, name: str = None) 
     else:
         raw_username = (user_info.get('preferred_username')
                         or user_info.get('email', ''))
+        # MK Nov 2026 - an address the IdP marks as not verified is one anybody could
+        # have typed in at a self-service sign-up. It names nobody: the sign-in goes on
+        # as one without a name, which finds the account already bound to its sub.
+        # Only an explicit false - Entra and AD FS send no flag at all.
+        if raw_username and not user_info.get('preferred_username') and _email_unverified(user_info):
+            logging.warning("[OIDC] the email claim is marked as not verified, so it does not "
+                            "name the account - going on as a sign-in without a name")
+            raw_username = ''
 
     # Char set matches sanitize_username()'s allowlist. '+' belongs here for the
     # same reason '@' does: dropping it silently merges identities, so
