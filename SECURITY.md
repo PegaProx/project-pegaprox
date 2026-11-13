@@ -141,9 +141,12 @@ PegaProx implements the following security measures:
 - **Transport security:** The web interface is served over HTTPS, with a self-signed
   certificate until you add your own or use the built-in ACME support. TLS certificate
   verification can be enabled per connection for Proxmox VE clusters, XCP-ng pools and ESXi
-  hosts, and for LDAP in the LDAP settings. It is off by default because these systems usually
-  start with self-signed certificates. PegaProx logs a security warning while it is off for a
-  Proxmox VE cluster or for LDAP.
+  hosts. It is off by default because these systems usually start with self-signed
+  certificates. LDAP set up since 1.5.0 starts with STARTTLS and certificate verification on,
+  and the CA certificate of an internal CA goes into the LDAP settings. A directory configured
+  before keeps its settings, and the LDAP settings show a note while it runs in plain text or
+  without the check. PegaProx logs a security warning while verification is off for a Proxmox
+  VE cluster or for LDAP, and while LDAP runs in plain text.
 - **SSH host key verification:** Host keys are pinned on first contact and a changed key is
   rejected. A strict mode that also rejects unknown hosts is enabled with
   `PEGAPROX_SSH_STRICT_HOST_KEYS=1`.
@@ -210,7 +213,7 @@ To keep your PegaProx installation secure:
    cluster. If the cluster was unreachable at that moment, delete the token in Proxmox VE
    (Datacenter → Permissions → API Tokens).
 7. **Enable TLS certificate verification** for cluster and LDAP connections, using a trusted
-   certificate or your own CA.
+   certificate or your own CA (for LDAP, paste that CA certificate into the LDAP settings).
 8. **Enable strict SSH host key checking** (`PEGAPROX_SSH_STRICT_HOST_KEYS=1`) once all nodes
    are known.
 9. **Use full-database encryption** if you need the database encrypted as a whole (an install
