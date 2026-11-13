@@ -6,6 +6,7 @@ PegaProx LDAP Authentication - Layer 4
 import copy
 import json
 import logging
+import re
 import time
 import hashlib
 import base64
@@ -40,6 +41,7 @@ def get_ldap_settings() -> dict:
         'default_role': settings.get('ldap_default_role', ROLE_VIEWER),
         'auto_create_users': settings.get('ldap_auto_create_users', True),
         'verify_tls': settings.get('ldap_verify_tls', False),  # NS: Mar 2026 - default off, most AD envs use internal CAs not in system trust store (#108)
+        'ca_cert': settings.get('ldap_ca_cert', '') or '',  # MK Nov 2026 - such an internal CA, as PEM
         # MK: Feb 2026 - Custom group→role mappings for custom roles & tenants
         # Format: [{"group_dn": "CN=...", "role": "custom_role_name", "tenant": "tenant_id", "permissions": [...]}]
         'group_mappings': settings.get('ldap_group_mappings', []),
@@ -60,6 +62,176 @@ def get_ldap_settings() -> dict:
                            f"server='{config['server']}', base_dn='{config['base_dn']}'. "
                            f"DB keys present: {[k for k in settings if k.startswith('ldap_')]} (raw dump failed: {e})")
     return config
+
+
+# MK Nov 2026 - room for a root and a few intermediates. A whole system bundle is not what
+# the field is for, the system trust store is used when it is empty
+LDAP_CA_CERT_MAX = 64 * 1024
+
+LDAP_TLS_HINT = ('If the directory certificate comes from an internal CA, paste that CA '
+                 'certificate into "CA Certificate" in the LDAP settings. Turning off "Verify TLS '
+                 'Certificate" is the last resort: anyone on the network path can then pose as '
+                 'the directory.')
+
+
+_CERT_BLOCK = re.compile(r'-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----', re.S)
+
+
+def ldap_ca_cert_clean(value):
+    """The CA certificate field as it is stored, and why it cannot be stored.
+
+    Returns (pem, None) or ('', error). Empty is fine. Otherwise the text is one or more
+    BEGIN/END CERTIFICATE blocks with nothing but whitespace around them, each block has to
+    load as a certificate the way ldap3 will load it, and what is stored is the blocks
+    written out again. Text around them, a private key above all, is turned down rather
+    than kept: the field goes out with every settings read and every backup."""
+    if value is None:
+        return '', None
+    if not isinstance(value, str):
+        return '', 'The LDAP CA certificate must be PEM text'
+    text = value.strip()
+    if not text:
+        return '', None
+    if len(text) > LDAP_CA_CERT_MAX:
+        return '', (f'The LDAP CA certificate is larger than {LDAP_CA_CERT_MAX // 1024} KB. Paste '
+                    f'the CA that issued the directory certificate, not a whole bundle.')
+    unreadable = ('The LDAP CA certificate could not be read. Paste one or more PEM certificates, '
+                  'each starting with -----BEGIN CERTIFICATE-----.')
+    outside = _CERT_BLOCK.sub('', text)
+    if re.search(r'private\s*key', outside, re.I):
+        return '', ('The LDAP CA certificate field holds a private key. Paste only the CA '
+                    'certificate, the key stays on the CA.')
+    if outside.strip():
+        return '', ('The LDAP CA certificate field holds text besides the certificates. Paste only '
+                    'the -----BEGIN CERTIFICATE----- blocks.')
+    import binascii
+    import ssl
+    blocks = []
+    for body in _CERT_BLOCK.findall(text):
+        try:
+            der = base64.b64decode(''.join(body.split()), validate=True)
+            ssl.create_default_context(cadata=der)
+        except (binascii.Error, ValueError, TypeError, ssl.SSLError):
+            return '', unreadable
+        blocks.append(ssl.DER_cert_to_PEM_cert(der).strip())
+    if not blocks:
+        return '', unreadable
+    return '\n'.join(blocks), None
+
+
+def ldap_ca_cert_error(value):
+    """Why `value` cannot be the CA certificate of the directory, None when it can."""
+    return ldap_ca_cert_clean(value)[1]
+
+
+def ldap_split_server(value):
+    """(host, use_ssl, port) of a server field. use_ssl and port are None unless the field
+    is an ldap:// or ldaps:// URL, whose scheme ldap3 takes over the LDAPS toggle and whose
+    port over the port setting. The host comes back without the scheme, as ldap3 reads it."""
+    text = str(value or '').strip()
+    low = text.lower()
+    if low.startswith('ldaps://'):
+        use_ssl, rest = True, text[8:]
+    elif low.startswith('ldap://'):
+        use_ssl, rest = False, text[7:]
+    else:
+        return text, None, None
+    rest = rest.rstrip('/')
+    port = None
+    if rest.startswith('['):
+        host, sep, tail = rest[1:].partition(']')
+        if sep:
+            rest = host
+            if tail.startswith(':') and tail[1:].isdecimal():
+                port = int(tail[1:])
+    elif rest.count(':') == 1:
+        host, _, tail = rest.partition(':')
+        if tail.isdecimal():
+            rest, port = host, int(tail) or None
+    return rest, use_ssl, port
+
+
+def ldap_transport(server, use_ssl, use_starttls, verify):
+    """What a login with these settings runs over: ('ldaps' | 'starttls' | 'plain', checked).
+
+    MK Nov 2026 - read the way ldap_authenticate and ldap3 act on them, not off the toggles
+    alone: a scheme in the server wins over the LDAPS toggle, STARTTLS is skipped while that
+    toggle is on, and the certificate is only checked when one of the toggles built the Tls
+    (LDAPS through the scheme alone runs on ldap3's default, which checks nothing). The tab
+    note and the test say this, so they do not call a plain bind checked."""
+    scheme_ssl = ldap_split_server(server)[1]
+    ssl_on = bool(use_ssl) if scheme_ssl is None else scheme_ssl
+    if ssl_on:
+        kind = 'ldaps'
+    elif use_starttls and not use_ssl:
+        kind = 'starttls'
+    else:
+        kind = 'plain'
+    return kind, kind != 'plain' and bool(verify) and bool(use_ssl or use_starttls)
+
+
+def ldap_tls(use_tls, verify, ca_cert=''):
+    """The ldap3 Tls for LDAPS or STARTTLS, None for plain LDAP.
+
+    With the check on, the certificate is checked against the pasted CA when there is one
+    (and only against it), against the system trust store when there is none."""
+    if not use_tls:
+        return None
+    import ssl
+    from ldap3 import Tls
+    if not verify:
+        return Tls(validate=ssl.CERT_NONE)
+    ca = str(ca_cert or '').strip()
+    if ca:
+        return Tls(validate=ssl.CERT_REQUIRED, ca_certs_data=ca)
+    return Tls(validate=ssl.CERT_REQUIRED)
+
+
+def _is_ip(host):
+    import ipaddress
+    try:
+        ipaddress.ip_address(str(host).strip('[]'))
+        return True
+    except ValueError:
+        return False
+
+
+def ldap_tls_hint(err, server=''):
+    """What an admin can do about a failed TLS handshake, '' when `err` is something else."""
+    import ssl
+    text = str(err).lower()
+    # ldap3's own host name check, after a handshake the CA was fine with. It matches DNS
+    # names only on newer Pythons, so an IP address in the server field never passes there
+    if "doesn't match any name" in text:
+        if _is_ip(ldap_split_server(server)[0]):
+            return ('The certificate is checked against the server name, and the IP address in '
+                    'the server field did not pass that check. Enter the DNS name the directory '
+                    'certificate carries.')
+        return ('The directory certificate does not name this server. Enter the DNS name the '
+                'certificate was issued for.')
+    if 'certificate has expired' in text or 'not yet valid' in text:
+        return 'The directory certificate has expired or is not valid yet. Renew it on the directory.'
+    if isinstance(err, ssl.SSLError) or 'certificate' in text or 'ssl' in text or 'tls' in text:
+        return LDAP_TLS_HINT
+    return ''
+
+
+LDAP_REFERRAL_HINT = ('The directory referred the search to another server, and PegaProx does not '
+                      'follow that referral (with the certificate check on, it would reach that '
+                      'server unchecked). Use the Global Catalog port (3268, or 3269 with LDAPS) or a '
+                      'base DN inside the domain of this server.')
+
+
+def ldap_referrals(conn):
+    """The referral URLs the last search on `conn` answered with instead of entries."""
+    out = []
+    result = getattr(conn, 'result', None) or {}
+    if result.get('result') == 10:
+        out.extend(result.get('referrals') or [])
+    for ref in getattr(conn, 'response', None) or []:
+        if isinstance(ref, dict) and ref.get('type') == 'searchResRef':
+            out.extend(ref.get('uri') or [])
+    return [str(r) for r in out]
 
 
 # auth_source values an LDAP login owns and may therefore refresh. Mirrors
@@ -107,15 +279,21 @@ def ldap_authenticate(username: str, password: str) -> dict:
     
     try:
         import ldap3
-        from ldap3 import Server, Connection, ALL, SUBTREE, Tls
+        from ldap3 import Server, Connection, ALL, SUBTREE
         from ldap3.utils.conv import escape_filter_chars  # NS: Proper LDAP escaping
-        import ssl as ssl_module
     except ImportError:
         logging.error("[LDAP] ldap3 module not installed. Run: pip install ldap3")
         return {'error': 'LDAP module not installed'}
     
     server_url = ldap_config['server']
     port = int(ldap_config['port'])
+    # MK Nov 2026 - ldap3 follows a referral on a connection of its own, built without the
+    # CA and the check: from LDAPS an ldap:// referral binds in plain text, after STARTTLS it
+    # runs STARTTLS checking nothing. With the check on that would undo it, so referrals are
+    # not followed then. Without the check nothing is lost by following them, and installs
+    # that rely on them (a base DN at the forest root) keep doing so
+    follow = not ldap_transport(server_url, ldap_config['use_ssl'], ldap_config['use_starttls'],
+                                ldap_config.get('verify_tls', False))[1]
     
     try:
         # MK: Build server with optional TLS
@@ -123,10 +301,9 @@ def ldap_authenticate(username: str, password: str) -> dict:
         tls_config = None
         if ldap_config['use_ssl'] or ldap_config['use_starttls']:
             verify_tls = ldap_config.get('verify_tls', False)
-            validate = ssl_module.CERT_REQUIRED if verify_tls else ssl_module.CERT_NONE
-            if validate == ssl_module.CERT_NONE:
+            if not verify_tls:
                 logging.warning("[LDAP] TLS certificate verification disabled - MITM risk")
-            tls_config = Tls(validate=validate)
+            tls_config = ldap_tls(True, verify_tls, ldap_config.get('ca_cert', ''))
         else:
             # MK Sep 2026 - the warning above only fires INSIDE the TLS branch, so the one
             # configuration that has no protection at all was the only one that said nothing.
@@ -154,10 +331,11 @@ def ldap_authenticate(username: str, password: str) -> dict:
         use_starttls = ldap_config['use_starttls'] and not ldap_config['use_ssl']
         
         if bind_dn and bind_password:
-            conn = Connection(server, user=bind_dn, password=bind_password, raise_exceptions=True)
+            conn = Connection(server, user=bind_dn, password=bind_password, raise_exceptions=True,
+                              auto_referrals=follow)
         else:
             # Anonymous bind (some LDAP servers allow this)
-            conn = Connection(server, raise_exceptions=True)
+            conn = Connection(server, raise_exceptions=True, auto_referrals=follow)
         
         conn.open()
         if use_starttls:
@@ -182,7 +360,12 @@ def ldap_authenticate(username: str, password: str) -> dict:
         conn.search(search_base, user_filter, search_scope=SUBTREE, attributes=attributes)
         
         if not conn.entries:
+            refs = ldap_referrals(conn)
             conn.unbind()
+            if refs:
+                logging.warning(f"[LDAP] The search for '{username}' was referred to {', '.join(refs)}, "
+                                f"which is not followed{' with the certificate check on' if not follow else ''}. "
+                                f"Use the Global Catalog port (3268/3269) or a base DN inside the domain.")
             logging.info(f"[LDAP] User '{username}' not found in directory")
             return {'error': 'User not found in LDAP'}
         
@@ -227,7 +410,8 @@ def ldap_authenticate(username: str, password: str) -> dict:
         # Step 3: Verify user's password by binding with their credentials
         # LW: This is the actual authentication step
         try:
-            user_conn = Connection(server, user=user_dn, password=password, raise_exceptions=True)
+            user_conn = Connection(server, user=user_dn, password=password, raise_exceptions=True,
+                                   auto_referrals=follow)
             user_conn.open()
             if use_starttls:
                 user_conn.start_tls()
@@ -240,7 +424,8 @@ def ldap_authenticate(username: str, password: str) -> dict:
         # Step 4: If we also need to search for groups separately (not via memberOf)
         if not member_of and ldap_config['group_base_dn']:
             try:
-                group_conn = Connection(server, user=bind_dn, password=bind_password, raise_exceptions=True)
+                group_conn = Connection(server, user=bind_dn, password=bind_password, raise_exceptions=True,
+                                        auto_referrals=follow)
                 group_conn.open()
                 if use_starttls:
                     group_conn.start_tls()
@@ -320,13 +505,21 @@ def ldap_authenticate(username: str, password: str) -> dict:
     except Exception as e:
         import ssl as _ssl
         # NS: Mar 2026 - catch TLS errors specifically so the user gets a useful hint (#108)
+        # MK Nov 2026 - ldap3 folds the ssl error of a refused handshake into the exception it
+        # raises, so those land here. Its own host name check does not raise an ssl error:
+        # during STARTTLS a name that does not match came as a plain LDAPStartTLSError and read
+        # as a failed login
         try:
-            from ldap3.core.exceptions import LDAPSocketOpenError
+            from ldap3.core.exceptions import LDAPSocketOpenError, LDAPStartTLSError, LDAPCertificateError
+            _tls_errors = (_ssl.SSLError, LDAPSocketOpenError, LDAPStartTLSError, LDAPCertificateError)
         except ImportError:
-            LDAPSocketOpenError = None
-        if isinstance(e, _ssl.SSLError) or (LDAPSocketOpenError and isinstance(e, LDAPSocketOpenError)):
+            _tls_errors = (_ssl.SSLError,)
+        if isinstance(e, _tls_errors):
             logging.error(f"[LDAP] TLS/certificate error: {e}")
-            return {'error': 'LDAP connection failed - TLS/certificate error. Disable "Verify TLS Certificate" for self-signed/internal CA certificates.'}
+            # MK Nov 2026 - this sent everyone to switch the check off, which is the one
+            # setting that lets a machine on the path answer for the directory
+            hint = ldap_tls_hint(e, server_url)
+            return {'error': 'LDAP connection failed - TLS/certificate error.' + (' ' + hint if hint else '')}
         logging.error(f"[LDAP] Authentication error: {e}")
         return {'error': 'LDAP authentication failed'}  # MK: Don't leak internal error details
 

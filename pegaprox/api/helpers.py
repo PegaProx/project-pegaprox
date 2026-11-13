@@ -157,6 +157,7 @@ def load_server_settings():
         'ldap_default_role': 'viewer',
         'ldap_auto_create_users': True,
         'ldap_group_mappings': [],
+        'ldap_ca_cert': '',  # PEM, one or more CA certificates the directory's certificate is checked against
         # NS: Mar 2026 - reverse proxy support (nginx/haproxy)
         'reverse_proxy_enabled': False,
         'trusted_proxies': '',  # comma-separated IPs/CIDRs, empty = loopback only

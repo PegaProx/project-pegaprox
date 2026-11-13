@@ -1575,6 +1575,12 @@ def get_server_settings():
     # redirect port. Read-only: both save paths below take named fields and leave it out
     from pegaprox import globals as _g
     settings['http_redirect_state'] = dict(_g.HTTP_REDIRECT_STATE)
+    # what LDAP runs over as stored, a scheme in the server included, for the note of the
+    # LDAP tab. Read-only as well
+    from pegaprox.utils.ldap import ldap_transport
+    _kind, _checked = ldap_transport(settings.get('ldap_server'), settings.get('ldap_use_ssl'),
+                                     settings.get('ldap_use_starttls'), settings.get('ldap_verify_tls'))
+    settings['ldap_transport'] = {'kind': _kind, 'checked': _checked}
     return jsonify(settings)
 
 
@@ -1658,10 +1664,19 @@ def _stored_password_moves(data, settings):
     out = []
     if settings.get('smtp_password') and not typed('smtp_password') and moved('smtp_host', 'smtp_port', 587):
         out.append('smtp_password')
+    # an ldap:// or ldaps:// server is compared by the host and port ldap3 takes from it, so
+    # the save that takes the scheme apart (below) does not count as a move
     if settings.get('ldap_bind_password') and not typed('ldap_bind_password') \
-            and moved('ldap_server', 'ldap_port', 389):
+            and _ldap_endpoint(now('ldap_server'), data['ldap_port'] if 'ldap_port' in data else settings.get('ldap_port')) \
+            != _ldap_endpoint(settings.get('ldap_server'), settings.get('ldap_port')):
         out.append('ldap_bind_password')
     return out
+
+
+def _ldap_endpoint(server, port):
+    from pegaprox.utils.ldap import ldap_split_server
+    host, _ssl, url_port = ldap_split_server(server)
+    return host.lower().rstrip('.'), url_port or _port_of(port, 389)
 
 
 @bp.route('/api/settings/server', methods=['POST'])
@@ -1708,6 +1723,19 @@ def update_server_settings():
             refused = _refuse_confined_lock() if lock_note else None
             if refused:
                 return refused
+            # MK Nov 2026 - ldap3 goes by a scheme in the server field, over the LDAPS toggle
+            # and the port. Taken apart here, what is stored says what runs: ldaps:// is LDAPS,
+            # ldap:// is not (STARTTLS stays as chosen)
+            if isinstance(data.get('ldap_server'), str):
+                from pegaprox.utils.ldap import ldap_split_server
+                _host, _scheme_ssl, _url_port = ldap_split_server(data['ldap_server'])
+                if _scheme_ssl is not None:
+                    data['ldap_server'] = _host
+                    data['ldap_use_ssl'] = _scheme_ssl
+                    if _scheme_ssl:
+                        data['ldap_use_starttls'] = False
+                    if _url_port:
+                        data['ldap_port'] = _url_port
             _stale = _stored_password_moves(data, settings)
             if _stale:
                 return jsonify({'error': 'Re-enter the ' + ' and the '.join(
@@ -1716,6 +1744,15 @@ def update_server_settings():
                                     'without a login takes any value there, the password is not sent '
                                     'without a user or bind DN.',
                                 'code': 'CREDENTIAL_REQUIRED', 'fields': _stale}), 400
+            # MK Nov 2026 - a CA that does not load would only show at the next login, as a
+            # handshake that fails for everyone. Refused here, before anything is stored, and
+            # stored as the certificate blocks alone
+            if 'ldap_ca_cert' in data:
+                from pegaprox.utils.ldap import ldap_ca_cert_clean
+                _ca, _ca_error = ldap_ca_cert_clean(data['ldap_ca_cert'])
+                if _ca_error:
+                    return jsonify({'error': _ca_error, 'code': 'LDAP_CA_CERT_INVALID'}), 400
+                data['ldap_ca_cert'] = _ca
             
             # server config
             if 'domain' in data:
@@ -1972,6 +2009,7 @@ def update_server_settings():
                 'ldap_default_role': lambda v: str(v).strip() if v else 'viewer',  # NS: Accept custom roles too
                 'ldap_auto_create_users': lambda v: bool(v),
                 'ldap_verify_tls': lambda v: bool(v),  # NS: Mar 2026 - persist TLS cert verification toggle (#108)
+                'ldap_ca_cert': lambda v: str(v or ''),  # checked and cleaned above
             }
             
             # NS: Feb 2026 - Log incoming LDAP data for debugging save issues
@@ -2726,6 +2764,22 @@ _RESTORE_SECRETS = {
 _CHANNEL_SECRETS = ('url', 'token', 'topic')
 
 
+def _restored_ldap_ca(incoming):
+    """The LDAP CA of a restore goes through the check of the settings save. Cleaned in
+    `incoming`, or taken out of it when it fails, so the one held stays. Returns what to
+    tell then: a CA that does not load fails every TLS login and every later save of the tab.
+    MK Nov 2026"""
+    if not isinstance(incoming, dict) or 'ldap_ca_cert' not in incoming:
+        return None
+    from pegaprox.utils.ldap import ldap_ca_cert_clean
+    pem, error = ldap_ca_cert_clean(incoming['ldap_ca_cert'])
+    if error:
+        incoming.pop('ldap_ca_cert')
+        return f'Server settings: the LDAP CA certificate was not restored, the one held stays. {error}'
+    incoming['ldap_ca_cert'] = pem
+    return None
+
+
 def _blank_secret(value):
     # a sealed secret is a string; a list or a number in its place carries none either
     return not isinstance(value, str) or value in ('', '********')
@@ -3294,6 +3348,9 @@ def restore_config():
                     from pegaprox.core import ha
                     incoming_ss = {k: v for k, v in (data['server_settings'] or {}).items()
                                    if k not in _PROTECTED_CONSENT and k != ha.MEMBER_SETTING}
+                    _ca_error = _restored_ldap_ca(incoming_ss)
+                    if _ca_error:
+                        results['errors'].append(_ca_error)
                     _secrets, _to_enter = _restored_secrets(incoming_ss, current, mode)
                     if mode == 'merge':
                         # Only update non-empty values
@@ -3310,6 +3367,9 @@ def restore_config():
                         save_server_settings(incoming_ss)
                 else:
                     # the dry run names them as well, it is what the restore dialog shows first
+                    _ca_error = _restored_ldap_ca(dict(data['server_settings'] or {}))
+                    if _ca_error:
+                        results['errors'].append(_ca_error)
                     _to_enter = _restored_secrets(dict(data['server_settings'] or {}),
                                                   load_server_settings(), mode)[1]
                 if _to_enter:
@@ -7129,7 +7189,23 @@ def test_ldap():
         'email_attribute': data.get('ldap_email_attribute', saved.get('ldap_email_attribute', 'mail')),
         'display_name_attribute': data.get('ldap_display_name_attribute', saved.get('ldap_display_name_attribute', 'displayName')),
         'verify_tls': data.get('ldap_verify_tls', saved.get('ldap_verify_tls', False)),
+        'ca_cert': data.get('ldap_ca_cert', saved.get('ldap_ca_cert', '')),
     }
+
+    from pegaprox.utils.ldap import (LDAP_REFERRAL_HINT, ldap_ca_cert_clean, ldap_referrals,
+                                     ldap_split_server, ldap_tls, ldap_tls_hint, ldap_transport)
+    config['ca_cert'], _ca_error = ldap_ca_cert_clean(config['ca_cert'])
+    if _ca_error:
+        return jsonify({'error': _ca_error, 'code': 'LDAP_CA_CERT_INVALID'}), 400
+    # MK Nov 2026 - a scheme in the server taken apart the way the save does it, so the test
+    # runs what a save of this form stores
+    _host, _scheme_ssl, _url_port = ldap_split_server(config['server'])
+    if _scheme_ssl is not None:
+        config['server'], config['use_ssl'] = _host, _scheme_ssl
+        if _scheme_ssl:
+            config['use_starttls'] = False
+        if _url_port:
+            config['port'] = _url_port
 
     # MK Nov 2026 - read as text above (a null or a number had no .strip() below), and an
     # empty or blank one is turned down before anything is done with the stored password
@@ -7140,8 +7216,8 @@ def test_ldap():
     if not config['bind_password'] or config['bind_password'] == '********':
         # MK Nov 2026 - only for the saved server: a test against another one would hand it
         # the stored bind password. The SMTP test draws the same line.
-        same = (config['server'].strip().lower().rstrip('.') == str(saved.get('ldap_server') or '').strip().lower().rstrip('.')
-                and config['port'] == _port_of(saved.get('ldap_port'), 389))
+        same = _ldap_endpoint(config['server'], config['port']) == _ldap_endpoint(saved.get('ldap_server'),
+                                                                                 saved.get('ldap_port'))
         if config['bind_dn'] and saved.get('ldap_bind_password') and not same:
             return jsonify({'error': 'A bind password is required to test a server other than the saved one',
                             'code': 'CREDENTIAL_REQUIRED'}), 400
@@ -7149,9 +7225,8 @@ def test_ldap():
 
     try:
         import ldap3
-        from ldap3 import Server, Connection, ALL, SUBTREE, Tls
+        from ldap3 import Server, Connection, ALL, SUBTREE
         from ldap3.utils.conv import escape_filter_chars
-        import ssl as ssl_module
     except ImportError:
         return jsonify({'error': 'ldap3 module not installed. Run: pip install ldap3'}), 500
 
@@ -7160,10 +7235,9 @@ def test_ldap():
     try:
         # Step 1: Connect to server
         # MK: Mar 2026 - use verify_tls from config instead of hardcoded CERT_NONE (#108)
-        tls_config = None
-        if config['use_ssl'] or config['use_starttls']:
-            validate = ssl_module.CERT_REQUIRED if config['verify_tls'] else ssl_module.CERT_NONE
-            tls_config = Tls(validate=validate)
+        # MK Nov 2026 - and the pasted CA, built by the same helper the login uses
+        tls_config = ldap_tls(bool(config['use_ssl'] or config['use_starttls']),
+                              config['verify_tls'], config['ca_cert'])
         
         server = Server(config['server'], port=config['port'], 
                        use_ssl=config['use_ssl'], tls=tls_config, 
@@ -7172,12 +7246,15 @@ def test_ldap():
         # Step 2: Bind with service account
         # NS: same fix as ldap_authenticate - starttls before bind!!
         use_starttls = config['use_starttls'] and not config['use_ssl']
+        # no referrals followed with the check on, as in ldap_authenticate
+        follow = not ldap_transport(config['server'], config['use_ssl'], config['use_starttls'],
+                                    config['verify_tls'])[1]
         
         if config['bind_dn'] and config['bind_password']:
             conn = Connection(server, user=config['bind_dn'], password=config['bind_password'],
-                            raise_exceptions=True)
+                            raise_exceptions=True, auto_referrals=follow)
         else:
-            conn = Connection(server, raise_exceptions=True)
+            conn = Connection(server, raise_exceptions=True, auto_referrals=follow)
         
         try:
             conn.open()
@@ -7187,6 +7264,13 @@ def test_ldap():
             if use_starttls:
                 conn.start_tls()
                 results['steps'].append({'step': 'STARTTLS', 'status': 'ok'})
+            # MK Nov 2026 - what the passwords of the binds below travel over, once it is up,
+            # read off the connection: a check that failed has raised by now
+            kind = 'ldaps' if getattr(server, 'ssl', False) else \
+                'starttls' if getattr(conn, 'tls_started', False) else 'plain'
+            results['steps'].append(_ldap_transport_step(
+                kind, kind != 'plain' and tls_config is not None and bool(config['verify_tls']),
+                config['ca_cert']))
             
             conn.bind()
             
@@ -7198,7 +7282,14 @@ def test_ldap():
             # Step 3: Search base DN
             if config['base_dn']:
                 conn.search(config['base_dn'], '(objectClass=*)', search_scope='BASE', attributes=['objectClass'])  # Issue #70: 'dn' is not a valid attribute
-                results['steps'].append({'step': 'Base DN accessible', 'status': 'ok', 'detail': config['base_dn']})
+                refs = ldap_referrals(conn)
+                if refs:
+                    # another server holds it; with the check on that referral is not followed
+                    results['steps'].append({'step': 'Base DN accessible', 'status': 'warning',
+                                             'detail': f"{config['base_dn']} - referred to {', '.join(refs)}"})
+                    results['hint'] = LDAP_REFERRAL_HINT
+                else:
+                    results['steps'].append({'step': 'Base DN accessible', 'status': 'ok', 'detail': config['base_dn']})
             
             # Step 4: Optional - test user search
             test_username = data.get('test_username', '')
@@ -7218,7 +7309,11 @@ def test_ldap():
                     }
                     results['steps'].append({'step': f'User search: {test_username}', 'status': 'ok', 'detail': user_info})
                 else:
-                    results['steps'].append({'step': f'User search: {test_username}', 'status': 'warning', 'detail': 'User not found'})
+                    refs = ldap_referrals(conn)
+                    results['steps'].append({'step': f'User search: {test_username}', 'status': 'warning',
+                                             'detail': 'User not found' + (f" - referred to {', '.join(refs)}" if refs else '')})
+                    if refs:
+                        results['hint'] = LDAP_REFERRAL_HINT
             
             # LW: Get server info
             results['server_info'] = {
@@ -7243,6 +7338,8 @@ def test_ldap():
         completed = [s['step'] for s in results['steps']]
         if 'Server connection' not in completed:
             failed_step = 'Server connection'
+        elif config['use_starttls'] and not config['use_ssl'] and 'STARTTLS' not in completed:
+            failed_step = 'STARTTLS'
         elif not any('bind' in s.lower() for s in completed):
             failed_step = 'Bind'
         elif 'Base DN accessible' not in completed and config.get('base_dn'):
@@ -7250,5 +7347,27 @@ def test_ldap():
         else:
             failed_step = 'Connection'
         results['steps'].append({'step': failed_step, 'status': 'error', 'detail': str(e)})
+        # until the Transport step a failure is the connection or its TLS. What to do about a
+        # certificate the check refused is the CA field, not switching the check off
+        if 'Transport' not in completed and (config['use_ssl'] or config['use_starttls']):
+            hint = ldap_tls_hint(e, config['server'])
+            if hint:
+                results['hint'] = hint
     
     return jsonify(results)
+
+
+def _ldap_transport_step(kind, checked, ca_cert):
+    """The Transport step of the LDAP test for what the connection runs over ('ldaps',
+    'starttls' or 'plain'): plain text and an unchecked certificate are warnings, a checked
+    one is ok."""
+    if kind == 'plain':
+        return {'step': 'Transport', 'status': 'warning',
+                'detail': 'plain text - passwords cross the network readable'}
+    name = 'LDAPS' if kind == 'ldaps' else 'STARTTLS'
+    if not checked:
+        return {'step': 'Transport', 'status': 'warning',
+                'detail': f'{name} without certificate check - anyone on the path can pose as the directory'}
+    return {'step': 'Transport', 'status': 'ok',
+            'detail': f"{name}, certificate checked against "
+                      + ('the CA certificate in the settings' if ca_cert else 'the system trust store')}
