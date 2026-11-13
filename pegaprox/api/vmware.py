@@ -2,6 +2,7 @@
 """vmware + v2p migration routes - split from monolith dec 2025, NS"""
 
 import logging
+import re
 import time
 import threading
 import uuid
@@ -23,6 +24,7 @@ from pegaprox.api.helpers import (check_cluster_access, check_vmware_access, cal
                                   UPSTREAM_AUTH_STATUSES, caller_acts_as_admin)
 from pegaprox.core.vmware import VMwareManager, load_vmware_servers, save_vmware_server, esxi_target_refusal
 from pegaprox.core.v2p import V2PMigrationTask, _run_v2p_migration, DISK_CACHE_MODES, DIRECT_CACHE_MODES
+from pegaprox.core import v2p as _v2p
 from pegaprox.background.broadcast import broadcast_resources_loop
 
 bp = Blueprint('vmware', __name__)
@@ -1265,6 +1267,11 @@ def rename_vmware_vm(vmware_id, vm_id):
 
 # ===========================================================================
 
+# what the migration plan lists of a NIC for a caller who may migrate the guest but not view it:
+# the NIC rows of the wizard, nothing a dry run of the migration does not show anyway
+_V2P_PLAN_NIC_KEYS = ('label', 'network', 'mac_address', 'pve_model')
+
+
 @bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/migration-plan', methods=['GET'])
 @require_auth(perms=['vmware.vm.migrate'])
 def get_vmware_migration_plan(vmware_id, vm_id):
@@ -1292,6 +1299,26 @@ def get_vmware_migration_plan(vmware_id, vm_id):
     if 'error' in result:
         return jsonify(result), 400
     vm_data = result['data']
+    # the NICs in the order nic_map counts them: the same list the migrate
+    # route hands the task, plus what the wizard shows as detected hardware
+    try:
+        _vm_full = (mgr.get_vm(vm_id) or {}).get('data') or {}
+    except Exception:
+        _vm_full = {}
+    _nics = list(_vm_full.get('nics') or [])
+    # hardware, sizing, guest OS and notes are what the VM view shows (vmware.vm.view). A
+    # caller who may only migrate the guest gets the rows the wizard needs for its NIC choices;
+    # the migration reads the rest from ESXi itself when it starts
+    _may_view = user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.view')
+    if _may_view:
+        vm_data['nics'] = _nics
+        for _k in ('hardware', 'cpu', 'memory', 'guest_OS', 'notes'):
+            if _k in _vm_full and _k not in vm_data:
+                vm_data[_k] = _vm_full[_k]
+    else:
+        vm_data['nics'] = [{k: n[k] for k in _V2P_PLAN_NIC_KEYS if k in n} if isinstance(n, dict) else {}
+                           for n in _nics]
+    vm_data['details'] = bool(_may_view)
     
     # Available Proxmox targets — only clusters the caller may reach (don't leak others' topology)
     targets = []
@@ -1345,7 +1372,7 @@ def start_vmware_migration(vmware_id, vm_id):
     - esxi_password: Root password for ESXi SSH access
     
     Optional:
-    - esxi_host: ESXi host IP (default: from VMware server config)
+    - esxi_host: ESXi host IP (default: from the ESXi server config)
     - esxi_user: SSH username (default: root)
     - esxi_datastore: Datastore name (auto-detected if not set)
     - esxi_vm_dir: VM directory name on datastore (default: VM name)
@@ -1353,6 +1380,17 @@ def start_vmware_migration(vmware_id, vm_id):
     - wait_for_confirmation (#562): hold before the final switchover and wait for an
       explicit POST .../confirm-cutover (or .../cancel-cutover). Default false.
     - confirmation_timeout: seconds to wait at that gate before auto-aborting (default 86400).
+    - nic_map: [{index, bridge, vlan, skip}] per source NIC, in the order of the migration
+      plan's source.nics. The bridge must exist on the target node (bridge, OVS bridge or an
+      SDN VNet of a zone on that node).
+    - disk_map: [{index, storage, skip}] per source disk, in the order of source.disks. The
+      storage must be active on the target node and take images; disk 0 cannot be skipped.
+      EFI and TPM state stay on target_storage.
+    - verify: 'sample' (default), 'full' (every copied disk compared with its source before
+      the target starts; Live Clone, Auto and Offline Copy only) or 'off'.
+    - dry_run: true checks all of it against the target node and answers 200 with the
+      resolved plan ({ok, errors, warnings, nics, disks, storages, available}); nothing is
+      started and no ESXi password is needed.
     """
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
@@ -1367,6 +1405,11 @@ def start_vmware_migration(vmware_id, vm_id):
         return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
     
     data = request.json or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'A JSON object is expected'}), 400
+    dry_run = data.get('dry_run', False)
+    if not isinstance(dry_run, bool):
+        return jsonify({'error': 'dry_run must be true or false'}), 400
 
     for field in ('target_cluster', 'target_node', 'target_storage'):
         if not data.get(field):
@@ -1379,66 +1422,13 @@ def start_vmware_migration(vmware_id, vm_id):
             return jsonify({'error': 'Permission denied: removing the source guest needs '
                                      'vmware.vm.manage on it'}), 403
 
-    # MK May 2026 (#481 port) — target_storage flows into `pvesm` calls on the
-    # PVE node. Validate at the api boundary before the shell touches it.
-    from pegaprox.utils.sanitization import validate_storage_name, validate_esxi_path_component
-    if not validate_storage_name(data['target_storage']):
-        return jsonify({'error': 'Invalid target_storage name. Must be alphanumeric with hyphens, underscores, or dots only.'}), 400
+    # the shape of the body: names that reach a node shell or a config line, the ESXi host
+    # pinned to the server's, the per NIC / per disk choices and the verify mode
+    _body_err, _opts = _migrate_body_refusal(vmware_id, data, dry_run)
+    if _body_err:
+        return jsonify({'error': _body_err}), 400
 
-    # NS 2026-06-05 (audit C-2/M-2): esxi_datastore / esxi_vm_dir are user-supplied
-    # and get interpolated into root shell commands on the PVE node. Empty = let
-    # the task auto-detect from the VM config; non-empty must be a safe single
-    # component name (no slashes, no shell metacharacters). Reject at the door.
-    for _f in ('esxi_datastore', 'esxi_vm_dir'):
-        _v = (data.get(_f) or '').strip()
-        if _v and not validate_esxi_path_component(_v):
-            return jsonify({'error': f'Invalid {_f}: only letters, digits, space and ._()+- are allowed (single name, no path).'}), 400
-
-    # #598 — aio_mode is interpolated into the root `qm set` / conf line that
-    # attaches the migrated disk. V2PMigrationTask.__init__ already whitelists it,
-    # but reject a bad value at the door too (matches the boundary-validation
-    # style above); empty = unset = PVE default.
-    _aio = (data.get('aio_mode') or '').strip().lower()
-    if _aio and _aio not in ('threads', 'native', 'io_uring'):
-        return jsonify({'error': 'Invalid aio_mode: must be threads, native or io_uring.'}), 400
-    # JB Nov 2026 (#1270) - the cache mode reaches the same line. A guest whose disk has native
-    # AIO without O_DIRECT does not start, so that pair is refused here and not found out later
-    _cache = str(data.get('disk_cache') or '').strip().lower()
-    if _cache and _cache not in DISK_CACHE_MODES:
-        return jsonify({'error': f"Invalid disk_cache: must be one of {', '.join(DISK_CACHE_MODES)}."}), 400
-    if _aio == 'native' and _cache not in ('',) + DIRECT_CACHE_MODES:
-        return jsonify({'error': 'aio_mode native needs the cache mode none or directsync.'}), 400
-
-    # NS Oct 2026 (#1090) - root loop-mounts this on the node; empty = the default places
-    from pegaprox.utils.sanitization import validate_node_iso_path
-    _iso = data.get('virtio_iso_path')
-    if data.get('install_virtio_drivers') and _iso not in (None, '') and not validate_node_iso_path(_iso):
-        return jsonify({'error': 'Invalid virtio_iso_path: an absolute path to an .iso file '
-                                 'on the node'}), 400
-
-    # NS Oct 2026 (#1106) - esxi_host decides which host the PVE node SSHes/sshfs-mounts and
-    # reads disks from as root. Left to the caller it could aim the node at an attacker's SSH
-    # server serving a crafted descriptor. It is the configured server's host; pin it there.
-    # The wizard never sends it (it defaults to the server host); an explicit mismatch is refused.
-    _reg_host = vmware_managers[vmware_id].host
-    _req_host = data.get('esxi_host')
-    if _req_host not in (None, '') and str(_req_host).strip().lower() != str(_reg_host or '').lower():
-        return jsonify({'error': 'esxi_host must match the registered ESXi server'}), 400
-    # the task reads data['esxi_host'] as is, so hand it the registered value, not the
-    # spelling that passed the compare
-    data['esxi_host'] = _reg_host
-    # NS Oct 2026 - user and host go onto the local sshpass/ssh argv and into the ssh, scp,
-    # sshfs and ssh_config text the node runs as root. A user starting with '-' is an
-    # OpenSSH option there, a newline in the host a new ssh_config line.
-    from pegaprox.utils.sanitization import validate_ssh_user, validate_host_address
-    _esxi_user = data.get('esxi_user')
-    if _esxi_user not in (None, '') and not validate_ssh_user(_esxi_user):
-        return jsonify({'error': 'Invalid esxi_user: letters, digits and ._- only, '
-                                 'not starting with - or .'}), 400
-    if not validate_host_address(data['esxi_host']):
-        return jsonify({'error': 'Invalid esxi_host: a host name or an IP address'}), 400
-
-    if not data.get('esxi_password'):
+    if not dry_run and not data.get('esxi_password'):
         return jsonify({'error': 'esxi_password is required for SSHFS-based migration'}), 400
     if data['target_cluster'] not in cluster_managers:
         return jsonify({'error': 'Target cluster not found'}), 404
@@ -1472,54 +1462,94 @@ def start_vmware_migration(vmware_id, vm_id):
     vm_detail = mgr.get_vm(vm_id)
     vm_name = vm_detail.get('data', {}).get('name', vm_id) if 'data' in vm_detail else vm_id
 
+    # the plan against the target node: what a dry run answers with, and the allowlist the
+    # bridges and storages of nic_map / disk_map have to be on before anything starts
+    _plan = None
+    if dry_run or _opts['nic_map'] is not None or _opts['disk_map'] is not None:
+        _plan, _plan_err = _v2p_plan(mgr, vm_id, data, _opts, vm_detail)
+        if _plan_err:
+            return _plan_err
+    _skipped = {i for i, e in (_opts['disk_map'] or {}).items() if e['skip']}
+
     # MK Oct 2026 - the guest lands on the target as a new one, sized as core/v2p.py builds
     # it (the wizard's sockets, cores and memory over what ESXi reports): the tenant quota
     # counts it like a create
     def _v2p_adds():
         from pegaprox.utils.rbac import landing_adds, quota_tenant
-        vd = (vm_detail.get('data') or {}) if isinstance(vm_detail, dict) else {}
-        cpu = vd.get('cpu') or {}
-        sockets = int(data.get('sockets') or cpu.get('sockets') or 0)
-        per = int(data.get('cores_per_socket') or cpu.get('cores_per_socket') or 0)
-        cores = sockets * per if sockets and per else int(cpu.get('count') or 1)
-        mem_mb = float(data.get('memory') or (vd.get('memory') or {}).get('size_MiB') or 0)
-        disks = vd.get('disks') or {}
-        disk_b = sum(float((d or {}).get('capacity') or 0) for d in
-                     (disks.values() if isinstance(disks, dict) else disks))
-        return landing_adds(quota_tenant(_v2p_u), data['target_cluster'],
-                            {'cores': cores, 'memory_gb': mem_mb / 1024.0, 'disk_gb': disk_b / 1024.0 ** 3},
+        return landing_adds(quota_tenant(_v2p_u), data['target_cluster'], _v2p_footprint(vm_detail, data, _skipped),
                             source_cluster=vmware_id, source_removed=bool(data.get('remove_source')))
     from pegaprox.api.helpers import tenant_quota_gate, quota_hold_alive
-    _qerr, _qwarn = tenant_quota_gate(_v2p_u, f'ESXi migration of {vm_name}', _v2p_adds,
-                                      cluster=data['target_cluster'],
-                                      hold={'cluster_id': data['target_cluster']})
-    if _qerr:
-        return _qerr
+    from pegaprox.core import esxi_bulk as _ebulk
+    if dry_run:
+        _busy = _guest_busy(vmware_id, vm_id, tasks=False)
+        if _busy:
+            _plan['errors'].append(_busy)
+            _plan['ok'] = False
+        # the same quota question, without holding a slot for a run that does not start
+        _qerr, _qwarn = tenant_quota_gate(_v2p_u, f'ESXi migration of {vm_name} (dry run)', _v2p_adds,
+                                          cluster=data['target_cluster'])
+        if _qerr:
+            try:
+                _plan['errors'].append(str((_qerr[0].get_json() or {}).get('error') or 'Tenant quota exceeded'))
+            except Exception:
+                _plan['errors'].append('Tenant quota exceeded')
+            _plan['ok'] = False
+        if _qwarn:
+            _plan['warnings'].append(str(_qwarn.get('message') or 'Tenant quota exceeded (warning only)'))
+        return jsonify({'dry_run': True, 'vm_name': vm_name, **_plan})
+    if _plan is not None and not _plan['ok']:
+        return jsonify({'error': 'The migration plan does not fit the target node: '
+                                 + '; '.join(_plan['errors']),
+                        'errors': _plan['errors'], 'warnings': _plan['warnings']}), 400
 
-    # NS: pass all NICs from VMware to migration task so multi-NIC + MAC works
-    if 'selected_nics' not in data and 'data' in vm_detail:
-        nics = vm_detail['data'].get('nics', [])
-        if nics:
-            data['selected_nics'] = nics
-
+    # MK Oct 2026 - one job per guest. Taken here under the lock the bulk runs take theirs
+    # with, given back when the job returns or on any way out below before it started
     mid = str(uuid.uuid4())[:8]
-    task = V2PMigrationTask(mid, vmware_id, vm_id, data['target_cluster'],
-                            data['target_node'], data['target_storage'], vm_name, data)
-    
-    with _migration_lock_v2p:
-        _vmware_migrations[mid] = task
-    # the quota holds the new guest while the task runs (MK Oct 2026)
-    quota_hold_alive(alive=lambda: task.status == 'running')
+    _holder = _ebulk.task_holder(mid)
+    _other = _ebulk.hold(vmware_id, vm_id, _holder)
+    if _other:
+        return jsonify({'error': _guest_busy(vmware_id, vm_id, _other, tasks=False)}), 409
+    _started = False
+    try:
+        _qerr, _qwarn = tenant_quota_gate(_v2p_u, f'ESXi migration of {vm_name}', _v2p_adds,
+                                          cluster=data['target_cluster'],
+                                          hold={'cluster_id': data['target_cluster']})
+        if _qerr:
+            return _qerr
 
-    # a user job: in an automatic group each call it sends asks for the lease (#625)
-    from pegaprox.core import ha
-    thread = threading.Thread(target=ha.as_job(_run_v2p_migration, 'ESXi migration'), args=(task,),
-                              daemon=True)
-    thread.start()
-    
+        # NS: pass all NICs from ESXi to migration task so multi-NIC + MAC works
+        if 'selected_nics' not in data and 'data' in vm_detail:
+            nics = vm_detail['data'].get('nics', [])
+            if nics:
+                data['selected_nics'] = nics
+
+        task = V2PMigrationTask(mid, vmware_id, vm_id, data['target_cluster'],
+                                data['target_node'], data['target_storage'], vm_name, data)
+
+        with _migration_lock_v2p:
+            _vmware_migrations[mid] = task
+        # the quota holds the new guest while the task runs (MK Oct 2026)
+        quota_hold_alive(alive=lambda: task.status == 'running')
+
+        # a user job: in an automatic group each call it sends asks for the lease (#625)
+        from pegaprox.core import ha
+        thread = threading.Thread(target=ha.as_job(_run_held, 'ESXi migration'), args=(task, _holder),
+                                  daemon=True)
+        thread.start()
+        _started = True
+    finally:
+        if not _started:
+            _never_ran(mid)
+            _ebulk.let_go(vmware_id, vm_id, _holder)
+
+    _extra = ''
+    if _opts['nic_map'] is not None or _opts['disk_map'] is not None or _opts['verify'] != 'sample':
+        _extra = (f" (verify {_opts['verify']}, {len(_skipped)} disk(s) skipped, "
+                  f"per-disk storage {'yes' if _opts['disk_map'] else 'no'}, "
+                  f"per-NIC network {'yes' if _opts['nic_map'] else 'no'})")
     log_audit(request.session.get('user', 'admin'), 'vmware.migration.started',
               f"V2P migration: {vm_name} @ {data.get('esxi_host', mgr.host)} -> "
-              f"{data['target_cluster']}/{data['target_node']}/{data['target_storage']}")
+              f"{data['target_cluster']}/{data['target_node']}/{data['target_storage']}{_extra}")
     
     return jsonify({
         'migration_id': mid,
@@ -1527,6 +1557,167 @@ def start_vmware_migration(vmware_id, vm_id):
         'task': task.to_dict(),
         **({'quota_warning': _qwarn} if _qwarn else {}),
     }), 202
+
+
+def _migrate_body_refusal(vmware_id, data, dry_run):
+    """(error, None) for the first thing wrong with the shape of a migrate body, else
+    (None, parse_migration_options of it). Sets data['esxi_host'] to the registered host.
+    The single migrate route and each guest of a bulk run (at the submit and again right
+    before it starts) go through this."""
+    # MK May 2026 (#481 port) - target_storage flows into `pvesm` calls on the
+    # PVE node. Validate at the api boundary before the shell touches it.
+    from pegaprox.utils.sanitization import validate_storage_name, validate_esxi_path_component
+    if not validate_storage_name(data['target_storage']):
+        return 'Invalid target_storage name. Must be alphanumeric with hyphens, underscores, or dots only.', None
+
+    # NS 2026-06-05: esxi_datastore / esxi_vm_dir are user-supplied
+    # and get interpolated into root shell commands on the PVE node. Empty = let
+    # the task auto-detect from the VM config; non-empty must be a safe single
+    # component name (no slashes, no shell metacharacters). Reject at the door.
+    for _f in ('esxi_datastore', 'esxi_vm_dir'):
+        _v = (data.get(_f) or '').strip()
+        if _v and not validate_esxi_path_component(_v):
+            return f'Invalid {_f}: only letters, digits, space and ._()+- are allowed (single name, no path).', None
+
+    # #598 - aio_mode is interpolated into the root `qm set` / conf line that
+    # attaches the migrated disk. V2PMigrationTask.__init__ already whitelists it,
+    # but reject a bad value at the door too (matches the boundary-validation
+    # style above); empty = unset = PVE default.
+    _aio = (data.get('aio_mode') or '').strip().lower()
+    if _aio and _aio not in ('threads', 'native', 'io_uring'):
+        return 'Invalid aio_mode: must be threads, native or io_uring.', None
+    # JB Nov 2026 (#1270) - the cache mode reaches the same line. A guest whose disk has native
+    # AIO without O_DIRECT does not start, so that pair is refused here and not found out later
+    _cache = str(data.get('disk_cache') or '').strip().lower()
+    if _cache and _cache not in DISK_CACHE_MODES:
+        return f"Invalid disk_cache: must be one of {', '.join(DISK_CACHE_MODES)}.", None
+    if _aio == 'native' and _cache not in ('',) + DIRECT_CACHE_MODES:
+        return 'aio_mode native needs the cache mode none or directsync.', None
+
+    # the tenant quota sizes the new guest from these. A value that is no number made that
+    # count raise, the quota gate takes a failed count as "could not check" and lets the
+    # migration through, and the create still got the value ([64] goes out as 64)
+    for _f, _hi in (('sockets', 4096), ('cores_per_socket', 4096), ('memory', 16 * 1024 * 1024)):
+        if data.get(_f) in (None, ''):
+            continue
+        try:
+            _v2p._whole_number(data[_f], 0, _hi, _f)
+        except ValueError as e:
+            return str(e), None
+
+    # NS Oct 2026 (#1090) - root loop-mounts this on the node; empty = the default places
+    from pegaprox.utils.sanitization import validate_node_iso_path
+    _iso = data.get('virtio_iso_path')
+    if data.get('install_virtio_drivers') and _iso not in (None, '') and not validate_node_iso_path(_iso):
+        return 'Invalid virtio_iso_path: an absolute path to an .iso file on the node', None
+
+    # NS Oct 2026 (#1106) - esxi_host decides which host the PVE node SSHes/sshfs-mounts and
+    # reads disks from as root. Left to the caller it could aim the node at any SSH server,
+    # one serving a crafted descriptor. It is the configured server's host; pin it there.
+    # The wizard never sends it (it defaults to the server host); an explicit mismatch is refused.
+    _reg_host = vmware_managers[vmware_id].host
+    _req_host = data.get('esxi_host')
+    if _req_host not in (None, '') and str(_req_host).strip().lower() != str(_reg_host or '').lower():
+        return 'esxi_host must match the registered ESXi server', None
+    # the task reads data['esxi_host'] as is, so hand it the registered value, not the
+    # spelling that passed the compare
+    data['esxi_host'] = _reg_host
+    # NS Oct 2026 - user and host go onto the local sshpass/ssh argv and into the ssh, scp,
+    # sshfs and ssh_config text the node runs as root. A user starting with '-' is an
+    # OpenSSH option there, a newline in the host a new ssh_config line.
+    from pegaprox.utils.sanitization import validate_ssh_user, validate_host_address
+    _esxi_user = data.get('esxi_user')
+    if _esxi_user not in (None, '') and not validate_ssh_user(_esxi_user):
+        return 'Invalid esxi_user: letters, digits and ._- only, not starting with - or .', None
+    if not validate_host_address(data['esxi_host']):
+        return 'Invalid esxi_host: a host name or an IP address', None
+
+    # MK Oct 2026 - the per NIC / per disk choices and the verify mode, parsed at the door. The
+    # names in them are checked against the target node in _v2p_plan; a bridge also has to look
+    # like one, since it lands on the guest's net line
+    try:
+        _opts = _v2p.parse_migration_options(data)
+    except ValueError as e:
+        return f'Invalid migration options: {e}', None
+    # the list nic_map counts and the plan makes a row of each: a guest has net0 to net31,
+    # a longer list is only a way to make this process build millions of rows
+    _sel = data.get('selected_nics')
+    if isinstance(_sel, list) and len(_sel) > _v2p.NIC_MAP_MAX:
+        return f'selected_nics has more than {_v2p.NIC_MAP_MAX} entries', None
+    # its model and MAC go onto the guest's net line as they are: 'virtio,trunks=1-4094' would
+    # open options there that no check of this route ever saw
+    _sel_err = _v2p.selected_nics_refusal(_sel)
+    if _sel_err:
+        return _sel_err, None
+    _bridge = data.get('network_bridge')
+    if _bridge not in (None, '') and not _v2p.valid_bridge_name(_bridge):
+        return 'Invalid network_bridge: a bridge or VNet name, letters, digits and ._- only', None
+    _full_refusal = _v2p.full_verify_refusal(data.get('transfer_mode', 'auto')) \
+        if _opts['verify'] == 'full' else None
+    if _full_refusal and not dry_run:
+        return _full_refusal, None
+    return None, _opts
+
+
+def _v2p_footprint(vm_detail, data, skipped):
+    """{cores, memory_gb, disk_gb} of the guest a migration lands on the target, sized as
+    core/v2p.py builds it: the request's sockets, cores and memory over what ESXi reports,
+    without the disks left behind."""
+    vd = (vm_detail.get('data') or {}) if isinstance(vm_detail, dict) else {}
+    cpu = vd.get('cpu') or {}
+    sockets = int(data.get('sockets') or cpu.get('sockets') or 0)
+    per = int(data.get('cores_per_socket') or cpu.get('cores_per_socket') or 0)
+    cores = sockets * per if sockets and per else int(cpu.get('count') or 1)
+    mem_mb = float(data.get('memory') or (vd.get('memory') or {}).get('size_MiB') or 0)
+    disks = vd.get('disks') or {}
+    # a disk left behind does not land on the target
+    disk_b = sum(float((d or {}).get('capacity') or 0) for i, d in
+                 enumerate(disks.values() if isinstance(disks, dict) else disks) if i not in skipped)
+    return {'cores': cores, 'memory_gb': mem_mb / 1024.0, 'disk_gb': disk_b / 1024.0 ** 3}
+
+
+def _v2p_plan(mgr, vm_id, data, opts, vm_detail, inv=None, exp=None):
+    """(plan, None) or (None, error response) for a migrate request: its disks, NICs and
+    choices checked against what the target node offers right now. A bulk run hands in the
+    node's inventory it read once for all its guests, and the disk list it read already."""
+    pve = cluster_managers.get(data['target_cluster'])
+    node = str(data.get('target_node') or '')
+    if node not in (getattr(pve, 'nodes', None) or {}):
+        return None, (jsonify({'error': f'{node[:64]!r} is not a node of the target cluster'}), 400)
+    if exp is None:
+        exp = mgr.get_vm_disks_for_export(vm_id)
+    if not isinstance(exp, dict) or 'error' in exp:
+        return None, (jsonify({'error': f"The VM's disks could not be read: "
+                                        f"{(exp or {}).get('error') if isinstance(exp, dict) else exp}"}), 502)
+    disks = (exp.get('data') or {}).get('disks') or []
+    vd = (vm_detail.get('data') or {}) if isinstance(vm_detail, dict) else {}
+    if opts.get('nic_map') is not None and data.get('selected_nics') not in (None, []) \
+            and not isinstance(data.get('selected_nics'), list):
+        # nic_map counts the entries of this list; anything else has no order to count
+        return None, (jsonify({'error': 'selected_nics must be a list when nic_map is given'}), 400)
+    nics = data.get('selected_nics') if isinstance(data.get('selected_nics'), list) else (vd.get('nics') or [])
+    if inv is None:
+        try:
+            inv = _v2p.read_target_inventory(pve, node)
+        except RuntimeError as e:
+            return None, (jsonify({'error': f'The target node could not be checked: {e}'}), 502)
+    hw = vd.get('hardware') or {}
+    bios = str(data.get('bios') or 'auto')
+    needs_efi = bios == 'ovmf' or (bios == 'auto' and hw.get('firmware') == 'efi')
+    tpm = data.get('tpm_enabled')
+    needs_tpm = bool(hw.get('has_tpm')) if tpm is None else bool(tpm)
+    plan = _v2p.resolve_migration_plan(
+        inv, disks, nics, opts, data['target_storage'], data.get('network_bridge', 'vmbr0'),
+        net_vlan_tag=data.get('net_vlan_tag'), transfer_mode=data.get('transfer_mode', 'auto'),
+        needs_efi=needs_efi, needs_tpm=needs_tpm)
+    plan['target'] = {'cluster': data['target_cluster'], 'node': node, 'storage': data['target_storage']}
+    plan['available'] = {
+        'bridges': [{'name': n, 'kind': k} for n, k in sorted(inv['bridges'].items())],
+        'storages': [{'storage': n, 'type': st['type'], 'avail_bytes': st['avail']}
+                     for n, st in sorted(inv['storages'].items())
+                     if st['active'] and 'images' in st['content']],
+    }
+    return plan, None
 
 
 def _migration_reachable(t):
@@ -1616,6 +1807,564 @@ def cancel_vmware_cutover(mid):
     log_audit(request.session.get('user', 'admin'), 'vmware.migration.cutover_cancelled',
               f"V2P cutover cancelled for {getattr(task, 'vm_name', mid)} (migration {mid}) — source left running")
     return jsonify({'message': 'Cutover cancelled — source VM left running', 'task': task.to_dict()})
+
+
+# =============================================================================
+# ESXi bulk migration (core/esxi_bulk.py)
+#
+# MK Oct 2026 - several guests of one ESXi server with one set of target settings and their
+# own NIC / disk choices. The submit checks every guest the way a dry run of the single
+# migrate route does, against one read of the target node, and refuses the whole request
+# with a line per guest when one of them does not fit. The run starts `width` of them at a
+# time and asks the same questions again right before each one.
+
+# what a bulk run takes besides the guests. The rest of what the single route reads
+# (datastore, VM folder, sizing, NICs) belongs to each guest and comes from ESXi. A key that
+# is not here refuses the request instead of being dropped without a word
+_BULK_COMMON = ('target_cluster', 'target_node', 'target_storage', 'network_bridge', 'net_vlan_tag',
+                'transfer_mode', 'verify', 'start_after', 'remove_source', 'wait_for_confirmation',
+                'confirmation_timeout', 'esxi_user', 'preserve_mac', 'bios', 'disk_format')
+_BULK_KEYS = frozenset(_BULK_COMMON + ('vms', 'width', 'dry_run', 'esxi_password'))
+_BULK_FLAGS = ('start_after', 'remove_source', 'wait_for_confirmation', 'preserve_mac')
+_BULK_MODES = ('vmkfstools_clone', 'auto', 'sshfs_boot', 'snapshot_zero', 'offline')
+# what ESXi calls a guest: vm-42 over REST, a plain number on a lone host over SOAP
+_ESXI_VM_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}')
+# the submit reads two things per guest from ESXi, a few guests at a time
+_BULK_READERS = 5
+_BULK_READ_SECONDS = 300
+
+
+def _v2p_task(mid):
+    return _vmware_migrations.get(mid) if isinstance(mid, str) else None
+
+
+def _v2p_running(vmware_id, vm_id):
+    """Whether a migration of this guest runs in this process"""
+    with _migration_lock_v2p:
+        tasks = list(_vmware_migrations.values())
+    return any(getattr(t, 'vmware_id', None) == vmware_id and str(getattr(t, 'vm_id', '')) == str(vm_id)
+               and getattr(t, 'status', '') == 'running' for t in tasks)
+
+
+def _guest_busy(vmware_id, vm_id, have=None, tasks=True):
+    """Why this guest cannot start another migration now, None when it can. `have` is who
+    holds it, when the caller asked already; `tasks` also counts a migration of it in this
+    process that says it runs (what a bulk run always asked)."""
+    from pegaprox.core import esxi_bulk as ebulk
+    have = have if have is not None else ebulk.holder(vmware_id, vm_id)
+    if have and have.startswith('bulk:'):
+        return 'Another bulk migration has this guest already'
+    if have or (tasks and _v2p_running(vmware_id, vm_id)):
+        return 'A migration of this guest is running'
+    return None
+
+
+def _run_held(task, holder):
+    """The migration job of one guest. However it ends, the guest is free for another job
+    once it returns."""
+    from pegaprox.core import esxi_bulk as ebulk
+    try:
+        _run_v2p_migration(task)
+    finally:
+        ebulk.let_go(task.vmware_id, task.vm_id, holder)
+
+
+def _never_ran(mid):
+    # a task registered for a job that never started must not count as running: the quota
+    # hold and the start checks of the guest ask its status
+    with _migration_lock_v2p:
+        t = _vmware_migrations.get(mid)
+    if t is not None and getattr(t, 'status', '') == 'running':
+        t.status, t.phase = 'failed', 'failed'
+        t.error = 'The migration could not be started'
+
+
+def _answer_error(resp, default='The check failed'):
+    """The error text of a (response, status) a helper answered with"""
+    try:
+        return str((resp[0].get_json() or {}).get('error') or default)
+    except Exception:
+        return default
+
+
+def _bulk_vm_refusal(user, vmware_id, vm_id, settings):
+    """Why `user` may not migrate this guest as the run's settings say, None when they may"""
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.migrate'):
+        return 'Permission denied: vmware.vm.migrate'
+    if settings.get('remove_source') and not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.manage'):
+        return 'Permission denied: removing the source guest needs vmware.vm.manage on it'
+    return None
+
+
+def _bulk_vms(raw):
+    """[(vm_id, {nic_map, disk_map})] of a bulk request. Raises ValueError."""
+    from pegaprox.core import esxi_bulk as ebulk
+    if not isinstance(raw, list) or not 1 <= len(raw) <= ebulk.ITEMS_MAX:
+        raise ValueError(f'vms is a list of 1 to {ebulk.ITEMS_MAX} guests')
+    out, seen = [], set()
+    for row in raw:
+        if isinstance(row, str):
+            row = {'vm_id': row}
+        if not isinstance(row, dict):
+            raise ValueError('every vms entry is a VM id or {vm_id, nic_map, disk_map}')
+        extra = sorted(str(k)[:40] for k in row if k not in ('vm_id', 'nic_map', 'disk_map'))
+        if extra:
+            raise ValueError(f'vms: unknown field {extra[0]!r}')
+        vm_id = row.get('vm_id')
+        if not isinstance(vm_id, str) or not _ESXI_VM_ID.fullmatch(vm_id):
+            raise ValueError('vms holds something that is no ESXi VM id')
+        if vm_id in seen:
+            raise ValueError(f'vms names {vm_id} twice')
+        seen.add(vm_id)
+        out.append((vm_id, {k: row[k] for k in ('nic_map', 'disk_map') if row.get(k) not in (None, [])}))
+    return out
+
+
+def _bulk_settings(vmware_id, data, dry_run):
+    """(settings, None) of the part every guest of a bulk request shares, (None, error) when
+    its shape is wrong. The checks of the single route, and a few of its own: a transfer
+    mode or VLAN the task would quietly ignore is refused here."""
+    s = {k: data[k] for k in _BULK_COMMON if k in data}
+    for f in ('target_cluster', 'target_node', 'target_storage'):
+        if not isinstance(s.get(f), str) or not s[f]:
+            return None, f'{f} is required'
+    from pegaprox.utils.sanitization import validate_hostname
+    if not validate_hostname(s['target_node']):
+        return None, 'target_node is a node name'
+    if s.setdefault('transfer_mode', 'auto') not in _BULK_MODES:
+        return None, f"transfer_mode is one of {', '.join(_BULK_MODES)}"
+    for f in _BULK_FLAGS:
+        if f in s and not isinstance(s[f], bool):
+            return None, f'{f} must be true or false'
+    if s.get('bios', 'auto') not in ('auto', 'seabios', 'ovmf'):
+        return None, 'bios is auto, seabios or ovmf'
+    if s.get('disk_format', 'raw') not in ('raw', 'qcow2'):
+        return None, 'disk_format is raw or qcow2'
+    try:
+        if s.get('net_vlan_tag') in (None, ''):
+            s.pop('net_vlan_tag', None)
+        else:
+            s['net_vlan_tag'] = _v2p._whole_number(s['net_vlan_tag'], 1, 4094, 'net_vlan_tag')
+        if 'confirmation_timeout' in s:
+            s['confirmation_timeout'] = _v2p._whole_number(s['confirmation_timeout'], 0, 30 * 86400,
+                                                           'confirmation_timeout')
+    except ValueError as e:
+        return None, str(e)
+    err, _opts = _migrate_body_refusal(vmware_id, s, dry_run)
+    if err:
+        return None, err
+    return s, None
+
+
+def _bulk_check(vmware_id, settings, vms, user):
+    """Every guest of a bulk request checked like a dry run of the single migrate route,
+    against one read of the target node: ({ok, errors, warnings, items, storages, available,
+    target}, None), or (None, error response) when nothing can be checked."""
+    from pegaprox.core import esxi_bulk as ebulk
+    from pegaprox.api.helpers import tenant_quota_gate
+    from pegaprox.utils.concurrent import run_per_node
+    mgr = vmware_managers[vmware_id]
+    pve = cluster_managers.get(settings['target_cluster'])
+    node = settings['target_node']
+    if node not in (getattr(pve, 'nodes', None) or {}):
+        return None, (jsonify({'error': f'{node[:64]!r} is not a node of the target cluster'}), 400)
+
+    items, todo, permitted = [], {}, 0
+    busy = ebulk.busy_vm_ids(vmware_id)
+    for vm_id, maps in vms:
+        it = {'vm_id': vm_id, 'name': '', 'ok': False, 'errors': [], 'warnings': [], 'nics': [], 'disks': [],
+              'storages': [], 'custom_network': 'nic_map' in maps, 'custom_storage': 'disk_map' in maps}
+        items.append(it)
+        why = _bulk_vm_refusal(user, vmware_id, vm_id, settings)
+        if why:
+            it['errors'].append(why)
+            continue
+        permitted += 1
+        why = 'Another bulk migration has this guest already' if vm_id in busy else _guest_busy(vmware_id, vm_id)
+        if why:
+            it['errors'].append(why)
+            continue
+        body = dict(settings, **maps)
+        try:
+            opts = _v2p.parse_migration_options(body)
+        except ValueError as e:
+            it['errors'].append(f'Invalid migration options: {e}')
+            continue
+        todo[vm_id] = (it, body, opts)
+    if not permitted:
+        # nothing is read for a caller who may migrate none of them, not even the target node
+        return None, (jsonify({'error': 'Permission denied: You do not have access to these VMs',
+                               'items': items}), 403)
+
+    inv = {'bridges': {}, 'storages': {}, 'notes': []}
+    if todo:
+        try:
+            inv = _v2p.read_target_inventory(pve, node)
+        except RuntimeError as e:
+            return None, (jsonify({'error': f'The target node could not be checked: {e}'}), 502)
+
+    def _read(vm_id):
+        return mgr.get_vm(vm_id), mgr.get_vm_disks_for_export(vm_id)
+    got = {}
+    if todo:
+        mgr.ensure_connected()
+        got = run_per_node({vm_id: _read for vm_id in todo}, max_concurrent=_BULK_READERS,
+                           timeout=_BULK_READ_SECONDS)
+
+    needed, guests_on = {}, {}
+    for vm_id, (it, body, opts) in todo.items():
+        pair = got.get(vm_id)
+        detail, exp = pair if isinstance(pair, tuple) and len(pair) == 2 else (None, None)
+        if not isinstance(detail, dict) or not isinstance(detail.get('data'), dict):
+            why = detail.get('error') if isinstance(detail, dict) else None
+            it['errors'].append('The guest could not be read on ESXi' + (f': {str(why)[:200]}' if why else ''))
+            continue
+        vd = detail['data']
+        it['name'] = str(vd.get('name') or vm_id)[:200]
+        it['power_state'] = str(vd.get('power_state') or '')
+        plan, perr = _v2p_plan(mgr, vm_id, body, opts, detail, inv=inv, exp=exp)
+        if perr:
+            it['errors'].append(_answer_error(perr))
+            continue
+        it.update(nics=plan['nics'], disks=plan['disks'], storages=plan['storages'],
+                  verify=plan['verify'], transfer_mode=plan['transfer_mode'])
+        it['errors'] += plan['errors']
+        it['warnings'] += plan['warnings']
+        skipped = {i for i, e in (opts['disk_map'] or {}).items() if e['skip']}
+        it['_footprint'] = _v2p_footprint(detail, body, skipped)
+        for row in plan['storages']:
+            name = row['storage']
+            needed[name] = needed.get(name, 0) + int(row.get('needed_bytes') or 0)
+            guests_on[name] = guests_on.get(name, 0) + 1
+
+    # each guest fits on its own above; together they may not
+    errors, warnings, storages = [], [], []
+    for name in sorted(needed):
+        st = inv['storages'].get(name) or {}
+        row = {'storage': name, 'type': st.get('type', ''), 'needed_bytes': needed[name],
+               'avail_bytes': st.get('avail'), 'guests': guests_on[name], 'ok': True}
+        storages.append(row)
+        if not st or st.get('avail') is None or needed[name] <= st['avail'] or guests_on[name] < 2:
+            continue
+        msg = (f"storage {name!r} has {st['avail'] / 1024 ** 3:.1f} GiB free, the {guests_on[name]} guests "
+               f"placed on it need {needed[name] / 1024 ** 3:.1f} GiB together")
+        if st.get('type') in _v2p._SPACE_SOFT_TYPES:
+            warnings.append(msg + ' (it may still fit if the pool compresses)')
+        else:
+            row['ok'] = False
+            errors.append(msg + ' - the copy writes every block of a disk')
+
+    def _adds():
+        from pegaprox.utils.rbac import landing_adds, quota_tenant
+        total = {}
+        for it in items:
+            if it.get('_footprint') is None:
+                continue
+            a = landing_adds(quota_tenant(user), settings['target_cluster'], it['_footprint'],
+                             source_cluster=vmware_id, source_removed=bool(settings.get('remove_source')))
+            for k, v in (a or {}).items():
+                total[k] = total.get(k, 0) + v
+        return total or None
+    qerr, qwarn = tenant_quota_gate(user, f'ESXi bulk migration of {len(items)} guest(s) (check)', _adds,
+                                    cluster=settings['target_cluster'])
+    if qerr:
+        errors.append(_answer_error(qerr, 'Tenant quota exceeded'))
+    if qwarn:
+        warnings.append(str(qwarn.get('message') or 'Tenant quota exceeded (warning only)'))
+
+    for it in items:
+        it.pop('_footprint', None)
+        it['ok'] = not it['errors']
+    return {'ok': not errors and all(it['ok'] for it in items), 'errors': errors, 'warnings': warnings,
+            'items': items, 'storages': storages,
+            'target': {'cluster': settings['target_cluster'], 'node': node, 'storage': settings['target_storage']},
+            'available': {
+                'bridges': [{'name': n, 'kind': k} for n, k in sorted(inv['bridges'].items())],
+                'storages': [{'storage': n, 'type': st['type'], 'avail_bytes': st['avail']}
+                             for n, st in sorted(inv['storages'].items())
+                             if st['active'] and 'images' in st['content']]}}, None
+
+
+def _bulk_start_item(app, run, item):
+    """Start one guest of an ESXi bulk run as a normal migration. core/esxi_bulk.py calls
+    this from the run's thread, right before the guest's turn: the account is asked again
+    whether it may migrate it, the guest must not be migrating already, and its plan has to
+    fit the target node as it is now."""
+    from pegaprox.core import esxi_bulk as ebulk
+    from pegaprox.core import ha
+    from pegaprox.api.helpers import tenant_quota_gate
+    s, vm_id = run.settings, item['vm_id']
+    with app.app_context():
+        user = ebulk.caller(run)
+        if not user:
+            return {'state': 'skipped', 'note': 'The account that started the run may no longer act '
+                                                '(removed, switched off, or its API token revoked)'}
+        why = _bulk_vm_refusal(user, run.vmware_id, vm_id, s)
+        if why:
+            return {'state': 'skipped', 'note': why}
+        if caller_is_scoped(user, s['target_cluster']):
+            return {'state': 'skipped', 'note': 'Access denied to the target cluster'}
+        if _v2p_running(run.vmware_id, vm_id):
+            return {'state': 'skipped', 'note': 'Another migration of this guest is running'}
+        mgr = vmware_managers.get(run.vmware_id)
+        if mgr is None or s['target_cluster'] not in cluster_managers:
+            return {'state': 'failed', 'note': 'The ESXi server or the target cluster is gone from PegaProx'}
+        pw = run.password()
+        if not pw:
+            return {'state': 'cancelled', 'note': 'Not started: the run was cancelled'}
+        body = dict(s, **(item.get('_maps') or {}))
+        err, opts = _migrate_body_refusal(run.vmware_id, body, False)
+        if err:
+            return {'state': 'failed', 'note': err}
+        mgr.ensure_connected()
+        vm_detail = mgr.get_vm(vm_id)
+        if not isinstance(vm_detail, dict) or not isinstance(vm_detail.get('data'), dict):
+            return {'state': 'failed', 'note': 'The guest could not be read on ESXi'}
+        vm_name = str(vm_detail['data'].get('name') or vm_id)
+        plan, perr = _v2p_plan(mgr, vm_id, body, opts, vm_detail)
+        if perr:
+            return {'state': 'failed', 'note': _answer_error(perr)}
+        if not plan['ok']:
+            return {'state': 'failed', 'note': 'The plan no longer fits the target node: ' + '; '.join(plan['errors'])}
+        skipped = {i for i, e in (opts['disk_map'] or {}).items() if e['skip']}
+
+        # the run had the guest since the submit; its migration has it from here on, under the
+        # same lock the single route takes a guest with
+        mid = str(uuid.uuid4())[:8]
+        holder = ebulk.task_holder(mid)
+        if not ebulk.pass_on(run.vmware_id, vm_id, run.holder, holder):
+            return {'state': 'skipped', 'note': 'Another migration of this guest is running'}
+        started = False
+        # the quota holds the new guest while its migration runs; nothing to hold once it failed
+        box = {'task': None, 'dead': False}
+
+        def _alive():
+            return (box['task'].status == 'running') if box['task'] is not None else not box['dead']
+
+        def _adds():
+            from pegaprox.utils.rbac import landing_adds, quota_tenant
+            return landing_adds(quota_tenant(user), s['target_cluster'], _v2p_footprint(vm_detail, body, skipped),
+                                source_cluster=run.vmware_id, source_removed=bool(s.get('remove_source')))
+        try:
+            qerr, _qwarn = tenant_quota_gate(user, f'ESXi migration of {vm_name} (bulk run {run.id})', _adds,
+                                             cluster=s['target_cluster'],
+                                             hold={'cluster_id': s['target_cluster'], 'alive': _alive})
+            if qerr:
+                return {'state': 'failed', 'note': _answer_error(qerr, 'Tenant quota exceeded')}
+            nics = vm_detail['data'].get('nics') or []
+            if nics:
+                body['selected_nics'] = nics
+            body['esxi_password'] = pw
+            task = V2PMigrationTask(mid, run.vmware_id, vm_id, s['target_cluster'], s['target_node'],
+                                    s['target_storage'], vm_name, body)
+            with _migration_lock_v2p:
+                _vmware_migrations[mid] = task
+            box['task'] = task
+            # a user job: in an automatic group each call it sends asks for the lease
+            threading.Thread(target=ha.as_job(_run_held, 'ESXi migration'), args=(task, holder),
+                             daemon=True).start()
+            started = True
+        finally:
+            if not started:
+                box['dead'] = True
+                _never_ran(mid)
+                ebulk.let_go(run.vmware_id, vm_id, holder)
+        maps = item.get('_maps') or {}
+        log_audit(run.user, 'vmware.migration.started',
+                  f"V2P migration: {vm_name} @ {body.get('esxi_host')} -> {s['target_cluster']}/"
+                  f"{s['target_node']}/{s['target_storage']} (bulk run {run.id}, verify {opts['verify']}"
+                  f"{', own network' if 'nic_map' in maps else ''}{', own storage' if 'disk_map' in maps else ''})",
+                  ip_address=run.ip)
+        return {'migration_id': mid, 'name': vm_name}
+
+
+def _bulk_view(run, with_items=True):
+    """The run as the caller may see it, None when it is not theirs to see: who started it
+    and an admin see it, nobody else. Who is no admin sees the guests they may still migrate."""
+    if run is None:
+        return None
+    me = request.session.get('user', '')
+    user = build_authz_user(me, request.session)
+    admin = acts_as_admin(user)
+    if not admin and (not me or me != run.user):
+        return None
+    items = run.items_copy()
+    if not admin:
+        items = [it for it in items if user_can_access_vmware_vm(user, run.vmware_id, it['vm_id'],
+                                                                 'vmware.vm.migrate')]
+    view = run.view(items, with_items=with_items, me=me)
+    view['may_cancel'] = view['state'] == 'running' and not view['cancelled_by']
+    return view
+
+
+@bp.route('/api/vmware/<vmware_id>/bulk-migrate', methods=['POST'])
+@require_auth(perms=['vmware.vm.migrate'])
+def start_vmware_bulk_migration(vmware_id):
+    """Migrate several guests of an ESXi server to Proxmox, a few at a time
+
+    Body: vms (1 to 200 guests: a VM id, or {vm_id, nic_map, disk_map} with the guest's own
+    NIC and disk choices as the single migrate route takes them), width (how many migrate at
+    once, 1 to 5, default 1), esxi_password (one for the run), dry_run, and what every guest
+    shares: target_cluster, target_node, target_storage (required), network_bridge,
+    net_vlan_tag, transfer_mode, verify, start_after, remove_source (needs vmware.vm.manage
+    on each guest), wait_for_confirmation, confirmation_timeout, esxi_user, preserve_mac,
+    bios, disk_format. Any other key is refused.
+
+    Each guest is checked like a dry run of POST .../vms/<vm_id>/migrate: the caller may
+    migrate it, no other migration has it, its NICs and disks fit the target node, and the
+    guests together fit the storages and the tenant quota. dry_run: true answers 200 with
+    that check ({ok, errors, warnings, items: one per guest, storages, available}), needs no
+    password and starts nothing. Without it, one guest that does not fit refuses the whole
+    request (400, with the same items); otherwise the answer is the run (202, {run}), to
+    follow with GET /api/vmware/bulk-migrate/<run_id>.
+
+    Before each guest starts, the run asks all of it again. Each started guest is a normal
+    migration in /api/vmware/migrations. The run lives in this process (a restart ends it),
+    and the ESXi password with it: in memory only, dropped once no guest is left to start.
+    """
+    from flask import current_app
+    from functools import partial
+    from pegaprox.core import esxi_bulk as ebulk
+    from pegaprox.utils.audit import get_client_ip
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'A JSON object is expected'}), 400
+    unknown = sorted(str(k)[:40] for k in data if k not in _BULK_KEYS)
+    if unknown:
+        return jsonify({'error': f'{unknown[0]!r} is not a setting of a bulk migration'}), 400
+    dry_run = data.get('dry_run', False)
+    if not isinstance(dry_run, bool):
+        return jsonify({'error': 'dry_run must be true or false'}), 400
+    width = data.get('width', 1)
+    if isinstance(width, bool) or not isinstance(width, int) or not 1 <= width <= ebulk.WIDTH_MAX:
+        return jsonify({'error': f'width is a number from 1 to {ebulk.WIDTH_MAX}'}), 400
+    try:
+        vms = _bulk_vms(data.get('vms'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    settings, serr = _bulk_settings(vmware_id, data, dry_run)
+    if serr:
+        return jsonify({'error': serr}), 400
+    pw = data.get('esxi_password')
+    if pw not in (None, '') and (not isinstance(pw, str) or len(pw) > 1024):
+        return jsonify({'error': 'esxi_password is a text of at most 1024 characters'}), 400
+    if not dry_run and not pw:
+        return jsonify({'error': 'esxi_password is required for SSHFS-based migration'}), 400
+    target = settings['target_cluster']
+    if target not in cluster_managers:
+        return jsonify({'error': 'Target cluster not found'}), 404
+    # the guests land on the target as new ones: a caller confined to some guests of that
+    # cluster may not put any there (the single route asks the same)
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(user, target):
+        return jsonify({'error': 'Access denied to the target cluster'}), 403
+    allowed, err_response = check_cluster_access(target)
+    if not allowed:
+        return err_response
+    me = request.session.get('user', '')
+    if not dry_run:
+        busy = ebulk.room(vmware_id, me)
+        if busy:
+            return jsonify({'error': busy}), 409
+
+    res, rerr = _bulk_check(vmware_id, settings, vms, user)
+    if rerr:
+        return rerr
+    res['width'] = width
+    if dry_run:
+        return jsonify({'dry_run': True, **res})
+    if not res['ok']:
+        bad = sum(1 for it in res['items'] if not it['ok'])
+        why = (f'{bad} of {len(res["items"])} guests cannot be migrated as asked' if bad
+               else 'The guests do not fit the target together: ' + '; '.join(res['errors']))
+        return jsonify({'error': why, **res}), 400
+
+    mgr = vmware_managers[vmware_id]
+    items = [ebulk.new_item(vm_id, it['name'], maps) for (vm_id, maps), it in zip(vms, res['items'])]
+    run = ebulk.EsxiBulkRun(vmware_id, str(getattr(mgr, 'name', '') or vmware_id), me, request.session,
+                            get_client_ip(), settings, width, items, pw)
+    try:
+        ebulk.register(run)
+    except (ebulk.TooMany, ebulk.Taken) as e:
+        # Taken: a guest went to another run or the single route since the check above
+        return jsonify({'error': str(e)}), 409
+    names = [it['name'] or it['vm_id'] for it in items]
+    try:
+        log_audit(me, 'vmware.bulk_migration.started',
+                  f"ESXi bulk migration {run.id} of {len(items)} guest(s) from {run.vmware_name} to "
+                  f"{target}/{settings['target_node']}/{settings['target_storage']}, {width} at a time, "
+                  f"{settings['transfer_mode']}, verify {settings.get('verify') or 'sample'}"
+                  f"{', source removed after' if settings.get('remove_source') else ''}: "
+                  f"{', '.join(names[:50])}{' ...' if len(names) > 50 else ''}", ip_address=run.ip)
+        ebulk.launch(run, partial(_bulk_start_item, current_app._get_current_object()), _v2p_task)
+    except Exception as e:
+        # registered but nobody works on it: it must not keep the password or the slots
+        logging.error(f"[ESXI-BULK] run {run.id} could not be started: {e}", exc_info=True)
+        ebulk.abandon(run, 'The run could not be started - see the PegaProx log')
+        return jsonify({'error': 'The bulk migration could not be started - see the PegaProx log'}), 500
+    return jsonify({'run': _bulk_view(run)}), 202
+
+
+@bp.route('/api/vmware/bulk-migrate', methods=['GET'])
+@require_auth(perms=['vmware.vm.migrate'])
+def list_vmware_bulk_migrations():
+    """ESXi bulk migrations of the last hours
+
+    The runs the caller started (an admin: every run), newest first, with their counts and
+    without the guests; ?vmware_id= narrows it to one ESXi server. A run lives in the
+    process of the instance that started it: a restart ends it."""
+    from pegaprox.core import esxi_bulk as ebulk
+    only = request.args.get('vmware_id') or None
+    out = []
+    for run in ebulk.runs():
+        if only is not None and run.vmware_id != only:
+            continue
+        view = _bulk_view(run, with_items=False)
+        if view:
+            out.append(view)
+    return jsonify({'runs': out})
+
+
+@bp.route('/api/vmware/bulk-migrate/<run_id>', methods=['GET'])
+@require_auth(perms=['vmware.vm.migrate'])
+def get_vmware_bulk_migration(run_id):
+    """One ESXi bulk migration, a line per guest
+
+    Each guest with its state (wait, starting, migrating, done, failed, skipped, cancelled,
+    unknown), a note, the migration it became (migration_id, see /api/vmware/migrations),
+    its phase and progress; may_cancel says whether the rest can still be cancelled."""
+    from pegaprox.core import esxi_bulk as ebulk
+    view = _bulk_view(ebulk.get(run_id))
+    if not view:
+        return jsonify({'error': 'Bulk migration not found'}), 404
+    return jsonify({'run': view})
+
+
+@bp.route('/api/vmware/bulk-migrate/<run_id>/cancel', methods=['POST'])
+@require_auth(perms=['vmware.vm.migrate'])
+def cancel_vmware_bulk_migration(run_id):
+    """Cancel the rest of an ESXi bulk migration
+
+    Who started it or an admin. No further guest starts and the run drops the ESXi
+    password. Migrations that already started go on to their end: each can still be
+    cancelled at its switchover gate (wait_for_confirmation)."""
+    from pegaprox.core import esxi_bulk as ebulk
+    run = ebulk.get(run_id)
+    if not _bulk_view(run, with_items=False):
+        return jsonify({'error': 'Bulk migration not found'}), 404
+    me = request.session.get('user', 'system')
+    if not ebulk.cancel(run, me):
+        return jsonify({'error': 'This bulk migration is over'}), 409
+    waiting = sum(1 for it in run.items_copy() if it['state'] == ebulk.WAITING)
+    log_audit(me, 'vmware.bulk_migration.cancelled',
+              f"ESXi bulk migration {run.id} from {run.vmware_name} (started by {run.user}): "
+              f"{waiting} guest(s) not started")
+    view = _bulk_view(run) or {}
+    view['may_cancel'] = False
+    return jsonify({'run': view})
 
 
 # End VMware API endpoints

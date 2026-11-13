@@ -20,7 +20,8 @@ def _set_args(monkeypatch, answer):
         return answer
     monkeypatch.setattr(v2p, '_pve_node_exec', node)
     logs = []
-    task = SimpleNamespace(target_node='pve1', proxmox_vmid=100, log=logs.append, boot_volume=lambda: 'store:vm-100-disk-0')
+    task = SimpleNamespace(target_node='pve1', proxmox_vmid=100, log=logs.append, boot_volume=lambda: 'store:vm-100-disk-0',
+                           kept_disks=lambda n: list(range(n)))
     v2p._ensure_guest_sector_size_512(SimpleNamespace(), task, 'scsi', 1)
     return logs
 

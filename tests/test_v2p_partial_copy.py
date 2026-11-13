@@ -66,7 +66,8 @@ class _World:
     def copy(self):
         recorded = []
         task = SimpleNamespace(id='t1', target_node='pve1', target_storage='store', proxmox_vmid=100, vm_id='vm-1',
-                               log=self.logs.append, config={}, record_disk_volume=lambda i, v: recorded.append(v))
+                               log=self.logs.append, config={}, record_disk_volume=lambda i, v: recorded.append(v),
+                               disk_target=lambda i: 'store')
         if self.https is not None:
             task._vmware_mgr_ref = SimpleNamespace(get_vm=lambda vm: {'data': {'power_state': 'POWERED_ON'}})
         got = v2p._ssh_pipe_transfer(SimpleNamespace(), task, 'esxi', 'root', 'x', 'ds1', 'web01', 'web01.vmdk', 0)

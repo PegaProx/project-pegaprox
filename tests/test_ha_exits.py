@@ -476,6 +476,14 @@ EXITS = {
     # and its own port at the address it paired with (the other socket only binds, to
     # tell an address of this host)
     ('pegaprox/witness.py', '_dial_own', 'socket'): (2, 'local'),
+    # the QNetd helper on a Unix socket of this host: the root socket unit of the local kind
+    # (/run/pegaprox-qnetd/local.sock) or the sidecar's volume. No cluster, no node
+    ('pegaprox/core/qnetd.py', '_UnixHelper.call', 'socket'): (1, 'local'),
+    # one command with a deadline, on the clients of NodeShell (the manager's _ssh_connect)
+    # and SshTransport (secure_ssh_client): both guard_client'ed, every exec asks
+    ('pegaprox/core/qnetd.py', '_exec_bounded', 'ssh-exec'): (1, 'client'),
+    # the helper copied to an ssh QNetd host over SFTP, on the same guarded client
+    ('pegaprox/core/qnetd.py', 'SshTransport.install_helper', 'ssh-exec'): (1, 'client'),
 }
 
 VERDICTS = {'guard', 'client', 'console', 'login', 'read', 'local', 'external', 'peer', 'unused'}
@@ -509,14 +517,14 @@ def test_the_inventory_counts_what_the_report_says():
         by[verdict] += n
     # S4 with the witness and the lease link, and the connection check, the three restarts
     # asking systemctl in one helper, the join fingerprint read through tls_fingerprint,
-    # the stored key's leg of _pve_node_exec, less the ESXi guest config over REST (the API
-    # has no such call):
-    # 256 calls out of this process, 151 (function, kind) pairs in 137 functions; 45 of
-    # them guarded at the exit and 86 execs on a client from a guarded factory. No route
+    # and the QDevice setup with its QNetd hosts, and the stored key's leg of _pve_node_exec,
+    # less the ESXi guest config over REST (the API has no such call):
+    # 259 calls out of this process, 154 (function, kind) pairs in 140 functions; 45 of
+    # them guarded at the exit and 88 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 256 and len(EXITS) == 151
-    assert len({(f, q) for f, q, _k in EXITS}) == 137
-    assert by['guard'] == 45 and by['client'] == 86
+    assert sum(n for n, _v in EXITS.values()) == 259 and len(EXITS) == 154
+    assert len({(f, q) for f, q, _k in EXITS}) == 140
+    assert by['guard'] == 45 and by['client'] == 88
 
 
 @pytest.mark.parametrize('key', sorted(k for k, v in EXITS.items() if v[1] == 'guard'),
@@ -760,6 +768,8 @@ AUTOMATIONS = {
     ('pegaprox/core/ha.py', '_lease_spawn'): (1, 'lease'),
     ('pegaprox/api/vms.py', 'cross_cluster_migrate_api'): (1, 'job'),
     ('pegaprox/api/vmware.py', 'start_vmware_migration'): (1, 'job'),
+    # a guest of an ESXi bulk run, started as the single route starts one
+    ('pegaprox/api/vmware.py', '_bulk_start_item'): (1, 'job'),
     ('pegaprox/api/xhm.py', 'xhm_start'): (1, 'job'),
     ('pegaprox/app.py', 'main'): (3, 'local'),
     # the batch restore runs its restores in ha.as_job, like the server-side bulk migration
@@ -788,6 +798,8 @@ AUTOMATIONS = {
     ('pegaprox/core/backup_verify.py', 'start_verification'): (1, 'job'),
     # a bulk migration of a user, one guest after another (#952)
     ('pegaprox/core/bulk_migrate.py', 'launch'): (1, 'job'),
+    # and the ESXi bulk run, a few guests of one ESXi server at a time
+    ('pegaprox/core/esxi_bulk.py', 'launch'): (1, 'job'),
     # one SSH login per node after a cluster was added, `sudo -n true` at most (#1136)
     ('pegaprox/core/node_creds.py', 'check_in_background'): (1, 'read'),
     ('pegaprox/core/ha.py', '_later'): (1, 'lease'),
@@ -809,7 +821,18 @@ AUTOMATIONS = {
     ('pegaprox/core/pbs.py', 'PBSManager.start_update'): (2, 'job'),
     # a disconnected PBS logged in again, a login and GET /version (#1156)
     ('pegaprox/core/pbs.py', 'start_reconnect_loop'): (1, 'read'),
+    # a QDevice setup, removal or bulk run of an admin, through ha.as_job
+    ('pegaprox/core/qnetd.py', 'launch'): (1, 'job'),
+    # the status of the QNetd hosts the qnetd alert rules watch, at most once a minute:
+    # version, status and ca of the helper, in ha.reading() (READ_SITES)
+    ('pegaprox/core/qnetd.py', 'kick_refresh'): (1, 'read'),
+    # the deadline of one SSH command: it closes that channel of this process, nothing
+    # is sent to anyone
+    ('pegaprox/core/qnetd.py', '_exec_bounded'): (1, 'local'),
     ('pegaprox/core/v2p.py', '_ssh_pipe_transfer'): (1, 'read'),
+    # verify=full: the md5 of the ESXi source file and of the node's copy side by side; the
+    # node side runs on ha.carry, with the mark of the job it checks for
+    ('pegaprox/core/v2p.py', '_full_check_disk'): (2, 'read'),
     ('pegaprox/core/vmware.py', 'load_vmware_servers'): (1, 'read'),
     ('pegaprox/core/xcpng.py', 'XcpngManager.start'): (1, 'confirm'),
     ('pegaprox/core/xcpng.py', 'XcpngManager.start_node_update'): (1, 'job'),
@@ -1162,6 +1185,11 @@ READ_SITES = [
     # the progress of an ESXi import: stat, lvs and the dd log of the target volume, from
     # a plain thread of the import job
     ('pegaprox/core/v2p.py', '_monitor_disk_write.probe', {'_pve_node_exec': 1}),
+    # verify=full of an ESXi import: stat and block md5s of the source file on ESXi
+    ('pegaprox/core/v2p.py', '_full_check_disk._esxi_side', {'_ssh_exec': 1}),
+    # the background status of the QNetd hosts (version, status, ca of the helper over SSH
+    # for an ssh host): plain threads of the alert loop, refused unasked in an automatic group
+    ('pegaprox/core/qnetd.py', 'kick_refresh.work', {'run_per_node': 1}),
 ]
 
 

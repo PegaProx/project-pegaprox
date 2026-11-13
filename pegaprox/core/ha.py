@@ -279,6 +279,9 @@ FORWARDED_READS = LEADER_ONLY_READS | XCPNG_TASK_READS | frozenset((
     # a bulk migration runs in the process of the instance that started it (#952)
     '/api/bulk-migrations',
     '/api/bulk-migrations/<run_id>',
+    # and an ESXi bulk run as well (core/esxi_bulk.py)
+    '/api/vmware/bulk-migrate',
+    '/api/vmware/bulk-migrate/<run_id>',
     # and so does a batch restore
     '/api/batch-restores',
     '/api/batch-restores/<run_id>',

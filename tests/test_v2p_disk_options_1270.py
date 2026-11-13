@@ -101,7 +101,8 @@ def test_cache_and_aio_go_on_together():
 
 def test_every_attach_of_a_final_disk_carries_the_drive_options():
     # the rescue of an unused volume attaches a final disk too, and a bare attach drops them
-    attaches = re.findall(r'qm set \{task\.proxmox_vmid\} --\{disk_bus\}\{\w+\} \{\w*vol\w*\}(\S*)',
+    attaches = re.findall(r'qm set \{task\.proxmox_vmid\} --\{disk_bus\}\{\w+\} '
+                          r'\{(?:shlex\.quote\()?\w*vol\w*\)?\}(\S*)',
                           inspect.getsource(v2p))
     assert len(attaches) >= 11, attaches
     assert [a for a in attaches if not a.startswith('{task._disk_attach_opts()}')] == []

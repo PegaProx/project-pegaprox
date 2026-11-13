@@ -644,7 +644,11 @@ def test_the_routes_are_served_once(api):
     assert rules == [('/api/bulk-migrations', ['GET']),
                      ('/api/bulk-migrations/<run_id>', ['GET']),
                      ('/api/bulk-migrations/<run_id>/cancel', ['POST']),
-                     ('/api/clusters/<cluster_id>/vms/bulk-migrate', ['POST'])]
+                     ('/api/clusters/<cluster_id>/vms/bulk-migrate', ['POST']),
+                     ('/api/vmware/<vmware_id>/bulk-migrate', ['POST']),
+                     ('/api/vmware/bulk-migrate', ['GET']),
+                     ('/api/vmware/bulk-migrate/<run_id>', ['GET']),
+                     ('/api/vmware/bulk-migrate/<run_id>/cancel', ['POST'])]
 
 
 # --- the pieces --------------------------------------------------------------------------------
