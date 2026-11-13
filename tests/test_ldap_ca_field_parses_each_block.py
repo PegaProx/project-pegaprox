@@ -69,12 +69,13 @@ def test_a_block_with_headers_in_it_is_text_besides_the_certificates(pki):
 
 
 @pytest.mark.parametrize('fill', ['BEGIN markers', 'BEGIN markers and base64', 'END markers'])
-def test_a_field_full_of_markers_is_read_in_linear_time(pki, fill):
+def test_a_field_full_of_markers_is_read_in_linear_time(fill):
+    """No END after them: each BEGIN made the old pattern scan to the end of the field."""
     from pegaprox.utils.ldap import LDAP_CA_CERT_MAX, ldap_ca_cert_clean
     unit = {'BEGIN markers': '-----BEGIN CERTIFICATE-----',
-            'BEGIN markers and base64': '-----BEGIN CERTIFICATE-----AAAA',
+            'BEGIN markers and base64': '-----BEGIN CERTIFICATE-----\nAAAA\n',
             'END markers': '-----END CERTIFICATE-----'}[fill]
-    value = unit * ((LDAP_CA_CERT_MAX - len(pki['ca'])) // len(unit)) + pki['ca']
+    value = unit * (LDAP_CA_CERT_MAX // len(unit))
     assert len(value) <= LDAP_CA_CERT_MAX
     started = time.monotonic()
     pem, err = ldap_ca_cert_clean(value)
