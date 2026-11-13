@@ -1908,7 +1908,7 @@ def verify_password_api():
     elif auth_source == 'ldap':
         from pegaprox.utils.ldap import ldap_authenticate
         result = ldap_authenticate(username, password)
-        if 'error' in result:
+        if not result.get('success'):  # only a sign-in the directory confirmed, not "no error"
             return jsonify({'error': 'Invalid password'}), 401
     elif auth_source in ('oidc', 'entra'):
         # NS May 2026: stolen-cookie replay risk — the original "session valid → accept"

@@ -107,12 +107,16 @@ class FakeDirectory:
 
     TLS from the first byte (LDAPS) or after STARTTLS. Every bind request it reads is kept,
     password included, so a test can tell whether one reached it at all. With `refer` it
-    answers every search with a referral to that URL instead."""
+    answers every search with a referral to that URL instead, and `bind_answers` maps the
+    number of a bind (0 for the first one it reads) to the result code it gets. Without
+    `nested` it finds nothing for the AD nested group lookup, as a directory without it."""
 
-    def __init__(self, cert, key, ldaps, user='jdoe', groups=(ADMINS,), refer=None):
+    def __init__(self, cert, key, ldaps, user='jdoe', groups=(ADMINS,), refer=None, bind_answers=None,
+                 nested=True):
         self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.ctx.load_cert_chain(cert, key)
         self.ldaps, self.user, self.groups, self.refer = ldaps, user, groups, refer
+        self.bind_answers, self.nested = dict(bind_answers or {}), nested
         self.binds = []
         self.plain_binds = []
         self.sock = socket.socket()
@@ -146,10 +150,12 @@ class FakeDirectory:
                 msgid, rest = body[2:2 + n], body[2 + n:]
                 op = rest[0]
                 if op == 0x60:          # bind
+                    code = self.bind_answers.get(len(self.binds), 0)
                     self.binds.append(rest)
                     if not secure:
                         self.plain_binds.append(rest)
-                    conn.sendall(_message(msgid, _result(0x61)))
+                    extra = _tlv(0xa3, _str(f'ldap://localhost:{self.port}/{BASE_DN}')) if code == 10 else b''
+                    conn.sendall(_message(msgid, _result(0x61, code=code, extra=extra)))
                 elif op == 0x77:        # extended: STARTTLS is the only one asked for
                     conn.sendall(_message(msgid, _result(0x78, extra=_tlv(0x8a, b'1.3.6.1.4.1.1466.20037'))))
                     conn = self.ctx.wrap_socket(conn, server_side=True)
@@ -159,7 +165,9 @@ class FakeDirectory:
                     if self.refer:
                         conn.sendall(_message(msgid, _result(0x65, code=10, extra=_tlv(0xa3, _str(self.refer)))))
                         continue
-                    if BASE_DN.lower().encode() in rest.lower() and self.user.encode() in rest:
+                    if not self.nested and b'1.2.840.113556.1.4.1941' in rest:
+                        pass
+                    elif BASE_DN.lower().encode() in rest.lower() and self.user.encode() in rest:
                         attrs = _tlv(0x30, _str('memberOf') + _tlv(0x31, b''.join(_str(g) for g in self.groups)))
                         dn = f'CN={self.user},OU=Users,{BASE_DN}'
                         conn.sendall(_message(msgid, _tlv(0x64, _str(dn) + _tlv(0x30, attrs))))

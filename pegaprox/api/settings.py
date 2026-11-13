@@ -7192,8 +7192,9 @@ def test_ldap():
         'ca_cert': data.get('ldap_ca_cert', saved.get('ldap_ca_cert', '')),
     }
 
-    from pegaprox.utils.ldap import (LDAP_REFERRAL_HINT, ldap_ca_cert_clean, ldap_referrals,
-                                     ldap_split_server, ldap_tls, ldap_tls_hint, ldap_transport)
+    from pegaprox.utils.ldap import (LDAP_REFERRAL_HINT, ldap_bind_answer, ldap_ca_cert_clean,
+                                     ldap_referrals, ldap_split_server, ldap_tls, ldap_tls_hint,
+                                     ldap_transport)
     config['ca_cert'], _ca_error = ldap_ca_cert_clean(config['ca_cert'])
     if _ca_error:
         return jsonify({'error': _ca_error, 'code': 'LDAP_CA_CERT_INVALID'}), 400
@@ -7272,7 +7273,9 @@ def test_ldap():
                 kind, kind != 'plain' and tls_config is not None and bool(config['verify_tls']),
                 config['ca_cert']))
             
-            conn.bind()
+            # the login counts a bind only when it says so (ldap_authenticate), and so does this
+            if not conn.bind():
+                raise RuntimeError(f'The directory did not accept the bind, it answered {ldap_bind_answer(conn)}')
             
             if config['bind_dn'] and config['bind_password']:
                 results['steps'].append({'step': 'Service account bind', 'status': 'ok', 'detail': config['bind_dn']})

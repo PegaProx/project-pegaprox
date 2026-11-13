@@ -237,6 +237,12 @@ LDAP_REFERRAL_HINT = ('The directory referred the search to another server, and 
                       'base DN inside the domain of this server.')
 
 
+def ldap_bind_answer(conn):
+    """What the directory answered a bind with, for the log and the test."""
+    result = getattr(conn, 'result', None) or {}
+    return f"{result.get('result', '?')} {result.get('description') or ''}".strip()
+
+
 def ldap_referrals(conn):
     """The referral URLs the last search on `conn` answered with instead of entries."""
     out = []
@@ -356,7 +362,12 @@ def ldap_authenticate(username: str, password: str) -> dict:
         conn.open()
         if use_starttls:
             conn.start_tls()
-        conn.bind()
+        # MK Nov 2026 - bind() raises on a refusal like a wrong password, but some answers
+        # (a referral, a SASL step, compare or limit results) come back as False, and all
+        # three binds below went on as if they had worked. A bind counts when it says so
+        if not conn.bind():
+            logging.warning(f"[LDAP] The directory did not accept the service account bind: {ldap_bind_answer(conn)}")
+            return {'error': 'LDAP authentication failed'}
         
         # Step 2: Search for user
         # NS: SECURITY - Use ldap3's escape_filter_chars to prevent LDAP injection
@@ -431,7 +442,10 @@ def ldap_authenticate(username: str, password: str) -> dict:
             user_conn.open()
             if use_starttls:
                 user_conn.start_tls()
-            user_conn.bind()
+            if not user_conn.bind():
+                logging.info(f"[LDAP] Password verification failed for '{username}': "
+                             f"the directory answered {ldap_bind_answer(user_conn)}")
+                return {'error': 'Invalid LDAP credentials'}
             user_conn.unbind()
         except Exception as bind_err:
             logging.info(f"[LDAP] Password verification failed for '{username}': {bind_err}")
@@ -445,7 +459,8 @@ def ldap_authenticate(username: str, password: str) -> dict:
                 group_conn.open()
                 if use_starttls:
                     group_conn.start_tls()
-                group_conn.bind()
+                if not group_conn.bind():
+                    raise RuntimeError(f"the service account bind was answered {ldap_bind_answer(group_conn)}")
                 group_filter = ldap_config['group_filter'].replace('{user_dn}', escape_filter_chars(user_dn))
                 group_conn.search(ldap_config['group_base_dn'], group_filter, 
                                 search_scope=SUBTREE, attributes=['cn'])  # Issue #70: removed 'dn' -- entry_dn is implicit

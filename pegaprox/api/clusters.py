@@ -427,7 +427,7 @@ def reconfigure_cluster(cluster_id):
         # LDAP user: verify against LDAP server
         from pegaprox.utils.ldap import ldap_authenticate
         ldap_result = ldap_authenticate(username, current_password) if current_password else {}
-        if not current_password or 'error' in ldap_result:
+        if not current_password or not ldap_result.get('success'):
             return jsonify({'error': 'Invalid LDAP password'}), 401
     else:
         return jsonify({'error': 'Re-authentication not supported for this account type. Use a local admin account.'}), 400
