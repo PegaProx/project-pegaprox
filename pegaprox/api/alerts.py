@@ -973,7 +973,13 @@ def create_alert():
         'enabled': data.get('enabled', True),
         'created': datetime.now().isoformat()
     }
-    
+    if new_alert['metric'] == 'qnetd':
+        # MK Oct 2026 - the QNetd host rule is an administrator's here too, not only on the
+        # cluster routes (alert_events.normalize_rule stamps who saved it)
+        bad = alert_events.normalize_rule(new_alert, data)
+        if bad:
+            return jsonify({'error': bad}), 400
+
     config['alerts'].append(new_alert)
     save_alerts_config(config)
     
@@ -1011,6 +1017,7 @@ def update_alert(alert_id):
                 _cerr = require_unconfined(_new_cid)
                 if _cerr:
                     return _cerr
+            _prev_metric = alert.get('metric')
             alert.update({
                 'name': data.get('name', alert['name']),
                 'cluster_id': data.get('cluster_id', alert['cluster_id']),
@@ -1021,6 +1028,10 @@ def update_alert(alert_id):
                 'threshold': data.get('threshold', alert['threshold']),
                 'enabled': data.get('enabled', alert['enabled']),
             })
+            if 'qnetd' in (alert.get('metric'), _prev_metric):
+                bad = alert_events.normalize_rule(alert, data, prev_metric=_prev_metric)
+                if bad:
+                    return jsonify({'error': bad}), 400
             save_alerts_config(config)
             return jsonify(alert)
     

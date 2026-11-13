@@ -49,6 +49,9 @@ import os
 import sys
 
 USE_GEVENT = os.environ.get('PEGAPROX_NO_GEVENT', '').lower() not in ('1', 'true', 'yes')
+# the QNetd sidecar (`qnetd run|health`) is a plain supervisor with threads: no app, no gevent
+if sys.argv[1:2] == ['qnetd']:
+    USE_GEVENT = False
 # MK Nov 2026 - with --print-key stdout is the key and nothing else, it goes into
 # systemd-creds. The lines below came out after it in a pipe.
 _SAY = sys.stderr if '--print-key' in sys.argv else sys.stdout
@@ -167,6 +170,27 @@ def download_static_files():
     return _download()
 
 
+def qnetd_command(args):
+    """`qnetd run|health`: the QNetd sidecar of the Docker setup (docs/qdevice.md). All of it
+    lives in the helper the QNetd hosts run, loaded from this tree."""
+    import importlib.machinery
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(here, 'packaging', 'qnetd', 'pegaprox-qnetd-helper'),
+                 '/usr/lib/pegaprox/qnetd/pegaprox-qnetd-helper'):
+        if os.path.isfile(path):
+            break
+    else:
+        print('pegaprox-qnetd: the QNetd helper is not part of this install', file=sys.stderr)
+        return 1
+    # no __pycache__ next to a helper that also runs as root
+    sys.dont_write_bytecode = True
+    loader = importlib.machinery.SourceFileLoader('pegaprox_qnetd_helper', path)
+    helper = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(helper)
+    return helper.sidecar_main(args)
+
+
 if __name__ == '__main__':
     # MK Oct 2026 (#625) - the witness of an automatic group: same package, a process of
     # its own that never starts the app (the Docker image runs it as the command `witness`)
@@ -179,6 +203,10 @@ if __name__ == '__main__':
                                install=os.environ.get('PEGAPROX_WITNESS_INSTALL')
                                or ('docker' if _in_image else 'manual'),
                                again=[sys.executable, os.path.abspath(__file__), 'witness']))
+    # MK Oct 2026 - the QNetd sidecar: corosync-qnetd plus the helper socket the PegaProx
+    # container signs cluster certificates through. Never starts the app either
+    if len(sys.argv) > 1 and sys.argv[1] == 'qnetd':
+        sys.exit(qnetd_command(sys.argv[2:]))
     if '--requirements' in sys.argv:
         print_system_requirements()
     elif '--download-static' in sys.argv:
@@ -230,6 +258,7 @@ Options:
   --set-port N      write the listen port into the database (from the next start on)
   --help, -h        this message
   witness ...       the witness of an automatic group instead (witness --help)
+  qnetd run|health  the QNetd sidecar of the Docker setup (docs/qdevice.md)
 
 Env vars:
   PEGAPROX_DB_KEY            master key (urlsafe-base64 or hex)

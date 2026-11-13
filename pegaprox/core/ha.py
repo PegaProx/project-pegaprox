@@ -282,6 +282,14 @@ FORWARDED_READS = LEADER_ONLY_READS | XCPNG_TASK_READS | frozenset((
     # and so does a batch restore
     '/api/batch-restores',
     '/api/batch-restores/<run_id>',
+    # a QDevice setup, removal or bulk setup (core/qnetd.py), and what the active asks
+    # the QNetd hosts and nodes: a 'local' QNetd host is the active's own machine
+    '/api/qnetd/jobs',
+    '/api/qnetd/jobs/<job_id>',
+    '/api/qnetd/hosts',
+    '/api/qnetd/hosts/<host_id>/status',
+    '/api/clusters/<cluster_id>/qdevice/preflight',
+    '/api/clusters/<cluster_id>/qdevice/plan',
 ))
 # The one rule every plugin route is served behind (api/plugins.py plugin_proxy). A
 # plugin handler serves every method from one function and most never look at which
@@ -341,6 +349,8 @@ SYNC_TABLES = (
     'recovery_targets', 'restore_test_marks',
     # manual confirmations of a guest's recoverability, beside the automatic facts
     'recovery_confirmations',
+    # the QNetd hosts and which cluster votes through which (core/qnetd.py)
+    'qnetd_hosts', 'qnetd_attachments',
     # the custom node hardening profiles, picks of the built-in controls
     'hardening_profiles',
     # VM blueprints: a library image or a PVE template plus hardware and Cloud-Init, and
@@ -404,6 +414,7 @@ ENCRYPTED_COLUMNS = {
     'esxi_storages': ('password_encrypted',),
     'node_bmc_endpoints': ('bmc_password_encrypted',),
     'cluster_node_credentials': ('password_encrypted',),
+    'qnetd_hosts': ('password_encrypted', 'ssh_key_encrypted'),
     'pbs_servers': ('pass_encrypted', 'api_token_secret_encrypted', 'ssh_key_encrypted'),
     'vmware_servers': ('pass_encrypted',),
     'auto_install_profiles': ('answer_encrypted',),

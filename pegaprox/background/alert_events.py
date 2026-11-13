@@ -3,8 +3,8 @@
 PegaProx Event Alerts - Layer 7
 Failed Proxmox tasks, Ceph health, slow Ceph OSDs, replication, PegaProx's own
 replication jobs past their RPO, stale snapshots, guests without a backup job, ZFS pools
-in trouble, node clocks that drift, guests in a restart loop and a QDevice that is not
-connected.
+in trouble, node clocks that drift, guests in a restart loop, a QDevice that is not
+connected and a QNetd host that is down.
 
 The metric rules in alerts.py compare a number on every tick and send again after each
 cooldown for as long as it stays over the line. The rules here watch a condition: one
@@ -32,6 +32,8 @@ What it reads, per cluster that has such a rule:
     above, kept per guest for RESTART_WINDOW_MAX minutes
   - /cluster/status and /cluster/config/qdevice of each node that can be asked, at most
     every qdevice.FRESH seconds, shared with the QDevice view of the UI (core/qdevice.py)
+  - nothing of the cluster for a QNetd host: the status core/qnetd.py keeps of every host a
+    cluster is attached to, refreshed in the background every qnetd.REFRESH_EVERY
   - /nodes/<n>/ceph/osd, the CRUSH tree with the latencies of every OSD, through one node
     that has Ceph, at most every OSD_EVERY, shared with the Prometheus exporter
   - PegaProx's own replication jobs (cross_cluster_replications, the ones behind the
@@ -68,13 +70,14 @@ except ImportError:  # python < 3.11
 
 EVENT_METRICS = ('task_failed', 'ceph_health', 'replication', 'snapshot_age', 'backup_coverage',
                  'zfs_health', 'clock_drift', 'restart_loop', 'qdevice', 'ceph_osd_latency',
-                 'replication_rpo', 'restore_test_age')
+                 'replication_rpo', 'restore_test_age', 'qnetd')
 # the rules that leave out the guests tagged like this
 TAGGED_OUT = ('backup_coverage', 'restore_test_age')
 # the rules that have no number to set; a threshold sent along is ignored
-_NO_THRESHOLD = ('task_failed', 'qdevice')
+_NO_THRESHOLD = ('task_failed', 'qdevice', 'qnetd')
 # the rules that read PegaProx's database only: they go on while their cluster is out of reach
-DB_ONLY = ('replication_rpo',)
+# (a QNetd host is no part of the cluster: what is known of it is kept in this process)
+DB_ONLY = ('replication_rpo', 'qnetd')
 
 # the fields a matching decision rests on; a rule whose one of these changed starts over
 MATCH_FIELDS = ('metric', 'target_type', 'target_id', 'threshold', 'task_type', 'task_status',
@@ -138,6 +141,7 @@ _THRESHOLDS = {
     'ceph_osd_latency': (100, 5, 10000),  # ms of apply or commit latency
     'replication_rpo': (0, 0, 10080),   # minutes since the last successful run; 0: twice the interval
     'restore_test_age': (30, 1, 365),   # days a guest may go without a restore test that passed
+    'qnetd': (0, 0, 0),                 # nothing to set: reachable and running or not
 }
 _SNAPSHOT_TASKS = frozenset(('qmsnapshot', 'qmdelsnapshot', 'qmrollback',
                              'vzsnapshot', 'vzdelsnapshot', 'vzrollback'))
@@ -284,6 +288,17 @@ def normalize_rule(rule, data, prev_metric=None):
     other metric only takes notify_resolved from here.
     """
     metric = rule.get('metric')
+    if metric == 'qnetd' or prev_metric == 'qnetd':
+        # the QNetd hosts are an administrator's (api/qnetd.py): so is the rule that watches
+        # them, set up, changed or moved off. It keeps who saved it; it watches only while
+        # that one is an administrator (qnetd_rules_allowed)
+        who = _qnetd_caller()
+        if who is None:
+            return 'only an administrator can set up or change the QNetd host rule'
+        if metric == 'qnetd':
+            rule['qnetd_by'] = who
+    if metric != 'qnetd':
+        rule.pop('qnetd_by', None)
     if 'notify_resolved' in data:
         rule['notify_resolved'] = bool(data.get('notify_resolved'))
     if metric not in TAGGED_OUT:
@@ -339,7 +354,7 @@ def normalize_rule(rule, data, prev_metric=None):
             minutes = _int_in(rule.get('restart_window_minutes'), 1, RESTART_WINDOW_MAX)
         rule['restart_window_minutes'] = minutes or RESTART_WINDOW_DEFAULT
 
-    if metric == 'ceph_health':
+    if metric in ('ceph_health', 'qnetd'):
         rule['target_type'], rule['target_id'] = 'cluster', None
     ttype = rule.get('target_type') or 'cluster'
     tid = rule.get('target_id')
@@ -363,6 +378,64 @@ def normalize_rule(rule, data, prev_metric=None):
         tid = None
     rule['target_type'], rule['target_id'] = ttype, (str(tid).strip() if tid is not None else None)
     return None
+
+
+def _qnetd_caller():
+    """The administrator saving a rule in this request: the account name, or None for
+    anyone else and outside a request. The test of the QNetd routes, with the role
+    require_auth worked out (a token's floored one, a tenant mapping that lowers an
+    admin)."""
+    try:
+        from flask import has_request_context, request
+        if not has_request_context():
+            return None
+        session = getattr(request, 'session', None) or {}
+        name = session.get('user')
+        if not isinstance(name, str) or not name:
+            return None
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import acts_as_admin
+        user = dict(build_authz_user(name, session),
+                    effective_role=session.get('effective_role', session.get('role')))
+        return name if acts_as_admin(user) else None
+    except Exception as e:
+        logging.debug(f"[AlertEvents] caller of a qnetd rule unknown: {e}")
+        return None
+
+
+def _is_admin(name):
+    if not isinstance(name, str) or not name:
+        return False
+    try:
+        from pegaprox.utils.rbac import acts_as_admin
+        user = get_db().get_user(name)
+    except Exception as e:
+        logging.debug(f"[AlertEvents] user {name!r} unreadable: {e}")
+        return False
+    return bool(user) and user.get('enabled', True) is not False and acts_as_admin(user)
+
+
+def qnetd_rules_allowed(rules, record=None):
+    """`rules` without the qnetd rules no administrator stands behind: one made through
+    POST /api/alerts (alert.manage takes any metric there, normalize_rule never sees it)
+    and one whose administrator is gone or one no more. Such a rule reads no QNetd host
+    and raises nothing; what it had open closes with the orphans."""
+    if not any(r.get('metric') == 'qnetd' for r in rules):
+        return rules
+    known, out = {}, []
+    for r in rules:
+        if r.get('metric') == 'qnetd':
+            who = r.get('qnetd_by')
+            if who not in known:
+                known[who] = _is_admin(who)
+            if not known[who]:
+                if record:
+                    record(r.get('id'), reason='no administrator set this QNetd rule up (or is one any '
+                                               'more): an administrator saves it again',
+                           cluster_id=r.get('cluster_id'), metric='qnetd')
+                continue
+        out.append(r)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1643,6 +1716,41 @@ def _eval_qdevice(rule, seen):
     return p
 
 
+def _eval_qnetd(rule, seen):
+    """One incident per QNetd host this cluster votes through, not one per node: the
+    QDevice rule says which nodes lost it, this one that the host itself is down or its
+    corosync-qnetd stopped. A host without a recent enough read is left as it is; one the
+    cluster no longer hangs on closes without a word. The incident names no host, address
+    or error: anybody with the cluster sees its alerts, the QNetd hosts are an
+    administrator's (Settings > High Availability > QNetd hosts has the rest)."""
+    rows = seen.get('qnetd')
+    if rows is None:
+        return None
+    p = _Pass()
+    p.known = {f"qnetd:{r['qnetd_id']}" for r in rows}
+    for r in rows:
+        obj = f"qnetd:{r['qnetd_id']}"
+        if r['state'] == 'unknown':
+            continue
+        if r['state'] == 'ok':
+            p.fine[obj] = ('Resolved: QNetd host',
+                           'The QNetd host this cluster votes through answers and corosync-qnetd runs again.')
+            continue
+        what = {'down': 'does not answer', 'inactive': 'answers, but corosync-qnetd is not running',
+                'outdated': 'runs a helper older than this PegaProx speaks'}.get(r['state'], 'is not ready')
+        message = (f"The QNetd host this cluster votes through {what}. The cluster keeps quorum while "
+                   f"all its nodes run, but loses the vote of its QDevice. Which host and why: Settings > "
+                   f"High Availability > QNetd hosts.")
+        p.firing[obj] = {
+            'object': obj, 'target_type': 'cluster', 'target_id': None,
+            'target_name': 'QNetd host', 'target_key': '',
+            'name': f"QNetd host {r['state']}", 'message': message,
+            'value': 0.0, 'display': r['state'], 'severity': 'critical' if r['state'] == 'down' else 'warning',
+            'details': [('State', r['state']), ('Last read', r.get('read_at') or '-')],
+        }
+    return p
+
+
 def _eval_restarts(rule, seen, cname, cid, now):
     """One incident per guest that started `threshold` times within the window; it closes
     once the guest stayed quiet for a whole window, so a loop is said once, not on every
@@ -2087,6 +2195,8 @@ def _evaluate(A, rule, cid, seen, mutes, settings, now):
             p = _eval_restarts(rule, seen, cname, cid, now)
         elif metric == 'qdevice':
             p = _eval_qdevice(rule, seen)
+        elif metric == 'qnetd':
+            p = _eval_qnetd(rule, seen)
         elif metric == 'ceph_osd_latency':
             p = _eval_osds(rule, seen)
         elif metric == 'replication_rpo':
@@ -2120,6 +2230,7 @@ def check_event_alerts(now=None):
     except Exception as e:
         logging.warning(f"[AlertEvents] rules unreadable: {e}")
         return
+    rules = qnetd_rules_allowed(rules, A._record_eval)
     _close_orphans(rules)
     prune_mutes(now)
     by_cluster = {}
@@ -2163,6 +2274,14 @@ def check_event_alerts(now=None):
             for j in listed:
                 own.setdefault(j['source'], []).append(j)
 
+    watched = sorted({c for c, _m, rs in order if any(r.get('metric') == 'qnetd' for r in rs)})
+    if watched:
+        # what the rules below read was kept by an earlier tick; this one only starts
+        # the background read of the hosts of these clusters that went stale (at most
+        # every qnetd.REFRESH_EVERY), it never waits for a QNetd host
+        from pegaprox.core import qnetd
+        qnetd.kick_refresh(now, cluster_ids=watched)
+
     plans = [(cid, mgr, (seen or {}).get('snapshot_plan') or [])
              for (cid, mgr, _), seen in zip(order, results)]
     read_now = _run_snapshot_reads([p for p in plans if p[2]], now)
@@ -2201,6 +2320,14 @@ def check_event_alerts(now=None):
         if seen.get('backup') is not None and any(r.get('metric') == 'backup_coverage'
                                                   and r.get('backup_exclude_tags') for r in crules):
             seen['tags'] = guest_tags(cid, seen.get('resources'))
+        if any(r.get('metric') == 'qnetd' for r in crules):
+            from pegaprox.core import qnetd
+            seen['qnetd'] = qnetd.alert_view(cid, now=now)
+            if seen['qnetd'] is None:
+                _note(cid, 'qnetd', False, 'QNetd attachments unreadable')
+            else:
+                _note(cid, 'qnetd', True, f"{len(seen['qnetd'])} QNetd host(s): "
+                      + (', '.join(r['state'] for r in seen['qnetd']) or 'none attached'))
         if any(r.get('metric') == 'restore_test_age' for r in crules) and seen.get('guests'):
             seen['restore_marks'] = _restore_marks(cid)
             if 'tags' not in seen and any(r.get('metric') == 'restore_test_age' and r.get('backup_exclude_tags')

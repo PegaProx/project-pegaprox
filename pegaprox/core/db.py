@@ -997,6 +997,40 @@ class PegaProxDB:
             )
         ''')
 
+        # The QNetd hosts a cluster's QDevice can vote through (core/qnetd.py). address/port
+        # is what the cluster nodes dial; the ssh_* columns are how PegaProx itself reaches a
+        # host of kind 'ssh'. Both secrets sealed like the cluster's own.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS qnetd_hosts (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                address TEXT NOT NULL,
+                port INTEGER DEFAULT 5403,
+                ssh_host TEXT DEFAULT '',
+                ssh_port INTEGER DEFAULT 22,
+                ssh_user TEXT DEFAULT '',
+                password_encrypted TEXT DEFAULT '',
+                ssh_key_encrypted TEXT DEFAULT '',
+                ca_sha256 TEXT DEFAULT '',
+                created_by TEXT DEFAULT '',
+                created_at TEXT,
+                updated_at TEXT
+            )
+        ''')
+        # one QNetd host per cluster; a QDevice knows exactly one
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS qnetd_attachments (
+                cluster_id TEXT PRIMARY KEY,
+                qnetd_id TEXT NOT NULL,
+                cluster_name TEXT NOT NULL,
+                attached_at TEXT,
+                attached_by TEXT DEFAULT ''
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_qnetd_attachments_host '
+                       'ON qnetd_attachments(qnetd_id)')
+
         # NS #501 Jun 2026 — persisted active (fired) alert instances for ack +
         # escalation tracking. The in-memory cooldown map only deduped sends; this
         # records each ongoing incident so the UI can acknowledge it and the loop
@@ -2984,6 +3018,97 @@ class PegaProxDB:
         cur = self.conn.cursor()
         cur.execute('DELETE FROM cluster_node_credentials WHERE cluster_id = ? AND node = ?',
                     (cluster_id, node))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    # --- QNetd hosts and the clusters attached to them (core/qnetd.py) ------------
+    _QNETD_COLS = ('id', 'name', 'kind', 'address', 'port', 'ssh_host', 'ssh_port', 'ssh_user',
+                   'ca_sha256', 'created_by', 'created_at', 'updated_at')
+
+    def _qnetd_row(self, r, secrets=False):
+        row = {c: r[c] for c in self._QNETD_COLS}
+        row['has_password'] = bool(r['password_encrypted'])
+        row['has_ssh_key'] = bool(r['ssh_key_encrypted'])
+        if secrets:
+            # server side only. A value that does not open is no credential: the login
+            # then fails at the host instead of offering ciphertext as a password
+            for col, key in (('password_encrypted', 'password'), ('ssh_key_encrypted', 'ssh_key')):
+                try:
+                    row[key] = self._decrypt(r[col]) if r[col] else ''
+                except Exception:
+                    logging.warning(f"[QNetd] {col} of host {r['id']} does not open with this key")
+                    row[key] = ''
+        return row
+
+    def list_qnetd_hosts(self):
+        cur = self.conn.cursor()
+        cur.execute('SELECT * FROM qnetd_hosts ORDER BY name COLLATE NOCASE')
+        return [self._qnetd_row(r) for r in cur.fetchall()]
+
+    def get_qnetd_host(self, host_id, secrets=False):
+        cur = self.conn.cursor()
+        cur.execute('SELECT * FROM qnetd_hosts WHERE id = ?', (host_id,))
+        r = cur.fetchone()
+        return self._qnetd_row(r, secrets) if r else None
+
+    def save_qnetd_host(self, host_id, fields, password=None, ssh_key=None):
+        """Insert or update one host. password / ssh_key: None keeps what is stored,
+        '' clears it, anything else is sealed."""
+        cur = self.conn.cursor()
+        now = datetime.now().astimezone().isoformat(timespec='seconds')
+        old = cur.execute('SELECT password_encrypted, ssh_key_encrypted FROM qnetd_hosts WHERE id = ?',
+                          (host_id,)).fetchone()
+        pw = (old['password_encrypted'] if old else '') if password is None else \
+            (self._encrypt(password) if password else '')
+        key = (old['ssh_key_encrypted'] if old else '') if ssh_key is None else \
+            (self._encrypt(ssh_key) if ssh_key else '')
+        vals = tuple(fields.get(c, d) for c, d in (('name', ''), ('kind', ''), ('address', ''),
+                                                  ('port', 5403), ('ssh_host', ''), ('ssh_port', 22),
+                                                  ('ssh_user', '')))
+        if old:
+            cur.execute('UPDATE qnetd_hosts SET name=?, kind=?, address=?, port=?, ssh_host=?, ssh_port=?, '
+                        'ssh_user=?, password_encrypted=?, ssh_key_encrypted=?, updated_at=? WHERE id=?',
+                        vals + (pw or '', key or '', now, host_id))
+        else:
+            cur.execute('INSERT INTO qnetd_hosts (id, name, kind, address, port, ssh_host, ssh_port, ssh_user, '
+                        'password_encrypted, ssh_key_encrypted, created_by, created_at, updated_at) '
+                        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        (host_id,) + vals + (pw or '', key or '', fields.get('created_by', ''), now, now))
+        self.conn.commit()
+
+    def set_qnetd_ca_pin(self, host_id, fingerprint):
+        """The CA a host answered with the first time ('' forgets it)."""
+        cur = self.conn.cursor()
+        cur.execute('UPDATE qnetd_hosts SET ca_sha256 = ? WHERE id = ?', (fingerprint or '', host_id))
+        self.conn.commit()
+
+    def delete_qnetd_host(self, host_id):
+        cur = self.conn.cursor()
+        cur.execute('DELETE FROM qnetd_hosts WHERE id = ?', (host_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def list_qnetd_attachments(self, qnetd_id=None, cluster_id=None):
+        cur = self.conn.cursor()
+        if qnetd_id is not None:
+            cur.execute('SELECT * FROM qnetd_attachments WHERE qnetd_id = ? ORDER BY cluster_name', (qnetd_id,))
+        elif cluster_id is not None:
+            cur.execute('SELECT * FROM qnetd_attachments WHERE cluster_id = ?', (cluster_id,))
+        else:
+            cur.execute('SELECT * FROM qnetd_attachments ORDER BY cluster_name')
+        return [dict(r) for r in cur.fetchall()]
+
+    def save_qnetd_attachment(self, cluster_id, qnetd_id, cluster_name, by):
+        cur = self.conn.cursor()
+        now = datetime.now().astimezone().isoformat(timespec='seconds')
+        cur.execute('INSERT OR REPLACE INTO qnetd_attachments (cluster_id, qnetd_id, cluster_name, '
+                    'attached_at, attached_by) VALUES (?,?,?,?,?)',
+                    (cluster_id, qnetd_id, cluster_name, now, by or ''))
+        self.conn.commit()
+
+    def delete_qnetd_attachment(self, cluster_id):
+        cur = self.conn.cursor()
+        cur.execute('DELETE FROM qnetd_attachments WHERE cluster_id = ?', (cluster_id,))
         self.conn.commit()
         return cur.rowcount > 0
 
@@ -6190,7 +6315,9 @@ class PegaProxDB:
                                 # next ISO fetch answering 500.
                                 ('auto_install_profiles', ('answer_encrypted',)),
                                 # the root passwords of single nodes (#1136)
-                                ('cluster_node_credentials', ('password_encrypted',))):
+                                ('cluster_node_credentials', ('password_encrypted',)),
+                                # the SSH login of a QNetd host (core/qnetd.py)
+                                ('qnetd_hosts', ('password_encrypted', 'ssh_key_encrypted'))):
                 try:
                     cursor.execute(f"SELECT id, {', '.join(_cols)} FROM {_tbl}")
                     for _r in cursor.fetchall():

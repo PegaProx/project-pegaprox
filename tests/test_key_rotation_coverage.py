@@ -41,6 +41,9 @@ def seeded(db):
         "VALUES (?, ?, ?, ?)",
         ('ai1', 'rack-7', db._encrypt('[global]\nroot-password = "in the rack"\n'), 'deadbeef'))
     db.save_node_credential('c1', 'pve2', 'nodepw', 'root')
+    db.save_qnetd_host('q1', {'name': 'witness', 'kind': 'ssh', 'address': '192.0.2.50',
+                              'ssh_host': '192.0.2.50', 'ssh_user': 'root'},
+                       password='qnetdpw', ssh_key='-----BEGIN OPENSSH PRIVATE KEY-----')
     db.save_server_setting('ldap_bind_password', db._encrypt('bindpw'))
     db.save_server_setting(VAPID, {'private_pem': db._encrypt('-----BEGIN PRIVATE KEY-----'),
                                    'public_b64': 'pub'})
@@ -70,6 +73,9 @@ def test_every_secret_survives_a_rotation(seeded):
         _col(seeded, 'auto_install_profiles', 'answer_encrypted', 'ai1'))
     # the root password of a single node (#1136)
     assert seeded.node_credential_secrets('c1') == {'pve2': 'nodepw'}
+    # the SSH login of a QNetd host
+    q = seeded.get_qnetd_host('q1', secrets=True)
+    assert (q['password'], q['ssh_key']) == ('qnetdpw', '-----BEGIN OPENSSH PRIVATE KEY-----')
     settings = seeded.get_server_settings()
     assert seeded._decrypt(settings['ldap_bind_password']) == 'bindpw'
     assert seeded._decrypt(settings[VAPID]['private_pem']).startswith('-----BEGIN')
