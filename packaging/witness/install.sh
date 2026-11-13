@@ -11,6 +11,7 @@
 #   printf '%s\n' <code> | sh install.sh --code -     the code on stdin, as the lines do
 #   sh install.sh                      paired already: repair, and update from the leader
 #   sh install.sh --uninstall [--force]
+#   sh install.sh ... --qnetd          this host also a QNetd for the QDevices of PegaProx (docs/qdevice.md)
 #
 # It installs python 3.9 or later with cryptography, gevent and requests from the system
 # packages (what has none comes from PyPI into a virtualenv next to them), makes the user
@@ -24,6 +25,12 @@
 # with --no-auto-update). A paired witness keeps its address: another --url or --port
 # needs a new pairing. A new code on a host that is paired already pairs anew only once
 # the old group let the witness go.
+#
+# With --qnetd (on the first run or any later one) it also installs corosync-qnetd, makes
+# its CA as corosync-qnetd-certutil does where the package did not, and starts it: the
+# third site is the right place for that vote too. PegaProx reaches the QNetd over SSH
+# and puts its helper there itself. --uninstall leaves the QNetd alone, clusters may
+# still vote through it.
 #
 # For the tests: PEGAPROX_WITNESS_ROOT puts every path under another root,
 # PEGAPROX_PORT is the port of a PegaProx instance it looks for on this host,
@@ -53,6 +60,7 @@ USER_NAME=pegaprox-witness
 APP_PORT=${PEGAPROX_PORT:-5000}
 WAIT=${PEGAPROX_WITNESS_WAIT:-60}
 MODULES="cryptography gevent requests"
+QNETD_CONF="$ROOT/etc/corosync/qnetd"
 
 CODE=
 URL=
@@ -62,6 +70,7 @@ ALLOW=
 AUTO=
 UNINSTALL=
 FORCE=
+QNETD=
 PY=
 TMP=
 
@@ -91,6 +100,7 @@ while [ $# -gt 0 ]; do
         --auto-update) AUTO=1; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
         --force) FORCE=1; shift ;;
+        --qnetd) QNETD=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown option $1 (see --help)" ;;
     esac
@@ -889,6 +899,81 @@ check_address() {
     fi
 }
 
+# --- the QNetd next to the witness (--qnetd) ----------------------------------------------
+
+qnetd_options_file() {
+    # the environment file of the distribution's unit: /etc/default on Debian and Ubuntu,
+    # /etc/sysconfig on RHEL and SUSE
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "$ROOT/etc/default/corosync-qnetd"
+    else
+        echo "$ROOT/etc/sysconfig/corosync-qnetd"
+    fi
+}
+
+require_qnetd_tls() {
+    # a corosync-qnetd this run installed asks every client for TLS (-s req): its default
+    # (-s on) lets a client go without, and such a client shows no certificate. Only the
+    # file as the package ships it is changed, any other options line is its admin's.
+    f=$(qnetd_options_file)
+    [ -d "$(dirname "$f")" ] || return 1
+    if [ -f "$f" ] && grep -q '^[[:space:]]*COROSYNC_QNETD_OPTIONS=' "$f"; then
+        if grep '^[[:space:]]*COROSYNC_QNETD_OPTIONS=' "$f" | grep -qv '^COROSYNC_QNETD_OPTIONS=""$'; then
+            return 1
+        fi
+        new=$(mktemp "$f.XXXXXX") || return 1
+        sed 's/^COROSYNC_QNETD_OPTIONS=""$/COROSYNC_QNETD_OPTIONS="-s req"/' "$f" > "$new" || { rm -f "$new"; return 1; }
+    else
+        new=$(mktemp "$f.XXXXXX") || return 1
+        { [ ! -f "$f" ] || cat "$f"; echo 'COROSYNC_QNETD_OPTIONS="-s req"'; } > "$new" || { rm -f "$new"; return 1; }
+    fi
+    chmod 0644 "$new" && mv -f "$new" "$f" || { rm -f "$new"; return 1; }
+}
+
+setup_qnetd() {
+    # corosync's own daemon and its CA, nothing of PegaProx: PegaProx reaches it over SSH
+    # (root, or a user with sudo) and installs its helper here itself (docs/qdevice.md)
+    fresh=
+    tls=
+    command -v corosync-qnetd >/dev/null 2>&1 || fresh=1
+    if ! command -v corosync-qnetd >/dev/null 2>&1 || ! command -v certutil >/dev/null 2>&1; then
+        say "installing corosync-qnetd"
+        if command -v apt-get >/dev/null 2>&1; then
+            pkg_install corosync-qnetd libnss3-tools || die "could not install corosync-qnetd (see above)"
+        elif command -v zypper >/dev/null 2>&1; then
+            pkg_install corosync-qnetd mozilla-nss-tools || die "could not install corosync-qnetd (see above)"
+        else
+            pkg_install corosync-qnetd nss-tools ||
+                die "could not install corosync-qnetd - on RHEL and its rebuilds it is in the High Availability repository, enable that first"
+        fi
+    fi
+    if [ ! -f "$QNETD_CONF/nssdb/cert9.db" ] && [ ! -f "$QNETD_CONF/nssdb/cert8.db" ]; then
+        # the Debian package makes the CA when it is installed; elsewhere the stock tool
+        # does, once, with the group of the daemon reading it as on Debian
+        say "making the QNetd CA in $QNETD_CONF/nssdb"
+        corosync-qnetd-certutil -i -G >/dev/null || die "corosync-qnetd-certutil could not make the QNetd CA"
+        if getent group coroqnetd >/dev/null 2>&1 && [ "$(stat -c %g "$QNETD_CONF")" = 0 ]; then
+            chgrp coroqnetd "$QNETD_CONF/nssdb" "$QNETD_CONF/nssdb/cert9.db" "$QNETD_CONF/nssdb/key4.db"
+        fi
+    fi
+    if [ -n "$fresh" ]; then
+        require_qnetd_tls && tls=1
+    fi
+    systemctl enable --now corosync-qnetd.service >/dev/null 2>&1 ||
+        systemctl enable --now corosync-qnetd.service || die "could not start corosync-qnetd (see above)"
+    if [ -n "$tls" ]; then
+        # the package started it before its options were in place
+        systemctl restart corosync-qnetd.service || die "could not restart corosync-qnetd (see above)"
+        say "corosync-qnetd asks every node for TLS (-s req in $(qnetd_options_file))"
+    elif [ -n "$fresh" ]; then
+        say "warning: could not set -s req in $(qnetd_options_file), corosync-qnetd lets a client skip TLS"
+    fi
+    say "corosync-qnetd runs here: in PegaProx, add this host as a QNetd host over SSH - as root,"
+    say "or as a user with sudo - with the address the Proxmox nodes reach it at, port 5403."
+    say "Open TCP port 5403 on this host for every node of the clusters that vote through it (with ufw"
+    say "or firewalld, the setup of a QDevice in PegaProx does that for each cluster on request)."
+}
+
 # --- remove ---------------------------------------------------------------------------
 
 uninstall() {
@@ -923,6 +1008,9 @@ uninstall() {
         userdel "$USER_NAME" >/dev/null 2>&1 || true
     fi
     say "the witness is removed from this host"
+    if command -v corosync-qnetd >/dev/null 2>&1; then
+        say "corosync-qnetd stays: clusters may still vote through it (remove their QDevice in PegaProx, then remove the package corosync-qnetd)"
+    fi
 }
 
 # --- the run --------------------------------------------------------------------------
@@ -993,3 +1081,6 @@ wait_for_it
 refresh_base
 say "the witness runs (state in $STATE, updates from the leader $([ "$AUTO" = 0 ] && echo off || echo on))"
 firewall_text
+if [ -n "$QNETD" ]; then
+    setup_qnetd
+fi

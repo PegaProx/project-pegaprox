@@ -181,6 +181,12 @@ main() {
                 mkdir -p "$INSTALL_DIR/systemd"
                 cp "$SCRIPT_DIR/systemd/pegaprox-witness.service" "$INSTALL_DIR/systemd/"
             fi
+            # the QNetd helper: install.sh copies it root-owned from here, and an ssh QNetd
+            # host gets this copy (docs/qdevice.md)
+            if [ -d "$SCRIPT_DIR/packaging/qnetd" ]; then
+                mkdir -p "$INSTALL_DIR/packaging/qnetd"
+                cp "$SCRIPT_DIR/packaging/qnetd/"* "$INSTALL_DIR/packaging/qnetd/"
+            fi
             # NS Oct 2026 (#1134): the plugins never came along from a checkout. A re-run
             # replaces their code and keeps each plugin's config.json
             if [ -d "$SCRIPT_DIR/plugins" ] && [ -f "$SCRIPT_DIR/packaging/plugins/sync_plugins.py" ]; then

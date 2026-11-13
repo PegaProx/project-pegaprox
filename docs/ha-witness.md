@@ -165,6 +165,16 @@ running (a reboot does not start it again). It starts itself again into an updat
 fetched from the leader, and goes back to the code before it when that does not come up,
 in the same process.
 
+### The QNetd for your Proxmox clusters, on the same host
+
+The witness host sits at a third site, which makes it the best place for the QDevice
+vote of 2-node Proxmox clusters too. Add `--qnetd` to the installer line (after
+`--code -`), or run `sudo sh /opt/pegaprox-witness/install.sh --qnetd` on a witness that
+runs already: it installs corosync-qnetd (requiring TLS from the nodes), makes its CA and
+starts it. Then add the host
+in PegaProx as a QNetd host over SSH, and open TCP port 5403 for the cluster nodes.
+Removing the witness leaves the QNetd alone. All of it in [QDevice](qdevice.md).
+
 ## The firewall
 
 The members call the witness on TCP port 5005. Open that port for the addresses of the
