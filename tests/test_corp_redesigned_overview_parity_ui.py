@@ -550,6 +550,20 @@ def test_runtime_the_profile_card_calls_the_layout_no_preview(opener):
     _no_errors(app)
 
 
+def test_runtime_the_profile_offers_the_redesign_in_place_of_classic_corporate(opener):
+    """LW Nov 2026 - classic Corporate has no card here any more for someone not on it."""
+    app = opener()
+    page = app.page
+    page.locator('[data-user-menu]').click()
+    page.get_by_text('My Profile').first.click()
+    card = page.locator('[data-layout-pick="corporate-redesigned"]')
+    card.wait_for(timeout=5000)
+    names = card.locator('xpath=..').locator(':scope > button .text-center > span').evaluate_all(
+        "ns => ns.map(n => n.innerText.split('\\n')[0].trim())")
+    assert names == ['Modern', 'Corporate Redesigned', '\u2601\ufe0f Cloud'], names
+    _no_errors(app)
+
+
 class _BundleLock(_LockServer):
     def handle(self, route):
         path = re.sub(r'^https?://[^/]+', '', route.request.url).split('?')[0]
@@ -564,7 +578,8 @@ def test_runtime_an_admin_can_pin_corporate_redesigned_and_it_is_drawn(browser):
     try:
         page = _to_server_tab(admin)
         values = page.locator('#ui-layout-lock option').evaluate_all('os => os.map(o => o.value)')
-        assert values == ['', 'modern', 'corporate', 'corporate-redesigned', 'cloud'], values
+        # classic Corporate only while it is the pin, the redesign takes its place
+        assert values == ['', 'modern', 'corporate-redesigned', 'cloud'], values
         assert page.locator('#ui-layout-lock').input_value() == 'corporate-redesigned'
         assert not admin.errors, admin.errors
     finally:

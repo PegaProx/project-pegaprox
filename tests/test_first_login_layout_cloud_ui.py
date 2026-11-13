@@ -1,7 +1,8 @@
-"""The layout choice at the first login offers Cloud next to Modern and Corporate, and
-picking it sets the Cloud theme with it, as the card under My Profile does.
+"""The layout choice at the first login offers Cloud next to Modern and Corporate Redesigned,
+and picking it sets the Cloud theme with it, as the card under My Profile does. Classic
+Corporate is no longer offered, only someone already on it still sees its card.
 
-LW Oct 2026
+LW Oct 2026, Nov 2026
 """
 import pytest
 
@@ -47,24 +48,46 @@ def test_runtime_cloud_is_offered_and_brings_its_theme(browser):  # noqa: F811
         app.ctx.close()
 
 
-# LW Nov 2026 - four cards since Corporate Redesigned is offered here too:
-# one row from 768 px, two by two above 640, stacked on a phone
+def _cards(page):
+    return page.evaluate("""() => Array.from(document.querySelectorAll('button'))
+        .filter(b => /Modern|Corporate|Cloud/.test(b.innerText) && b.querySelector('.h-20'))
+        .map(b => { const r = b.getBoundingClientRect();
+                    return {name: b.querySelector('.text-center span').innerText.split('\\n')[0].trim(),
+                            box: [r.left, r.top, r.right]}; })""")
+
+
+@pytest.mark.parametrize('layout, offered', [
+    ('modern', ['Modern', 'Corporate Redesigned', 'Cloud']),
+    ('corporate', ['Modern', 'Corporate', 'Corporate Redesigned', 'Cloud']),
+])
+def test_runtime_corporate_redesigned_takes_the_place_of_classic_corporate(browser, layout, offered):  # noqa: F811
+    app, _ = _first_login(browser, layout=layout)
+    try:
+        page = app.page
+        page.locator('[data-layout-pick="corporate-redesigned"]').wait_for(timeout=5000)
+        assert [c['name'] for c in _cards(page)] == offered
+        assert not app.errors, app.errors
+    finally:
+        app.ctx.close()
+
+
+# LW Nov 2026 - three cards, four for someone still on classic Corporate:
+# one row from 768 px, stacked on a phone
+@pytest.mark.parametrize('layout', ['modern', 'corporate'])
 @pytest.mark.parametrize('width', [1280, 390])
-def test_runtime_the_cards_fit_without_scrolling_sideways(browser, width):  # noqa: F811
-    app, _ = _first_login(browser, width=width)
+def test_runtime_the_cards_fit_without_scrolling_sideways(browser, width, layout):  # noqa: F811
+    app, _ = _first_login(browser, layout=layout, width=width)
     try:
         page = app.page
         page.locator('[data-layout-pick="cloud"]').wait_for(timeout=5000)
         over = page.evaluate('() => document.documentElement.scrollWidth - window.innerWidth')
         assert over <= 0, over
-        boxes = page.evaluate("""() => Array.from(document.querySelectorAll('button'))
-            .filter(b => /Modern|Corporate|Cloud/.test(b.innerText) && b.querySelector('.h-20'))
-            .map(b => { const r = b.getBoundingClientRect(); return [r.left, r.top, r.right]; })""")
-        assert len(boxes) == 4, boxes
+        boxes = [c['box'] for c in _cards(page)]
+        assert len(boxes) == (4 if layout == 'corporate' else 3), boxes
         if width >= 768:
             assert len({round(t) for _, t, _ in boxes}) == 1, boxes   # one row
         else:
-            assert len({round(t) for _, t, _ in boxes}) == 4, boxes   # stacked
+            assert len({round(t) for _, t, _ in boxes}) == len(boxes), boxes   # stacked
         assert all(r <= width for _, _, r in boxes), boxes
     finally:
         app.ctx.close()

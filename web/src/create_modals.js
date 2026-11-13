@@ -3497,7 +3497,9 @@
                                         <p className="text-xs text-gray-400 mb-3">
                                             {t('layoutStyleDesc') || 'Choose between modern dashboard or corporate enterprise style.'}
                                         </p>
-                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                        {/* LW Nov 2026 - Corporate Redesigned takes the place of classic Corporate,
+                                            whose card only someone already on it still sees */}
+                                        <div className={`grid grid-cols-2 ${user?.ui_layout === 'corporate' ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-3`}>
                                             {/* Modern layout card */}
                                             <button
                                                 onClick={async () => {
@@ -3533,44 +3535,46 @@
                                                 </div>
                                             </button>
                                             {/* Corporate layout card */}
-                                            <button
-                                                onClick={async () => {
-                                                    const corpTheme = localStorage.getItem('corp-theme') === 'light' ? 'corporateLight' : 'corporateDark';
-                                                    const result = await updatePreferences({ ui_layout: 'corporate', theme: corpTheme });
-                                                    if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutCorporate') || 'Corporate'}`, 'success');
-                                                }}
-                                                className={`p-3 rounded-xl border-2 transition-all hover:scale-105 text-left ${
-                                                    user?.ui_layout === 'corporate'
-                                                        ? 'border-proxmox-orange ring-2 ring-proxmox-orange/30'
-                                                        : 'border-proxmox-border hover:border-gray-500'
-                                                }`}
-                                            >
-                                                <div className="h-16 rounded mb-2 relative overflow-hidden bg-proxmox-dark border border-proxmox-border">
-                                                    {/* Corporate preview: flat sidebar, tree lines, underline tabs */}
-                                                    <div className="absolute left-0 top-0 bottom-0 w-5 bg-proxmox-card border-r border-proxmox-border">
-                                                        <div className="mt-2 ml-1 space-y-1">
-                                                            <div className="w-3 h-0.5 bg-gray-500" />
-                                                            <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
-                                                            <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                            {user?.ui_layout === 'corporate' && (
+                                                <button
+                                                    onClick={async () => {
+                                                        const corpTheme = localStorage.getItem('corp-theme') === 'light' ? 'corporateLight' : 'corporateDark';
+                                                        const result = await updatePreferences({ ui_layout: 'corporate', theme: corpTheme });
+                                                        if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutCorporate') || 'Corporate'}`, 'success');
+                                                    }}
+                                                    className={`p-3 rounded-xl border-2 transition-all hover:scale-105 text-left ${
+                                                        user?.ui_layout === 'corporate'
+                                                            ? 'border-proxmox-orange ring-2 ring-proxmox-orange/30'
+                                                            : 'border-proxmox-border hover:border-gray-500'
+                                                    }`}
+                                                >
+                                                    <div className="h-16 rounded mb-2 relative overflow-hidden bg-proxmox-dark border border-proxmox-border">
+                                                        {/* Corporate preview: flat sidebar, tree lines, underline tabs */}
+                                                        <div className="absolute left-0 top-0 bottom-0 w-5 bg-proxmox-card border-r border-proxmox-border">
+                                                            <div className="mt-2 ml-1 space-y-1">
+                                                                <div className="w-3 h-0.5 bg-gray-500" />
+                                                                <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                                                <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                                            </div>
                                                         </div>
-                                                    </div>
-                                                    <div className="absolute right-1.5 top-1.5 left-7 h-2 bg-proxmox-card border-b border-proxmox-border flex items-end gap-1 px-1">
-                                                        <div className="w-3 h-0.5 bg-proxmox-orange" />
-                                                        <div className="w-3 h-0.5 bg-gray-600" />
-                                                        <div className="w-3 h-0.5 bg-gray-600" />
-                                                    </div>
-                                                    <div className="absolute right-1.5 top-5 left-7 bottom-1.5 bg-proxmox-card border border-proxmox-border" />
-                                                    {user?.ui_layout === 'corporate' && (
-                                                        <div className="absolute top-1 right-1 bg-proxmox-orange rounded-full p-0.5">
-                                                            <Icons.Check className="w-3 h-3 text-white" />
+                                                        <div className="absolute right-1.5 top-1.5 left-7 h-2 bg-proxmox-card border-b border-proxmox-border flex items-end gap-1 px-1">
+                                                            <div className="w-3 h-0.5 bg-proxmox-orange" />
+                                                            <div className="w-3 h-0.5 bg-gray-600" />
+                                                            <div className="w-3 h-0.5 bg-gray-600" />
                                                         </div>
-                                                    )}
-                                                </div>
-                                                <div className="text-center">
-                                                    <span className="text-xs font-medium">{t('layoutCorporate') || 'Corporate'}</span>
-                                                    <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
-                                                </div>
-                                            </button>
+                                                        <div className="absolute right-1.5 top-5 left-7 bottom-1.5 bg-proxmox-card border border-proxmox-border" />
+                                                        {user?.ui_layout === 'corporate' && (
+                                                            <div className="absolute top-1 right-1 bg-proxmox-orange rounded-full p-0.5">
+                                                                <Icons.Check className="w-3 h-3 text-white" />
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                    <div className="text-center">
+                                                        <span className="text-xs font-medium">{t('layoutCorporate') || 'Corporate'}</span>
+                                                        <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
+                                                    </div>
+                                                </button>
+                                            )}
                                             {/* LW Oct 2026 - Corporate Redesigned: Corporate with the redesigned skin */}
                                             <button
                                                 data-layout-pick="corporate-redesigned"

@@ -351,19 +351,20 @@ def test_runtime_the_vm_charts_follow_the_time_range_and_say_when_they_failed(op
 
 
 def test_runtime_back_in_classic_corporate_the_monitor_tab_falls_back_to_the_summary(open_app):
-    """Monitor is a tab of the preview only. Picking classic Corporate in My Profile while it is
-    open keeps the VM view mounted; it must show the summary, not an empty page."""
+    """Monitor is a tab of the preview only. When classic Corporate takes over while it is open
+    (no longer picked in My Profile, but an admin may pin it: the refusal of another pick
+    brings the pin along), the VM view stays mounted; it must show the summary, not an empty page."""
     app = open_app()
     page = app.page
     _open_guest(page, 'web01')
     page.locator('[data-cr-tabs="guest"] [data-cr-tab="monitor"]').click()
     page.locator('[data-cr-perf="ready"]').wait_for(timeout=8000)
-    app.server.extra[('PUT', '/api/user/preferences')] = (200, {
-        'success': True, 'theme': 'corporateDark', 'language': 'en', 'ui_layout': 'corporate',
-        'layout_chosen': True, 'taskbar_auto_expand': True, 'sidebar_show_vmid': False})
+    app.server.extra[('PUT', '/api/user/preferences')] = (403, {
+        'error': 'The layout is set by your administrator', 'code': 'UI_LOCKED', 'field': 'ui_layout',
+        'lock': {'layout': 'corporate', 'language': '', 'admins': True}})
     page.locator('[data-user-menu]').click()
     page.get_by_text('My Profile').first.click()
-    # the classic card sits right before the preview's
+    # no classic card for someone on the preview: the Modern one sits right before it
     page.locator('[data-layout-pick="corporate-redesigned"]').locator('xpath=preceding-sibling::button[1]').click()
     page.wait_for_function('() => !document.body.dataset.corpVariant', timeout=5000)
     page.keyboard.press('Escape')
@@ -372,7 +373,8 @@ def test_runtime_back_in_classic_corporate_the_monitor_tab_falls_back_to_the_sum
     assert strip.locator('button.active').inner_text().strip() == 'Summary'
     assert page.locator('.corp-property-grid', has_text='QEMU Agent').count() == 1
     assert page.locator('[data-cr-perf]').count() == 0
-    _no_errors(app)
+    # the page logs the refused pick, which is how the pin arrived here
+    assert not [e for e in app.errors if 'updatePreferences: Request failed' not in e], app.errors
 
 
 def test_runtime_a_stopped_guest_says_why_it_has_no_charts(open_app):

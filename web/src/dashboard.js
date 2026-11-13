@@ -34476,7 +34476,9 @@
                                 {t('layoutSelectionDesc') || 'Choose your preferred interface style. You can change this anytime under My Profile \u2192 Layout Style.'}
                             </p>
 
-                            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                            {/* LW Nov 2026 - Corporate Redesigned takes the place of classic Corporate, which
+                                only someone already on it still sees here */}
+                            <div className={`grid grid-cols-1 sm:grid-cols-2 ${user?.ui_layout === 'corporate' ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-4 mb-4`}>
                                 {/* Modern */}
                                 <button
                                     onClick={() => pickLayout('modern')}
@@ -34505,37 +34507,39 @@
                                 </button>
 
                                 {/* Corporate */}
-                                <button
-                                    onClick={() => pickLayout('corporate')}
-                                    disabled={saving}
-                                    className={`p-4 rounded-xl border-2 transition-all hover:scale-[1.03] text-left ${
-                                        user?.ui_layout === 'corporate'
-                                            ? 'border-proxmox-orange ring-2 ring-proxmox-orange/30'
-                                            : 'border-proxmox-border hover:border-gray-500'
-                                    } disabled:opacity-60`}
-                                >
-                                    <div className="h-20 rounded mb-3 relative overflow-hidden bg-proxmox-dark border border-proxmox-border">
-                                        <div className="absolute left-0 top-0 bottom-0 w-6 bg-proxmox-card border-r border-proxmox-border">
-                                            <div className="mt-2 ml-1.5 space-y-1">
-                                                <div className="w-3 h-0.5 bg-gray-500" />
-                                                <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
-                                                <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
-                                                <div className="w-3 h-0.5 bg-gray-500" />
-                                                <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                {user?.ui_layout === 'corporate' && (
+                                    <button
+                                        onClick={() => pickLayout('corporate')}
+                                        disabled={saving}
+                                        className={`p-4 rounded-xl border-2 transition-all hover:scale-[1.03] text-left ${
+                                            user?.ui_layout === 'corporate'
+                                                ? 'border-proxmox-orange ring-2 ring-proxmox-orange/30'
+                                                : 'border-proxmox-border hover:border-gray-500'
+                                        } disabled:opacity-60`}
+                                    >
+                                        <div className="h-20 rounded mb-3 relative overflow-hidden bg-proxmox-dark border border-proxmox-border">
+                                            <div className="absolute left-0 top-0 bottom-0 w-6 bg-proxmox-card border-r border-proxmox-border">
+                                                <div className="mt-2 ml-1.5 space-y-1">
+                                                    <div className="w-3 h-0.5 bg-gray-500" />
+                                                    <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                                    <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                                    <div className="w-3 h-0.5 bg-gray-500" />
+                                                    <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                                </div>
                                             </div>
+                                            <div className="absolute right-2 top-2 left-8 h-2.5 bg-proxmox-card border-b border-proxmox-border flex items-end gap-1.5 px-1">
+                                                <div className="w-4 h-0.5 bg-proxmox-orange" />
+                                                <div className="w-4 h-0.5 bg-gray-600" />
+                                                <div className="w-4 h-0.5 bg-gray-600" />
+                                            </div>
+                                            <div className="absolute right-2 top-6 left-8 bottom-2 bg-proxmox-card border border-proxmox-border" />
                                         </div>
-                                        <div className="absolute right-2 top-2 left-8 h-2.5 bg-proxmox-card border-b border-proxmox-border flex items-end gap-1.5 px-1">
-                                            <div className="w-4 h-0.5 bg-proxmox-orange" />
-                                            <div className="w-4 h-0.5 bg-gray-600" />
-                                            <div className="w-4 h-0.5 bg-gray-600" />
+                                        <div className="text-center">
+                                            <span className="text-sm font-medium text-white">{t('layoutCorporate') || 'Corporate'}</span>
+                                            <p className="text-xs text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
                                         </div>
-                                        <div className="absolute right-2 top-6 left-8 bottom-2 bg-proxmox-card border border-proxmox-border" />
-                                    </div>
-                                    <div className="text-center">
-                                        <span className="text-sm font-medium text-white">{t('layoutCorporate') || 'Corporate'}</span>
-                                        <p className="text-xs text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
-                                    </div>
-                                </button>
+                                    </button>
+                                )}
                                 {/* LW Nov 2026 - Corporate Redesigned, offered from the first login on as under My Profile */}
                                 <button
                                     onClick={() => pickLayout('corporate-redesigned')}
