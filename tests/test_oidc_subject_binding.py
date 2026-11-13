@@ -501,3 +501,42 @@ def test_on_a_standby_an_unbound_row_sends_the_user_to_the_active(ha_env, db, mo
     _oidc_row(db, 'olga', oidc_sub='idp-subject-olga')
     assert _sb_sign_in(ha_env.api, 'olga').status_code == 200
 
+
+# --- what the identity providers send, signed in twice ------------------------------------
+
+# (token claims, userinfo answer, the account it lands on). The token is signed and its
+# key set served over TLS, as in every callback test here; Entra is above.
+SHAPES = {
+    # Keycloak: the user id as sub, the username as preferred_username
+    'keycloak': ({'sub': '3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b', 'preferred_username': 'kc.user',
+                  'email': 'kc.user@corp.example', 'email_verified': True},
+                 {'sub': '3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b', 'preferred_username': 'kc.user',
+                  'email': 'kc.user@corp.example', 'email_verified': True}, 'kc.user'),
+    # Authentik: a hashed user id as sub (its default subject mode)
+    'authentik': ({'sub': 'c6b5a8e2f1d04e7b9a3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a',
+                   'preferred_username': 'akuser', 'email': 'ak@corp.example', 'email_verified': True},
+                  {'sub': 'c6b5a8e2f1d04e7b9a3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a',
+                   'preferred_username': 'akuser', 'email': 'ak@corp.example', 'email_verified': True},
+                  'akuser'),
+    # Google: a numeric sub, no preferred_username, a verified email
+    'google': ({'sub': '109876543210987654321', 'preferred_username': None,
+                'email': 'Someone@Corp.Example', 'email_verified': True},
+               {'sub': '109876543210987654321', 'email': 'Someone@Corp.Example', 'email_verified': True},
+               'someone@corp.example'),
+    # AD FS: userinfo has a sub of its own and nothing else, the name sits in the token
+    'adfs': ({'sub': 'ppid-of-the-token', 'preferred_username': None, 'email': None,
+              'upn': 'bob@corp.example'},
+             {'sub': 'adfs-userinfo-sub'}, _key('adfs-userinfo-sub')),
+}
+
+
+@pytest.mark.parametrize('shape', sorted(SHAPES))
+def test_each_identity_provider_signs_in_again_to_its_account(api, db, idp, signer, monkeypatch, shape):
+    claims, userinfo, lands_on = SHAPES[shape]
+    token = _id_token(signer, **claims)
+    for _ in range(2):
+        r = _generic(api, monkeypatch, token, dict(userinfo))
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert r.get_json()['user'] == lands_on
+    assert _accounts(db) == [lands_on]
+    assert db.get_user(lands_on)['oidc_sub'] == userinfo['sub']
