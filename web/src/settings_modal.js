@@ -2741,7 +2741,7 @@
             const [ldapConfig, setLdapConfig] = useState({
                 ldap_enabled: false,
                 ldap_server: '', ldap_port: 389,
-                ldap_use_ssl: false, ldap_use_starttls: false,
+                ldap_use_ssl: false, ldap_use_starttls: true,
                 ldap_bind_dn: '', ldap_bind_password: '',
                 ldap_base_dn: '',
                 ldap_user_filter: '(&(objectClass=person)(sAMAccountName={username}))',
@@ -2753,9 +2753,13 @@
                 ldap_admin_group: '', ldap_user_group: '', ldap_viewer_group: '',
                 ldap_default_role: 'viewer',
                 ldap_auto_create_users: true,
-                ldap_verify_tls: false,
+                ldap_verify_tls: true,
+                ldap_ca_cert: '',
                 ldap_group_mappings: [],  // LW: [{group_dn, role, tenant, tenant_role, permissions}]
             });
+            // LW Nov 2026 - the transport of the SAVED settings, which the note at the top of
+            // the connection block is about. The form can differ until it is saved
+            const [ldapSaved, setLdapSaved] = useState(null);
             const [ldapTesting, setLdapTesting] = useState(false);
             const [ldapTestResult, setLdapTestResult] = useState(null);
             const [ldapTestUser, setLdapTestUser] = useState('');
@@ -3776,8 +3780,17 @@
                             ldap_default_role: data.ldap_default_role || 'viewer',
                             ldap_auto_create_users: data.ldap_auto_create_users !== false,
                             ldap_verify_tls: data.ldap_verify_tls || false,
+                            ldap_ca_cert: data.ldap_ca_cert || '',
                             ldap_group_mappings: data.ldap_group_mappings || [],
                         }));
+                        // the server says what runs (a scheme in a server stored before wins over
+                        // the toggles); the toggles only for an answer without it
+                        const lt = data.ldap_transport;
+                        setLdapSaved({
+                            on: !!data.ldap_enabled || !!String(data.ldap_server || '').trim(),
+                            tls: lt ? lt.kind !== 'plain' : !!(data.ldap_use_ssl || data.ldap_use_starttls),
+                            verified: lt ? !!lt.checked : !!data.ldap_verify_tls,
+                        });
                         
                         // NS: Load OIDC / Entra ID settings
                         setOidcConfig(prev => ({
@@ -7379,10 +7392,23 @@
                                     {/* Connection Settings */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-4">
                                         <h4 className="text-white font-medium">Connection</h4>
+                                        {ldapSaved && ldapSaved.on && !(ldapSaved.tls && ldapSaved.verified) && (
+                                            <div className="rounded-lg p-3 text-sm border bg-yellow-500/10 border-yellow-500/40 text-yellow-200 flex items-start gap-2" data-ldap-transport-note={ldapSaved.tls ? 'unverified' : 'plain'}>
+                                                <span className="mt-0.5 flex-shrink-0"><Icons.AlertTriangle /></span>
+                                                <span>{ldapSaved.tls
+                                                    ? 'LDAP uses TLS without checking the certificate: a machine on the network path can pose as the directory, read the passwords and let anyone sign in as an admin. Turn on Verify TLS Certificate and paste the CA certificate of your directory below.'
+                                                    : 'LDAP runs in plain text: the service account password and every user password cross the network readable, and a machine on the path can pose as the directory and let anyone sign in as an admin. Turn on STARTTLS or LDAPS with Verify TLS Certificate and paste the CA certificate of your directory below.'}</span>
+                                            </div>
+                                        )}
                                         <div className="grid grid-cols-3 gap-3">
                                             <div className="col-span-2">
                                                 <label className="block text-sm text-gray-400 mb-1">Server (hostname or IP)</label>
                                                 <input type="text" value={ldapConfig.ldap_server} onChange={e => setLdapConfig(prev => ({...prev, ldap_server: e.target.value}))} placeholder="ldap.example.com" className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm" />
+                                                {/* LW Nov 2026 - ldap3 matches DNS names only on newer Pythons, so an address fails the check there */}
+                                                {(ldapConfig.ldap_use_ssl || ldapConfig.ldap_use_starttls) && ldapConfig.ldap_verify_tls
+                                                    && /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$|^\[?[0-9a-f]*:[0-9a-f]*:[0-9a-f:.]*\]?(:\d+)?$/i.test(String(ldapConfig.ldap_server || '').trim().replace(/^ldaps?:\/\//i, '').replace(/\/+$/, '')) && (
+                                                    <p className="text-xs text-yellow-400 mt-1" data-ldap-ip-hint>The certificate check compares the server name with the certificate, and an IP address does not pass it on every system. Enter the DNS name the directory certificate carries.</p>
+                                                )}
                                             </div>
                                             <div>
                                                 <label className="block text-sm text-gray-400 mb-1">Port</label>
@@ -7391,11 +7417,13 @@
                                         </div>
                                         <div className="flex gap-4">
                                             <label className="flex items-center gap-2 cursor-pointer">
-                                                <input type="checkbox" checked={ldapConfig.ldap_use_ssl} onChange={e => setLdapConfig(prev => ({...prev, ldap_use_ssl: e.target.checked, ldap_port: e.target.checked ? 636 : 389}))} className="w-4 h-4 accent-proxmox-orange" />
+                                                <input type="checkbox" checked={ldapConfig.ldap_use_ssl} onChange={e => setLdapConfig(prev => ({...prev, ldap_use_ssl: e.target.checked, ldap_port: e.target.checked ? 636 : 389, ldap_use_starttls: e.target.checked ? false : prev.ldap_use_starttls}))} className="w-4 h-4 accent-proxmox-orange" />
                                                 <span className="text-sm text-gray-300">SSL (LDAPS, port 636)</span>
                                             </label>
                                             <label className="flex items-center gap-2 cursor-pointer">
-                                                <input type="checkbox" checked={ldapConfig.ldap_use_starttls} onChange={e => setLdapConfig(prev => ({...prev, ldap_use_starttls: e.target.checked}))} className="w-4 h-4 accent-proxmox-orange" />
+                                                <input type="checkbox" checked={ldapConfig.ldap_use_starttls} onChange={e => setLdapConfig(prev => (e.target.checked && prev.ldap_use_ssl
+                                                    ? {...prev, ldap_use_starttls: true, ldap_use_ssl: false, ldap_port: prev.ldap_port === 636 ? 389 : prev.ldap_port}
+                                                    : {...prev, ldap_use_starttls: e.target.checked}))} className="w-4 h-4 accent-proxmox-orange" />
                                                 <span className="text-sm text-gray-300">STARTTLS</span>
                                             </label>
                                             {(ldapConfig.ldap_use_ssl || ldapConfig.ldap_use_starttls) && (
@@ -7405,6 +7433,16 @@
                                                 </label>
                                             )}
                                         </div>
+                                        {(ldapConfig.ldap_use_ssl || ldapConfig.ldap_use_starttls) && (
+                                            <div>
+                                                <label htmlFor="ldap-ca-cert" className="block text-sm text-gray-400 mb-1">CA Certificate (PEM)</label>
+                                                <textarea id="ldap-ca-cert" rows={4} spellCheck={false} value={ldapConfig.ldap_ca_cert}
+                                                    onChange={e => setLdapConfig(prev => ({...prev, ldap_ca_cert: e.target.value}))}
+                                                    placeholder="-----BEGIN CERTIFICATE-----"
+                                                    className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-xs font-mono" />
+                                                <p className="text-xs text-gray-500 mt-1">The CA that issued the directory certificate, for an internal CA that is not in the system trust store. Used while Verify TLS Certificate is on; with a CA here only this CA is trusted, empty uses the system trust store.</p>
+                                            </div>
+                                        )}
                                     </div>
                                     
                                     {/* Bind Credentials */}
@@ -7535,6 +7573,7 @@
                                                 <p className={`font-medium text-sm ${ldapTestResult.success ? 'text-green-400' : 'text-red-400'}`}>
                                                     {ldapTestResult.success ? '✓ Connection Successful' : `✗ ${ldapTestResult.error}`}
                                                 </p>
+                                                {ldapTestResult.hint && <p className="text-xs text-gray-300 mt-1">{ldapTestResult.hint}</p>}
                                                 {ldapTestResult.steps && (
                                                     <div className="mt-2 space-y-1">
                                                         {ldapTestResult.steps.map((step, i) => (
