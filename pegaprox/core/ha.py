@@ -378,6 +378,47 @@ LOCAL_TABLES = (
     'metrics_part', 'metrics_roster',
 )
 
+# MK Nov 2026 - three leader sites (stage 1): which tables a site writes alone
+# when the ha_sites switch is on. 'cluster': only the cluster's home site writes
+# them, the other sites get row-level changes (ha_cluster_changes); the table
+# must carry a cluster_id column. 'global': the group leader writes them, the
+# snapshot carries them as today. 'local': never replicated (LOCAL_TABLES above).
+# Cross-cluster objects (site recovery plans, multi-cluster vnets, replications)
+# are global: no single home owns them.
+TABLE_CLASS = {
+    'affinity_rules': 'cluster', 'alert_mutes': 'cluster', 'alerts': 'cluster',
+    'balancing_excluded_pools': 'cluster', 'balancing_excluded_vms': 'cluster',
+    'blueprint_templates': 'cluster', 'change_plans': 'cluster',
+    'cluster_alerts': 'cluster', 'cluster_node_credentials': 'cluster',
+    'cost_rates': 'cluster', 'custom_scripts': 'cluster',
+    'drift_baselines': 'cluster', 'efficient_snapshots': 'cluster',
+    'node_bmc_endpoints': 'cluster', 'node_maintenance': 'cluster',
+    'pool_permissions': 'cluster', 'power_host_profiles': 'cluster',
+    'power_rates': 'cluster', 'recovery_confirmations': 'cluster',
+    'recovery_targets': 'cluster', 'restore_test_marks': 'cluster',
+    'rolling_update_runs': 'cluster', 'scheduled_actions': 'cluster',
+    'scheduled_tasks': 'cluster', 'snapshot_policies': 'cluster',
+    'storage_clusters': 'cluster', 'suspended_ha_rules': 'cluster',
+    'update_schedules': 'cluster', 'user_favorites': 'cluster',
+    'vm_acls': 'cluster', 'vm_tags': 'cluster',
+    'xcpng_pool_members': 'cluster', 'xcpng_pools': 'cluster',
+    'xcpng_vmid_map': 'cluster',
+    'api_tokens': 'global', 'auto_install_profiles': 'global',
+    'cluster_groups': 'global', 'clusters': 'global',
+    'cross_cluster_replications': 'global', 'custom_cloud_templates': 'global',
+    'custom_roles': 'global', 'esxi_storages': 'global',
+    'ha_recovery_journal': 'global', 'ha_schedule_marks': 'global',
+    'hardening_profiles': 'global', 'multi_cluster_vnets': 'global',
+    'pbs_servers': 'global', 'pegaprox_kv': 'global', 'plugin_state': 'global',
+    'push_subscriptions': 'global', 'server_settings': 'global',
+    'siem_targets': 'global', 'site_recovery_plans': 'global',
+    'site_recovery_vms': 'global', 'status_incidents': 'global',
+    'tenants': 'global', 'user_folders': 'global', 'users': 'global',
+    'vm_blueprints': 'global', 'vmware_servers': 'global',
+    'webauthn_credentials': 'global',
+}
+
+
 # server_settings keys that describe this host, not the deployment
 LOCAL_SETTING_KEYS = frozenset((
     'domain', 'port', 'ssl_enabled', 'http_redirect_port', 'reverse_proxy_enabled',
@@ -657,6 +698,12 @@ def _default_state():
         'source': None,
         'pairing': None,
         'sync': {},
+        # three leader sites (stage 1): off until the group leader turns it on.
+        # homes: which leader site acts on which cluster; homes_epoch grows on
+        # every change. Both spread with the member list (see _adopt_group).
+        'ha_sites': False,
+        'homes': {},
+        'homes_epoch': 0,
     }
     # Only once automatic failover was switched on in the group, and absent before:
     #   lease     what ha_vote.Node writes down (mode, epoch, voted_for, gen, cfg,
@@ -1171,6 +1218,75 @@ def takes_writes():
         return True
     node = _lease_live(st)
     return node is not None and node.lease_until - ha_clock() >= ha_vote.WRITE_LEASE_MARGIN
+
+
+
+# MK Nov 2026 - three leader sites (stage 1): per-cluster gates. With the
+# switch off these are exactly is_active()/takes_writes(); with it on, the
+# instance must also be the cluster's home in the current homes assignment.
+# Stage 1 ties them to the group leader's lease: when it expires, every
+# site closes its gates, the leader election runs, and the new leader
+# re-spreads homes. A site's own lease (renewed independently of the
+# leader's) is stage 2.
+
+def is_active_for(cluster_id):
+    """True when this instance may act on cluster_id: change it, fire its
+    schedules, balance it. With the switch off this is is_active(). With it
+    on, the instance is the cluster's home in the last adopted homes (a
+    cluster without an entry has the group leader as its home), and
+    is_active() holds."""
+    st = _load()
+    if not st.get('ha_sites'):
+        return is_active()
+    if not is_active():
+        return False
+    homes = st.get('homes') or {}
+    home = homes.get(str(cluster_id)) if isinstance(cluster_id, (str, int)) else None
+    if home is None:
+        # without an entry the group leader is the home; the leader is
+        # whoever is_active() already says may act
+        return _is_group_leader(st)
+    return home == st['instance_id']
+
+
+def takes_writes_for(cluster_id):
+    """True when a write for cluster_id may start here: is_active_for(),
+    and in an automatic group at least WRITE_LEASE_MARGIN of the group
+    leader's lease left, the same margin takes_writes() applies."""
+    if not is_active_for(cluster_id):
+        return False
+    st = _load()
+    if not _lease_mode(st):
+        return True
+    node = _lease_live(st)
+    return node is not None and node.lease_until - ha_clock() >= ha_vote.WRITE_LEASE_MARGIN
+
+
+
+def sites_enabled():
+    """True when three leader sites are switched on in this group."""
+    return bool(_load().get('ha_sites'))
+
+
+def voter_count():
+    """How many voices the group has: data members plus the witness."""
+    st = _load()
+    members = len(st.get('members') or {})
+    # the witness counts as one voice when it is configured (the lease cfg says)
+    lease = _lease(st)
+    witness = 1 if lease and lease.get('cfg', {}).get('body', {}).get('witness') else 0
+    return members + witness
+
+
+def _is_group_leader(st):
+    """True in the instance the group follows right now (not a standby, and in
+    an automatic group the lease holder)."""
+    if st['role'] == ROLE_STANDBY:
+        return False
+    if not _lease_mode(st):
+        return True
+    node = _lease_live(st)
+    return node is not None and node.holds_lease()
 
 
 def instance_id():
@@ -4198,6 +4314,16 @@ def _adopt_group(snap):
                 # not listed at all is no flag either
                 own = _clean_entries(snap['members']).get(st['instance_id']) or {}
                 new['serve_assigned'] = own.get('serve') is True
+                # MK Nov 2026 - the homes assignment and its epoch travel with
+                # the member list, like serve; a standby that never heard of
+                # three-leader-sites keeps its (empty) defaults
+                if isinstance(snap.get('ha_sites'), bool):
+                    new['ha_sites'] = snap['ha_sites']
+                if isinstance(snap.get('homes'), dict):
+                    new['homes'] = {str(k): str(v) for k, v in snap['homes'].items()
+                                   if isinstance(k, str) and isinstance(v, str)}
+                if isinstance(snap.get('homes_epoch'), int):
+                    new['homes_epoch'] = snap['homes_epoch']
                 # the VM it runs as, as the leader holds it: should it lead one day, its
                 # own entry of the list it hands out carries it on (Force leader, 7.3)
                 if own.get('agent_vmid'):

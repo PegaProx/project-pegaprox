@@ -35226,7 +35226,7 @@
           }
         },
         "summary": "Serve the web interface",
-        "description": "NS May 2026 — when air-gap mode is on, inject the localStorage flag\n*before* the boot loader runs. Otherwise the very first page load on\na fresh browser (no localStorage yet) hits cdn.jsdelivr while waiting\nfor /auth/check to come back. We rewrite a tiny prelude into <head>\nso the loader sees the flag synchronously on its first read.",
+        "description": "NS May 2026 — when air-gap mode is on, inject the localStorage flag\n*before* the boot loader runs. Otherwise the very first page load on\na fresh browser (no localStorage yet) hits cdn.jsdelivr while waiting\nfor /auth/check to come back. We rewrite a tiny prelude into <head>\nso the loader sees the flag synchronously on its first read.\n\nMK Nov 2026 - read once, each coding compressed once, a reload gets its 304 and the\nflag changes the ETag (utils/index_page.py). Every route that sends the page goes there.",
         "x-pegaprox-auth": "public"
       }
     },
@@ -49255,6 +49255,52 @@
         },
         "summary": "Switch the group between manual and automatic failover, on the leader. Wants user_password.",
         "description": "mode: auto starts the switch. It needs at least three votes (data members or the\nwitness), every member answering on this release within the last two minutes,\nclocks within 5 s, a time zone for the group (one that has none takes the zone of\nthis instance; where that cannot be told, it is set first) and no member that says\nthe group is automatic already while this instance holds no voter config of that;\nwhat stands in the way comes back as 409 HA_AUTO_REFUSED with\nfindings [{code, level, text, member}]. A warning (an even number of votes) wants\nits code in accept, else 409 HA_AUTO_CONFIRM with the same list. The voter config\nthen goes to every member as pending, and automatic mode is in force once all of\nthem hold it (waiting names them); one that does not take it within ten minutes\ntakes the group back to manual mode. lease_s is the lease length, 15 to 120 s,\n20 unless given; sent again in automatic mode it changes it.\n\nmode: manual switches it off, in force once a majority holds the change, or takes a\npending switch back. The answer's mode is the group's: auto, with result off, while\nthe change waits for that majority (the leader still holds its lease then, and one\nthat loses it first drops the change); manual once it is through. 409 while it\nwaits, HA_AUTO_NOT_SHIPPED while this release does not offer automatic failover,\n503 HA_NO_LEASE on an instance that does not hold the lease, 500 when the change\ncould not be written (nothing changed).",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/ha/sites": {
+      "put": {
+        "operationId": "ha.set_sites_put",
+        "tags": [
+          "ha"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Switch three leader sites on or off, on the group leader. Wants user_password.",
+        "description": "ha_sites: true turns it on. Refused with 409 when fewer than 4 voters\nexist, or a member reports a different SCHEMA_VERSION, or a member does\nnot know the switch (an older release). ha_sites: false turns it off;\nevery site closes its gates, the group leader reverts to acting on every\ncluster. 503 HA_NO_LEASE on an instance that does not hold the lease.",
         "requestBody": {
           "required": false,
           "content": {
