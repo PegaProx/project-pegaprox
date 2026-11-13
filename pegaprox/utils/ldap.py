@@ -77,7 +77,11 @@ LDAP_TLS_HINT = ('If the directory certificate comes from an internal CA, paste 
                  'the directory.')
 
 
-_CERT_BLOCK = re.compile(r'-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----', re.S)
+# MK Nov 2026 - the body is base64 and whitespace only, so a match cannot run on over the
+# next marker: '(.*?)' tried every END from every BEGIN, and a field of BEGIN markers alone
+# took over a second of the hub. A block with anything else in it stays outside and is
+# turned down as text besides the certificates
+_CERT_BLOCK = re.compile(r'-----BEGIN CERTIFICATE-----([A-Za-z0-9+/=\s]*)-----END CERTIFICATE-----')
 
 
 def ldap_ca_cert_clean(value):
@@ -109,17 +113,25 @@ def ldap_ca_cert_clean(value):
                     'the -----BEGIN CERTIFICATE----- blocks.')
     import binascii
     import ssl
+    from cryptography import x509
+    from cryptography.hazmat.primitives.serialization import Encoding
     blocks = []
     for body in _CERT_BLOCK.findall(text):
+        # one certificate per block, parsed as such: an empty block decodes to nothing,
+        # which ssl took for no CA data at all and stored, and every TLS login failed on it
         try:
-            der = base64.b64decode(''.join(body.split()), validate=True)
-            ssl.create_default_context(cadata=der)
-        except (binascii.Error, ValueError, TypeError, ssl.SSLError):
+            cert = x509.load_der_x509_certificate(base64.b64decode(''.join(body.split()), validate=True))
+            blocks.append(cert.public_bytes(Encoding.PEM).decode().strip())
+        except (binascii.Error, ValueError, TypeError):
             return '', unreadable
-        blocks.append(ssl.DER_cert_to_PEM_cert(der).strip())
     if not blocks:
         return '', unreadable
-    return '\n'.join(blocks), None
+    pem = '\n'.join(blocks)
+    try:
+        ssl.create_default_context(cadata=pem)
+    except (ssl.SSLError, ValueError):
+        return '', unreadable
+    return pem, None
 
 
 def ldap_ca_cert_error(value):
