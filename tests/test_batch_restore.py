@@ -281,7 +281,9 @@ def test_the_list_shows_the_batches_newest_first(api, seed):
     ({'run': 'all'}, "run is 'sequential' or 'parallel'"),
     ({'run': 'parallel', 'parallel': 9}, 'parallel is a number from 2 to 4'),
     ({'run': 'parallel', 'parallel': True}, 'parallel is a number'),
-    ({'target_node': '../x'}, 'target_node is required'),
+    # a '/' is refused by the request check before the route reads the body, a blank by the route
+    ({'target_node': '../x'}, 'Invalid node name'),
+    ({'target_node': 'pve 1'}, 'target_node is required'),
     ({'target_node': 'pve9'}, 'pve9 is no node of this cluster'),
     ({'target_node': 'pve3'}, 'pve3 is not online'),
     ({'target_storage': 'bad storage'}, 'target_storage is a storage ID'),
