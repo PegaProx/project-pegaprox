@@ -480,6 +480,26 @@ def create_app():
                    'storage_name': 'storage name', 'storage_id': 'storage name',
                    'snapname': 'snapshot name', 'vm_type': 'guest type', 'vmtype': 'guest type'}
 
+    def _request_names():
+        """The query string, an urlencoded form and a JSON object of the request. A multipart
+        body is left out: parsing it here would spool a whole upload before require_auth has
+        looked at the caller, and the one cluster route that takes one checks its node."""
+        out = [request.args]
+        if request.mimetype == 'application/x-www-form-urlencoded':
+            request.get_data(cache=True)    # parsed from the cached bytes, a standby forwards them
+            out.append(request.form)
+        elif request.is_json:
+            # silent covers a ValueError only: a body nested too deep raised a RecursionError
+            # here, a 500 before require_auth had looked at the caller. It is no object then,
+            # and the route answers for it as before
+            try:
+                body = request.get_json(silent=True)
+            except (RecursionError, ValueError):
+                body = None
+            if isinstance(body, dict):
+                out.append(body)
+        return out
+
     @app.before_request
     def refuse_odd_route_arguments():
         rule = request.url_rule
@@ -488,9 +508,14 @@ def create_app():
         on_cluster = rule.rule.startswith('/api/clusters/')
         if not on_cluster and not rule.rule.startswith('/api/pbs/'):
             return None
-        from pegaprox.utils.sanitization import odd_route_argument
+        from pegaprox.utils.sanitization import odd_route_argument, odd_request_name
         name = odd_route_argument(rule.rule, request.view_args)
-        if name is None:
+        label = None if name is None else _ARG_LABELS.get(name, name.replace('_', ' '))
+        if label is None and rule.rule.startswith('/api/clusters/<cluster_id>/'):
+            # MK Nov 2026 - and the names a cluster route takes from the query string or the
+            # body (sanitization.NAME_VALUE_LABELS), which reach the API path the same way
+            label = odd_request_name(*_request_names())
+        if label is None:
             return None
         if on_cluster:
             # an XCP-ng pool and an ESXi host name their hosts freely ('xen host #1') and
@@ -499,7 +524,7 @@ def create_app():
             mgr = g.cluster_managers.get(request.view_args.get('cluster_id'))
             if mgr is not None and getattr(mgr, 'cluster_type', 'proxmox') in ('xcpng', 'esxi'):
                 return None
-        return jsonify({'error': f"Invalid {_ARG_LABELS.get(name, name.replace('_', ' '))}"}), 400
+        return jsonify({'error': f'Invalid {label}'}), 400
 
     # MK Sep 2026 (#625) - a standby takes its configuration from the active instance
     # and would lose a local change at the next sync, so it refuses writes. With the

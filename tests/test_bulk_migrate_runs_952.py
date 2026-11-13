@@ -379,7 +379,9 @@ def test_the_options_reach_proxmox(api, seed):
     ({'mode': 'parallel', 'parallel': True}, 'parallel is a number from 2 to 5'),
     ({'mode': 'sequential', 'online': 'yes'}, 'online and with_local_disks are true or false'),
     ({'mode': 'sequential', 'with_local_disks': 1}, 'online and with_local_disks are true or false'),
-    ({'mode': 'sequential', 'target': '../pve2'}, 'Target node is required'),
+    # a value that would not stay one path segment is refused by the request hook first
+    ({'mode': 'sequential', 'target': '../pve2'}, 'Invalid target name'),
+    ({'mode': 'sequential', 'target': 'pve 2'}, 'Target node is required'),
     ({'mode': 'sequential', 'target': 'pve9'}, 'pve9 is no node of this cluster'),
     ({'mode': 'sequential', 'target': 'pve3'}, 'pve3 is not online'),
     ({'mode': 'sequential', 'vms': [{'vmid': True}]}, 'vms holds something that is no VMID'),

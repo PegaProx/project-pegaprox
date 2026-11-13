@@ -415,7 +415,9 @@ def test_the_route_answers_the_preflight_and_changes_nothing(api, seed):
     ({'vms': []}, 'vms is a list of 1 to 1000 guests'),
     ({'vms': list(range(1, 1002))}, 'vms is a list of 1 to 1000 guests'),
     ({'vms': [True]}, 'vms holds something that is no VMID'),
-    ({'vms': [100], 'target': '../x'}, 'target is a node name'),
+    # a value that would not stay one path segment is refused by the request hook first
+    ({'vms': [100], 'target': '../x'}, 'Invalid target name'),
+    ({'vms': [100], 'target': 'pve 2'}, 'target is a node name'),
     ({'vms': [100], 'target': 5}, 'target is a node name'),
     ({'vms': [100], 'online': 'yes'}, 'online and with_local_disks are true or false'),
     ({'vms': [100], 'mode': 'fast'}, 'mode is sequential, parallel or all'),

@@ -2730,10 +2730,10 @@ def get_node_storage_content(cluster_id, node, storage):
         content_type = request.args.get('content', '')
         
         url = f"https://{host}:{port}/api2/json/nodes/{node}/storage/{storage}/content"
-        if content_type:
-            url += f"?content={content_type}"
-        
-        resp = manager._create_session().get(url, timeout=30)
+        # MK Nov 2026 - a parameter, not URL text: written in, an '&' in the filter added
+        # parameters of its own and a '#' cut off what came after it
+        params = {'content': content_type} if content_type else None
+        resp = manager._create_session().get(url, params=params, timeout=30)
 
         if resp.status_code == 200:
             data = resp.json().get('data', [])

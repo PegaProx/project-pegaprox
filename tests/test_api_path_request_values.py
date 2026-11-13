@@ -216,8 +216,11 @@ def isos(pve):
 def test_an_iso_list_of_a_storage_that_is_no_name_sends_nothing(api, seed, isos, storage):
     c = api.as_user(seed.user('stv', role='viewer',
                               permissions=['storage.view', 'cluster.view', 'node.view']))
-    r = c.get('/api/clusters/cluster_1/nodes/n1/isos', query_string={'storage': storage})
-    assert r.status_code == 200 and r.get_json() == []
+    # the request hook answers before the route (app.refuse_odd_route_arguments), and the
+    # manager behind it still lists nothing for such a storage
+    _refused(c.get('/api/clusters/cluster_1/nodes/n1/isos', query_string={'storage': storage}),
+             'Invalid storage name')
+    assert PegaProxManager.get_iso_list(isos, 'n1', storage) == []
     assert isos.rec.sent == []
     # counterproof: storage names as Proxmox VE gives them are read
     for real in ('local', 'nfs-iso.2', 'iso_store'):
@@ -254,12 +257,19 @@ def test_a_template_download_onto_a_node_that_is_no_name_sends_nothing(admin, pv
     assert _posts(pve) == ['/api2/json/nodes/pve-02/aplinfo', '/api2/json/nodes/n1/aplinfo']
 
 
+def _hook_or(node, own):
+    """What a node in the body is refused with: by the request hook when it would not stay
+    one path segment, by the route's own check otherwise."""
+    from pegaprox.utils.sanitization import not_one_path_segment
+    return 'Invalid node name' if not_one_path_segment(node) else own
+
+
 @pytest.mark.parametrize('node', ELSEWHERE_IN_A_BODY)
 def test_a_restore_onto_a_node_that_is_no_name_sends_nothing(admin, pve, node):
     body = {'volid': 'local:backup/vzdump-qemu-100-2026_01_01-00_00_00.vma.zst',
             'target_vmid': 300, 'mode': 'new'}
     _refused(admin.post('/api/clusters/cluster_1/backup-restore', json=dict(body, target_node=node)),
-             'Invalid target_node')
+             _hook_or(node, 'Invalid target_node'))
     assert pve.rec.sent == []
     r = admin.post('/api/clusters/cluster_1/backup-restore', json=dict(body, target_node='pve-02'))
     assert r.status_code == 200, r.get_data(as_text=True)
@@ -272,7 +282,7 @@ def test_a_clone_onto_a_node_that_is_no_name_sends_nothing(admin, pve, node):
     pve._wait_for_task.return_value = True
     body = {'newid': 301, 'name': 'c', 'ciuser': 'ops'}
     _refused(admin.post('/api/clusters/cluster_1/vms/n1/qemu/100/clone',
-                        json=dict(body, target_node=node)), 'Invalid target node')
+                        json=dict(body, target_node=node)), _hook_or(node, 'Invalid target node'))
     assert pve.rec.sent == [] and not pve.clone_vm.called
     # counterproof: a node's name gets the clone and its Cloud-Init settings
     r = admin.post('/api/clusters/cluster_1/vms/n1/qemu/100/clone', json=dict(body, target_node='pve-02'))

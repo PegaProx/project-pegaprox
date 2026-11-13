@@ -14484,6 +14484,11 @@ def bulk_migrate_api(cluster_id):
     if not isinstance(vms, list) or not all(isinstance(v, dict) and v.get('node') and v.get('type') in ('qemu', 'lxc')
                                              for v in vms):
         return jsonify({'error': 'vms is a list of {vmid, node, type}'}), 400
+    # MK Nov 2026 - each guest's node goes into the migrate call's path, and the checks below
+    # look at its VMID only: 'n1/qemu/200/migrate?' moved guest 200 in the name of guest 100
+    if getattr(mgr, 'cluster_type', 'proxmox') not in ('xcpng', 'esxi') and not all(
+            isinstance(v['node'], str) and validate_hostname(v['node']) for v in vms):
+        return jsonify({'error': 'Invalid node name'}), 400
     wanted = _vmid_list([v.get('vmid') for v in vms])
     if wanted is None:
         return jsonify({'error': 'vms holds something that is no VMID'}), 400

@@ -186,6 +186,42 @@ def odd_route_argument(rule, view_args):
     return None
 
 
+# MK Nov 2026 - the same names come from the query string and the body as well: a node, a
+# target node or storage, a guest type or VMID that a route or the manager behind it puts
+# into the API path. There a '/' is not decoded first, it simply adds path segments.
+_NOT_ONE_SEGMENT = re.compile(r'[%?#/\\\x00-\x1f\x7f]')
+NAME_VALUE_LABELS = {
+    'node': 'node name', 'target_node': 'node name', 'source_node': 'node name',
+    'storage': 'storage name', 'target_storage': 'storage name', 'targetstorage': 'storage name',
+    # a node in the migrations, a storage where disks move between storages
+    'target': 'target name',
+    'vm_type': 'guest type', 'vmid': 'VMID', 'target_vmid': 'VMID',
+}
+
+
+def not_one_path_segment(value):
+    """True for a string that would not stay one segment of an API path."""
+    return isinstance(value, str) and bool(_NOT_ONE_SEGMENT.search(value))
+
+
+def odd_request_name(*sources):
+    """The label (NAME_VALUE_LABELS) of the first name in `sources` - the query string, a
+    form, a JSON object - that would not stay one path segment, or None. A list is looked
+    at item by item; a number or anything else is left to the route."""
+    for src in sources:
+        if not src:
+            continue
+        for key, label in NAME_VALUE_LABELS.items():
+            if key not in src:
+                continue
+            values = src.getlist(key) if hasattr(src, 'getlist') else [src[key]]
+            for value in values:
+                items = value if isinstance(value, list) else [value]
+                if any(not_one_path_segment(v) for v in items):
+                    return label
+    return None
+
+
 # NS Oct 2026 - an SSH login name goes onto the ssh/sshpass/scp command line and into
 # shell strings run on the nodes. Starting with '-' it is an OpenSSH option there
 # (-oProxyCommand=... runs a command on this host), so only what a POSIX login name
