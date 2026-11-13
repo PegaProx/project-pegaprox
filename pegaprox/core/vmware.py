@@ -406,7 +406,7 @@ class VMwareManager:
             return f'ESXi host {self.host} answered with a redirect (HTTP {code}), which PegaProx does not follow'
         return ''
 
-    def _build_validated_url(self, path: str) -> str:
+    def _build_validated_url(self, path: str, query: str = '') -> str:
         """Build the full vSphere URL from base + path with defensive validation.
 
         MK May 2026 (Aikido #489 manual port) — every caller passes a hardcoded
@@ -419,9 +419,19 @@ class VMwareManager:
         """
         if not path.startswith('/'):
             raise ValueError('path must start with /')
-        if '/../' in path or re.search(r'/%2e%2e/', path, re.IGNORECASE):
+        # MK Nov 2026 - urlunparse writes a '?' or '#' in the path out as it is, and requests
+        # then reads what follows as the query or drops it: a VM id 'vm-12?' (or 'vm-12#')
+        # from the route turned the delete of one snapshot into the delete of the VM. The
+        # query a call needs comes in `query`
+        if '?' in path or '#' in path:
+            raise ValueError("a '?' or '#' in the path")
+        # and a '.' or '..' segment anywhere, the last one too: a snapshot id '..' made
+        # .../vm/vm-12/snapshots/.. a DELETE of .../vm/vm-12/ once urllib3 folded it away,
+        # and '%2e%2e' went out as '..' as well. The old check wanted a '/' after the dots
+        from pegaprox.utils.sanitization import url_path_climbs
+        if url_path_climbs(path):
             raise ValueError('path traversal blocked')
-        parsed = urlparse(self._base_url)._replace(path=path, query='', fragment='')
+        parsed = urlparse(self._base_url)._replace(path=path, query=query, fragment='')
         return urlunparse(parsed)
 
     def api_get(self, path: str, params: dict = None) -> dict:
@@ -458,11 +468,11 @@ class VMwareManager:
         except Exception as e:
             return {'error': str(e)}
     
-    def api_post(self, path: str, data: dict = None) -> dict:
+    def api_post(self, path: str, data: dict = None, query: str = '') -> dict:
         """POST request to vSphere REST API"""
         try:
             try:
-                url = self._build_validated_url(path)
+                url = self._build_validated_url(path, query)
             except ValueError as ve:
                 return {'error': f'invalid path: {ve}'}
             # asked at the exit and once its connection is up in an automatic group (#625)
@@ -1372,12 +1382,12 @@ class VMwareManager:
     def get_tags(self, category_id: str = None) -> dict:
         """List tags, optionally filtered by category"""
         if category_id:
-            return self.api_post(f'/api/cis/tagging/tag/id:{{category_id}}?~action=list-tags-for-category')
+            return self.api_post(f'/api/cis/tagging/tag/id:{{category_id}}', query='~action=list-tags-for-category')
         return self.api_get('/api/cis/tagging/tag')
     
     def get_vm_tags(self, vm_id: str) -> dict:
         """List tags attached to a VM"""
-        return self.api_post('/api/cis/tagging/tag-association?~action=list-attached-tags', data={
+        return self.api_post('/api/cis/tagging/tag-association', query='~action=list-attached-tags', data={
             'object_id': {'type': 'VirtualMachine', 'id': vm_id}
         })
     
@@ -1404,7 +1414,7 @@ class VMwareManager:
     
     def get_library_items(self, library_id: str) -> dict:
         """List items in a content library"""
-        return self.api_get(f'/api/content/library/item?library_id={library_id}')
+        return self.api_get('/api/content/library/item', params={'library_id': library_id})
     
     # -- Alarms --
     
@@ -1425,7 +1435,7 @@ class VMwareManager:
     
     def rename_vm(self, vm_id: str, new_name: str) -> dict:
         """Rename a VM"""
-        return self.api_post(f'/api/vcenter/vm/{vm_id}?~action=rename', data={'name': new_name})
+        return self.api_post(f'/api/vcenter/vm/{vm_id}', query='~action=rename', data={'name': new_name})
     
     def clone_vm(self, vm_id: str, name: str, folder: str = None, resource_pool: str = None, datastore: str = None) -> dict:
         """Clone a VM (instant clone or full clone depending on vSphere version)"""
@@ -1442,7 +1452,7 @@ class VMwareManager:
             placement['datastore'] = datastore
         if placement:
             spec['placement'] = placement
-        return self.api_post('/api/vcenter/vm?~action=clone', data={'spec': spec})
+        return self.api_post('/api/vcenter/vm', query='~action=clone', data={'spec': spec})
     
     def delete_vm(self, vm_id: str) -> dict:
         """Delete a VM (must be powered off)"""

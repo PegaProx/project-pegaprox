@@ -7,11 +7,14 @@ a VMID or a datastore in their body or query too, and put it into the API path o
 cluster, at once or at every later run. Each of them takes a name only now, checked on the
 cluster that name belongs to: an XCP-ng host keeps its free name.
 
-An IP set entry of a guest firewall goes into its path as one segment.
+An IP set entry of a guest firewall goes into its path as one segment, and an ESXi call
+refuses a '?' or '#' in its path, where a VM id 'vm-12?' turned a snapshot delete into the
+delete of the VM.
 MK Nov 2026
 """
 import json
 import types
+from urllib.parse import urlsplit
 from unittest.mock import MagicMock, create_autospec
 
 import pytest
@@ -20,6 +23,7 @@ from requests.adapters import HTTPAdapter
 
 import pegaprox.globals as ppglobals
 from pegaprox.core.manager import PegaProxManager
+from pegaprox.core.vmware import VMwareManager
 from pegaprox.core.xcpng import XcpngManager
 
 
@@ -306,3 +310,75 @@ def test_an_ip_set_entry_is_one_path_segment(api, admin, cidr, sent):
     r = admin.delete(f'/api/clusters/cluster_1/vms/n1/qemu/100/firewall/ipset/office/{cidr}')
     assert r.status_code == 200, r.get_data(as_text=True)
     assert m.rec.sent == [('DELETE', f'/api2/json/nodes/n1/qemu/100/firewall/ipset/office/{sent}')]
+
+
+# --- an ESXi call --------------------------------------------------------------------------
+
+@pytest.fixture
+def esxi(monkeypatch):
+    sent = []
+
+    def send(self, request, **kw):
+        parts = urlsplit(request.url)
+        sent.append((request.method, parts.path + (f'?{parts.query}' if parts.query else '')))
+        r = requests.Response()
+        r.status_code = 200
+        r._content = b'{}'
+        r.request = request
+        return r
+    monkeypatch.setattr(HTTPAdapter, 'send', send)
+    m = VMwareManager('esxi1', {'host': 'esxi.lab', 'port': 443, 'name': 'lab'})
+    m.session_id, m.connected = 'S', True
+    m.sent = sent
+    return m
+
+
+@pytest.mark.parametrize('vm_id', ['vm-12?', 'vm-12#', 'vm-12?x=/power/stop'])
+def test_an_esxi_call_with_a_query_or_fragment_in_its_path_sends_nothing(esxi, vm_id):
+    """'vm-12?' turned DELETE .../vm/vm-12?/snapshots/1 into DELETE .../vm/vm-12."""
+    assert 'error' in esxi.delete_snapshot(vm_id, 'snapshot-1')
+    assert 'error' in esxi.rename_vm(vm_id, 'web')
+    assert 'error' in esxi.get_vm(vm_id)
+    assert esxi.sent == []
+
+
+@pytest.mark.parametrize('snapshot_id', ['..', '.', '%2e%2e', '.%2E', '..\\', 'x/..'])
+def test_an_esxi_call_with_a_dot_segment_in_its_path_sends_nothing(esxi, snapshot_id):
+    assert 'error' in esxi.delete_snapshot('vm-12', snapshot_id)
+    assert 'error' in esxi.delete_vm(snapshot_id)
+    assert esxi.sent == []
+
+
+def test_esxi_calls_with_a_query_of_their_own_go_out_as_before(esxi):
+    esxi.delete_snapshot('vm-12', 'snapshot-1')
+    esxi.rename_vm('vm-12', 'web')
+    esxi.clone_vm('vm-12', 'web2')
+    esxi.get_vm_tags('vm-12')
+    esxi.get_library_items('lib-1')
+    assert esxi.sent == [
+        ('DELETE', '/api/vcenter/vm/vm-12/snapshots/snapshot-1'),
+        ('POST', '/api/vcenter/vm/vm-12?~action=rename'),
+        ('POST', '/api/vcenter/vm?~action=clone'),
+        ('POST', '/api/cis/tagging/tag-association?~action=list-attached-tags'),
+        ('GET', '/api/content/library/item?library_id=lib-1'),
+    ]
+
+
+@pytest.mark.parametrize('vm_id,snapshot_id', [
+    ('vm-12%3F', 'snapshot-1'),
+    # a dot segment at the end: urllib3 folds .../snapshots/.. into .../vm/vm-12/
+    ('vm-12', '..'), ('vm-12', '%252e%252e'), ('vm-12', '.%252E'), ('vm-12', '.'),
+    ('vm-12', '..%5C'),
+])
+def test_an_esxi_snapshot_delete_that_would_reach_another_path_deletes_no_vm(api, admin, esxi,
+                                                                              vm_id, snapshot_id):
+    ppglobals.vmware_managers['esxi1'] = esxi
+    try:
+        r = admin.delete(f'/api/vmware/esxi1/vms/{vm_id}/snapshots/{snapshot_id}')
+        assert r.status_code >= 400, r.get_data(as_text=True)
+        assert esxi.sent == []
+        r = admin.delete('/api/vmware/esxi1/vms/vm-12/snapshots/snapshot-1')
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert esxi.sent == [('DELETE', '/api/vcenter/vm/vm-12/snapshots/snapshot-1')]
+    finally:
+        ppglobals.vmware_managers.pop('esxi1', None)
