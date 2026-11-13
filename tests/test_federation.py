@@ -1079,11 +1079,9 @@ def test_the_vote_lands_on_disk_before_the_grant(tmp_path):
     a, b, c = _three(tmp_path)
     a_id = federation_ref_id(a)
     with at_db(a):
-        # the first word on a cluster is term 1 - a term may only step by one
-        verdict = federation.lease_vote(a_id, {'cluster_id': 'c7',
-                                               'candidate': a_id, 'term': 4,
-                                               'lease_s': 30})
-        assert verdict.get('granted') is False
+        # a dead promise (none yet, or run out) takes any higher term - that is
+        # the way back from wedged term histories. What must NOT work: stepping
+        # onto somebody's LIVE promise
         verdict = federation.lease_vote(a_id, {'cluster_id': 'c7',
                                                'candidate': a_id, 'term': 1,
                                                'lease_s': 30})
@@ -1092,12 +1090,19 @@ def test_the_vote_lands_on_disk_before_the_grant(tmp_path):
         state = federation._load()
         promised = state['lease_promises']['c7']
         assert promised['term'] == 1 and promised['candidate'] == a_id
-        # and a second grant at the same term for another candidate is refused
+        # a second grant at the same term for another candidate is refused, and
+        # so is a higher term while the promise is live: nobody steps onto a
+        # live word, whatever term it says
         v2 = federation.lease_vote(federation_ref_id(b),
                                    {'cluster_id': 'c7',
                                     'candidate': federation_ref_id(b),
                                     'term': 1, 'lease_s': 30})
         assert v2.get('granted') is False
+        v3 = federation.lease_vote(federation_ref_id(b),
+                                   {'cluster_id': 'c7',
+                                    'candidate': federation_ref_id(b),
+                                    'term': 9, 'lease_s': 30})
+        assert v3.get('granted') is False
 
 
 # --- the adoption (Phase 4) ------------------------------------------------------------
@@ -1247,3 +1252,29 @@ def test_a_local_cluster_is_never_overwritten_by_a_mirror(tmp_path):
         assert row['name'] == 'ours'
         assert any('pve-5' in c_ for c_ in
                    report[federation_ref_id(a)]['conflicts'])
+
+
+def test_a_dropped_lease_recovers_across_a_fresh_voter(tmp_path):
+    """The wedge the live demo found: the holder still knows term 2 from an old
+    round, a voter that joined fresh holds term 0 - an exact-plus-one rule alone
+    leaves every ask refused forever. A dead promise takes any higher term, and
+    the holder steps up by one: the lease comes back."""
+    a, b, c = _three(tmp_path)
+    _add_cluster(a, 'pve-9')
+    with at_db(a):
+        federation.enroll_cluster('pve-9')
+        federation.release_lease('pve-9')      # the lease goes, the promise stays
+    with at_db(b):
+        federation.sync_identities()
+    # b's voter forgets everything (fresh join), a's holder keeps its word
+    with at_db(b):
+        def fresh(state):
+            state['lease_promises'] = {}
+            return True
+        federation._mutate(fresh)
+    with at_db(a):
+        # renewing the dropped lease fails (no term matches b) - the way out is
+        # acquire: the holder steps 1->2, the fresh voter takes the higher term
+        lease = federation.acquire_lease('pve-9')
+        assert not lease.get('failed'), lease
+        assert federation.takes_writes_for('pve-9') is True

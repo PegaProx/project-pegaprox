@@ -1444,10 +1444,16 @@ def _lease_check_vote(candidate, cluster_id, term, lease_s, now=None):
             until = now + lease_s
             return {'granted': True, 'term': term, 'until': until}, \
                 {'term': term, 'candidate': candidate, 'until': until}
-        # a new word on the cluster steps the term by exactly one - no jumps, or a
-        # member could sit on a huge term and starve the cluster's writers forever
-        if term == held_term + 1 and (candidate == held_by or held_until == 0
-                                      or now > held_until + LEASE_SKEW):
+        # a new word on the cluster steps the term by exactly one - no jumps onto a
+        # LIVE promise, or a member could sit on a huge term and starve the
+        # cluster's writers forever. A DEAD promise (run out, or given back) takes
+        # any higher term: a voter that joined fresh, or dropped the holder's word
+        # with its member, must not wedge the cluster between two term histories
+        # forever. The holder itself may always step up by one - that is the way
+        # back after its own lease was dropped.
+        dead = held_until == 0 or now > held_until + LEASE_SKEW
+        if ((candidate == held_by and term == held_term + 1)
+                or (term > held_term and dead)):
             until = now + lease_s
             return {'granted': True, 'term': term, 'until': until}, \
                 {'term': term, 'candidate': candidate, 'until': until}
