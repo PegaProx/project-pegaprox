@@ -376,6 +376,10 @@ LOCAL_TABLES = (
     'ha_change_journal', 'ha_cv_dirty',
     # the parts of this host's metrics snapshots and the guest rosters they share
     'metrics_part', 'metrics_roster',
+    # the federation's identity notes (Phase 2): whose delete this host noted, and
+    # what this host last pulled from which member - both belong to the host that
+    # wrote them, a standby would only confuse its own pulls for the active's
+    'federation_identity_tombstones', 'federation_sync_state',
 )
 
 # server_settings keys that describe this host, not the deployment

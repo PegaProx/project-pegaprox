@@ -1377,9 +1377,15 @@ def ensure_api_tokens_table():
                 last_used_at TEXT,
                 last_used_ip TEXT,
                 created_at TEXT NOT NULL,
-                revoked INTEGER DEFAULT 0
+                revoked INTEGER DEFAULT 0,
+                fed_home TEXT NOT NULL DEFAULT ''
             )
         ''')
+        # Federation Phase 2: an api_tokens that predates it has no fed_home column
+        # (db.py adds it at init; this is the without-restart path)
+        cursor.execute("PRAGMA table_info(api_tokens)")
+        if 'fed_home' not in [col[1] for col in cursor.fetchall()]:
+            cursor.execute("ALTER TABLE api_tokens ADD COLUMN fed_home TEXT NOT NULL DEFAULT ''")
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(username)')
         db.conn.commit()

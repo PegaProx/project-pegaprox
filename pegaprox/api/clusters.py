@@ -1270,6 +1270,14 @@ def delete_cluster(cluster_id):
         # affinity_rules, cluster_alerts, pool_permissions, node_maintenance, … ~20 of them), so the
         # per-table DELETEs that used to live here are gone — they only ever covered three of them.
         db.delete_cluster(cluster_id)
+
+        # Federation Phase 3: the lease goes with the cluster - the voters hear it,
+        # so the next one to hold this id starts without waiting out an old promise
+        try:
+            from pegaprox.core import federation as _fed_core
+            _fed_core.release_lease(cluster_id)
+        except Exception:
+            pass
         # the node passwords went with it (cluster_node_credentials), and so does what this
         # process remembers of them (#1136)
         from pegaprox.core import node_creds

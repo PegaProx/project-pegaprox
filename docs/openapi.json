@@ -791,7 +791,7 @@
     },
     "/api/auth/tokens/{token_id}": {
       "delete": {
-        "operationId": "auth.revoke_api_token_endpoint_delete",
+        "operationId": "auth._refuse_own_mirror_delete",
         "tags": [
           "auth"
         ],
@@ -806,7 +806,7 @@
             "description": "Not authenticated"
           }
         },
-        "summary": "Revoke an API token",
+        "summary": "409 when the signed-in user is a mirror of another federation member: their password, second factor and tokens are the home's to change. None when not.",
         "parameters": [
           {
             "name": "token_id",
@@ -50334,6 +50334,853 @@
           {
             "haPeer": []
           }
+        ]
+      }
+    },
+    "/api/federation/peer/join": {
+      "post": {
+        "operationId": "federation.peer_join_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "The joining instance's half of the pairing handshake.",
+        "description": "No session and no peer header: the pairing code in the body authenticates the\ncall and is spent by it. The joining instance sends its https address, its\ninstance id, its Ed25519 public key and a site label; the member list it gets\nback is sealed under the code's secret. A wrong code is 403 on every instance,\nwhatever the federation holds - whoever holds no code learns nothing here.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/federation/peer/status": {
+      "get": {
+        "operationId": "federation.peer_status_get",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not the paired instance"
+          },
+          "410": {
+            "description": "HA_REMOVED: the caller was removed from the group"
+          }
+        },
+        "summary": "Who we are, who we know, and a summary count. Signed by the asking member.",
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "haPeer": []
+          }
+        ]
+      }
+    },
+    "/api/federation/peer/member-added": {
+      "post": {
+        "operationId": "federation.peer_member_added_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not the paired instance"
+          },
+          "410": {
+            "description": "HA_REMOVED: the caller was removed from the group"
+          }
+        },
+        "summary": "A member tells us of another: any member may vouch, as the issuer of a pairing tells the members that paired before. The record is checked as a pairing's is.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "haPeer": []
+          }
+        ]
+      }
+    },
+    "/api/federation/peer/member-removed": {
+      "post": {
+        "operationId": "federation.peer_member_removed_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not the paired instance"
+          },
+          "410": {
+            "description": "HA_REMOVED: the caller was removed from the group"
+          }
+        },
+        "summary": "A member tells us another is out. It lands as a tombstone: the next call of the removed member hears 410 and knows to let go.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "haPeer": []
+          }
+        ]
+      }
+    },
+    "/api/federation/peer/left": {
+      "post": {
+        "operationId": "federation.peer_left_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not the paired instance"
+          },
+          "410": {
+            "description": "HA_REMOVED: the caller was removed from the group"
+          }
+        },
+        "summary": "A member leaves the federation; the push it makes on its way out. Only the leaving member's own signature says this - no member can throw another out by claiming it left.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "haPeer": []
+          }
+        ]
+      }
+    },
+    "/api/federation/status": {
+      "get": {
+        "operationId": "federation.federation_status_get",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "This instance, its members and the reachability it last saw. members carries what the registry holds; reachable says which answered a status call just now.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/members": {
+      "get": {
+        "operationId": "federation.federation_members_get",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/pairing-code": {
+      "post": {
+        "operationId": "federation.create_pairing_code_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "A one-time code for an instance that is to join this federation through this one. url is this instance as the joining instance will reach it; site is our own label in the federation. A new code replaces an open one; it is good for 15 minutes and for one join.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/join": {
+      "post": {
+        "operationId": "federation.join_federation_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Join the federation of the instance that made the code, then be a member of every member it listed. own_url is this instance as the others will reach it; site is our own label. 409 says what went wrong - a refused code, or a conversation with the other instance that failed; 502 only for the unexpected.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/members/{instance_id}/remove": {
+      "post": {
+        "operationId": "federation.remove_member_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Take a member out of the federation, with a tombstone its later calls hear. The others are told; the member itself hears 410 on its next call.",
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/leave": {
+      "post": {
+        "operationId": "federation.leave_federation_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Leave the federation: the others are told, the registry is emptied. Pairing anew afterwards is a fresh start, with a fresh code.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/reconcile": {
+      "post": {
+        "operationId": "federation.reconcile_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Ask every member for its status and take the members it lists that this instance lacks - the repair for a push that did not arrive.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/peer/identities": {
+      "get": {
+        "operationId": "federation.peer_identities_get",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not the paired instance"
+          },
+          "410": {
+            "description": "HA_REMOVED: the caller was removed from the group"
+          }
+        },
+        "summary": "The users, custom roles and API tokens homed at this instance, and the deletes noted here - what another member pulls to mirror our identities. Signed by the asking member; an If-None-Match it sends against the etag it holds turns the answer into a 304, as the HA snapshot poll does it. Nothing homed at another member is served: a member answers for itself alone.",
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "haPeer": []
+          }
+        ]
+      }
+    },
+    "/api/federation/sync": {
+      "post": {
+        "operationId": "federation.sync_identities_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Pull the identities of every member now: the users, roles and tokens homed there become mirrors here, the deletes noted there remove ours. One member's failure to answer never stops the others - its report says 'failed' instead.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/peer/lease-vote": {
+      "post": {
+        "operationId": "federation.peer_lease_vote_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not the paired instance"
+          },
+          "410": {
+            "description": "HA_REMOVED: the caller was removed from the group"
+          }
+        },
+        "summary": "One member's ask for a lease on a cluster - or its word that it is done with one. Signed by the asking member; a member asks for its own lease alone, and a promise it wins here is on this disk before the grant leaves.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "haPeer": []
+          }
+        ]
+      }
+    },
+    "/api/federation/leases": {
+      "get": {
+        "operationId": "federation.federation_leases_get",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The leases this instance holds and the promises it has given, with the owners the cluster rows name.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/clusters/{cluster_id}/enroll": {
+      "post": {
+        "operationId": "federation.enroll_cluster_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Put a local cluster under the federation's rule: this instance becomes the writer, a majority of the members behind it.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/clusters/{cluster_id}/release": {
+      "post": {
+        "operationId": "federation.release_cluster_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Give the LEASE up and keep the enrollment: the gate stays shut here (an owner without a lease writes nothing) while another member takes the cluster over. Unenrolling is its own word.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/clusters/{cluster_id}/unenroll": {
+      "post": {
+        "operationId": "federation.unenroll_cluster_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Take a cluster out of the federation's rule altogether: lease and owner go, the row is this instance's alone again.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/clusters/{cluster_id}/renew": {
+      "post": {
+        "operationId": "federation.renew_cluster_lease_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "One renewal round now, out of the worker's cadence. The answer says whether a majority still backs this instance on that cluster.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
         ]
       }
     },

@@ -699,6 +699,17 @@ def ldap_provision_user(ldap_result: dict) -> dict:
     username = ldap_result['username'].lower()
     users = load_users()
     existing = users.get(username)
+    # Federation Phase 2: a user mirrored from another instance is the home's to
+    # provision - this directory would overwrite rights it does not own
+    if existing is not None:
+        try:
+            from pegaprox.core import federation as _fed_core
+            if _fed_core.foreign_home('users', (username,)):
+                logging.info(f"[LDAP] '{username}' is a federation mirror - left to "
+                             f"its home instance")
+                return existing
+        except Exception:
+            pass
     user = ldap_build_user_row(ldap_result, existing)
     if user is None:
         return None  # Caller should handle None return

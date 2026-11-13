@@ -23,6 +23,8 @@ from pegaprox.utils.auth import (
 )
 from pegaprox.utils.audit import log_audit, is_audit_pseudo_actor
 from pegaprox.utils.oidc import OIDC_AUTH_SOURCES, oidc_key_names_a_subject
+from pegaprox.api.federation import refuse_foreign
+from pegaprox.core import federation as fed_core
 from pegaprox.utils.rbac import (
     invalidate_tenants_cache,
     load_custom_roles, save_custom_roles, get_custom_roles, invalidate_roles_cache,
@@ -412,6 +414,11 @@ def admin_disable_2fa(username):
     if username is None:
         return jsonify({'error': 'User not found'}), 404
     
+    # Federation Phase 2: the home of a mirrored user owns its second factor
+    denied = refuse_foreign('users', (username,), f'User {username}')
+    if denied:
+        return denied
+    
     user = users_db[username]
     _ct = _caller_tenant_or_none()
     if _ct is not None and user.get('tenant_id', DEFAULT_TENANT_ID) != _ct:
@@ -497,6 +504,11 @@ def admin_change_password(username):
     
     if username is None:
         return jsonify({'error': 'User not found'}), 404
+    
+    # Federation Phase 2: the home of a mirrored user owns its password
+    denied = refuse_foreign('users', (username,), f'User {username}')
+    if denied:
+        return denied
     
     data = request.get_json()
     new_password = data.get('password', '')
@@ -792,7 +804,13 @@ def reset_all_password_expiry():
             continue
         if not user.get('enabled', True):
             continue  # skip disabled users
-            
+        # Federation Phase 2: a mirrored user's expiry is the home's to reset
+        try:
+            from pegaprox.core import federation as _fed_core
+            if _fed_core.foreign_home('users', (username,)):
+                continue
+        except _fed_core.FederationError:
+            continue
         user['password_changed_at'] = old_date
         reset_count += 1
     
@@ -1047,6 +1065,12 @@ def create_user():
         return jsonify({'error': f"The username '{username}' is reserved for entries PegaProx "
                                  f"writes itself - choose another"}), 400
     
+    # Federation Phase 2: the name may be a mirror of another member's user - saving
+    # over it would take the row as ours while the next sync still lists it there
+    denied = refuse_foreign('users', (username,), f'A user named {username}')
+    if denied:
+        return denied
+    
     # Validate password policy
     is_valid, error_msg = validate_password_policy(password)
     if not is_valid:
@@ -1142,6 +1166,11 @@ def update_user(username):
     
     if username is None:
         return jsonify({'error': 'User not found'}), 404
+    
+    # Federation Phase 2: a mirrored user is the home's to change
+    denied = refuse_foreign('users', (username,), f'User {username}')
+    if denied:
+        return denied
     
     data = request.get_json()
     user = users_db[username]
@@ -1313,6 +1342,11 @@ def delete_user(username):
     if username == request.session['user']:
         return jsonify({'error': 'Cannot delete your own account'}), 400
     
+    # Federation Phase 2: a mirrored user is the home's to delete
+    denied = refuse_foreign('users', (username,), f'User {username}')
+    if denied:
+        return denied
+    
     # Prevent deleting last admin
     user = users_db[username]
     _ct = _caller_tenant_or_none()
@@ -1343,6 +1377,12 @@ def delete_user(username):
         # account whose tokens are revoked, which is the harmless direction.
         db.execute('UPDATE api_tokens SET revoked = 1 WHERE username = ?', (username,))
         db.delete_user(username)
+        # Federation Phase 2: the delete travels with the next snapshot this member
+        # serves, as a tombstone every puller applies
+        try:
+            fed_core.note_identity_delete('user', username)
+        except Exception:
+            pass
         logging.info(f"Deleted user '{_sl(username)}' from database")
     except Exception as e:
         logging.error(f"Failed to delete user from DB: {e}")
@@ -1828,6 +1868,11 @@ def create_custom_role():
     
     if not role_id:
         return jsonify({'error': 'Role ID required'}), 400
+
+    # Federation Phase 2: the id may be a mirror of another member's role
+    denied = refuse_foreign('custom_roles', (role_id, tenant_id or ''), f"Role '{role_id}'")
+    if denied:
+        return denied
     
     # cant use builtin names
     if role_id in BUILTIN_ROLES:
@@ -1916,12 +1961,12 @@ def update_custom_role(role_id):
     """Update a custom role"""
     if role_id in BUILTIN_ROLES:
         return jsonify({'error': 'Cannot modify builtin roles'}), 400
-    
+
     data = request.json or {}
     name = data.get('name')
     permissions = data.get('permissions')
     tenant_id = data.get('tenant_id')  # which tenant's role to update
-    
+
     # Tenant validation: non-admins can only update roles in their own tenant
     user = build_authz_user(request.session.get('user', ''), request.session)
     if not acts_as_admin(user):
@@ -1934,6 +1979,14 @@ def update_custom_role(role_id):
             return jsonify({'error': 'Access denied - cannot update roles in other tenants'}), 403
         # pin to own tenant — a non-admin can't reach a global role this way
         tenant_id = user_tenant
+
+    # Federation Phase 2: a mirrored role is the home's to change. The guard runs
+    # after the tenant pinning, so it sees the row the write will really touch -
+    # a delegate's body without a tenant_id means its tenant's role, not the global
+    denied = refuse_foreign('custom_roles', (role_id, tenant_id or ''),
+                            f"Role '{role_id}'")
+    if denied:
+        return denied
         # NS Aug 2026 (audit) — a non-admin must not raise a role's perms above what it holds
         # itself; without this an admin.roles delegate rewrites its own role to admin.* and
         # self-escalates on the next request (require_auth re-resolves perms live).
@@ -2004,6 +2057,11 @@ def delete_custom_role(role_id):
     if not found:
         return jsonify({'error': 'Role not found'}), 404
 
+    # Federation Phase 2: a mirrored role is the home's to delete
+    denied = refuse_foreign('custom_roles', (role_id, tenant_id or ''), f"Role '{role_id}'")
+    if denied:
+        return denied
+
     # sec (audit): deleting a role does not revoke it from the accounts holding it, and
     # get_role_permissions_for_user falls back to the ROLE_VIEWER defaults for a name it can no
     # longer resolve. So removing a deliberately narrow role WIDENED its holders — a role
@@ -2048,6 +2106,10 @@ def delete_custom_role(role_id):
     if not _saved:
         return jsonify({'error': 'Could not save the role - check the server logs',
                         'code': 'ROLE_WRITE_FAILED'}), 500
+    try:
+        fed_core.note_identity_delete('role', f'{role_id}\x1f{tenant_id or ""}')
+    except Exception:
+        pass
     
     log_audit(request.session['user'], 'role.deleted', f"Deleted role: {role_id}")
     return jsonify({'success': True})

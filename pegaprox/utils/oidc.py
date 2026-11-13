@@ -1521,6 +1521,17 @@ def oidc_provision_user(user_info: dict, role_mapping: dict, auth_source: str = 
     if built is None:
         return None  # Caller should handle None return
     username, user = built
+    # Federation Phase 2: a user mirrored from another instance is the home's to
+    # provision - this provider would overwrite rights it does not own
+    if username in users:
+        try:
+            from pegaprox.core import federation as _fed_core
+            if _fed_core.foreign_home('users', (username,)):
+                logging.info(f"[OIDC] '{username}' is a federation mirror - left to "
+                             f"its home instance")
+                return {**users[username], 'username': username}
+        except Exception:
+            pass
     if username in users:
         logging.info(f"[OIDC] Updated user '{username}' (role={user['role']}, source={auth_source})")
     else:

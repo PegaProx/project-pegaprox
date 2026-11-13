@@ -835,7 +835,49 @@ class PegaProxDB:
                 ''')
         except Exception as e:
             logging.error(f"user_favorites migration failed, favorites stay unavailable: {e}")
-        
+
+        # Federation Phase 2 (Nov 2026) — identity federation between PegaProx
+        # instances: every row of users, custom_roles and api_tokens says which
+        # instance it is homed at. '' is a local row, an instance id is a mirror of
+        # that member's row, and writes to a mirror are refused where they are made
+        # (the home decides). A delete travels as a tombstone, so a pull cannot
+        # bring back what the home took out.
+        try:
+            for table in ('users', 'custom_roles', 'api_tokens',
+                          'webauthn_credentials'):
+                cursor.execute(f"PRAGMA table_info({table})")
+                columns = [col[1] for col in cursor.fetchall()]
+                if columns and 'fed_home' not in columns:
+                    cursor.execute(
+                        f"ALTER TABLE {table} ADD COLUMN fed_home TEXT NOT NULL DEFAULT ''")
+            # Phase 3: the federation's lease on a cluster - '' is a cluster this
+            # instance owns alone (no federation, no lease), an instance id is the
+            # member whose writes a majority of the federation backs
+            cursor.execute("PRAGMA table_info(clusters)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if columns and 'fed_owner' not in columns:
+                cursor.execute(
+                    "ALTER TABLE clusters ADD COLUMN fed_owner TEXT NOT NULL DEFAULT ''")
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS federation_identity_tombstones (
+                    kind TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    home TEXT NOT NULL,
+                    at INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (kind, key)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS federation_sync_state (
+                    peer TEXT PRIMARY KEY,
+                    etag TEXT NOT NULL DEFAULT '',
+                    pulled_at INTEGER NOT NULL DEFAULT 0,
+                    rows INTEGER NOT NULL DEFAULT 0
+                )
+            ''')
+        except Exception as e:
+            logging.error(f"federation identity migration failed, identities stay local: {e}")
+
         # Scheduled actions table - NS Jan 2026
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS scheduled_actions (
@@ -1188,7 +1230,8 @@ class PegaProxDB:
                 last_used_at TEXT,
                 last_used_ip TEXT,
                 created_at TEXT NOT NULL,
-                revoked INTEGER DEFAULT 0
+                revoked INTEGER DEFAULT 0,
+                fed_home TEXT NOT NULL DEFAULT ''
             )
         ''')
         cursor.execute('''
@@ -1212,7 +1255,8 @@ class PegaProxDB:
                 user_handle BLOB NOT NULL,
                 created_at TEXT NOT NULL,
                 last_used_at TEXT,
-                last_used_ip TEXT
+                last_used_ip TEXT,
+                fed_home TEXT NOT NULL DEFAULT ''
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_webauthn_user ON webauthn_credentials(username)')
@@ -2826,6 +2870,17 @@ class PegaProxDB:
         # NS Feb 2026 - never store plaintext, fail safely
         raise RuntimeError("No encryption backend available (neither AES-256-GCM nor Fernet). Cannot store sensitive data.")
     
+    def _decrypt_safe(self, data: str) -> str:
+        """_decrypt for a row of a table other hosts write into: a value this host's
+        key cannot open comes back empty with a line in the log, instead of raising
+        past the whole read."""
+        try:
+            return self._decrypt(data)
+        except Exception as e:
+            logging.warning(f"could not decrypt a field-level value on this host "
+                            f"({type(e).__name__}): treated as empty")
+            return ''
+
     def _decrypt(self, data: str) -> str:
         """decrypt - handles both old and new format"""
         # NS: handles aes256 and old fernet
@@ -3302,8 +3357,10 @@ class PegaProxDB:
                      migration_threshold, check_interval, auto_migrate, 
                      balance_containers, balance_local_disks, dry_run, enabled, 
                      ha_enabled, fallback_hosts, ssh_user, ssh_key_encrypted, 
-                     ssh_port, ha_settings, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ssh_port, ha_settings, created_at, updated_at,
+                     fed_owner)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    COALESCE((SELECT fed_owner FROM clusters WHERE id = ?), ''))
                 ''', (
                     cluster_id,
                     cluster.get('name', ''),
@@ -3324,7 +3381,8 @@ class PegaProxDB:
                     self._encrypt(cluster.get('ssh_key', '')),
                     cluster.get('ssh_port', 22),
                     self._encrypt(json.dumps(cluster.get('ha_settings', {}))),
-                    now, now
+                    now, now,
+                    cluster_id
                 ))
             except Exception as e:
                 logging.error(f"Failed to migrate cluster {cluster_id}: {e}")
@@ -4557,8 +4615,11 @@ class PegaProxDB:
                 'last_login': row_dict.get('last_login'),
                 'password_expiry': row_dict.get('password_expiry'),
                 'password_changed_at': row_dict.get('password_changed_at'),
-                'totp_secret': self._decrypt(row_dict.get('totp_secret_encrypted') or ''),
-                'totp_pending_secret': self._decrypt(row_dict.get('totp_pending_secret_encrypted') or ''),  # MK: Load pending 2FA secret
+                # Federation Phase 2 (audit K1): a ciphertext this host cannot open
+                # (a mirrored row from before the clear-on-apply rule) must cost the
+                # row its secret, never every user the whole table
+                'totp_secret': self._decrypt_safe(row_dict.get('totp_secret_encrypted') or ''),
+                'totp_pending_secret': self._decrypt_safe(row_dict.get('totp_pending_secret_encrypted') or ''),  # MK: Load pending 2FA secret
                 'totp_enabled': bool(row_dict.get('totp_enabled', 0)),
                 'force_password_change': bool(row_dict.get('force_password_change', 0)),
                 'enabled': bool(row_dict.get('enabled', 1)),
@@ -4629,8 +4690,8 @@ class PegaProxDB:
             'last_login': row_dict.get('last_login'),
             'password_expiry': row_dict.get('password_expiry'),
             'password_changed_at': row_dict.get('password_changed_at'),
-            'totp_secret': self._decrypt(row_dict.get('totp_secret_encrypted') or ''),
-            'totp_pending_secret': self._decrypt(row_dict.get('totp_pending_secret_encrypted') or ''),  # MK: Load pending 2FA secret
+            'totp_secret': self._decrypt_safe(row_dict.get('totp_secret_encrypted') or ''),
+            'totp_pending_secret': self._decrypt_safe(row_dict.get('totp_pending_secret_encrypted') or ''),  # MK: Load pending 2FA secret
             'totp_enabled': bool(row_dict.get('totp_enabled', 0)),
             'force_password_change': bool(row_dict.get('force_password_change', 0)),
             'enabled': bool(row_dict.get('enabled', 1)),
@@ -4664,7 +4725,7 @@ class PegaProxDB:
         """Save or update user"""
         cursor = self.conn.cursor()
         now = datetime.now().isoformat()
-        
+
         cursor.execute('''
             INSERT OR REPLACE INTO users
             (username, password_salt, password_hash, role, permissions, tenant,
@@ -4675,7 +4736,7 @@ class PegaProxDB:
              ldap_permissions, ldap_tenant, ldap_tenant_permissions,
              tenant_permissions, denied_permissions, oidc_sub, last_oidc_sync,
              layout_chosen, portal_only, sidebar_show_vmid, user_folder,
-             directory_groups)
+             directory_groups, fed_home)
             VALUES (?, ?, ?, ?, ?, ?,
                     COALESCE((SELECT created_at FROM users WHERE username = ?), ?),
                     ?, ?,
@@ -4685,7 +4746,8 @@ class PegaProxDB:
                     ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
-                    COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]'))
+                    COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]'),
+                    COALESCE((SELECT fed_home FROM users WHERE username = ?), ''))
         ''', (
             username,
             data.get('password_salt', ''),
@@ -4732,6 +4794,7 @@ class PegaProxDB:
             (json.dumps(_directory_groups(data.get('auth_source', 'local'), data.get('groups')))
              if 'groups' in data or data.get('auth_source', 'local') not in DIRECTORY_AUTH_SOURCES
              else None),
+            username,
             username,
         ))
         self.conn.commit()

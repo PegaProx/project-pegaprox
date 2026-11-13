@@ -11,6 +11,7 @@ from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth, load_users, save_users
+from pegaprox.api.federation import refuse_foreign
 from pegaprox.utils.audit import log_audit
 # MK 2026-06-04 (CWE-117 log-injection): user-input from URL params + request
 # body lands in the four loggers below — wrap with _sl so CRLF can't forge new
@@ -546,6 +547,11 @@ def set_user_perms(username):
     if username is None:
         return jsonify({'error': 'User not found'}), 404
     
+    # Federation Phase 2: a mirrored user's permissions are the home's to set
+    denied = refuse_foreign('users', (username,), f'User {username}')
+    if denied:
+        return denied
+    
     data = request.json or {}
     tenant_id = data.get('tenant_id')  # if set, update tenant-specific perms
     _global = caller_acts_as_admin()
@@ -649,6 +655,11 @@ def remove_user_tenant_perms(username, tenant_id):
     
     if username is None:
         return jsonify({'error': 'User not found'}), 404
+
+    # Federation Phase 2: a mirrored user's permissions are the home's to change
+    denied = refuse_foreign('users', (username,), f'User {username}')
+    if denied:
+        return denied
 
     # MK Jun 2026 (sec-review): tenant-scoped admins can only touch their own tenant
     if not caller_acts_as_admin():

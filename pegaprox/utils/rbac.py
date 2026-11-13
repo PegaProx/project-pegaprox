@@ -127,39 +127,52 @@ def save_custom_roles(roles: dict):
     try:
         db = get_db()
         cursor = db.conn.cursor()
-        
+
+        # Federation Phase 2: this rewrite starts with a DELETE, and a mirror of
+        # another member's role is a row like any other. Its home is held before the
+        # delete and written back with the row, or the mirror would turn into a local
+        # role that the next sync refuses to touch.
+        homes = {}
+        for row in cursor.execute(
+                "SELECT name, COALESCE(tenant_id, '') AS tenant_id, fed_home "
+                "FROM custom_roles").fetchall():
+            if row['fed_home']:
+                homes[(row['name'], row['tenant_id'])] = row['fed_home']
+
         # Clear existing roles
         cursor.execute('DELETE FROM custom_roles')
-        
+
         now = datetime.now().isoformat()
-        
+
         # Save global roles (use empty string for tenant_id to work with composite key)
         for role_id, role_data in roles.get('global', {}).items():
             cursor.execute('''
-                INSERT INTO custom_roles (name, permissions, description, tenant_id, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO custom_roles (name, permissions, description, tenant_id, created_at, fed_home)
+                VALUES (?, ?, ?, ?, ?, ?)
             ''', (
                 role_id,
                 json.dumps(role_data.get('permissions', [])),
                 role_data.get('name', role_id),
                 '',  # Empty string for global roles
-                now
+                now,
+                homes.get((role_id, ''), '')
             ))
-        
+
         # Save tenant-specific roles
         for tenant_id, tenant_roles in roles.get('tenants', {}).items():
             for role_id, role_data in tenant_roles.items():
                 cursor.execute('''
-                    INSERT INTO custom_roles (name, permissions, description, tenant_id, created_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO custom_roles (name, permissions, description, tenant_id, created_at, fed_home)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 ''', (
                     role_id,
                     json.dumps(role_data.get('permissions', [])),
                     role_data.get('name', role_id),
                     tenant_id,
-                    now
+                    now,
+                    homes.get((role_id, tenant_id), '')
                 ))
-        
+
         db.conn.commit()
         return True
     except Exception as e:

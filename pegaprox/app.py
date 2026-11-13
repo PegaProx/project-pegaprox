@@ -142,6 +142,23 @@ def create_app():
         return '', 404
 
     @app.before_request
+    def federation_cluster_write_gate():
+        """Phase 3: a write on any cluster-scoped path (/api/clusters/<id>/...)
+        goes through the lease gate - one hook for every blueprint that writes
+        there, the VM and storage and Ceph routes included. Reads pass; an
+        unenrolled cluster is this instance's own and passes too; the path piece
+        after /api/clusters/ that is no id ('reorder') passes. Runs after the CSRF
+        gate, which answers first."""
+        if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            return None
+        import re as _re
+        m = _re.match(r'^/api/clusters/([^/?]+)', request.path)
+        if not m or m.group(1) == 'reorder':
+            return None
+        from pegaprox.api.federation import refuse_unleased
+        return refuse_unleased(m.group(1), f'Cluster {m.group(1)}')
+
+    @app.before_request
     def validate_request():
         if request.path.startswith('/static/') or request.path.startswith('/images/'):
             return None
@@ -180,6 +197,11 @@ def create_app():
             if request.path.startswith('/api/ha/peer/'):
                 from pegaprox.api.ha import signed_member_call
                 peer_call = signed_member_call()
+            # Nov 2026, federation Phase 1 - the same for a federation member's
+            # signed call: the pushes of a pairing come from one member address
+            if request.path.startswith('/api/federation/peer/'):
+                from pegaprox.api.federation import request_fed_peer
+                peer_call = request_fed_peer()[0] == 'member'
             if not peer_call and not any(request.path.startswith(p) for p in skip_paths):
                 # the portal_only hook below looks API tokens up only for a counted request
                 request.environ['pegaprox.rate_counted'] = True
