@@ -982,6 +982,9 @@ def _fake_paramiko(known):
             return self.get(host)
 
         def save(self, path):
+            # the script hands save() a temp file next to known_hosts and renames it over
+            with open(path, 'w') as f:
+                f.writelines(f'{host} {kt}\n' for host, keys in self.items() for kt in keys)
             fake.saved.append(path)
 
     fake.hostkeys = types.SimpleNamespace(HostKeys=_OnDisk)
@@ -1033,7 +1036,8 @@ def test_the_ssh_server_pins_nothing_on_a_standby(tmp_path, monkeypatch, known_o
     else:
         # counterproof: the TOFU pin as before, then the (fake) shell fails
         assert NOT_KNOWN not in said and 'no shell in this test' in said, ws.sent
-        assert fake.saved == [str(tmp_path / 'known_hosts')]
+        assert len(fake.saved) == 1
+        assert (tmp_path / 'known_hosts').read_text() == '192.0.2.10 ssh-ed25519\n'
 
 
 @pytest.fixture

@@ -12860,6 +12860,9 @@ import json
 import re
 import sys
 import os
+import errno
+import stat
+import tempfile
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -12888,6 +12891,52 @@ import threading
 # subprocess: a TOFU host-key save must not race another and corrupt the file
 # (mirrors the main app's _persist_lock, which this standalone can't import).
 _KH_WRITE_LOCK = threading.Lock()
+
+
+# MK Nov 2026 - the two below are inlined from utils/ssh_security.py, which this script
+# cannot import. A key that never reaches the disk is trusted again on the next connect,
+# with whatever key that one shows, so no first use without a known_hosts we can write.
+def _kh_writable(path):
+    # the save puts a temp file next to known_hosts and renames it over, so the folder
+    # has to take new files and an existing file must not be read-only
+    target = os.path.realpath(path)
+    if os.path.exists(target) and not os.access(target, os.W_OK):
+        return False
+    return os.access(os.path.dirname(target) or '.', os.W_OK | os.X_OK)
+
+
+def _write_kh(path, write):
+    """Replace known_hosts with what write(tmp) puts into a temp file next to it.
+    paramiko's save() truncates first, so a write that failed half way left a shorter
+    file and every pin after the cut read as unknown. The rename leaves either file."""
+    target = os.path.realpath(path)
+    st = None
+    if os.path.exists(target):
+        if not os.access(target, os.W_OK):
+            raise PermissionError(errno.EACCES, 'known_hosts is read-only', target)
+        st = os.stat(target)
+    fd, tmp = tempfile.mkstemp(prefix='.ssh_known_hosts.', dir=os.path.dirname(target) or '.')
+    os.close(fd)
+    try:
+        write(tmp)
+        fd = os.open(tmp, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if st is not None:
+            os.chmod(tmp, stat.S_IMODE(st.st_mode))
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except OSError:
+                pass
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 async def _refused_as_standby(ws, resp):
@@ -13161,6 +13210,14 @@ async def ssh_handler(websocket):
                     "Repair or remove the damaged line (see the log) and connect again")
             if os.environ.get('PEGAPROX_SSH_STRICT_HOST_KEYS', '').strip().lower() in ('1', 'true', 'yes', 'on'):
                 raise paramiko.SSHException("strict host-key checking: unknown SSH host key for " + str(_h))
+            # the key is saved after the login, so check before it that it can be
+            if not _kh_writable(_ssh_kh):
+                print("[SSH-WS] known_hosts " + _ssh_kh + " is not writable - not trusting "
+                      + str(_h) + " on first use")
+                raise paramiko.SSHException(
+                    f"config/.ssh_known_hosts could not be written, so the host key of {_h} "
+                    "cannot be pinned - refusing to trust it on first use. Check the permissions "
+                    "and free space of the config folder (see the log) and connect again")
             try:
                 _c._host_keys.add(_h, _k.get_name(), _k)
             except Exception:
@@ -13185,9 +13242,10 @@ async def ssh_handler(websocket):
                             merged.add(_hn, _kt, _key)
                             added += 1
                 if added:
-                    merged.save(_ssh_kh)
-        except Exception:
-            pass
+                    _write_kh(_ssh_kh, merged.save)
+        except Exception as e:
+            # the shell stays open, but these hosts are not pinned
+            print("[SSH-WS] could not write known_hosts (" + str(e) + ") - new host keys were not pinned")
 
     try:
         print(f"Connecting SSH to {ssh_user}@{node_ip}...")
