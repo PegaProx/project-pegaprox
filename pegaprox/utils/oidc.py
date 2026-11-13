@@ -11,6 +11,7 @@ import hashlib
 import base64
 import secrets
 import re
+import unicodedata
 import requests
 from datetime import datetime
 from urllib.parse import urlencode, urlparse, urlunparse
@@ -1244,6 +1245,83 @@ def oidc_derive_username(user_info: dict, users: dict = None, name: str = None) 
     return username
 
 
+def _oidc_name_is_exact(raw, username: str) -> bool:
+    """Whether the claim `raw` became the key `username` by lower-casing alone.
+
+    The automatic order drops what the username filter does not know and lower() folds the
+    Kelvin sign into a k, so 'Bob\u200b@corp.example', ' bob@corp.example', "bo'b@..." or a
+    decomposed umlaut all come out as some other account's key.
+    """
+    return (isinstance(raw, str) and raw == raw.strip()
+            and unicodedata.normalize('NFKC', raw) == raw and raw.lower() == username)
+
+
+def oidc_new_account_refusal(username: str, user_info: dict, name: str = None):
+    """Why this sign-in may not make the new account `username`, or None when it may.
+
+    MK Nov 2026 - the same folds made a new account for a stranger: 'Bob\u200b@corp.example',
+    'bob@corp.example ' or the Kelvin sign made bob@corp.example or kelvin@corp.example,
+    bound to that sub, and the person of the name was refused from then on. Punctuation
+    may still go (the apostrophe of an O'Brien address) and case folds as before; padding,
+    what NFKC folds and what cannot be seen or combines with a letter may not.
+    """
+    raw = name if name is not None else (user_info.get('preferred_username') or user_info.get('email'))
+    if not isinstance(raw, str) or not raw:
+        return None
+    lowered = raw.lower()
+    dropped = [c for c in lowered if not (c.isalnum() or c in '._-@+')]
+    if ''.join(c for c in lowered if c not in dropped) != username:
+        return None  # the key is not this name's: a sign-in without one, keyed on its sub
+    if raw != raw.strip():
+        return 'padding around the name'
+    if unicodedata.normalize('NFKC', raw) != raw:
+        return 'characters NFKC folds into others'
+    hidden = [c for c in dropped if c != ' ' and unicodedata.category(c)[0] in 'CMZ']
+    if hidden:
+        return ('characters that cannot be seen or combine with a letter ('
+                + ', '.join(f'U+{ord(c):04X}' for c in hidden[:4]) + ')')
+    return None
+
+
+def oidc_subject_refusal(username: str, row: dict, user_info: dict, subjects=None, name: str = None):
+    """Why this sign-in may not use the OIDC / Entra account `row`, or None when it may.
+
+    `subjects` are the ids this one sign-in goes by besides user_info's sub: with Entra
+    the Graph id when /me answered and the verified token's sub and oid, so a Graph
+    hiccup does not lock anyone out. `name` is the picked username claim, as for
+    oidc_derive_username.
+    """
+    sub = user_info.get('sub')
+    # MK Oct 2026 (#1141) - a fallback key is lower case now, so a name claim can spell
+    # one ("oidc_" + 16 hex). That row is its sub's, not whoever picks it as a username.
+    if _oidc_is_fallback_row(username, row) and row.get('oidc_sub') != sub:
+        return "that account was made for another subject's sign-in without a name"
+    # NS Oct 2026 (#1149) - the account stays with the subject it was made for. Claims like
+    # email can be changed or handed on at some identity providers, and the update would
+    # give the row and its role to whoever carries the value now.
+    # MK Nov 2026 - whatever names the account, the picked claim or the automatic order:
+    # two subjects with one preferred_username (a renamed or recycled IdP account, a second
+    # IdP) took turns on the row. A row with no subject stored (made by hand, or reset by
+    # an admin) is bound by the next sign-in that carries a subject id and names it exactly.
+    bound = row.get('oidc_sub')
+    own = {s for s in [*(subjects or ()), sub] if isinstance(s, str) and s}
+    if bound:
+        if bound not in own:
+            return ("the account belongs to another subject of the identity provider; an admin "
+                    "can reset its sign-in binding if it is the same person (after a move to "
+                    "another identity provider, for example)")
+        return None
+    if not own:
+        return "the account is not bound yet and the sign-in carries no subject id to bind it to"
+    raw = name if name is not None else (user_info.get('preferred_username') or user_info.get('email'))
+    if not _oidc_name_is_exact(raw, username):
+        return ("the account is not bound yet and is taken only by its exact name, while this "
+                "sign-in's name reaches it only once characters are dropped or folded (padding, "
+                "invisible or combining characters, punctuation, a look-alike letter). If it is "
+                "the owner, an admin can delete the account and the next sign-in creates it again")
+    return None
+
+
 def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, users: dict,
                         name: str = None, subjects=None):
     """The row an OIDC sign-in would store for this user, without storing it.
@@ -1260,7 +1338,10 @@ def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, u
     username = oidc_derive_username(user_info, users, name=name)
     if username is None:
         return None  # no name, and the fallback key is not this identity's (#1141)
-    if name is not None and not user_info.get('sub'):
+    # MK Nov 2026 - in the automatic order too: a row made or updated without a sub is
+    # bound to nobody, and an update wrote the empty sub over the stored one
+    sub = user_info.get('sub')
+    if not isinstance(sub, str) or not sub:
         logging.warning(f"[OIDC] Rejected login for '{username}' - the sign-in has no sub, "
                         f"so the account cannot be tied to it")
         return None
@@ -1282,30 +1363,10 @@ def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, u
             logging.warning(f"[OIDC] Rejected login for '{username}' - a {existing_source} "
                             f"account of that name exists and cannot be taken over by OIDC")
             return None  # Caller should handle None return
-        # MK Oct 2026 (#1141) - a fallback key is lower case now, so a name claim can spell
-        # one ("oidc_" + 16 hex). That row is its sub's, not whoever picks it as a username.
-        if (_oidc_is_fallback_row(username, users[username])
-                and users[username].get('oidc_sub') != user_info.get('sub')):
-            logging.warning(f"[OIDC] Rejected login for '{username}' - that account was made "
-                            f"for another subject's sign-in without a name")
+        refusal = oidc_subject_refusal(username, users[username], user_info, subjects, name=name)
+        if refusal:
+            logging.warning(f"[OIDC] Rejected login for '{username}' - {refusal}")
             return None
-        # NS Oct 2026 (#1149) - with a claim the admin picked, the account stays with the
-        # subject it was made for. Claims like email can be changed or handed on at some
-        # identity providers, and the update below would give the row and its role to
-        # whoever carries the value now.
-        # `subjects` are the ids this one sign-in goes by: with Entra the Graph id when /me
-        # answered and the token's sub and oid, so a Graph hiccup does not lock anyone out.
-        # A row with no subject stored is not taken either: an admin binds or deletes it.
-        bound = users[username].get('oidc_sub')
-        if name is not None:
-            own = {s for s in (set(subjects or ()) | {user_info.get('sub')}) if s}
-            if not bound or bound not in own:
-                logging.warning(f"[OIDC] Rejected login for '{username}' - the account "
-                                + ("has no identity provider subject stored; an admin can "
-                                   "delete it to let the sign-in create it again" if not bound else
-                                   "belongs to another subject of the identity provider; an "
-                                   "admin can delete it if that person is gone"))
-                return None
 
         # Update existing OIDC user - on a copy, so the table the caller handed in
         # stays what it was
@@ -1369,6 +1430,12 @@ def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, u
             user['groups'] = _held + [g for g in (role_mapping.get('groups') or [])
                                       if isinstance(g, str) and g.lower() not in _have]
     else:
+        refusal = oidc_new_account_refusal(username, user_info, name=name)
+        if refusal:
+            logging.warning(f"[OIDC] Rejected login for '{username}' - the sign-in's name reaches this "
+                            f"key only through {refusal}; a new account takes a name only as the "
+                            f"identity provider spells it")
+            return None
         # Create new user
         user = {
             'role': role_mapping.get('role', ROLE_VIEWER),

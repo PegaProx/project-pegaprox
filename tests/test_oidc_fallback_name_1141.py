@@ -437,12 +437,17 @@ def test_a_named_sign_in_never_takes_over_an_old_lower_case_fallback_account(db)
     assert same['username'] == old and same['role'] == 'admin'
 
 
-def test_a_named_account_is_still_adopted_by_name(db):
-    # unchanged: an OIDC row under a real name follows its name, whatever the sub says now
-    # (Entra stores the Graph object id, the userinfo endpoint answers a pairwise sub)
+def test_a_named_account_is_adopted_by_name_for_its_own_subject(db):
+    # an OIDC row under a real name follows its name for the subject it is bound to, by
+    # any id this sign-in goes by: Entra stores the Graph object id, the userinfo endpoint
+    # answers a pairwise sub, and the verified token carries both (sub and oid).
+    # MK Nov 2026 - whatever the sub says now was enough before: another subject of that
+    # name took the row over
     _seed_oidc(db, 'wanda@corp.example', sub='object-id-1', role='user')
-    user = oidc_provision_user({'sub': 'pairwise-sub', 'preferred_username': 'Wanda@Corp.Example'},
-                               {'role': 'viewer'}, auth_source='entra')
+    info = {'sub': 'pairwise-sub', 'preferred_username': 'Wanda@Corp.Example'}
+    assert oidc_provision_user(info, {'role': 'viewer'}, auth_source='entra') is None
+    user = oidc_provision_user(info, {'role': 'viewer'}, auth_source='entra',
+                               subjects={'pairwise-sub', 'object-id-1'})
     assert user['username'] == 'wanda@corp.example' and user['role'] == 'user'
 
 

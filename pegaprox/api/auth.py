@@ -40,6 +40,7 @@ from pegaprox.utils.oidc import (
     oidc_get_user_groups, oidc_get_user_groups_ex, oidc_map_groups_to_role, oidc_provision_user,
     oidc_derive_username, oidc_build_user_row, OIDC_AUTH_SOURCES, oidc_username_claim_value,
     oidc_username_claim_refusal, oidc_id_token_verified, oidc_idp_request_target,
+    oidc_subject_refusal, oidc_new_account_refusal,
 )
 from pegaprox.utils.rbac import get_user_permissions, DEFAULT_TENANT_ID, portal_only_holds
 from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, get_session_timeout, safe_error, effective_reverse_proxy
@@ -117,6 +118,10 @@ def _oidc_begin(answer):
         cookie_val += f":{redirect_after}"
     response.set_cookie('oidc_state', cookie_val, httponly=True, secure=is_secure, samesite='Lax', max_age=600)
     return response
+
+
+# what a sign-in hears when no account it may use goes by its name; the reason is logged
+_OIDC_UNMATCHED = 'This sign-in could not be matched to a PegaProx account. Contact an administrator.'
 
 
 def _idp_location(url):
@@ -274,34 +279,49 @@ def oidc_callback():
     if not user_info or not (user_info.get('preferred_username') or user_info.get('email') or user_info.get('sub')):
         return jsonify({'error': 'Could not retrieve user information from provider'}), 401
 
+    def _sid(value):
+        return value if isinstance(value, str) and value else None
+
+    # the ids the verified ID token gives this sign-in. MK Nov 2026 - in both naming modes:
+    # an account stays with the subject it is bound to (oidc_subject_refusal)
+    entra = config.get('provider') == 'entra'
+    verified = oidc_id_token_verified(id_claims)
+    token_ids = set()
+    if verified:
+        token_ids = {_sid(id_claims.get('sub'))}
+        if entra:
+            token_ids.add(_sid(id_claims.get('oid')))   # the id Graph /me answers with
+        token_ids.discard(None)
+
     # NS Oct 2026 (#1149) - the claim the admin picked names the account, or the sign-in
     # stops here: no quiet fallback to another naming scheme
     claim = config.get('username_claim') or ''
     picked_name = None
-    subjects = None
+    if not claim and not _sid(user_info.get('sub')):
+        # MK Nov 2026 - a userinfo answer without a sub (OIDC Core 5.3.2 says it carries one)
+        # is about the subject of this sign-in's verified ID token. Without either there is
+        # nobody to bind an account to, and no account is made or updated
+        if verified and _sid(id_claims.get('sub')):
+            user_info = dict(user_info, sub=id_claims['sub'])
+        else:
+            logging.warning("[OIDC] Sign-in refused: neither the userinfo answer nor a verified "
+                            "ID token carries a subject id")
+            return jsonify({'error': 'Could not retrieve user information from provider'}), 401
+    # with Entra the Graph id when /me answered, else the userinfo sub, plus the token's
+    # sub and oid: a Graph answer that comes and goes locks nobody out
+    subjects = token_ids | ({_sid(user_info.get('sub'))} - {None})
     unmatched = None
     if claim:
-        unmatched = 'This sign-in could not be matched to a PegaProx account. Contact an administrator.'
+        unmatched = _OIDC_UNMATCHED
         no_claim = jsonify({'error': f"This sign-in carries no usable '{claim}' claim. Ask an "
                                      f"administrator to check the OIDC settings and the claims "
                                      f"the identity provider issues."}), 401
-        entra = config.get('provider') == 'entra'
-        if claim == 'email' and (entra or (oidc_id_token_verified(id_claims) and id_claims.get('tid'))):
+        if claim == 'email' and (entra or (verified and id_claims.get('tid'))):
             # what the settings refuse too: Entra's email is the unverified mail attribute. An
             # Entra tenant set up as a generic provider is told by the tenant id in its token.
             logging.warning("[OIDC] Sign-in refused: email cannot name Entra accounts")
             return no_claim
 
-        def _sid(value):
-            return value if isinstance(value, str) and value else None
-
-        verified = oidc_id_token_verified(id_claims)
-        token_ids = set()
-        if verified:
-            token_ids = {_sid(id_claims.get('sub'))}
-            if entra:
-                token_ids.add(_sid(id_claims.get('oid')))   # the id Graph /me answers with
-            token_ids.discard(None)
         subject_info = userinfo_answer
         if isinstance(subject_info, dict) and verified and (
                 set(subject_info) <= {'sub'} or (entra and not _sid(id_claims.get('oid')))):
@@ -333,25 +353,36 @@ def oidc_callback():
                                            groups_complete=groups_complete)
     
     # Step 5: Provision/update local user
+    # MK: this has to match the logic in oidc_provision_user or we get mismatches
+    # (had a bug where "john.doe" here vs "johndoe" in provision caused 403s)
+    users = load_users()
+    derived = oidc_derive_username(user_info, users, name=picked_name)
     if not config['auto_create_users']:
-        # Check if user already exists
-        # MK: this has to match the logic in oidc_provision_user or we get mismatches
-        # (had a bug where "john.doe" here vs "johndoe" in provision caused 403s)
-        users = load_users()
-        check_username = oidc_derive_username(user_info, users, name=picked_name)
-        if check_username not in users:
-            return jsonify({'error': unmatched or 'User account does not exist. Contact an administrator.'}), 403
+        # Check if user already exists. MK Nov 2026 - in the words a held name gets, so the
+        # answer does not tell which names are taken
+        if derived not in users:
+            return jsonify({'error': _OIDC_UNMATCHED}), 403
     else:
         # MK Nov 2026 - the background jobs write their audit entries under a few names, and
         # an account created under one would read those entries as its own. One that exists
         # already signs in as before.
-        users = load_users()
-        new_name = oidc_derive_username(user_info, users, name=picked_name)
-        if new_name and new_name not in users and is_audit_pseudo_actor(new_name):
-            logging.warning(f"[OIDC] Sign-in refused: '{new_name}' is reserved for entries "
+        if derived and derived not in users and is_audit_pseudo_actor(derived):
+            logging.warning(f"[OIDC] Sign-in refused: '{derived}' is reserved for entries "
                             f"PegaProx writes itself")
-            return jsonify({'error': f"The username '{new_name}' is reserved for entries PegaProx "
+            return jsonify({'error': f"The username '{derived}' is reserved for entries PegaProx "
                                      f"writes itself. Contact an administrator."}), 403
+
+    def _not_this_sign_ins(table):
+        # MK Nov 2026 - an OIDC account of that name bound to another subject, or a new one
+        # the name reaches only through a fold: told apart from a name another identity
+        # source owns, which keeps its own answer
+        if not derived:
+            return False
+        row = table.get(derived)
+        if row is None:
+            return oidc_new_account_refusal(derived, user_info, name=picked_name) is not None
+        return (isinstance(row, dict) and row.get('auth_source', 'local') in OIDC_AUTH_SOURCES
+                and oidc_subject_refusal(derived, row, user_info, subjects, name=picked_name) is not None)
     
     # Determine auth_source label
     provider = config.get('provider', 'oidc')
@@ -369,21 +400,26 @@ def oidc_callback():
         built = oidc_build_user_row(user_info, role_mapping, auth_source, users, name=picked_name,
                                     subjects=subjects)
         user = None  # another source owns the name: the answer below, as on the active
-        if built is None and claim:
-            # NS Oct 2026 (#1149) - with a picked claim a name held by another subject, or one
-            # with no subject stored, answers like a missing account: a standby writes nothing,
-            # so a different answer would let anyone probe which names are taken unseen
+        if built is None and (claim or _not_this_sign_ins(users)):
+            # NS Oct 2026 (#1149) - a name held by another subject (with a picked claim, any
+            # name this sign-in may not use) answers like a missing account: a standby writes
+            # nothing, so a different answer would let anyone probe which names are taken
+            # unseen. MK Nov 2026 - the automatic order binds as well now
             logging.warning("[OIDC] A sign-in on a standby names an account it may not use "
-                            "(another subject's, or none stored) - answered like a missing one")
+                            "(another subject's) - answered like a missing one")
             if not config['auto_create_users']:
-                return jsonify({'error': unmatched}), 403   # what a missing name got above
+                return jsonify({'error': _OIDC_UNMATCHED}), 403   # what a missing name got above
             built = (oidc_derive_username(user_info, users, name=picked_name) or '', None)
         if built is not None:
             username, would_be = built
             row = users.get(username) if would_be is not None else None
-            if not isinstance(row, dict):
+            # MK Nov 2026 - nor a row not bound to a subject yet: the binding is made on the
+            # active, and a standby, which writes nothing, would let every subject of that
+            # name in, again and again
+            unbound = isinstance(row, dict) and not row.get('oidc_sub')
+            if not isinstance(row, dict) or unbound:
                 logging.warning(f"[OIDC] '{username}' signs in on a standby that does not "
-                                f"hold the account yet - refused")
+                                f"hold the account {'bound to a subject ' if unbound else ''}yet - refused")
                 return jsonify({
                     'error': 'Your account is not on this instance yet - sign in on the active '
                              'instance once; it reaches this standby with the next sync.',
@@ -402,11 +438,21 @@ def oidc_callback():
             user = {**row, 'username': username}
             logging.info(f"[OIDC] User '{username}' authenticated via {provider} from {client_ip} (standby, synced row)")
     else:
+        # MK Nov 2026 - a disabled account is refused before anything is written: provisioning
+        # would bind it and store this sign-in's groups first. Asked of a row this sign-in may
+        # use only, so a name held by another subject does not tell that it is disabled
+        held = users.get(derived) if derived else None
+        if (isinstance(held, dict) and not held.get('enabled', True)
+                and oidc_build_user_row(user_info, role_mapping, auth_source, users, name=picked_name,
+                                        subjects=subjects) is not None):
+            return jsonify({'error': 'Account is disabled'}), 403
         user = oidc_provision_user(user_info, role_mapping, auth_source=auth_source, name=picked_name,
                                    subjects=subjects)
     
     # NS: SECURITY - oidc_provision_user returns None if local account would be overwritten
     if not user:
+        if unmatched is None and _not_this_sign_ins(users):
+            return jsonify({'error': _OIDC_UNMATCHED}), 403
         return jsonify({'error': unmatched or 'A local account with this username already exists. Contact an administrator.'}), 403
     
     username = user.get('username', '')

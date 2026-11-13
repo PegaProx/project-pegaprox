@@ -11,9 +11,10 @@ now say which claim becomes the username:
   c) a sign-in without a usable value is refused; it never falls back to another name, and
      a value is taken whole or not at all (nothing is dropped or folded)
   d) with a picked claim an account stays with the subject it was made for: the ids this
-     sign-in goes by (with Entra the Graph id and the token's sub and oid), never a row
-     with no subject stored, and the refusals read alike so nobody can probe for names -
-     on a standby too, where a held name answers like a missing one
+     sign-in goes by (with Entra the Graph id and the token's sub and oid); a row with no
+     subject stored is bound by the next sign-in; the refusals read alike so nobody can
+     probe for names - on a standby too, where a held name answers like a missing one
+     (the automatic order binds the same way, test_oidc_subject_binding.py)
   e) email never names an Entra account: there it is the mail attribute, unverified
 
 NS Oct 2026
@@ -328,14 +329,19 @@ def test_the_same_subject_gets_its_account_again(api, db, idp, signer, monkeypat
     assert _accounts(db) == ['bob@corp.example']
 
 
-def test_a_row_without_a_stored_subject_is_not_taken(api, db, idp, signer, monkeypatch, caplog):
+def test_a_row_without_a_stored_subject_is_bound_by_the_next_sign_in(api, db, idp, signer, monkeypatch):
+    # MK Nov 2026 - one rule in both naming modes: a row made by hand, or one whose binding
+    # an admin reset, belongs to the sign-in that comes next, and from then on to it alone
     _seed_oidc(db, 'bob@corp.example', sub='', auth_source='oidc', role='admin', tenant_id='t-secret')
-    with caplog.at_level(logging.WARNING):
-        r = _adfs(api, monkeypatch, _id_token(signer, upn='bob@corp.example'), username_claim='upn')
-    assert r.status_code == 403
-    assert 'has no identity provider subject stored' in caplog.text
+    r = _adfs(api, monkeypatch, _id_token(signer, upn='bob@corp.example'), username_claim='upn')
+    assert r.status_code == 200, r.get_data(as_text=True)
     row = db.get_user('bob@corp.example')
-    assert (row['oidc_sub'], row['role'], row['tenant_id']) == ('', 'admin', 't-secret')
+    assert (row['oidc_sub'], row['tenant_id']) == (SUB, 't-secret')
+    other = _adfs(api, monkeypatch, _id_token(signer, sub='someone-else', upn='bob@corp.example'),
+                  username_claim='upn')
+    assert other.status_code == 403
+    assert other.get_json()['error'] == UNMATCHED
+    assert db.get_user('bob@corp.example')['oidc_sub'] == SUB
 
 
 def test_without_auto_create_a_missing_and_a_foreign_account_read_alike(api, db, idp, signer, monkeypatch):
@@ -370,13 +376,15 @@ def test_a_local_or_directory_account_is_still_never_taken(db, source):
                                name='bob@corp.example') is None
 
 
-def test_without_a_picked_claim_the_old_update_is_unchanged(db):
-    # the old order still updates an OIDC row by name, sub and all: this change does not
-    # reach installs that leave the setting empty
+def test_without_a_picked_claim_another_subject_is_refused_too(db):
+    # MK Nov 2026 - the automatic order updated an OIDC row by name, sub and all, so the
+    # account went to whoever signed in last under that name. It binds now as well
     users = {'bob@corp.example': {'auth_source': 'oidc', 'oidc_sub': 'old', 'role': 'user'}}
-    built = oidc_build_user_row({'sub': 'new', 'email': 'bob@corp.example'}, {'role': 'viewer'},
+    assert oidc_build_user_row({'sub': 'new', 'email': 'bob@corp.example'}, {'role': 'viewer'},
+                               'oidc', users) is None
+    built = oidc_build_user_row({'sub': 'old', 'email': 'bob@corp.example'}, {'role': 'viewer'},
                                 'oidc', users)
-    assert built is not None and built[1]['oidc_sub'] == 'new'
+    assert built is not None and built[1]['oidc_sub'] == 'old'
 
 
 def test_a_kelvin_sign_does_not_get_karen_s_name(api, db, idp, signer, monkeypatch):
