@@ -4951,6 +4951,11 @@ def diff_pbs_backups(pbs_id):
     ts_b = request.args.get('b', '')
     if not all([store, btype, bid, ts_a, ts_b]):
         return jsonify({'error': 'store, type, id, a, b query params required'}), 400
+    # MK Nov 2026 - the datastore goes into the path of the snapshot list, as the route
+    # argument of the datastore routes does (app.refuse_odd_route_arguments)
+    from pegaprox.utils.sanitization import not_one_path_segment
+    if not_one_path_segment(store):
+        return jsonify({'error': 'Invalid datastore name'}), 400
     # sec (audit) — type+id name a guest, and the diff hands back its manifests; the seven
     # sibling routes that take the same pair all gate on it.
     ok, err = _authz_pbs_backup(pbs, btype, bid, 'vm.view', store=store, ns='')

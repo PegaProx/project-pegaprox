@@ -13,6 +13,7 @@ from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.rbac import user_can_access_vm
 from pegaprox.api.helpers import check_cluster_access, caller_is_scoped
+from pegaprox.utils.sanitization import validate_hostname
 from pegaprox.core.xhm import (
     XHMigrationTask, plan_xcpng_to_pve, plan_pve_to_xcpng,
     _run_xcpng_to_pve, _run_pve_to_xcpng,
@@ -127,6 +128,9 @@ def xhm_plan():
         source_node = request.args.get('source_node', '')
         if not source_node:
             return jsonify({'error': 'source_node required for Proxmox source'}), 400
+        # MK Nov 2026 - it goes into the API paths of the source's config and status reads
+        if not validate_hostname(source_node):
+            return jsonify({'error': 'Invalid node name'}), 400
         result = plan_pve_to_xcpng(source_cluster, source_node, source_vmid, target_cluster)
     else:
         return jsonify({'error': f'Unsupported migration: {src_type} -> {tgt_type}'}), 400
@@ -213,6 +217,14 @@ def xhm_start():
 
     if direction in ('xcpng_to_pve', 'esxi_to_pve') and not data.get('target_node'):
         return jsonify({'error': 'target_node is required for migration to Proxmox'}), 400
+    # MK Nov 2026 - a node of the Proxmox VE side goes into the API paths the task calls there
+    # (the new guest and its config on the target, the config reads on the source). An XCP-ng
+    # host keeps its free name, it is never part of a path
+    for _key, _pve in (('source_node', direction == 'pve_to_xcpng'),
+                       ('target_node', direction in ('xcpng_to_pve', 'esxi_to_pve'))):
+        _v = data.get(_key)
+        if _pve and _v not in (None, '') and not (isinstance(_v, str) and validate_hostname(_v)):
+            return jsonify({'error': 'Invalid node name'}), 400
 
     # MK Oct 2026 - the copy is a new guest on the target, the size of its source. It counts
     # for the tenant quota unless it only moves between two clusters the tenant has

@@ -18,7 +18,7 @@ from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.background.scheduler import (load_scheduled_tasks, save_scheduled_tasks, execute_scheduled_task,
                                             task_refusal)
-from pegaprox.utils.sanitization import validate_storage_name
+from pegaprox.utils.sanitization import validate_storage_name, validate_hostname, not_one_path_segment
 from pegaprox.api.helpers import bounded_limit, get_connected_manager, check_cluster_access
 
 bp = Blueprint('history', __name__)
@@ -30,6 +30,15 @@ def _task_refused(task, storage_given=True):
     cannot run is said here instead of failing every night (scheduler.task_refusal)."""
     if storage_given and not validate_storage_name(task.get('backup_storage') or 'local'):
         return jsonify({'error': 'Invalid backup storage name'}), 400
+    # the node and the guest type go into the API path of the snapshot on Proxmox VE; an
+    # XCP-ng host keeps its free name, it is no part of a path there
+    mgr = cluster_managers.get(task.get('cluster_id', ''))
+    if getattr(mgr, 'cluster_type', 'proxmox') not in ('xcpng', 'esxi'):
+        node, kind = task.get('target_node'), task.get('target_type')
+        if node not in (None, '') and not (isinstance(node, str) and validate_hostname(node)):
+            return jsonify({'error': 'Invalid node name'}), 400
+        if kind is not None and (not isinstance(kind, str) or not_one_path_segment(kind)):
+            return jsonify({'error': 'Invalid guest type'}), 400
     why = task_refusal(task.get('cluster_id', ''), task.get('action', ''))
     if why:
         return jsonify({'error': why}), 400

@@ -592,6 +592,10 @@ def add_plan_vm(plan_id):
     from pegaprox.utils.rbac import user_can_access_vm
     user = build_authz_user(request.session['user'], request.session)
     vm_type = data.get('vm_type', 'qemu')
+    # MK Nov 2026 - stored with the guest and put into the API paths of every failover and
+    # test run: one of the two guest types, nothing that would add to such a path
+    if vm_type not in ('qemu', 'lxc'):
+        return jsonify({'error': 'vm_type is qemu or lxc'}), 400
     if not user_can_access_vm(user, plan['source_cluster'], data['vmid'], 'vm.view', vm_type):
         return jsonify({'error': 'Access denied: you do not have permission to add this VM to the plan'}), 403
 

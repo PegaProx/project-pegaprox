@@ -319,9 +319,14 @@ def test_cross_cluster_mixed_case_type_does_not_widen(api, seed, xc_pair):
     _pool_member(SRC, 100, 'pool_a')
     u = api.as_user(seed.user('pooler', role='user', tenant_id='poolco',
                               permissions=['vm.delete']))
-    for vt in ('qemu', 'QEMU', 'Qemu', 'lxc'):
+    for vt in ('qemu', 'lxc'):
         r = u.post(XC, json=_xc_body(vm_type=vt, delete_source=True))
         assert r.status_code == 403, (vt, r.get_data(as_text=True))
+    # another spelling is no guest type at all: it goes into the API path, and is refused
+    for vt in ('QEMU', 'Qemu'):
+        r = u.post(XC, json=_xc_body(vm_type=vt, delete_source=True))
+        assert r.status_code == 400 and r.get_json() == {'error': 'vm_type is qemu or lxc'}, \
+            (vt, r.get_data(as_text=True))
     xc_pair.remote_migrate_vm.assert_not_called()
     # and the pool grant itself still moves the guest
     u.post(XC, json=_xc_body(vm_type='qemu', delete_source=False))

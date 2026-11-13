@@ -8795,6 +8795,7 @@ def snapshots_overview_delete():
     user_data = build_authz_user(user, request.session)
     data = request.get_json(silent=True) or {}
     snapshots = data.get('snapshots', [])
+    from pegaprox.utils.sanitization import validate_hostname
     from pegaprox.utils.rbac import acts_as_admin
     is_admin = acts_as_admin(user_data)
     user_clusters = get_user_clusters(user_data)   # None => all clusters
@@ -8819,6 +8820,14 @@ def snapshots_overview_delete():
             
             if not mgr.is_connected:
                 errors.append(f"Cluster {cluster_id} not connected")
+                continue
+
+            # MK Nov 2026 - node, guest type, VMID and snapshot name all go into the path of
+            # the delete, and the checks below ask about the VMID alone
+            if getattr(mgr, 'cluster_type', 'proxmox') not in ('xcpng', 'esxi') and not (
+                    isinstance(node, str) and validate_hostname(node) and vm_type in ('qemu', 'lxc')
+                    and str(vmid).isdigit() and validate_snapshot_name(snapname)):
+                errors.append('Invalid node, guest type, VMID or snapshot name')
                 continue
 
             if not is_admin and user_clusters is not None and cluster_id not in user_clusters:
@@ -10941,6 +10950,20 @@ def create_cross_cluster_replication():
         return jsonify({'error': 'Source cluster not found'}), 404
     if target_cluster not in cluster_managers:
         return jsonify({'error': 'Target cluster not found'}), 404
+    # MK Nov 2026 - the job keeps the guest type, the target node and storage, and every run
+    # puts them into API paths and the replica's disk lines; the source node goes into the
+    # config read of the quota check below. Names only, on the cluster each one belongs to
+    if data.get('vm_type', 'qemu') not in ('qemu', 'lxc'):
+        return jsonify({'error': 'vm_type is qemu or lxc'}), 400
+    from pegaprox.utils.sanitization import validate_hostname, validate_storage_name
+    for _cid, _key, _ok, _what in ((source_cluster, 'source_node', validate_hostname, 'node'),
+                                   (target_cluster, 'target_node', validate_hostname, 'node'),
+                                   (target_cluster, 'target_storage', validate_storage_name, 'storage')):
+        _v = data.get(_key)
+        if _v in (None, '') or getattr(cluster_managers[_cid], 'cluster_type', 'proxmox') in ('xcpng', 'esxi'):
+            continue
+        if not (isinstance(_v, str) and _ok(_v)):
+            return jsonify({'error': f'Invalid {_what} name'}), 400
 
     # MK Jun 2026 (sec-review) — cluster.config is a GLOBAL perm; the tenant/ACL
     # boundary in this codebase is check_cluster_access. The cross-cluster MIGRATION
@@ -15108,6 +15131,14 @@ def cross_cluster_migrate_api():
         return jsonify({'error': 'Source cluster not found'}), 404
     if target_cluster_id not in cluster_managers:
         return jsonify({'error': 'Target cluster not found'}), 404
+    # MK Nov 2026 - the source node and the guest type go into the path of the config read
+    # and of the migration itself, the checks below ask about the VMID alone: a node
+    # 'n1/qemu/200/remote_migrate?' moved and deleted guest 200 in the name of guest 100
+    if vm_type not in ('qemu', 'lxc'):
+        return jsonify({'error': 'vm_type is qemu or lxc'}), 400
+    if getattr(cluster_managers[source_cluster_id], 'cluster_type', 'proxmox') not in ('xcpng', 'esxi') \
+            and not (isinstance(source_node, str) and validate_hostname(source_node)):
+        return jsonify({'error': 'Invalid node name'}), 400
     # MK Feb 2026 - check access to BOTH source and target cluster
     ok, err = check_cluster_access(source_cluster_id)
     if not ok:
