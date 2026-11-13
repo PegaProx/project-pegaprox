@@ -2020,6 +2020,10 @@ def own_clusters_body():
     me = instance_id()
     mgrs = None
     for r in rows:
+        # a mirror of another member's cluster is not this instance's to report -
+        # the owner answers for it, and listing it here would show it twice
+        if r['fed_owner'] and r['fed_owner'] != me:
+            continue
         rec = {'id': r['id'], 'name': r['name'],
                'type': r['cluster_type'] or 'proxmox',
                'enabled': bool(r['enabled']),
