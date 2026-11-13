@@ -927,7 +927,8 @@ require_qnetd_tls() {
         new=$(mktemp "$f.XXXXXX") || return 1
         { [ ! -f "$f" ] || cat "$f"; echo 'COROSYNC_QNETD_OPTIONS="-s req"'; } > "$new" || { rm -f "$new"; return 1; }
     fi
-    chmod 0644 "$new" && mv -f "$new" "$f" || { rm -f "$new"; return 1; }
+    chmod 0644 "$new" || { rm -f "$new"; return 1; }
+    mv -f "$new" "$f" || { rm -f "$new"; return 1; }
 }
 
 setup_qnetd() {
