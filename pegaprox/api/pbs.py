@@ -104,13 +104,16 @@ def list_pbs_servers():
             return True
         linked = linked or []
         return (not linked) or any(c in _uc for c in linked)
+    from pegaprox.api.helpers import _request_caller
+    _caller = _request_caller() or {}  # empty: no session user, confined everywhere
     result = []
     for pbs_id, mgr in pbs_managers.items():
         if not _pbs_visible(getattr(mgr, 'linked_clusters', None)):
             continue
         info = mgr.to_dict()
-        # Include quick status if connected
-        if mgr.connected and mgr.last_status:
+        # Include quick status if connected. MK Nov 2026 - not for a confined caller,
+        # these are the host figures /status refuses them
+        if mgr.connected and mgr.last_status and not _confined_on_pbs(mgr, _caller):
             info['status'] = {
                 'cpu': mgr.last_status.get('cpu', 0),
                 'memory': mgr.last_status.get('memory', {}),
@@ -429,6 +432,9 @@ def get_pbs_status(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
@@ -469,6 +475,9 @@ def get_pbs_apt_updates(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -540,6 +549,9 @@ def get_pbs_update_status(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -604,9 +616,15 @@ def get_pbs_datastores(pbs_id):
     
     # Get list of datastores
     config_resp = mgr.get_datastores()
-    usage_resp = mgr.get_datastore_usage()
-    
     datastores = config_resp.get('data', [])
+
+    # MK Nov 2026 - a confined caller browses its own guests' snapshots by datastore, so it
+    # gets the names. Usage, GC, counts and the path describe the whole server
+    if _confined_on_pbs(mgr):
+        return jsonify([{'name': ds.get('name', '')} for ds in datastores
+                        if isinstance(ds, dict) and ds.get('name')])
+
+    usage_resp = mgr.get_datastore_usage()
     usage_list = {u.get('store'): u for u in usage_resp.get('data', [])}
     gc_jobs = _gc_jobs_by_store(mgr)
     
@@ -1091,6 +1109,38 @@ def require_pbs_wide(pbs_id, action='this action'):
     return None
 
 
+def _confined_on_pbs(mgr, user=None):
+    """Whether this request's caller is confined on the PBS (_caller_is_scoped_here).
+    A global admin never is, a request without a session user always is. Pass `user`
+    from _request_caller() when asking for several servers in one request."""
+    from pegaprox.api.helpers import _request_caller
+    if user is None:
+        user = _request_caller()
+    if not user:
+        return True
+    if acts_as_admin(user):
+        return False
+    return _caller_is_scoped_here(mgr, user)
+
+
+def require_pbs_unconfined(pbs_id):
+    """Gate for a read of the PBS host itself: its log, network, disks, jobs, datastore
+    settings and usage. None of that is per guest, and the syslog names every guest's
+    backup task. The snapshot, group and task listings scope their rows instead.
+
+    A confined caller (VM ACL, pool grant, or a cluster reached through another tenant) is
+    refused, the same contract require_unconfined keeps on the PVE side. An admin and a
+    caller confined nowhere pass.
+
+    Returns an error response to `return`, or None. MK Nov 2026"""
+    mgr = pbs_managers.get(pbs_id)
+    if mgr is None:
+        return jsonify({'error': 'PBS server not found'}), 404
+    if _confined_on_pbs(mgr):
+        return jsonify({'error': 'Access denied: this shows the whole backup server'}), 403
+    return None
+
+
 def _authz_pbs_backup(mgr, backup_type, backup_id, permission='vm.backup', user=None, scoped=None,
                       store=None, ns=None, owners=None):
     """NS Aug 2026 (sec-report, BOLA/CWE-639) — object-level scope for PBS backup ops.
@@ -1251,6 +1301,9 @@ def get_pbs_jobs(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1319,7 +1372,11 @@ def get_pbs_namespaces(pbs_id, store):
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
     result = mgr.get_namespaces(store)
-    return jsonify(result.get('data', []))
+    rows = result.get('data', [])
+    # the comment is the server owner's note, a confined caller only needs the path to browse
+    if _confined_on_pbs(mgr):
+        return jsonify([{'ns': n.get('ns', '')} for n in rows if isinstance(n, dict)])
+    return jsonify(rows)
 
 
 @bp.route('/api/pbs/<pbs_id>/disks', methods=['GET'])
@@ -1330,6 +1387,9 @@ def get_pbs_disks(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1345,6 +1405,9 @@ def get_pbs_remotes(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1360,6 +1423,9 @@ def get_pbs_subscription(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1375,6 +1441,9 @@ def get_pbs_datastore_rrd(pbs_id, store):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1532,6 +1601,9 @@ def get_pbs_traffic_control(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1548,6 +1620,9 @@ def get_pbs_syslog(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1570,6 +1645,9 @@ def get_pbs_node_rrd(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1705,6 +1783,9 @@ def get_pbs_datastore_config(pbs_id, store):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -2230,6 +2311,9 @@ def get_pbs_disk_smart(pbs_id, disk):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     result = pbs_managers[pbs_id].get_disk_smart(disk)
@@ -2275,6 +2359,9 @@ def get_pbs_network(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     result = pbs_managers[pbs_id].get_network()
@@ -2289,6 +2376,9 @@ def get_pbs_dns(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     result = pbs_managers[pbs_id].get_dns()
@@ -2303,6 +2393,9 @@ def get_pbs_time(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     result = pbs_managers[pbs_id].get_time()
@@ -3691,6 +3784,9 @@ def get_pbs_health(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -3818,6 +3914,9 @@ def get_pbs_capacity_forecast(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _whole = require_pbs_unconfined(pbs_id)
+    if _whole:
+        return _whole
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS not found'}), 404
     mgr = pbs_managers[pbs_id]
