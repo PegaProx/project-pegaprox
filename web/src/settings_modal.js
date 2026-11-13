@@ -4395,7 +4395,30 @@
                     addToast('Error disabling 2FA', 'error');
                 }
             };
-            
+
+            // LW Nov 2026 - an OIDC / Entra account signs in only for the IdP subject it is bound
+            // to. Clearing it lets the next sign-in through the IdP under this name bind it again
+            const handleResetOidcBinding = async (username) => {
+                if (!confirm(t('resetOidcBindingConfirm').replace('{user}', username))) return;
+                try {
+                    const response = await fetch(`${API_URL}/users/${encodeURIComponent(username)}/oidc-binding`, {
+                        method: 'DELETE',
+                        credentials: 'include',
+                        headers: getAuthHeaders()
+                    });
+                    if (response && response.ok) {
+                        addToast(t('resetOidcBindingDone'), 'success');
+                        fetchUsers();
+                        fetchAuditLogs();
+                    } else {
+                        const data = await response.json().catch(() => ({}));
+                        addToast(data.error || t('resetOidcBindingFailed'), 'error');
+                    }
+                } catch (err) {
+                    addToast(t('resetOidcBindingFailed'), 'error');
+                }
+            };
+
             const handleCreateUser = async (e) => {
                 e.preventDefault();
                 setLoading(true);
@@ -5113,6 +5136,18 @@
                                                                             {userFolders.find(f => f.id === user.user_folder)?.name}
                                                                         </span>
                                                                     ) : null}
+                                                                    {/* not for an account keyed on its IdP subject: the server refuses that one */}
+                                                                    {editingUser === user.username && user.oidc_resettable && (
+                                                                        <button
+                                                                            type="button"
+                                                                            data-oidc-binding-reset={user.username}
+                                                                            onClick={() => handleResetOidcBinding(user.username)}
+                                                                            className="block mt-1 text-xs text-left text-gray-400 hover:text-yellow-400 hover:underline"
+                                                                            title={t('resetOidcBindingHint')}
+                                                                        >
+                                                                            {t('resetOidcBinding')}
+                                                                        </button>
+                                                                    )}
                                                                 </div>
                                                             </div>
                                                         </td>
