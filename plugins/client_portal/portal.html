@@ -323,7 +323,13 @@ async function startOidcLogin(){
         const r=await fetch(`${API}/api/auth/oidc/authorize?redirect_after=/portal`);
         if(r.ok){
             const d=await r.json();
-            if(d.auth_url) window.location.href=d.auth_url;
+            // MK Nov 2026 - the rule of the main login button (auth.js): an https URL or nothing
+            if(typeof d.auth_url==='string'&&d.auth_url.startsWith('https://')){
+                window.location.href=d.auth_url;
+            }else{
+                S.err=d.auth_url?'Insecure authentication URL rejected':'SSO is not configured or unavailable';
+                S.loading=false;render();
+            }
         }else{
             S.err='SSO is not configured or unavailable';S.loading=false;render();
         }

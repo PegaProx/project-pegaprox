@@ -152,7 +152,10 @@ def oidc_authorize():
     
     NS: Generates CSRF state, stores in session, redirects to IdP
     """
-    response = _oidc_begin(lambda auth_url: make_response(jsonify({'auth_url': auth_url})))
+    # MK Nov 2026 - the buttons follow this URL, so it passes the rule the login link's
+    # Location does: an absolute https URL of the identity provider, or none at all
+    response = _oidc_begin(lambda auth_url: make_response(jsonify({'auth_url': auth_url}))
+                           if _idp_location(auth_url) else None)
     if response is None:
         return jsonify({'error': 'OIDC authentication is not configured'}), 400
     return response
