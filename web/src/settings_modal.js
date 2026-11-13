@@ -10361,6 +10361,7 @@
             const [joinUrl, setJoinUrl] = useState('');
             const [joinSite, setJoinSite] = useState('');
             const [passwords, setPasswords] = useState({ code: '', join: '', confirm: '' });
+            const [fedClusters, setFedClusters] = useState(null);
             const [confirmBox, setConfirmBox] = useState(null); // {kind, id, name, word, needPw, force}
             const [typed, setTyped] = useState('');
             const [force, setForce] = useState(false);
@@ -10396,6 +10397,10 @@
                 const r = await fedSend('GET', 'leases', null, t('fedLoadFailed'));
                 if (r.ok) setLeases(r.data);
             }
+            async function refreshFedClusters() {
+                const r = await fedSend('GET', 'clusters', null, '');
+                if (r.ok) setFedClusters(r.data);
+            }
             async function refreshClusters() {
                 let r;
                 try { r = await fetch(`${API_URL}/clusters`, { credentials: 'include', headers: getAuthHeaders() }); }
@@ -10409,13 +10414,16 @@
                 // a chain, not an interval: a status answer with unreachable peers
                 // takes up to 3 s per member, and the next tick must wait for the
                 // last one instead of stacking requests behind it
+                let rounds = 0;
                 const poll = async () => {
                     if (!document.hidden) {
-                        await Promise.all([refreshStatus(), refreshLeases()]);
+                        await Promise.all([refreshStatus(), refreshLeases(),
+                          (rounds % 3 === 0 ? refreshFedClusters() : Promise.resolve())]);
+                        rounds++;
                     }
                     if (alive) timer = setTimeout(poll, 20000);
                 };
-                poll(); refreshClusters();
+                poll(); refreshClusters(); refreshFedClusters();
                 return () => { alive = false; clearTimeout(timer); };
             }, []);
             // the second tick drives the pairing-code countdown alone
@@ -10703,6 +10711,56 @@
                                                         </tr>
                                                     );
                                                 })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* the linked-mode view: every cluster of every site, asked live */}
+                            <div className={HA_GROUP_CARD} data-fed-clusters>
+                                <h4 className="font-medium text-white flex items-center gap-2"><Icons.Globe className="w-4 h-4 text-proxmox-orange" />{t('fedAllClustersTitle')}</h4>
+                                <p className="text-sm text-gray-400">{t('fedAllClustersDesc')}</p>
+                                {!fedClusters && <p className="text-sm text-gray-500">{t('fedWorking')}</p>}
+                                {fedClusters && (
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-sm">
+                                            <thead><tr className="text-left text-xs text-gray-500 border-b border-proxmox-border">
+                                                <th className="py-2 pr-3">{t('fedCluster')}</th>
+                                                <th className="py-2 pr-3">{t('fedSite')}</th>
+                                                <th className="py-2 pr-3">{t('fedNodes')}</th>
+                                                <th className="py-2 pr-3">{t('fedGuests')}</th>
+                                                <th className="py-2">{t('fedRule')}</th>
+                                            </tr></thead>
+                                            <tbody>
+                                                {(fedClusters.self || []).map(c => (
+                                                    <tr key={'self-' + c.id} className="border-b border-proxmox-border/50">
+                                                        <td className="py-2 pr-3"><code className="text-xs">{c.id}</code> <span className="text-gray-400">{c.name}</span></td>
+                                                        <td className="py-2 pr-3">{status.site || t('fedMe')}</td>
+                                                        <td className="py-2 pr-3 text-gray-400 tabular-nums">{c.nodes ?? '—'}</td>
+                                                        <td className="py-2 pr-3 text-gray-400 tabular-nums">{c.vms ?? '—'}</td>
+                                                        <td className="py-2">{c.enrolled
+                                                            ? <span className="inline-flex items-center gap-1.5 text-green-400"><Icons.Shield className="w-3 h-3" />{t('fedLedHere')}</span>
+                                                            : <span className="text-gray-500">{t('fedLocalOnly')}</span>}</td>
+                                                    </tr>
+                                                ))}
+                                                {Object.entries(fedClusters.peers || {}).map(([pid, p]) => (
+                                                    (p.clusters || []).length > 0 ? p.clusters.map(c => (
+                                                        <tr key={pid + '-' + c.id} className="border-b border-proxmox-border/50" data-fed-peer-cluster={c.id}>
+                                                            <td className="py-2 pr-3"><code className="text-xs">{c.id}</code> <span className="text-gray-400">{c.name}</span></td>
+                                                            <td className="py-2 pr-3">{p.site || pid.slice(0, 8)}</td>
+                                                            <td className="py-2 pr-3 text-gray-400 tabular-nums">{c.nodes ?? '—'}</td>
+                                                            <td className="py-2 pr-3 text-gray-400 tabular-nums">{c.vms ?? '—'}</td>
+                                                            <td className="py-2">{c.enrolled
+                                                                ? <span className="inline-flex items-center gap-1.5 text-green-400"><Icons.Shield className="w-3 h-3" />{t('fedLedThere').replace('{site}', p.site || pid.slice(0, 8))}</span>
+                                                                : <span className="text-gray-500">{t('fedLocalOnly')}</span>}</td>
+                                                        </tr>
+                                                    )) : (
+                                                        <tr key={pid} className="border-b border-proxmox-border/50">
+                                                            <td colSpan={5} className="py-2 text-gray-500">{p.clusters === null ? t('fedPeerSilent').replace('{site}', p.site || pid.slice(0, 8)) : t('fedPeerNoClusters').replace('{site}', p.site || pid.slice(0, 8))}</td>
+                                                        </tr>
+                                                    )
+                                                ))}
                                             </tbody>
                                         </table>
                                     </div>

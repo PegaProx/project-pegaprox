@@ -50929,6 +50929,70 @@
         ]
       }
     },
+    "/api/federation/peer/clusters": {
+      "get": {
+        "operationId": "federation.peer_clusters_get",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not the paired instance"
+          },
+          "410": {
+            "description": "HA_REMOVED: the caller was removed from the group"
+          }
+        },
+        "summary": "What this instance leads, for the overview of the member that asks: names, type and counts alone - a login never travels in this answer.",
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "haPeer": []
+          }
+        ]
+      }
+    },
+    "/api/federation/clusters": {
+      "get": {
+        "operationId": "federation.federation_clusters_get",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The clusters of every member of the federation, asked live at each - the linked-mode view: no copy, the owner answers. A member that stays silent shows as unreachable, the rest of the list stands.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
     "/api/federation/leases": {
       "get": {
         "operationId": "federation.federation_leases_get",

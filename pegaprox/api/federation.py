@@ -612,6 +612,30 @@ def peer_lease_vote():
     return jsonify(answer), code
 
 
+@bp.route('/api/federation/peer/clusters', methods=['GET'])
+def peer_clusters():
+    """What this instance leads, for the overview of the member that asks:
+    names, type and counts alone - a login never travels in this answer."""
+    peer, refused = _peer_or_refuse()
+    if refused:
+        return refused
+    federation.touch(peer['instance_id'])
+    return jsonify({'instance_id': federation.instance_id(),
+                    'clusters': federation.own_clusters_body()})
+
+
+@bp.route('/api/federation/clusters', methods=['GET'])
+@require_auth(roles=[ROLE_ADMIN])
+def federation_clusters():
+    """The clusters of every member of the federation, asked live at each -
+    the linked-mode view: no copy, the owner answers. A member that stays
+    silent shows as unreachable, the rest of the list stands."""
+    denied = _refuse_confined_admin()
+    if denied:
+        return denied
+    return jsonify(federation.federation_clusters())
+
+
 @bp.route('/api/federation/leases', methods=['GET'])
 @require_auth(roles=[ROLE_ADMIN])
 def federation_leases():

@@ -1993,3 +1993,62 @@ def _reseat_credentials(cluster_id, owner, key_b64, force):
         conn.execute(f'UPDATE clusters SET {", ".join(updates)} WHERE id = ?',
                      params)
         conn.commit()
+
+
+# --- the clusters of the federation (the ELM view) ----------------------------------------
+#
+# What every member leads, asked live at each member - on demand, the way vCenter's
+# linked mode reads the inventory of its partners: no copy, the owner answers. The
+# answer carries names and counts alone; credentials never leave their host.
+
+CLUSTERS_PATH = '/api/federation/peer/clusters'
+
+
+def own_clusters_body():
+    """What /peer/clusters answers: this instance's clusters, enrolled or not -
+    names, type, and whether the federation's rule holds on them. Nothing that
+    opens a login travels in this."""
+    from pegaprox.core.db import get_db
+    out = []
+    try:
+        rows = get_db().conn.execute(
+            "SELECT id, name, cluster_type, enabled, fed_owner FROM clusters "
+            "ORDER BY name").fetchall()
+    except Exception as e:
+        logging.warning(f"[FED] could not read the clusters for the view: {e}")
+        return []
+    me = instance_id()
+    mgrs = None
+    for r in rows:
+        rec = {'id': r['id'], 'name': r['name'],
+               'type': r['cluster_type'] or 'proxmox',
+               'enabled': bool(r['enabled']),
+               'enrolled': bool(r['fed_owner'])}
+        try:
+            if mgrs is None:
+                from pegaprox import globals as g
+                mgrs = getattr(g, 'cluster_managers', None) or {}
+            mgr = mgrs.get(r['id'])
+            if mgr is not None:
+                nodes = getattr(mgr, 'nodes', None) or {}
+                rec['nodes'] = len(nodes)
+                rec['vms'] = sum(len(getattr(n, 'vms', None) or {}) for n in nodes.values()) \
+                    if nodes and all(hasattr(n, 'vms') for n in nodes.values()) else None
+                rec['connected'] = bool(getattr(mgr, 'connected', False))
+        except Exception:
+            pass
+        out.append(rec)
+    return out
+
+
+def federation_clusters():
+    """The clusters of every member, asked at every member (this one included).
+    One member's silence costs its line, never the list."""
+    out = {'self': own_clusters_body(), 'peers': {}}
+    for iid, rec in members().items():
+        status, body = call_peer(iid, 'GET', CLUSTERS_PATH, timeout=5)
+        if status == 200 and isinstance(body, dict) and isinstance(body.get('clusters'), list):
+            out['peers'][iid] = {'site': rec.get('site') or '', 'clusters': body['clusters']}
+        else:
+            out['peers'][iid] = {'site': rec.get('site') or '', 'clusters': None}
+    return out
