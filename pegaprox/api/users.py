@@ -22,6 +22,7 @@ from pegaprox.utils.auth import (
     build_authz_user,
 )
 from pegaprox.utils.audit import log_audit, is_audit_pseudo_actor
+from pegaprox.utils.oidc import OIDC_AUTH_SOURCES, oidc_key_names_a_subject
 from pegaprox.utils.rbac import (
     invalidate_tenants_cache,
     load_custom_roles, save_custom_roles, get_custom_roles, invalidate_roles_cache,
@@ -430,6 +431,57 @@ def admin_disable_2fa(username):
     return jsonify({'success': True, 'message': f'2FA for {username} disabled'})
 
 
+@bp.route('/api/users/<username>/oidc-binding', methods=['DELETE'])
+@require_auth(perms=['admin.users'])
+def reset_oidc_binding(username):
+    """Admin: forget the identity provider subject an OIDC / Entra account is bound to.
+
+    MK Nov 2026 - such an account signs in only for the subject stored with it (see
+    oidc_subject_refusal). After a move to another identity provider, or a provider that
+    hands out new subject ids, the admin clears it here and the next sign-in through the
+    provider under exactly this name binds the account again.
+
+    Not for an account keyed on its subject (a sign-in without a name made it): it is found
+    by the stored sub alone, so it is deleted instead and the next sign-in makes it again.
+    An account keyed on the part before the @ of an address (releases that cut the name
+    there) is found by its sub too, and cannot be told from a provider username without
+    an @: the admin is told in the confirmation to delete such an account instead.
+    """
+    users_db = load_users()
+    username = find_user_key(users_db, username)
+    if username is None:
+        return jsonify({'error': 'User not found'}), 404
+
+    user = users_db[username]
+    _ct = _caller_tenant_or_none()
+    if _ct is not None and user.get('tenant_id', DEFAULT_TENANT_ID) != _ct:
+        return jsonify({'error': 'Access denied: cannot modify users in other tenants'}), 403
+    # whoever signs in next under this name gets the account and what it holds, so the
+    # same tier guard as a password reset
+    if not _caller_can_manage_user(user):
+        return jsonify({'error': 'Access denied: target has privileges beyond your own'}), 403
+    if user.get('auth_source', 'local') not in OIDC_AUTH_SOURCES:
+        return jsonify({'error': 'Only OIDC and Entra ID accounts are bound to an identity provider subject'}), 400
+    if oidc_key_names_a_subject(username, user):
+        return jsonify({'error': 'This account is named after its identity provider subject, not after a name: '
+                                 'after a reset its owner would not find it again, and a sign-in that spells '
+                                 'the name would get it. Delete the account instead; the next sign-in of its '
+                                 'owner creates it again.'}), 400
+
+    user['oidc_sub'] = ''
+    try:
+        get_db().save_user(username, user)
+    except Exception as e:
+        logging.error(f"Failed to reset the sign-in binding of '{_sl(username)}': {e}")
+        return jsonify({'error': 'Failed to reset the sign-in binding'}), 500
+
+    logging.info(f"Admin '{_sl(request.session['user'])}' reset the sign-in binding of '{_sl(username)}'")
+    log_audit(request.session['user'], 'user.oidc_binding_reset',
+              f"Reset the identity provider sign-in binding of user: {username} - the next "
+              f"sign-in under this name binds it again")
+    return jsonify({'success': True})
+
+
 @bp.route('/api/users/<username>/password', methods=['PUT'])
 @require_auth(perms=['admin.users'])
 def admin_change_password(username):
@@ -533,6 +585,12 @@ def get_users():
             'last_login': user.get('last_login'),
             'tenant_id': user.get('tenant_id', DEFAULT_TENANT_ID),  # MK: Added for tenant display
             'auth_source': user.get('auth_source', 'local'),  # NS: For LDAP/Entra/OIDC badge in user list
+            # whether the account is tied to an identity provider subject; the sub stays here
+            'oidc_bound': bool(user.get('oidc_sub')),
+            # and whether the binding reset takes it (not for an account keyed on its subject)
+            'oidc_resettable': (user.get('auth_source', 'local') in OIDC_AUTH_SOURCES
+                                and bool(user.get('oidc_sub'))
+                                and not oidc_key_names_a_subject(username, user)),
             'permissions': user.get('permissions', []),  # LW: For permission display
             'portal_only': user.get('portal_only', False),
             'user_folder': user.get('user_folder', ''),

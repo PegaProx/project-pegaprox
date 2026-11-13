@@ -1005,6 +1005,52 @@
         ]
       }
     },
+    "/api/users/{username}/oidc-binding": {
+      "delete": {
+        "operationId": "users.reset_oidc_binding_delete",
+        "tags": [
+          "users"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Admin: forget the identity provider subject an OIDC / Entra account is bound to.",
+        "description": "MK Nov 2026 - such an account signs in only for the subject stored with it (see\noidc_subject_refusal). After a move to another identity provider, or a provider that\nhands out new subject ids, the admin clears it here and the next sign-in through the\nprovider under exactly this name binds the account again.\n\nNot for an account keyed on its subject (a sign-in without a name made it): it is found\nby the stored sub alone, so it is deleted instead and the next sign-in makes it again.\nAn account keyed on the part before the @ of an address (releases that cut the name\nthere) is found by its sub too, and cannot be told from a provider username without\nan @: the admin is told in the confirmation to delete such an account instead.",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
     "/api/users/{username}/password": {
       "put": {
         "operationId": "users.admin_change_password_put",

@@ -1210,6 +1210,16 @@ def _oidc_is_fallback_row(username: str, row: dict) -> bool:
     return username in (_oidc_fallback_key(sub), f"oidc_{sub[:12]}")
 
 
+def oidc_key_names_a_subject(username: str, row: dict) -> bool:
+    """Whether the account's key was made from a subject id, not from a name: the account
+    of a sign-in without a name claim (_oidc_is_fallback_row), or a key of the hash's shape.
+
+    MK Nov 2026 - such an account is found by its sub alone. Without one stored, its owner
+    lands elsewhere and a sign-in whose name spells the key would get it.
+    """
+    return _oidc_is_fallback_row(username, row) or bool(re.fullmatch(r'oidc_[0-9a-f]{16}', username or ''))
+
+
 def oidc_derive_username(user_info: dict, users: dict = None, name: str = None) -> str:
     """Derive the local username key from OIDC claims.
 
