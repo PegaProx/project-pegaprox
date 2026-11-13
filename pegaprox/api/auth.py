@@ -476,7 +476,18 @@ def oidc_callback():
         user['last_login'] = datetime.now().isoformat()
         save_single_user(username, user)
 
-    log_audit(username, 'auth.oidc.login', f"OIDC login via {provider} from {client_ip}")
+    # MK Nov 2026 - a sign-in whose ID token signature went unchecked says so in the audit
+    # log, with the reason: the admin's switch, or a key set that could not be loaded
+    # (oidc_decode_id_token takes the token on the verified TLS connection then)
+    detail = f"OIDC login via {provider} from {client_ip}"
+    if not id_token_raw:
+        detail += " - no ID token: the token endpoint returned none"
+    elif not verified:
+        detail += " - ID token signature not checked: " + (
+            "oidc_skip_jwt_verification is on" if config.get('oidc_skip_jwt_verification') else
+            "the identity provider's key set (JWKS) could not be loaded, the token was taken "
+            "on the verified TLS connection to the token endpoint")
+    log_audit(username, 'auth.oidc.login', detail)
     
     # NS: Apr 2026 - include portal_only so client portal can validate OIDC users
     fresh_user = users.get(username, user)
