@@ -517,6 +517,61 @@ def test_a_pool_scoped_caller_gets_no_tenants_and_only_its_guests(env):
     assert 'guest100' not in str(d)
 
 
+def _pbs_jobs_of_three(env):
+    env.pve['/cluster/backup'] = [{'id': 'job-a', 'storage': 'pbs1', 'all': 1, 'exclude': '103', 'schedule': '01:00'},
+                                  {'id': 'job-own', 'storage': 'pbs1', 'vmid': '101', 'schedule': '03:00'},
+                                  {'id': 'job-mixed', 'storage': 'pbs1', 'vmid': '101,102', 'schedule': '04:00'}]
+    whatif._cache(env.mgr).clear()
+
+
+def test_a_pool_scoped_caller_sees_the_pbs_jobs_and_nodes_of_its_own_guests(env):
+    """The PBS block named every node the storage is active on and every job writing to it,
+    with id and schedule. A confined caller gets the nodes of its guests and the jobs the
+    Backup page shows it: those naming its own guests only."""
+    from test_audit_bola_high_2026_09 import _seed_pool_membership
+    _pbs_jobs_of_three(env)
+    seed = env.seed
+    seed.tenant('acme', clusters=[CID])
+    seed.pool(CID, 'pool_1', 'mallory', ['pool.view', 'vm.view'])
+    _seed_pool_membership(CID, {101: ('qemu', 'pool_1')})
+    c = env.api.as_user(seed.user('mallory', role='viewer', tenant_id='acme'))
+    d = c.post(URL, json={'type': 'pbs_failure', 'storage': 'pbs1'}).get_json()
+    pbs = d['pbs']
+    assert [j['id'] for j in pbs['jobs']] == ['job-own'] and pbs['jobs_read'] is True
+    assert pbs['active_on'] == ['pve1'] and pbs['active'] is True
+    assert 'pve2' not in str(pbs) and 'job-a' not in str(d) and '04:00' not in str(d)
+    # the counts stay whole
+    assert (pbs['guests_all_lost'], pbs['guests_some_lost'], pbs['guests_job_only']) == (1, 1, 2)
+
+
+def test_the_pbs_jobs_and_nodes_of_an_admin_are_whole(env):
+    _pbs_jobs_of_three(env)
+    c = env.api.as_user(env.seed.user('root', role='admin'))
+    pbs = c.post(URL, json={'type': 'pbs_failure', 'storage': 'pbs1'}).get_json()['pbs']
+    assert [j['id'] for j in pbs['jobs']] == ['job-a', 'job-own', 'job-mixed']
+    assert pbs['active_on'] == list(NODES)
+
+
+def test_jobs_unread_on_the_second_look_are_said_to_be_unread(env, monkeypatch):
+    from pegaprox.api import whatif as whatif_api
+    from test_audit_bola_high_2026_09 import _seed_pool_membership
+    _pbs_jobs_of_three(env)
+    seed = env.seed
+    seed.tenant('acme', clusters=[CID])
+    seed.pool(CID, 'pool_1', 'mallory', ['pool.view', 'vm.view'])
+    _seed_pool_membership(CID, {101: ('qemu', 'pool_1')})
+    real = whatif.backup_jobs
+    calls = []
+
+    def second_fails(mgr):
+        calls.append(1)
+        return real(mgr) if len(calls) == 1 else None
+    monkeypatch.setattr(whatif_api.whatif, 'backup_jobs', second_fails)
+    c = env.api.as_user(seed.user('mallory', role='viewer', tenant_id='acme'))
+    pbs = c.post(URL, json={'type': 'pbs_failure', 'storage': 'pbs1'}).get_json()['pbs']
+    assert len(calls) == 2 and pbs['jobs'] == [] and pbs['jobs_read'] is False
+
+
 def test_a_standby_ranks_from_its_own_view(ha_env, seed):  # noqa: F811
     guests, pve = _pve()
     ha_env.api.set_manager(CID, _manager(pve, guests))

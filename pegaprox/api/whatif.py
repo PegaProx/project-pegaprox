@@ -9,7 +9,8 @@ All only read. The POST takes its scenario in the body, so a standby with the li
 answers it from its own managers like any read (app.py _STANDBY_LOCAL_WRITES) and the
 active tells its members about nothing. A caller confined to some guests of the cluster
 gets the rows of those guests only, and of the nodes they run on: the counts stay, the names
-of the other guests and the load of the other nodes do not. Their picker offers those nodes
+of the other guests and the load of the other nodes do not, and of the backup jobs of a PBS
+report the ones naming their own guests only. Their picker offers those nodes
 and what is on them. The tenants of a report are the
 caller's own tenant to anyone but an administrator, and none to a confined caller; the
 ranking is a whole-cluster view and is refused to a confined caller.
@@ -92,7 +93,7 @@ def thresholds_for(cluster_id, override=None):
     return out
 
 
-def _visible(cluster_id, report, nodes=None):
+def _visible(cluster_id, report, nodes=None, mgr=None):
     """The report as this caller may see it: guest rows and the guests of each limit
     scoped like the guest list, the counts kept. nodes: the nodes a confined caller's guests
     run on (caller_guest_nodes), None for the whole cluster."""
@@ -106,6 +107,8 @@ def _visible(cluster_id, report, nodes=None):
             item['guests'] = [v for v in item['guests'] if v in ids]
     # MK Oct 2026 - the tenants a caller may see by name
     user = build_authz_user(request.session.get('user', ''), request.session)
+    if nodes is not None and isinstance(report.get('pbs'), dict):
+        _pbs_jobs_visible(cluster_id, report['pbs'], user, mgr)
     mine = None if caller_is_scoped(user, cluster_id) else (acting_tenant(user) or True)
     risk = report.get('risk')
     if risk:
@@ -122,6 +125,22 @@ def _visible(cluster_id, report, nodes=None):
     report['guests_truncated'] = max(0, len(seen) - GUEST_ROWS)
     report['guests'] = seen[:GUEST_ROWS]
     return report
+
+
+def _pbs_jobs_visible(cluster_id, pbs, user, mgr):
+    """The backup jobs of a PBS report that a confined caller sees on the Backup page
+    (storage._job_visible): those naming their own guests only. An all, pool or exclude job
+    spans guests of others, its id and schedule stay out. The counts stay whole."""
+    from pegaprox.api.storage import _job_visible
+    if not pbs.get('jobs'):
+        return
+    raw = whatif.backup_jobs(mgr) if mgr is not None else None
+    if raw is None:
+        # not readable again: say so rather than show the storage without jobs
+        pbs['jobs'], pbs['jobs_read'] = [], False
+        return
+    by_id = {str(j.get('id') or ''): j for j in raw}
+    pbs['jobs'] = [j for j in pbs['jobs'] if j['id'] in by_id and _job_visible(user, cluster_id, by_id[j['id']])]
 
 
 @bp.route('/api/clusters/<cluster_id>/whatif/options', methods=['GET'])
@@ -192,7 +211,7 @@ def whatif_run(cluster_id):
     except Exception as e:
         logging.error(f"[WHATIF] {cluster_id} run failed: {e}")
         return jsonify({'error': safe_error(e, 'The what-if simulation failed')}), 500
-    return jsonify(_visible(cluster_id, report, nodes))
+    return jsonify(_visible(cluster_id, report, nodes, mgr))
 
 
 @bp.route('/api/clusters/<cluster_id>/whatif/ranking', methods=['POST'])

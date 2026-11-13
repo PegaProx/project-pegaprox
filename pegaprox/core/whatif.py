@@ -1844,9 +1844,10 @@ def for_nodes(report, nodes):
     report['limits'] = limits
     if isinstance(report.get('headroom'), dict):
         report['headroom']['combinations'] = []
-    for key in ('storage', 'network'):
-        if isinstance(report.get(key), dict) and isinstance(report[key].get('nodes'), list):
-            report[key]['nodes'] = [n for n in report[key]['nodes'] if n in keep]
+    # the nodes a PBS storage is active on too, its 'active' stays whole like the counts
+    for key, field in (('storage', 'nodes'), ('network', 'nodes'), ('pbs', 'active_on')):
+        if isinstance(report.get(key), dict) and isinstance(report[key].get(field), list):
+            report[key][field] = [n for n in report[key][field] if n in keep]
     return report
 
 
