@@ -611,10 +611,12 @@ def url_without_login(url):
     return urlunsplit(p._replace(netloc=p.netloc.rpartition('@')[2]))
 
 
-# the login of an http(s) URL in a line: up to its last '@' before the path, or, with a
-# blank in it, up to an '@' that a host and a path follow
+# the login of an http(s) URL in a line: up to the last '@' before the path that a host
+# and a path follow, a blank in the password included, or else up to its last '@' before
+# a blank. MK Nov 2026 - in that order: the other way round 'u:p@ss word@mirror/x' kept
+# "ss word" in the line, the blank-free part matching first at its first '@'
 _URL_LOGIN = re.compile(
-    r'''(https?://)(?:[^/?#\s'"<>]+@|[^/?#'"<>]*@(?=[A-Za-z0-9_.\-:\[\]]+[/?#]))''')
+    r'''(https?://)(?:[^/?#'"<>]*@(?=[A-Za-z0-9_.\-:\[\]]+[/?#])|[^/?#\s'"<>]+@)''')
 
 
 def mask_url_logins(text):
