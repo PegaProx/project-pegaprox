@@ -950,9 +950,29 @@ def oidc_get_user_groups_ex(config: dict, access_token: str):
                         "login can grant but not revoke")
         return groups, False
 
+    from urllib.parse import urlsplit as _urlsplit
+    try:
+        _first = _urlsplit(url)
+        _origin = (_first.scheme, _first.netloc.lower())
+    except ValueError:
+        return groups, False
+    if _origin[0] not in ('http', 'https') or not _origin[1]:
+        return groups, False
+
     try:
         # NS: Entra Graph API for group memberships
         while url:
+            # pagination links must stay on the same scheme/host as the configured endpoint
+            try:
+                _cur = _urlsplit(url)
+                _cur_origin = (_cur.scheme, _cur.netloc.lower())
+            except ValueError:
+                _cur_origin = None
+            if _cur_origin != _origin:
+                logging.warning("[OIDC] Group fetch aborted: pagination link left the configured endpoint")
+                complete = False
+                break
+
             # a redirect is not followed (see _redirect_refused): any status but 200 is a failed fetch
             resp = requests.get(url, headers=headers, timeout=10, allow_redirects=False)
             if resp.status_code != 200:
