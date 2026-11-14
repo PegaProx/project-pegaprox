@@ -4256,8 +4256,8 @@
                                                     </div>
                                                     <LineChart
                                                         datasets={[
-                                                            { label: 'Net In', data: perfNet.metrics.net_in, color: '#06b6d4' },
-                                                            { label: 'Net Out', data: perfNet.metrics.net_out, color: '#8b5cf6' }
+                                                            { label: t('netIn'), data: perfNet.metrics.net_in, color: '#06b6d4' },
+                                                            { label: t('netOut'), data: perfNet.metrics.net_out, color: '#8b5cf6' }
                                                         ]}
                                                         timestamps={perfNet.timestamps}
                                                         label="Network I/O"
@@ -8019,7 +8019,7 @@
                                                         <LineChart {...perfZoom.series('iowait')} label="IO Wait" color="#eab308" unit="%" />
                                                         <LineChart {...perfZoom.series('loadavg')} label="Load Average" color="#22c55e" unit="" />
                                                     </div>
-                                                    <LineChart datasets={[{label: 'Net In', data: perfNet.metrics.net_in, color: '#06b6d4'}, {label: 'Net Out', data: perfNet.metrics.net_out, color: '#8b5cf6'}]} timestamps={perfNet.timestamps} label="Network I/O" unit=" KB/s" />
+                                                    <LineChart datasets={[{label: t('netIn'), data: perfNet.metrics.net_in, color: '#06b6d4'}, {label: t('netOut'), data: perfNet.metrics.net_out, color: '#8b5cf6'}]} timestamps={perfNet.timestamps} label="Network I/O" unit=" KB/s" />
                                                     <div className="grid grid-cols-2 gap-3">
                                                         <LineChart {...perfZoom.series('swap')} label="Swap" color="#ec4899" unit="%" yMin={0} yMax={100} />
                                                         <LineChart {...perfZoom.series('rootfs')} label="Root FS" color="#a855f7" unit="%" yMin={0} yMax={100} />
@@ -8171,7 +8171,7 @@
                                                         </div>
                                                     </div>
                                                     <table className="corp-datagrid">
-                                                        <thead><tr><th>{t('name')}</th><th>{t('type')}</th><th>CIDR</th><th>Gateway</th><th>{t('active') || 'Active'}</th><th>{t('comment')}</th><th style={{width: '60px'}}></th></tr></thead>
+                                                        <thead><tr><th>{t('name')}</th><th>{t('type')}</th><th>CIDR</th><th>{t('gateway')}</th><th>{t('active') || 'Active'}</th><th>{t('comment')}</th><th style={{width: '60px'}}></th></tr></thead>
                                                         <tbody>
                                                             {(Array.isArray(data.network) ? data.network : []).map((iface, i) => (
                                                                 <tr key={i}>
@@ -8195,7 +8195,7 @@
                                                                     </td>
                                                                 </tr>
                                                             ))}
-                                                            {(!data.network || data.network.length === 0) && <tr><td colSpan={7} className="text-center py-4" style={{color: '#728b9a'}}>No network interfaces</td></tr>}
+                                                            {(!data.network || data.network.length === 0) && <tr><td colSpan={7} className="text-center py-4" style={{color: '#728b9a'}}>{t('noNetworkInterfaces')}</td></tr>}
                                                         </tbody>
                                                     </table>
                                                     </>)}

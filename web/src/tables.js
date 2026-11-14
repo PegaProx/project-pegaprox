@@ -1853,14 +1853,14 @@
                 { key: 'vmid', label: 'ID' },
                 { key: 'name', label: t('name') },
                 { key: 'type', label: t('type') },
-                { key: 'node', label: 'Node' },
+                { key: 'node', label: t('node') },
                 { key: 'ip', label: 'IP' },
                 { key: 'cpu_percent', label: 'CPU' },
                 { key: 'mem', label: 'RAM' },
                 { key: 'disk', label: t('disk') },
                 ...(showAgent ? [{ key: 'agent', label: t('listColAgent') }] : []),
                 ...(showIo ? [{ key: 'diskio', label: t('listColDiskIo') }] : []),
-                { key: 'status', label: 'Status' },
+                { key: 'status', label: t('status') },
                 { key: 'actions', label: t('actions') },
             ];
 
