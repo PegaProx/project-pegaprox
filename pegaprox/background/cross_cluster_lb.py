@@ -70,10 +70,17 @@ def _pick_node(manager, highest=True):
 def run_cross_cluster_balance_check(group):
     """Core logic: compare cluster scores within a group, migrate if needed.
     NS: Intentionally conservative - one VM per cycle, dry_run default on.
-    """
+    A cluster enrolled in the federation migrates only while this instance
+    holds a live lease on it (Q8)."""
     # a standby migrates nothing, from the loop or from the manual trigger
     if not ha.is_active():
         return
+    # Q8: the federation lease - a balance move is a write on the source
+    try:
+        from pegaprox.core import federation as _fed
+        _fed_lb_gate = _fed.worker_takes_writes_for
+    except ImportError:
+        _fed_lb_gate = lambda cid: True
     group_id = group['id']
     group_name = group.get('name', group_id)
     threshold = group.get('cross_cluster_threshold', 30)
@@ -92,6 +99,9 @@ def run_cross_cluster_balance_check(group):
     scored = []
     for r in rows:
         mgr = cluster_managers.get(r['id'])
+    if not _fed_lb_gate(r['id']):
+        logging.info(f"[LB] cluster {r['id']} is enrolled without a live lease here - skipped")
+        continue
         if not mgr:
             continue
         score = compute_cluster_score(mgr)

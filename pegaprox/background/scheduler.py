@@ -401,7 +401,16 @@ PVE_REFUSAL = ('This action is not supported for Proxmox VE scheduled tasks. Use
 
 
 def task_refusal(cluster_id, action):
-    """Why a task of `action` cannot run on the cluster, None when it can."""
+    """Why a task of `action` cannot run on the cluster, None when it can.
+    A cluster enrolled in the federation runs scheduled actions only while
+    this instance holds a live lease on it (Q8)."""
+    try:
+        from pegaprox.core import federation as _fed
+        if not _fed.worker_takes_writes_for(cluster_id):
+            return ('This cluster is enrolled in the federation and this '
+                    'instance holds no live lease on it.')
+    except ImportError:
+        pass
     if action not in _ACTION_METHODS:
         return f"Unknown action '{_sl(str(action))[:40]}'"
     manager = cluster_managers.get(cluster_id)

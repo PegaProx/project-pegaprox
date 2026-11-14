@@ -3254,6 +3254,13 @@ def _promote():
         new = {k: v for k, v in st.items() if k != 'group_mode'}
         _commit_locked(dict(new, epoch=new_epoch, role=ROLE_ACTIVE, members=ms, source=None,
                             serve_assigned=False, cv=cvr, change_gap=gap))
+    # Q7: the federation identity moves with the promotion - the clusters that
+    # came with the HA sync still name the old active; their ownership goes here
+    try:
+        from pegaprox.core import federation as _fed
+        _fed.adopt_ha_federation_identity()
+    except Exception as e:
+        logging.warning(f'[HA] federation identity move failed: {e}')
     return new_epoch, gap
 
 
