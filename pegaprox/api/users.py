@@ -21,19 +21,20 @@ from pegaprox.utils.auth import (
     mark_admin_initialized, invalidate_all_user_sessions, revoke_user_api_tokens,
     build_authz_user,
 )
-from pegaprox.utils.audit import log_audit
+from pegaprox.utils.audit import log_audit, is_audit_pseudo_actor
+from pegaprox.utils.oidc import OIDC_AUTH_SOURCES, oidc_key_names_a_subject
 from pegaprox.utils.rbac import (
     invalidate_tenants_cache,
     load_custom_roles, save_custom_roles, get_custom_roles, invalidate_roles_cache,
     get_role_permissions_for_user, load_tenants, save_tenants,
-    get_user_permissions, has_permission, get_user_effective_role,
+    get_user_permissions, has_permission, get_user_effective_role, get_acting_role,
     get_user_clusters, filter_clusters_for_user,
     load_vm_acls, save_vm_acls, get_vm_acls, invalidate_vm_acls_cache,
     user_can_access_vm, get_user_vms,
     get_pool_membership_cache, invalidate_pool_cache, get_vm_pool_cached,
     DEFAULT_TENANT_ID, ROLE_TEMPLATES, acts_as_admin,
 )
-from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, check_cluster_access, safe_error, caller_acts_as_admin, find_user_key
+from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, check_cluster_access, safe_error, caller_acts_as_admin, find_user_key, ui_lock, ui_lock_holds, UI_LOCKED
 
 bp = Blueprint('users', __name__)
 
@@ -302,6 +303,8 @@ def update_user_preferences():
     
     username = request.session['user']
     data = request.get_json() or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Expected a JSON object'}), 400
     
     logging.info(f"update_user_preferences: user={_sl(username)}, data={_sl(data)}")
     
@@ -313,6 +316,18 @@ def update_user_preferences():
     user = users_db[username]
     
     logging.info(f"update_user_preferences: user before update: ui_layout={user.get('ui_layout')}")
+    
+    # MK Oct 2026 (#1189, #1167) - a layout or language the admin pinned for everyone. The
+    # whole request is refused before anything is saved; sending the pinned value is fine.
+    # What the user picked before stays stored, so lifting the lock gives it back. The lock
+    # goes along, so a page that could not read it follows it without asking again
+    lock = ui_lock()
+    if ui_lock_holds(user.get('role', request.session.get('role')), lock):
+        for field, pinned, what in (('ui_layout', lock['layout'], 'layout'),
+                                    ('language', lock['language'], 'language')):
+            if pinned and field in data and data[field] != pinned:
+                return jsonify({'error': f'The {what} is set by your administrator',
+                                'code': UI_LOCKED, 'field': field, 'lock': lock}), 403
     
     # Only allow specific fields to be updated
     allowed_themes = [
@@ -342,7 +357,9 @@ def update_user_preferences():
     # NS: UI Layout - Jan 2026
     if 'ui_layout' in data:
         layout = data['ui_layout']
-        if layout in ['modern', 'classic', 'corporate', 'cloud']:
+        # MK Oct 2026 - corporate-redesigned is a skin over Corporate. A lock may name it
+        # (UI_LAYOUT_LOCKS); a corporate lock pins its users to the classic one
+        if layout in ['modern', 'classic', 'corporate', 'corporate-redesigned', 'cloud']:
             user['ui_layout'] = layout
             logging.info(f"update_user_preferences: Setting ui_layout to '{_sl(layout)}' for user '{_sl(username)}'")
         else:
@@ -412,6 +429,57 @@ def admin_disable_2fa(username):
     log_audit(request.session['user'], '2fa.admin_disabled', f"Admin disabled 2FA for user: {username}")
     
     return jsonify({'success': True, 'message': f'2FA for {username} disabled'})
+
+
+@bp.route('/api/users/<username>/oidc-binding', methods=['DELETE'])
+@require_auth(perms=['admin.users'])
+def reset_oidc_binding(username):
+    """Admin: forget the identity provider subject an OIDC / Entra account is bound to.
+
+    MK Nov 2026 - such an account signs in only for the subject stored with it (see
+    oidc_subject_refusal). After a move to another identity provider, or a provider that
+    hands out new subject ids, the admin clears it here and the next sign-in through the
+    provider under exactly this name binds the account again.
+
+    Not for an account keyed on its subject (a sign-in without a name made it): it is found
+    by the stored sub alone, so it is deleted instead and the next sign-in makes it again.
+    An account keyed on the part before the @ of an address (releases that cut the name
+    there) is found by its sub too, and cannot be told from a provider username without
+    an @: the admin is told in the confirmation to delete such an account instead.
+    """
+    users_db = load_users()
+    username = find_user_key(users_db, username)
+    if username is None:
+        return jsonify({'error': 'User not found'}), 404
+
+    user = users_db[username]
+    _ct = _caller_tenant_or_none()
+    if _ct is not None and user.get('tenant_id', DEFAULT_TENANT_ID) != _ct:
+        return jsonify({'error': 'Access denied: cannot modify users in other tenants'}), 403
+    # whoever signs in next under this name gets the account and what it holds, so the
+    # same tier guard as a password reset
+    if not _caller_can_manage_user(user):
+        return jsonify({'error': 'Access denied: target has privileges beyond your own'}), 403
+    if user.get('auth_source', 'local') not in OIDC_AUTH_SOURCES:
+        return jsonify({'error': 'Only OIDC and Entra ID accounts are bound to an identity provider subject'}), 400
+    if oidc_key_names_a_subject(username, user):
+        return jsonify({'error': 'This account is named after its identity provider subject, not after a name: '
+                                 'after a reset its owner would not find it again, and a sign-in that spells '
+                                 'the name would get it. Delete the account instead; the next sign-in of its '
+                                 'owner creates it again.'}), 400
+
+    user['oidc_sub'] = ''
+    try:
+        get_db().save_user(username, user)
+    except Exception as e:
+        logging.error(f"Failed to reset the sign-in binding of '{_sl(username)}': {e}")
+        return jsonify({'error': 'Failed to reset the sign-in binding'}), 500
+
+    logging.info(f"Admin '{_sl(request.session['user'])}' reset the sign-in binding of '{_sl(username)}'")
+    log_audit(request.session['user'], 'user.oidc_binding_reset',
+              f"Reset the identity provider sign-in binding of user: {username} - the next "
+              f"sign-in under this name binds it again")
+    return jsonify({'success': True})
 
 
 @bp.route('/api/users/<username>/password', methods=['PUT'])
@@ -517,6 +585,12 @@ def get_users():
             'last_login': user.get('last_login'),
             'tenant_id': user.get('tenant_id', DEFAULT_TENANT_ID),  # MK: Added for tenant display
             'auth_source': user.get('auth_source', 'local'),  # NS: For LDAP/Entra/OIDC badge in user list
+            # whether the account is tied to an identity provider subject; the sub stays here
+            'oidc_bound': bool(user.get('oidc_sub')),
+            # and whether the binding reset takes it (not for an account keyed on its subject)
+            'oidc_resettable': (user.get('auth_source', 'local') in OIDC_AUTH_SOURCES
+                                and bool(user.get('oidc_sub'))
+                                and not oidc_key_names_a_subject(username, user)),
             'permissions': user.get('permissions', []),  # LW: For permission display
             'portal_only': user.get('portal_only', False),
             'user_folder': user.get('user_folder', ''),
@@ -762,6 +836,9 @@ def get_security_audit(cluster_id):
     try:
         host, port = manager.host, manager.api_port
         session = manager._create_session()
+        # MK Nov 2026 - the port PegaProx dials the nodes on, not a fixed '22'
+        from pegaprox.utils.ssh import node_ssh_port
+        ssh_port = str(node_ssh_port(manager.config))
         
         # Get nodes
         nodes_url = f"https://{host}:{port}/api2/json/nodes"
@@ -845,7 +922,7 @@ def get_security_audit(cluster_id):
             result['ssh']['nodes'][node] = {
                 'permit_root_login': 'unknown',
                 'password_auth': 'unknown',
-                'port': '22',
+                'port': ssh_port,
                 'pubkey_auth': 'unknown'
             }
             
@@ -964,6 +1041,11 @@ def create_user():
     
     if len(username) < 3:
         return jsonify({'error': 'Username must be at least 3 characters'}), 400
+    # the background jobs write their audit entries under these names, and an account
+    # holding one would read them as its own
+    if is_audit_pseudo_actor(username):
+        return jsonify({'error': f"The username '{username}' is reserved for entries PegaProx "
+                                 f"writes itself - choose another"}), 400
     
     # Validate password policy
     is_valid, error_msg = validate_password_policy(password)
@@ -1420,7 +1502,8 @@ def get_my_tenants():
             'id': tid,
             'name': t.get('name', tid),
             'is_home': tid == home,
-            'effective_role': get_user_effective_role(user, tid),
+            # an API token's own role there, not its owner's
+            'effective_role': get_acting_role(user, tid),
         })
     return jsonify({'tenants': out, 'home': home})
 
@@ -2441,6 +2524,9 @@ def get_all_pool_permissions_api(cluster_id):
     """Get all pool permissions for a cluster"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - the per-pool route above answers a pool- or ACL-scoped caller for its
+    # own pools only. This one handed the same caller every pool's grants at once
+    _confined, _granted = _pool_visibility(cluster_id)
     
     db = get_db()
     perms = db.get_pool_permissions(cluster_id)
@@ -2449,6 +2535,8 @@ def get_all_pool_permissions_api(cluster_id):
     by_pool = {}
     for p in perms:
         pool_id = p['pool_id']
+        if _confined and pool_id not in _granted:
+            continue
         if pool_id not in by_pool:
             by_pool[pool_id] = []
         by_pool[pool_id].append(p)

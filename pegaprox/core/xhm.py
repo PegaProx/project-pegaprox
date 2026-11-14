@@ -16,12 +16,33 @@ from datetime import datetime
 
 from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.core import ha_transport
-from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec, ssh_password_for, ssh_password_to, bare_host, is_ipv6_literal
-from pegaprox.utils.sanitization import validate_ssh_user
+from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec, ssh_password_for, ssh_password_to, bare_host, is_ipv6_literal, node_login
+from pegaprox.utils.sanitization import validate_ssh_user, scrub_session_id
 from pegaprox.utils.realtime import broadcast_sse
 from pegaprox.utils.audit import log_audit
 
 logger = logging.getLogger(__name__)
+
+# MK Nov 2026 - the raw VDI urls carry the XAPI session in the query string, and a
+# request that fails names its url in the exception text. That text went into the
+# task error, the SSE log stream every migration viewer gets and the server log, and
+# the session is the pool login itself until XCP-ng drops it. The log record sanitizer
+# app.py installs blanks it on every logger now; this filter keeps the module logger
+# clean where that is not installed.
+class _ScrubSessionFilter(logging.Filter):
+    # logger.exception appends the traceback, and its last line is the same exception text
+    def filter(self, record):
+        try:
+            record.msg = scrub_session_id(record.getMessage())
+            record.args = None
+            if record.exc_info and not record.exc_text:
+                record.exc_text = scrub_session_id(logging.Formatter().formatException(record.exc_info))
+        except Exception:
+            pass    # a log line that cannot render must not stop the migration
+        return True
+
+
+logger.addFilter(_ScrubSessionFilter())
 
 # MK: Mar 2026 - hardware mapping tables for cross-hypervisor translation
 # Proxmox ostype -> XCP-ng template name
@@ -52,11 +73,6 @@ _PVE_NIC_TO_XCP = {
     'vmxnet3': 'e1000',
     'rtl8139': 'rtl8139',
     'e1000e': 'e1000',
-}
-_XCP_NIC_TO_PVE = {
-    'netfront': 'virtio',
-    'e1000': 'e1000',
-    'rtl8139': 'rtl8139',
 }
 
 # NS: Mar 2026 - ESXi guest OS -> Proxmox ostype
@@ -168,13 +184,16 @@ class XHMigrationTask:
         self.log_lines = []
         self.cancel_event = threading.Event()
         # options
-        self.network_map = self.config.get('network_map', {})
+        # MK Nov 2026 - every leg reads it as {source network or NIC index: target network}
+        _nm = self.config.get('network_map')
+        self.network_map = _nm if isinstance(_nm, dict) else {}
         self.start_after = self.config.get('start_after', True)
         self.remove_source = self.config.get('remove_source', False)
         self._last_sse_progress = 0
         self._last_sse_log = 0
 
     def log(self, msg):
+        msg = scrub_session_id(msg)
         ts = datetime.now().strftime('%H:%M:%S')
         entry = f"[{ts}] {msg}"
         self.log_lines.append(entry)
@@ -203,6 +222,7 @@ class XHMigrationTask:
         self.phase_times[phase] = {'start': datetime.now().isoformat(), 'end': None, 'duration': None}
 
         if error:
+            error = scrub_session_id(error)
             self.error = error
             self.status = 'failed'
             self.log(f"FAILED: {error}")
@@ -302,7 +322,8 @@ def plan_xcpng_to_pve(source_cluster_id, source_vmid, target_cluster_id):
         return {'error': 'Source XCP-ng cluster not found'}
 
     tgt = cluster_managers.get(target_cluster_id)
-    if not tgt or getattr(tgt, 'cluster_type', 'proxmox') == 'xcpng':
+    # an ESXi host is not XCP-ng either, and it has no nodes to plan on
+    if not tgt or getattr(tgt, 'cluster_type', 'proxmox') != 'proxmox':
         return {'error': 'Target must be a Proxmox cluster'}
 
     if not src.is_connected:
@@ -355,16 +376,15 @@ def plan_xcpng_to_pve(source_cluster_id, source_vmid, target_cluster_id):
         })
         total_bytes += d.get('size', 0)
 
-    # networks
+    # networks - a VIF record carries no NIC model, and the runner gives every NIC virtio
     nets_info = []
     for n in cfg.get('networks', []):
-        pve_model = _XCP_NIC_TO_PVE.get('e1000', 'virtio')  # default virtio on PVE
         nets_info.append({
             'id': n.get('id', ''),
             'mac': n.get('mac', ''),
             'network': n.get('network', ''),
             'bridge': n.get('bridge', ''),
-            'target_model': pve_model,
+            'target_model': 'virtio',
         })
 
     # available PVE targets
@@ -721,7 +741,7 @@ def _run_xcpng_to_pve(task):
                     task.set_phase('failed', f'Cannot resolve IP for PVE node {task.target_node}')
                     return
 
-                pve_user = getattr(tgt_mgr.config, 'ssh_user', '') or 'root'
+                pve_user = node_login(tgt_mgr.config)
                 pve_pass = ssh_password_to(tgt_mgr, pve_host)
                 pve_key = getattr(tgt_mgr.config, 'ssh_key', '')
                 pve_port = int(getattr(tgt_mgr.config, 'ssh_port', 22))
@@ -977,6 +997,8 @@ def _run_xcpng_to_pve(task):
         except Exception as e:
             task.set_phase('failed', f'VM creation failed: {e}')
             return
+        if not _pve_create_done(tgt_mgr, task, resp, new_vmid, imported_volumes):
+            return
 
         task.log(f"Created VM {new_vmid} on {task.target_node}")
         task.progress = 85
@@ -984,19 +1006,8 @@ def _run_xcpng_to_pve(task):
         # === ATTACHING ===
         task.set_phase('attaching')
 
-        for vol_info in imported_volumes:
-            try:
-                attach_data = {f'scsi{vol_info["index"]}': vol_info['vol_id']}
-                resp = tgt_mgr._api_post(
-                    f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/nodes/{task.target_node}/qemu/{new_vmid}/config",
-                    data=attach_data
-                )
-                if resp.status_code == 200:
-                    task.log(f"Attached {vol_info['vol_id']} as scsi{vol_info['index']}")
-                else:
-                    task.log(f"Warning: attach scsi{vol_info['index']} returned {resp.status_code}")
-            except Exception as e:
-                task.log(f"Warning: couldn't attach disk: {e}")
+        if not _attach_pve_volumes(tgt_mgr, task, new_vmid, imported_volumes):
+            return
 
         # EFI disk for UEFI
         if bios == 'ovmf':
@@ -1022,24 +1033,35 @@ def _run_xcpng_to_pve(task):
             pass
 
         # start if requested
+        started = False
         if task.start_after:
             try:
                 time.sleep(2)  # give PVE a moment
-                tgt_mgr._api_post(
+                resp = tgt_mgr._api_post(
                     f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/nodes/{task.target_node}/qemu/{new_vmid}/status/start",
                     data={}
                 )
-                task.log(f"Started VM {new_vmid}")
+                if resp.status_code == 200:
+                    task.log(f"Started VM {new_vmid}")
+                    started = True
+                else:
+                    said = _pve_said(resp)
+                    task.log(f"Auto-start failed: HTTP {resp.status_code}" + (f" - {said}" if said else ''))
             except Exception as e:
                 task.log(f"Auto-start failed: {e}")
 
-        # remove source if requested
+        # remove source if requested, and only for a target that runs: the copy that is known to
+        # work goes last
         if task.remove_source:
-            try:
-                api.VM.destroy(vm_ref)
-                task.log("Source VM destroyed on XCP-ng")
-            except Exception as e:
-                task.log(f"Warning: couldn't remove source VM: {e}")
+            if not (started and _pve_target_runs(tgt_mgr, task.target_node, new_vmid)):
+                task.log(f"remove_source is set, but VM {new_vmid} does not run - the source VM stays on XCP-ng, "
+                         f"remove it there once the target runs")
+            else:
+                try:
+                    api.VM.destroy(vm_ref)
+                    task.log("Source VM destroyed on XCP-ng")
+                except Exception as e:
+                    task.log(f"Warning: couldn't remove source VM: {e}")
 
         task.set_phase('completed')
         task.log(f"Migration complete! VM {task.vm_name} -> PVE VMID {new_vmid}")
@@ -1235,7 +1257,7 @@ def _run_pve_to_xcpng(task):
 
             # SSH into PVE, stream disk -> PegaProx -> HTTP PUT to XCP-ng
             try:
-                pve_user = getattr(src_mgr.config, 'ssh_user', '') or 'root'
+                pve_user = node_login(src_mgr.config)
                 pve_pass = ssh_password_to(src_mgr, pve_host)
                 pve_key = getattr(src_mgr.config, 'ssh_key', '')
                 pve_port = int(getattr(src_mgr.config, 'ssh_port', 22))
@@ -1396,19 +1418,7 @@ def _run_pve_to_xcpng(task):
         # configure VM
         try:
             # remove template VBDs first (they have empty disks)
-            for old_vbd in xapi.VM.get_VBDs(new_vm_ref):
-                try:
-                    old_vbd_rec = xapi.VBD.get_record(old_vbd)
-                    if old_vbd_rec.get('type') == 'Disk':
-                        old_vdi = old_vbd_rec.get('VDI', 'OpaqueRef:NULL')
-                        xapi.VBD.destroy(old_vbd)
-                        if old_vdi != 'OpaqueRef:NULL':
-                            try:
-                                xapi.VDI.destroy(old_vdi)
-                            except:
-                                pass
-                except:
-                    pass
+            _xcp_drop_template_disks(xapi, new_vm_ref)
 
             # set properties
             xapi.VM.set_name_description(new_vm_ref,
@@ -1441,24 +1451,18 @@ def _run_pve_to_xcpng(task):
         task.set_phase('attaching')
 
         # attach VDIs
+        attach_failed = []
         for vdi_info in created_vdis:
             try:
-                vbd_rec = {
-                    'VM': new_vm_ref,
-                    'VDI': vdi_info['ref'],
-                    'userdevice': str(vdi_info['index']),
-                    'bootable': vdi_info['bootable'],
-                    'mode': 'RW',
-                    'type': 'Disk',
-                    'empty': False,
-                    'other_config': {},
-                    'qos_algorithm_type': '',
-                    'qos_algorithm_params': {},
-                }
-                xapi.VBD.create(vbd_rec)
+                xapi.VBD.create(_xcp_disk_vbd(new_vm_ref, vdi_info))
                 task.log(f"Attached VDI {vdi_info['uuid']} as device {vdi_info['index']}")
             except Exception as e:
-                task.log(f"Warning: VBD attach failed for device {vdi_info['index']}: {e}")
+                attach_failed.append(f"device {vdi_info['index']}: {e}")
+        if attach_failed:
+            task.set_phase('failed', f"Disks could not be attached, the source VM stays; VM {task.vm_name} ({new_uuid}) "
+                                     f"and its VDIs ({', '.join(v['uuid'] for v in created_vdis)}) are left on the pool: "
+                                     f"{'; '.join(attach_failed)}")
+            return
 
         # attach networks
         net_map = task.network_map or {}
@@ -1487,16 +1491,21 @@ def _run_pve_to_xcpng(task):
         task.progress = 95
 
         # start if requested
+        started = False
         if task.start_after:
             try:
                 time.sleep(2)
                 xapi.Async.VM.start(new_vm_ref, False, False)
                 task.log(f"Started VM on XCP-ng")
+                started = True
             except Exception as e:
                 task.log(f"Auto-start failed: {e}")
 
-        # cleanup source
-        if task.remove_source:
+        # cleanup source, once the target runs: the async start above can still fail
+        if task.remove_source and not (started and _xcp_target_runs(xapi, new_vm_ref)):
+            task.log(f"remove_source is set, but VM {task.vm_name} does not run on XCP-ng - the source VM "
+                     f"{task.source_vmid} stays on Proxmox, remove it there once the target runs")
+        elif task.remove_source:
             try:
                 # NS Oct 2026 (#1079) - hours can pass since planning, and a VMID freed in
                 # the meantime may already belong to somebody else's new guest. Destroy only
@@ -1534,6 +1543,92 @@ def _run_pve_to_xcpng(task):
 # ============================================================
 # helpers
 # ============================================================
+
+def _pve_said(resp):
+    """The reason in a PVE error answer: its message, and the errors of a refused parameter."""
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        return (getattr(resp, 'text', '') or '')[:200]
+    said = [str(body.get('message') or '')]
+    if isinstance(body.get('errors'), dict):
+        said += [f'{k}: {v}' for k, v in body['errors'].items()]
+    return ' '.join(' '.join(said).split())[:200]
+
+
+def _pve_create_done(tgt_mgr, task, resp, new_vmid, volumes):
+    """The create call answers with its task, and the VM is locked until that task is through: an
+    attach sent before is refused. False when it did not finish; the run has failed then."""
+    try:
+        upid = resp.json().get('data')
+    except (ValueError, AttributeError):
+        upid = None
+    if not (isinstance(upid, str) and upid.startswith('UPID:')):
+        return True
+    if tgt_mgr._wait_for_task(task.target_node, upid, timeout=300):
+        return True
+    task.set_phase('failed', f"Creating VM {new_vmid} did not finish, the source VM stays; the volumes "
+                             f"({', '.join(v['vol_id'] for v in volumes)}) are left on {task.target_node}")
+    return False
+
+
+def _pve_target_runs(tgt_mgr, node, vmid, wait=60, poll=2):
+    """True once the migrated VM reports running on Proxmox, False after wait seconds."""
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            r = tgt_mgr._api_get(f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/nodes/{node}"
+                                 f"/qemu/{vmid}/status/current")
+            if r.status_code == 200 and (r.json().get('data') or {}).get('status') == 'running':
+                return True
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll)
+
+
+def _xcp_target_runs(xapi, vm_ref, wait=60, poll=2):
+    """True once the migrated VM is Running on XCP-ng, False after wait seconds."""
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            if str(xapi.VM.get_power_state(vm_ref)) == 'Running':
+                return True
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll)
+
+
+def _attach_pve_volumes(tgt_mgr, task, new_vmid, volumes):
+    # JB Nov 2026 - these were warnings, and the run went on to destroy the source and say completed with a
+    # target that had no disk. A copy that is not attached is no copy yet
+    # PUT, the synchronous call: a 200 means the disk is in the config. POST answers 200 with a task that can still fail.
+    # PVE itself waits up to 10 s for the config lock, so more than the default timeout here
+    failed = []
+    for vol in volumes:
+        try:
+            resp = tgt_mgr._api_put(
+                f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/nodes/{task.target_node}/qemu/{new_vmid}/config",
+                data={f'scsi{vol["index"]}': vol['vol_id']}, timeout=60)
+            if resp.status_code == 200:
+                task.log(f"Attached {vol['vol_id']} as scsi{vol['index']}")
+            else:
+                said = _pve_said(resp)
+                failed.append(f"scsi{vol['index']}: HTTP {resp.status_code}" + (f" - {said}" if said else ''))
+        except Exception as e:
+            failed.append(f"scsi{vol['index']}: {e}")
+    if failed:
+        task.set_phase('failed', f"Disks could not be attached, the source VM stays; VM {new_vmid} on {task.target_node} "
+                                 f"and its volumes ({', '.join(v['vol_id'] for v in volumes)}) are left in place: "
+                                 f"{'; '.join(failed)}")
+        return False
+    return True
+
 
 def _pve_guest_identity(raw):
     """The config keys that tell a guest apart from a later one under the same VMID.
@@ -1681,6 +1776,45 @@ def _ssh_cleanup(ssh, path):
         ssh.exec_command(f"rm -f '{path}'", timeout=10)
     except:
         pass
+
+
+def _xcp_drop_template_disks(api, vm_ref):
+    """Destroy the Disk VBDs (and their VDIs) a VM cloned from a template brought along.
+    Best effort, as each step was: a template that cannot be read has nothing to drop."""
+    try:
+        old_vbds = api.VM.get_VBDs(vm_ref)
+    except Exception:
+        return
+    for old_vbd in old_vbds:
+        try:
+            old_vbd_rec = api.VBD.get_record(old_vbd)
+            if old_vbd_rec.get('type') == 'Disk':
+                old_vdi = old_vbd_rec.get('VDI', 'OpaqueRef:NULL')
+                api.VBD.destroy(old_vbd)
+                if old_vdi != 'OpaqueRef:NULL':
+                    try:
+                        api.VDI.destroy(old_vdi)
+                    except:
+                        pass
+        except:
+            pass
+
+
+def _xcp_disk_vbd(vm_ref, vdi_info):
+    """The VBD record that attaches a migrated VDI as disk `index` of the VM. MK Nov 2026 -
+    one record for both legs into XCP-ng, which had drifted apart once."""
+    return {
+        'VM': vm_ref,
+        'VDI': vdi_info['ref'],
+        'userdevice': str(vdi_info['index']),
+        'bootable': vdi_info['bootable'],
+        'mode': 'RW',
+        'type': 'Disk',
+        'empty': False,
+        'other_config': {},
+        'qos_algorithm_type': '',
+        'qos_algorithm_params': {},
+    }
 
 
 def _xcp_attach_network(api, vm_ref, net_ident, device='0'):
@@ -1837,7 +1971,11 @@ def plan_esxi_to_xcpng(source_cluster_id, source_vmid, target_cluster_id):
             'vcpus': data.get('cpu_count', 1),
             'memory_mb': data.get('memory_mb', 1024),
             'disks': disks_info,
-            'networks': [],
+            # MK Nov 2026 - each adapter with its port group; no 'bridge', so the dialog keys
+            # the map by the NIC's index, which is what the runner sorts by
+            'networks': [{'network': n.get('network') or n.get('label') or f'NIC {i}',
+                          'label': n.get('label', ''), 'mac': n.get('mac_address', '')}
+                         for i, n in enumerate(data.get('nics') or [])],
             'template': xcp_template,
             'guest_os': guest_os,
         },
@@ -1915,7 +2053,7 @@ def _run_esxi_to_pve(task):
         if not validate_ssh_user(esxi_user):
             task.set_phase('failed', 'The SSH user of the ESXi source is not a valid user name')
             return
-        pve_user = getattr(tgt_mgr.config, 'ssh_user', '') or 'root'
+        pve_user = node_login(tgt_mgr.config)
         pve_pass = ssh_password_to(tgt_mgr, pve_host)
         pve_key = getattr(tgt_mgr.config, 'ssh_key', '')
         pve_port = int(getattr(tgt_mgr.config, 'ssh_port', 22))
@@ -1998,14 +2136,23 @@ def _run_esxi_to_pve(task):
                     # the parent with the default mode and that is the directory whose
                     # contents we care about. Two steps because -m only applies to the last
                     # component.
-                    f"mkdir -m 700 -p {_q_local(task.scratch)}",
-                    f"mkdir -m 700 -p {_q_local(mount_dir)}",
-                    f"sshfs -o StrictHostKeyChecking={_hk},password_stdin "
-                    f"{_q_local(esxi_user + '@' + _scp_host(esxi_host) + ':/vmfs/volumes/' + datastore_name)} "
-                    f"{_q_local(mount_dir)} <<< {_q_local(esxi_pass)}",
+                    (f"mkdir -m 700 -p {_q_local(task.scratch)}", None),
+                    (f"mkdir -m 700 -p {_q_local(mount_dir)}", None),
+                    # the password goes to sshfs on stdin like the scp fallback's below; as a
+                    # here-string it sat on the node shell's command line while the mount ran
+                    (f"sshfs -o StrictHostKeyChecking={_hk},password_stdin "
+                     f"{_q_local(esxi_user + '@' + _scp_host(esxi_host) + ':/vmfs/volumes/' + datastore_name)} "
+                     f"{_q_local(mount_dir)}", (esxi_pass or '') + "\n"),
                 ]
-                for cmd in mount_cmds:
-                    _, out, err = ssh_pve.exec_command(cmd, timeout=30)
+                for cmd, feed in mount_cmds:
+                    m_in, out, err = ssh_pve.exec_command(cmd, timeout=30)
+                    if feed is not None:
+                        try:
+                            m_in.write(feed)
+                            m_in.flush()
+                            m_in.channel.shutdown_write()
+                        except Exception:
+                            pass
                     out.channel.recv_exit_status()
 
                 # check mount worked
@@ -2198,25 +2345,16 @@ def _run_esxi_to_pve(task):
         except Exception as e:
             task.set_phase('failed', f'VM creation failed: {e}')
             return
+        if not _pve_create_done(tgt_mgr, task, resp, new_vmid, imported_volumes):
+            return
 
         task.log(f"Created VM {new_vmid}")
         task.progress = 85
 
         # === ATTACHING ===
         task.set_phase('attaching')
-        for vol in imported_volumes:
-            try:
-                attach_data = {f'scsi{vol["index"]}': vol['vol_id']}
-                resp = tgt_mgr._api_post(
-                    f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/nodes/{task.target_node}/qemu/{new_vmid}/config",
-                    data=attach_data
-                )
-                if resp.status_code == 200:
-                    task.log(f"Attached {vol['vol_id']} as scsi{vol['index']}")
-                else:
-                    task.log(f"Warning: attach scsi{vol['index']} returned {resp.status_code}")
-            except Exception as e:
-                task.log(f"Warning: attach failed: {e}")
+        if not _attach_pve_volumes(tgt_mgr, task, new_vmid, imported_volumes):
+            return
 
         task.progress = 95
         task.set_phase('completed')
@@ -2501,29 +2639,56 @@ def _run_esxi_to_xcpng(task):
             return
 
         task.log(f"Created XCP-ng VM from template: {xcp_template}")
+        # MK Nov 2026 - as the PVE leg: a template that carries a disk at device 0 would refuse
+        # the boot disk below
+        _xcp_drop_template_disks(xapi, new_vm_ref)
         task.progress = 90
 
         # attach VDIs
+        # JB Nov 2026 - this leg called _xcpng_attach_vdi / _xcpng_attach_network, which never
+        # existed: the NameErrors were logged as warnings and the VM ended up without disks.
+        # Attach the way the PVE -> XCP-ng leg above does.
         task.set_phase('attaching')
+        attached, unattached = [], []
         for vdi_info in created_vdis:
             try:
-                _xcpng_attach_vdi(xapi, new_vm_ref, vdi_info['ref'],
-                                  str(vdi_info['index']), vdi_info['bootable'])
+                xapi.VBD.create(_xcp_disk_vbd(new_vm_ref, vdi_info))
                 task.log(f"Attached VDI {vdi_info['uuid']} as device {vdi_info['index']}")
+                attached.append(vdi_info)
             except Exception as e:
-                task.log(f"Warning: attach VDI failed: {e}")
+                unattached.append(vdi_info)
+                task.log(f"Warning: attaching disk {vdi_info['index']} (VDI {vdi_info['uuid']}) failed: {e}")
+        # MK Nov 2026 - a VM without its boot disk did not migrate: failed, with what is left on
+        # the pool, instead of "completed" with a guest that cannot start
+        if created_vdis and (not attached or any(v['bootable'] for v in unattached)):
+            task.set_phase('failed', f"{len(unattached)} of {len(created_vdis)} disk(s) could not be attached, "
+                                     f"the boot disk among them; VM {task.vm_name} and its VDIs "
+                                     f"({', '.join(v['uuid'] for v in unattached)}) are left on the pool")
+            return
 
-        # add default network
-        try:
-            net_refs = xapi.network.get_all()
-            if net_refs:
-                _xcpng_attach_network(xapi, new_vm_ref, net_refs[0])
-        except:
-            pass
+        # only a network the user mapped: the first one the pool lists can be its management
+        # or storage network, and the plan has no source NICs to map from. NIC indexes in
+        # their numeric order ('10' after '2'), names after them
+        mapped = sorted(task.network_map.items(),
+                        key=lambda kv: (0, int(kv[0]), '') if str(kv[0]).isdigit() else (1, 0, str(kv[0])))
+        target_nets = [v for _, v in mapped if v]
+        if len(target_nets) > 4:
+            task.log(f"{len(target_nets)} networks mapped, the first 4 are attached")
+        for net_idx, target_net in enumerate(target_nets[:4]):
+            try:
+                _xcp_attach_network(xapi, new_vm_ref, target_net, str(net_idx))
+                task.log(f"Attached network {target_net} as device {net_idx}")
+            except Exception as e:
+                task.log(f"Warning: network attach failed: {e}")
+        if not target_nets:
+            task.log("No target network mapped: the VM has no network interface, add one on XCP-ng")
 
         task.progress = 100
         task.set_phase('completed')
-        task.log(f"Migration complete: ESXi -> XCP-ng")
+        if unattached:
+            task.log(f"Migration complete: ESXi -> XCP-ng, {len(unattached)} data disk(s) not attached")
+        else:
+            task.log(f"Migration complete: ESXi -> XCP-ng")
 
     except Exception as e:
         logger.error(f"[XHM:{task.id}] ESXi->XCP failed: {e}")

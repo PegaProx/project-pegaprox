@@ -169,6 +169,19 @@ def _build_teams(alert):
     }
 
 
+def _delivered(r):
+    """(success, detail) for the answer of a webhook endpoint.
+
+    The senders post with allow_redirects=False. A 3xx is not followed, so we cannot tell
+    whether the alert was received: only a 2xx is a delivery, and the detail says why a
+    3xx is not one.
+    """
+    code = r.status_code
+    if 300 <= code < 400:
+        return False, f'HTTP {code}, redirect not followed'
+    return 200 <= code < 300, f'HTTP {code}'
+
+
 def _post_ntfy(channel, alert):
     """ntfy wants a plaintext body + headers. Different shape from JSON webhooks."""
     if not requests:
@@ -191,7 +204,7 @@ def _post_ntfy(channel, alert):
         return False, 'blocked: unsafe url'
     try:
         r = requests.post(url, data=body.encode('utf-8'), headers=headers, timeout=6, allow_redirects=False)
-        return 200 <= r.status_code < 300, f'HTTP {r.status_code}'
+        return _delivered(r)
     except Exception as e:
         return False, _redact_webhook_url(str(e))
 
@@ -227,7 +240,7 @@ def send_to_channel(channel, alert):
 
     try:
         r = requests.post(url, json=body, timeout=6, allow_redirects=False)
-        return 200 <= r.status_code < 400, f'HTTP {r.status_code}'
+        return _delivered(r)
     except Exception as e:
         return False, _redact_webhook_url(str(e))
 
@@ -245,6 +258,9 @@ def send_to_channels(alert, channel_ids=None):
     except Exception as e:
         logging.debug(f"[webhooks] could not load channels: {_redact_webhook_url(str(e))}")
         return
+    # a row edited by hand that is no object raised in the loop, past its own except
+    # (ch.get), and the channels after it got nothing
+    channels = [c for c in channels if isinstance(c, dict)]
     if channel_ids is not None:
         wanted = {str(c) for c in channel_ids}
         channels = [c for c in channels if str(c.get('id')) in wanted]

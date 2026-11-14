@@ -284,8 +284,10 @@ class Node:
             return 0, _md5_lines(self.copied_from.get(path, path), n), ''
         if 'curl' in cmd and 'FSIZE' in cmd:
             return 0, 'HTTP=000 DL=0 FSIZE=0', ''
-        if 'sshpass -e ssh' in cmd and '| dd of=' in cmd:
-            src = shlex.split(re.search(r'"dd if=(.+?) bs=4M"', cmd).group(1))[0]
+        if 'sshpass -f ' in cmd and '| dd of=' in cmd:
+            # the last word before the pipe is the command ESXi runs, quoted once more
+            remote = shlex.split(cmd.split(' 2>/dev/null | dd of=')[0])[-1]
+            src = shlex.split(remote)[1][len('if='):]
             dst = re.search(r"\| dd of=(\S+)", cmd).group(1).strip("'\"")
             flat = src.rsplit('/', 1)[-1]
             for i, nm in enumerate(('app01', 'app01_1', 'app01_2')):

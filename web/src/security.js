@@ -6,7 +6,7 @@
         // LW: The locked IPs table was AI-generated (Claude), I just styled it - Oct 2025
         function SecuritySettingsSection({ addToast }) {
             const { t } = useTranslation();
-            const { getAuthHeaders, isAdmin, haStandby, haReadOnly } = useAuth();
+            const { getAuthHeaders, isAdmin, haStandby, haReadOnly, haServing } = useAuth();
             const { isCorporate } = useLayout();
             const [settings, setSettings] = useState({
                 login_max_attempts: 5,
@@ -134,6 +134,12 @@
                     if(res.ok) {
                         setSettings(newSettings);
                         addToast(t('settingsSaved'), 'success');
+                    } else {
+                        // JB Nov 2026 - a refusal said nothing and the form kept showing the refused value
+                        const err = await res.json().catch(() => ({}));
+                        const why = err.code === 'HA_STANDBY' ? (haServing ? t('pgHaServingRefused') : t('pgHaStandbyRefused')) : err.error;
+                        addToast(why || t('failedToSaveSettings'), 'error');
+                        fetchSettings();
                     }
                 } catch(e) {
                     addToast(t('failedToSaveSettings'), 'error');
@@ -1624,6 +1630,23 @@
                 }
             };
 
+            // LW Nov 2026 - what the restore answer names in secrets_to_enter
+            const secretToEnter = (s) => {
+                if (s.channel !== undefined) return t('restoreSecretChannel').replace('{name}', () => s.channel);
+                if (s.agent_token) return t('restoreSecretAgentKey').replace('{name}', () => s.cluster);
+                // the nodes go in first, a cluster name can hold any text
+                if (Array.isArray(s.fences)) return t('restoreSecretFences').replace('{nodes}', () => s.fences.join(', ')).replace('{name}', () => s.cluster);
+                if (Array.isArray(s.nodes)) return t('restoreSecretNodes').replace('{nodes}', () => s.nodes.join(', ')).replace('{name}', () => s.cluster);
+                if (s.cluster !== undefined) return t('restoreSecretCluster').replace('{name}', () => s.cluster);
+                return {
+                    smtp_password: t('restoreSecretSmtp'),
+                    ldap_bind_password: t('restoreSecretLdap'),
+                    oidc_client_secret: t('restoreSecretOidc'),
+                    acme_dns_rfc2136_secret: t('restoreSecretRfc2136'),
+                    acme_dns_cloudflare_token: t('restoreSecretCloudflare'),
+                }[s.setting] || s.setting;
+            };
+
             return (
                 <div className="space-y-6">
                     {/* Security Notice */}
@@ -1739,7 +1762,7 @@
 
                     {/* Results */}
                     {lastResult && (
-                        <div className={`p-4 rounded-lg border ${lastResult.errors?.length > 0 ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-green-500/10 border-green-500/30'}`}>
+                        <div className={`p-4 rounded-lg border ${lastResult.errors?.length > 0 || lastResult.secrets_to_enter?.length > 0 ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-green-500/10 border-green-500/30'}`}>
                             <h5 className="font-medium text-white mb-2">
                                 {lastResult.dry_run ? (t('dryRunResults') || 'Dry Run Results') : (t('restoreResults') || 'Restore Results')}
                             </h5>
@@ -1771,6 +1794,18 @@
                                     </div>
                                 )}
                                 
+                                {lastResult.secrets_to_enter?.length > 0 && (
+                                    <div className="mt-2">
+                                        <strong className="text-yellow-400">{t('restoreSecretsToEnter')}:</strong>
+                                        <div className="text-xs text-gray-400">{t('restoreSecretsToEnterDesc')}</div>
+                                        <ul className="ml-4">
+                                            {lastResult.secrets_to_enter.map((s, i) => (
+                                                <li key={i}>{secretToEnter(s)}</li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
+
                                 {lastResult.errors?.length > 0 && (
                                     <div className="mt-2">
                                         <strong className="text-red-400">{t('errors') || 'Errors'}:</strong>
@@ -2530,7 +2565,7 @@
         }
 
         // update Manager Section Component (for Settings tab)
-        function UpdateManagerSection({ clusterId, addToast }) {
+        function UpdateManagerSection({ clusterId, clusterName, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders, isAdmin, user, haReadOnly, haServing } = useAuth();
             // #644-class: gate the update-manager controls on the backend perms they
@@ -2621,6 +2656,87 @@
                 );
             };
 
+            // the Type column of a package row (the table and the copied text)
+            const pkgKind = (pkg) => {
+                if (pkg.Package?.includes('linux-image') || pkg.Package?.includes('kernel')) return 'Kernel';
+                if (pkg.Origin?.includes('security') || pkg.Section?.includes('security')) return 'Security';
+                return 'Update';
+            };
+
+            // LW Oct 2026 (#1192) - the update list as plain text for a change ticket. Every
+            // host of the last check, expanded or not, with the columns of the tables below;
+            // the versions in full where the table cuts them at 15 characters
+            const updateListText = () => {
+                const st = updateStatus || {};
+                const sum = st.summary || {};
+                const stamp = (d) => fmtDate(d, { timeZoneName: 'short' });
+                // aligned columns, so it reads the same in a ticket, a mail or a terminal
+                const table = (rows) => {
+                    rows = rows.map(r => r.map(String));
+                    const width = rows[0].map((_, i) => Math.max(...rows.map(r => r[i].length)));
+                    return rows.map(r => '  ' + r.map((c, i) => i < r.length - 1 ? c.padEnd(width[i]) : c).join('  '));
+                };
+                const head = (name, d, flags = []) => !d.success
+                    ? `${name} - ${t('checkFailed')}${d.error ? ': ' + d.error : ''}`
+                    : `${name} - ${d.count || 0} ${t('updates')}${flags.length ? ' - ' + flags.join(', ') : ''}`;
+                const nodes = Object.entries(st.nodes || {});
+                const pbs = Object.entries(st.pbs || {});
+                const total = sum.total_updates || 0;
+
+                const out = [t('updCopyHeading').replace('{cluster}', () => clusterName || clusterId)];
+                try {
+                    const cached = JSON.parse(localStorage.getItem(`updateCheck_${clusterId}`) || 'null');
+                    if (cached?.time) out.push(`${t('lastChecked')}: ${stamp(cached.time)}`);
+                } catch (e) {}
+                out.push(t('updCopyCopiedAt').replace('{time}', stamp(new Date())));
+                out.push(total > 0 || sum.nodes_failed > 0 ? `${total} ${t('updatesAvailable')}` : t('noUpdatesAvailable'));
+                const failed = [...nodes, ...pbs].filter(([, d]) => !d.success).length;
+                if (failed) out.push(t('updCopyFailedHosts').replace('{n}', failed));
+                // the browser's copy of the last check keeps the nodes, not the backup servers
+                if (!st.pbs && sum.total_pbs > 0) out.push(t('updCopyPbsMissing').replace('{n}', sum.total_pbs));
+
+                nodes.forEach(([name, d]) => {
+                    out.push('', head(name, d, [nodeHasKernelUpdates(d) && 'Kernel', nodeHasSecurityUpdates(d) && 'Security'].filter(Boolean)));
+                    if (d.success && (d.updates || []).length) {
+                        out.push(...table([[t('package'), t('currentVersion'), t('newVersion'), t('type')],
+                            ...d.updates.map(p => [p.Package || 'unknown', p.OldVersion || '-', p.Version || '-', pkgKind(p)])]));
+                    }
+                });
+                if (pbs.length) out.push('', 'Proxmox Backup Server');
+                pbs.forEach(([name, d]) => {
+                    out.push('', head(name, d));
+                    if (d.success && (d.updates || []).length) {
+                        out.push(...table([[t('package'), 'Version'],
+                            ...d.updates.map(p => [p.Package || p.package || '-', p.Version || p.version || '-'])]));
+                    }
+                });
+                return out.join('\n') + '\n';
+            };
+
+            const copyUpdateList = async () => {
+                const text = updateListText();
+                let ok = false;
+                try {
+                    if (navigator.clipboard?.writeText) {
+                        await navigator.clipboard.writeText(text);
+                        ok = true;
+                    }
+                } catch (e) { /* refused, try the textarea */ }
+                if (!ok) {
+                    // plain http has no navigator.clipboard
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.setAttribute('readonly', '');
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+                    document.body.removeChild(ta);
+                }
+                addToast(ok ? t('updCopyDone') : t('updCopyFailed'), ok ? 'success' : 'error');
+            };
+
             // update single node
             const updateSingleNode = async (nodeName, withReboot) => {
                 setShowNodeUpdateConfirm(null);
@@ -2636,7 +2752,8 @@
                     let data = await response.json();
                     
                     // If node not in maintenance mode, ask user if they want to force
-                    if (!response.ok && data.error?.includes('Wartungsmodus')) {
+                    // LW Nov 2026 - the route names the refusal by code now (the German sentence of older servers still counts)
+                    if (!response.ok && (data.code === 'NOT_IN_MAINTENANCE' || data.error?.includes('Wartungsmodus'))) {
                         const forceUpdate = confirm(
                             `${t('nodeNotInMaintenance') || 'Node is not in maintenance mode.'}\n\n` +
                             `${t('forceUpdateWarning') || 'Running VMs on this node may be affected if a reboot is performed.'}\n\n` +
@@ -2730,6 +2847,7 @@
                         setUpdateStatus(json);
                         localStorage.setItem(`updateCheck_${clusterId}`, JSON.stringify({
                             time: new Date().toISOString(),
+                            user: user?.username || '',   // LW Nov 2026 - whose check, the redesign copies only its own
                             summary: json.summary,
                             nodes: json.nodes
                         }));
@@ -3147,6 +3265,19 @@
                                     {t('checkForUpdates')}
                                 </button>}
                                 
+                                {/* LW Oct 2026 (#1192) - the list as text, a standby included: it only reads */}
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); copyUpdateList(); }}
+                                    disabled={checking || !updateStatus || (Object.keys(updateStatus.nodes || {}).length + Object.keys(updateStatus.pbs || {}).length) === 0}
+                                    title={t('updCopyHint')}
+                                    aria-label={t('updCopyButton')}
+                                    data-testid="updates-copy-text"
+                                    className="px-4 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-sm hover:border-proxmox-orange transition-colors flex items-center gap-2 disabled:opacity-50"
+                                >
+                                    <Icons.ClipboardList />
+                                    <span className="hidden sm:inline">{t('updCopyButton')}</span>
+                                </button>
+
                                 {/* MK: Schedule button */}
                                 {hasPerm('backup.schedule') && (
                                     <button
@@ -3297,8 +3428,7 @@
                                                                         </thead>
                                                                         <tbody>
                                                                             {(nodeData.updates || []).map((pkg, idx) => {
-                                                                                const isKernelPkg = pkg.Package?.includes('linux-image') || pkg.Package?.includes('kernel');
-                                                                                const isSecurityPkg = pkg.Origin?.includes('security') || pkg.Section?.includes('security');
+                                                                                const kind = pkgKind(pkg);
                                                                                 
                                                                                 return (
                                                                                     <tr key={idx} className="border-t border-gray-700/50 hover:bg-proxmox-hover/20">
@@ -3312,9 +3442,9 @@
                                                                                             {pkg.Version?.substring(0, 15) || '-'}
                                                                                         </td>
                                                                                         <td className="p-2">
-                                                                                            {isKernelPkg ? (
+                                                                                            {kind === 'Kernel' ? (
                                                                                                 <span className="px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded">Kernel</span>
-                                                                                            ) : isSecurityPkg ? (
+                                                                                            ) : kind === 'Security' ? (
                                                                                                 <span className="px-1.5 py-0.5 bg-orange-500/20 text-orange-400 rounded">Security</span>
                                                                                             ) : (
                                                                                                 <span className="px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded">Update</span>
@@ -3646,6 +3776,11 @@
                                                             <Icons.AlertTriangle className="w-4 h-4" />
                                                             {t('rollQuorumContinueAnyway')}
                                                         </button>
+                                                    )}
+                                                    {/* LW Oct 2026 - no QDevice and an even node count: set one up from here, then Continue */}
+                                                    {rollingUpdate.paused_reason === 'quorum' && (
+                                                        <QdeviceQuorumButton clusterId={clusterId} clusterName={clusterName}
+                                                            held={rollingUpdate.paused_details} onChanged={() => getRollingStatus()} />
                                                     )}
                                                     <button
                                                         onClick={cancelRollingUpdate}
@@ -4453,13 +4588,23 @@
 
         // SMBIOS Auto-Config Section Component
         // LW: this whole feature started because Windows kept complaining about hardware changes after migrations
-        function SmbiosAutoConfigSection({ clusterId, selectedCluster, updateConfig, addToast }) {
+        // LW Nov 2026 - the inputs edit the saved SMBIOS settings of the cluster (GET/PUT .../smbios-autoconfig).
+        // They were bound to selectedCluster.smbios_* and saved with updateConfig, but those are no cluster
+        // fields: the PATCH changed nothing, said saved, and the next refresh showed the defaults again
+        function SmbiosAutoConfigSection({ clusterId, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
             const { isCorporate } = useLayout();
             const [smbiosStatus, setSmbiosStatus] = useState({});
             const [smbiosLoading, setSmbiosLoading] = useState(false);
             const [smbiosActionLoading, setSmbiosActionLoading] = useState({});  // per-node loading state
+            const [smbiosForm, setSmbiosForm] = useState(null);    // what the inputs show, null until loaded
+            const [smbiosSaved, setSmbiosSaved] = useState(null);  // what the server holds
+            const [smbiosLoadError, setSmbiosLoadError] = useState('');
+            const [smbiosSaving, setSmbiosSaving] = useState(false);
+            // an answer that comes back after a switch to another cluster is dropped
+            const smbiosCluster = useRef(clusterId);
+            smbiosCluster.current = clusterId;
             
             // Local authFetch for this component - NS Jan 2026
             const authFetch = (url, opts = {}) => fetch(url, { ...opts, credentials: 'include', headers: { ...opts.headers, ...getAuthHeaders() } });
@@ -4480,9 +4625,70 @@
                 setSmbiosLoading(false);
             };
             
-            // Load status on mount
+            const loadSmbiosSettings = async () => {
+                const cid = clusterId;
+                if (!cid) return;
+                setSmbiosLoadError('');
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${cid}/smbios-autoconfig`);
+                    const data = await res.json().catch(() => ({}));
+                    if (smbiosCluster.current !== cid) return;
+                    if (!res.ok) {
+                        setSmbiosLoadError(data.error || `${t('failedToLoad') || 'Failed to load'} (HTTP ${res.status})`);
+                        return;
+                    }
+                    setSmbiosForm(data);
+                    setSmbiosSaved(data);
+                } catch (e) {
+                    if (smbiosCluster.current === cid) setSmbiosLoadError(e.message);
+                }
+            };
+            
+            // one PUT with every field, true only when the server took it
+            const saveSmbiosSettings = async (values) => {
+                const cid = clusterId;
+                setSmbiosSaving(true);
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${cid}/smbios-autoconfig`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            enabled: !!values.enabled,
+                            manufacturer: values.manufacturer,
+                            product: values.product,
+                            version: values.version,
+                            family: values.family
+                        })
+                    });
+                    const result = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        addToast(result.error || `${t('saveFailed') || 'Save failed'} (HTTP ${res.status})`, 'error');
+                        return false;
+                    }
+                    if (smbiosCluster.current === cid) setSmbiosSaved(result.settings || values);
+                    return true;
+                } catch (e) {
+                    addToast('Error: ' + e.message, 'error');
+                    return false;
+                } finally {
+                    setSmbiosSaving(false);
+                }
+            };
+            
+            const saveSmbiosForm = async () => {
+                if (!smbiosForm) return;
+                if (await saveSmbiosSettings(smbiosForm)) addToast(t('settingsSaved') || 'Settings saved', 'success');
+            };
+            
+            const smbiosDirty = !!(smbiosForm && smbiosSaved) &&
+                ['enabled', 'manufacturer', 'product', 'version', 'family'].some(k => smbiosForm[k] !== smbiosSaved[k]);
+            
+            // Load settings and status on mount and for each cluster
             useEffect(() => {
+                setSmbiosForm(null);
+                setSmbiosSaved(null);
                 if (clusterId) {
+                    loadSmbiosSettings();
                     loadSmbiosStatus();
                 }
             }, [clusterId]);
@@ -4532,37 +4738,33 @@
             
             // Deploy to all nodes
             const deployToAll = async () => {
+                if (!smbiosForm) return;
                 if (!confirm(t('deploySmbiosConfirm') || 'Deploy SMBIOS Auto-Config to all nodes?')) return;
                 setSmbiosLoading(true);
                 try {
-                    // Save config first
-                    await authFetch(`${API_URL}/clusters/${clusterId}/smbios-autoconfig`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            manufacturer: selectedCluster?.smbios_manufacturer || 'Proxmox',
-                            product: selectedCluster?.smbios_product || 'PegaProxManagment',
-                            version: selectedCluster?.smbios_version || 'v1',
-                            family: selectedCluster?.smbios_family || 'ProxmoxVE'
-                        })
-                    });
+                    // the nodes get the saved settings, so save what the form shows first
+                    if (!(await saveSmbiosSettings(smbiosForm))) return;
                     
                     // Deploy
                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/smbios-autoconfig/deploy-all`, {
                         method: 'POST'
                     });
-                    const result = await res.json();
-                    if (result.success) {
+                    const result = await res.json().catch(() => ({}));
+                    if (res.ok && result.success) {
                         addToast(result.message, 'success');
-                        if (updateConfig) updateConfig('smbios_enabled', true);
+                        // deployed means enabled; kept with the other settings now
+                        if (!smbiosForm.enabled && await saveSmbiosSettings({ ...smbiosForm, enabled: true })) {
+                            setSmbiosForm(f => f && { ...f, enabled: true });
+                        }
                         await loadSmbiosStatus();
                     } else {
-                        addToast(result.error || 'Deploy failed', 'error');
+                        addToast(result.error || result.message || 'Deploy failed', 'error');
                     }
                 } catch (e) {
                     addToast('Error: ' + e.message, 'error');
+                } finally {
+                    setSmbiosLoading(false);
                 }
-                setSmbiosLoading(false);
             };
             
             // Count running nodes
@@ -4612,50 +4814,73 @@
                             <label className="block text-xs text-gray-400 mb-1">Manufacturer</label>
                             <input 
                                 type="text" 
-                                value={selectedCluster?.smbios_manufacturer || 'Proxmox'} 
-                                onChange={(e) => updateConfig && updateConfig('smbios_manufacturer', e.target.value)}
-                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                value={smbiosForm?.manufacturer ?? ''}
+                                onChange={(e) => { const v = e.target.value; setSmbiosForm(f => ({ ...f, manufacturer: v })); }}
+                                disabled={!smbiosForm}
+                                maxLength={64}
+                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm disabled:opacity-50"
                             />
                         </div>
                         <div>
                             <label className="block text-xs text-gray-400 mb-1">Product</label>
                             <input 
                                 type="text" 
-                                value={selectedCluster?.smbios_product || 'PegaProxManagment'} 
-                                onChange={(e) => updateConfig && updateConfig('smbios_product', e.target.value)}
-                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                value={smbiosForm?.product ?? ''}
+                                onChange={(e) => { const v = e.target.value; setSmbiosForm(f => ({ ...f, product: v })); }}
+                                disabled={!smbiosForm}
+                                maxLength={64}
+                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm disabled:opacity-50"
                             />
                         </div>
                         <div>
                             <label className="block text-xs text-gray-400 mb-1">Version</label>
                             <input 
                                 type="text" 
-                                value={selectedCluster?.smbios_version || 'v1'} 
-                                onChange={(e) => updateConfig && updateConfig('smbios_version', e.target.value)}
-                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                value={smbiosForm?.version ?? ''}
+                                onChange={(e) => { const v = e.target.value; setSmbiosForm(f => ({ ...f, version: v })); }}
+                                disabled={!smbiosForm}
+                                maxLength={64}
+                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm disabled:opacity-50"
                             />
                         </div>
                         <div>
                             <label className="block text-xs text-gray-400 mb-1">Family</label>
                             <input 
                                 type="text" 
-                                value={selectedCluster?.smbios_family || 'ProxmoxVE'} 
-                                onChange={(e) => updateConfig && updateConfig('smbios_family', e.target.value)}
-                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                value={smbiosForm?.family ?? ''}
+                                onChange={(e) => { const v = e.target.value; setSmbiosForm(f => ({ ...f, family: v })); }}
+                                disabled={!smbiosForm}
+                                maxLength={64}
+                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm disabled:opacity-50"
                             />
                         </div>
                     </div>
                     
-                    {/* Deploy Button */}
-                    <div className="flex gap-3 mb-4">
+                    {smbiosLoadError && (
+                        <p className="text-xs text-red-400 mb-4">{smbiosLoadError}</p>
+                    )}
+                    
+                    {/* Save + Deploy */}
+                    <div className="flex flex-wrap items-center gap-3 mb-4">
+                        <button
+                            onClick={saveSmbiosForm}
+                            disabled={!smbiosDirty || smbiosSaving}
+                            className="flex items-center gap-2 px-4 py-2 bg-proxmox-orange rounded-lg text-white text-sm font-medium hover:bg-orange-600 transition-colors disabled:opacity-50"
+                        >
+                            {smbiosSaving ? <Icons.RotateCw className="w-4 h-4 animate-spin" /> : <Icons.Save className="w-4 h-4" />}
+                            {t('save') || 'Save'}
+                        </button>
                         <button
                             onClick={deployToAll}
-                            disabled={smbiosLoading}
+                            disabled={smbiosLoading || smbiosSaving || !smbiosForm}
                             className="flex items-center gap-2 px-4 py-2 bg-green-600 rounded-lg text-white text-sm font-medium hover:bg-green-500 transition-colors disabled:opacity-50"
                         >
                             {smbiosLoading ? <Icons.RotateCw className="w-4 h-4 animate-spin" /> : <Icons.Download className="w-4 h-4" />}
                             {installedCount > 0 ? (t('updateAllNodes') || 'Update All Nodes') : (t('deployToAllNodes') || 'Deploy to All Nodes')}
                         </button>
+                        {smbiosDirty && (
+                            <span className="text-xs text-yellow-400">{t('unsavedChanges') || 'Unsaved changes'}</span>
+                        )}
                     </div>
                     
                     {/* Per-Node Status */}

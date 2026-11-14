@@ -17,12 +17,18 @@ LABEL maintainer="support@pegaprox.com"
 # NS Oct 2026 - 32-bit ARM (arm/v7) has no wheels for gevent, greenlet, cffi, pynacl,
 # pillow and a few more: they compile below, which wants a C++ compiler, make and the
 # headers pillow builds against
+# MK Oct 2026 - corosync-qnetd and the NSS tools for the QNetd sidecar (`qnetd run`,
+# docs/qdevice.md). Its package makes a CA when it is installed: that one goes again in
+# this same layer, or every container of the image would share one CA key. The sidecar
+# makes its own on its volume at first start
 ARG TARGETARCH
 ARG TARGETVARIANT
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     gcc libffi-dev libssl-dev \
     openssh-client sshpass \
+    corosync-qnetd libnss3-tools \
     $(if [ "$TARGETARCH/$TARGETVARIANT" = "arm/v7" ]; then echo g++ make zlib1g-dev libjpeg62-turbo-dev; fi) \
+    && rm -rf /etc/corosync/qnetd/nssdb \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -53,6 +59,9 @@ COPY --chown=pegaprox:pegaprox update.sh .
 # bundle this instance serves (#625)
 COPY --chown=pegaprox:pegaprox packaging/witness/install.sh packaging/witness/install.sh
 COPY --chown=pegaprox:pegaprox systemd/pegaprox-witness.service systemd/pegaprox-witness.service
+# the QNetd helper: the sidecar serves it on its socket, and PegaProx copies it to the
+# QNetd hosts it reaches over SSH
+COPY --chown=pegaprox:pegaprox packaging/qnetd/pegaprox-qnetd-helper packaging/qnetd/pegaprox-qnetd-helper
 # NS Oct 2026 (#1134): plugins/ above is what the image ships. The plugins are loaded from
 # the config volume; PegaProx brings the shipped ones in from PEGAPROX_PLUGINS_SEED on
 # every start and leaves each plugin's config.json alone - a new image used to reset it
@@ -68,8 +77,15 @@ ENV PEGAPROX_BRANCH=${PEGAPROX_BRANCH}
 
 # Create runtime directories
 # /app/witness: the state of the witness, for the command `witness` (#625)
+# the QNetd sidecar runs corosync-qnetd as this image's user: its NSS database (a volume
+# of the sidecar alone), its own IPC socket, and the helper socket in a volume shared
+# with the PegaProx container only. A new named volume takes owner and mode from here
 RUN mkdir -p /app/config /app/logs /app/backups /app/witness \
-    && chown -R pegaprox:pegaprox /app
+    && chown -R pegaprox:pegaprox /app \
+    && mkdir -p /etc/corosync/qnetd /run/corosync-qnetd /run/pegaprox-qnetd \
+    && chown pegaprox:pegaprox /etc/corosync/qnetd /run/corosync-qnetd /run/pegaprox-qnetd \
+    && chmod 0750 /etc/corosync/qnetd \
+    && chmod 0770 /run/corosync-qnetd /run/pegaprox-qnetd
 
 # Persistent volumes for config and logs
 VOLUME ["/app/config", "/app/logs"]
@@ -80,6 +96,8 @@ USER pegaprox
 EXPOSE 5000 5001 5002
 # the witness, when the container runs the command `witness`
 EXPOSE 5005
+# corosync-qnetd, when the container runs the command `qnetd run`
+EXPOSE 5403
 
 # MK May 2026 — start_period bumped from 15s to 120s and retries from 3 to 5
 # to give the one-time plain→SQLCipher DB migration room to finish on first
@@ -98,8 +116,10 @@ EXPOSE 5005
 # matches the served protocol; the opposite scheme is only a misconfig fallback.
 # MK Oct 2026 (#625): a container that runs the witness (its state file in /app/witness)
 # has no app on 5000 - it is healthy when `witness health` says so, and only then.
+# The QNetd sidecar likewise: its NSS database is only ever in its own volume.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=5 \
     CMD if [ -f /app/witness/ha_witness.json ]; then exec python3 pegaprox_multi_cluster.py witness health; fi; \
+        if [ -f /etc/corosync/qnetd/nssdb/cert9.db ]; then exec python3 pegaprox_multi_cluster.py qnetd health; fi; \
         python3 -c "import os,urllib.request,ssl; s=('http' if os.environ.get('PEGAPROX_BEHIND_PROXY','').lower() in ('1','true','yes') else 'https'); urllib.request.urlopen(s+'://127.0.0.1:5000/api/health', context=(ssl._create_unverified_context() if s=='https' else None), timeout=4)" 2>/dev/null \
         || python3 -c "import os,urllib.request,ssl; s=('https' if os.environ.get('PEGAPROX_BEHIND_PROXY','').lower() in ('1','true','yes') else 'http'); urllib.request.urlopen(s+'://127.0.0.1:5000/api/health', context=(ssl._create_unverified_context() if s=='https' else None), timeout=4)" \
         || exit 1

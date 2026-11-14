@@ -151,6 +151,8 @@ def test_a_confined_caller_still_reads_the_shared_content(api, seed):
     """Reading ISOs and templates stays theirs: they boot their guests from them."""
     who = _who(api, seed)
     m = _manager(api)
+    # MK Nov 2026 (#1218) - of a node their guest runs on
+    m.get_vm_resources.return_value = [{'vmid': 100, 'node': 'pve1', 'type': 'qemu'}]
     listing = MagicMock(status_code=200)
     listing.json.return_value = {'data': [{'volid': 'local:iso/debian.iso', 'content': 'iso', 'size': 1}]}
     m._create_session.return_value.get.return_value = listing

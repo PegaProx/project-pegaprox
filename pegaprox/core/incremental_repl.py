@@ -32,6 +32,20 @@ logger = logging.getLogger(__name__)
 # lock the relay by filling an undrained stderr buffer.
 _RBD = "rbd --no-progress"
 
+# how long both ends get after the stream to send their exit status: an importer
+# commits what it got in that time, one hung on its storage does not
+_EXIT_WAIT = 600
+
+
+def _exit_status(chan, deadline):
+    """The channel's exit status, or None if there is none by `deadline` (monotonic)."""
+    # counted, so a clock that stands still cannot keep it going
+    for _ in range(int(max(0.0, deadline - time.monotonic()) / 0.2) + 1):
+        if chan.exit_status_ready():
+            return chan.recv_exit_status()
+        time.sleep(0.2)
+    return chan.recv_exit_status() if chan.exit_status_ready() else None
+
 
 def _relay_pipe(src_ssh, src_cmd, tgt_ssh, tgt_cmd, chunk=4 * 1024 * 1024,
                 timeout=14400, log=None):
@@ -87,8 +101,27 @@ def _relay_pipe(src_ssh, src_cmd, tgt_ssh, tgt_cmd, chunk=4 * 1024 * 1024,
         try: tgt_chan.shutdown_write()
         except Exception: pass
 
-    src_rc = src_chan.recv_exit_status()
-    tgt_rc = tgt_chan.recv_exit_status()
+    if relay_err:
+        # Nobody reads the exporter any more. Once its window is full it blocks and never
+        # exits, so its exit status would never come. Closing the channel ends it.
+        try: src_chan.close()
+        except Exception: pass
+
+    # recv_exit_status alone waits for ever, on an importer stuck on its storage too.
+    # Both get a while after the stream to finish, then the run is given up with 124
+    # (what coreutils' timeout says) and the job is free for its next turn.
+    wait = min(timeout, _EXIT_WAIT)
+    deadline = time.monotonic() + wait
+    stuck, rcs = [], []
+    for side, ch in (('exporter', src_chan), ('importer', tgt_chan)):
+        rc = _exit_status(ch, deadline)
+        if rc is None:
+            stuck.append(f"no exit status from the {side} within {wait:.0f}s")
+            rc = 124
+        rcs.append(rc)
+        try: ch.close()
+        except Exception: pass
+    src_rc, tgt_rc = rcs
 
     def _slurp(ssh, path):
         try:
@@ -100,7 +133,7 @@ def _relay_pipe(src_ssh, src_cmd, tgt_ssh, tgt_cmd, chunk=4 * 1024 * 1024,
     tgt_err = _slurp(tgt_ssh, f"{tok}.terr")
     _slurp(tgt_ssh, f"{tok}.tout")   # importer stdout — discard, just clean up
 
-    parts = [p for p in (relay_err, src_err and f"src: {src_err}",
+    parts = [p for p in (relay_err, *stuck, src_err and f"src: {src_err}",
                          tgt_err and f"tgt: {tgt_err}") if p]
     ok = (relay_err is None) and src_rc == 0 and tgt_rc == 0
     return {'ok': ok, 'bytes': total, 'src_rc': src_rc, 'tgt_rc': tgt_rc,

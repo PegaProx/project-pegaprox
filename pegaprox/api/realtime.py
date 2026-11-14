@@ -26,8 +26,8 @@ from pegaprox.globals import (
     sse_clients, sse_clients_lock,
 )
 from pegaprox.utils.auth import (require_auth, validate_session, session_alive,
-                                 api_token_alive, request_credential)
-from pegaprox.utils.rbac import get_user_clusters, acts_as_admin
+                                 api_token_alive, request_credential, PORTAL_ONLY_ERROR)
+from pegaprox.utils.rbac import get_user_clusters, acts_as_admin, portal_only_holds
 from pegaprox.utils.realtime import (
     broadcast_update, broadcast_sse, broadcast_action,
     create_sse_token, validate_sse_token,
@@ -107,6 +107,12 @@ def ws_live_updates(ws):
         if _user_data is None:
             ws.send(json.dumps({'type': 'error', 'message': 'Authentication required'}))
             return
+        # MK Oct 2026 - the session comes in this message, where hold_portal_only_accounts
+        # (app.py) does not look: a portal_only account gets no live stream
+        if portal_only_holds(_user_data):
+            ws.send(json.dumps({'type': 'error', 'message': PORTAL_ONLY_ERROR['error'],
+                                'code': PORTAL_ONLY_ERROR['code']}))
+            return
         _allowed = get_user_clusters(_user_data)  # None = admin (all clusters)
         # MK Oct 2026 - the connect message is checked like the subscribe message below: an
         # unrestricted caller's list went into the registry as sent, and one unhashable entry
@@ -157,6 +163,9 @@ def ws_live_updates(ws):
                 _acct = _stream_identity(username)
                 if _acct is None or not _acct.get('enabled', True):
                     logging.info(f"[WS] closing stream for '{_sl(username)}' — account gone or disabled")
+                    break
+                if portal_only_holds(_acct):
+                    logging.info(f"[WS] closing stream for '{_sl(username)}' - portal_only now")
                     break
                 # the session it was opened under, signed out or revoked since (#1038)
                 if not session_alive(session_id):
@@ -246,11 +255,12 @@ def narrow_stream_scope(previous, fresh_allowed):
 
 
 # The SSH console server this process starts (api/vms.py start_ssh_websocket_server) gets
-# this in its environment and sends it back with every validate call. Only that caller is
-# handed the cluster context, and the PVE session ticket in it is one of the cluster's own
-# account - root@pam unless an admin set another, so root on every node. Any other holder
-# of a ws token learns whether the token is good and nothing else. New with every start:
-# the console server is restarted with the app.
+# this in its environment and sends it back with every validate and cluster-creds call.
+# Only that caller is handed the cluster context, and the PVE session ticket in it is one
+# of the cluster's own account - root@pam unless an admin set another, so root on every
+# node. Any other holder of a ws token learns whether the token is good and nothing else;
+# cluster-creds (api/auth.py) answers nobody else at all. New with every start: the
+# console server is restarted with the app.
 CONSOLE_SERVER_HEADER = 'X-PegaProx-Console-Server'
 _CONSOLE_SERVER_SECRET = secrets.token_urlsafe(32)
 
@@ -259,8 +269,11 @@ def console_server_secret():
     return _CONSOLE_SERVER_SECRET
 
 
-def _from_console_server():
+def from_console_server():
+    """True for a request of the console server this process started."""
     sent = request.headers.get(CONSOLE_SERVER_HEADER) or ''
+    if not sent or not _CONSOLE_SERVER_SECRET:
+        return False
     return hmac.compare_digest(sent.encode(), _CONSOLE_SERVER_SECRET.encode())
 
 
@@ -472,6 +485,13 @@ def validate_ws_token_api():
                 if caller_is_scoped({**user, 'username': data['user']}, requested_cluster):
                     logging.warning(f"[WS-TOKEN] user '{_sl(data['user'])}' is confined on '{_sl(requested_cluster)}', no node shell")
                     return jsonify({'error': 'Access denied: this action affects the whole cluster'}), 403
+                # MK Nov 2026 - and none on a cluster with SSH switched off. Answered here,
+                # not by the SSH server: without this answer it gets no node address
+                from pegaprox.api.helpers import node_shell_refusal
+                from pegaprox.globals import cluster_managers
+                why = node_shell_refusal(cluster_managers.get(requested_cluster))
+                if why:
+                    return jsonify({'code': 'SSH_DISABLED', 'error': why}), 409
 
             # MK May 2026 - lightweight cluster context for the SSH/VNC proxy.
             # We intentionally do NOT call mgr._get_node_ip() here: that has a
@@ -488,7 +508,7 @@ def validate_ws_token_api():
                 from pegaprox.globals import cluster_managers
                 mgr = cluster_managers.get(requested_cluster)
                 # only for our own console server, see CONSOLE_SERVER_HEADER
-                if mgr is not None and _from_console_server():
+                if mgr is not None and from_console_server():
                     cluster_host = getattr(mgr, 'host', None)
                     cfg = getattr(mgr, 'config', None)
                     node_ips = {}
@@ -704,6 +724,9 @@ def sse_updates():
                     if _acct is None or not _acct.get('enabled', True):
                         logging.info(f"[SSE] closing stream for '{_sl(user)}' — account gone or disabled")
                         return
+                    if portal_only_holds(_acct):
+                        logging.info(f"[SSE] closing stream for '{_sl(user)}' - portal_only now")
+                        return
                     _authz_misses = 0
                     # Both constraints have to hold, and each is authoritative in one
                     # direction: a scoped token must not widen because its owner was promoted,
@@ -846,7 +869,8 @@ def test_smtp():
     saved_settings = load_server_settings()
 
     # Build SMTP settings from request or use saved
-    smtp_host = data.get('smtp_host', '')
+    # MK Nov 2026 - read as text, a null as no host (a number or a list had no .strip())
+    smtp_host = str(data.get('smtp_host') or '')
 
     if smtp_host:
         # Use provided settings for testing (before save)
@@ -856,8 +880,12 @@ def test_smtp():
             # NS Aug 2026 (Aikido pentest) — only reuse the saved SMTP password when the test host
             # matches the saved host; otherwise a settings admin could point the stored credential
             # at an attacker-controlled MX = credential exfil. A different host needs its own password.
-            if smtp_host != (saved_settings.get('smtp_host') or ''):
-                return jsonify({'error': 'A password is required to test a host other than the saved one'}), 400
+            # MK Nov 2026 - and its port, like the save does
+            from pegaprox.api.settings import _port_of
+            if smtp_host.strip().lower().rstrip('.') != str(saved_settings.get('smtp_host') or '').strip().lower().rstrip('.') \
+                    or _port_of(data.get('smtp_port'), 587) != _port_of(saved_settings.get('smtp_port'), 587):
+                return jsonify({'error': 'A password is required to test a host other than the saved one',
+                                'code': 'CREDENTIAL_REQUIRED'}), 400
             # Use saved password - NS: Feb 2026: now encrypted in DB, must decrypt
             raw_password = saved_settings.get('smtp_password', '')
             try:

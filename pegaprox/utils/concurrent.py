@@ -4,6 +4,7 @@ PegaProx Concurrency Helpers - Layer 2
 """
 
 import os
+import time
 import logging
 from typing import Dict
 
@@ -191,7 +192,7 @@ def retry_with_backoff(fn, max_retries=3, base_delay=0.5, jitter=True):
 #
 # Uses gevent pool (size-bounded) when gevent is available, otherwise falls
 # back to a thread pool with a Semaphore.
-def run_per_node(node_callables, max_concurrent=8, timeout=120):
+def run_per_node(node_callables, max_concurrent=8, timeout=120, whole=False):
     """Fan out per-node callables with bounded concurrency.
 
     Args:
@@ -200,6 +201,8 @@ def run_per_node(node_callables, max_concurrent=8, timeout=120):
             Tuned conservatively — going higher than 8 risks per-host SSH
             rate-limits on busier nodes. Per-cluster, NOT global.
         timeout: per-task wall-clock timeout in seconds.
+        whole: the timeout bounds the whole fan-out instead (a read with a
+            deadline). A job whose slot comes after it is not started (None).
 
     Returns:
         dict {node_name: result_or_None}. Failed/timed-out tasks return None,
@@ -211,18 +214,34 @@ def run_per_node(node_callables, max_concurrent=8, timeout=120):
     # Cap concurrency at the lesser of node count and max_concurrent
     n = len(node_callables)
     workers = max(1, min(int(max_concurrent), n))
+    end = time.monotonic() + timeout if whole else None
 
     # Path 1: gevent pool — preferred since pegaprox is gevent-monkey-patched
     if GEVENT_AVAILABLE:
         try:
             from gevent.pool import Pool as GP
-            pool = GP(size=workers)
             jobs = {}
-            for node, fn in node_callables.items():
-                # bind node name into the closure so the callable receives it
-                jobs[node] = pool.spawn(_run_node_safe, node, fn)
+            if whole:
+                # MK Nov 2026 - Pool.spawn blocks while every slot is busy, so the join below only
+                # began once the last job had a slot and the timeout cut off the final wave alone.
+                # Here they all start at once and queue for a slot; one that gets it too late
+                # does nothing
+                from gevent import spawn
+                from gevent.lock import Semaphore
+                gate = Semaphore(workers)
+
+                def _slot(node, fn):
+                    with gate:
+                        return None if time.monotonic() >= end else _run_node_safe(node, fn)
+                for node, fn in node_callables.items():
+                    jobs[node] = spawn(_slot, node, fn)
+            else:
+                pool = GP(size=workers)
+                for node, fn in node_callables.items():
+                    # bind node name into the closure so the callable receives it
+                    jobs[node] = pool.spawn(_run_node_safe, node, fn)
             from gevent import joinall
-            joinall(list(jobs.values()), timeout=timeout)
+            joinall(list(jobs.values()), timeout=max(end - time.monotonic(), 0) if whole else timeout)
             # #777 — NB: deliberately NOT reaping stragglers here. run_per_node uses a LOCAL,
             # bounded pool (not the shared GEVENT_POOL that caused the outage), so a straggler
             # can't exhaust the request pool; and some callers (multi_sdn writes) do remote
@@ -249,7 +268,7 @@ def run_per_node(node_callables, max_concurrent=8, timeout=120):
 
     def _worker(node, fn):
         with sem:
-            r = _run_node_safe(node, fn)
+            r = None if whole and time.monotonic() >= end else _run_node_safe(node, fn)
         with lock:
             results[node] = r
 
@@ -258,11 +277,14 @@ def run_per_node(node_callables, max_concurrent=8, timeout=120):
         t.start()
         threads.append(t)
     for t in threads:
-        t.join(timeout=timeout)
-    # Any thread still alive after timeout → that node is None
+        t.join(timeout=max(end - time.monotonic(), 0) if whole else timeout)
+    # Any thread still alive after timeout → that node is None. With a deadline the answer is
+    # a copy: a straggler writes into results, the caller's dict stays as it was handed out
+    with lock:
+        out = dict(results) if whole else results
     for node in node_callables:
-        results.setdefault(node, None)
-    return results
+        out.setdefault(node, None)
+    return out
 
 
 def _run_node_safe(node, fn):

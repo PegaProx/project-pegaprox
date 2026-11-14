@@ -30,7 +30,20 @@ if [ "$1" = "configure" ]; then
         /usr/share/pegaprox/plugins /var/lib/pegaprox/plugins --owner pegaprox:pegaprox \
         || echo "pegaprox: not every bundled plugin could be brought into /var/lib/pegaprox/plugins (see above)" >&2
 
+    # NS Nov 2026 (#1226): with python3-sqlcipher3 the first start encrypts the database, and
+    # without a key in /etc/pegaprox it would make one right next to it. The unit runs the
+    # same before every start (ExecStartPre); an image build has no systemd running and is
+    # left to that, so every copy of an image gets a key of its own.
+    if [ -d /run/systemd/system ]; then
+        /usr/bin/python3 -I -B /usr/lib/pegaprox/packaging/debian/master_key.py \
+            --key /etc/pegaprox/secret.key --state-dir /var/lib/pegaprox --user pegaprox \
+            --unit pegaprox.service \
+            || echo "pegaprox: the master key is not in place, PegaProx does not start until it is (see above)" >&2
+    fi
+
     systemctl enable pegaprox.service
+    # the unit as this package ships it, ExecStartPre included, not the one of before the upgrade
+    systemctl daemon-reload || true
     systemctl restart pegaprox.service || true
 
 fi

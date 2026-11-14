@@ -117,16 +117,21 @@ PegaProx implements the following security measures:
 
 - **Database encryption at rest:** Where the `sqlcipher3` module is available, the whole
   database is encrypted with SQLCipher 4 (AES-256-CBC + HMAC-SHA512). That is the case for
-  installs with `deploy.sh` or pip on Linux x86_64 and for the amd64 Docker image. The Debian
-  package, the appliance images and the ARM Docker images use plain SQLite. On every install,
+  installs with `deploy.sh` or pip on Linux x86_64 and aarch64, macOS and Windows, for the
+  amd64 and arm64 Docker images and appliance images, and for the Debian package on amd64.
+  The 32-bit ARM Docker image uses plain SQLite, and so does the Debian package on arm64
+  where its `python3-sqlcipher3` holds the x86_64 module only (the one of apt.pegaprox.com, once that repository is live,
+  and the one the appliance images build, is built for arm64). On every install,
   sensitive fields (cluster passwords, SSH keys, API token secrets, TOTP secrets) are also
   encrypted individually with AES-256-GCM. PegaProx warns at startup when the database stays
   plain SQLite, and the `--keystore-status` option shows the active mode and the key source.
 - **Key management:** The master key is loaded from `PEGAPROX_DB_KEY`, a systemd
   `LoadCredentialEncrypted` credential, `PEGAPROX_KEY_FILE` or `/etc/pegaprox/secret.key`.
-  `deploy.sh` creates `/etc/pegaprox/secret.key`. Docker, the Debian package and the appliance
-  keep their keys in the config directory by default, so treat a backup of `config/` as secret
-  or move the key out of it.
+  `deploy.sh` creates `/etc/pegaprox/secret.key`, the Debian package before PegaProx starts
+  (an appliance at its first start). A package install whose database was encrypted before
+  keeps that key: it is copied there from the config directory, where the old file stays.
+  Docker keeps its key in the config directory by default, so treat a backup of `config/` as
+  secret or move the key out of it.
 - **Encrypted exports:** Configuration backups are always password-protected and encrypted
   with AES-256-GCM, with the key derived from the password by PBKDF2-HMAC-SHA256.
 - **Password hashing:** Local user passwords are hashed with Argon2id. Hashes from older
@@ -136,9 +141,12 @@ PegaProx implements the following security measures:
 - **Transport security:** The web interface is served over HTTPS, with a self-signed
   certificate until you add your own or use the built-in ACME support. TLS certificate
   verification can be enabled per connection for Proxmox VE clusters, XCP-ng pools and ESXi
-  hosts, and for LDAP in the LDAP settings. It is off by default because these systems usually
-  start with self-signed certificates. PegaProx logs a security warning while it is off for a
-  Proxmox VE cluster or for LDAP.
+  hosts. It is off by default because these systems usually start with self-signed
+  certificates. LDAP set up since 1.5.0 starts with STARTTLS and certificate verification on,
+  and the CA certificate of an internal CA goes into the LDAP settings. A directory configured
+  before keeps its settings, and the LDAP settings show a note while it runs in plain text or
+  without the check. PegaProx logs a security warning while verification is off for a Proxmox
+  VE cluster or for LDAP, and while LDAP runs in plain text.
 - **SSH host key verification:** Host keys are pinned on first contact and a changed key is
   rejected. A strict mode that also rejects unknown hosts is enabled with
   `PEGAPROX_SSH_STRICT_HOST_KEYS=1`.
@@ -205,7 +213,7 @@ To keep your PegaProx installation secure:
    cluster. If the cluster was unreachable at that moment, delete the token in Proxmox VE
    (Datacenter → Permissions → API Tokens).
 7. **Enable TLS certificate verification** for cluster and LDAP connections, using a trusted
-   certificate or your own CA.
+   certificate or your own CA (for LDAP, paste that CA certificate into the LDAP settings).
 8. **Enable strict SSH host key checking** (`PEGAPROX_SSH_STRICT_HOST_KEYS=1`) once all nodes
    are known.
 9. **Use full-database encryption** if you need the database encrypted as a whole (an install

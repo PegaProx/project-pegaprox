@@ -61,7 +61,7 @@ def test_the_alert_dialog_strings_exist_in_every_language():
     body = _translations()
     for key in ('rollingUpdates', 'rollingUpdateAlarmHelp'):
         found = len(re.findall(rf'^\s*{key}:', body, re.M))
-        assert found == 9, f'{key} is in {found} of 9 language blocks - the UI would show the key'
+        assert found == 10, f'{key} is in {found} of 10 language blocks - the UI would show the key'
 
 
 def test_the_option_reached_the_built_bundle():

@@ -117,11 +117,14 @@ def broadcast_update(update_type: str, data: dict, cluster_id: str = None):
                 candidates.append((client_id, client_info))
 
         clients_to_send = []
+        _node_views = {}     # (user, role) -> how it sees THIS node action frame
+        _own_message = []    # the frame for a confined client, made once
         for client_id, client_info in candidates:
             # Only send if client is subscribed to this cluster or all clusters
             subscribed = client_info.get('clusters')
             if not (cluster_id is None or subscribed is None or cluster_id in subscribed):
                 continue
+            client_message = message
             # sec (audit): the WS path had cluster-level scoping only, while its SSE twin
             # filters per VM. 'action' frames name the vmid, the VM's NAME and the operator
             # (create/delete/migrate/power), so a pool-/ACL-scoped client watching a cluster
@@ -133,18 +136,38 @@ def broadcast_update(update_type: str, data: dict, cluster_id: str = None):
                     if not _sse_user_can_view_vm(client_info.get('user'), cluster_id, _rid,
                                                  client_info.get('effective_role')):
                         continue
-            clients_to_send.append((client_id, client_info['ws'], client_info['lock']))
+                else:
+                    # MK Nov 2026 (#1218) - a node's maintenance, reboot, removal and the start,
+                    # stop or move of all its guests: as the SSE node_status frame, node.view,
+                    # and a confined client only about a node its own guests run on, without
+                    # the guests of the action (others' among them) and its target
+                    _key = (client_info.get('user'), client_info.get('effective_role'))
+                    _view = _node_views.get(_key, _SSE_FILTER_MISSING)
+                    if _view is _SSE_FILTER_MISSING:
+                        _view = _ws_node_action_view(_key[0], _rid if isinstance(_rid, str) else None,
+                                                     cluster_id, _key[1])
+                        _node_views[_key] = _view
+                    if _view is None:
+                        continue
+                    if _view == 'own':
+                        if not _own_message:
+                            _details = {k: v for k, v in ((data or {}).get('details') or {}).items()
+                                        if k not in ('vms', 'target')}
+                            _own_message.append(json.dumps(dict(json.loads(message),
+                                                                data=dict(data, details=_details))))
+                        client_message = _own_message[0]
+            clients_to_send.append((client_id, client_info['ws'], client_info['lock'], client_message))
 
         # Send to clients outside the main lock.
         # A client already mid-send holds its own lock, and blocking on it here let one slow or
         # wedged consumer delay the frame for everyone after it in the list. Skip it for this
         # frame instead; the next broadcast reaches it once it has caught up.
-        for client_id, ws, client_lock in clients_to_send:
+        for client_id, ws, client_lock, client_message in clients_to_send:
             if not client_lock.acquire(blocking=False):
                 logging.debug(f"[WS] client {client_id} still sending — skipped this frame")
                 continue
             try:
-                ws.send(message)
+                ws.send(client_message)
             except Exception as e:
                 logging.debug(f"Failed to send to client {client_id}: {e}")
                 disconnected.append(client_id)
@@ -437,6 +460,140 @@ def _hang_up(ws):
 
 _SSE_FILTER_MISSING = object()
 
+# MK Nov 2026 - the nodes of a cluster a non-admin stream may see, as the resources pass last
+# found them: (cluster_id, user, role) -> (monotonic, scope). None is the whole cluster, a
+# frozenset the nodes its own guests run on, False no cluster.view, _SCOPE_UNSEEN confined
+# with no resources pass yet. The frames that carry nodes are cut from it, so the per-guest
+# work stays in the resources pass. That one goes out at least every 10th loop and a loop
+# takes up to 9 s, hence the TTL; an entry older than it is not trusted.
+_SSE_SCOPE_TTL = 120.0
+_SCOPE_UNSEEN = object()
+_sse_node_scope = {}
+_sse_node_scope_lock = threading.Lock()
+_sse_scope_pruned_at = 0.0
+
+# what a non-admin needs for these frames, as their REST twins ask it
+_NODE_EVENT_PERMS = {'node_status': 'node.view', 'ha_status': 'ha.view'}
+# HA events whose message lists guests of the node by vmid, others' included
+_HA_EVENTS_NAMING_GUESTS = ('ha.recovery_left_guests', 'ha.recovery_node_back',
+                            'ha.recovery_unclassified', 'ha.recovery_interrupted')
+
+
+def _node_scope_of(user, cluster_id, guests=None):
+    """The node scope of `user` in `cluster_id` (see _sse_node_scope). guests: the rows of
+    the resources frame this user gets; without them a confined user's nodes are unseen.
+    Fails closed: a check that fails reads as no cluster.view, or as confined."""
+    from pegaprox.utils.rbac import has_permission
+    from pegaprox.api.helpers import caller_is_scoped
+    try:
+        if not has_permission(user, 'cluster.view'):
+            return False
+    except Exception:
+        return False
+    try:
+        if not caller_is_scoped(user, cluster_id):
+            return None
+    except Exception:
+        pass
+    if guests is None:
+        return _SCOPE_UNSEEN
+    return frozenset(r.get('node') for r in guests if r.get('node'))
+
+
+def _note_node_scope(cluster_id, username, effective_role, scope, keep_fresh=False):
+    """Store a node scope and hand back the one that holds. keep_fresh: leave an entry that
+    is still fresh, so a guess from a metrics frame never covers a resources pass."""
+    global _sse_scope_pruned_at
+    key = (cluster_id, username, effective_role)
+    now = time.monotonic()
+    with _sse_node_scope_lock:
+        had = _sse_node_scope.get(key)
+        if keep_fresh and had is not None and now - had[0] < _SSE_SCOPE_TTL:
+            return had[1]
+        _sse_node_scope[key] = (now, scope)
+        if now - _sse_scope_pruned_at > _SSE_SCOPE_TTL:
+            _sse_scope_pruned_at = now
+            for k in [k for k, (t, _s) in _sse_node_scope.items() if now - t >= _SSE_SCOPE_TTL]:
+                del _sse_node_scope[k]
+    return scope
+
+
+def _sse_node_scope_for(cluster_id, username, effective_role=None, user=None):
+    """The node scope of a non-admin stream. Without a fresh entry the account is read once
+    (or `user` taken) and what it tells is kept for the TTL: no cluster.view, the whole
+    cluster, or confined. A confined stream's nodes only come from the resources pass."""
+    had = _sse_node_scope.get((cluster_id, username, effective_role))
+    if had is not None and time.monotonic() - had[0] < _SSE_SCOPE_TTL:
+        return had[1]
+    if user is None:
+        user = _sse_stored_user(username, effective_role)
+    if not user:
+        return False
+    return _note_node_scope(cluster_id, username, effective_role,
+                            _node_scope_of(user, cluster_id), keep_fresh=True)
+
+
+def _metrics_for_nodes(nodes, scope, cluster_id, timestamp):
+    """The 'metrics' frame with the nodes in `scope` only, a maintenance on them less its
+    guests. Serialized; None for a frame that is no node map."""
+    if not isinstance(nodes, dict):
+        return None
+    from pegaprox.api.helpers import nodes_in_maintenance_view, nodes_without_maintenance_guests
+    cut = {name: n for name, n in nodes.items() if name in scope}
+    if nodes_in_maintenance_view(cut):
+        cut = nodes_without_maintenance_guests(cut)
+    return _serialize_sse_message('metrics', cut, cluster_id, timestamp)
+
+
+def _sse_may_see_node_event(username, update_type, data, cluster_ids, effective_role=None):
+    """Whether a non-admin stream gets this 'node_status' / 'ha_status' frame. It needs the
+    permission (node.view / ha.view); unconfined in one of `cluster_ids` it gets the frame
+    whole, confined only one about a node its own guests run on, and none that lists guests.
+    Fails closed."""
+    user = _sse_stored_user(username, effective_role)
+    if not user or not cluster_ids:
+        return False
+    data = data if isinstance(data, dict) else {}
+    view = _node_event_view(user, username, _NODE_EVENT_PERMS[update_type], data.get('node'),
+                            cluster_ids, effective_role)
+    return view == 'whole' or (view == 'own' and data.get('event') not in _HA_EVENTS_NAMING_GUESTS)
+
+
+def _ws_node_action_view(username, node, cluster_id, effective_role=None):
+    """_node_event_view of a WebSocket client for an 'action' frame about a node (node.view).
+    One account read; the node scope comes from the SSE resources pass, so a confined client
+    that has no stream gets none of these frames."""
+    user = _sse_stored_user(username, effective_role)
+    if not user:
+        return None
+    return _node_event_view(user, username, 'node.view', node, (cluster_id,), effective_role)
+
+
+def _node_event_view(user, username, perm, node, cluster_ids, effective_role=None):
+    """How a non-admin stream sees an event about `node`: 'whole' when `user` holds `perm`
+    and is unconfined in one of `cluster_ids`, 'own' when confined and one of its own guests
+    runs on `node` (the scope of the resources pass), else None. Fails closed."""
+    from pegaprox.utils.rbac import has_permission
+    from pegaprox.api.helpers import caller_is_scoped
+    try:
+        if not has_permission(user, perm):
+            return None
+    except Exception:
+        return None
+    for cid in cluster_ids:
+        try:
+            if not caller_is_scoped(user, cid):
+                return 'whole'
+        except Exception:
+            pass
+    if not node:
+        return None
+    for cid in cluster_ids:
+        scope = _sse_node_scope_for(cid, username, effective_role, user)
+        if isinstance(scope, frozenset) and node in scope:
+            return 'own'
+    return None
+
 
 def _serialize_sse_message(update_type, data, cluster_id, timestamp):
     """One consistent SSE frame — used for the shared broadcast and per-user filtered frames."""
@@ -468,6 +625,12 @@ def _filtered_resources_frame(resources, cluster_id, username, timestamp, effect
         r for r in resources
         if user_can_access_vm(user, cluster_id, r.get('vmid'), 'vm.view', r.get('type'))
     ]
+    # MK Nov 2026 - the nodes these guests run on are what the stream shows of the cluster
+    try:
+        _note_node_scope(cluster_id, username, effective_role,
+                         _node_scope_of(user, cluster_id, allowed))
+    except Exception as e:
+        logging.debug(f"[SSE] node scope of '{_sl(username)}' on {cluster_id} not kept: {e}")
     return _serialize_sse_message('resources', allowed, cluster_id, timestamp)
 
 
@@ -756,6 +919,9 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
         _obj_frame_cache = {}     # uname -> bool: may see THIS migration/DR-plan frame (audit)
         _maint_seen_cache = {}    # uname -> bool: gets the guests of a maintenance in this cluster
         _metrics_cut = []         # the 'metrics' frame less those guests, made once
+        _metrics_frame_cache = {}  # uname -> the 'metrics' frame cut to their node scope
+        _metrics_by_scope = {}    # node set -> that frame, made once per distinct set
+        _node_event_cache = {}    # uname -> bool: gets THIS node_status / ha_status frame
         # only while a node of the cluster is in maintenance, so a quiet cluster costs nothing
         _metrics_maint = False
         if update_type == 'metrics' and cluster_id is not None:
@@ -830,9 +996,43 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
                             client_message = _filtered_tasks_frame(data, cluster_id, uname,
                                                                    timestamp, _eff)
                             _tasks_frame_cache[uname, _eff] = client_message
+                    elif (update_type == 'metrics' and cluster_id is not None
+                          and not client_info.get('is_admin', False)):
+                        # MK Nov 2026 (#1218) - the frame named every node to each client of the
+                        # cluster, a grant on one guest or no cluster.view at all being enough.
+                        # A non-admin gets the nodes its own guests run on, from the scope the
+                        # resources pass keeps, and nothing while that is not known. No guest
+                        # and no account is looked at here in steady state.
+                        uname, _eff = client_info.get('user'), client_info.get('effective_role')
+                        client_message = _metrics_frame_cache.get((uname, _eff), _SSE_FILTER_MISSING)
+                        if client_message is _SSE_FILTER_MISSING:
+                            _scope = _sse_node_scope_for(cluster_id, uname, _eff)
+                            if _scope is None:
+                                client_message = message   # unconfined: maintenance guests too
+                            elif isinstance(_scope, frozenset):
+                                client_message = _metrics_by_scope.get(_scope, _SSE_FILTER_MISSING)
+                                if client_message is _SSE_FILTER_MISSING:
+                                    client_message = _metrics_for_nodes(data, _scope, cluster_id, timestamp)
+                                    _metrics_by_scope[_scope] = client_message
+                            else:
+                                client_message = None
+                            _metrics_frame_cache[uname, _eff] = client_message
+                    elif update_type in _NODE_EVENT_PERMS and not client_info.get('is_admin', False):
+                        # MK Nov 2026 (#1218) - node online/offline and the HA events went to every
+                        # client of the cluster, without node.view / ha.view and with every node
+                        uname, _eff = client_info.get('user'), client_info.get('effective_role')
+                        _ids = ((cluster_id,) if cluster_id is not None else
+                                tuple(c for c in (target_clusters or ())
+                                      if subscribed is None or c in subscribed))
+                        _ok_ev = _node_event_cache.get((uname, _eff, _ids), _SSE_FILTER_MISSING)
+                        if _ok_ev is _SSE_FILTER_MISSING:
+                            _ok_ev = _sse_may_see_node_event(uname, update_type, data, _ids, _eff)
+                            _node_event_cache[uname, _eff, _ids] = _ok_ev
+                        if not _ok_ev:
+                            continue
                     elif _metrics_maint:
-                        # asked of admins as well: is_admin does not know the tenant override
-                        # that lowers an admin where they live (sees_whole_maintenance does)
+                        # an admin client, asked all the same: is_admin does not know the tenant
+                        # override that lowers an admin where they live (sees_whole_maintenance does)
                         uname, _eff = client_info.get('user'), client_info.get('effective_role')
                         _ok_maint = _maint_seen_cache.get((uname, _eff), _SSE_FILTER_MISSING)
                         if _ok_maint is _SSE_FILTER_MISSING:

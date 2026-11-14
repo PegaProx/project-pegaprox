@@ -18,7 +18,7 @@ from test_ha_ui import CLUSTER, VM, SSE_TOKEN, _App, _FakeServer, _classes, brow
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHOTS = os.environ.get('PEGAPROX_SHOTS', '')
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 
 
 def _read(*parts):
@@ -58,7 +58,7 @@ def test_every_new_string_is_in_every_language_once():
     assert len(keys) > 60
     for key in keys:
         found = len(re.findall(rf'^\s*{key}:', tr, re.M))
-        assert found == 9, f'{key} is in {found} of 9 language blocks - the UI would show the key'
+        assert found == 10, f'{key} is in {found} of 10 language blocks - the UI would show the key'
 
 
 def test_no_key_of_the_two_features_is_left_unused():
@@ -81,7 +81,7 @@ def test_placeholders_survive_translation():
     tr = _read('web', 'src', 'translations.js')
     for key in _keys():
         values = re.findall(rf'^\s*{key}: "(.*)",$', tr, re.M)
-        assert len(values) == 9, key
+        assert len(values) == 10, key
         wanted = set(re.findall(r'\{(\w+)\}', values[LANGS.index('en')]))
         for v in values:
             assert set(re.findall(r'\{(\w+)\}', v)) == wanted, (key, v)
@@ -394,7 +394,7 @@ def _restore_reads(post=None):
         ('GET', '/api/clusters/c1/datastores'): (200, DATASTORES),
         ('GET', '/api/clusters/c1/datastores/backupsrv/content'): (200, CONTENT),
         ('GET', '/api/clusters/c1/storage-clusters'): (200, []),
-        ('GET', '/api/clusters/c1/next-vmid'): (200, {'vmid': 900}),
+        ('GET', '/api/clusters/c1/nextid'): (200, {'vmid': 900}),
         ('POST', '/api/clusters/c1/backup-restore/batch'): post or (202, {'run': _batch()}),
         ('GET', f'/api/batch-restores/{RUN_ID}'): (200, {'run': _batch()}),
         ('POST', f'/api/batch-restores/{RUN_ID}/cancel'): (200, {'run': dict(_batch(), cancelled_by='admin', may_cancel=False)}),
@@ -419,6 +419,23 @@ def _open_storage(app, layout):
 
 def _body(app):
     return app.server.bodies.get('/api/clusters/c1/backup-restore/batch', [])
+
+
+def test_runtime_a_full_tenant_range_suggests_no_id(open_app):
+    """The route then answers with an id outside the range, which the restore would refuse."""
+    reads = _restore_reads()
+    reads[('GET', '/api/clusters/c1/nextid')] = (200, {'vmid': 900, 'range': [100, 110], 'range_exhausted': True})
+    app = open_app(reads, layout='modern')
+    page = _open_storage(app, 'modern')
+    page.locator('[data-br-open]').click()
+    page.locator('[data-br-pick]').wait_for(timeout=5000)
+    page.locator('[data-br-check="100"]').check()
+    page.locator('[data-br-next]').click()
+    page.locator('[data-br-options]').wait_for(timeout=5000)
+    page.wait_for_timeout(500)
+    assert page.locator('[data-br-first]').input_value() == ''
+    assert ('GET', '/api/clusters/c1/nextid') in app.server.calls
+    assert not app.errors, app.errors
 
 
 @pytest.mark.parametrize('layout', ['modern', 'corporate'])

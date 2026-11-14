@@ -29,6 +29,7 @@ from pegaprox.globals import cluster_managers
 from pegaprox.core import timeline as tl
 from pegaprox.core import node_history
 from pegaprox.core.db import get_db
+from pegaprox.utils.audit import masked_details
 from pegaprox.utils.auth import require_auth
 from pegaprox.api.helpers import bounded_limit, caller_is_scoped, check_cluster_access
 
@@ -225,7 +226,7 @@ def _audit(ask):
     """The cluster's audit rows (settings.py /api/clusters/<id>/audit). A confined caller
     gets the rows that name one of their guests, as there."""
     filtered = ask.scoped or ask.vmid is not None or ask.node is not None
-    rows, depth = _window(ask, _select('SELECT id, timestamp, user, action, details, severity FROM audit_log '
+    rows, depth = _window(ask, _select('SELECT id, timestamp, user, action, details, severity, cluster FROM audit_log '
                                        'WHERE cluster_id = ?', (ask.cid,), 'timestamp'),
                           'timestamp', ask.reads('audit', filtered))
     known = set(ask.node_names())
@@ -251,7 +252,8 @@ def _audit(ask):
         if not ask.keeps(guest, {node} if node else ()):
             continue
         kept.add(tl.event('audit', r['id'], at, cluster=ask.cid, severity=tl.severity_of(r['severity']),
-                          title=r['action'], details=details, node=node, guest=guest,
+                          title=r['action'], details=masked_details(details, r['cluster'] or ''),
+                          node=node, guest=guest,
                           guest_name=ask.guest_name(guest) if guest is not None else '',
                           what='audit', params={'action': r['action'], 'user': r['user'] or ''},
                           route=f'/api/clusters/{ask.cid}/audit'))
@@ -260,8 +262,10 @@ def _audit(ask):
 
 def _alerts(ask):
     """Alerts as they fired and cleared (alerts.py active-alerts keeps the open ones). A
-    confined caller gets the ones on their guests and none about a node."""
+    confined caller gets the ones on their guests and none about a node, a cluster-wide
+    caller a node's only with node.view, as active-alerts."""
     filtered = ask.scoped or ask.node is not None
+    no_nodes = not ask.scoped and not ask.holds('node.view')
     cols = ('id, alert_id, severity, message, metric, target_type, target_id, target_name, '
             'triggered_at, resolved_at, resolved_by')
     out, depths = [], []
@@ -271,6 +275,8 @@ def _alerts(ask):
         if ask.vmid is not None:
             sql += " AND target_type = 'vm' AND target_id = ?"
             params.append(str(ask.vmid))
+        if no_nodes:
+            sql += " AND COALESCE(target_type, '') != 'node'"
         rows, depth = _window(ask, _select(sql, params, column, order=''), column, ask.reads('alert', filtered))
         kept = _Kept(ask, depth)
         for r in rows:
@@ -426,7 +432,8 @@ def _tasks(ask):
             continue
         if not ask.keeps(guest, {node} if node else ()):
             continue
-        status = str(t.get('status') or '')
+        # get_tasks turns a failed task into 'failed'; what Proxmox said is in exitstatus
+        status = str(t.get('exitstatus') or t.get('status') or '')
         running = not t.get('endtime') or status.lower() == 'running'
         failed = not running and status != 'OK' and not status.startswith('WARNINGS')
         backup = t.get('type') == 'vzdump'

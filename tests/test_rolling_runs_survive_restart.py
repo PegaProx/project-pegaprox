@@ -162,6 +162,9 @@ class _Cluster:
             t.reboot_issued = True
             if self.die_at == ('rebooting', node):
                 self.die_at, self.armed = None, 'status'
+            else:
+                # as the real task: it saw the node back, unless the run asked it not to wait
+                t.back_online = (self._rolling_update or {}).get('wait_for_reboot') is not False
         return t
 
     def suspend_negative_ha_rules(self, who='system'):
@@ -721,7 +724,8 @@ def test_a_scheduled_run_is_kept_like_one_started_by_hand(api, seed, db, fast):
     assert row['status'] == 'completed' and row['completed_at'], row['logs']
     state = row['state']
     assert state['scheduled'] is True and state['started_by'] == 'scheduler'
-    assert state['allow_local_disks'] is True and state['pause_on_evacuation_error'] is False
+    # a guest left behind pauses it as it does a run started by hand
+    assert state['allow_local_disks'] is True and state['pause_on_evacuation_error'] is True
     assert {n: s['result'] for n, s in state['node_state'].items()} == {'pve1': 'done', 'pve2': 'done'}
 
 

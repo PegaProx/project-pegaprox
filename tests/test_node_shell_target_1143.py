@@ -713,7 +713,8 @@ def test_cluster_creds_lists_no_stand_in_for_an_xcp_ng_host(api, seed):
     sid = api.as_user(seed.user('root', role='admin')).session_id
     client = api.app.test_client()
     client.set_cookie('session', sid, domain='localhost')
-    r = client.get('/api/internal/cluster-creds/cluster_1', base_url='http://localhost')
+    r = client.get('/api/internal/cluster-creds/cluster_1', base_url='http://localhost',
+                   headers=_console_server())
     assert r.status_code == 200, r.data
     assert r.get_json()['node_ips'] == {'xh1': '10.1.1.11'}
     mgr._get_host_ip.assert_not_called()

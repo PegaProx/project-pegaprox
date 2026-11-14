@@ -909,7 +909,9 @@ def test_the_ssh_servers_calls_answer_on_a_serving_standby(fwd, seed, monkeypatc
                           base_url='http://localhost')
 
     def creds():
-        return client.get(f'/api/internal/cluster-creds/{CID}', base_url='http://localhost')
+        from pegaprox.api.realtime import CONSOLE_SERVER_HEADER, console_server_secret
+        return client.get(f'/api/internal/cluster-creds/{CID}', base_url='http://localhost',
+                          headers={CONSOLE_SERVER_HEADER: console_server_secret()})
 
     def session_check():
         return client.get('/api/auth/validate', base_url='http://localhost')
@@ -980,6 +982,9 @@ def _fake_paramiko(known):
             return self.get(host)
 
         def save(self, path):
+            # the script hands save() a temp file next to known_hosts and renames it over
+            with open(path, 'w') as f:
+                f.writelines(f'{host} {kt}\n' for host, keys in self.items() for kt in keys)
             fake.saved.append(path)
 
     fake.hostkeys = types.SimpleNamespace(HostKeys=_OnDisk)
@@ -1031,7 +1036,8 @@ def test_the_ssh_server_pins_nothing_on_a_standby(tmp_path, monkeypatch, known_o
     else:
         # counterproof: the TOFU pin as before, then the (fake) shell fails
         assert NOT_KNOWN not in said and 'no shell in this test' in said, ws.sent
-        assert fake.saved == [str(tmp_path / 'known_hosts')]
+        assert len(fake.saved) == 1
+        assert (tmp_path / 'known_hosts').read_text() == '192.0.2.10 ssh-ed25519\n'
 
 
 @pytest.fixture

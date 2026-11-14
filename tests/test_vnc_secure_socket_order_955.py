@@ -108,7 +108,11 @@ def run(tmp_path_factory):
         pytest.skip('node is needed to run the shipped socket wrapper')
     harness = tmp_path_factory.mktemp('vss955') / 'harness.js'
     harness.write_text(HARNESS, encoding='utf-8')
-    p = subprocess.run(['node', str(harness), SRC], capture_output=True, text=True, timeout=60)
+    # the WebCrypto globals came with Node 20, Node 18 keeps them behind a flag
+    major = int(subprocess.run(['node', '-p', 'process.versions.node.split(".")[0]'], capture_output=True,
+                               text=True, timeout=60, check=True).stdout)
+    flags = ['--experimental-global-webcrypto'] if major < 20 else []
+    p = subprocess.run(['node', *flags, str(harness), SRC], capture_output=True, text=True, timeout=60)
     assert p.returncode == 0, p.stderr
     return json.loads(p.stdout.strip().splitlines()[-1])
 

@@ -25,7 +25,7 @@ from test_ha_ui import SSE_TOKEN, _App, _FakeServer, _classes, _wait_for_call, b
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHOTS = os.environ.get('PEGAPROX_SHOTS', '')
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 KEYS = ['esxiCredentialsRefused', 'esxiCredentialsHint', 'esxiEditServer', 'esxiRemoveServer']
 REFUSED = 'The ESXi server refused the stored credentials (HTTP 401)'
 SERVER = {'id': 'v1', 'name': 'lab esxi', 'host': 'esx1.lab', 'port': 443, 'username': 'root',

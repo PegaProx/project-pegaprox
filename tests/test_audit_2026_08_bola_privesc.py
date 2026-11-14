@@ -52,6 +52,11 @@ def test_bulk_migrate_denies_foreign_vmid_but_migrates_own(api, seed):
 
     fake = api.make_fake_manager('cluster_1', migrate_vm_manual={'success': True, 'task': 'UPID:mig'})
     fake.config = MagicMock(); fake.config.name = 'cluster_1'
+    # MK Nov 2026 - bob's 101 runs on node2: a confined caller moves guests onto a node of theirs
+    seed.vm_acl('cluster_1', 101, users=['bob'])
+    fake.get_vm_resources.return_value = [{'vmid': 100, 'node': 'node1', 'type': 'qemu'},
+                                          {'vmid': 101, 'node': 'node2', 'type': 'qemu'},
+                                          {'vmid': 200, 'node': 'node1', 'type': 'qemu'}]
     api.set_manager('cluster_1', fake)
 
     r = api.as_user(bob).post('/api/clusters/cluster_1/vms/bulk-migrate', json={

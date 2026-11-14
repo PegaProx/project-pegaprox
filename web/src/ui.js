@@ -556,7 +556,13 @@
         }
 
         // Chart.js line chart component - uses canvas for interactive charts
-        const LineChart = React.memo(function LineChart({ data, datasets, timestamps, label, color, unit, formatValue, yMin, yMax }) {
+        // LW Nov 2026 - options for the diagnostic charts of the preview, each left out by every other view:
+        // tension (0 joins the samples with straight lines instead of a curve that overshoots them),
+        // thresholds ([{value, label, color}], drawn as dashed lines where they fall on the scale), legend
+        // (false when the view toggles the series itself; a dataset can come with hidden and dash),
+        // markGaps (shades the slots without any sample) and resize (draws again when the box changes width)
+        const LineChart = React.memo(function LineChart({ data, datasets, timestamps, label, color, unit, formatValue, yMin, yMax,
+                                                          tension, thresholds, legend, markGaps, resize }) {
             const { t } = useTranslation();
             const canvasRef = React.useRef(null);
             const chartRef = React.useRef(null);
@@ -590,10 +596,25 @@
                 return span + '|' + chartDatasets.map(ds => {
                     const d = ds.data;
                     if (!d || d.length === 0) return '0';
-                    return d.length + ':' + d[0] + ':' + d[Math.floor(d.length/2)] + ':' + d[d.length-1];
+                    return d.length + ':' + d[0] + ':' + d[Math.floor(d.length/2)] + ':' + d[d.length-1] + (ds.hidden ? ':h' : '');
                 }).join('|');
             }, [chartDatasets, timestamps]);
             const rangeKey = range ? range.from + '-' + range.to : '';
+            const lines = (thresholds || []).filter(x => x && typeof x.value === 'number' && isFinite(x.value));
+            const linesKey = lines.map(x => x.value + ':' + (x.label || '') + ':' + (x.color || '')).join('|');
+            // the width the box had when it last changed, so a narrower window draws a narrower chart
+            const [boxWidth, setBoxWidth] = React.useState(0);
+            React.useEffect(() => {
+                const canvas = canvasRef.current;
+                const box = canvas && canvas.parentElement;
+                if (!resize || !box || typeof ResizeObserver === 'undefined') return undefined;
+                const ro = new ResizeObserver(() => {
+                    const w = box.clientWidth;
+                    if (w > 0 && Math.abs(w - canvas.getBoundingClientRect().width) >= 2) setBoxWidth(w);
+                });
+                ro.observe(box);
+                return () => ro.disconnect();
+            }, [resize, chartDatasets.length > 0]);
 
             // Cleanup on unmount
             React.useEffect(() => {
@@ -715,7 +736,9 @@
                         backgroundColor: (ds.color || color) + '33',
                         fill: ds.fill !== undefined ? ds.fill : true,
                         spanGaps: false,
-                        tension: 0.4,
+                        tension: typeof tension === 'number' ? tension : 0.4,
+                        ...(ds.hidden ? { hidden: true } : {}),
+                        ...(ds.dash ? { borderDash: ds.dash } : {}),
                         pointRadius: lone.some(Boolean) ? (c => lone[c.dataIndex] ? 2 : 0) : 0,
                         pointBackgroundColor: ds.color || color,
                         pointHitRadius: 8,
@@ -759,6 +782,55 @@
                     }
                 };
 
+                // the dashed lines of the thresholds a view passes, each with its label at the right end
+                const linesPlugin = {
+                    id: 'ppThresholds',
+                    afterDatasetsDraw(ch) {
+                        const a = ch.chartArea, sy = ch.scales.y;
+                        if (!a || !sy) return;
+                        const c = ch.ctx;
+                        c.save();
+                        c.font = '10px sans-serif';
+                        c.textAlign = 'right';
+                        c.textBaseline = 'bottom';
+                        lines.forEach(x => {
+                            if (x.value < sy.min || x.value > sy.max) return;
+                            const py = Math.round(sy.getPixelForValue(x.value)) + 0.5;
+                            c.strokeStyle = x.color || '#9ca3af';
+                            c.fillStyle = x.color || '#9ca3af';
+                            c.globalAlpha = 0.9;
+                            c.lineWidth = 1;
+                            c.setLineDash([5, 4]);
+                            c.beginPath(); c.moveTo(a.left, py); c.lineTo(a.right, py); c.stroke();
+                            if (x.label) { c.setLineDash([]); c.fillText(x.label, a.right - 3, py - 2); }
+                        });
+                        c.restore();
+                    }
+                };
+                // a slot no shown series has a sample for, shaded over the height of the chart
+                const gapsPlugin = {
+                    id: 'ppGaps',
+                    beforeDatasetsDraw(ch) {
+                        const a = ch.chartArea, sx = ch.scales.x;
+                        const sets = ch.data.datasets.filter((d, i) => ch.isDatasetVisible(i));
+                        if (!a || !sx || !sets.length) return;
+                        const n = ch.data.labels.length;
+                        const half = n > 1 ? Math.abs(sx.getPixelForValue(1) - sx.getPixelForValue(0)) / 2 : 0;
+                        const css = getComputedStyle(ch.canvas);
+                        const c = ch.ctx;
+                        c.save();
+                        c.fillStyle = (css.getPropertyValue('--cr-text-muted') || '').trim() || '#9ca3af';
+                        c.globalAlpha = 0.16;
+                        for (let i = 0; i < n; i++) {
+                            if (!sets.every(d => d.data[i] === null || d.data[i] === undefined)) continue;
+                            const px = sx.getPixelForValue(i);
+                            const x0 = Math.max(a.left, px - half), x1 = Math.min(a.right, px + half);
+                            if (x1 > x0) c.fillRect(x0, a.top, x1 - x0, a.bottom - a.top);
+                        }
+                        c.restore();
+                    }
+                };
+
                 const unitStr = unit || '%';
                 const ctx = canvas.getContext('2d');
 
@@ -769,7 +841,7 @@
                             labels: finalLabels,
                             datasets: processedDatasets
                         },
-                        plugins: [bandPlugin],
+                        plugins: [bandPlugin, ...(lines.length ? [linesPlugin] : []), ...(markGaps ? [gapsPlugin] : [])],
                         options: {
                             responsive: false,
                             animation: false,
@@ -781,7 +853,7 @@
                             },
                             plugins: {
                                 legend: {
-                                    display: processedDatasets.length > 1,
+                                    display: legend === false ? false : processedDatasets.length > 1,
                                     labels: { color: '#9ca3af', usePointStyle: true, boxWidth: 6 }
                                 },
                                 tooltip: {
@@ -838,7 +910,7 @@
                 } catch(e) {
                     console.error('Chart.js error for ' + label + ':', e);
                 }
-            }, [dataFingerprint, unit, yMin, yMax, rangeKey]); // re-run if data or the zoom changes
+            }, [dataFingerprint, unit, yMin, yMax, rangeKey, tension, linesKey, legend, markGaps, boxWidth]); // re-run if data or the zoom changes
 
             // the drag: pointer events on the canvas, so mouse, pen and touch work alike
             const hasCanvas = chartDatasets.length > 0;
@@ -1138,16 +1210,20 @@
         }
         // Gauge Component
         function Gauge({ value, max = 100, size = 120, label, color }) {
+            // LW Nov 2026 - no figure (a node entry from the HA cache) is an empty ring with '-',
+            // value.toFixed threw on it and took the node card down
+            const num = value == null || value === '' ? NaN : Number(value);
+            const known = Number.isFinite(num);
             const r = 45;
             const circ = 2 * Math.PI * r;
-            const prog = Math.min(value / max, 1);
+            const prog = known ? Math.min(num / max, 1) : 0;
             const off = circ - (prog * circ);
             
             // color thresholds
             const getColor = () => {
                 if (color) return color;
-                if (value < 50) return '#22c55e';  // green
-                if (value < 80) return '#eab308';  // yellow
+                if (num < 50) return '#22c55e';  // green
+                if (num < 80) return '#eab308';  // yellow
                 return '#ef4444';  // red
             };
 
@@ -1167,7 +1243,7 @@
                             }}
                         />
                         <text x="50" y="50" textAnchor="middle" dy="0.35em" className="gauge-text text-white text-lg">
-                            {value.toFixed(1)}%
+                            {known ? `${num.toFixed(1)}%` : '-'}
                         </text>
                     </svg>
                     <span className="text-xs text-gray-400 mt-1 font-medium">{label}</span>
@@ -1240,7 +1316,7 @@
                 4: 'https://netzware.at/',  // Netzware - Platinum
                 5: 'https://www.occentus.net/',  // Occentus Network - Platinum
 
-                6: null,
+                6: 'https://www.factorfx.com/',  // FactorFX - Platinum
                 7: null,
                 8: null
             };
@@ -1786,7 +1862,9 @@
             // esc to close
             React.useEffect(() => {
                 const onKey = (e) => {
-                    if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
+                    // a menu that just closed is gone from the page before this listener is removed,
+                    // and its Escape belongs to whatever the menu opened (the task log of a row)
+                    if (e.key === 'Escape' && menuRef.current) { e.stopPropagation(); onClose(); }
                 };
                 document.addEventListener('keydown', onKey, true);
                 return () => document.removeEventListener('keydown', onKey, true);
@@ -1950,6 +2028,33 @@
             { keys: ['t'],                              desc: 'Toggle theme (light/dark)' },
             { keys: ['Shift', '?'],                     desc: 'Show keyboard shortcuts' },
         ];
+
+        // NS Nov 2026 - Escape for the big modals that hold their own dialogs (Settings,
+        // My Profile): it closes like the X, but only when the key is theirs. Not when a
+        // handler before took it, not on a native select (its popup takes Escape), and
+        // not while one of their inner dialogs, or anything above them, holds the middle
+        // of the window.
+        function useEscapeToClose(isOpen, onClose, layerRef) {
+            const closeRef = React.useRef(onClose);
+            closeRef.current = onClose;
+            React.useEffect(() => {
+                if (!isOpen) return;
+                const onKey = (e) => {
+                    if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+                    if (e.target && e.target.tagName === 'SELECT') return;
+                    const layer = layerRef.current;
+                    let el = layer && document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+                    if (!el || !layer.contains(el)) return;
+                    for (; el && el !== layer; el = el.parentElement) {
+                        if (window.getComputedStyle(el).position === 'fixed') return;
+                    }
+                    e.preventDefault();
+                    closeRef.current();
+                };
+                window.addEventListener('keydown', onKey);
+                return () => window.removeEventListener('keydown', onKey);
+            }, [isOpen]);
+        }
 
         function KeyboardShortcutsModal({ open, onClose }) {
             React.useEffect(() => {
@@ -2558,9 +2663,32 @@
         }
         try { window.PegaProxStatTile = StatTile; } catch (_) {}
 
+        // NS Oct 2026 - the header pill and the Cluster Health card of the overview both poll
+        // /health of the selected cluster. One request serves both for 30s (#948); null when
+        // it failed, and a failed one is not kept. Kept per signed-in account: a logout does
+        // not reload the page, and the next account may be one that sees less of the cluster
+        const _clusterHealthReads = new Map();
+        function readClusterHealth(clusterId, authFetch, apiUrl, who) {
+            const key = `${apiUrl}|${clusterId}|${who || ''}`;
+            const hit = _clusterHealthReads.get(key);
+            if (hit && hit.authFetch === authFetch && Date.now() - hit.at < 30000) return hit.promise;
+            const promise = (async () => {
+                const res = await authFetch(`${apiUrl}/clusters/${clusterId}/health`);
+                if (res && res.ok) return await res.json();
+                if (res && res.status === 503) return { score: 0, band: 'critical', factors: [], issues: ['Offline'] };
+                return null;
+            })();
+            const forget = () => { if (_clusterHealthReads.get(key)?.promise === promise) _clusterHealthReads.delete(key); };
+            promise.then(d => { if (!d) forget(); }, forget);
+            _clusterHealthReads.set(key, { at: Date.now(), authFetch, promise });
+            return promise;
+        }
+
         // NS May 2026 — single-number cluster health pill. Polls /health every 60s.
         // Hover for factor breakdown, click for full modal.
         function ClusterHealthBadge({ clusterId, authFetch, apiUrl }) {
+            const { user } = useAuth();
+            const who = user?.username || '';
             const [data, setData] = React.useState(null);
             const [loading, setLoading] = React.useState(false);
             const [showDetails, setShowDetails] = React.useState(false);
@@ -2570,15 +2698,11 @@
                 if (!clusterId || !authFetch) return;
                 setLoading(true);
                 try {
-                    const res = await authFetch(`${apiUrl}/clusters/${clusterId}/health`);
-                    if (res && res.ok) {
-                        setData(await res.json());
-                    } else if (res && res.status === 503) {
-                        setData({ score: 0, band: 'critical', factors: [], issues: ['Offline'] });
-                    }
+                    const d = await readClusterHealth(clusterId, authFetch, apiUrl, who);
+                    if (d) setData(d);
                 } catch (_) { /* keep last */ }
                 finally { setLoading(false); }
-            }, [clusterId, authFetch, apiUrl]);
+            }, [clusterId, authFetch, apiUrl, who]);
 
             React.useEffect(() => {
                 fetchHealth();
@@ -2632,9 +2756,9 @@
                                     <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', padding: '2px 0' }}>
                                         <span style={{ opacity: 0.8 }}>{f.label}</span>
                                         <span style={{
-                                            color: f.delta < 0 ? '#f54f47' : '#60b515',
+                                            color: f.delta < 0 ? '#f54f47' : f.severity === 'unknown' ? '#999' : '#60b515',
                                             fontVariantNumeric: 'tabular-nums',
-                                        }}>{f.delta < 0 ? f.delta : 'ok'}</span>
+                                        }}>{f.delta < 0 ? f.delta : f.severity === 'unknown' ? '?' : 'ok'}</span>
                                     </div>
                                 ))}
                             </div>
@@ -2685,9 +2809,9 @@
                                             <span className="opacity-80 text-sm">{f.value}</span>
                                             <span style={{
                                                 fontVariantNumeric: 'tabular-nums', fontWeight: 600,
-                                                color: f.delta < 0 ? '#f54f47' : '#60b515',
+                                                color: f.delta < 0 ? '#f54f47' : f.severity === 'unknown' ? '#999' : '#60b515',
                                                 minWidth: '36px', textAlign: 'right',
-                                            }}>{f.delta < 0 ? f.delta : '0'}</span>
+                                            }}>{f.delta < 0 ? f.delta : f.severity === 'unknown' ? '?' : '0'}</span>
                                         </span>
                                     </div>
                                 ))}
@@ -3355,6 +3479,8 @@
             const [mode, setMode] = React.useState('new');
             const [targetNode, setTargetNode] = React.useState(nodes?.[0] || '');
             const [targetVmid, setTargetVmid] = React.useState(snapshot?.vmid ? snapshot.vmid + 1000 : 999);
+            // once the user typed an id, a suggestion (late, or after a mode switch) must not replace it
+            const vmidTyped = React.useRef(false);
             const [targetStorage, setTargetStorage] = React.useState('');
             const [running, setRunning] = React.useState(false);
             const [error, setError] = React.useState(null);
@@ -3364,10 +3490,11 @@
                 if (mode !== 'new' || !clusterId) return;
                 (async () => {
                     try {
-                        const r = await authFetch(`${apiUrl}/clusters/${clusterId}/next-vmid`);
+                        const r = await authFetch(`${apiUrl}/clusters/${clusterId}/nextid`);
                         if (r && r.ok) {
                             const j = await r.json();
-                            if (j.vmid) setTargetVmid(j.vmid);
+                            // a full tenant range answers with PVE's next id, which the restore refuses
+                            if (j.vmid && !j.range_exhausted && !vmidTyped.current) setTargetVmid(j.vmid);
                         }
                     } catch (_) {}
                 })();
@@ -3449,7 +3576,7 @@
 
                             <div>
                                 <div className="text-xs uppercase tracking-wide opacity-60 mb-1">{t('pbsTargetVmid') || 'Target VMID'}</div>
-                                <input type="number" value={targetVmid} onChange={e => setTargetVmid(e.target.value)}
+                                <input type="number" value={targetVmid} onChange={e => { vmidTyped.current = true; setTargetVmid(e.target.value); }}
                                     className="w-full px-2 py-1.5 text-sm"
                                     style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }} />
                             </div>
@@ -3844,8 +3971,8 @@
 
             useEffect(() => {
                 if (phase !== 'options' || firstVmid) return;
-                call(`${API_URL}/clusters/${encodeURIComponent(clusterId)}/next-vmid`)
-                    .then(r => (r.ok ? r.json() : null)).then(j => { if (j && j.vmid) setFirstVmid(String(j.vmid)); })
+                call(`${API_URL}/clusters/${encodeURIComponent(clusterId)}/nextid`)
+                    .then(r => (r.ok ? r.json() : null)).then(j => { if (j && j.vmid && !j.range_exhausted) setFirstVmid(String(j.vmid)); })
                     .catch(() => {});
             }, [phase]);  // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -4469,7 +4596,8 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
             const [error, setError] = useState('');
             const [kind, setKind] = useState('all');
             const [shown, setShown] = useState(RASR_PAGE);
-            const [tags, setTags] = useState('');
+            // JB Nov 2026 - null shows the server's tags; a typed draft outlives the reloads after each action
+            const [tags, setTags] = useState(null);
             const [dialog, setDialog] = useState(null);
             const [busy, setBusy] = useState('');
             const [verdict, setVerdict] = useState(null);
@@ -4484,25 +4612,30 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                     if (res.ok) {
                         const body = await res.json();
                         setData(body);
-                        setTags((body.critical_tags || []).join(', '));
                         setError('');
                     } else { setData(null); setError(await PegaProxApiErrors.message(res, t('rtestLoadFailed'))); }
                 } catch (e) { if (mine === look.current) setError(t('rtestLoadFailed')); }
             }, [base, days, call]);  // eslint-disable-line react-hooks/exhaustive-deps
             useEffect(() => { load(); }, [load, stamp]);
+            useEffect(() => { setTags(null); }, [clusterId]);  // a draft belongs to its cluster
 
-            const send = async (key, method, url, body, done) => {
+            const send = async (key, method, url, body, done, after) => {
                 setBusy(key);
                 try {
                     const res = await call(url, { method, headers: { 'Content-Type': 'application/json' },
                                                   body: body === undefined ? undefined : JSON.stringify(body) });
-                    if (res.ok) { say(done, 'success'); setDialog(null); await load(); }
+                    if (res.ok) { say(done, 'success'); setDialog(null); await load(); if (after) after(); }
                     else say(await bkpError(res, t, haServing), 'error');
                 } catch (e) { say(t('connectionError'), 'error'); }
                 setBusy('');
             };
-            const saveTags = () => send('tags', 'PUT', `${base}/recovery-settings`,
-                { critical_tags: tags.split(',').map(s => s.trim()).filter(Boolean) }, t('rtestSaved'));
+            const shownTags = tags !== null ? tags : ((data && data.critical_tags) || []).join(', ');
+            const saveTags = () => {
+                const sent = shownTags;
+                send('tags', 'PUT', `${base}/recovery-settings`,
+                    { critical_tags: sent.split(',').map(s => s.trim()).filter(Boolean) }, t('rtestSaved'),
+                    () => setTags(cur => (cur === sent ? null : cur)));  // what was typed since stays
+            };
             const saveConfirm = () => {
                 const body = { vmid: Number(dialog.vmid) || dialog.vmid, text: dialog.text.trim() };
                 if (String(dialog.days).trim() !== '') body.expires_days = Number(dialog.days);
@@ -4564,7 +4697,7 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                     {canTags && (
                         <div className="flex flex-wrap items-end gap-2">
                             <label className="text-xs text-gray-400 flex-1" style={{ minWidth: '200px' }}>{t('rasrCriticalTags')}
-                                <input value={tags} onChange={e => setTags(e.target.value)} placeholder={t('rasrCriticalTagsHint')} className={`${field} font-mono`} data-rasr-tags />
+                                <input value={shownTags} onChange={e => setTags(e.target.value)} placeholder={t('rasrCriticalTagsHint')} className={`${field} font-mono`} data-rasr-tags />
                             </label>
                             <button onClick={saveTags} disabled={busy === 'tags'} data-rasr-save-tags
                                 className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded text-sm font-medium disabled:opacity-50">{t('save')}</button>

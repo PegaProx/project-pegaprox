@@ -155,9 +155,10 @@ def test_the_cluster_list_the_window_resolves_its_host_from_is_scoped(api, seed,
 
 
 def test_a_portal_account_is_still_bound_by_its_scope(api, seed, cluster):
-    """portal_only is a UI-routing flag — nothing server-side reads it, here or anywhere
-    else — so what confines a portal account is its pool grant. Worth asserting because a
-    console link is the one piece of PegaProx UI a portal user can type by hand."""
+    """A console link is the one piece of PegaProx UI a portal user can type by hand. Since
+    Oct 2026 the server holds portal_only (test_portal_only_is_enforced_on_the_server.py):
+    the main API's console is not the portal's, so even the account's own pooled guest is
+    refused here, and the portal opens it through its own route instead."""
     seed.tenant('t5', clusters=[CLUSTER])
     user = seed.user('portal_user', role='user', tenant_id='t5', portal_only=True)
     seed.pool(CLUSTER, 'pool_p', 'portal_user', ['pool.view', 'vm.view', 'vm.console'])
@@ -166,7 +167,8 @@ def test_a_portal_account_is_still_bound_by_its_scope(api, seed, cluster):
         client = api.as_user(user)
 
         assert _console(client, THEIRS).status_code == 403
-        assert _console(client, MINE).status_code == 200
+        r = _console(client, MINE)
+        assert r.status_code == 403 and r.get_json()['code'] == 'PORTAL_ONLY', r.data
     finally:
         with rbac._pool_cache_lock:
             rbac._pool_membership_cache.pop(CLUSTER, None)

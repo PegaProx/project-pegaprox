@@ -181,6 +181,12 @@ main() {
                 mkdir -p "$INSTALL_DIR/systemd"
                 cp "$SCRIPT_DIR/systemd/pegaprox-witness.service" "$INSTALL_DIR/systemd/"
             fi
+            # the QNetd helper: install.sh copies it root-owned from here, and an ssh QNetd
+            # host gets this copy (docs/qdevice.md)
+            if [ -d "$SCRIPT_DIR/packaging/qnetd" ]; then
+                mkdir -p "$INSTALL_DIR/packaging/qnetd"
+                cp "$SCRIPT_DIR/packaging/qnetd/"* "$INSTALL_DIR/packaging/qnetd/"
+            fi
             # NS Oct 2026 (#1134): the plugins never came along from a checkout. A re-run
             # replaces their code and keeps each plugin's config.json
             if [ -d "$SCRIPT_DIR/plugins" ] && [ -f "$SCRIPT_DIR/packaging/plugins/sync_plugins.py" ]; then
@@ -487,7 +493,9 @@ EOF
     elif [ -f "$LEGACY_KEY" ]; then
         print_warning "Legacy key at $LEGACY_KEY detected"
         print_info "  PegaProx will keep using it but emit a deprecation warning."
-        print_info "  Migrate with:  sudo mv \"$LEGACY_KEY\" \"$SYS_KEY\" && sudo chmod 640 \"$SYS_KEY\" && sudo chown root:$SERVICE_GROUP \"$SYS_KEY\""
+        # NS Nov 2026 - a copy, not a move: the file is also the Fernet key of old field values
+        print_info "  Migrate with:  sudo cp \"$LEGACY_KEY\" \"$SYS_KEY\" && sudo chmod 640 \"$SYS_KEY\" && sudo chown root:$SERVICE_GROUP \"$SYS_KEY\""
+        print_info "  Keep $LEGACY_KEY: PegaProx reads old field values with it too (docs/SECURITY.md)."
     else
         # No key anywhere — generate the new default at the secure location.
         mkdir -p "$SYS_KEY_DIR"
@@ -528,17 +536,18 @@ finally:
     sleep 8
 
     # Set port in database if not default
+    # NS Nov 2026 - through PegaProx itself, as the service user in its directory: the
+    # sqlite3 CLI cannot open the SQLCipher database, so this failed on every encrypted install
     if [ "$ACCESS_PORT" != 5000 ]; then
         print_info "Configuring port $ACCESS_PORT..."
-        PEGAPROX_DB="$INSTALL_DIR/config/pegaprox.db"
-
-        if [ -f "$PEGAPROX_DB" ]; then
-            sqlite3 "$PEGAPROX_DB" "INSERT OR REPLACE INTO server_settings (key, value) VALUES ('port', '$ACCESS_PORT');" 2>/dev/null && {
-                echo "Restarting with new port..."
-                systemctl restart pegaprox
-                sleep 5
-                print_success "Port set to $ACCESS_PORT"
-            } || print_warning "Set port manually in Settings > Server"
+        if (cd "$INSTALL_DIR" && runuser -u "$SERVICE_USER" -- "$INSTALL_DIR/venv/bin/python" \
+                "$INSTALL_DIR/$PYTHON_FILE" --set-port "$ACCESS_PORT"); then
+            echo "Restarting with new port..."
+            systemctl restart pegaprox
+            sleep 5
+            print_success "Port set to $ACCESS_PORT"
+        else
+            print_warning "Set port manually in Settings > Server"
         fi
     fi
 

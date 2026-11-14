@@ -984,10 +984,31 @@ def _apply_policy(cluster_id, results):
 # Scan
 # ──────────────────────────────────────────────────────────────────────────
 
+SCAN_ALREADY_RUNNING = 'a scan of this cluster is already running'
+# NS Nov 2026 - clusters with a scan in progress. "Scan now" pressed twice, or while the
+# scheduled pass was on the same cluster, ran two scans side by side: both read the same open
+# deviations and both wrote the same event. The second one is skipped and says why.
+_scans_running = set()
+_scans_running_lock = threading.Lock()
+
+
 def _scan_cluster(cluster_id, autobaseline=False):
     """Snapshot + diff for one cluster. Returns dict with counts/events.
     If autobaseline=True and no baseline exists yet, set one without firing
-    drift events (initial seeding behavior)."""
+    drift events (initial seeding behavior). One scan per cluster at a time, the
+    manual route and the scheduled scanner alike."""
+    with _scans_running_lock:
+        if cluster_id in _scans_running:
+            return {'error': SCAN_ALREADY_RUNNING, 'status': 'skipped'}
+        _scans_running.add(cluster_id)
+    try:
+        return _scan_cluster_once(cluster_id, autobaseline)
+    finally:
+        with _scans_running_lock:
+            _scans_running.discard(cluster_id)
+
+
+def _scan_cluster_once(cluster_id, autobaseline):
     if cluster_id not in cluster_managers:
         return {'error': 'cluster not found'}
     mgr = cluster_managers[cluster_id]
@@ -1359,7 +1380,10 @@ def _scanner_loop():
                 if not ha.is_active():
                     break
                 try:
-                    _scan_cluster(cid, autobaseline=True)
+                    # a manual scan of this cluster may be running: then this pass leaves it be
+                    res = _scan_cluster(cid, autobaseline=True)
+                    if isinstance(res, dict) and res.get('error') == SCAN_ALREADY_RUNNING:
+                        logging.debug(f"[drift] scheduled scan of {cid} skipped, one is running")
                 except Exception as e:
                     logging.debug(f"[drift] scan {cid} failed: {e}")
         except Exception as e:

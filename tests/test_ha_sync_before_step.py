@@ -220,7 +220,7 @@ class _Cluster:
     def _get_vm_storage(self, node, vmid, vm_type):
         return 'fast'
 
-    def create_api_token(self, name):
+    def create_api_token(self, name, **kw):
         return {'success': True, 'token_id': 'root@pam!xcrepl', 'token_value': 'secret'}
 
     def delete_api_token(self, name):
@@ -238,6 +238,8 @@ class _Cluster:
 def full(db, monkeypatch):
     said, cleaned = [], []
     monkeypatch.setattr(vms_api, '_wait_for_task', lambda *a, **k: (True, 'OK'))
+    # the run follows its migration through the token cleanup: here it ended OK
+    monkeypatch.setattr(vms_api.transfer_net, 'drop_token_when_done', lambda *a, **k: ('ok', 'OK'))
     monkeypatch.setattr(vms_api, '_capture_vm_identity', lambda *a, **k: {})
     monkeypatch.setattr(vms_api, '_restore_vm_identity', lambda *a, **k: None)
     monkeypatch.setattr(vms_api, '_is_replica_of_job', lambda *a, **k: True)

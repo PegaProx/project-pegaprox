@@ -143,6 +143,8 @@ class VncPollSession:
         self.bytes_sent = 0       # browser → PVE
         self.bytes_recv = 0       # PVE → browser
         self._closed = False
+        # the pump sets _closed when PVE ends first; teardown still has to run after that
+        self._stopped = False
         self._buf = deque()
         self._buf_lock = threading.Lock()
         self._buf_cond = threading.Condition(self._buf_lock)
@@ -241,8 +243,9 @@ class VncPollSession:
         return chunks
 
     def stop(self):
-        if self._closed:
+        if self._stopped:
             return
+        self._stopped = True
         self._closed = True
         try: self.pve_ws.close()
         except Exception: pass

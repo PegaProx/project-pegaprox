@@ -181,8 +181,9 @@ def test_an_admin_still_reaches_every_pbs(api, db, seed, tenants, pbs):
 
 # --- roles=[ROLE_ADMIN]: the scheduled tasks (#1000) ------------------------------------------
 
+# a snapshot: a Proxmox VE cluster refuses the power and backup actions of these tasks
 TASK = {'name': 'nightly', 'cluster_id': FOREIGN, 'target_type': 'qemu', 'target_id': '100',
-        'target_node': 'n1', 'action': 'stop', 'schedule_type': 'daily', 'schedule_time': '02:00'}
+        'target_node': 'n1', 'action': 'snapshot', 'schedule_type': 'daily', 'schedule_time': '02:00'}
 
 
 @pytest.fixture

@@ -100,8 +100,13 @@ its own at the first login and keeps the password for what a token cannot do.
   node scripts, hardening and CVE checks, the self-fence agents of the 2-node HA, the
   transfer network check, file restore into containers and ESXi migration. Store an SSH
   key in the cluster settings (for root, or a user with `sudo`), or give single nodes a
-  root password of their own under *Node credentials*. ESXi migration signs in by
-  password only. A cluster can switch SSH off entirely.
+  root password of their own under *Node credentials*. Every one of them logs in as the
+  *SSH user* of the cluster, root when it is empty; a user other than root needs
+  passwordless `sudo` on every node. The cluster password goes along only when the
+  cluster is connected with that same `@pam` account (`root@pam` for root), never the
+  password of a `@pve` or LDAP account. ESXi migration offers the key first and a
+  password after it, and the target node itself needs port 22 of the ESXi host: the
+  SSHFS mount runs there. A cluster can switch SSH off entirely.
 - **root@pam**: raw PCI and USB devices on a VM, most LXC feature flags and creating or
   removing Ceph OSDs. Proxmox keeps these to `root@pam` and refuses them to every API
   token, `root@pam`'s own included; PegaProx needs the `root@pam` password for them.
@@ -109,7 +114,19 @@ its own at the first login and keeps the password for what a token cannot do.
   (xterm.js), and cross-cluster migration, replication and Site Recovery into this
   cluster, for which PegaProx creates a temporary API token on the target. That token
   holds what the account holds, so the target's role needs `Sys.Incoming` as well
-  (`remoteMigration`).
+  (`remoteMigration`). The token of a migration, whether started by hand, by the
+  cross-cluster balancer, by a Site Recovery run or by a cross-cluster replication run,
+  stays on the target for as long as its task runs, and PegaProx deletes it 30 seconds
+  after the task has ended, trying twice more a few minutes apart when the target does not
+  take the delete. A Site Recovery or replication run waits for that end itself, however
+  long the copy takes, and takes its result from how the task ended. Two limits delete the
+  token earlier, each with a warning in the log: a task whose status cannot be read for two
+  hours in a row, and a task that still reports running after seven days. Every migration
+  gets a token of its own, `pegaprox-migrate-<epoch>-<hex>`, `xclb-<group>-<vmid>-<hex>`,
+  `pegaprox-sr-<hex>` or `xcrepl-<job>-<number>` in `pveum user token list <user>`,
+  created with an expiry eight days ahead. A token PegaProx did not get to delete, after a
+  restart or a lost lease during the migration, stays listed there until it is deleted by
+  hand, and Proxmox refuses it once its expiry has passed.
 
 ## What works with a connection
 

@@ -141,19 +141,85 @@ def url_path_climbs(url) -> bool:
 
 
 def refuse_climbing_paths(session):
-    """Wrap session.request so a URL whose path climbs (url_path_climbs) is refused with a
-    ValueError before requests folds it. Returns the session."""
+    """Wrap session.request so a URL whose path climbs (url_path_climbs) or that carries a
+    '#' is refused with a ValueError before requests folds or cuts it. Returns the session."""
     if getattr(session, '_paths_checked', False):
         return session
-    request = session.request
+    # like manager._refuse_redirects: a stand-in without request() sends nothing through it
+    request = getattr(session, 'request', None)
+    if request is None:
+        return session
 
     def checked(method, url, *args, **kwargs):
         if url_path_climbs(url):
             raise ValueError('refused an API path with a . or .. segment')
+        # MK Nov 2026 - no API URL of ours has a fragment, and requests never sends one: a
+        # value with a '#' in it cut off the part of the path the code put after it
+        if '#' in str(url):
+            raise ValueError('refused an API URL with a fragment')
         return request(method, url, *args, **kwargs)
     session.request = checked
     session._paths_checked = True
     return session
+
+
+# MK Nov 2026 - the WSGI server decodes the request path once, so a route argument can
+# still hold '%2F' (sent as '%252F'). Proxmox VE decodes the whole path again before it
+# splits it, and in its API path that is a separator; a '?' or '#' moves what the code put
+# after the value into the query or cuts it off. No node, storage, guest or job id of
+# Proxmox VE or PBS holds any of these.
+_ODD_IN_A_NAME = re.compile(r'[%?#\\\x00-\x1f\x7f]')
+_PATH_ARG_RE = re.compile(r'<path:(\w+)>')
+# a user or group name of ours: only our own table is asked about it
+_OUR_OWN_NAMES = frozenset(('subject_id',))
+
+
+def odd_route_argument(rule, view_args):
+    """The name of the first argument of a cluster or PBS route (`rule` as the URL map
+    writes it) that holds a '%', '?', '#', a backslash or a control character, or None.
+    A <path:> argument may hold a '/' and each route that takes one checks or quotes it
+    itself."""
+    skip = set(_PATH_ARG_RE.findall(rule)) | _OUR_OWN_NAMES
+    for name, value in (view_args or {}).items():
+        if name not in skip and isinstance(value, str) and _ODD_IN_A_NAME.search(value):
+            return name
+    return None
+
+
+# MK Nov 2026 - the same names come from the query string and the body as well: a node, a
+# target node or storage, a guest type or VMID that a route or the manager behind it puts
+# into the API path. There a '/' is not decoded first, it simply adds path segments.
+_NOT_ONE_SEGMENT = re.compile(r'[%?#/\\\x00-\x1f\x7f]')
+NAME_VALUE_LABELS = {
+    'node': 'node name', 'target_node': 'node name', 'source_node': 'node name',
+    'storage': 'storage name', 'target_storage': 'storage name', 'targetstorage': 'storage name',
+    # a node in the migrations, a storage where disks move between storages
+    'target': 'target name',
+    'vm_type': 'guest type', 'vmid': 'VMID', 'target_vmid': 'VMID',
+}
+
+
+def not_one_path_segment(value):
+    """True for a string that would not stay one segment of an API path."""
+    return isinstance(value, str) and bool(_NOT_ONE_SEGMENT.search(value))
+
+
+def odd_request_name(*sources):
+    """The label (NAME_VALUE_LABELS) of the first name in `sources` - the query string, a
+    form, a JSON object - that would not stay one path segment, or None. A list is looked
+    at item by item; a number or anything else is left to the route."""
+    for src in sources:
+        if not src:
+            continue
+        for key, label in NAME_VALUE_LABELS.items():
+            if key not in src:
+                continue
+            values = src.getlist(key) if hasattr(src, 'getlist') else [src[key]]
+            for value in values:
+                items = value if isinstance(value, list) else [value]
+                if any(not_one_path_segment(v) for v in items):
+                    return label
+    return None
 
 
 # NS Oct 2026 - an SSH login name goes onto the ssh/sshpass/scp command line and into
@@ -189,6 +255,22 @@ def validate_host_address(value) -> bool:
         return True
     except ValueError:
         return False
+
+
+# one DNS label: letters, digits and inner hyphens, at most 63 characters
+_DNS_LABEL_RE = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z')
+
+
+def dns_suffix(value):
+    """`value` as a DNS suffix, without surrounding space and dots ('' when empty), or
+    None when it is no string or anything but labels of letters, digits and hyphens
+    separated by dots. The node UI suffix of a cluster is one."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip().strip('.')
+    if value and (len(value) > 253 or not all(_DNS_LABEL_RE.match(label) for label in value.split('.'))):
+        return None
+    return value
 
 
 def validate_storage_name(storage) -> bool:
@@ -326,6 +408,9 @@ def sanitize_csv_field(value) -> str:
 # everything in C0 except tab, DEL, and the C1 range - ESC among them, which is what
 # every ANSI sequence starts with
 _CONTROL_CHARS_RE = re.compile(r'[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]')
+# half of a UTF-16 pair on its own: a client can send "\ud800" in JSON, and a UTF-8 log
+# handler raises on it inside emit(), so the whole line was lost
+_LONE_SURROGATE_RE = re.compile('[\ud800-\udfff]')
 
 
 def sanitize_log_message(value) -> str:
@@ -353,7 +438,8 @@ def sanitize_log_message(value) -> str:
     # line, move the cursor, repaint something else, set the window title. Stripping CR
     # and LF stopped the forged LINE and left the forged SCREEN. Tab stays: it is
     # legitimate in action strings and cannot move a cursor about.
-    return _CONTROL_CHARS_RE.sub(' ', s)
+    s = _CONTROL_CHARS_RE.sub(' ', s)
+    return _LONE_SURROGATE_RE.sub('�', s)
 
 
 
@@ -499,9 +585,48 @@ def redact_url(value):
             out += '?' + '&'.join(parts)
         return out
 
+    # the login runs to the last '@' before the path, as the fetcher reads it: a password
+    # with an '@' in it otherwise left its tail in the line as the host
     return re.sub(
-        r'(https?)://(?:([^/@\s]+)@)?([A-Za-z0-9_.\-:\[\]]+)([^\s\'"<>]*)',
+        r'(https?)://(?:([^/?#\s\'"<>]+)@)?([A-Za-z0-9_.\-:\[\]]+)([^\s\'"<>]*)',
         _one, text)
+
+
+def url_without_login(url):
+    """A single URL (not a log text) with its user:password@ taken off.
+
+    redact_url() reads free text, so a login there ends at a blank. A typed URL is split
+    the way the fetcher splits it: the netloc runs to the first '/', '?' or '#', the host
+    is what follows its last '@'. Pass the result on to redact_url() for the path and the
+    query."""
+    if not url:
+        return url
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        p = urlsplit(str(url))
+    except ValueError:
+        return '[REDACTED]'
+    if '@' not in p.netloc:
+        return str(url)
+    return urlunsplit(p._replace(netloc=p.netloc.rpartition('@')[2]))
+
+
+# the login of an http(s) URL in a line: up to the last '@' before the path that a host
+# and a path follow, a blank in the password included, or else up to its last '@' before
+# a blank. MK Nov 2026 - in that order: the other way round 'u:p@ss word@mirror/x' kept
+# "ss word" in the line, the blank-free part matching first at its first '@'
+_URL_LOGIN = re.compile(
+    r'''(https?://)(?:[^/?#'"<>]*@(?=[A-Za-z0-9_.\-:\[\]]+[/?#])|[^/?#\s'"<>]+@)''')
+
+
+def mask_url_logins(text):
+    """`text` with the user:password@ of each http(s) URL in it as [REDACTED]@.
+
+    For a line shown whole, a task log line say, where redact_url() would take the
+    path and the query as well."""
+    if not text or not isinstance(text, str) or '@' not in text:
+        return text
+    return _URL_LOGIN.sub(r'\1[REDACTED]@', text)
 
 
 def redact_request_line(line):
@@ -524,6 +649,52 @@ def redact_request_line(line):
         return '?' + '&'.join(parts)
 
     return re.sub(r'\?([^\s"#]*)', _query, line)
+
+
+# MK Nov 2026 - the HTTP handlers of XAPI (import_raw_vdi, export_raw_vdi, rrd_updates)
+# take the session in the query string, and the session is the pool login until XCP-ng
+# drops it. requests names the url of a call that fails in its exception text, encoded
+# (session_id=OpaqueRef%3A...) once requests or urlencode built the query, and urllib3
+# logs every request line with it at DEBUG. The value ends where the url ends: blank,
+# & (%26 in a url inside a url) or the quote or bracket a urllib3 message or a repr puts
+# around it. The dict form ('session_id': 'OpaqueRef:...') needs the quote on the value,
+# a keyword repr (session_id='...') may have one, and with blanks around the = or a bare
+# colon the value has to be an OpaqueRef, so prose and a line of code stay as they are.
+_SESSION_ID_RE = re.compile(
+    r'''(session_id(?:=['"]?|%3D|['"]?\s*:\s*['"]|\s*[:=]\s*['"]?(?=OpaqueRef)))'''
+    r'''(?:(?!%26)[^&\s'"()\[\]<>,;\\])+''', re.IGNORECASE)
+
+
+def scrub_session_id(text):
+    """`text` with the value of every session_id written as ***.
+
+    The rest stays, so a failed call still says which handler it was and how it failed.
+    Takes anything (an exception too) and returns its text; None and '' come back as
+    they are."""
+    if text is None:
+        return None
+    text = str(text)
+    if not text:
+        return text
+    return _SESSION_ID_RE.sub(r'\1***', text)
+
+
+def _names_a_session(exc):
+    """Whether a traceback of exc shows a session_id: its own text or the text of an
+    exception it was raised from or while handling, as the traceback prints them."""
+    todo, seen = [exc], set()
+    while todo and len(seen) < 10:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        try:
+            if _SESSION_ID_RE.search(str(e)):
+                return True
+        except Exception:
+            pass    # the traceback prints <exception str() failed> for this one
+        todo.extend((getattr(e, '__cause__', None), getattr(e, '__context__', None)))
+    return False
 
 
 class LogInjectionFilter(logging.Filter):
@@ -587,7 +758,8 @@ def install_log_record_sanitizer():
     factory is already installed rather than replacing it, and is idempotent.
 
     Same deliberate scope as the filter: `msg` and `args` only. A traceback arrives via
-    exc_info and is rendered by the formatter, so it keeps its newlines.
+    exc_info and is rendered by the formatter, so it keeps its newlines. The one thing a
+    traceback loses here is an XAPI session (scrub_session_id), see below.
     """
     global _RECORD_FACTORY_INSTALLED
     if _RECORD_FACTORY_INSTALLED:
@@ -616,10 +788,26 @@ def install_log_record_sanitizer():
         # the formatter afterwards, so tracebacks keep their newlines.
         _render = record.getMessage
 
+        # MK Nov 2026 - and an XAPI session in a url (scrub_session_id). The per-cluster
+        # XCPng_<name> loggers and urllib3's request lines in --debug reach no filter of
+        # their own, this runs for both.
         def _clean_render(_r=_render):
-            return sanitize_log_message(_r())
+            return scrub_session_id(sanitize_log_message(_r()))
 
         record.getMessage = _clean_render
+
+        # logger.exception: the traceback shows the exception text again, and the text of
+        # each exception it was raised from or while handling. Rendered here only when one
+        # of those names a session: every other traceback is rendered once, by the
+        # handler's formatter, with a formatException of its own if it has one. Newlines
+        # stay.
+        if record.exc_info and not record.exc_text:
+            try:
+                if _names_a_session(record.exc_info[1]):
+                    record.exc_text = scrub_session_id(
+                        logging.Formatter().formatException(record.exc_info))
+            except Exception:
+                pass
         return record
 
     logging.setLogRecordFactory(_sanitising_factory)

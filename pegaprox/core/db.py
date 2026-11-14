@@ -6,6 +6,7 @@ SQLite database wrapper with encryption support.
 # MK: the db stuff was the worst part of the monolith, everything was just inline sql
 
 import os
+import re
 import sys
 import json
 import time
@@ -21,7 +22,7 @@ import uuid
 # alias is kept for the Row / IntegrityError types we use in queries below.
 import sqlite3
 from pegaprox.core import dbcrypto
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -35,9 +36,21 @@ from pegaprox.constants import (
 )
 from pegaprox.models.tasks import balancer_cooldown, BALANCER_COOLDOWN_DEFAULT
 
+# an audit field with one of these cannot be encoded, see add_audit_entry
+_LONE_SURROGATE = re.compile('[\ud800-\udfff]')
+
 # Fallback tenant ID for existing users (mirrors pegaprox.utils.rbac.DEFAULT_TENANT_ID)
 # Defined here to avoid circular import: rbac imports from db
 DEFAULT_TENANT_ID = 'default'
+
+# Options of a run started by hand that a rolling update schedule carries too, added in
+# place; a schedule saved before them gets the safe value of the default
+UPDATE_SCHEDULE_RUN_COLUMNS = (
+    ('wait_for_reboot', 'INTEGER DEFAULT 1'),
+    ('pause_on_evacuation_error', 'INTEGER DEFAULT 1'),
+    ('ceph_health_gate', "TEXT DEFAULT 'off'"),
+    ('notify_channels', "TEXT DEFAULT '[]'"),
+)
 
 # Encryption imports
 ENCRYPTION_AVAILABLE = False
@@ -136,6 +149,12 @@ def _directory_groups(auth_source, value):
     if not isinstance(value, (list, tuple)):
         return []
     return [g for g in value if isinstance(g, str) and g]
+
+
+def _password_stamp():
+    """Now, in UTC with its offset - what the password expiry checks read from
+    password_changed_at (they parse it with fromisoformat)."""
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
 def _replay_sr_failover_state(cursor):
@@ -262,6 +281,9 @@ class PegaProxDB:
             except Exception as e:
                 logging.error(f"SECURITY: Could not set key file permissions: {e}")
                 raise RuntimeError(f"Cannot secure encryption key file: {e}")
+            # MK Nov 2026 - on disk before a field is sealed with it: a power cut soon after
+            # the first start left an empty key file, and the start after it refuses one
+            dbcrypto.sync_file(aes_key_file)
             logging.info("Generated new AES-256-GCM encryption key")
         
         self.aesgcm = AESGCM(aes_key)
@@ -285,6 +307,8 @@ class PegaProxDB:
                 os.chmod(KEY_FILE, 0o600)
             except Exception as e:
                 logging.warning(f"Could not set Fernet key file permissions: {e}")
+            # the keystore's legacy tier reads the same file as the SQLCipher master key
+            dbcrypto.sync_file(KEY_FILE)
             self.fernet = Fernet(fernet_key)
             logging.info("Generated legacy Fernet key (for compatibility)")
 
@@ -315,6 +339,9 @@ class PegaProxDB:
             # Note: with SQLCipher, WAL is still supported but the WAL/SHM
             # auxiliary files are also encrypted — backups must include them.
             self._local.conn.execute("PRAGMA journal_mode = WAL")
+            # MK Nov 2026 - and synchronous=NORMAL with it. connect() set it already where the
+            # file was in WAL; a new file is only now (dbcrypto.wal_normal, sync_wal)
+            dbcrypto.wal_normal(self._local.conn)
         return self._local.conn
     
     @property
@@ -383,6 +410,8 @@ class PegaProxDB:
                 created_at TEXT,
                 last_login TEXT,
                 password_expiry TEXT,
+                -- when the local password was last set; the expiry warning counts from it
+                password_changed_at TEXT,
                 totp_secret_encrypted TEXT,
                 totp_pending_secret_encrypted TEXT,
                 totp_enabled INTEGER DEFAULT 0,
@@ -406,6 +435,8 @@ class PegaProxDB:
                 -- stopped working.
                 ldap_permissions TEXT DEFAULT '[]',
                 ldap_tenant TEXT DEFAULT '',
+                -- and the same for the per-tenant roles a group mapping granted
+                ldap_tenant_permissions TEXT DEFAULT '{}',
                 tenant_permissions TEXT DEFAULT '{}',
                 denied_permissions TEXT DEFAULT '[]',
                 oidc_sub TEXT DEFAULT '',
@@ -870,6 +901,9 @@ class PegaProxDB:
             for _col in ('migrate_templates', 'relax_anti_affinity'):
                 if _col not in _us_cols:
                     cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} INTEGER DEFAULT 0")
+            for _col, _decl in UPDATE_SCHEDULE_RUN_COLUMNS:
+                if _col not in _us_cols:
+                    cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} {_decl}")
         except Exception as _e:
             logging.warning(f"update_schedules reboot_timeout migration skipped: {_e}")
 
@@ -962,6 +996,40 @@ class PegaProxDB:
                 UNIQUE(cluster_id, node)
             )
         ''')
+
+        # The QNetd hosts a cluster's QDevice can vote through (core/qnetd.py). address/port
+        # is what the cluster nodes dial; the ssh_* columns are how PegaProx itself reaches a
+        # host of kind 'ssh'. Both secrets sealed like the cluster's own.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS qnetd_hosts (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                address TEXT NOT NULL,
+                port INTEGER DEFAULT 5403,
+                ssh_host TEXT DEFAULT '',
+                ssh_port INTEGER DEFAULT 22,
+                ssh_user TEXT DEFAULT '',
+                password_encrypted TEXT DEFAULT '',
+                ssh_key_encrypted TEXT DEFAULT '',
+                ca_sha256 TEXT DEFAULT '',
+                created_by TEXT DEFAULT '',
+                created_at TEXT,
+                updated_at TEXT
+            )
+        ''')
+        # one QNetd host per cluster; a QDevice knows exactly one
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS qnetd_attachments (
+                cluster_id TEXT PRIMARY KEY,
+                qnetd_id TEXT NOT NULL,
+                cluster_name TEXT NOT NULL,
+                attached_at TEXT,
+                attached_by TEXT DEFAULT ''
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_qnetd_attachments_host '
+                       'ON qnetd_attachments(qnetd_id)')
 
         # NS #501 Jun 2026 — persisted active (fired) alert instances for ack +
         # escalation tracking. The in-memory cooldown map only deduped sends; this
@@ -1265,7 +1333,8 @@ class PegaProxDB:
                     logging.error(f"Failed to add ldap_dn column: {e}")
             
             for _col, _decl in (('ldap_permissions', "TEXT DEFAULT '[]'"),
-                                ('ldap_tenant', "TEXT DEFAULT ''")):
+                                ('ldap_tenant', "TEXT DEFAULT ''"),
+                                ('ldap_tenant_permissions', "TEXT DEFAULT '{}'")):
                 if _col not in columns:
                     try:
                         cursor.execute(f"ALTER TABLE users ADD COLUMN {_col} {_decl}")
@@ -1324,6 +1393,22 @@ class PegaProxDB:
                     logging.info("Added directory_groups column to users table")
                 except Exception as e:
                     logging.error(f"Failed to add directory_groups column: {e}")
+
+            # MK Nov 2026 - every password change put password_changed_at into the user
+            # dict and no column kept it, so the expiry check found no date for anybody:
+            # no warning mail ever went out and the banner said expired for everyone.
+            # The rows already there start their clock with this upgrade, so nobody is
+            # expired by it. The time is the column default rather than a value written
+            # into every row: HA takes a value other than the default for a change made
+            # here, and a standby in step kept its whole users table at the next sync.
+            if 'password_changed_at' not in columns:
+                try:
+                    # our own stamp, digits and separators only, so it can stand as a literal
+                    cursor.execute("ALTER TABLE users ADD COLUMN password_changed_at TEXT "
+                                   f"DEFAULT '{_password_stamp()}'")
+                    logging.info("Added password_changed_at column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add password_changed_at column: {e}")
 
         except Exception as e:
             logging.error(f"Error checking users schema: {e}")
@@ -1602,6 +1687,9 @@ class PegaProxDB:
                 for _col in ('migrate_templates', 'relax_anti_affinity'):   # #763, #954
                     if _col not in _us_cols2:
                         cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} INTEGER DEFAULT 0")
+                for _col, _decl in UPDATE_SCHEDULE_RUN_COLUMNS:
+                    if _col not in _us_cols2:
+                        cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} {_decl}")
             except Exception as _e2:
                 logging.warning(f"update_schedules reboot_timeout migration skipped: {_e2}")
             logging.info("Ensured update_schedules table exists")
@@ -1823,7 +1911,8 @@ class PegaProxDB:
                     target_vmid INTEGER,
                     notes TEXT DEFAULT '',
                     failed_over TEXT DEFAULT '',
-                    failed_over_at TEXT DEFAULT ''
+                    failed_over_at TEXT DEFAULT '',
+                    failed_over_vmid INTEGER
                 )
             ''')
             cursor.execute('''
@@ -1885,6 +1974,11 @@ class PegaProxDB:
                     self._sr_replay_owed = True
                     logging.info("Added failed_over columns to site_recovery_vms, their state is "
                                  "replayed from the failover events once this instance acts")
+                # MK Nov 2026 - the VMID a failed-over guest has on the DR site: its replica's
+                # after an emergency failover. NULL on a mark from before, whose run used the
+                # guest's own
+                if 'failed_over_vmid' not in vm_cols:
+                    cursor.execute("ALTER TABLE site_recovery_vms ADD COLUMN failed_over_vmid INTEGER")
             except Exception as e:
                 logging.error(f"Failed to add failed_over columns: {e}")
             logging.info("Ensured site_recovery tables exist")
@@ -2147,6 +2241,75 @@ class PegaProxDB:
             logging.info("Ensured custom_cloud_templates table exists")
         except Exception as e:
             logging.error(f"Error creating custom_cloud_templates table: {e}")
+
+        # MK Nov 2026 (#1220) - blueprints: a library image plus the hardware and Cloud-Init
+        # a VM from it gets (api/blueprints.py), and the deploys made from them
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS vm_blueprints (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    template_id TEXT NOT NULL,
+                    cores INTEGER DEFAULT 2,
+                    memory INTEGER DEFAULT 2048,
+                    disk_gb INTEGER DEFAULT 0,
+                    cpu TEXT DEFAULT '',
+                    nics TEXT DEFAULT '[]',
+                    ciuser TEXT DEFAULT '',
+                    sshkeys TEXT DEFAULT '',
+                    ip_mode TEXT DEFAULT 'dhcp',
+                    nameserver TEXT DEFAULT '',
+                    searchdomain TEXT DEFAULT '',
+                    ciupgrade INTEGER DEFAULT 1,
+                    tags TEXT DEFAULT '',
+                    start INTEGER DEFAULT 0,
+                    created_by TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS blueprint_deployments (
+                    id TEXT PRIMARY KEY,
+                    blueprint_id TEXT NOT NULL,
+                    blueprint_name TEXT,
+                    cluster_id TEXT NOT NULL,
+                    node TEXT NOT NULL,
+                    vmid INTEGER,
+                    name TEXT,
+                    template_vmid INTEGER,
+                    build_dep_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    step TEXT DEFAULT '',
+                    progress INTEGER DEFAULT 0,
+                    log TEXT DEFAULT '',
+                    error TEXT DEFAULT '',
+                    started_by TEXT DEFAULT '',
+                    started_at TEXT,
+                    finished_at TEXT
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_bp_dep_cluster ON blueprint_deployments(cluster_id, started_at DESC)')
+            # a blueprint can also start from an existing PVE template, Windows ones among
+            # them; which template that is gets remembered per cluster
+            cols = [r[1] for r in cursor.execute("PRAGMA table_info(vm_blueprints)").fetchall()]
+            if 'source_kind' not in cols:
+                cursor.execute("ALTER TABLE vm_blueprints ADD COLUMN source_kind TEXT DEFAULT 'library'")
+            if 'os' not in cols:
+                cursor.execute("ALTER TABLE vm_blueprints ADD COLUMN os TEXT DEFAULT 'linux'")
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS blueprint_templates (
+                    blueprint_id TEXT NOT NULL,
+                    cluster_id TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    updated_by TEXT DEFAULT '',
+                    updated_at TEXT,
+                    PRIMARY KEY (blueprint_id, cluster_id)
+                )
+            ''')
+        except Exception as e:
+            logging.error(f"Error creating blueprint tables: {e}")
 
         # MK May 2026 — extend audit_log with cluster + severity columns for richer filtering
         try:
@@ -2615,6 +2778,26 @@ class PegaProxDB:
         except Exception as e:
             logging.error(f"Error creating node_state_history and the timeline indexes: {e}")
 
+        # MK Oct 2026 - custom node hardening profiles: a named pick of the built-in controls
+        # and values for their parameters, never commands of their own (api/reports.py).
+        # controls and params are JSON. Shared with the standbys (core/ha.py SYNC_TABLES).
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS hardening_profiles (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    controls TEXT NOT NULL DEFAULT '[]',
+                    params TEXT NOT NULL DEFAULT '{}',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_by TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                )
+            ''')
+        except Exception as e:
+            logging.error(f"Error creating hardening_profiles table: {e}")
+
         conn.commit()
         logging.info("DB schema initialized")
     
@@ -2835,6 +3018,97 @@ class PegaProxDB:
         cur = self.conn.cursor()
         cur.execute('DELETE FROM cluster_node_credentials WHERE cluster_id = ? AND node = ?',
                     (cluster_id, node))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    # --- QNetd hosts and the clusters attached to them (core/qnetd.py) ------------
+    _QNETD_COLS = ('id', 'name', 'kind', 'address', 'port', 'ssh_host', 'ssh_port', 'ssh_user',
+                   'ca_sha256', 'created_by', 'created_at', 'updated_at')
+
+    def _qnetd_row(self, r, secrets=False):
+        row = {c: r[c] for c in self._QNETD_COLS}
+        row['has_password'] = bool(r['password_encrypted'])
+        row['has_ssh_key'] = bool(r['ssh_key_encrypted'])
+        if secrets:
+            # server side only. A value that does not open is no credential: the login
+            # then fails at the host instead of offering ciphertext as a password
+            for col, key in (('password_encrypted', 'password'), ('ssh_key_encrypted', 'ssh_key')):
+                try:
+                    row[key] = self._decrypt(r[col]) if r[col] else ''
+                except Exception:
+                    logging.warning(f"[QNetd] {col} of host {r['id']} does not open with this key")
+                    row[key] = ''
+        return row
+
+    def list_qnetd_hosts(self):
+        cur = self.conn.cursor()
+        cur.execute('SELECT * FROM qnetd_hosts ORDER BY name COLLATE NOCASE')
+        return [self._qnetd_row(r) for r in cur.fetchall()]
+
+    def get_qnetd_host(self, host_id, secrets=False):
+        cur = self.conn.cursor()
+        cur.execute('SELECT * FROM qnetd_hosts WHERE id = ?', (host_id,))
+        r = cur.fetchone()
+        return self._qnetd_row(r, secrets) if r else None
+
+    def save_qnetd_host(self, host_id, fields, password=None, ssh_key=None):
+        """Insert or update one host. password / ssh_key: None keeps what is stored,
+        '' clears it, anything else is sealed."""
+        cur = self.conn.cursor()
+        now = datetime.now().astimezone().isoformat(timespec='seconds')
+        old = cur.execute('SELECT password_encrypted, ssh_key_encrypted FROM qnetd_hosts WHERE id = ?',
+                          (host_id,)).fetchone()
+        pw = (old['password_encrypted'] if old else '') if password is None else \
+            (self._encrypt(password) if password else '')
+        key = (old['ssh_key_encrypted'] if old else '') if ssh_key is None else \
+            (self._encrypt(ssh_key) if ssh_key else '')
+        vals = tuple(fields.get(c, d) for c, d in (('name', ''), ('kind', ''), ('address', ''),
+                                                  ('port', 5403), ('ssh_host', ''), ('ssh_port', 22),
+                                                  ('ssh_user', '')))
+        if old:
+            cur.execute('UPDATE qnetd_hosts SET name=?, kind=?, address=?, port=?, ssh_host=?, ssh_port=?, '
+                        'ssh_user=?, password_encrypted=?, ssh_key_encrypted=?, updated_at=? WHERE id=?',
+                        vals + (pw or '', key or '', now, host_id))
+        else:
+            cur.execute('INSERT INTO qnetd_hosts (id, name, kind, address, port, ssh_host, ssh_port, ssh_user, '
+                        'password_encrypted, ssh_key_encrypted, created_by, created_at, updated_at) '
+                        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        (host_id,) + vals + (pw or '', key or '', fields.get('created_by', ''), now, now))
+        self.conn.commit()
+
+    def set_qnetd_ca_pin(self, host_id, fingerprint):
+        """The CA a host answered with the first time ('' forgets it)."""
+        cur = self.conn.cursor()
+        cur.execute('UPDATE qnetd_hosts SET ca_sha256 = ? WHERE id = ?', (fingerprint or '', host_id))
+        self.conn.commit()
+
+    def delete_qnetd_host(self, host_id):
+        cur = self.conn.cursor()
+        cur.execute('DELETE FROM qnetd_hosts WHERE id = ?', (host_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def list_qnetd_attachments(self, qnetd_id=None, cluster_id=None):
+        cur = self.conn.cursor()
+        if qnetd_id is not None:
+            cur.execute('SELECT * FROM qnetd_attachments WHERE qnetd_id = ? ORDER BY cluster_name', (qnetd_id,))
+        elif cluster_id is not None:
+            cur.execute('SELECT * FROM qnetd_attachments WHERE cluster_id = ?', (cluster_id,))
+        else:
+            cur.execute('SELECT * FROM qnetd_attachments ORDER BY cluster_name')
+        return [dict(r) for r in cur.fetchall()]
+
+    def save_qnetd_attachment(self, cluster_id, qnetd_id, cluster_name, by):
+        cur = self.conn.cursor()
+        now = datetime.now().astimezone().isoformat(timespec='seconds')
+        cur.execute('INSERT OR REPLACE INTO qnetd_attachments (cluster_id, qnetd_id, cluster_name, '
+                    'attached_at, attached_by) VALUES (?,?,?,?,?)',
+                    (cluster_id, qnetd_id, cluster_name, now, by or ''))
+        self.conn.commit()
+
+    def delete_qnetd_attachment(self, cluster_id):
+        cur = self.conn.cursor()
+        cur.execute('DELETE FROM qnetd_attachments WHERE cluster_id = ?', (cluster_id,))
         self.conn.commit()
         return cur.rowcount > 0
 
@@ -3084,6 +3358,10 @@ class PegaProxDB:
             return
         retired = USERS_FILE_ENCRYPTED + '.migrated'
         try:
+            # MK Nov 2026 - the accounts in the table on disk first: a power cut right after an
+            # import (synchronous=NORMAL) would leave the table without them and the file
+            # moved aside, where nothing reads it
+            dbcrypto.sync_wal(self.db_path)
             os.replace(USERS_FILE_ENCRYPTED, retired)
             logging.info(f"Legacy user file moved to {retired}, the database holds the accounts")
         except OSError as e:
@@ -3098,6 +3376,7 @@ class PegaProxDB:
 
         cursor = self.conn.cursor()
         now = datetime.now().isoformat()
+        stamp = _password_stamp()
         written = 0
 
         for username, user in data.items():
@@ -3108,9 +3387,9 @@ class PegaProxDB:
                 cursor.execute('''
                     INSERT OR IGNORE INTO users
                     (username, password_salt, password_hash, role, permissions, tenant, 
-                     created_at, last_login, password_expiry, 
+                     created_at, last_login, password_expiry, password_changed_at,
                      totp_secret_encrypted, totp_enabled, force_password_change, enabled)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     username,
                     user.get('password_salt', ''),
@@ -3121,6 +3400,8 @@ class PegaProxDB:
                     user.get('created_at', now),
                     user.get('last_login'),
                     user.get('password_expiry'),
+                    # the JSON store kept it; an account without one starts now
+                    user.get('password_changed_at') or stamp,
                     self._encrypt(user.get('totp_secret', '')),
                     1 if user.get('totp_enabled', False) else 0,
                     1 if user.get('force_password_change', False) else 0,
@@ -3887,7 +4168,7 @@ class PegaProxDB:
         # MK: Mar 2026 - preserve group_id/display_name/sort_order that aren't in config data (#111)
         cursor.execute('SELECT group_id, display_name, sort_order, created_at, '
                        'proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict, '
-                       'migration_cooldown, transfer_network FROM clusters WHERE id = ?', (cluster_id,))
+                       'migration_cooldown, transfer_network, smbios_autoconfig FROM clusters WHERE id = ?', (cluster_id,))
         existing = cursor.fetchone()
 
         # MK May 2026 — preserve previously-set worldmap location across save_cluster
@@ -3957,7 +4238,10 @@ class PegaProxDB:
             data.get('ssh_port', 22),
             self._encrypt(json.dumps(data.get('ha_settings', {}))),
             json.dumps(data.get('excluded_nodes', [])),
-            json.dumps(data.get('smbios_autoconfig', {})),
+            # MK Nov 2026 - only the SMBIOS route writes these (update_cluster): a save of the
+            # cluster config, which does not carry them, keeps what is stored
+            (json.dumps(data['smbios_autoconfig']) if 'smbios_autoconfig' in data
+             else (existing['smbios_autoconfig'] if existing and existing['smbios_autoconfig'] else '{}')),
             data.get('api_token_user', ''),
             self._encrypt(data.get('api_token_secret', '')) if data.get('api_token_secret') else '',
             data.get('group_id', existing['group_id'] if existing else None),
@@ -4041,9 +4325,14 @@ class PegaProxDB:
                 cols = [row[1] for row in cursor.execute('PRAGMA table_info("%s")' % tbl).fetchall()]
             except Exception:
                 continue
-            if 'cluster_id' in cols:
+            if 'cluster_id' in cols and tbl not in self.KEPT_ON_CLUSTER_DELETE:
                 cursor.execute('DELETE FROM "%s" WHERE cluster_id = ?' % tbl, (cluster_id,))
         self.conn.commit()
+
+    # MK Nov 2026 - audit_log got a cluster_id with #1121, so the sweep above took a deleted
+    # cluster's entries with it. They are history, and every row is a link of the hash chain:
+    # the integrity check showed the hole as rows missing, the way tampering looks.
+    KEPT_ON_CLUSTER_DELETE = ('audit_log', 'audit_checkpoints')
 
     # MK Oct 2026 - the moves the balancer made, with why. migration_history is a local
     # table: the instance whose balancer moved the guest holds the row, a standby asks it.
@@ -4267,6 +4556,7 @@ class PegaProxDB:
                 'created_at': row_dict.get('created_at'),
                 'last_login': row_dict.get('last_login'),
                 'password_expiry': row_dict.get('password_expiry'),
+                'password_changed_at': row_dict.get('password_changed_at'),
                 'totp_secret': self._decrypt(row_dict.get('totp_secret_encrypted') or ''),
                 'totp_pending_secret': self._decrypt(row_dict.get('totp_pending_secret_encrypted') or ''),  # MK: Load pending 2FA secret
                 'totp_enabled': bool(row_dict.get('totp_enabled', 0)),
@@ -4288,6 +4578,7 @@ class PegaProxDB:
                 'last_ldap_sync': row_dict.get('last_ldap_sync', ''),
                 'ldap_permissions': json.loads(row_dict.get('ldap_permissions') or '[]'),
                 'ldap_tenant': row_dict.get('ldap_tenant', '') or '',
+                'ldap_tenant_permissions': json.loads(row_dict.get('ldap_tenant_permissions') or '{}'),
                 # NS: Feb 2026 - OIDC and tenant permission fields
                 'tenant_permissions': json.loads(row_dict.get('tenant_permissions') or '{}'),
                 'denied_permissions': json.loads(row_dict.get('denied_permissions') or '[]'),
@@ -4337,6 +4628,7 @@ class PegaProxDB:
             'created_at': row_dict.get('created_at'),
             'last_login': row_dict.get('last_login'),
             'password_expiry': row_dict.get('password_expiry'),
+            'password_changed_at': row_dict.get('password_changed_at'),
             'totp_secret': self._decrypt(row_dict.get('totp_secret_encrypted') or ''),
             'totp_pending_secret': self._decrypt(row_dict.get('totp_pending_secret_encrypted') or ''),  # MK: Load pending 2FA secret
             'totp_enabled': bool(row_dict.get('totp_enabled', 0)),
@@ -4356,6 +4648,7 @@ class PegaProxDB:
             'last_ldap_sync': row_dict.get('last_ldap_sync', ''),
             'ldap_permissions': json.loads(row_dict.get('ldap_permissions') or '[]'),
             'ldap_tenant': row_dict.get('ldap_tenant', '') or '',
+            'ldap_tenant_permissions': json.loads(row_dict.get('ldap_tenant_permissions') or '{}'),
             # NS: Feb 2026 - OIDC and tenant permission fields
             'tenant_permissions': json.loads(row_dict.get('tenant_permissions') or '{}'),
             'denied_permissions': json.loads(row_dict.get('denied_permissions') or '[]'),
@@ -4375,19 +4668,21 @@ class PegaProxDB:
         cursor.execute('''
             INSERT OR REPLACE INTO users
             (username, password_salt, password_hash, role, permissions, tenant,
-             created_at, last_login, password_expiry,
+             created_at, last_login, password_expiry, password_changed_at,
              totp_secret_encrypted, totp_pending_secret_encrypted, totp_enabled, force_password_change,
             enabled, theme, language, ui_layout, taskbar_auto_expand,
              auth_source, display_name, email, avatar_mime, avatar_data, ldap_dn, last_ldap_sync,
-             ldap_permissions, ldap_tenant,
+             ldap_permissions, ldap_tenant, ldap_tenant_permissions,
              tenant_permissions, denied_permissions, oidc_sub, last_oidc_sync,
              layout_chosen, portal_only, sidebar_show_vmid, user_folder,
              directory_groups)
             VALUES (?, ?, ?, ?, ?, ?,
                     COALESCE((SELECT created_at FROM users WHERE username = ?), ?),
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?,
                     ?, ?,
+                    COALESCE(?, (SELECT password_changed_at FROM users WHERE username = ?)),
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
                     COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]'))
@@ -4401,6 +4696,9 @@ class PegaProxDB:
             username, now,
             data.get('last_login'),
             data.get('password_expiry'),
+            # a dict without it (a backup from before the column) keeps the stored one;
+            # the routes that create a local account set it themselves
+            data.get('password_changed_at') or None, username,
             self._encrypt(data.get('totp_secret', '')),
             self._encrypt(data.get('totp_pending_secret', '')),  # MK: Save pending 2FA secret
             1 if data.get('totp_enabled', False) else 0,
@@ -4419,6 +4717,7 @@ class PegaProxDB:
             data.get('last_ldap_sync', ''),
             json.dumps(list(data.get('ldap_permissions') or [])),
             data.get('ldap_tenant', '') or '',
+            json.dumps(dict(data.get('ldap_tenant_permissions') or {})),
             # NS: Feb 2026 - OIDC and tenant permission fields
             json.dumps(data.get('tenant_permissions', {})),
             json.dumps(data.get('denied_permissions', [])),
@@ -4959,11 +5258,17 @@ class PegaProxDB:
         try:
             out = work(conn.cursor())
             conn.commit()
-            return out
         except Exception:
             if began:
                 conn.rollback()
             raise
+        # MK Nov 2026 - on disk before anything acts on it. The connections run
+        # synchronous=NORMAL, and a power cut takes the last commits: a checkpoint lost
+        # under the anchor beside the key reads as cut away, and rows the SIEM targets and
+        # the evidence bundles already hold would be numbered again. What was committed
+        # before (the action an entry is about) lands with it.
+        dbcrypto.sync_wal(self.db_path)
+        return out
 
     def _ensure_audit_genesis(self):
         try:
@@ -5009,9 +5314,11 @@ class PegaProxDB:
             else:
                 severity = 'info'
 
-        # stored as text whatever came in, so the row reads back as it was hashed
+        # stored as text whatever came in, so the row reads back as it was hashed.
+        # NS Nov 2026 - a lone surrogate ("\ud800" in a client's JSON) has no UTF-8 form: the
+        # chain hash raised on it and the entry was lost. It is replaced before the hash.
         def _txt(v):
-            return None if v is None else str(v)
+            return None if v is None else _LONE_SURROGATE.sub('\ufffd', str(v))
         row = {'user': _txt(user), 'action': _txt(action) or '', 'details': _txt(details),
                'ip_address': _txt(ip), 'cluster': _txt(cluster) or '', 'severity': severity,
                'cluster_id': _txt(cluster_id) or ''}
@@ -5057,18 +5364,46 @@ class PegaProxDB:
             # silently swallow — SIEM is optional and shouldn't break audit writes
             pass
 
+    @staticmethod
+    def _audit_scope_cond(scope, params) -> str:
+        """WHERE part for scope=(cluster_ids, username): the rows of those clusters plus the
+        user's own, no row at all when both are empty. Appends its values to params.
+
+        A name the background jobs and the session fallbacks write under has no own rows:
+        those rows belong to every tenant (audit.AUDIT_PSEUDO_ACTORS)."""
+        from pegaprox.utils.audit import is_audit_pseudo_actor
+        cids, own = list(scope[0] or []), scope[1] or ''
+        if is_audit_pseudo_actor(own):
+            own = ''
+        parts = []
+        if cids:
+            parts.append(f"cluster_id IN ({','.join('?' * len(cids))})")
+            params.extend(cids)
+        if own:
+            parts.append('user = ?')
+            params.append(own)
+        return f"({' OR '.join(parts)})" if parts else '1 = 0'
+
     def search_audit_log(self, q='', user='', action='', cluster='', severity='',
-                         ip='', date_from='', date_to='', offset=0, limit=100):
+                         ip='', date_from='', date_to='', offset=0, limit=100, scope=None):
         """Search audit log with rich filters + pagination.
-        Returns (entries, total) where total is the un-paginated row count."""
+        Returns (entries, total) where total is the un-paginated row count.
+
+        scope as in get_audit_log, part of the WHERE so total and the page only count
+        the rows the caller may read."""
         cursor = self.conn.cursor()
         conds = []
         params = []
         if q:
-            # search across user, action, details, cluster
-            conds.append('(user LIKE ? OR action LIKE ? OR details LIKE ? OR cluster LIKE ?)')
+            # search across user, action, details, cluster. A details hit has to hold in
+            # the text the route hands out as well (masked_details), else a masked value
+            # could still be told by searching for it
+            from pegaprox.utils.audit import masked_details
+            self.conn.create_function('shown_details', 2, lambda d, c: masked_details(d, c or ''))
+            conds.append('(user LIKE ? OR action LIKE ? OR (details LIKE ? AND shown_details(details, cluster) LIKE ?)'
+                         ' OR cluster LIKE ?)')
             wild = f'%{q}%'
-            params.extend([wild, wild, wild, wild])
+            params.extend([wild, wild, wild, wild, wild])
         if user:
             conds.append('user = ?')
             params.append(user)
@@ -5090,6 +5425,8 @@ class PegaProxDB:
         if date_to:
             conds.append('timestamp <= ?')
             params.append(date_to)
+        if scope is not None:
+            conds.append(self._audit_scope_cond(scope, params))
         where = (' WHERE ' + ' AND '.join(conds)) if conds else ''
 
         # total
@@ -5104,17 +5441,21 @@ class PegaProxDB:
         rows = [dict(r) for r in cursor.fetchall()]
         return rows, total
 
-    def audit_facets(self, days=7):
-        """Return top users/actions for the audit search UI dropdowns."""
+    def audit_facets(self, days=7, scope=None):
+        """Return top users/actions for the audit search UI dropdowns.
+        scope as in get_audit_log: only the rows the caller may read are counted."""
         cursor = self.conn.cursor()
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         out = {'users': [], 'actions': [], 'clusters': []}
+        since, params = 'timestamp >= ?', [cutoff]
+        if scope is not None:
+            since += ' AND ' + self._audit_scope_cond(scope, params)
         try:
-            cursor.execute('SELECT user, COUNT(*) AS n FROM audit_log WHERE timestamp >= ? AND user != "" GROUP BY user ORDER BY n DESC LIMIT 30', (cutoff,))
+            cursor.execute(f'SELECT user, COUNT(*) AS n FROM audit_log WHERE {since} AND user != "" GROUP BY user ORDER BY n DESC LIMIT 30', params)
             out['users'] = [{'user': r['user'], 'count': r['n']} for r in cursor.fetchall()]
-            cursor.execute('SELECT action, COUNT(*) AS n FROM audit_log WHERE timestamp >= ? GROUP BY action ORDER BY n DESC LIMIT 50', (cutoff,))
+            cursor.execute(f'SELECT action, COUNT(*) AS n FROM audit_log WHERE {since} GROUP BY action ORDER BY n DESC LIMIT 50', params)
             out['actions'] = [{'action': r['action'], 'count': r['n']} for r in cursor.fetchall()]
-            cursor.execute('SELECT cluster, COUNT(*) AS n FROM audit_log WHERE timestamp >= ? AND cluster != "" GROUP BY cluster ORDER BY n DESC LIMIT 30', (cutoff,))
+            cursor.execute(f'SELECT cluster, COUNT(*) AS n FROM audit_log WHERE {since} AND cluster != "" GROUP BY cluster ORDER BY n DESC LIMIT 30', params)
             out['clusters'] = [{'cluster': r['cluster'], 'count': r['n']} for r in cursor.fetchall()]
         except Exception as e:
             logging.warning(f"audit_facets failed: {e}")
@@ -5139,15 +5480,7 @@ class PegaProxDB:
             conditions.append('action LIKE ?')
             params.append(f'%{action}%')
         if scope is not None:
-            cids, own = list(scope[0] or []), scope[1] or ''
-            parts = []
-            if cids:
-                parts.append(f"cluster_id IN ({','.join('?' * len(cids))})")
-                params.extend(cids)
-            if own:
-                parts.append('user = ?')
-                params.append(own)
-            conditions.append(f"({' OR '.join(parts)})" if parts else '1 = 0')
+            conditions.append(self._audit_scope_cond(scope, params))
 
         if conditions:
             query += ' WHERE ' + ' AND '.join(conditions)
@@ -5473,7 +5806,8 @@ class PegaProxDB:
                 'created_at': datetime.now().isoformat(), 'pruned_rows': gone,
                 'legacy_count': count, 'legacy_digest': digest, 'legacy_changed': changed,
                 'cutoff': cutoff_iso})
-        cp = dbcrypto.run_off_hub(_work, self.db_path, commit=True)
+        # durable: the anchor and the SIEM targets get the checkpoint next (_audit_chain_txn)
+        cp = dbcrypto.run_off_hub(_work, self.db_path, commit=True, durable=True)
         if cp:
             self._after_checkpoint(cp)
         return cp
@@ -5981,7 +6315,9 @@ class PegaProxDB:
                                 # next ISO fetch answering 500.
                                 ('auto_install_profiles', ('answer_encrypted',)),
                                 # the root passwords of single nodes (#1136)
-                                ('cluster_node_credentials', ('password_encrypted',))):
+                                ('cluster_node_credentials', ('password_encrypted',)),
+                                # the SSH login of a QNetd host (core/qnetd.py)
+                                ('qnetd_hosts', ('password_encrypted', 'ssh_key_encrypted'))):
                 try:
                     cursor.execute(f"SELECT id, {', '.join(_cols)} FROM {_tbl}")
                     for _r in cursor.fetchall():
@@ -6116,6 +6452,10 @@ class PegaProxDB:
                     f.flush()
                     os.fsync(f.fileno())
                 os.chmod(backup_file, 0o600)
+                # MK Nov 2026 - and its name, before the key file is written over in place: a
+                # power cut in that write leaves a short key, and the start refuses it and
+                # points at this copy
+                dbcrypto.sync_file(backup_file)
 
                 with open(aes_key_file, 'wb') as f:
                     f.write(new_key)
@@ -6145,6 +6485,16 @@ class PegaProxDB:
                 stats['errors'].append(f"Commit failed, rotation rolled back: {e}")
                 stats['success'] = False
                 return stats
+            # MK Nov 2026 - the new key is on disk since step 4, so the rows it opens have to be
+            # too before anything goes on: under synchronous=NORMAL a power cut could leave
+            # them on the old key under the new key file. They are committed, so a failed sync
+            # keeps the new key and names the copy of the old one.
+            try:
+                dbcrypto.sync_wal(self.db_path)
+            except OSError as e:
+                logging.error(f"Key rotation: the re-encrypted rows could not be synced to disk ({e}); "
+                              f"after a power cut they may need the old key from {backup_file}")
+                stats['errors'].append(f"The re-encrypted rows could not be synced to disk: {e}")
 
             # 5. Update in-memory key
             self.aes_key = new_key
@@ -6382,11 +6732,15 @@ class PegaProxDB:
         ))
         self.conn.commit()
     
-    def delete_affinity_rule(self, rule_id: str):
-        """Delete affinity rule"""
+    def delete_affinity_rule(self, rule_id: str, cluster_id: str = None) -> bool:
+        """Delete affinity rule, of that cluster when one is given. True if a row went."""
         cursor = self.conn.cursor()
-        cursor.execute('DELETE FROM affinity_rules WHERE id = ?', (rule_id,))
+        if cluster_id:
+            cursor.execute('DELETE FROM affinity_rules WHERE id = ? AND cluster_id = ?', (rule_id, cluster_id))
+        else:
+            cursor.execute('DELETE FROM affinity_rules WHERE id = ?', (rule_id,))
         self.conn.commit()
+        return cursor.rowcount > 0
     
     def save_all_affinity_rules(self, rules: dict):
         """Save all affinity rules"""
@@ -6526,6 +6880,10 @@ class PegaProxDB:
             cursor = self.conn.cursor()
             marked = _replay_sr_failover_state(cursor)
             self.conn.commit()
+            # MK Nov 2026 - the columns came with an earlier commit and are all that says the
+            # replay ran: a power cut (synchronous=NORMAL) that kept them and took the replay
+            # would leave the marks unset for good
+            dbcrypto.sync_wal(self.db_path)
             self._sr_replay_owed = False
         logging.info(f"site_recovery_vms: {marked} guest(s) failed over, replayed from the failover events")
         return marked

@@ -13,6 +13,7 @@ import os
 import time
 import secrets
 import logging
+import urllib.parse
 from datetime import datetime
 from flask import Blueprint, jsonify, request
 
@@ -72,6 +73,19 @@ def _is_ip_literal(host):
         return False
 
 
+def _host_without_port(value):
+    """'name', 'name:port', '[v6]' or '[v6]:port' -> the bare lowercased host.
+
+    Splitting on ':' cut a bracketed IPv6 literal down to '[', which is no IP literal,
+    so the ip_literal_host answer never fired for it. A value urlsplit cannot read
+    (an unclosed bracket) gives '', the same as no host at all.
+    """
+    try:
+        return urllib.parse.urlsplit('//' + value).hostname or ''
+    except ValueError:
+        return ''
+
+
 def _effective_host():
     """Resolve the host the browser thinks it's talking to.
 
@@ -90,10 +104,10 @@ def _effective_host():
             xfh = (request.headers.get('X-Forwarded-Host') or '').strip()
             if xfh:
                 # may be a comma list if chained; take the leftmost
-                return xfh.split(',')[0].strip().split(':')[0].lower()
+                return _host_without_port(xfh.split(',')[0].strip())
     except Exception:
         pass
-    return (request.host or '').split(':')[0].lower()
+    return _host_without_port(request.host or '')
 
 
 def _get_rp_or_error():

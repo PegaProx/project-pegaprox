@@ -7,9 +7,9 @@ services:
     # whatever it points at now, with nothing to compare against. That is fine for a
     # lab and wrong for anything that manages a production estate, so the tag is a
     # variable. Default unchanged, and an operator pins with one line:
-    #   PEGAPROX_VERSION=1.4.1 docker compose up -d
+    #   PEGAPROX_VERSION=1.5.0 docker compose up -d
     # Strictest is a digest, which cannot be repointed at all:
-    #   PEGAPROX_VERSION=1.4.1@sha256:<digest from `docker buildx imagetools inspect`>
+    #   PEGAPROX_VERSION=1.5.0@sha256:<digest from `docker buildx imagetools inspect`>
     image: ghcr.io/pegaprox/pegaprox:${PEGAPROX_VERSION:-latest}
     # build: .  # uncomment to build locally
     container_name: pegaprox
@@ -17,9 +17,17 @@ services:
       - "5000:5000"   # web UI + API
       - "5001:5001"   # VNC websocket (noVNC console)
       - "5002:5002"   # SSH websocket (xterm.js)
+      # NS Nov 2026 - http://host:5000 is redirected to https://host:5000 with nothing set.
+      # For http://host on port 80 and for ACME HTTP-01, uncomment this line, and below
+      # environment: with PEGAPROX_HTTP_PORT. The image runs as the pegaprox user; Docker
+      # 20.10 and newer let it open port 80 inside the container. If the log says port 80
+      # needs root or CAP_NET_BIND_SERVICE, map "80:8080" and set PEGAPROX_HTTP_PORT to 8080.
+      # - "80:80"     # extra HTTP port: redirect to https and ACME HTTP-01
     volumes:
       - pegaprox-config:/app/config
       - pegaprox-logs:/app/logs
+      # the socket of the QNetd sidecar below (profile qdevice): empty and unused without it
+      - pegaprox-qnetd-sock:/run/pegaprox-qnetd
       # MK 2026-06-01: SSL certs + login-background uploads now live under
       # config/ssl and config/branding (auto-migrated from legacy ssl/ +
       # images/login_bg.* on first boot). The separate ssl/ bind-mount is
@@ -30,6 +38,7 @@ services:
     #   PEGAPROX_BEHIND_PROXY: "true"           # behind nginx/haproxy
     #   PEGAPROX_TRUSTED_PROXIES: "172.16.0.0/12"
     #   PEGAPROX_ALLOWED_ORIGINS: "https://pegaprox.example.com"
+    #   PEGAPROX_HTTP_PORT: "80"                # with the "80:80" port line above
 
   # MK Oct 2026 (#625) - the witness: the third vote of an automatic group, at a third
   # site and never on a host that runs PegaProx. Same image, the command `witness`.
@@ -51,7 +60,40 @@ services:
   #     test: ["CMD", "python3", "pegaprox_multi_cluster.py", "witness", "health"]
   #   restart: unless-stopped
 
+  # MK Oct 2026 - the QNetd: the external vote of the QDevice of 2-node (and other even)
+  # Proxmox clusters, on this Docker host. Same image, the command `qnetd run`:
+  # corosync-qnetd on 5403 (every cluster node has to reach it) and the helper PegaProx
+  # signs the cluster certificates through, on a socket in a volume only the two of them
+  # mount. The CA key stays in pegaprox-qnetd, never in the PegaProx container. Named
+  # volumes, not bind mounts: a new named volume takes owner and mode from the image, and
+  # the sidecar refuses a socket directory that is not its own. Not on a Docker host that
+  # is a VM of a cluster it should vote for (docs/qdevice.md). It starts only with its
+  # profile: docker compose --profile qdevice up -d
+  # Docker publishes 5403 itself, past the host's own firewall rules for it: limit it to
+  # the cluster nodes where this host faces other networks (docs/qdevice.md, The firewall).
+  pegaprox-qnetd:
+    image: ghcr.io/pegaprox/pegaprox:${PEGAPROX_VERSION:-latest}
+    container_name: pegaprox-qnetd
+    profiles: ["qdevice"]
+    command: ["qnetd", "run"]
+    ports:
+      - "5403:5403"
+    volumes:
+      - pegaprox-qnetd:/etc/corosync/qnetd
+      - pegaprox-qnetd-sock:/run/pegaprox-qnetd
+    # the container cannot read the SMBIOS uuid of this host, PegaProx checks with it that
+    # the QNetd is not a VM of the cluster. Put it into .env next to this file once:
+    #   echo "PEGAPROX_QNETD_HOST_UUID=$(sudo cat /sys/class/dmi/id/product_uuid)" >> .env
+    # Empty, PegaProx cannot tell and asks you to confirm the host is not a guest of the cluster.
+    environment:
+      PEGAPROX_QNETD_HOST_UUID: "${PEGAPROX_QNETD_HOST_UUID:-}"
+    healthcheck:
+      test: ["CMD", "python3", "pegaprox_multi_cluster.py", "qnetd", "health"]
+    restart: unless-stopped
+
 volumes:
   pegaprox-config:
   pegaprox-logs:
   # pegaprox-witness:
+  pegaprox-qnetd:
+  pegaprox-qnetd-sock:

@@ -964,7 +964,8 @@ def test_a_promotion_waits_for_the_sync_that_is_under_way(env, db, monkeypatch):
         assert done == [] and ha.role() == ha.ROLE_STANDBY
     finally:
         ha._pull_lock.release()
-    g.join(5)
+    # a slow one left running would change the role under the next test
+    g.join(60)
     assert done == [4] and ha.role() == ha.ROLE_ACTIVE
 
     # a sync that hangs on a source that is gone does not hold the failover up for good

@@ -12,6 +12,7 @@ MK Oct 2026 (#625)
 """
 import base64
 import hashlib
+import itertools
 import json
 import os
 import secrets
@@ -92,10 +93,22 @@ exec REAL_PYTHON $iso "$@"
 }
 
 
+_PORTS = itertools.count()
+
+
 def _free_port():
-    with socket.socket() as s:
-        s.bind(('127.0.0.1', 0))
-        return s.getsockname()[1]
+    # A port closed here is free for anyone until the witness binds it, and with the ports the system hands out
+    # that was once another worker's witness: the test then talked to it. So every worker keeps to its own.
+    worker = int(os.environ.get('PYTEST_XDIST_WORKER', 'gw0')[2:])
+    for _ in range(200):
+        port = 20000 + worker * 200 + next(_PORTS) % 200
+        with socket.socket() as s:
+            try:
+                s.bind(('127.0.0.1', port))
+            except OSError:
+                continue
+            return port
+    raise AssertionError(f'no free port for worker {worker}')
 
 
 def _alive(pid):

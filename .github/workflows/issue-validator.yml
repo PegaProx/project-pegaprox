@@ -73,6 +73,17 @@ jobs:
               }
             }
 
+            // The field checks below find all three fields in the untouched template itself (its
+            // comments, the empty "1." to "3.", the bold labels). Strip those plus the intro quote,
+            // headings, fences and checklist; with no letter or digit left, nothing was filled in.
+            const own = body.replace(/\r\n/g, '\n').replace(/<!--[\s\S]*?-->/g, '').split('\n')
+              .filter(l => !/^\s*(>|-{3,}\s*$|#{1,6}\s|```|~~~)/.test(l))
+              .filter(l => !/^\s*[-*]\s*\[[ xX]?\]/.test(l))
+              .filter(l => !/^\s*(\d+\.|[-*])\s*$/.test(l))
+              .filter(l => !/^\s*[-*]\s*\*\*[^*]+\*\*\s*$/.test(l))
+              .join('\n');
+            const untouched = !/[\p{L}\p{N}]/u.test(own);
+
             // === BUG REPORT ===
             if (!isInvalid && !isMaintainer &&
                 (labels.includes('bug') || title.includes('[bug]'))) {
@@ -83,7 +94,7 @@ jobs:
                 { name: 'PegaProx Version', check: /pegaprox version:\s*\S+/i }
               ];
               
-              const missing = requiredFields.filter(f => !f.check.test(body));
+              const missing = untouched ? requiredFields : requiredFields.filter(f => !f.check.test(body));
               
               if (missing.length > 0 || body.length < 100) {
                 isInvalid = true;
@@ -103,7 +114,7 @@ jobs:
             if (!isInvalid && !isMaintainer &&
                 (labels.includes('enhancement') || labels.includes('feature') || title.includes('[feature]'))) {
               
-              const hasDescription = body.length > 50;
+              const hasDescription = body.length > 50 && !untouched;
               
               if (!hasDescription) {
                 isInvalid = true;

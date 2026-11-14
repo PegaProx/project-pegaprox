@@ -4,6 +4,7 @@ PegaProx Task Models - Layer 0
 No pegaprox imports allowed.
 """
 
+import math
 from datetime import datetime
 
 
@@ -24,6 +25,25 @@ def balancer_cooldown(value):
     except (TypeError, ValueError):
         return BALANCER_COOLDOWN_DEFAULT
     return min(max(secs, BALANCER_COOLDOWN_MIN), BALANCER_COOLDOWN_MAX)
+
+
+# MK: the score above which a node trends to overload. A row from before the
+# setting holds 0.0 or NULL; the UI shows 75 for it, so 75 is what runs.
+PREDICTIVE_THRESHOLD_DEFAULT = 75
+
+
+def predictive_threshold(value):
+    """A stored or synced threshold as it runs: the default for 0, NULL, '' and anything
+    that is no number above 0."""
+    if isinstance(value, bool):
+        return PREDICTIVE_THRESHOLD_DEFAULT
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return PREDICTIVE_THRESHOLD_DEFAULT
+    if not math.isfinite(num) or num <= 0:
+        return PREDICTIVE_THRESHOLD_DEFAULT
+    return value if isinstance(value, (int, float)) else num
 
 
 class MaintenanceTask:
@@ -93,6 +113,7 @@ class UpdateTask:
         self.completed_at = None
         self.reboot_issued = False
         self.back_online = False
+        self.reboot_waited = 0
 
     def add_output(self, line: str):
         self.output_lines.append({
@@ -156,6 +177,8 @@ class PegaProxConfig:
         # MK Sep 2026 (#941) — hard off switch. Everything that reaches a node over SSH
         # goes through PegaProxManager._ssh_connect, so this turns the lot off for this
         # cluster: node shell, VNC tunnel, the LVM snapshot probe, the hardening checks.
+        # MK Nov 2026 - the node shell does not (its login is the operator's), it asks
+        # api/helpers.node_shell_refusal
         self.ssh_disabled = bool(cluster_data.get('ssh_disabled', False))
         # MK May 2026 — Proxmox API port. Default :8006 covers ~all installs,
         # but ops running PVE on a non-standard port (firewall constraint,
@@ -196,7 +219,7 @@ class PegaProxConfig:
         # Were API-settable but never persisted before, so users saw "saved"
         # toasts that reverted within seconds.
         self.predictive_balancing = cluster_data.get('predictive_balancing', False)
-        self.predictive_threshold = cluster_data.get('predictive_threshold', 0.0)
+        self.predictive_threshold = predictive_threshold(cluster_data.get('predictive_threshold'))
         self.balance_cpu_weight = cluster_data.get('balance_cpu_weight', 1.0)
         self.balance_mem_weight = cluster_data.get('balance_mem_weight', 1.0)
         self.balance_io_weight = cluster_data.get('balance_io_weight', 1.0)

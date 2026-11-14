@@ -351,9 +351,8 @@ def _wake_all():
 # ──────────────────────────────────────────────────────────────────────────
 
 def _alert_handler(alert_data: dict):
-    """Receives every alert from background/alerts.py. Stores in inbox per
-    *all* admin users (since alerts aren't user-scoped today) and sends
-    a wake-up push to every registered subscription."""
+    """Receives every alert from background/alerts.py. Stores it in the inbox of
+    each subscriber who may read it and sends their subscriptions a wake-up push."""
     try:
         title = alert_data.get('alert_name') or 'PegaProx Alert'
         body = alert_data.get('message') or ''
@@ -379,7 +378,12 @@ def _alert_handler(alert_data: dict):
         # cluster-less system alerts (no cid) go to all. Fail CLOSED on a lookup error.
         from pegaprox.utils.rbac import get_user_clusters
         from pegaprox.utils.auth import load_users
+        from pegaprox.api.helpers import alert_scope
         _all_users = load_users()
+        targets = [(alert_data.get('target_type') or 'cluster', alert_data.get('target_id'))]
+        # the summary of an event rule names the alerts it stands for: each has to be readable
+        targets += [tuple(t) for t in (alert_data.get('targets') or ())
+                    if isinstance(t, (list, tuple)) and len(t) == 2]
         for u in users:
             if cid:
                 # NS Jul 2026 (CodeAnt re-scan — fail-open fix) — a subscriber whose user record
@@ -399,10 +403,43 @@ def _alert_handler(alert_data: dict):
                     continue                              # fail closed — never leak on error
                 if allowed is not None and cid not in allowed:
                     continue
+                # reaching the cluster is not seeing all of it: a subscriber confined to a
+                # pool or to some guests, or without node.view, gets what the active-alerts
+                # list shows them. Asked of everyone, a default-tenant account (allowed is
+                # None) can hold a pool grant here too.
+                try:
+                    sees = alert_scope(udict, cid)
+                    if sees is not None and not all(sees(*t) for t in targets):
+                        continue
+                except Exception:
+                    continue
+            elif alert_data.get('target_type') == 'instance' and not _sees_every_cluster(_all_users.get(u), u):
+                # the HA group's own alerts: a missed schedule names actions of every cluster
+                continue
             _push_to_inbox(u, title, body, sev, url, tag)
             _wake_user(u)
     except Exception as e:
         logging.debug(f"[push] alert_handler swallowed: {e}")
+
+
+def _sees_every_cluster(urec, username):
+    """Whether a subscriber sees every cluster whole: no tenant limits it, and no pool
+    grant or guest ACL confines it in any of them. An alert about this instance and its
+    HA group goes to these subscribers only. Fails closed."""
+    if not urec:
+        return False
+    try:
+        from pegaprox.globals import cluster_managers
+        from pegaprox.utils.rbac import acts_as_admin, get_user_clusters
+        from pegaprox.api.helpers import caller_is_scoped
+        udict = dict(urec, username=username)
+        if acts_as_admin(udict):
+            return True
+        if get_user_clusters(udict, include_pools=False) is not None:
+            return False
+        return not any(caller_is_scoped(udict, cid) for cid in list(cluster_managers))
+    except Exception:
+        return False
 
 
 def register_alert_handler():

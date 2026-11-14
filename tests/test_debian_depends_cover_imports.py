@@ -115,10 +115,12 @@ def test_every_import_of_the_package_has_a_depends_entry():
 def test_without_defusedxml_in_depends_it_goes_red():
     """The counterproof: the gap this file was written for, put back."""
     text = _control()
-    assert '         python3-defusedxml\n' in text
-    without = text.replace('         python3-xenapi,\n         python3-defusedxml\n',
-                           '         python3-xenapi\n')
-    assert without != text
+    assert 'python3-defusedxml' in depends_of(text)
+    # drop the entry wherever it sits; as the last one it takes the comma before it along
+    without = re.sub(r'^[ \t]+python3-defusedxml,\n', '', text, flags=re.M)
+    if without == text:
+        without = re.sub(r',\n[ \t]+python3-defusedxml\n', '\n', text)
+    assert 'python3-defusedxml' not in depends_of(without)
     found = problems(third_party_imports(), depends_of(without))
     assert len(found) == 1 and found[0].startswith('defusedxml (pegaprox/core/xcpng.py:'), found
 
@@ -155,12 +157,13 @@ def test_trixie_python3_fido2_stays_out():
 
 def test_what_trixie_lacks_is_built_by_the_repo():
     built = {p['deb'] for p in _load('build_python_debs', 'packaging/apt/build-python-debs.py').PACKAGES.values()}
-    assert built == {'python3-flask-sock', 'python3-xenapi'}
+    assert built == {'python3-flask-sock', 'python3-xenapi', 'python3-sqlcipher3'}
     assert built <= depends_of(_control())
     with open(os.path.join(ROOT, 'packaging', 'apt', 'python-debs', 'requirements.txt'), encoding='utf-8') as fh:
         pins = fh.read()
-    for name in ('flask-sock', 'xenapi'):
-        assert re.search(rf'^{name}==\S+ \\\n\s+--hash=sha256:[0-9a-f]{{64}}$', pins, re.M), name
+    # one hash per wheel: sqlcipher3 has one for each architecture
+    for name, hashes in (('flask-sock', 1), ('xenapi', 1), ('sqlcipher3', 2)):
+        assert re.search(rf'^{name}==\S+' + r' \\\n\s+--hash=sha256:[0-9a-f]{64}' * hashes + '$', pins, re.M), name
     for deb in built:
         assert os.path.isfile(os.path.join(ROOT, 'packaging', 'apt', 'python-debs', f'{deb}.copyright'))
 
@@ -169,3 +172,28 @@ def test_what_trixie_lacks_is_built_by_the_repo():
 def test_depends_parsing_strips_versions_alternatives_and_qualifiers(entry):
     text = f'Source: x\n\nPackage: pegaprox\nDepends: ${{misc:Depends}},\n         {entry}\n'
     assert 'python3-foo' in depends_of(text)
+
+
+def test_the_smoke_test_imports_the_zstd_module_and_not_just_its_namespace(monkeypatch, capsys):
+    """backports imports as soon as any backports.* package is installed, compression on
+    3.14 also without zstd: the smoke test said available for the zstd variant either way."""
+    real = importlib.import_module
+
+    def import_module(name, *a):
+        if name in ('backports', 'compression'):
+            return type(sys)(name)
+        if name in ('backports.zstd', 'compression.zstd'):
+            raise ModuleNotFoundError(f'No module named {name!r}')
+        return real(name, *a)
+    monkeypatch.setattr(deb_imports.importlib, 'import_module', import_module)
+    deb_imports.main()
+    out = capsys.readouterr().out
+    seen = {ln.split()[1]: ln.split()[0] for ln in out.splitlines()
+            if ln.startswith(('  available ', '  absent '))}
+    for mod in ('backports', 'compression'):
+        assert seen.get(f'{mod}.zstd') == 'absent' and mod not in seen, out
+
+
+def test_every_probe_is_a_module_of_its_optional_entry():
+    for mod, name in deb_imports.PROBE.items():
+        assert mod in deb_imports.OPTIONAL and name.startswith(mod + '.'), (mod, name)

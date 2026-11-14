@@ -164,15 +164,23 @@ def test_cross_tenant_user_denied_node_summary_403(api, seed):
 def test_pool_reach_user_allowed_at_cluster_level_200(api, seed):
     # A user reaching cluster_1 SOLELY via a pool grant: nodes.py has no
     # _require_vm_access, so cluster-level reach is sufficient for node.view reads
-    # (the reach-only per-VM deny that exists for vms.py does NOT apply here).
+    # (the reach-only per-VM deny that exists for vms.py does NOT apply here) on the
+    # node a guest of that pool runs on. Another node is not theirs to read.
+    import time
+    import pegaprox.utils.rbac as rbac
     seed.tenant('tenant_a', clusters=['cluster_home'])   # does NOT own cluster_1
     alice = seed.user('alice', role='user', tenant_id='tenant_a')
     seed.pool(CID, 'pool_1', 'alice', ['pool.view', 'vm.view'])  # reaches cluster_1
-    api.set_manager(CID, _mgr(api, get_node_summary={'node': NODE, 'status': 'online'}))
+    with rbac._pool_cache_lock:
+        rbac._pool_membership_cache[CID] = {'data': {'100:qemu': 'pool_1'}, 'timestamp': time.time(),
+                                            'refreshing': False}
+    api.set_manager(CID, _mgr(api, get_node_summary={'node': NODE, 'status': 'online'},
+                              get_vm_resources=[{'vmid': 100, 'node': NODE, 'type': 'qemu'}]))
 
     resp = api.as_user(alice).get(SUMMARY_ROUTE)
     assert resp.status_code == 200, resp.get_data(as_text=True)
     assert resp.get_json()['node'] == NODE
+    assert api.as_user(alice).get(f'/api/clusters/{CID}/nodes/pve2/summary').status_code == 403
 
 
 # ===========================================================================

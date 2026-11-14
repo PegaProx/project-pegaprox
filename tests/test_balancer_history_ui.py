@@ -278,8 +278,11 @@ def test_runtime_the_filters_ask_the_server(open_app):
     page.locator('[data-bal-row="6"]').wait_for(timeout=5000)
     page.locator('[data-bal-filter-trigger]').select_option('affinity')
     assert _wait_for(page, lambda: 'trigger=affinity' in _reads(app)[-1])
-    page.locator('[data-bal-row="6"]').wait_for(state='detached', timeout=5000)
-    assert page.locator('[data-bal-row]').count() == 1 and page.locator('[data-bal-row="4"]').count() == 1
+    # a changed filter empties the list until the read has answered, and row 4 is in the old list too
+    page.wait_for_function('''() => {
+      const rows = document.querySelectorAll('[data-bal-row]');
+      return rows.length === 1 && rows[0].getAttribute('data-bal-row') === '4';
+    }''', timeout=5000)
     page.locator('[data-bal-filter-status]').select_option('success')
     assert _wait_for(page, lambda: 'status=success' in _reads(app)[-1])
     page.locator('[data-bal-empty]').wait_for(timeout=5000)

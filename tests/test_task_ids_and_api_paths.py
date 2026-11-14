@@ -7,6 +7,9 @@ check, which reads the id's own fields. A task id is now checked for its form be
 anything else, and the API sessions of both managers refuse a path with such a
 segment, whatever value put it there.
 MK Oct 2026
+
+They refuse a URL with a '#' as well: requests sends no fragment, so a value holding one
+cut off the rest of the path the code put after it. MK Nov 2026
 """
 import types
 from unittest.mock import MagicMock
@@ -91,6 +94,41 @@ def test_the_session_refuses_a_climbing_path_before_anything_is_sent():
     assert rec.sent[-1].endswith('/tasks/' + GOOD + '/log')
 
 
+class _Wire(_Recorder):
+    """What goes into the request line."""
+    def send(self, request, **kwargs):
+        r = super().send(request, **kwargs)
+        self.sent[-1] = request.path_url
+        return r
+
+
+@pytest.mark.parametrize('url', [
+    'https://h:8006/api2/json/nodes/n1/qemu/200?purge=1#/storage/local/content/x',
+    'https://h:8006/api2/json/nodes/n1/storage/local/prunebackups#/content/y',
+    'https://h:8006/api2/json/nodes/n1#',
+])
+def test_the_session_refuses_a_url_with_a_fragment_before_anything_is_sent(url):
+    s = requests.Session()
+    rec = _Recorder()
+    s.mount('https://', rec)
+    refuse_climbing_paths(s)
+    for call in (s.get, s.delete, s.post):
+        with pytest.raises(ValueError):
+            call(url)
+    assert rec.sent == []
+    # counterproof: unguarded, the request line ends at the '#'
+    plain = requests.Session()
+    wire = _Wire()
+    plain.mount('https://', wire)
+    plain.delete(url)
+    assert wire.sent == [url.split('#')[0].split(':8006', 1)[1]]
+    # and a '#' quoted into the path or handed over as a parameter still goes out
+    s.delete('https://h:8006/api2/json/nodes/n1/storage/local/content/local%3Aiso%2Fa%23b.iso')
+    s.get('https://h:8006/api2/json/nodes/n1/storage/local/content', params={'note': 'a#b'})
+    assert rec.sent == ['https://h:8006/api2/json/nodes/n1/storage/local/content/local%3Aiso%2Fa%23b.iso',
+                        'https://h:8006/api2/json/nodes/n1/storage/local/content?note=a%23b']
+
+
 def test_both_managers_build_guarded_sessions():
     from pegaprox.core.manager import PegaProxManager
     from pegaprox.core.pbs import PBSManager
@@ -99,6 +137,35 @@ def test_both_managers_build_guarded_sessions():
     assert getattr(m._create_session(), '_paths_checked', False) is True
     p = PBSManager('p1', {'name': 'pbs', 'host': '10.0.0.5'})
     assert getattr(p._session, '_paths_checked', False) is True
+
+
+def test_the_root_at_pam_session_refuses_the_same_paths(monkeypatch):
+    import logging
+    from pegaprox.core.manager import PegaProxManager
+
+    class _Ticket:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {'data': {'ticket': 'PVE:root@pam:T', 'CSRFPreventionToken': 'c'}}
+    monkeypatch.setattr(requests.Session, 'post', lambda self, *a, **k: _Ticket())
+    m = PegaProxManager.__new__(PegaProxManager)
+    m.id, m.current_host, m._ssl_verify = None, None, False
+    m.config = types.SimpleNamespace(host='10.0.0.1', api_port=8006, user='root@pam', pass_='pw')
+    m.logger = logging.getLogger('test')
+    s, err = m.create_privileged_session('a disk wipe')
+    assert err is None and getattr(s, '_paths_checked', False) is True
+    rec = _Recorder()
+    s.mount('https://', rec)
+    for url in ('https://10.0.0.1:8006/api2/json/nodes/n1/disks/../../qemu/100',
+                'https://10.0.0.1:8006/api2/json/nodes/n1/qemu/100#/disks/wipedisk'):
+        with pytest.raises(ValueError):
+            s.delete(url)
+    assert rec.sent == []
+    # counterproof: a path as the code names it goes out
+    s.put('https://10.0.0.1:8006/api2/json/nodes/n1/disks/wipedisk', data={'disk': '/dev/sdb'})
+    assert rec.sent == ['https://10.0.0.1:8006/api2/json/nodes/n1/disks/wipedisk']
 
 
 # --- the routes ---------------------------------------------------------------------------

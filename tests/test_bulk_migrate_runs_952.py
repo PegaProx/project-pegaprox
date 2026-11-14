@@ -379,7 +379,9 @@ def test_the_options_reach_proxmox(api, seed):
     ({'mode': 'parallel', 'parallel': True}, 'parallel is a number from 2 to 5'),
     ({'mode': 'sequential', 'online': 'yes'}, 'online and with_local_disks are true or false'),
     ({'mode': 'sequential', 'with_local_disks': 1}, 'online and with_local_disks are true or false'),
-    ({'mode': 'sequential', 'target': '../pve2'}, 'Target node is required'),
+    # a value that would not stay one path segment is refused by the request hook first
+    ({'mode': 'sequential', 'target': '../pve2'}, 'Invalid target name'),
+    ({'mode': 'sequential', 'target': 'pve 2'}, 'Target node is required'),
     ({'mode': 'sequential', 'target': 'pve9'}, 'pve9 is no node of this cluster'),
     ({'mode': 'sequential', 'target': 'pve3'}, 'pve3 is not online'),
     ({'mode': 'sequential', 'vms': [{'vmid': True}]}, 'vms holds something that is no VMID'),
@@ -485,6 +487,8 @@ def test_a_vm_acl_user_moves_their_guests_and_sees_only_those(api, seed):
     seed.tenant('acme', clusters=['cluster_1'])
     seed.vm_acl('cluster_1', 100, users=['portal'])
     seed.vm_acl('cluster_1', 101, users=['portal'])
+    # MK Nov 2026 - 300 runs on pve2: a confined caller moves guests onto a node of theirs only
+    seed.vm_acl('cluster_1', 300, users=['portal'])
     pve = _Pve(api)
     portal = api.as_user(seed.user('portal', role='user', tenant_id='acme'))
     # a guest outside the grant gets the answer of one that does not exist
@@ -513,6 +517,7 @@ def test_a_run_asks_again_before_each_guest(api, seed, monkeypatch):
     seed.tenant('acme', clusters=['cluster_1'])
     seed.vm_acl('cluster_1', 100, users=['portal'])
     seed.vm_acl('cluster_1', 101, users=['portal'])
+    seed.vm_acl('cluster_1', 300, users=['portal'])   # theirs on pve2, the target
     monkeypatch.setattr(bulk, 'AUTHZ_SECONDS', 0)
     pve = _Pve(api)
     portal = api.as_user(seed.user('portal', role='user', tenant_id='acme'))
@@ -639,7 +644,11 @@ def test_the_routes_are_served_once(api):
     assert rules == [('/api/bulk-migrations', ['GET']),
                      ('/api/bulk-migrations/<run_id>', ['GET']),
                      ('/api/bulk-migrations/<run_id>/cancel', ['POST']),
-                     ('/api/clusters/<cluster_id>/vms/bulk-migrate', ['POST'])]
+                     ('/api/clusters/<cluster_id>/vms/bulk-migrate', ['POST']),
+                     ('/api/vmware/<vmware_id>/bulk-migrate', ['POST']),
+                     ('/api/vmware/bulk-migrate', ['GET']),
+                     ('/api/vmware/bulk-migrate/<run_id>', ['GET']),
+                     ('/api/vmware/bulk-migrate/<run_id>/cancel', ['POST'])]
 
 
 # --- the pieces --------------------------------------------------------------------------------

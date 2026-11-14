@@ -340,11 +340,13 @@ def _library(browser, layout, role):
                                     extra=reads))
     page = app.page
     if layout == 'cloud':
-        page.locator('.cloud-shell').get_by_text('Templates', exact=True).first.click()
+        # the page of Cloud is called after the blueprints above the cards as well (#1220)
+        page.locator('.cloud-nav-item', has_text=re.compile(r'^\s*(Templates|Blueprints & Templates)\s*$')).first.click()
     else:
         page.get_by_text('Testi').first.click()
         page.locator('button', has_text='Automation').first.click()
-        page.locator('button', has_text='Cloud-Init Template Library').first.click()
+        # Modern calls the sub tab after the blueprints above the cards (#1220)
+        page.locator('button', has_text=re.compile(r'^\s*(Cloud-Init Template Library|Blueprints & Templates)\s*$')).first.click()
     page.get_by_text('Ubuntu 26.04 LTS (Resolute)').first.wait_for(timeout=8000)
     page.wait_for_timeout(300)
     return app

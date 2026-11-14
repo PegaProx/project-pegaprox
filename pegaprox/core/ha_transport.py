@@ -281,9 +281,10 @@ def guard_ssh(host, cmd='', again=False):
     ha.guard(f'SSH {host} {_first_word(cmd)}'.strip(), kind='ssh', again=again)
 
 
-def guard_client(client, host=''):
+def guard_client(client, host='', again=False):
     """exec_command, invoke_shell and open_sftp of a paramiko client ask the guard first.
-    Returns the client."""
+    Returns the client. `again`: the caller asked guard_ssh for its command before it
+    connected, so the ask here is that same command once more."""
     for name in ('exec_command', 'invoke_shell', 'open_sftp'):
         real = getattr(client, name, None)
         if real is None:
@@ -292,7 +293,7 @@ def guard_client(client, host=''):
         def guarded(*args, _real=real, _name=name, **kwargs):
             if ha.guard_on():
                 cmd = (args[0] if args else kwargs.get('command', '')) if _name == 'exec_command' else _name
-                guard_ssh(host or _peer(client), cmd)
+                guard_ssh(host or _peer(client), cmd, again=again)
             return _real(*args, **kwargs)
         setattr(client, name, guarded)
     return client

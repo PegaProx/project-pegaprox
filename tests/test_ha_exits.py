@@ -311,7 +311,6 @@ EXITS = {
     ('pegaprox/core/vmware.py', 'VMwareManager.api_get', 'http-direct'): (2, 'read'),
     ('pegaprox/core/vmware.py', 'VMwareManager.api_post', 'http-guarded'): (2, 'guard'),
     ('pegaprox/core/vmware.py', 'VMwareManager.api_delete', 'http-guarded'): (1, 'guard'),
-    ('pegaprox/core/vmware.py', 'VMwareManager.update_vm_config', 'http-guarded'): (1, 'guard'),
     ('pegaprox/core/vmware.py', 'VMwareManager._ping_session', 'http-direct'): (1, 'read'),
     ('pegaprox/core/vmware.py', 'VMwareManager._connect_soap', 'soap'): (1, 'guard'),
     ('pegaprox/core/vmware.py', 'VMwareManager._connect_soap', 'socket'): (1, 'read'),
@@ -323,7 +322,7 @@ EXITS = {
     ('pegaprox/core/xcpng.py', 'XcpngManager._ssh_connect', 'ssh-paramiko'): (1, 'guard'),
     ('pegaprox/core/xcpng.py', 'XcpngManager._ssh_exec', 'ssh-exec'): (1, 'client'),
     ('pegaprox/core/xcpng.py', 'XcpngManager._perform_node_update', 'ssh-exec'): (3, 'client'),
-    ('pegaprox/core/xcpng.py', 'XcpngManager._wait_for_host_online', 'socket'): (1, 'read'),
+    ('pegaprox/core/xcpng.py', 'XcpngManager.node_reboot_look', 'socket'): (1, 'read'),
     # the HTTP side of XAPI: RRD reads, and uploads into an SR
     ('pegaprox/core/xcpng.py', 'XcpngManager._rrd_fetch', 'http-direct'): (1, 'read'),
     ('pegaprox/core/xcpng.py', 'XcpngManager.upload_to_storage', 'http-guarded'): (1, 'guard'),
@@ -354,6 +353,8 @@ EXITS = {
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_ping_host', 'subprocess'): (1, 'local'),
     ('pegaprox/utils/ssh.py', '_ssh_exec', 'ssh-paramiko'): (5, 'guard'),
     ('pegaprox/utils/ssh.py', '_ssh_exec', 'ssh-exec'): (1, 'guard'),
+    # the stored key's leg of _pve_node_exec, on a client of _ssh_connect (#1224)
+    ('pegaprox/utils/ssh.py', '_run_on_client', 'ssh-exec'): (1, 'client'),
     ('pegaprox/utils/ssh_security.py', 'secure_ssh_client', 'ssh-paramiko'): (1, 'guard'),
     ('pegaprox/utils/ssh_pool.py', 'get_pooled_transport', 'ssh-paramiko'): (1, 'unused'),
     # TCP probes of a node before the call, and the socket _ssh_exec connects with
@@ -475,6 +476,14 @@ EXITS = {
     # and its own port at the address it paired with (the other socket only binds, to
     # tell an address of this host)
     ('pegaprox/witness.py', '_dial_own', 'socket'): (2, 'local'),
+    # the QNetd helper on a Unix socket of this host: the root socket unit of the local kind
+    # (/run/pegaprox-qnetd/local.sock) or the sidecar's volume. No cluster, no node
+    ('pegaprox/core/qnetd.py', '_UnixHelper.call', 'socket'): (1, 'local'),
+    # one command with a deadline, on the clients of NodeShell (the manager's _ssh_connect)
+    # and SshTransport (secure_ssh_client): both guard_client'ed, every exec asks
+    ('pegaprox/core/qnetd.py', '_exec_bounded', 'ssh-exec'): (1, 'client'),
+    # the helper copied to an ssh QNetd host over SFTP, on the same guarded client
+    ('pegaprox/core/qnetd.py', 'SshTransport.install_helper', 'ssh-exec'): (1, 'client'),
 }
 
 VERDICTS = {'guard', 'client', 'console', 'login', 'read', 'local', 'external', 'peer', 'unused'}
@@ -507,13 +516,15 @@ def test_the_inventory_counts_what_the_report_says():
     for (_f, _q, kind), (n, verdict) in EXITS.items():
         by[verdict] += n
     # S4 with the witness and the lease link, and the connection check, the three restarts
-    # asking systemctl in one helper, the join fingerprint read through tls_fingerprint:
-    # 256 calls out of this process, 151 (function, kind) pairs in 137 functions; 46 of
-    # them guarded at the exit and 85 execs on a client from a guarded factory. No route
+    # asking systemctl in one helper, the join fingerprint read through tls_fingerprint,
+    # and the QDevice setup with its QNetd hosts, and the stored key's leg of _pve_node_exec,
+    # less the ESXi guest config over REST (the API has no such call):
+    # 259 calls out of this process, 154 (function, kind) pairs in 140 functions; 45 of
+    # them guarded at the exit and 88 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 256 and len(EXITS) == 151
-    assert len({(f, q) for f, q, _k in EXITS}) == 137
-    assert by['guard'] == 46 and by['client'] == 85
+    assert sum(n for n, _v in EXITS.values()) == 259 and len(EXITS) == 154
+    assert len({(f, q) for f, q, _k in EXITS}) == 140
+    assert by['guard'] == 45 and by['client'] == 88
 
 
 @pytest.mark.parametrize('key', sorted(k for k, v in EXITS.items() if v[1] == 'guard'),
@@ -705,12 +716,16 @@ AUTOMATIONS = {
     ('pegaprox/api/clusters.py', 'trigger_balance_now'): (1, 'confirm'),
     ('pegaprox/api/clusters.py', 'install_self_fence_agent'): (1, 'job'),
     ('pegaprox/api/clusters.py', 'uninstall_self_fence_agent'): (1, 'job'),
+    # the Ceph status behind the health score, API GETs only (alert_events.ceph_status)
+    ('pegaprox/api/clusters.py', '_health_ceph_spawn'): (1, 'read'),
     ('pegaprox/api/dr_drill.py', 'start_drill'): (1, 'job'),
     ('pegaprox/api/drift.py', 'start_scanner'): (1, 'read'),
     # the replication and backup reads behind the Prometheus series, API GETs only
     ('pegaprox/api/metrics_exporter.py', '_spawn'): (1, 'read'),
     # the node network configs behind the transfer network view, API GETs only
     ('pegaprox/core/transfer_net.py', '_spawn'): (1, 'read'),
+    # the token delete after a Site Recovery or replication migration, a job of its own
+    ('pegaprox/core/transfer_net.py', 'drop_token_when_done'): (1, 'job'),
     ('pegaprox/api/groups.py', 'trigger_xclb_balance_now'): (1, 'confirm'),
     # a history report (power, costs, right-sizing) worked out in a greenlet of its own:
     # the metrics history and the guest list (an API GET), nothing else
@@ -718,12 +733,12 @@ AUTOMATIONS = {
     ('pegaprox/api/multi_sdn.py', 'start_scanner'): (1, 'confirm'),
     ('pegaprox/api/realtime.py', 'update_sse_subscription'): (1, 'read'),
     ('pegaprox/api/reports.py', '<module>'): (2, 'read'),
-    ('pegaprox/api/schedules.py', 'execute_scheduled_rolling_update'): (1, 'job'),
     ('pegaprox/api/schedules.py', 'start_scheduler'): (1, 'confirm'),
     ('pegaprox/api/settings.py', 'perform_pegaprox_update'): (1, 'local'),
     ('pegaprox/api/settings.py', 'rollback_pegaprox_update'): (1, 'local'),
     ('pegaprox/api/settings.py', 'restart_server'): (1, 'local'),
-    # the worker of a rolling update, for a start and for a Continue after a restart
+    # the worker of a rolling update, for a start (by hand or by a schedule) and for a
+    # Continue after a restart
     ('pegaprox/api/settings.py', '_launch_rolling_update'): (1, 'job'),
     ('pegaprox/api/siem.py', 'start_worker'): (1, 'read'),
     ('pegaprox/api/site_recovery.py', '_safe_spawn_failover'): (1, 'job'),
@@ -733,6 +748,8 @@ AUTOMATIONS = {
     ('pegaprox/api/storage.py', 'iso_sync_trigger'): (1, 'job'),
     ('pegaprox/api/storage.py', 'iso_sync_all'): (1, 'job'),
     ('pegaprox/api/templates_lib.py', 'deploy'): (1, 'job'),
+    # a blueprint deploy: the library's build, then clone and config, as a user job (#1220)
+    ('pegaprox/api/blueprints.py', 'deploy_blueprint'): (1, 'job'),
     ('pegaprox/api/oci_catalog.py', '_spawn'): (1, 'job'),
     ('pegaprox/api/vms.py', 'download_iso_from_url'): (1, 'read'),
     ('pegaprox/api/vms.py', 'join_node_to_cluster'): (1, 'read'),
@@ -744,11 +761,15 @@ AUTOMATIONS = {
     ('pegaprox/api/vms.py', 'handle_vnc_websocket'): (1, 'console'),
     ('pegaprox/api/vms.py', 'vnc_websocket_proxy'): (1, 'console'),
     ('pegaprox/app.py', '_start_gevent_server.signal_handler'): (1, 'local'),
+    # one thread (a greenlet under gevent) per client of the extra HTTP redirect port
+    ('pegaprox/app.py', '_start_http_redirect'): (1, 'local'),
     ('pegaprox/core/ha.py', 'pull_soon'): (1, 'peer'),
     # the lease loop, the etag tick and when_active (the deferred boot gates)
     ('pegaprox/core/ha.py', '_lease_spawn'): (1, 'lease'),
     ('pegaprox/api/vms.py', 'cross_cluster_migrate_api'): (1, 'job'),
     ('pegaprox/api/vmware.py', 'start_vmware_migration'): (1, 'job'),
+    # a guest of an ESXi bulk run, started as the single route starts one
+    ('pegaprox/api/vmware.py', '_bulk_start_item'): (1, 'job'),
     ('pegaprox/api/xhm.py', 'xhm_start'): (1, 'job'),
     ('pegaprox/app.py', 'main'): (3, 'local'),
     # the batch restore runs its restores in ha.as_job, like the server-side bulk migration
@@ -777,6 +798,8 @@ AUTOMATIONS = {
     ('pegaprox/core/backup_verify.py', 'start_verification'): (1, 'job'),
     # a bulk migration of a user, one guest after another (#952)
     ('pegaprox/core/bulk_migrate.py', 'launch'): (1, 'job'),
+    # and the ESXi bulk run, a few guests of one ESXi server at a time
+    ('pegaprox/core/esxi_bulk.py', 'launch'): (1, 'job'),
     # one SSH login per node after a cluster was added, `sudo -n true` at most (#1136)
     ('pegaprox/core/node_creds.py', 'check_in_background'): (1, 'read'),
     ('pegaprox/core/ha.py', '_later'): (1, 'lease'),
@@ -796,11 +819,25 @@ AUTOMATIONS = {
     ('pegaprox/core/manager.py', 'PegaProxManager._schedule_update_clear'): (2, 'read'),
     ('pegaprox/core/manager.py', 'PegaProxManager.start'): (2, 'confirm'),
     ('pegaprox/core/pbs.py', 'PBSManager.start_update'): (2, 'job'),
+    # a disconnected PBS logged in again, a login and GET /version (#1156)
+    ('pegaprox/core/pbs.py', 'start_reconnect_loop'): (1, 'read'),
+    # a QDevice setup, removal or bulk run of an admin, through ha.as_job
+    ('pegaprox/core/qnetd.py', 'launch'): (1, 'job'),
+    # the status of the QNetd hosts the qnetd alert rules watch, at most once a minute:
+    # version, status and ca of the helper, in ha.reading() (READ_SITES)
+    ('pegaprox/core/qnetd.py', 'kick_refresh'): (1, 'read'),
+    # the deadline of one SSH command: it closes that channel of this process, nothing
+    # is sent to anyone
+    ('pegaprox/core/qnetd.py', '_exec_bounded'): (1, 'local'),
     ('pegaprox/core/v2p.py', '_ssh_pipe_transfer'): (1, 'read'),
+    # verify=full: the md5 of the ESXi source file and of the node's copy side by side; the
+    # node side runs on ha.carry, with the mark of the job it checks for
+    ('pegaprox/core/v2p.py', '_full_check_disk'): (2, 'read'),
     ('pegaprox/core/vmware.py', 'load_vmware_servers'): (1, 'read'),
     ('pegaprox/core/xcpng.py', 'XcpngManager.start'): (1, 'confirm'),
     ('pegaprox/core/xcpng.py', 'XcpngManager.start_node_update'): (1, 'job'),
-    ('pegaprox/utils/concurrent.py', 'run_per_node'): (1, 'carry'),
+    # the thread fallback and the greenlets of a fan-out with a whole deadline, both on the carried tasks
+    ('pegaprox/utils/concurrent.py', 'run_per_node'): (2, 'carry'),
     ('pegaprox/utils/concurrent.py', 'gevent_to_thread'): (1, 'console'),
     ('pegaprox/utils/rbac.py', 'get_pool_membership_cache'): (1, 'read'),
     ('pegaprox/utils/realtime.py', 'push_immediate_update'): (1, 'read'),
@@ -846,7 +883,7 @@ def test_a_user_job_is_started_through_as_job(key):
 # say they only read, and a plain thread carries neither a token nor the job mark of
 # whoever started it, so in an automatic group its first such call is refused. It says
 # so with `with ha.reading()` around the call, or it is started on ha.carry(fn).
-_NODE_SENDS = {'_pve_node_exec', '_node_ssh_exec', '_ssh_run_command', '_ssh_run_command_output',
+_NODE_SENDS = {'_pve_node_exec', '_node_ssh_exec', '_ssh_run_command', '_ssh_run_command_output', '_ssh_read_output',
                '_ssh_run_command_with_key', '_ssh_run_command_with_key_output',
                '_ssh_run_command_with_password', '_ssh_run_command_with_password_output',
                '_ssh_exec', '_ssh_execute', 'exec_command', 'invoke_shell', 'node_cmd', '_ha_agent_ssh'}
@@ -979,8 +1016,6 @@ CONFIRM_SITES = [
     # a test guest a run left behind, removed from the schedule loop
     ('pegaprox/core/backup_verify.py', 'sweep', ['remove_test_guest']),
     ('pegaprox/api/schedules.py', 'check_schedules', ['execute_scheduled_action']),
-    ('pegaprox/api/schedules.py', 'execute_scheduled_rolling_update.run_scheduled_update',
-     ['enter_maintenance_mode', 'start_node_update']),
     ('pegaprox/api/settings.py', 'run_rolling_update.run_node',
      ['enter_maintenance_mode', 'start_node_update']),
     ('pegaprox/api/snapshots.py', '_execute_policy', ['create_snapshot']),
@@ -1133,7 +1168,7 @@ READ_SITES = [
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_check_agents.one', {'_ha_agent_ssh': 1}),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_redeploy_fence_agents.look', {'_ha_agent_ssh': 1}),
     ('pegaprox/core/manager.py', 'PegaProxManager.get_efficient_snapshots', {'_node_ssh_exec': 2}),
-    ('pegaprox/core/manager.py', 'PegaProxManager.get_node_sensors', {'_ssh_run_command_output': 2}),
+    ('pegaprox/core/manager.py', 'PegaProxManager.get_node_sensors', {'_ssh_read_output': 2}),
     # the `echo OK` that finds a working address before the guests are stopped
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_ssh_stop_vms_on_node',
      {'_ssh_run_command_output': 1, '_ssh_run_command_with_key_output': 1,
@@ -1150,6 +1185,11 @@ READ_SITES = [
     # the progress of an ESXi import: stat, lvs and the dd log of the target volume, from
     # a plain thread of the import job
     ('pegaprox/core/v2p.py', '_monitor_disk_write.probe', {'_pve_node_exec': 1}),
+    # verify=full of an ESXi import: stat and block md5s of the source file on ESXi
+    ('pegaprox/core/v2p.py', '_full_check_disk._esxi_side', {'_ssh_exec': 1}),
+    # the background status of the QNetd hosts (version, status, ca of the helper over SSH
+    # for an ssh host): plain threads of the alert loop, refused unasked in an automatic group
+    ('pegaprox/core/qnetd.py', 'kick_refresh.work', {'run_per_node': 1}),
 ]
 
 

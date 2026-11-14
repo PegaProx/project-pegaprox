@@ -120,7 +120,86 @@ def _current_user():
         return ''
 
 
-def _row_to_target(row):
+# MK Nov 2026 - 'key' and the rest for the custom headers: X-API-Key, DD-API-KEY,
+# X-Insert-Key, Ocp-Apim-Subscription-Key, Cookie, X-Honeycomb-Team, X-Pass, X-Credential
+# and Signature carry the credential too. No settings field of a type has one of them.
+_SECRET_KEYS = ('token', 'password', 'api_key', 'apikey', 'secret', 'auth', 'authorization', 'key',
+                'cookie', 'pass', 'credential', 'signature', 'honeycomb')
+_MASK = '********'
+
+
+def _is_secret(key):
+    return any(s in str(key).lower() for s in _SECRET_KEYS)
+
+
+def _mask(d):
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out[k] = _mask(v)
+        elif v and _is_secret(k):
+            # a stored mask is a secret that is not set (see _stored_secret). Shown as the
+            # mask it read as set, so the form shows the field empty instead
+            out[k] = _MASK if v != _MASK else ''
+        elif k == 'headers' and v:
+            # headers stored as anything but an object (see _headers_not_an_object) slip
+            # past the mask by name, so none of them is shown
+            out[k] = _MASK
+        else:
+            out[k] = v
+    return out
+
+
+def _stored_secret(old, k):
+    # MK Nov 2026 - a target edited in the tab since July may store the mask itself, the
+    # old edit route wrote the masked settings back. That is no secret but one not set.
+    v = old.get(k)
+    return v if v and v != _MASK else None
+
+
+def _unmask(new, old):
+    """The settings of an edit with each masked secret put back to the stored value."""
+    old = old if isinstance(old, dict) else {}
+    out = {}
+    for k, v in new.items():
+        if isinstance(v, dict):
+            out[k] = _unmask(v, old.get(k))
+        elif v == _MASK and _is_secret(k):
+            if _stored_secret(old, k):
+                out[k] = old[k]
+        else:
+            out[k] = v
+    return out
+
+
+def _keeps_stored_secret(new, old):
+    old = old if isinstance(old, dict) else {}
+    for k, v in new.items():
+        if isinstance(v, dict):
+            if _keeps_stored_secret(v, old.get(k)):
+                return True
+        elif v == _MASK and _is_secret(k) and _stored_secret(old, k):
+            return True
+    return False
+
+
+def _headers_not_an_object(settings):
+    # MK Nov 2026 - the textarea of the tab takes any JSON, and a list of name/value pairs
+    # made headers as well, which the mask by name never looked into. Headers are an
+    # object of names and values, nothing else.
+    h = settings.get('headers') if isinstance(settings, dict) else None
+    return h is not None and not isinstance(h, dict)
+
+
+def _not_the_mask(value, what):
+    """A secret as stored, unless it is the mask (see _stored_secret). Sent, that only earns
+    a 401 at the collector, so the target's last error says what to type again instead."""
+    if value == _MASK:
+        raise ValueError(f'the {what} of this target is not set, enter it again')
+    return value
+
+
+def _row_to_target(row, masked=True):
     try:
         settings = json.loads(row['settings'] or '{}')
     except Exception:
@@ -128,18 +207,9 @@ def _row_to_target(row):
     # NS Jul 2026 (CodeAnt data-exposure) — SIEM target settings can hold auth secrets
     # (token/password/api_key/secret/Authorization header); mask them before returning to the
     # UI so a siem.view holder can't read the raw credential back out.
-    if isinstance(settings, dict):
-        _SECRET_KEYS = ('token', 'password', 'api_key', 'apikey', 'secret', 'auth', 'authorization')
-        def _mask(d):
-            out = {}
-            for k, v in d.items():
-                if isinstance(v, dict):
-                    out[k] = _mask(v)
-                elif v and any(s in str(k).lower() for s in _SECRET_KEYS):
-                    out[k] = '********'
-                else:
-                    out[k] = v
-            return out
+    # MK Nov 2026 - only on the way out. The sender read its targets through here as well
+    # and sent the mask as the HEC token, the password and the Authorization header.
+    if masked and isinstance(settings, dict):
         settings = _mask(settings)
     return {
         'id': row['id'],
@@ -164,7 +234,7 @@ def _list_enabled():
     try:
         c = get_db().conn.cursor()
         c.execute('SELECT * FROM siem_targets WHERE enabled = 1')
-        return [_row_to_target(r) for r in c.fetchall()]
+        return [_row_to_target(r, masked=False) for r in c.fetchall()]
     except Exception as e:
         logging.debug(f"[siem] list_enabled failed: {e}")
         return []
@@ -332,6 +402,11 @@ def _http_post(url, body_bytes, headers, timeout=10, verify_tls=True):
     """
     import ssl
     from pegaprox.utils.url_security import resolve_and_pin_url, SsrfError
+    # MK Nov 2026 - http.client refuses a header value with a line break and quotes the value
+    # in its error, which went into the last error of the target. Named here, not quoted.
+    bad = next((n for n, v in headers.items() if isinstance(v, str) and ('\r' in v or '\n' in v)), None)
+    if bad:
+        raise ValueError(f'the {bad} header of this target holds a line break, enter it again')
     try:
         # GHSA-hmcf-9q7f-vx35 — pin the vetted IP so urllib can't re-resolve the host to an internal
         # address between the check and the connect; when the admin disabled cert verification
@@ -363,10 +438,20 @@ def _http_post(url, body_bytes, headers, timeout=10, verify_tls=True):
         return code
 
 
+def _headers_of(settings):
+    headers = {'Content-Type': 'application/json'}
+    custom = settings.get('headers') or {}
+    if not isinstance(custom, dict):
+        # stored before the routes took an object only (see _headers_not_an_object)
+        raise ValueError('the headers of this target are not a JSON object, enter them again')
+    for name, value in custom.items():
+        headers[name] = _not_the_mask(value, f'{name} header') if _is_secret(name) else value
+    return headers
+
+
 def _send_http_json(target, event):
     settings = target.get('settings') or {}
-    headers = {'Content-Type': 'application/json'}
-    headers.update(settings.get('headers') or {})
+    headers = _headers_of(settings)
     body = json.dumps(_to_json_line(event)).encode('utf-8')
     _http_post(target['endpoint'], body, headers, verify_tls=_verify_tls_for(target))
 
@@ -376,6 +461,7 @@ def _send_splunk_hec(target, event):
     token = settings.get('token')
     if not token:
         raise ValueError('splunk_hec target needs settings.token')
+    _not_the_mask(token, 'token')
     headers = {
         'Authorization': f'Splunk {token}',
         'Content-Type': 'application/json',
@@ -400,6 +486,7 @@ def _send_elastic(target, event):
     user = settings.get('username')
     pw = settings.get('password')
     if user and pw is not None:
+        _not_the_mask(pw, 'password')
         token = base64.b64encode(f"{user}:{pw}".encode('utf-8')).decode('ascii')
         headers['Authorization'] = f"Basic {token}"
     body = json.dumps(_to_json_line(event)).encode('utf-8')
@@ -409,8 +496,7 @@ def _send_elastic(target, event):
 def _send_generic(target, event):
     """Plain webhook — POST JSON body, no auth assumptions."""
     settings = target.get('settings') or {}
-    headers = {'Content-Type': 'application/json'}
-    headers.update(settings.get('headers') or {})
+    headers = _headers_of(settings)
     _http_post(target['endpoint'], json.dumps(_to_json_line(event)).encode('utf-8'),
                headers, verify_tls=_verify_tls_for(target))
 
@@ -501,6 +587,8 @@ def create_target():
 
     if not name or typ not in TYPES or not endpoint:
         return jsonify({'error': f'name, type ({", ".join(sorted(TYPES))}), endpoint required'}), 400
+    if _headers_not_an_object(settings):
+        return jsonify({'error': 'headers must be a JSON object'}), 400
 
     tid = uuid.uuid4().hex[:12]
     try:
@@ -522,6 +610,36 @@ def create_target():
 @require_auth(roles=[ROLE_ADMIN])
 def update_target(tid):
     body = request.get_json(silent=True) or {}
+    try:
+        c = get_db().conn.cursor()
+        c.execute('SELECT endpoint, settings FROM siem_targets WHERE id = ?', (tid,))
+        row = c.fetchone()
+    except Exception:
+        logging.exception('handler error in siem.py'); return jsonify({'error': 'internal error'}), 500
+    if not row:
+        return jsonify({'error': 'not found'}), 404
+    try:
+        stored = json.loads(row['settings'] or '{}')
+    except ValueError:
+        stored = {}
+    # MK Nov 2026 - the tab sends the masked settings back with every edit, which wrote the
+    # mask over the stored token. A masked value is the stored one again, but not for a
+    # new endpoint: the token or password of a target goes to the address it was typed for,
+    # as with PBS and the clusters. Moving it means typing them again.
+    moved = 'endpoint' in body and str(body['endpoint']).strip() != (row['endpoint'] or '').strip()
+    if 'settings' in body:
+        new = body['settings'] if isinstance(body['settings'], dict) else {}
+        if _headers_not_an_object(new):
+            return jsonify({'error': 'headers must be a JSON object'}), 400
+        if moved and _keeps_stored_secret(new, stored):
+            return jsonify({'error': 'Re-enter the token or password of this target to change its endpoint.',
+                            'code': 'CREDENTIAL_REQUIRED'}), 400
+        body['settings'] = _unmask(new, stored)
+    elif moved and _keeps_stored_secret(_mask(stored), stored):
+        # the settings as the tab shows them: a stored mask reads as empty there, and only a
+        # secret that is set has to be typed again
+        return jsonify({'error': 'Re-enter the token or password of this target to change its endpoint.',
+                        'code': 'CREDENTIAL_REQUIRED'}), 400
     fields = []
     params = []
     for key in ('name', 'endpoint', 'format'):
@@ -576,7 +694,7 @@ def test_target(tid):
         row = c.fetchone()
         if not row:
             return jsonify({'error': 'not found'}), 404
-        target = _row_to_target(row)
+        target = _row_to_target(row, masked=False)
         evt = {
             'id': 0,
             'timestamp': datetime.now().isoformat(),

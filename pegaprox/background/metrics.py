@@ -543,6 +543,10 @@ def collect_metrics_snapshot():
     for cluster_id, mgr in list(cluster_managers.items()):
         if not mgr.is_connected:
             continue
+        # an ESXi host registered for XHM is in cluster_managers too: no nodes, no storage
+        # of its own to sample, and every cycle it only left a failure line here
+        if getattr(mgr, 'cluster_type', 'proxmox') == 'esxi':
+            continue
         
         try:
             cluster_data = {
@@ -682,8 +686,10 @@ def collect_metrics_snapshot():
 
             # Count VMs + per-VM samples for right-sizing (MK May 2026)
             cluster_data['vms'] = {}  # vmid -> {cpu_pct, mem_pct, maxmem, maxcpu, status}
+            unread = False
             try:
                 resources = mgr.get_vm_resources()
+                unread = getattr(resources, 'unavailable', False) is True
                 for r in resources:
                     rtype = r.get('type')
                     if rtype not in ('qemu', 'lxc'):
@@ -709,7 +715,14 @@ def collect_metrics_snapshot():
                         'n': r.get('node') or '',
                     }
             except Exception:
-                pass
+                unread = True
+            if unread:
+                # NS Nov 2026 - the guest list did not answer (UnreadList) or broke off: this
+                # snapshot has no guest counts rather than "0 running", which every chart of
+                # the history read as all guests down. The readers skip the missing keys.
+                for k in ('vms_running', 'vms_stopped', 'cts_running', 'cts_stopped'):
+                    cluster_data['totals'].pop(k, None)
+                cluster_data['vms'] = {}
 
             # Storage totals for capacity forecasting (MK May 2026)
             cluster_data['storage'] = {}

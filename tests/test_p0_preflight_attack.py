@@ -36,7 +36,10 @@ def test_a_list_target_does_not_switch_off_the_bulk_preflight(api, seed, monkeyp
     _together(monkeypatch, [100, 555], kind='separate', name='apart')
     seed.tenant('acme', clusters=[CID])
     seed.vm_acl(CID, 100, users=['portal'])
-    m = _Pve(api, guests=[_guest(100), _guest(555, node='pve2')], configs={100: CFG, 555: CFG})
+    # MK Nov 2026 - 101 on pve2 is theirs: a confined caller moves guests onto a node of theirs
+    seed.vm_acl(CID, 101, users=['portal'])
+    m = _Pve(api, guests=[_guest(100), _guest(555, node='pve2'), _guest(101, node='pve2')],
+             configs={100: CFG, 555: CFG, 101: CFG})
     u = seed.user('root', role='admin') if who == 'root' else seed.user('portal', role='user', tenant_id='acme')
     c = api.as_user(u)
     body = {'vms': [{'vmid': 100, 'node': 'pve1', 'type': 'qemu'}], 'target': 'pve2'}
@@ -120,7 +123,10 @@ def test_a_guest_scoped_caller_does_not_override_an_enforced_affinity_rule(api, 
     _together(monkeypatch, [100, 555], kind='separate', name='apart')
     seed.tenant('acme', clusters=[CID])
     seed.vm_acl(CID, 100, users=['portal'])
-    m = _Pve(api, guests=[_guest(100), _guest(555, node='pve2')], configs={100: CFG, 555: CFG})
+    # MK Nov 2026 - 101 on pve2 is theirs: the node may take their guest, the rule may not
+    seed.vm_acl(CID, 101, users=['portal'])
+    m = _Pve(api, guests=[_guest(100), _guest(555, node='pve2'), _guest(101, node='pve2')],
+             configs={100: CFG, 555: CFG, 101: CFG})
     portal = api.as_user(seed.user('portal', role='user', tenant_id='acme'))
     r = portal.post(f'/api/clusters/{CID}/vms/pve1/qemu/100/migrate', json={'target': 'pve2'})
     assert r.status_code == 409 and r.get_json().get('affinity_violation') is True

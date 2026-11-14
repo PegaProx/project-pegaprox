@@ -146,6 +146,10 @@ def cluster_entry(live):
                 'mem': round((r.get('mem', 0) or 0) / maxmem * 100, 1) if (running and maxmem > 0) else None,
                 'maxmem': maxmem, 'maxcpu': maxcpu, 'n': r.get('node') or '',
             }
+    else:
+        # a guest list that was not read leaves no counts (NS Nov 2026, was all zeros)
+        for k in ('vms_running', 'vms_stopped', 'cts_running', 'cts_stopped'):
+            del tot[k]
     cd['storage'] = {}
     if live['fail'] != 'storage':
         seen = set()

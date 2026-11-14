@@ -144,11 +144,17 @@ def test_the_frontend_translates_the_code_rather_than_the_english_body():
 
 def test_the_dashboard_stops_after_a_cluster_wide_reason():
     """Every node would answer the same thing, one second each. On a 100-node estate
-    that is 100 seconds of waiting to render one sentence."""
+    that is 100 seconds of waiting to render one sentence.
+
+    The loader now runs CMP_PARALLEL checks at a time, so the slice is the whole
+    function and the stop has to reach the workers' loop, not only one answer."""
     dash = open('web/src/dashboard.js', encoding='utf-8').read()
-    fan = dash[dash.index('const fetchCluster = async (cluster)'):][:2600]
+    start = dash.index('const fetchCluster = async (cluster)')
+    fan = dash[start:dash.index('const fetchAuditCounts', start)]
 
     assert 'info.clusterWide' in fan
+    assert 'stop = info' in fan, 'a cluster wide answer is not kept as the stop reason'
+    assert '!stop' in fan[fan.index('const worker'):], 'the workers keep asking after a cluster wide reason'
     assert '_cluster' in fan
 
 
@@ -161,7 +167,7 @@ def test_the_new_strings_exist_in_every_language(key):
     src = open('web/src/translations.js', encoding='utf-8').read()
     starts = {m.group(1): m.start()
               for m in re.finditer(r'^ {12}([a-z]{2}): \{$', src, re.M)}
-    assert len(starts) == 9, sorted(starts)
+    assert len(starts) == 10, sorted(starts)
 
     order = sorted(starts.items(), key=lambda kv: kv[1])
     for i, (lang, pos) in enumerate(order):

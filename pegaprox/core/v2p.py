@@ -13,10 +13,11 @@ import uuid
 import re
 import hashlib
 import shlex
+import unicodedata
 from datetime import datetime
 
 from pegaprox.globals import cluster_managers, vmware_managers, _v2p_migrations
-from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec
+from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec, forget_key_refusal
 from pegaprox.utils.realtime import broadcast_sse
 from pegaprox.utils.audit import log_audit
 
@@ -29,10 +30,196 @@ class V2PCutoverCancelled(Exception):
     pass
 
 
-# MK Oct 2026 - Offline Copy, Live Mirror and Snapshot-Iterative copy what the boot disk's
-# folder holds. A disk elsewhere is not there, and a disk running on a snapshot of the VM has
-# its current state in delta files the copy does not read. Live Clone reads each disk from
-# its own file as it is now.
+# Per NIC network, per disk storage, skipped disks and the verify mode of one migration.
+#
+# nic_map, disk_map and verify arrive as JSON from the migrate route. They are parsed here
+# and nowhere else; the copy code only reads the parsed form through the task's disk_target()
+# and nic_target(). A bridge or a storage reaches a node command or the VM config only after
+# it passed the name check below AND showed up in what the target node offers
+# (resolve_migration_plan), which is the real allowlist. Absent keys parse to None / 'sample'
+# and the migration runs exactly as it did before they existed.
+
+VERIFY_MODES = ('sample', 'full', 'off')
+# transfer modes whose copy can be held against a source that does not change before the
+# target takes over. sshfs_boot runs the guest on the target while it copies, snapshot_zero
+# assembles the disk from delta extents of a running chain; neither has that point.
+FULL_VERIFY_MODES = ('offline', 'vmkfstools_clone', 'auto')
+NIC_MAP_MAX = 32
+DISK_MAP_MAX = 64
+# a Linux interface name (15 chars) or an SDN VNet id; no comma, '=' or blank, which would
+# open another option on the net line
+_BRIDGE_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_.-]{0,14}\Z')
+# these may hold less than the disk size while the copy writes every block (compression)
+_SPACE_SOFT_TYPES = ('zfspool',)
+# EFI vars and TPM state, allocated on target_storage
+_SMALL_DISK_BYTES = 4 * 1024 ** 2
+
+
+def valid_bridge_name(name):
+    return isinstance(name, str) and bool(_BRIDGE_RE.match(name))
+
+
+def _whole_number(value, lo, hi, what):
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f'{what} must be a whole number')
+    try:
+        n = int(str(value).strip())
+    except ValueError:
+        raise ValueError(f'{what} must be a whole number')
+    if not lo <= n <= hi:
+        raise ValueError(f'{what} must be between {lo} and {hi}')
+    return n
+
+
+def _map_rows(raw, name, limit, fields):
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ValueError(f'{name} must be a list')
+    if not raw:
+        return None
+    if len(raw) > limit:
+        raise ValueError(f'{name} has more than {limit} entries')
+    for row in raw:
+        if not isinstance(row, dict):
+            raise ValueError(f'every {name} entry must be an object')
+        extra = sorted(k for k in row if k not in fields)
+        if extra:
+            raise ValueError(f'{name}: unknown field {str(extra[0])[:40]!r}')
+    return raw
+
+
+def parse_nic_map(raw):
+    """nic_map -> {index: {'bridge', 'vlan', 'vlan_set', 'skip'}}, None when not given.
+
+    A row without 'bridge' keeps the job's network_bridge, a row without 'vlan' keeps
+    net_vlan_tag; "vlan": null on a row means no tag on that NIC. Raises ValueError."""
+    rows = _map_rows(raw, 'nic_map', NIC_MAP_MAX, ('index', 'bridge', 'vlan', 'skip'))
+    if rows is None:
+        return None
+    out = {}
+    for row in rows:
+        idx = _whole_number(row.get('index'), 0, NIC_MAP_MAX - 1, 'nic_map index')
+        if idx in out:
+            raise ValueError(f'nic_map names NIC {idx} twice')
+        skip = row.get('skip', False)
+        if not isinstance(skip, bool):
+            raise ValueError(f'nic_map NIC {idx}: skip must be true or false')
+        bridge = row.get('bridge')
+        if bridge in (None, ''):
+            bridge = None
+        elif not valid_bridge_name(bridge):
+            raise ValueError(f'nic_map NIC {idx}: invalid bridge name')
+        vlan = row.get('vlan')
+        vlan = None if vlan in (None, '') else _whole_number(vlan, 1, 4094, f'nic_map NIC {idx} vlan')
+        out[idx] = {'bridge': bridge, 'vlan': vlan, 'vlan_set': 'vlan' in row, 'skip': skip}
+    return out
+
+
+def parse_disk_map(raw):
+    """disk_map -> {index: {'storage', 'skip'}}, None when not given. Raises ValueError.
+
+    Index is the disk's place in the migration plan's source disk list. The boot disk
+    (index 0) cannot be skipped."""
+    from pegaprox.utils.sanitization import validate_storage_name
+    rows = _map_rows(raw, 'disk_map', DISK_MAP_MAX, ('index', 'storage', 'skip'))
+    if rows is None:
+        return None
+    out = {}
+    for row in rows:
+        idx = _whole_number(row.get('index'), 0, DISK_MAP_MAX - 1, 'disk_map index')
+        if idx in out:
+            raise ValueError(f'disk_map names disk {idx} twice')
+        skip = row.get('skip', False)
+        if not isinstance(skip, bool):
+            raise ValueError(f'disk_map disk {idx}: skip must be true or false')
+        if skip and idx == 0:
+            raise ValueError('the boot disk (disk 0) cannot be skipped')
+        storage = row.get('storage')
+        if storage in (None, ''):
+            storage = None
+        elif not isinstance(storage, str) or not validate_storage_name(storage):
+            raise ValueError(f'disk_map disk {idx}: invalid storage name')
+        out[idx] = {'storage': storage, 'skip': skip}
+    return out
+
+
+def parse_verify(raw):
+    if raw is None or raw == '':
+        return 'sample'
+    mode = raw.strip().lower() if isinstance(raw, str) else None
+    if mode not in VERIFY_MODES:
+        raise ValueError("verify must be 'sample', 'full' or 'off'")
+    return mode
+
+
+def parse_migration_options(data):
+    """{'nic_map', 'disk_map', 'verify'} of a migrate request. Raises ValueError."""
+    data = data or {}
+    return {'nic_map': parse_nic_map(data.get('nic_map')),
+            'disk_map': parse_disk_map(data.get('disk_map')),
+            'verify': parse_verify(data.get('verify'))}
+
+
+def full_verify_refusal(transfer_mode):
+    """Why verify=full cannot be honoured for this transfer mode, None when it can."""
+    mode = str(transfer_mode or 'auto')
+    if mode in FULL_VERIFY_MODES:
+        return None
+    why = {'sshfs_boot': 'the guest already runs on the target while its disks are copied',
+           'snapshot_zero': 'the disks are put together from snapshot deltas of the running '
+                            'source, there is no single unchanged source to compare with'}
+    return (f"verify=full is not possible with the {mode} transfer mode: "
+            f"{why.get(mode, 'it has no point where the copy can be compared with an unchanged source')}. "
+            f"Use Live Clone, Auto or Offline Copy, or choose verify sample or off.")
+
+
+def vlan_tag(value):
+    """net_vlan_tag the way the task reads it: 1-4094, anything else is no tag."""
+    try:
+        tag = int(str(value if value is not None else '').strip())
+        return tag if 1 <= tag <= 4094 else None
+    except (ValueError, TypeError):
+        return None
+
+
+# MK Oct 2026 - the NIC models a Proxmox net line takes (qemu-server's model list). The model
+# is the first word of the line and the MAC its value, so either one with a comma or a '='
+# in it is another option on the guest's NIC
+PVE_NIC_MODELS = ('e1000', 'e1000-82540em', 'e1000-82544gc', 'e1000-82545em', 'e1000e', 'i82551',
+                  'i82557b', 'i82559er', 'ne2k_isa', 'ne2k_pci', 'pcnet', 'rtl8139', 'virtio', 'vmxnet3')
+# Proxmox's own rule for macaddr: six hex pairs with colons, the first one even (unicast)
+_UNICAST_MAC_RE = re.compile(r'[0-9a-fA-F][02468aceACE](?::[0-9a-fA-F]{2}){5}')
+
+
+def valid_nic_model(model):
+    return isinstance(model, str) and model in PVE_NIC_MODELS
+
+
+def valid_unicast_mac(mac):
+    return isinstance(mac, str) and bool(_UNICAST_MAC_RE.fullmatch(mac))
+
+
+def selected_nics_refusal(raw):
+    """Why a caller's selected_nics cannot go onto net lines, None when it can. Only the
+    model and the MAC of an entry reach the line; an empty one leaves it to the job."""
+    if raw in (None, '', []):
+        return None
+    for n, nic in enumerate(raw if isinstance(raw, list) else [raw]):
+        if not isinstance(nic, dict):
+            return f'selected_nics entry {n} is not an object'
+        model, mac = nic.get('pve_model'), nic.get('mac_address')
+        if model not in (None, '') and not valid_nic_model(model):
+            return f"selected_nics entry {n}: pve_model is one of {', '.join(PVE_NIC_MODELS)}"
+        if mac not in (None, '') and not valid_unicast_mac(mac):
+            return f'selected_nics entry {n}: mac_address is a unicast MAC like 02:00:00:00:00:01'
+    return None
+
+
+# The transfer modes that copy what the boot disk's folder holds. A disk elsewhere is not
+# there, and a disk running on a snapshot of the VM has its current state in delta files the
+# copy does not read. Live Clone reads each disk from its own file as it is now.
+FOLDER_COPY_MODES = ('offline', 'sshfs_boot', 'snapshot_zero')
 _MODE_NAMES = {'offline': 'Offline Copy', 'sshfs_boot': 'Live Mirror', 'snapshot_zero': 'Snapshot-Iterative',
                'auto': 'Auto', 'vmkfstools_clone': 'Live Clone'}
 _DISK_FILE_RE = re.compile(r'^\[([^\]]+)\]\s+(.+\.vmdk)$')
@@ -45,7 +232,8 @@ def folder_copy_gap(disks, datastore=None, vm_dir=None, descriptor_files=None):
     copy from the boot disk's folder would leave a disk out or read an old state of it.
 
     The folder is datastore / vm_dir, by default the one of disk 0. descriptor_files, when
-    given, is what that folder holds; without it only the disk paths ESXi reports count."""
+    given, is what that folder holds; without it only the disk paths ESXi reports are looked
+    at (the migration plan does that before anything runs)."""
     disks = [d if isinstance(d, dict) else {} for d in (disks or [])]
     first = _DISK_FILE_RE.match(str(disks[0].get('vmdk_file') or '').strip()) if disks else None
     if datastore is None and first:
@@ -54,7 +242,7 @@ def folder_copy_gap(disks, datastore=None, vm_dir=None, descriptor_files=None):
         vm_dir = os.path.dirname(first.group(2).strip())
     out = []
     for i, d in enumerate(disks):
-        # names ESXi reports go into the task log and the error: one line, and not too long
+        # names ESXi reports go into the task log and the answer: one line, and not too long
         label = re.sub(r'[\x00-\x1f\x7f]', ' ', str(d.get('label') or f'Hard disk {i + 1}'))[:80]
         what = f"disk {i + 1} ({label})"
         m = _DISK_FILE_RE.match(str(d.get('vmdk_file') or '').strip()[:1024])
@@ -88,6 +276,206 @@ def folder_copy_refusal(transfer_mode, why):
     return (f"The {mode} transfer mode copies the disk files of the boot disk's folder, and here that "
             f"would leave a disk out or copy an old state of it: {why}. The Live Clone transfer mode "
             f"reads every disk from its own file as it is now. {after}")
+
+
+def read_target_inventory(pve_mgr, node):
+    """What the target node offers a migrated guest, read from the Proxmox API.
+
+    {'bridges': {name: kind}, 'storages': {name: {type, content, active, avail}},
+     'notes': [...]}. Bridges are the node's Linux and OVS bridges plus the SDN VNets of the
+    zones that node is part of. Raises RuntimeError when the network or the storage list of
+    the node cannot be read (no list, no allowlist)."""
+    from urllib.parse import quote
+    base = f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json"
+    nq = quote(str(node), safe='')
+    inv = {'bridges': {}, 'storages': {}, 'notes': []}
+
+    def _rows(path, what):
+        try:
+            r = pve_mgr._api_get(f"{base}{path}")
+        except Exception as e:
+            raise RuntimeError(f"{what} could not be read ({str(e)[:120]})")
+        if getattr(r, 'status_code', 0) != 200:
+            raise RuntimeError(f"{what} could not be read (HTTP {getattr(r, 'status_code', '?')})")
+        try:
+            data = (r.json() or {}).get('data') or []
+        except Exception:
+            raise RuntimeError(f"{what} came back unreadable")
+        return [row for row in data[:4096] if isinstance(row, dict)] if isinstance(data, list) else []
+
+    for row in _rows(f"/nodes/{nq}/network", f"the network list of node {node}"):
+        name = row.get('iface')
+        if row.get('type') in ('bridge', 'OVSBridge') and valid_bridge_name(name):
+            inv['bridges'][name] = 'ovs' if row.get('type') == 'OVSBridge' else 'bridge'
+
+    # SDN: a VNet is only a bridge on nodes its zone covers
+    try:
+        vr = pve_mgr._api_get(f"{base}/cluster/sdn/vnets")
+        vstatus = getattr(vr, 'status_code', 0)
+    except Exception:
+        vr, vstatus = None, 0
+    if vstatus == 200:
+        try:
+            vnets = [v for v in ((vr.json() or {}).get('data') or [])[:4096] if isinstance(v, dict)]
+            zones = {z.get('zone') for z in _rows(f"/nodes/{nq}/sdn/zones", 'zones')
+                     if z.get('status') in (None, '', 'available')}
+            for v in vnets:
+                if v.get('zone') in zones and valid_bridge_name(v.get('vnet')):
+                    inv['bridges'].setdefault(v['vnet'], 'vnet')
+        except Exception:
+            inv['notes'].append(f"the SDN zones of node {node} could not be read, its VNets are not offered")
+    elif vstatus not in (404, 501):
+        inv['notes'].append('the SDN VNets could not be read, a VNet cannot be confirmed')
+
+    def _flag(v, default=1):
+        return str(default if v is None else v).strip().lower() in ('1', 'true')
+
+    for row in _rows(f"/nodes/{nq}/storage", f"the storage list of node {node}"):
+        name = row.get('storage')
+        if not isinstance(name, str) or not name:
+            continue
+        try:
+            avail = int(row['avail']) if row.get('avail') is not None else None
+        except (TypeError, ValueError):
+            avail = None
+        inv['storages'][name] = {
+            'type': str(row.get('type') or ''),
+            'content': {c.strip() for c in str(row.get('content') or '').split(',') if c.strip()},
+            'active': _flag(row.get('active')) and _flag(row.get('enabled')),
+            'avail': avail,
+        }
+    return inv
+
+
+def resolve_migration_plan(inv, source_disks, source_nics, opts, target_storage, network_bridge,
+                           net_vlan_tag=None, transfer_mode='auto', needs_efi=False, needs_tpm=False):
+    """The plan of one migration checked against what the target node offers.
+
+    Starts nothing and reads nothing: `inv` comes from read_target_inventory, the source
+    lists are the ESXi VM's disks and NICs in the order the migration plan shows them, `opts`
+    is parse_migration_options(). Returns {'ok', 'errors', 'warnings', 'nics', 'disks',
+    'storages', 'verify', 'transfer_mode'}."""
+    errors, warnings = [], []
+    nic_map = opts.get('nic_map') or {}
+    disk_map = opts.get('disk_map') or {}
+    verify = opts.get('verify') or 'sample'
+    default_vlan = vlan_tag(net_vlan_tag)
+    source_disks = list(source_disks or [])
+    source_nics = [n if isinstance(n, dict) else {} for n in (source_nics or [])]
+    for note in inv.get('notes') or []:
+        warnings.append(note)
+
+    # -- NICs. A VM without NICs still gets net0 on the job's bridge, as it always did
+    nic_rows = []
+    for idx in sorted(nic_map):
+        if idx >= max(1, len(source_nics)):
+            errors.append(f'nic_map names NIC {idx}, the VM has {len(source_nics)}')
+    for i, nic in enumerate(source_nics or [{}]):
+        ent = nic_map.get(i)
+        bridge, vlan = network_bridge, default_vlan
+        if ent:
+            if ent['bridge']:
+                bridge = ent['bridge']
+            if ent['vlan_set']:
+                vlan = ent['vlan']
+        row = {'index': i, 'net': f'net{i}', 'label': nic.get('label') or f'NIC {i + 1}',
+               'source_network': nic.get('network') or '', 'mac': nic.get('mac_address') or '',
+               'model': nic.get('pve_model') or '', 'skip': bool(ent and ent['skip']),
+               'bridge': None, 'vlan': None}
+        nic_rows.append(row)
+        if row['skip']:
+            continue
+        row['bridge'], row['vlan'] = bridge, vlan
+        kind = inv['bridges'].get(bridge) if valid_bridge_name(bridge) else None
+        if kind is None:
+            errors.append(f"NIC {i + 1}: bridge {str(bridge)[:40]!r} does not exist on the target node")
+        elif kind == 'vnet' and vlan:
+            warnings.append(f"NIC {i + 1}: {bridge} is an SDN VNet, Proxmox takes the tag "
+                            f"{vlan} only on a VLAN-aware VNet")
+    if nic_rows and all(r['skip'] for r in nic_rows):
+        warnings.append('every NIC is skipped, the migrated guest has no network')
+
+    # -- disks
+    for idx in sorted(disk_map):
+        if idx >= len(source_disks):
+            errors.append(f'disk_map names disk {idx}, the VM has {len(source_disks)}')
+    disk_rows, needed = [], {}
+    for i, d in enumerate(source_disks):
+        d = d if isinstance(d, dict) else {}
+        ent = disk_map.get(i) or {}
+        skip = bool(ent.get('skip'))
+        storage = None if skip else (ent.get('storage') or target_storage)
+        try:
+            size = max(0, int(d.get('capacity_bytes') or 0))
+        except (TypeError, ValueError):
+            size = 0
+        disk_rows.append({'index': i, 'label': d.get('label') or f'Disk {i + 1}',
+                          'vmdk_file': d.get('vmdk_file') or '', 'size_bytes': size,
+                          'boot': i == 0, 'skip': skip, 'storage': storage})
+        if skip:
+            warnings.append(f"disk {i + 1} ({disk_rows[-1]['label']}, {size / 1024 ** 3:.1f} GiB) "
+                            f"stays behind, the migrated guest will not have it")
+            continue
+        needed[storage] = needed.get(storage, 0) + size
+    small = _SMALL_DISK_BYTES * (int(bool(needs_efi)) + int(bool(needs_tpm)))
+    needed[target_storage] = needed.get(target_storage, 0) + small
+
+    storage_rows = []
+    for name in sorted(needed):
+        st = inv['storages'].get(name)
+        row = {'storage': name, 'needed_bytes': needed[name], 'avail_bytes': None, 'type': '',
+               'ok': False}
+        storage_rows.append(row)
+        if st is None:
+            errors.append(f"storage {name!r} does not exist on the target node")
+            continue
+        row['type'], row['avail_bytes'] = st['type'], st['avail']
+        if not st['active']:
+            errors.append(f"storage {name!r} is not active on the target node")
+            continue
+        if 'images' not in st['content']:
+            errors.append(f"storage {name!r} does not take disk images")
+            continue
+        row['ok'] = True
+        if st['avail'] is None:
+            warnings.append(f"the free space of storage {name!r} is unknown")
+        elif needed[name] > st['avail']:
+            msg = (f"storage {name!r} has {st['avail'] / 1024 ** 3:.1f} GiB free, the disks placed "
+                   f"on it need {needed[name] / 1024 ** 3:.1f} GiB")
+            if st['type'] in _SPACE_SOFT_TYPES:
+                warnings.append(msg + ' (it may still fit if the pool compresses)')
+            else:
+                row['ok'] = False
+                errors.append(msg + ' - the copy writes every block of a disk')
+
+    if verify == 'full':
+        why = full_verify_refusal(transfer_mode)
+        if why:
+            errors.append(why)
+    elif verify == 'off':
+        warnings.append('verify is off: the copied disks are not compared with their source')
+
+    # what the run refuses before it touches anything, said here already
+    _order, gap = folder_copy_gap(source_disks)
+    mode = str(transfer_mode or 'auto')
+    if gap and mode in FOLDER_COPY_MODES:
+        errors.append(f"{gap}. The {_MODE_NAMES[mode]} transfer mode copies the disk files of that folder "
+                      f"and would leave the disk out or copy an old state of it; Live Clone reads every "
+                      f"disk from its own file")
+    elif gap and mode == 'auto':
+        warnings.append(f"{gap}. Should the live clone not be possible, Auto stops instead of falling "
+                        f"back to a copy of the boot disk's folder")
+
+    return {'ok': not errors, 'errors': errors, 'warnings': warnings, 'nics': nic_rows,
+            'disks': disk_rows, 'storages': storage_rows, 'verify': verify,
+            'transfer_mode': str(transfer_mode or 'auto')}
+
+
+_BASIC_AUTH_HEADER = re.compile(r'(authorization:[ \t]*basic[ \t]+)[^\s]+', re.I)
+
+# the cache modes of a PVE drive; native AIO opens the disk with O_DIRECT, which only these two keep
+DISK_CACHE_MODES = ('none', 'writethrough', 'writeback', 'directsync', 'unsafe')
+DIRECT_CACHE_MODES = ('none', 'directsync')
 
 
 class V2PMigrationTask:
@@ -180,10 +568,21 @@ class V2PMigrationTask:
         self.memory = self.config.get('memory', 0)
         self.scsihw_override = self.config.get('scsihw', '')
         self.disk_format = self.config.get('disk_format', 'raw')
-        self.disk_cache = self.config.get('disk_cache', 'none')
-        self.disk_iothread = self.config.get('disk_iothread', True)
-        self.disk_discard = self.config.get('disk_discard', 'on')
-        self.disk_ssd = self.config.get('disk_ssd', False)
+        # JB Nov 2026 (#1270) - both end up in the root `qm set` / conf line of the disk:
+        # literal PVE tokens only, anything else counts as unset
+        _cache = str(self.config.get('disk_cache', '') or '').strip().lower()
+        self.disk_cache = _cache if _cache in DISK_CACHE_MODES else ''
+        _iot = self.config.get('disk_iothread', True)
+        self.disk_iothread = _iot if isinstance(_iot, bool) else str(_iot).strip().lower() in ('1', 'true', 'on')
+        # the same for discard and SSD emulation (#1246)
+        _discard = self.config.get('disk_discard', 'on')
+        # MK Nov 2026 - a bool is what the create dialog sends for its Discard box
+        if isinstance(_discard, bool):
+            _discard = 'on' if _discard else 'ignore'
+        _discard = _discard.strip().lower() if isinstance(_discard, str) else ''
+        self.disk_discard = _discard if _discard in ('on', 'ignore') else ''
+        _ssd = self.config.get('disk_ssd', False)
+        self.disk_ssd = _ssd if isinstance(_ssd, bool) else str(_ssd).strip().lower() in ('1', 'true', 'on')
         # #598 — optional per-VM QEMU aio backend for the FINAL target disk(s).
         # Whitelist STRICTLY to the three literal qemu tokens; the value is
         # interpolated into a root `qm set` / conf line, so never emit raw input
@@ -213,7 +612,55 @@ class V2PMigrationTask:
         # compatibility. Enable to pre-stage Windows for native virtio-scsi/virtio-net.
         self.install_virtio_drivers = bool(self.config.get('install_virtio_drivers', False))
         self.virtio_iso_path = self.config.get('virtio_iso_path', '') or ''
+        # MK Oct 2026 - per NIC / per disk choices and the verify mode. The route checked them
+        # against the target node already; parsed again here so a task built any other way
+        # cannot carry an unchecked name into a node command. A value that does not parse
+        # fails the run before it touches anything.
+        self._options_error = None
+        try:
+            _opts = parse_migration_options(self.config)
+        except ValueError as e:
+            _opts = {'nic_map': None, 'disk_map': None, 'verify': 'sample'}
+            self._options_error = str(e)
+        self.nic_map = _opts['nic_map']
+        self.disk_map = _opts['disk_map']
+        self.verify_mode = _opts['verify']
         self._disk_vols = {}       # disk index -> volume id it was copied to
+        self._copy_sources = {}    # disk index -> (path on ESXi, bytes) the last copy read
+        self.warnings = []         # what went wrong without failing the run (_result_warning)
+
+    def disk_target(self, i):
+        """The storage disk i is copied to, or None when it stays behind.
+
+        Every transfer mode asks here, for the allocation, the attach and every loop that
+        walks the disks, so a disk's storage and its skip are decided in one place. Without
+        a disk_map every disk goes to target_storage, as before."""
+        disk_map = getattr(self, 'disk_map', None)
+        if disk_map is None:
+            return self.target_storage
+        ent = disk_map.get(i)
+        if not ent:
+            return self.target_storage
+        if ent['skip'] and i != 0:
+            return None
+        return ent['storage'] or self.target_storage
+
+    def kept_disks(self, count):
+        """Indexes of the disks out of `count` that are copied."""
+        return [i for i in range(count) if self.disk_target(i) is not None]
+
+    def nic_target(self, i):
+        """(bridge, vlan tag or None) for source NIC i, None when it is skipped."""
+        bridge, tag = self.network_bridge, self.net_vlan_tag
+        ent = (getattr(self, 'nic_map', None) or {}).get(i)
+        if ent:
+            if ent['skip']:
+                return None
+            if ent['bridge']:
+                bridge = ent['bridge']
+            if ent['vlan_set']:
+                tag = ent['vlan']
+        return bridge, tag
 
     def record_disk_volume(self, i, vol_id):
         if vol_id:
@@ -231,10 +678,27 @@ class V2PMigrationTask:
 
     def _disk_attach_opts(self):
         # #598 — extra drive options appended to a FINAL target-disk attach only.
-        # aio_mode is whitelisted in __init__ to one of three literal tokens, so
-        # the returned suffix can never carry shell/config metacharacters. Returns
-        # '' by default (no behaviour change; PVE default aio=io_uring).
-        return f',aio={self.aio_mode}' if getattr(self, 'aio_mode', '') else ''
+        # aio_mode, disk_cache and disk_discard are whitelisted in __init__ to literal
+        # tokens and disk_iothread and disk_ssd are bools, so the returned suffix can
+        # never carry shell/config metacharacters. Returns '' when none of them applies
+        # (PVE default: no IO thread, cache=none, discard=ignore, no SSD, aio=io_uring).
+        opts = ''
+        # JB Nov 2026 (#1270) - PVE runs a disk in its own IO thread only on VirtIO Block or on
+        # SCSI behind virtio-scsi-single; elsewhere the flag is ignored or refused
+        bus, hw = getattr(self, '_attach_bus', ''), getattr(self, '_attach_scsihw', '')
+        if getattr(self, 'disk_iothread', False) and (bus == 'virtio' or (bus == 'scsi' and hw == 'virtio-scsi-single')):
+            opts += ',iothread=1'
+        # none is what PVE does without the option
+        if getattr(self, 'disk_cache', '') in DISK_CACHE_MODES and self.disk_cache != 'none':
+            opts += f',cache={self.disk_cache}'
+        # ignore is PVE's default, and VirtIO Block has no ssd option (#1246)
+        if getattr(self, 'disk_discard', '') == 'on':
+            opts += ',discard=on'
+        if getattr(self, 'disk_ssd', False) is True and bus in ('scsi', 'sata', 'ide'):
+            opts += ',ssd=1'
+        if getattr(self, 'aio_mode', ''):
+            opts += f',aio={self.aio_mode}'
+        return opts
 
     def _redact(self, text):
         # NS Oct 2026 (#1098) - tool output (qemu-img, ssh) can echo the ESXi password,
@@ -245,7 +709,8 @@ class V2PMigrationTask:
             import urllib.parse
             for form in {pw, urllib.parse.quote(pw, safe=''), shlex.quote(pw)}:
                 text = text.replace(form, '********')
-        return text
+        # curl -v prints the request headers it sent, the login as base64 among them
+        return _BASIC_AUTH_HEADER.sub(r'\1********', text)
 
     def log(self, msg):
         msg = self._redact(msg)
@@ -273,13 +738,17 @@ class V2PMigrationTask:
                 self.config.pop('esxi_password', None)
         except Exception:
             pass
-        # and the secret file the HTTPS boot handed to QEMU (#1098)
-        node_secret = getattr(self, '_node_secret', None)
-        if node_secret:
-            self._node_secret = None
+        # and the secret files the run left on the node (_node_secret_file): the one the
+        # HTTPS boot hands to QEMU (#1098), and any a step did not get to remove itself
+        held = getattr(self, '_node_secrets', None)
+        self._node_secrets = []
+        by_node = {}
+        for pve_mgr, node, path in (held if isinstance(held, list) else []):
+            by_node.setdefault((id(pve_mgr), node), (pve_mgr, node, []))[2].append(path)
+        for pve_mgr, node, paths in by_node.values():
             try:
-                pve_mgr, node, path = node_secret
-                _pve_node_exec(pve_mgr, node, f"rm -f {shlex.quote(path)}", timeout=10)
+                _pve_node_exec(pve_mgr, node, 'rm -f ' + ' '.join(shlex.quote(p) for p in paths),
+                               timeout=10)
             except Exception:
                 pass
 
@@ -326,7 +795,8 @@ class V2PMigrationTask:
             broadcast_sse('vmware_migration', {
                 'id': self.id, 'phase': self.phase, 'status': self.status,
                 'progress': self.progress, 'vm_name': self.vm_name,
-                'error': self.error, 'disk_progress': self.disk_progress
+                'error': self.error, 'disk_progress': self.disk_progress,
+                'warnings': list(getattr(self, 'warnings', None) or []),
             })
         except: pass
     
@@ -431,6 +901,7 @@ class V2PMigrationTask:
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
             'disk_progress': self.disk_progress, 'phase_times': self.phase_times,
             'total_downtime_seconds': self.total_downtime_seconds,
+            'warnings': list(getattr(self, 'warnings', None) or []),
             'log': self.log_lines[-20:],  # Last 20 log lines
             'config': {
                 'network_bridge': self.network_bridge,
@@ -438,6 +909,7 @@ class V2PMigrationTask:
                 'remove_source': self.remove_source,
                 'esxi_host': self.esxi_host,
                 'esxi_datastore': self.esxi_datastore,
+                'verify': getattr(self, 'verify_mode', 'sample'),
             },
         }
 
@@ -452,6 +924,138 @@ def _node_hkc():
     return 'yes' if strict_host_keys_enabled() else 'accept-new'
 
 
+# what the tool probe of the planning step prints for a tool the node does not have
+_TOOL_MISSING = 'V2P_TOOL_MISSING'
+
+
+def _first_lines(text, limit=300):
+    """The text of a node's answer on one line, for a log line."""
+    return ' '.join(str(text or '').split())[:limit]
+
+
+def _node_cannot_reach(pve_mgr, node, host, port, wait=5):
+    """Why `node` cannot open a TCP connection to host:port, '' when it can, None when
+    the probe gave no answer (it did not run, or a node exec without output).
+
+    bash's /dev/tcp under coreutils' timeout, both on every PVE node. A filtered port
+    waits for the timeout (124), a refused or unknown one fails at once with bash's
+    reason. Host and port are arguments of the inner bash, never part of its script:
+    that one parses its string again (an IPv6 zone id may hold any character)."""
+    from pegaprox.utils.ssh import bare_host
+    from pegaprox.utils.sanitization import validate_host_address
+    addr = bare_host(host)
+    if not validate_host_address(addr):
+        return None
+    rc, out, _ = _pve_node_exec(pve_mgr, node,
+        f"timeout {int(wait)} bash -c '</dev/tcp/\"$1\"/\"$2\"' _ {shlex.quote(addr)} {int(port)} 2>&1; "
+        f"echo V2P_TCP_RC=$?", timeout=int(wait) + 10)
+    lines = str(out or '').strip().splitlines()
+    m = re.fullmatch(r'V2P_TCP_RC=(\d+)', lines[-1].strip()) if lines else None
+    if not m:
+        return None
+    code = int(m.group(1))
+    if code == 0:
+        return ''
+    if code == 124:
+        return f'no answer within {int(wait)}s'
+    return _first_lines(' '.join(lines[:-1])) or f'exit code {code}'
+
+
+def _sshfs_mount_cmd(mnt_path, opts, source):
+    """The node's command for one SSHFS mount attempt (#1224). Run it with the ESXi
+    password as stdin_data: sshfs reads it from there, it is on no command line.
+
+    sshfs 3 sends the stderr of the ssh it starts to /dev/null and says no more than
+    'read: Connection reset by peer'. ssh -E puts ssh's own messages in a file, printed
+    to stderr when the mount fails and removed either way. Not sshfs_debug: that hands
+    ssh the command's stderr, and an ssh that stays for the mount keeps the call open."""
+    return (
+        f"mkdir -p {mnt_path} && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && {{ "
+        f"sshfs -o password_stdin,{opts} "
+        f"-o \"ssh_command=ssh -E $_log\" {source} {mnt_path}; "
+        f"_rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }}"
+    )
+
+
+# what a disk file name from the ESXi listing may not hold. Every shell command on the node
+# or on ESXi quotes it; these characters are refused on top of that, and a comma where the
+# name becomes part of a QEMU -drive spec (a comma starts the next option there)
+_DISK_NAME_REFUSED = re.compile(r'[\x00-\x1f\x7f-\x9f"\'`$\\/]')
+# and what breaks or reorders the line the name is shown on (task log, refusal): line and
+# paragraph separators, format characters such as a bidi override or a zero width space.
+# Other spaces are fine.
+_DISK_NAME_REFUSED_KINDS = frozenset(('Cc', 'Cf', 'Cs', 'Zl', 'Zp'))
+
+
+def disk_name_problem(name, drive_spec=False):
+    """What in the disk file `name` keeps the migration from using it, or None. Spaces,
+    umlauts, parentheses, '#', '&' and '+' are fine."""
+    if not isinstance(name, str) or not name.strip():
+        return 'nothing'
+    m = _DISK_NAME_REFUSED.search(name)
+    ch = m.group(0) if m else next(
+        (c for c in name if unicodedata.category(c) in _DISK_NAME_REFUSED_KINDS), None)
+    if ch:
+        return ('a control character or line break' if ch.isspace() or not ch.isprintable()
+                else f'the character {ch!r}')
+    if drive_spec and ',' in name:
+        return 'a comma, which the Live Mirror cannot hand to QEMU'
+    return None
+
+
+def _node_secret_file(pve_mgr, task, name, secret):
+    """Write `secret` to a new root-only file in /run on the target node and return its
+    path, None when that failed.
+
+    The secret goes over the command's stdin: a command line is readable by every local
+    account on the node while it runs, and on this host when the call falls back to the
+    ssh binary. The file is registered on the task, so the end of the run removes it
+    wherever it stopped; the caller removes it as soon as it is done (_drop_node_secret)."""
+    path = f"/run/pegaprox-v2p-{task.id}-{name}"
+    q = shlex.quote(path)
+    held = getattr(task, '_node_secrets', None)
+    if not isinstance(held, list):
+        held = task._node_secrets = []
+    # registered before the write: a write cut off halfway leaves part of the secret
+    held.append((pve_mgr, task.target_node, path))
+    # cat exits 0 on whatever part of stdin arrived, none at all included: only a file of
+    # the secret's full size counts, sshpass or curl would log in with less
+    size = len(str(secret).encode('utf-8', 'surrogatepass'))
+    rc, _, _ = _pve_node_exec(pve_mgr, task.target_node,
+        f"umask 077; rm -f {q} && cat > {q} && [ \"$(wc -c < {q})\" -eq {size} ]",
+        timeout=15, stdin_data=secret)
+    return path if rc == 0 else None
+
+
+def _drop_node_secret(pve_mgr, task, path):
+    if not path:
+        return
+    _pve_node_exec(pve_mgr, task.target_node, f"rm -f {shlex.quote(path)}", timeout=10)
+    held = getattr(task, '_node_secrets', None)
+    if isinstance(held, list):
+        held[:] = [h for h in held if h[2] != path]
+
+
+def _curl_login_config(user, password):
+    """A curl config file (-K) holding the ESXi login, so the password is on neither the
+    shell's nor curl's command line. In curl's quoted form a space is just a space."""
+    v = f"{user}:{password}"
+    for ch, esc in (('\\', '\\\\'), ('"', '\\"'), ('\n', '\\n'), ('\r', '\\r'), ('\t', '\\t')):
+        v = v.replace(ch, esc)
+    return f'user = "{v}"\n'
+
+
+# what sshfs and ssh print around a failed mount that never names its cause
+_SSHFS_NOISE = ('read: Connection reset by peer', 'Warning: Permanently added')
+
+
+def _mount_said(err, out):
+    """What a failed mount attempt said, on one line, without the _SSHFS_NOISE lines
+    (unless that is all it said)."""
+    lines = [ln.strip() for ln in str(err or out or '').splitlines() if ln.strip()]
+    return _first_lines(' '.join([ln for ln in lines if not ln.startswith(_SSHFS_NOISE)] or lines))
+
+
 # what mktemp in _write_node_script prints, and nothing else
 _NODE_SCRIPT_RE = re.compile(r'/tmp/v2p-[a-z0-9-]+-[A-Za-z0-9]{10}')
 
@@ -463,9 +1067,9 @@ def _write_node_script(pve_mgr, node, body, tag, timeout=15):
     task id the mount next to them gives away) and ran in a later call. A local account
     that created the name first got its own file run as root; with protected_regular the
     root write fails and the run still went ahead. mktemp makes a new 0600 file nobody else
-    can swap in sticky /tmp, and nothing runs when the write did not happen. Writing and
-    running stay two calls: some bodies carry the ESXi password, and a command line is
-    readable by every local account for as long as it runs.
+    can swap in sticky /tmp, and nothing runs when the write did not happen. The body
+    travels inline on the write call's command line, so it never holds a secret: the
+    scripts read the ESXi password from a file of _node_secret_file.
     """
     tag = re.sub(r'[^a-z0-9-]', '', str(tag).lower()) or 'script'
     if not body.endswith('\n'):
@@ -513,8 +1117,13 @@ def _run_v2p_migration(task):
             task.set_phase('failed', 'VMware server not found'); return
         if not pve_mgr:
             task.set_phase('failed', 'Proxmox cluster not found'); return
-        
+        if task._options_error:
+            task.set_phase('failed', f'Invalid migration options: {task._options_error}'); return
+        if task.verify_mode == 'full' and full_verify_refusal(task.transfer_mode):
+            task.set_phase('failed', full_verify_refusal(task.transfer_mode)); return
+
         esxi_host = task.esxi_host or vmware_mgr.host
+        esxi_addr = esxi_host   # unquoted, for the node's own probe of it
         esxi_user = task.esxi_user or 'root'
         esxi_pass = task.esxi_password
         # NS Feb 2026 - quote user/host for shell injection prevention
@@ -568,19 +1177,31 @@ def _run_v2p_migration(task):
         # standard binary dirs. Either path success counts.
         _preflight = {}
         _probe_dirs = '/usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin'
+        # MK Nov 2026 (#1224) - a run started by hand offers the stored key again even where
+        # a console tile saw it refused a minute ago: the operator may just have fixed that
+        forget_key_refusal(pve_mgr, task.target_node)
         for _tool in ['qemu-img', 'qemu-nbd', 'sshfs', 'sshpass']:
             # Belt-and-suspenders probe: `command -v` (POSIX builtin, honours
             # PATH) wins fast, else walk the canonical bin/sbin dirs and
             # check for executable absolute paths. The `&& exit 0` pattern
             # avoids the bash-precedence trap where `A || B; exit 1` runs
             # `exit 1` unconditionally because `;` isn't a `||`-continuation.
+            # MK Nov 2026 (#1224) - a missing tool says so on stdout; a non-zero
+            # answer without that line never ran on the node (SSH, login).
             probe = (
                 f"command -v {_tool} >/dev/null 2>&1 && exit 0; "
                 f"for d in {_probe_dirs}; do "
                 f"  [ -x \"$d/{_tool}\" ] && exit 0; "
-                f"done; exit 1"
+                f"done; echo {_TOOL_MISSING}; exit 1"
             )
-            rc_pf, out_pf, _ = _pve_node_exec(pve_mgr, task.target_node, probe, timeout=5)
+            rc_pf, out_pf, err_pf = _pve_node_exec(pve_mgr, task.target_node, probe, timeout=5)
+            if rc_pf != 0 and _TOOL_MISSING not in str(out_pf or ''):
+                _exec_err = _first_lines(err_pf or out_pf).rstrip('.') or f'exit code {rc_pf}'
+                task.set_phase('failed',
+                    f'Cannot run commands on target node {task.target_node} over SSH, so the '
+                    f'tool check could not run: {_exec_err}. Check the SSH key or password '
+                    f'stored for the cluster and that the node accepts it.')
+                return
             _preflight[_tool] = rc_pf == 0
         avail = [t for t, ok in _preflight.items() if ok]
         missing = [t for t, ok in _preflight.items() if not ok]
@@ -602,6 +1223,18 @@ def _run_v2p_migration(task):
                 'that package conflicts with pve-qemu-kvm and can break '
                 'Proxmox.')
             return
+
+        # MK Nov 2026 (#1224) - the SSHFS mount and the copies run on the node, so it is
+        # the node's way to the ESXi host that has to work. The test above only proved ours.
+        _reach_err = _node_cannot_reach(pve_mgr, task.target_node, esxi_addr, 22)
+        if _reach_err:
+            task.set_phase('failed',
+                f'Target node {task.target_node} cannot reach {esxi_host} on port 22 '
+                f'({_reach_err}). The SSHFS mount and the disk copies run on the node: allow '
+                f'it in the ESXi firewall and on the network in between.')
+            return
+        if _reach_err is not None:
+            task.log(f"Port 22 of {esxi_host} reachable from {task.target_node}")
 
         # Find VM directory on ESXi datastore
         datastore = task.esxi_datastore
@@ -677,19 +1310,34 @@ def _run_v2p_migration(task):
         if not descriptor_files:
             task.set_phase('failed', f'No VMDK descriptor files found in {vm_path}'); return
 
-        # MK Oct 2026 - disk i is the i-th disk of the VM, not the i-th file of the folder
-        # listing: ls puts app01_10.vmdk before app01_2.vmdk, and a leftover vmdk in the folder
-        # is no disk of the VM. A disk on another datastore or in another folder is not in the
-        # listing at all, and one that runs on a snapshot of the VM has its current state in
-        # delta files the folder copies leave out: the guest came up without that disk or with
-        # an old state of it, and the run said completed. Those modes refuse here, before
-        # anything is touched; Auto only when its clone fails and it would fall back to them.
+        # MK Oct 2026 - disk i is the i-th disk of the VM (what the migration plan listed), not
+        # the i-th file of the folder listing: ls puts app01_10.vmdk before app01_2.vmdk, and a
+        # leftover vmdk in the folder is no disk of the VM. The folder paths below copy what is
+        # lined up here; the clone path reads every disk from its own backing and needs none of it.
+        # A disk on another datastore or in another folder is not in the listing, and one that
+        # runs on a snapshot of the VM has its current state in delta files the folder copies
+        # leave out: the guest came up without that disk or with an old state of it, and the run
+        # said completed. Those modes refuse it here, before anything is touched; Auto only when
+        # its clone fails and it would fall back to them.
         aligned, folder_gap = folder_copy_gap(disks, datastore, vm_dir, descriptor_files)
         if folder_gap is None:
             descriptor_files = aligned
         elif task.transfer_mode not in ('vmkfstools_clone', 'auto'):
             task.set_phase('failed', folder_copy_refusal(task.transfer_mode, folder_gap))
             return
+        # the names ESXi listed go into root commands on the node and on ESXi from here on,
+        # and the Live Mirror puts them into QEMU -drive specs. Only these three modes never
+        # end there: Auto can fall back to it, and so can the pre-sync flow that a mode name
+        # this code does not know runs.
+        drive_spec = task.transfer_mode not in ('offline', 'snapshot_zero', 'vmkfstools_clone')
+        for df in descriptor_files:
+            why = disk_name_problem(df, drive_spec=drive_spec)
+            if why:
+                task.set_phase('failed',
+                    f"The name of the disk file {df[:120]!r} in [{datastore}] {vm_dir} holds {why}, "
+                    f"which the migration does not take. Rename the disk on ESXi and start the "
+                    f"migration again. Nothing was copied, the source VM was not touched.")
+                return
 
         # Verify sshfs on Proxmox node (auto-install + re-verify).
         # NS Apr 2026 — old check looked for the substring "sshfs" in apt-get output,
@@ -786,9 +1434,15 @@ def _run_v2p_migration(task):
         # boots fine via the generic --{disk_bus} path below.
         detected_bus = hw.get('disk_bus', 'scsi')
         disk_bus = task.disk_bus if task.disk_bus in ('scsi', 'sata', 'ide', 'virtio') else detected_bus
+        # every attach of a final disk reads these for its drive options (#1270)
+        task._attach_bus, task._attach_scsihw = disk_bus, scsihw
+        if getattr(task, 'disk_ssd', False) is True and disk_bus == 'virtio':
+            task.log("SSD emulation left out: VirtIO Block has no SSD option")
         
         # Network: match VMware (vmxnet3, E1000, E1000e)
         detected_nic = hw.get('nic_type_pve', 'e1000')
+        if not valid_nic_model(detected_nic):
+            detected_nic = 'e1000'
         _valid_nic = ('e1000', 'e1000e', 'virtio', 'vmxnet3')
         nic_explicit = task.net_driver in _valid_nic   # user picked a specific model, not 'auto'
         net_driver = task.net_driver if nic_explicit else detected_nic
@@ -827,7 +1481,6 @@ def _run_v2p_migration(task):
             'vga': vga_type,
         }
         # optional fields — only set if user configured them
-        disk_cache = getattr(task, 'disk_cache', '') or ''
         if getattr(task, 'numa', False):
             pve_config['numa'] = 1
         if getattr(task, 'agent', True):
@@ -854,6 +1507,13 @@ def _run_v2p_migration(task):
         preserve_mac = getattr(task, 'preserve_mac', False)
         if selected_nics:
             for idx, nic in enumerate(selected_nics if isinstance(selected_nics, list) else [selected_nics]):
+                # bridge and tag per NIC from the nic_map, the job's
+                # network_bridge / net_vlan_tag otherwise. A skipped NIC gets no netN.
+                nic_to = task.nic_target(idx)
+                if nic_to is None:
+                    task.log(f"NIC {idx + 1} skipped, net{idx} is not created")
+                    continue
+                bridge, tag = nic_to
                 # MK 2026-06-09 (#536 narukeh): an explicit Network Model pick (e.g. VirtIO)
                 # must win on every NIC. pve_model is the source-detected per-NIC type
                 # (vmxnet3/e1000) — only let it stand in for the 'auto/match-source' case,
@@ -862,17 +1522,31 @@ def _run_v2p_migration(task):
                     model = net_driver
                 else:
                     model = nic.get('pve_model', net_driver) if isinstance(nic, dict) else net_driver
-                nic_str = f'{model},bridge={task.network_bridge}'
+                    # the route checks a caller's list; what ESXi reported is held to the same
+                    # rule, a model is the first word of the net line
+                    if not valid_nic_model(model):
+                        model = net_driver
+                nic_str = f'{model},bridge={bridge}'
                 if preserve_mac and isinstance(nic, dict) and nic.get('mac_address'):
-                    nic_str += f',macaddr={nic["mac_address"]}'
-                if task.net_vlan_tag:  # #598 — validated int 1-4094
-                    nic_str += f',tag={task.net_vlan_tag}'
+                    if valid_unicast_mac(nic['mac_address']):
+                        nic_str += f',macaddr={nic["mac_address"]}'
+                    else:
+                        task.log(f"NIC {idx + 1}: {str(nic['mac_address'])[:40]!r} is no unicast MAC, "
+                                 f"Proxmox picks one for net{idx}")
+                if tag:  # #598 - validated int 1-4094
+                    nic_str += f',tag={tag}'
                 pve_config[f'net{idx}'] = nic_str
         else:
-            net0 = f'{net_driver},bridge={task.network_bridge}'
-            if task.net_vlan_tag:  # #598
-                net0 += f',tag={task.net_vlan_tag}'
-            pve_config['net0'] = net0
+            nic_to = task.nic_target(0)
+            if nic_to is not None:
+                net0 = f'{net_driver},bridge={nic_to[0]}'
+                if nic_to[1]:  # #598
+                    net0 += f',tag={nic_to[1]}'
+                pve_config['net0'] = net0
+        if task.nic_map is not None and 'net0' not in pve_config:
+            # the boot order may only name devices the VM has
+            nets = sorted((k for k in pve_config if re.fullmatch(r'net\d+', k)), key=lambda k: int(k[3:]))
+            pve_config['boot'] = f'order={disk_bus}0;{nets[0]}' if nets else f'order={disk_bus}0'
         if bios == 'ovmf':
             # NS Apr 2026 (offline-transfer bug): DON'T allocate efidisk0 here.
             # On file-based storage (NFS/dir), `efidisk0: storage:1` allocates vm-XXX-disk-0.qcow2.
@@ -939,6 +1613,9 @@ def _run_v2p_migration(task):
             except: pass
         
         for i, df in enumerate(descriptor_files):
+            if task.disk_target(i) is None:
+                task.log(f"Disk {i}: {df} stays behind (skipped)")
+                continue
             ds = disks[i]['capacity_bytes'] if i < len(disks) else 1
             task.disk_progress[f'disk{i}'] = {'copied': 0, 'total': ds or 1, 'pct': 0, 'file': df}
         
@@ -954,7 +1631,6 @@ def _run_v2p_migration(task):
         
         # Mount ESXi datastore via SSHFS (for file listing/discovery only)
         task.log("Mounting ESXi datastore via SSHFS...")
-        safe_pass = shlex.quote(esxi_pass)
 
         # Pre-flight: check root partition space and resolve TMPDIR for subprocesses
         rc_df, df_out, _ = _pve_node_exec(pve_mgr, task.target_node,
@@ -1008,8 +1684,11 @@ def _run_v2p_migration(task):
         #   negative_timeout=3600: cache "file not found" for 1h
         #   no_check_root: skip root dir check (faster mount)
         _hk = _node_hkc()
+        # MK Nov 2026 (#1224) - ConnectTimeout: ssh gives up inside the 30s an attempt gets,
+        # where a filtered port outlasted the call. Its reason comes back through the -E
+        # log of _sshfs_mount_cmd.
         sshfs_ssh_opts = (
-            f"StrictHostKeyChecking={_hk},"
+            f"StrictHostKeyChecking={_hk},ConnectTimeout=10,"
             "reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,"
             "cache=yes,kernel_cache,"
             "max_read=1048576,max_write=1048576,big_writes,large_read,"
@@ -1026,37 +1705,41 @@ def _run_v2p_migration(task):
             "-o IPQoS=throughput"
         )
         
-        mount_cmd = (
-            f"mkdir -p {mnt_path} && "
-            f"printf '%s' {safe_pass} | sshfs -o password_stdin,"
-            f"{sshfs_ssh_opts},{sshfs_algo_opts} "
-            f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)} {mnt_path}"
-        )
-        rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd, timeout=30)
+        _src = f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)}"
+        mount_cmd = _sshfs_mount_cmd(mnt_path, f"{sshfs_ssh_opts},{sshfs_algo_opts}", _src)
+        rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd, timeout=30,
+                                      stdin_data=esxi_pass)
+        # what the node's sshfs/ssh said goes into the log for each attempt, the last
+        # thing it said into the failure
+        _mount_err = ''
         if rc != 0:
+            _mount_err = _mount_said(err, out)
+            task.log(f"SSHFS mount attempt 1/3 failed, trying fewer options: "
+                     f"{_mount_err or f'exit code {rc}, no output'}")
             # Fallback 1: perf options but simpler SSH (no algo workaround)
-            mount_cmd2 = (
-                f"mkdir -p {mnt_path} && "
-                f"printf '%s' {safe_pass} | sshfs -o password_stdin,"
-                f"StrictHostKeyChecking={_hk},"
+            mount_cmd2 = _sshfs_mount_cmd(mnt_path,
+                f"StrictHostKeyChecking={_hk},ConnectTimeout=10,"
                 f"reconnect,ServerAliveInterval=15,"
                 f"cache=yes,kernel_cache,"
                 f"max_read=1048576,big_writes,large_read,"
-                f"entry_timeout=3600,attr_timeout=3600 "
-                f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)} {mnt_path}")
-            rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd2, timeout=30)
+                f"entry_timeout=3600,attr_timeout=3600", _src)
+            rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd2, timeout=30,
+                                          stdin_data=esxi_pass)
         if rc != 0:
+            _said = _mount_said(err, out)
+            _mount_err = _said or _mount_err
+            task.log(f"SSHFS mount attempt 2/3 failed, trying fewer options: "
+                     f"{_said or f'exit code {rc}, no output'}")
             # Fallback 2: minimal options (maximum compatibility)
-            mount_cmd3 = (
-                f"mkdir -p {mnt_path} && "
-                f"printf '%s' {safe_pass} | sshfs -o password_stdin,"
-                f"StrictHostKeyChecking={_hk},"
+            mount_cmd3 = _sshfs_mount_cmd(mnt_path,
+                f"StrictHostKeyChecking={_hk},ConnectTimeout=10,"
                 f"reconnect,ServerAliveInterval=15,"
-                f"cache=yes "
-                f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)} {mnt_path}")
-            rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd3, timeout=30)
+                f"cache=yes", _src)
+            rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd3, timeout=30,
+                                          stdin_data=esxi_pass)
             if rc != 0:
-                task.set_phase('failed', f'SSHFS mount failed: {err}'); return
+                _mount_err = _mount_said(err, out) or _mount_err or f'exit code {rc}, no output'
+                task.set_phase('failed', f'SSHFS mount failed: {_mount_err}'); return
         task.log(f"SSHFS mounted: {mnt_path}")
         
         # Verify files visible
@@ -1108,7 +1791,13 @@ def _run_v2p_migration(task):
             task.set_phase('pre_sync')
             task.log("=== PRE-SYNC: copy base VMDKs while VM keeps running ===")
             presync_volumes = []
+            # the descriptors of the copied disks, in step with presync_volumes: the delta
+            # loop pairs the two lists by position, a skipped disk must leave both
+            sz_desc = []
             for i, desc_file in enumerate(descriptor_files):
+                if task.disk_target(i) is None:
+                    continue
+                sz_desc.append(desc_file)
                 dk = f'disk{i}'
                 disk_size = task.disk_progress[dk]['total']
                 task.log(f"Pre-sync disk {i}: {desc_file} ({disk_size / (1024**3):.1f} GB)")
@@ -1129,7 +1818,7 @@ def _run_v2p_migration(task):
                 presync_volumes.append((vol_id, vol_path, esxi_flat, disk_size))
                 # attach to Proxmox VM shell — NS May 2026 (#222): rc-check
                 rc_a2, out_a2, _ = _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=30)
+                    f"qm set {task.proxmox_vmid} --{disk_bus}{i} {shlex.quote(vol_id)}{task._disk_attach_opts()} 2>&1", timeout=30)
                 if rc_a2 != 0:
                     out_full = str(out_a2 or '').strip()
                     # MK 2026-06-09 (#438 crcro): qm prints a "successfully created '<vol>'"
@@ -1148,7 +1837,7 @@ def _run_v2p_migration(task):
             try:
                 ok, n_iters, snap_chain = _snapshot_zero_v2p_delta_loop(
                     pve_mgr, task, vmware_mgr, esxi_host, esxi_user, esxi_pass,
-                    datastore, vm_dir, descriptor_files, presync_volumes, mnt_path)
+                    datastore, vm_dir, sz_desc, presync_volumes, mnt_path)
                 if not ok:
                     raise Exception("delta loop returned failure")
                 task.log(f"=== DELTA LOOP CONVERGED after {n_iters} iterations ===")
@@ -1174,7 +1863,7 @@ def _run_v2p_migration(task):
                 time.sleep(1)
 
                 all_deltas = _list_delta_files_on_esxi(esxi_host, esxi_user, esxi_pass,
-                                                        datastore, vm_dir, descriptor_files)
+                                                        datastore, vm_dir, sz_desc)
                 final_bytes = 0
                 for di, (vol_id, vol_path, _, _) in enumerate(presync_volumes):
                     deltas = all_deltas[di] if di < len(all_deltas) else []
@@ -1205,7 +1894,7 @@ def _run_v2p_migration(task):
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
                 _register_uefi_fallback_loader(pve_mgr, task)
                 try: _inject_virtio_drivers(pve_mgr, task)
-                except Exception as _ve: task.log(f"  VirtIO injection skipped: {_ve}")
+                except Exception as _ve: _virtio_not_injected(task, _ve)
 
                 # Start Proxmox VM
                 if task.start_after:
@@ -1235,9 +1924,7 @@ def _run_v2p_migration(task):
                 try: vmware_mgr.delete_migration_snapshot(task.vm_id)
                 except: pass
                 if task.remove_source:
-                    task.log("Deleting source VM on ESXi (remove_source=true)")
-                    try: vmware_mgr.delete_vm(task.vm_id)
-                    except Exception as _e: task.log(f"  delete_vm failed: {_e}")
+                    _remove_source_once_target_runs(pve_mgr, vmware_mgr, task)
 
                 task.set_phase('verify')
                 time.sleep(5)
@@ -1461,10 +2148,14 @@ def _run_v2p_migration(task):
                 # rebuild per-disk progress from the authoritative set (the earlier init keyed off
                 # the boot-folder glob, which is short for a multi-datastore VM)
                 task.disk_progress = {f'disk{_i}': {'copied': 0, 'total': _c or 1, 'pct': 0, 'file': _d}
-                                      for _i, (_a, _b, _d, _c) in enumerate(disk_specs)}
+                                      for _i, (_a, _b, _d, _c) in enumerate(disk_specs)
+                                      if task.disk_target(_i) is not None}
 
-                clone_vols = []  # (vol_id, vol_path, size) per disk, what the replay writes to
+                clone_vols = {}  # disk index -> (vol_id, vol_path, size), what the replay writes to
                 for i, (ds_i, vmdir_i, desc_file, disk_size) in enumerate(disk_specs):
+                    if task.disk_target(i) is None:
+                        task.log(f"Disk {i}: [{ds_i}] {vmdir_i}/{desc_file} stays behind (skipped)")
+                        continue
                     dk = f'disk{i}'
                     cb = f"_pegaprox_clone_{task.proxmox_vmid}_{i}"
 
@@ -1530,7 +2221,7 @@ def _run_v2p_migration(task):
 
                     # --- attach (offline pattern; keep the #438 tail) ---
                     rc_a, out_a, _ = _pve_node_exec(pve_mgr, task.target_node,
-                        f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=30)
+                        f"qm set {task.proxmox_vmid} --{disk_bus}{i} {shlex.quote(vol_id)}{task._disk_attach_opts()} 2>&1", timeout=30)
                     if rc_a != 0:
                         out_full = str(out_a or '').strip()
                         task.log(f"  ✗ qm set --{disk_bus}{i} failed (rc={rc_a}): {out_full}")
@@ -1540,14 +2231,30 @@ def _run_v2p_migration(task):
                         return
                     task.log(f"  Disk {i}: cloned → transferred → attached as {disk_bus}{i}")
                     task.update_progress(dk, disk_size, disk_size)
-                    clone_vols.append((vol_id, vol_path, disk_size or csz))
+                    clone_vols[i] = (vol_id, vol_path, disk_size or csz)
+
+                # verify=full: every copy against its clone, the frozen base it was
+                # read from, while the source still runs untouched. The switchover's replay then
+                # compares every block of the folded-back source with these copies, so the disks
+                # that start on Proxmox were compared in full on both sides of the snapshot.
+                fc_sums = {}
+                if task.verify_mode == 'full':
+                    ok_fc, why_fc, fc_sums = _full_check(
+                        pve_mgr, task, esxi_host, esxi_user, esxi_pass,
+                        {i: (v[0], v[1]) for i, v in clone_vols.items()}, 'the frozen base copies')
+                    if not ok_fc:
+                        raise _VmkSwitchoverFailed(f'{why_fc} - the source VM was not touched')
 
                 # checksums of the untouched copies ahead of the switchover, so it only has to
                 # read the ESXi side. Nothing writes to the target disks before the replay, the
                 # post-copy steps come after it.
                 pristine = {}
                 task.log("Checksumming the copied disks for the switchover...")
-                for i, (_vid, vol_path, size) in enumerate(clone_vols):
+                for i, (_vid, vol_path, size) in clone_vols.items():
+                    if len(fc_sums.get(i) or []) == (size + DELTA_BLOCK_SIZE - 1) // DELTA_BLOCK_SIZE:
+                        # the full check just read this copy block by block
+                        pristine[i] = fc_sums[i]
+                        continue
                     sums = _pve_block_checksums(pve_mgr, task.target_node, vol_path, size)
                     if sums:
                         pristine[i] = sums
@@ -1596,12 +2303,12 @@ def _run_v2p_migration(task):
                     _err = str(_res.get('error') or '') if isinstance(_res, dict) else ''
                     if _err:
                         task.log(f"  Snapshot removal reported: {_err}")
-                    if not _err or 'timed out' in _err.lower():
+                    if not _err or _remove_still_running(_err):
                         break
                     if _try == 0:
                         time.sleep(10)
                 # a timed-out remove keeps consolidating on ESXi, any other error gets a short look
-                _limit = 120 if _err and 'timed out' not in _err.lower() else fold_limit
+                _limit = 120 if _err and not _remove_still_running(_err) else fold_limit
                 if not _wait_clone_snap_consolidated(vmware_mgr, task.vm_id, backing_before, _limit):
                     raise _VmkSwitchoverFailed(
                         f'The clone snapshot was not consolidated within {_limit}s (still listed, or a '
@@ -1610,6 +2317,8 @@ def _run_v2p_migration(task):
 
                 task.log("=== Carrying over what changed on the source since the snapshot ===")
                 for i, (ds_i, vmdir_i, desc_file, _cap) in enumerate(disk_specs):
+                    if i not in clone_vols:
+                        continue
                     dk = f'disk{i}'
                     vol_id, vol_path, size = clone_vols[i]
                     src_flat, full_desc = _vc_replay_source(i, ds_i, vmdir_i, desc_file)
@@ -1627,12 +2336,17 @@ def _run_v2p_migration(task):
                         if not vol_id:
                             raise _VmkSwitchoverFailed(f'Disk {i}: the block replay and the full copy both failed')
                         rc_a, out_a, _ = _pve_node_exec(pve_mgr, task.target_node,
-                            f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=30)
+                            f"qm set {task.proxmox_vmid} --{disk_bus}{i} {shlex.quote(vol_id)}{task._disk_attach_opts()} 2>&1", timeout=30)
                         if rc_a != 0:
                             raise _VmkSwitchoverFailed(
                                 f'qm set --{disk_bus}{i} {vol_id} -> {str(out_a or "").strip()[-300:]}')
                         clone_vols[i] = (vol_id, vol_path, size)
                         task.log(f"  Disk {i}: copied again as {vol_id}")
+                        if task.verify_mode == 'full':
+                            ok_fc, why_fc, _ = _full_check(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
+                                                           {i: (vol_id, vol_path)}, f'disk {i} copied again')
+                            if not ok_fc:
+                                raise _VmkSwitchoverFailed(why_fc)
                     task.update_progress(dk, task.disk_progress[dk]['total'], task.disk_progress[dk]['total'])
 
                 # --- post-copy fix chain (mirror offline/snapshot_zero) ---
@@ -1651,7 +2365,7 @@ def _run_v2p_migration(task):
                 _register_uefi_fallback_loader(pve_mgr, task)
                 # must run while the VM is STILL stopped (live-NTFS guard inside)
                 try: _inject_virtio_drivers(pve_mgr, task)
-                except Exception as _ve: task.log(f"  VirtIO injection skipped: {_ve}")
+                except Exception as _ve: _virtio_not_injected(task, _ve)
                 try: _maybe_convert_disks_to_qcow2(pve_mgr, task)
                 except Exception as _qe: task.log(f"  qcow2 convert skipped: {_qe}")
 
@@ -1770,7 +2484,10 @@ def _run_v2p_migration(task):
                 task.log("VMware VM already off")
             
             # Copy each disk (VM off = no locks)
+            offline_vols = {}
             for i, desc_file in enumerate(descriptor_files):
+                if task.disk_target(i) is None:
+                    continue
                 dk = f'disk{i}'
                 disk_size = task.disk_progress[dk]['total']
                 task.log(f"Copying disk {i}: {desc_file} ({disk_size / (1024**3):.1f} GB)")
@@ -1787,7 +2504,7 @@ def _run_v2p_migration(task):
                 # Attach disk — NS May 2026 (#222): rc-check; silent failure used
                 # to leave the volume orphaned on storage and force users to run
                 # `qm rescan` to discover it.
-                attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts()} 2>&1"
+                attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{i} {shlex.quote(vol_id)}{task._disk_attach_opts()} 2>&1"
                 rc_a, out_a, _ = _pve_node_exec(pve_mgr, task.target_node, attach_cmd, timeout=30)
                 if rc_a != 0:
                     out_full = str(out_a or '').strip()
@@ -1799,6 +2516,28 @@ def _run_v2p_migration(task):
                     return
                 task.log(f"  Disk {i} attached as {disk_bus}{i}")
                 task.update_progress(dk, disk_size, disk_size)
+                offline_vols[i] = (vol_id, vol_path)
+
+            # verify=full: the source is off and stays as it is, so every copy
+            # is held against it now, before the post-copy fixes write to the copies and
+            # before anything starts them
+            if task.verify_mode == 'full':
+                ok_fc, why_fc, _ = _full_check(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
+                                               offline_vols, 'offline copy')
+                if not ok_fc:
+                    if is_running:
+                        task.log("The source VM ran before the migration, powering it back on")
+                        try:
+                            res = vmware_mgr.vm_power_action(task.vm_id, 'start')
+                            if isinstance(res, dict) and res.get('error'):
+                                why_fc += f" - powering the source VM back on failed: {res['error']}"
+                            else:
+                                why_fc += ' - the source VM was powered back on'
+                        except Exception as _pe:
+                            why_fc += f' - powering the source VM back on failed: {_pe}'
+                    task.set_phase('failed', f'{why_fc}; the target VM {task.proxmox_vmid} was not started')
+                    _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                    return
 
             # Set boot order and start
             _pve_node_exec(pve_mgr, task.target_node,
@@ -1821,7 +2560,7 @@ def _run_v2p_migration(task):
             # NS Apr 2026 — UEFI fallback loader so OVMF auto-boots Windows post-V2P
             _register_uefi_fallback_loader(pve_mgr, task)
             try: _inject_virtio_drivers(pve_mgr, task)
-            except Exception as _ve: task.log(f"VirtIO injection skipped: {_ve}")
+            except Exception as _ve: _virtio_not_injected(task, _ve)
 
             _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
 
@@ -1865,15 +2604,26 @@ def _run_v2p_migration(task):
         snap_result = vmware_mgr.create_migration_snapshot(task.vm_id)
         if 'error' in snap_result:
             task.log(f"Snapshot creation failed: {snap_result.get('error', 'unknown')}")
+            if task.verify_mode == 'full' and not vm_offline_from_start:
+                # without the snapshot the running VM writes into the very files being copied,
+                # there is nothing unchanged to compare the copy with
+                task.set_phase('failed',
+                    'verify=full needs the source frozen by a snapshot or powered off, and the '
+                    'snapshot could not be created. Nothing was copied, the source VM was not touched.')
+                _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                return
             task.log("Continuing anyway - HTTPS may still work, SSHFS will be limited")
         else:
             task.log("Migration snapshot created - base VMDKs are now read-only")
         
         presync_volumes = []  # Track (vol_id, vol_path, flat_path, flat_size) for delta sync
+        presync_index = []    # the disk index of each presync_volumes entry (skipped disks have none)
         # If VM was offline before we started, treat same as if we'd stopped it: skip delta-sync.
         stopped_for_presync = vm_offline_from_start
         
         for i, desc_file in enumerate(descriptor_files):
+            if task.disk_target(i) is None:
+                continue
             dk = f'disk{i}'
             disk_size = task.disk_progress[dk]['total']
             
@@ -1886,6 +2636,18 @@ def _run_v2p_migration(task):
             
             # If transfer failed with VM running → use SSHFS-boot strategy
             # Stop VM briefly, boot Proxmox VM from SSHFS, live-move disk in background
+            if not vol_id and not stopped_for_presync and task.verify_mode == 'full':
+                # the live mirror below runs the guest on Proxmox while it copies, there is no
+                # point where its copy could be checked before the handover
+                task.set_phase('failed',
+                    f'Pre-sync of disk {i} failed while the VM runs, and the fallback (live mirror) '
+                    f'cannot be verified in full. The source VM was not touched; use Offline Copy '
+                    f'or verify sample.')
+                _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                try: vmware_mgr.delete_migration_snapshot(task.vm_id)
+                except: pass
+                return
+
             if not vol_id and not stopped_for_presync:
                 task.log("Pre-sync failed (VMDK locked) - switching to QEMU SSH boot")
                 
@@ -1923,9 +2685,10 @@ def _run_v2p_migration(task):
             flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
             esxi_flat = f"/vmfs/volumes/{datastore}/{vm_dir}/{flat_file}"
             presync_volumes.append((vol_id, vol_path, esxi_flat, disk_size))
+            presync_index.append(i)
             
             # Attach the volume to the VM
-            attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts()} 2>&1"
+            attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{i} {shlex.quote(vol_id)}{task._disk_attach_opts()} 2>&1"
             rc_at, out_at, _ = _pve_node_exec(pve_mgr, task.target_node, attach_cmd, timeout=30)
             if rc_at == 0:
                 task.log(f"  Disk {i} attached as {disk_bus}{i} ({vol_id})")
@@ -1945,6 +2708,20 @@ def _run_v2p_migration(task):
         
         task.log("=== PRE-SYNC COMPLETE ===")
 
+        # verify=full: the base the pre-sync read is frozen by the migration
+        # snapshot (or the VM is off), so each copy is compared with it now, before the VM is
+        # stopped. The delta sync after it compares every block of the final source again.
+        if task.verify_mode == 'full':
+            ok_fc, why_fc, _ = _full_check(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
+                                           {i: (v[0], v[1]) for i, v in zip(presync_index, presync_volumes)},
+                                           'the pre-sync copies')
+            if not ok_fc:
+                task.set_phase('failed', f'{why_fc} - the source VM was not touched')
+                _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                try: vmware_mgr.delete_migration_snapshot(task.vm_id)
+                except: pass
+                return
+
         # NS Apr 2026 — snapshot_zero mode: iterative delta with VM running, then suspend + tiny final delta.
         # Falls back to standard delta_sync on any error.
         if task.transfer_mode == 'snapshot_zero' and not stopped_for_presync:
@@ -1953,7 +2730,8 @@ def _run_v2p_migration(task):
             try:
                 ok, n_iters, snap_chain = _snapshot_zero_v2p_delta_loop(
                     pve_mgr, task, vmware_mgr, esxi_host, esxi_user, esxi_pass,
-                    datastore, vm_dir, descriptor_files, presync_volumes, mnt_path)
+                    datastore, vm_dir, [descriptor_files[i] for i in presync_index],
+                    presync_volumes, mnt_path)
                 if not ok:
                     task.log("snapshot-zero loop failed, falling back to standard delta")
                     raise Exception("snapshot_zero failed")
@@ -1983,7 +2761,8 @@ def _run_v2p_migration(task):
 
                 # Apply final tiny delta — same logic as inside the loop
                 all_deltas = _list_delta_files_on_esxi(esxi_host, esxi_user, esxi_pass,
-                                                        datastore, vm_dir, descriptor_files)
+                                                        datastore, vm_dir,
+                                                        [descriptor_files[i] for i in presync_index])
                 final_bytes = 0
                 for di, (vol_id, vol_path, _, _) in enumerate(presync_volumes):
                     deltas = all_deltas[di] if di < len(all_deltas) else []
@@ -2014,7 +2793,7 @@ def _run_v2p_migration(task):
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
                 _register_uefi_fallback_loader(pve_mgr, task)
                 try: _inject_virtio_drivers(pve_mgr, task)
-                except Exception as _ve: task.log(f"  VirtIO injection skipped: {_ve}")
+                except Exception as _ve: _virtio_not_injected(task, _ve)
 
                 # Start Proxmox VM
                 if task.start_after:
@@ -2038,13 +2817,7 @@ def _run_v2p_migration(task):
                         task.log(f"  Snapshot cleanup of '{sn}' failed: {_ce}")
 
                 if task.remove_source:
-                    task.log("Powering off + deleting source VM on ESXi...")
-                    try:
-                        vmware_mgr.vm_power_action(task.vm_id, 'stop')
-                        time.sleep(3)
-                        vmware_mgr.delete_vm(task.vm_id)
-                    except Exception as _e:
-                        task.log(f"  Source-VM cleanup failed: {_e}")
+                    _remove_source_once_target_runs(pve_mgr, vmware_mgr, task, power_off=True)
 
                 task.set_phase('verify')
                 time.sleep(5)
@@ -2068,7 +2841,7 @@ def _run_v2p_migration(task):
             # Normal path: VM still running, do checksums + delta sync
             task.log("Pre-computing Proxmox checksums (VM still running)...")
             presync_checksums = {}
-            for i, (vol_id, vol_path, esxi_flat, flat_size) in enumerate(presync_volumes):
+            for i, (vol_id, vol_path, esxi_flat, flat_size) in zip(presync_index, presync_volumes):
                 num_blocks = (flat_size + DELTA_BLOCK_SIZE - 1) // DELTA_BLOCK_SIZE
                 task.log(f"  Checksumming disk {i}: {num_blocks} blocks...")
                 sums = _pve_block_checksums(pve_mgr, task.target_node, vol_path, flat_size)
@@ -2107,7 +2880,7 @@ def _run_v2p_migration(task):
             time.sleep(3)
         
             # Delta sync each disk (only changed blocks)
-            for i, (vol_id, vol_path, esxi_flat, flat_size) in enumerate(presync_volumes):
+            for i, (vol_id, vol_path, esxi_flat, flat_size) in zip(presync_index, presync_volumes):
                 dk = f'disk{i}'
                 task.log(f"Delta sync disk {i}: comparing blocks...")
             
@@ -2133,9 +2906,22 @@ def _run_v2p_migration(task):
                         _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
                         return
                 
-                    attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{i} {new_vol_id}{task._disk_attach_opts()} 2>&1"
+                    attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{i} {shlex.quote(new_vol_id)}{task._disk_attach_opts()} 2>&1"
                     _pve_node_exec(pve_mgr, task.target_node, attach_cmd, timeout=30)
                     task.log(f"  Full re-download complete ({new_vol_id})")
+                    if task.verify_mode == 'full':
+                        ok_fc, why_fc, _ = _full_check(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
+                                                       {i: (new_vol_id, new_vol_path)}, f'disk {i} copied again')
+                        if not ok_fc:
+                            # this run stopped the source for the delta sync: bring it back
+                            try:
+                                vmware_mgr.vm_power_action(task.vm_id, 'start')
+                                why_fc += ' - the source VM was powered back on'
+                            except Exception as _pe:
+                                why_fc += f' - powering the source VM back on failed: {_pe}'
+                            task.set_phase('failed', f'{why_fc}; the target VM {task.proxmox_vmid} was not started')
+                            _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                            return
             
                 task.update_progress(dk, task.disk_progress[dk]['total'], task.disk_progress[dk]['total'])
         
@@ -2171,7 +2957,7 @@ def _run_v2p_migration(task):
             # always try; helper bails harmlessly if disk has no Microsoft loader
             _register_uefi_fallback_loader(pve_mgr, task)
         try: _inject_virtio_drivers(pve_mgr, task)
-        except Exception as _ve: task.log(f"VirtIO injection skipped: {_ve}")
+        except Exception as _ve: _virtio_not_injected(task, _ve)
 
         if task.start_after:
             task.log("Starting VM on Proxmox...")
@@ -2200,8 +2986,7 @@ def _run_v2p_migration(task):
         _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
         task.log("SSHFS unmounted")
         if task.remove_source:
-            task.log("Removing source VM from VMware...")
-            vmware_mgr.delete_vm(task.vm_id)
+            _remove_source_once_target_runs(pve_mgr, vmware_mgr, task)
         
         task.set_phase('completed')
         dt_msg = f" (downtime: {task.total_downtime_seconds:.1f}s)" if task.total_downtime_seconds else ""
@@ -2302,7 +3087,9 @@ def _run_v2p_migration(task):
 # \EFI\Microsoft\Boot\bootmgfw.efi. Result: PXE/HTTP-boot loop and no usable disk
 # entry in the Boot Manager. Workaround: copy bootmgfw.efi to the removable-media
 # default path so OVMF auto-discovers it.
-def _register_uefi_fallback_loader(pve_mgr, task):
+def _register_uefi_fallback_loader(pve_mgr, task, guest_running=False):
+    # JB Nov 2026 (#1268) - guest_running: the guest has this disk open, so only look. A vfat mounted on both
+    # sides ends up damaged, for the same reason the live pivot leaves the VirtIO injection out
     try:
         vol_id = task.boot_volume()
         if not vol_id:
@@ -2317,6 +3104,10 @@ def _register_uefi_fallback_loader(pve_mgr, task):
         # #722 follow-up — a non-krbd RBD storage resolves to a librbd URI, not a block device, so the
         # loopback below would bail with 'volume not a block device'. Map it to /dev/rbdN (tracked so
         # the migration teardown unmaps it) and use that.
+        if vol_path.startswith('rbd:') and guest_running:
+            task.log("EFI fallback: not checked while the VM runs on this RBD volume. "
+                     "A Windows guest without EFI/BOOT/BOOTX64.EFI may need a boot entry after a restart")
+            return
         if vol_path.startswith('rbd:'):
             _mapped_efi = _map_rbd_uri_to_device(pve_mgr, task.target_node, vol_id, vol_path)
             if not _mapped_efi:
@@ -2324,7 +3115,7 @@ def _register_uefi_fallback_loader(pve_mgr, task):
                 return
             _rbd_map_sink(task).append(_mapped_efi)
             vol_path = _mapped_efi
-        task.log(f"EFI fallback: registering BOOTX64.EFI on {vol_path}")
+        task.log(f"EFI fallback: {'checking' if guest_running else 'registering'} BOOTX64.EFI on {vol_path}")
         # Combined script — losetup with 512b sector override, partprobe, identify ESP,
         # mount RW, copy loader, cleanup. Idempotent: if BOOTX64.EFI already exists with
         # same content, no-op. Read-only check first; write only if needed.
@@ -2343,7 +3134,7 @@ def _register_uefi_fallback_loader(pve_mgr, task):
             "[ -n \"$LOOP\" ] && losetup -d \"$LOOP\" 2>/dev/null||true; "
             "rm -rf \"$TMPDIR\"; }\n"
             "trap cleanup EXIT\n"
-            "LOOP=$(losetup -b 512 -fP --show \"$VOL\" 2>&1)\n"
+            f"LOOP=$(losetup {'-r ' if guest_running else ''}-b 512 -fP --show \"$VOL\" 2>&1)\n"
             "[ -b \"$LOOP\" ] || { echo \"losetup failed: $LOOP\"; exit 1; }\n"
             "# Wait briefly for partition nodes to materialize\n"
             "for i in 1 2 3 4 5; do ls -1 ${LOOP}p* 2>/dev/null | head -1 >/dev/null && break; sleep 1; done\n"
@@ -2355,15 +3146,21 @@ def _register_uefi_fallback_loader(pve_mgr, task):
             "if [ \"$PT\" = c12a7328-f81f-11d2-ba4b-00a0c93ec93b ]; then ESP=$p; break; fi; "
             "[ -z \"$ESP\" ] && ESP=$p; done\n"
             "[ -n \"$ESP\" ] || { echo 'no ESP partition found'; exit 1; }\n"
-            "mount -t vfat -o rw \"$ESP\" \"$MNT\" || { echo 'mount failed'; exit 1; }\n"
+            f"mount -t vfat -o {'ro' if guest_running else 'rw'} \"$ESP\" \"$MNT\" || {{ echo 'mount failed'; exit 1; }}\n"
             "MGR=\"$MNT/EFI/Microsoft/Boot/bootmgfw.efi\"\n"
             "[ -f \"$MGR\" ] || { echo 'bootmgfw.efi not present (not a Windows ESP?)'; exit 0; }\n"
             "DST=\"$MNT/EFI/BOOT/BOOTX64.EFI\"\n"
             "if [ -f \"$DST\" ] && cmp -s \"$MGR\" \"$DST\"; then "
             "echo 'fallback loader already in place'; exit 0; fi\n"
-            "mkdir -p \"$MNT/EFI/BOOT\"\n"
-            "cp -f \"$MGR\" \"$DST\" && sync && echo 'fallback loader installed'\n"
         )
+        if guest_running:
+            # NS Nov 2026 (#1268) - a loader that differs from bootmgfw.efi is normal after Windows updates
+            # and boots, only a missing one is worth a warning
+            script += ("if [ -f \"$DST\" ]; then echo 'a different fallback loader is there, left as it is "
+                       "while the VM runs'; else echo 'no BOOTX64.EFI, nothing written while the VM runs'; fi\n")
+        else:
+            script += ("mkdir -p \"$MNT/EFI/BOOT\"\n"
+                       "cp -f \"$MGR\" \"$DST\" && sync && echo 'fallback loader installed'\n")
         sf = _write_node_script(pve_mgr, task.target_node, script,
                                 f"efi-fallback-{task.proxmox_vmid}")
         if not sf:
@@ -2374,6 +3171,11 @@ def _register_uefi_fallback_loader(pve_mgr, task):
         out_str = str(out or '').strip()
         if rc == 0 and ('installed' in out_str or 'already in place' in out_str):
             task.log(f"EFI fallback loader: {out_str.splitlines()[-1] if out_str else 'OK'}")
+        elif rc == 0 and guest_running and 'no BOOTX64.EFI' in out_str:
+            _result_warning(task, "EFI fallback loader: the VM runs on this disk, so BOOTX64.EFI was not written to "
+                                  "its EFI partition. If this Windows guest does not boot after a full stop and "
+                                  "start, copy EFI\\Microsoft\\Boot\\bootmgfw.efi to EFI\\Boot\\bootx64.efi there "
+                                  "(mountvol S: /S inside the guest, create the folder if it is missing).")
         else:
             task.log(f"EFI fallback loader skipped (non-fatal): rc={rc} {out_str[-300:]}")
     except Exception as e:
@@ -2434,11 +3236,43 @@ def _detect_windows_driver_subdir(version_str, build_str):
     return 'w11/amd64'
 
 
+def _result_warning(task, msg):
+    """Log msg and keep it on the task, whose result in the UI lists it next to the
+    outcome. For a problem the migration finishes despite."""
+    msg = getattr(task, '_redact', str)(msg)
+    task.log(f"WARNING: {msg}")
+    warnings = getattr(task, 'warnings', None)
+    if not isinstance(warnings, list):
+        warnings = task.warnings = []
+    if msg not in warnings:
+        warnings.append(msg)
+
+
+def _virtio_not_injected(task, why):
+    """MK Nov 2026 (#1245) - the drivers were asked for and the guest boots without them.
+    That used to be one log line under a COMPLETED. Returns False for the caller."""
+    why = str(why).strip()[:300].rstrip('. ') or 'an unexpected error'
+    _result_warning(task, f"VirtIO drivers were not injected: {why}. "
+                          "The guest boots without them, install them from the virtio-win "
+                          "ISO after the first boot.")
+    return False
+
+
+# what the node script prints right before it gives up (first one in the output wins)
+_VIRTIO_SCRIPT_FAILURES = (
+    'ISO_MOUNT_FAILED', 'NOT_A_BLOCK_DEVICE', 'RBD_PARSE_FAILED', 'RBD_MAP_FAILED',
+    'NOT_A_FILE', 'qemu-nbd missing', 'NBD_CONNECT_FAILED', 'UNSUPPORTED_STORAGE_TYPE',
+    'LOSETUP_FAILED', 'NO_NTFS_FOUND', 'NTFS_MOUNT_FAILED', 'NTFS_NOT_RW', 'NO_WINDOWS_DIR',
+    'NO_DRIVERS_COPIED', 'HIVEX_MERGE_FAILED',
+)
+
+
 def _inject_virtio_drivers(pve_mgr, task):
     """Offline-inject VirtIO drivers into the boot disk's Windows install.
 
     Touches only the first attached disk (assumed boot). Returns True on success.
-    On any error we log + return False — never aborts the migration."""
+    On any error we log, put a warning into the result and return False. It never
+    aborts the migration."""
     if not getattr(task, 'install_virtio_drivers', False):
         return False
 
@@ -2453,7 +3287,7 @@ def _inject_virtio_drivers(pve_mgr, task):
             task.log("[VirtIO] Skipped — VM is already running (sshfs_boot live-pivot path). "
                      "Use transfer_mode=offline/auto/snapshot_zero for offline pre-staging, "
                      "or install drivers post-boot via the virtio-win.iso CD-ROM.")
-            return False
+            return _virtio_not_injected(task, "the target VM was already running")
     except Exception:
         pass  # if the status probe fails, fall through and try injection anyway
 
@@ -2493,7 +3327,7 @@ def _inject_virtio_drivers(pve_mgr, task):
             # lines of hook output and the operator got "✗ apt install failed:" with
             # nothing after the colon.
             task.log(f"[VirtIO] ✗ apt install failed: {str(out_apt or '').strip()[-600:]}")
-            return False
+            return _virtio_not_injected(task, "python3-hivex / ntfs-3g could not be installed on the node")
 
     # hivexsh is checked separately and is NOT fatal. It only feeds the version probe,
     # and the script falls back to a driver variant without it — which for a Windows 11
@@ -2518,7 +3352,7 @@ def _inject_virtio_drivers(pve_mgr, task):
         from pegaprox.utils.sanitization import validate_node_iso_path
         if not validate_node_iso_path(task.virtio_iso_path):
             task.log("[VirtIO] ✗ virtio_iso_path must be an absolute path to an .iso file - skipping")
-            return False
+            return _virtio_not_injected(task, "the virtio-win ISO path is not an absolute path to an .iso file")
         iso_candidates.append(task.virtio_iso_path)
     iso_candidates += [
         "/var/lib/vz/template/iso/virtio-win.iso",
@@ -2534,7 +3368,7 @@ def _inject_virtio_drivers(pve_mgr, task):
     if not iso_path:
         task.log("[VirtIO] ⚠ virtio-win.iso not found — skipping. Searched: " + ", ".join(iso_candidates))
         task.log("[VirtIO]   Hint: drop virtio-win.iso into /var/lib/vz/template/iso/ or set virtio_iso_path")
-        return False
+        return _virtio_not_injected(task, "virtio-win.iso was not found on the node")
     task.log(f"[VirtIO] ISO: {iso_path}")
 
     # 3) Build a single shell script — easier to follow + we get one rc back.
@@ -2544,16 +3378,21 @@ def _inject_virtio_drivers(pve_mgr, task):
     vol_id = task.boot_volume()
     if not vol_id:
         task.log("[VirtIO] no volume of the boot disk is known, skipping")
-        return False
+        return _virtio_not_injected(task, "no volume of the boot disk is known")
     rc, vol_path, _ = _pve_node_exec(pve_mgr, node,
         f"pvesm path {shlex.quote(vol_id)} 2>/dev/null", timeout=10)
     vol_path = str(vol_path or '').strip()
     if not vol_path:
         task.log("[VirtIO] ✗ Could not resolve boot disk path")
-        return False
+        return _virtio_not_injected(task, "the path of the boot disk could not be resolved")
     # Detect storage type so the script knows which exposure path to take
-    storage_type = _pve_storage_type(pve_mgr, node, task.target_storage)
+    storage_type = _pve_storage_type(pve_mgr, node, vol_id.split(':', 1)[0])
     task.log(f"[VirtIO] Target storage type: {storage_type or 'unknown'} ({vol_path})")
+    rbd_map = ''
+    if storage_type == 'rbd':
+        krbd_opts = {} if vol_path.startswith('rbd:') else \
+            _ceph_storage_opts(pve_mgr, node, task.target_storage)
+        rbd_map = ' '.join(shlex.quote(a) for a in _rbd_map_args(vol_path, krbd_opts))
 
     drivers_arg = ' '.join(_VIRTIO_DRIVERS)
     script = (
@@ -2562,6 +3401,7 @@ def _inject_virtio_drivers(pve_mgr, task):
         f"VOL={shlex.quote(vol_path)}\n"
         f"VOL_ID={shlex.quote(vol_id)}\n"
         f"STYPE={shlex.quote(storage_type)}\n"
+        f"RBD_MAP=({rbd_map})\n"
         f"ISO={shlex.quote(iso_path)}\n"
         f"DRIVERS=\"{drivers_arg}\"\n"
         "TMP=$(mktemp -d /tmp/v2p-virtio-XXXXXX)\n"
@@ -2592,16 +3432,22 @@ def _inject_virtio_drivers(pve_mgr, task):
         "    BLK=\"$VOL\"\n"
         "    ;;\n"
         # Ceph RBD — rbd map produces /dev/rbdN
+        # MK Nov 2026 (#1245) - pool, namespace, image and the storage's conf, monitors and
+        # keyring come from the pvesm path, for krbd from the storage config (RBD_MAP, see
+        # _rbd_map_args). The volume id is <storage>:<image> and has no pool in it. A krbd
+        # image PVE has mapped is used as it is, and that map stays; only a map made here
+        # is undone by cleanup.
         "  rbd)\n"
         "    command -v rbd >/dev/null || { echo 'rbd cli missing — apt install ceph-common'; "
         "      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ceph-common >/dev/null 2>&1; }\n"
-        "    POOLIMG=$(echo \"$VOL_ID\" | sed 's|^[^:]*:||')\n"
-        "    POOL=$(echo \"$POOLIMG\" | cut -d/ -f1)\n"
-        "    IMG=$(echo \"$POOLIMG\" | cut -d/ -f2)\n"
-        "    [ -z \"$POOL\" ] || [ -z \"$IMG\" ] && { echo 'RBD_PARSE_FAILED'; exit 2; }\n"
-        "    BLK=$(rbd map -p \"$POOL\" \"$IMG\" 2>&1 | tail -1)\n"
-        "    [ -b \"$BLK\" ] || { echo \"RBD_MAP_FAILED: $BLK\"; exit 2; }\n"
-        "    RBD=\"$BLK\"\n"
+        "    if [ -b \"$VOL\" ]; then\n"
+        "      BLK=\"$VOL\"\n"
+        "    else\n"
+        "      [ ${#RBD_MAP[@]} -gt 0 ] || { echo \"RBD_PARSE_FAILED: $VOL\"; exit 2; }\n"
+        "      BLK=$(rbd \"${RBD_MAP[@]}\" 2>\"$TMP/rbd.err\" | tail -1)\n"
+        "      [ -b \"$BLK\" ] || { echo \"RBD_MAP_FAILED: $(tr '\\n' ' ' <\"$TMP/rbd.err\" | tail -c 300)$BLK\"; exit 2; }\n"
+        "      RBD=\"$BLK\"\n"
+        "    fi\n"
         "    ;;\n"
         # File-based (qcow2 / raw on dir/NFS/CIFS/cephfs/glusterfs/btrfs) — qemu-nbd
         "  dir|nfs|cifs|cephfs|glusterfs|btrfs)\n"
@@ -2846,7 +3692,7 @@ def _inject_virtio_drivers(pve_mgr, task):
         # NS May 2026 — Bulk install via virtio-win-gt-x64.msi.
         # Cleanest approach: stage the official 4.4 MB MSI, register a
         # one-shot SYSTEM service that runs msiexec /quiet at first boot.
-        # The MSI itself handles cert import, ALL driver installs, qemu-ga,
+        # The MSI itself handles cert import, ALL driver installs and the
         # balloon service. Earlier we tried offline pnputil + RunOnce — that
         # ran into "registry corrupt" because RunOnce executes with the
         # logged-in user's standard token (no elevation), even for admins.
@@ -2864,6 +3710,11 @@ def _inject_virtio_drivers(pve_mgr, task):
         "  fi; "
         "done\n"
         "[ \"$MSI_OK\" -eq 1 ] || echo 'MSI_MISSING (skipping bulk install)'\n"
+        # JB Nov 2026 (#1247) - the driver MSI does not bring the guest agent, it is a package of its own on the ISO
+        "if [ -f \"$ISO_MNT/guest-agent/qemu-ga-x86_64.msi\" ]; then "
+        "  cp -f \"$ISO_MNT/guest-agent/qemu-ga-x86_64.msi\" \"$PEGADIR/qemu-ga-x86_64.msi\"; "
+        "  echo 'MSI_STAGED qemu-ga-x86_64.msi'; "
+        "else echo 'GUEST_AGENT_MSI_MISSING (skipping the guest agent)'; fi\n"
         # Register the one-shot service in the SYSTEM hive.
         # ImagePath runs as LocalSystem at next boot; cmd /c chains:
         #   msiexec /quiet → sc delete self → del MSI
@@ -2900,12 +3751,14 @@ def _inject_virtio_drivers(pve_mgr, task):
         # any manual `sc config` step on the customer side.
         "cmdline = (\n"
         "    'cmd.exe /c '\n"
-        "    '(msiexec /i \"C:\\\\PegaProx\\\\virtio-win-gt-x64.msi\" '\n"
+        "    '(start \"\" /wait msiexec /i \"C:\\\\PegaProx\\\\virtio-win-gt-x64.msi\" '\n"
         "    'ADDLOCAL=ALL /quiet /norestart /l*v \"C:\\\\PegaProx\\\\msi.log\") & '\n"
+        "    '(if exist \"C:\\\\PegaProx\\\\qemu-ga-x86_64.msi\" start \"\" /wait msiexec /i \"C:\\\\PegaProx\\\\qemu-ga-x86_64.msi\" '\n"
+        "    '/quiet /norestart /l*v \"C:\\\\PegaProx\\\\qemu-ga.log\") & '\n"
         "    '(sc config vioscsi start= boot >> \"C:\\\\PegaProx\\\\bootarm.log\" 2>&1) & '\n"
         "    '(sc config viostor start= boot >> \"C:\\\\PegaProx\\\\bootarm.log\" 2>&1) & '\n"
         "    '(sc delete PegaProxFirstBoot >> \"C:\\\\PegaProx\\\\service.log\" 2>&1) & '\n"
-        "    '(del \"C:\\\\PegaProx\\\\virtio-win-gt-x64.msi\" 2>nul)'\n"
+        "    '(del \"C:\\\\PegaProx\\\\virtio-win-gt-x64.msi\" \"C:\\\\PegaProx\\\\qemu-ga-x86_64.msi\" 2>nul)'\n"
         ")\n"
         "for cs_name in ['ControlSet001','ControlSet002']:\n"
         "    cs = fc(h.root(), cs_name)\n"
@@ -2928,7 +3781,7 @@ def _inject_virtio_drivers(pve_mgr, task):
     sf = _write_node_script(pve_mgr, node, script, f"virtio-inject-{task.proxmox_vmid}")
     if not sf:
         task.log("[VirtIO] ✗ the injection script could not be written on the node")
-        return False
+        return _virtio_not_injected(task, "the injection script could not be written on the node")
 
     # Detect version first via a separate quick run (so we can pass VIRTIO_SUBDIR cleanly)
     # Simpler path: do a probe-only run then a real run. But to keep cost down we just
@@ -2963,10 +3816,12 @@ def _inject_virtio_drivers(pve_mgr, task):
     # Surface the interesting lines — keep the log compact.
     # Most markers are once-per-run; COPIED/SKIP/COPY_FAILED are per-driver
     # so we log all of them (otherwise we'd hide which drivers actually staged).
-    _multi = ('COPIED ', 'SKIP ', 'COPY_FAILED ')
-    for marker in ['WIN_PART=', 'WDIR=', 'VER_NAME=', 'VER_BUILD=', 'SUBDIR_PRIMARY=', 'SUBDIR_FALLBACKS=', 'SUBDIR=', 'COPIED ', 'SKIP ', 'COPY_FAILED ', 'MSI_STAGED ', 'MSI_MISSING', 'SVC_REGISTERED', 'SVC_FAILED', 'INJECTION_OK']:
+    # JB Nov 2026 (#1247) - MSI_STAGED comes once per package, and every marker starts
+    # its line: as a substring, MSI_MISSING also took the guest agent's line.
+    _multi = ('COPIED ', 'SKIP ', 'COPY_FAILED ', 'MSI_STAGED ')
+    for marker in ['WIN_PART=', 'WDIR=', 'VER_NAME=', 'VER_BUILD=', 'SUBDIR_PRIMARY=', 'SUBDIR_FALLBACKS=', 'SUBDIR=', 'COPIED ', 'SKIP ', 'COPY_FAILED ', 'MSI_STAGED ', 'MSI_MISSING', 'GUEST_AGENT_MSI_MISSING', 'SVC_REGISTERED', 'SVC_FAILED', 'INJECTION_OK']:
         for line in out_str.splitlines():
-            if marker in line:
+            if line.strip().startswith(marker):
                 task.log(f"[VirtIO] {line.strip()}")
                 if marker not in _multi:
                     break
@@ -2998,7 +3853,9 @@ def _inject_virtio_drivers(pve_mgr, task):
         return True
     task.log(f"[VirtIO] ✗ Injection failed (rc={rc}). Last 400 chars of output:")
     task.log(out_str[-400:])
-    return False
+    why = next((ln.strip() for ln in out_str.splitlines()
+                if ln.strip().startswith(_VIRTIO_SCRIPT_FAILURES)), '')
+    return _virtio_not_injected(task, why or f"the node script ended with exit code {rc}")
 
 
 # NS Apr 2026 — Snapshot-iterative ZERO-DOWNTIME V2P (transfer_mode='snapshot_zero').
@@ -3149,6 +4006,13 @@ def _clone_snap_consolidated(vmware_mgr, vm_id, backing_before):
     return bool(backing_before) and all(files.get(k) == f for k, f in backing_before.items())
 
 
+def _remove_still_running(err):
+    # JB Nov 2026 (#1249) - ESXi's own words can say "timed out" too, and a task that ended in
+    # failure is not running on: the long wait for it would be downtime with the source off
+    err = str(err or '').lower()
+    return 'timed out' in err and not err.startswith('remove failed')
+
+
 def _consolidation_timeout(merge_bytes):
     # the remove call gives up after 120s while ESXi keeps folding the delta back. Sized from
     # what there is to merge at a slow 10 MiB/s (busy NFS or iSCSI), 10 min to 24 h; a 1 h
@@ -3244,6 +4108,43 @@ def _pve_vm_status(pve_mgr, node, vmid):
     return ''
 
 
+def _remove_source_once_target_runs(pve_mgr, vmware_mgr, task, power_off=False, wait=60, poll=2):
+    # JB Nov 2026 - these paths started the target without reading the answer, and then deleted the source
+    # either way. Only a target that runs is a reason to let go of the copy that is known to work. Without start
+    # after nothing here started it, and one somebody starts by hand in the meantime is no go-ahead either
+    # by now the cutover has powered the source off or suspended it
+    if not getattr(task, 'start_after', True):
+        _result_warning(task, "Remove source VM: the target VM was not started here, so the source VM stays on "
+                              "ESXi, powered off or suspended. Delete it there once the target runs.")
+        return False
+    deadline = time.monotonic() + wait
+    while _pve_vm_status(pve_mgr, task.target_node, task.proxmox_vmid) != 'running':
+        if time.monotonic() >= deadline:
+            _result_warning(task, f"Remove source VM: the target VM did not run within {wait}s, so the source VM "
+                                  "stays on ESXi, powered off or suspended. Power it on there again if the target "
+                                  "does not come up, or delete it once the target runs.")
+            return False
+        time.sleep(poll)
+    task.log("Deleting source VM on ESXi (remove_source=true)")
+    try:
+        if power_off:
+            off = vmware_mgr.vm_power_action(task.vm_id, 'stop')
+            if isinstance(off, dict) and off.get('error'):
+                # a source that is off already answers this too, the delete has the last word
+                task.log(f"  Power-off of the source VM answered: {str(off['error'])[:200]}")
+            time.sleep(3)
+        # the manager answers a refusal with {'error': ...}, it does not raise
+        res = vmware_mgr.delete_vm(task.vm_id)
+        err = res.get('error') if isinstance(res, dict) else None
+    except Exception as e:
+        err = str(e) or type(e).__name__
+    if err:
+        _result_warning(task, f"Remove source VM: ESXi did not delete the source VM ({str(err)[:200]}). "
+                              "It stays there, delete it by hand.")
+        return False
+    return True
+
+
 def _start_target_vm(pve_mgr, task, task_wait=300, run_wait=30, poll=2):
     """Start the target VM and find out whether it runs: ('running' | 'failed' | 'unknown', why).
 
@@ -3312,8 +4213,8 @@ def _list_delta_files_on_esxi(esxi_host, esxi_user, esxi_pass, datastore, vm_dir
     for desc in descriptor_files:
         # base name without extension
         bn = desc[:-5] if desc.endswith('.vmdk') else desc
-        # match <bn>-NNNNNN-delta.vmdk
-        cmd = f"ls -1 '{base_path}/{bn}-'*'-delta.vmdk' 2>/dev/null | sort"
+        # match <bn>-NNNNNN-delta.vmdk; only the * between the quoted parts is a pattern
+        cmd = f"ls -1 {shlex.quote(f'{base_path}/{bn}-')}*-delta.vmdk 2>/dev/null | sort"
         rc, out, _ = _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass, cmd, timeout=15)
         items = [l.strip() for l in (out or '').splitlines() if l.strip()]
         per_disk.append(items)
@@ -3506,10 +4407,11 @@ def _rebuild_sector_args(pve_mgr, node, vmid):
         new_args = ' '.join(parts)
         if new_args == cur_args:
             return False, cur_args, None
-        rc_s, out_s, _ = _pve_node_exec(pve_mgr, node,
+        rc_s, out_s, err_s = _pve_node_exec(pve_mgr, node,
             f"qm set {int(vmid)} --args {shlex.quote(new_args)} 2>&1", timeout=15)
         if rc_s != 0:
-            return False, new_args, f'qm set failed: {str(out_s or "")[:200]}'
+            why = str(out_s or '').strip() or str(err_s or '').strip()
+            return False, new_args, f'qm set failed: {why[:200]}'
         return True, new_args, None
     except Exception as e:
         return False, '', f'{type(e).__name__}: {e}'
@@ -3538,12 +4440,20 @@ def _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, disk_count):
         task.log(f"⚠ Target LUN reports {logical_sec}b logical sectors — "
                  f"injecting 512b emulation so guest GPT matches source VMDK layout")
         parts = []
-        for i in range(max(1, disk_count)):
+        # only devices the VM has: a skipped disk leaves its slot empty, and -set on a
+        # device that does not exist stops QEMU from starting
+        for i in (task.kept_disks(disk_count) or [0]):
             parts.append(f"-set device.{disk_bus}{i}.logical_block_size=512")
             parts.append(f"-set device.{disk_bus}{i}.physical_block_size=512")
         args_str = ' '.join(parts)
-        _pve_node_exec(pve_mgr, task.target_node,
+        rc_args, out_args, err_args = _pve_node_exec(pve_mgr, task.target_node,
             f"qm set {task.proxmox_vmid} --args {shlex.quote(args_str)} 2>&1", timeout=10)
+        # JB Nov 2026 - without it a guest with a 512 byte GPT does not boot from this LUN, so the log has to be true
+        if rc_args != 0:
+            # a call refused before qm ran (no SSH, backoff) has its reason in the error slot
+            why = str(out_args or '').strip() or str(err_args or '').strip()
+            task.log(f"⚠ 512b sector emulation could not be set, the guest may not boot from this LUN: {why[-200:]}")
+            return
         task.log(f"Applied 512b sector emulation ({disk_count} disk(s)): {args_str}")
         # If the customer later swaps scsi0 → sata0 via the Proxmox UI, these
         # static args break ("no device 'scsi0' defined"). They can recover via
@@ -3710,7 +4620,7 @@ def _drive_mirror_to_local(pve_mgr, task, node, vmid, drive_id, target_path, dis
 
 
 def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
-    """poll drive-mirror jobs until ready, then pivot. for FUSE/SSHFS uses pause-pivot-resume (~1-2s downtime)"""
+    """poll drive-mirror jobs until ready, then pivot. for FUSE/SSHFS uses pause-pivot-resume (the guest pauses until QEMU takes the pivot)"""
     import time, re
     
     drive_ids = {m[0] for m in mirrors}
@@ -3719,11 +4629,16 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
     ready_drives = set()
     at_100_since = {}  # drive_id -> timestamp when first reached ~100%
     PAUSE_PIVOT_AFTER = 60  # seconds at 100% before trying pause-pivot
+    PIVOT_WAIT = 10  # seconds the paused guest waits for QEMU to take the pivot
     
     for poll in range(timeout // 2):
         time.sleep(2)
         ok, jobs = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
         if not ok:
+            continue
+        # NS Nov 2026 - qm monitor prints its own errors as text and exits 0. Only the reply of
+        # info block-jobs itself may say that a job is gone, an error text is no news.
+        if 'No active jobs' not in jobs and 'device ' not in jobs:
             continue
         
         # Check each mirror
@@ -3737,15 +4652,16 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
                 if elapsed < 10:
                     all_near_100 = False
                     continue
+                # JB Nov 2026 - nothing completed this job yet, so it ended by a cancel or an
+                # error and its copy is not the disk. Counting it ready let a one-disk mirror
+                # report the pivot as done and the config point at the unfinished copy.
                 rc_log, out_log, _ = _pve_node_exec(pve_mgr, node,
                     f"tail -5 /var/log/pve/qemu-server/{vmid}.log 2>/dev/null | "
                     f"grep -i 'mirror\\|error\\|block\\|job' | tail -2", timeout=5)
                 qlog = str(out_log or '').strip()
-                if qlog and 'error' in qlog.lower():
-                    task.log(f"  {drive_id}: mirror job failed - {qlog[:150]}")
-                    return False
-                ready_drives.add(drive_id)
-                continue
+                task.log(f"  {drive_id}: the mirror job ended without a pivot"
+                         + (f" - {qlog[:150]}" if qlog else ''))
+                return False
             
             # Check if this specific drive is ready
             for job_line in jobs.split('\n'):
@@ -3775,61 +4691,70 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
             oldest_100 = min(at_100_since.values()) if at_100_since else time.time()
             if time.time() - oldest_100 > PAUSE_PIVOT_AFTER:
                 task.log(f"  All disks at 100% but not 'ready' - using pause-pivot-resume...")
-                task.log(f"  Pausing VM for atomic pivot (~1-2s)...")
-                
+                # a mirror job ends only by complete, cancel or an error, and nothing completed
+                # one yet: a disk whose job is gone has no copy to pivot to (#1250)
+                gone = [d for d, _, _ in mirrors if not re.search(rf'device {re.escape(d)}:', jobs)]
+                if gone:
+                    task.log(f"  {', '.join(gone)}: the mirror job ended without a pivot - not pausing")
+                    return False
+                task.log(f"  Pausing VM for atomic pivot...")
+
                 # Step 1: Pause VM (HMP "stop" = freeze CPUs, NOT qm stop!)
                 _qm_monitor_cmd(pve_mgr, node, vmid, "stop", timeout=10)
-                time.sleep(1)
-                
-                # Step 2: Wait for mirrors to catch up (should be instant, no new I/O)
-                ready_after_pause = set(ready_drives)
-                for _wait in range(10):
-                    time.sleep(1)
-                    ok2, jobs2 = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
-                    if ok2:
-                        for drive_id, _, _ in mirrors:
-                            if drive_id in ready_after_pause:
-                                continue
-                            if drive_id not in jobs2:
-                                ready_after_pause.add(drive_id)
-                            else:
-                                for jl in jobs2.split('\n'):
-                                    if drive_id in jl and 'ready' in jl.lower():
-                                        ready_after_pause.add(drive_id)
-                                        break
-                    if ready_after_pause >= drive_ids:
-                        break
-                
-                # Step 3: Pivot all drives
+                paused_at = time.monotonic()
+
+                # Step 2+3: pivot every drive.
+                # JB Nov 2026 (#1250) - HMP `info block-jobs` never says whether a job is ready, so
+                # waiting for that word kept the guest stopped for the whole 10 s window, and the
+                # refusal QEMU gives is not worded "not ready". QEMU refuses complete until the job
+                # is ready, so ask it again until it takes it; it answers nothing when it does.
+                pending = [d for d, _, _ in mirrors]
+                taken = []
                 pivot_ok = True
-                for drive_id, disk_total, di in mirrors:
-                    ok_p, out_p = _qm_block_job(pve_mgr, node, vmid,
-                        'complete', drive_id, timeout=30)
-                    if not ok_p and 'not ready' in str(out_p).lower():
-                        # Force cancel + resume if pivot fails
-                        task.log(f"  {drive_id}: pivot failed (not ready) - cancelling")
-                        _qm_block_job(pve_mgr, node, vmid, 'cancel', drive_id)
-                        pivot_ok = False
-                    elif not ok_p:
-                        task.log(f"  {drive_id}: pivot issue: {str(out_p)[:100]}")
+                last_out = {}
+                while pending:
+                    for drive_id in list(pending):
+                        ok_p, out_p = _qm_block_job(pve_mgr, node, vmid,
+                            'complete', drive_id, timeout=30)
+                        low = str(out_p or '').lower()
+                        if ok_p and 'error' not in low and 'unknown command' not in low:
+                            pending.remove(drive_id)
+                            taken.append(drive_id)
+                        elif ok_p and 'not found' in low:
+                            # a mirror job ends only by complete, cancel or an error: this one
+                            # is gone without its pivot, so its copy is not the disk
+                            pending.remove(drive_id)
+                            task.log(f"  {drive_id}: the mirror job ended without a pivot")
+                            pivot_ok = False
+                        else:
+                            last_out[drive_id] = str(out_p or '')
+                    if not pending or not pivot_ok or time.monotonic() - paused_at >= PIVOT_WAIT:
+                        break
+                    time.sleep(0.5)
+                for drive_id in pending:
+                    task.log(f"  {drive_id}: QEMU did not take the pivot: {last_out.get(drive_id, '')[:150]}")
+                    pivot_ok = False
                 
-                # Step 4: Wait for pivots to complete
-                time.sleep(2)
-                ok3, jobs3 = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
-                remaining = [d for d in drive_ids if d in str(jobs3 or '')]
-                if remaining:
-                    time.sleep(3)
+                # Step 4: Wait for the taken pivots to complete, also when another disk failed:
+                # the caller cancels every job after a failure, a pivot in flight included
+                remaining = list(taken)
+                while remaining:
                     ok3, jobs3 = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
-                    remaining = [d for d in drive_ids if d in str(jobs3 or '')]
+                    if ok3:
+                        remaining = [d for d in taken if re.search(rf'device {re.escape(d)}:', jobs3 or '')]
+                    if not remaining or time.monotonic() - paused_at >= PIVOT_WAIT + 5:
+                        break
+                    time.sleep(0.5)
                 
                 # Step 5: Resume VM
                 _qm_monitor_cmd(pve_mgr, node, vmid, "cont", timeout=10)
+                paused_for = time.monotonic() - paused_at
                 
                 if not remaining and pivot_ok:
                     elapsed = time.time() - start_t
                     total_gb = sum(m[1] for m in mirrors) / (1024**3)
                     task.log(f"  Pause-pivot-resume complete! "
-                             f"({total_gb:.1f} GB in {elapsed:.0f}s) - VM resumed on local storage ✓")
+                             f"({total_gb:.1f} GB in {elapsed:.0f}s, guest paused {paused_for:.1f}s) - VM resumed on local storage ✓")
                     for drive_id, disk_total, di in mirrors:
                         task.update_progress(f'disk{di}', disk_total, disk_total)
                     return True
@@ -3974,9 +4899,13 @@ def _parse_rbd_uri(rbd_uri):
     `pvesm path` (conf / id / keyring / mon_host are the ones PVE emits). Returns
     (pool, image, {k: v}) or (None, None, {}) when there's no parseable
     pool/image. Kept separate from the mapping so it's unit-testable without a node.
+
+    MK Nov 2026 (#1245) - PVE writes the colons inside mon_host (host:port, IPv6) as
+    '\\:', so only a bare ':' ends a field. A namespace stays in front of the image
+    (<ns>/<image>), _rbd_map_args takes it apart.
     """
     body = rbd_uri[4:] if str(rbd_uri or '').startswith('rbd:') else str(rbd_uri or '')
-    parts = body.split(':')
+    parts = [p.replace('\\:', ':') for p in re.split(r'(?<!\\):', body)]
     pool_image = parts[0].strip()
     if '/' not in pool_image:
         return None, None, {}
@@ -4007,6 +4936,83 @@ def _rbd_map_command(pool, image, opts):
     if opts.get('mon_host'):
         flags += f" -m {shlex.quote(opts['mon_host'])}"
     return f"rbd map{flags} -p {shlex.quote(pool)} {shlex.quote(image)}"
+
+
+def _rbd_map_args(vol_path, storage_opts=None):
+    """The `rbd` arguments that kernel-map the image behind a `pvesm path` answer, in the
+    order PVE's own map_volume passes them: -p, --namespace, -c, -m,
+    --auth_client_required, --id, --keyring, then `map <image>`. [] when the path names
+    no pool and image.
+
+    librbd paths are rbd:<pool>[/<ns>]/<image>[:k=v...] and carry the storage's conf,
+    monitors and keyring. krbd ones are /dev/rbd-pve/<fsid>/<pool>[/<ns>]/<image> and carry
+    none of it, so for those the settings come from storage_opts (_ceph_storage_opts)."""
+    path = str(vol_path or '').strip()
+    if path.startswith('rbd:'):
+        pool, image, opts = _parse_rbd_uri(path)
+        # PVE before Ceph 19.2.6 wrote auth_supported, which that Ceph no longer reads
+        if opts.get('auth_supported') and not opts.get('auth_client_required'):
+            opts['auth_client_required'] = opts['auth_supported']
+    else:
+        m = re.match(r'/dev/rbd(?:-pve/[^/]+)?/([^/]+)/(.+)$', path)
+        pool, image = (m.group(1), m.group(2)) if m else (None, None)
+        opts = dict(storage_opts or {})
+    ns, _, image = str(image or '').rpartition('/')
+    if not (pool and image):
+        return []
+    args = ['-p', pool] + (['--namespace', ns] if ns else [])
+    for flag, key in (('-c', 'conf'), ('-m', 'mon_host'),
+                      ('--auth_client_required', 'auth_client_required'),
+                      ('--id', 'id'), ('--keyring', 'keyring')):
+        val = opts.get(key)
+        if val:
+            # the path lists monitors with ';', PVE hands them to the CLI with ','
+            args += [flag, val.replace(';', ',') if key == 'mon_host' else val]
+    return args + ['map', image]
+
+
+# where PVE keeps a Ceph storage's own keyring and, for an external cluster, its conf
+_CEPH_PRIV_DIR = '/etc/pve/priv/ceph'
+
+
+def _ceph_mon(host):
+    # PVE's hostlist puts a bare IPv6 monitor in brackets, a port stays behind it
+    return f"[{host}]" if host.count(':') > 1 and not host.startswith('[') else host
+
+
+def _ceph_storage_opts(pve_mgr, node, storage):
+    """conf, monitors, client and keyring of an RBD storage, picked as PVE's
+    ceph_connect_option picks them. Only a krbd map needs this, its /dev path has none of
+    them. {} when the storage config cannot be read; the map then relies on the node's
+    own ceph.conf."""
+    sid = str(storage or '')
+    keyring = f"{_CEPH_PRIV_DIR}/{sid}.keyring"
+    conf = f"{_CEPH_PRIV_DIR}/{sid}.conf"
+    _rc, out, _ = _pve_node_exec(pve_mgr, node,
+        f"pvesh get /storage/{shlex.quote(sid)} --output-format json 2>/dev/null; echo; "
+        f"for f in {shlex.quote(keyring)} {shlex.quote(conf)}; do "
+        f"[ -e \"$f\" ] && echo \"HAVE $f\"; done", timeout=20)
+    lines = [ln.strip() for ln in str(out or '').splitlines()]
+    try:
+        scfg = json.loads(next(ln for ln in lines if ln.startswith('{')))
+    except (StopIteration, ValueError):
+        return {}
+    if not isinstance(scfg, dict):
+        return {}
+    have = {ln[5:] for ln in lines if ln.startswith('HAVE ')}
+    monhost = str(scfg.get('monhost') or '').strip()
+    opts = {'id': str(scfg.get('username') or 'admin')}
+    if keyring in have:
+        opts['keyring'] = keyring
+    if not monhost:
+        # pveceph-managed: the cluster's own conf, which also sets its auth
+        opts['conf'] = '/etc/pve/ceph.conf'
+        return opts
+    if conf in have:
+        opts['conf'] = conf
+    opts['mon_host'] = ','.join(_ceph_mon(h) for h in re.split(r'[\s,;]+', monhost) if h)
+    opts['auth_client_required'] = 'cephx' if 'keyring' in opts else 'none'
+    return opts
 
 
 def _map_rbd_uri_to_device(pve_mgr, node, vol_id, rbd_uri):
@@ -4206,15 +5212,18 @@ def _pvesm_alloc_named(pve_mgr, node, storage, storage_type, vmid, disk_index, s
     # Mixed formats (raw+qcow2) cause confusion and the dd/importdisk path always uses --format raw
     # MK Oct 2026 (#816) - and say so on every attempt. PVE 9 can put qcow2 on LVM, so an alloc
     # without --format may hand back a .qcow2 volume that the raw dd then writes over.
+    # the storage can come from a per-disk choice now; checked against the node's list at the
+    # API, quoted here all the same
+    q_st = shlex.quote(str(storage))
     alloc_attempts = [
-        f"pvesm alloc {storage} {vmid} {fn_raw} {size_gb}G --format raw 2>&1",
-        f"pvesm alloc {storage} {vmid} {fn_raw} {size_kb} --format raw 2>&1",
-        f"pvesm alloc {storage} {vmid} {fn_raw} {size_mb}M --format raw 2>&1",
+        f"pvesm alloc {q_st} {vmid} {fn_raw} {size_gb}G --format raw 2>&1",
+        f"pvesm alloc {q_st} {vmid} {fn_raw} {size_kb} --format raw 2>&1",
+        f"pvesm alloc {q_st} {vmid} {fn_raw} {size_mb}M --format raw 2>&1",
     ]
     if fn_qcow != fn_raw:
         # last resort: qcow2 for dir/nfs storage that requires a file extension.
         # Never on block storage, that is the same qcow2-on-LVM volume again.
-        alloc_attempts.append(f"pvesm alloc {storage} {vmid} {fn_qcow} {size_gb}G --format qcow2 2>&1")
+        alloc_attempts.append(f"pvesm alloc {q_st} {vmid} {fn_qcow} {size_gb}G --format qcow2 2>&1")
     
     last_error = ''
     for attempt_no, attempt_cmd in enumerate(alloc_attempts):
@@ -4382,8 +5391,9 @@ def _pvesm_alloc_named(pve_mgr, node, storage, storage_type, vmid, disk_index, s
             'size': f"{size_gb}G",
             'format': 'raw'
         }
+        from urllib.parse import quote as _uq
         resp = pve_mgr._api_post(
-            f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{node}/storage/{storage}/content",
+            f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{node}/storage/{_uq(str(storage), safe='')}/content",
             data=api_data)
         if resp.status_code in (200, 201):
             result = resp.json().get('data', '')
@@ -4555,6 +5565,14 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
     return key_path
 
 
+def _qemu_open_reason(output):
+    # JB Nov 2026 (#1269) - qemu-img repeats the whole json spec before it says why, which used up any cut-off.
+    # NS Nov 2026 - callers hand it redacted output: cut first and a password at the cut would keep a piece of itself
+    _, sep, reason = output.rpartition("}': ")
+    reason = reason.strip()
+    return reason[:300] if sep and reason else output[-300:]
+
+
 def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
     """Remove temporary SSH key from Proxmox and ESXi."""
     if not key_path:
@@ -4700,7 +5718,7 @@ def _cleanup_copy_isolation(pve_mgr, node, iso):
 
 
 def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
-                        datastore, vm_dir, descriptor_files, disk_bus):
+                        datastore, vm_dir, descriptor_files, disk_bus, pass_file=None):
     """Copy disks from ESXi to Proxmox -- maximum speed, minimal VM impact.
     
     Speed stack:
@@ -4718,13 +5736,13 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
     1. SSH + compression + parallel streams
     2. SSH single stream (always works)
     
+    Without key_path, ssh logs in with the password in pass_file (_node_secret_file).
+
     Returns True on success, False on failure.
     """
     import time, re, math
 
     BS_MB = 4
-    esxi_pass = task.esxi_password
-    safe_pass = shlex.quote(esxi_pass)
 
     # Build SSH command prefix -- works with key or password
     # Include legacy algorithm options for ESXi compatibility (OpenSSH 9.x → ESXi)
@@ -4742,12 +5760,16 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
         )
         SSH_PREFIX = "ssh"
     else:
+        if not pass_file:
+            task.log("  No SSH key and no password file on the node for the copy")
+            return False
         ssh_base = (
             f"-o StrictHostKeyChecking={_node_hkc()} "
             f"-o ServerAliveInterval=30 -o ServerAliveCountMax=5 "
             f"{ESXI_ALGO_OPTS}"
         )
-        SSH_PREFIX = f"SSHPASS={safe_pass} sshpass -e ssh"  # NS Feb 2026 - env var instead of -p (hides from /proc)
+        # the password stays in its 0600 file, the scripts below only name it
+        SSH_PREFIX = f"sshpass -f {shlex.quote(pass_file)} ssh"
     ssh_fast = f"{ssh_base} -o Compression=no -c aes128-gcm@openssh.com"
     
     # nice/ionice: idle priority so VM I/O is never impacted
@@ -4832,6 +5854,9 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
         task.log(f"Network QoS: migration limited to 80% on {iso['tc_dev']}")
     
     for di, desc_file in enumerate(descriptor_files):
+        d_store = task.disk_target(di)
+        if d_store is None:
+            continue
         dk = f'disk{di}'
         flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
         esxi_path = f"/vmfs/volumes/{datastore}/{vm_dir}/{flat_file}"
@@ -4843,7 +5868,7 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
         # Allocate volume using robust helper
         _alloc_err = []
         vol_id, dev_path = _pvesm_alloc_disk(pve_mgr, task.target_node,
-            task.target_storage, task.proxmox_vmid, di, disk_total, errbuf=_alloc_err, mapped_rbd=_rbd_map_sink(task))
+            d_store, task.proxmox_vmid, di, disk_total, errbuf=_alloc_err, mapped_rbd=_rbd_map_sink(task))
 
         task.log(f"  Target: {vol_id} → {dev_path}")
         if not vol_id or not dev_path:
@@ -4852,7 +5877,7 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
             # of a throwaway 1G re-probe (which had its own side effect + could
             # succeed where the real-size alloc failed, masking the cause).
             task.log(f"  Disk allocation failed for disk {di}")
-            task.log(f"  Storage: {task.target_storage}, VMID: {task.proxmox_vmid}")
+            task.log(f"  Storage: {d_store}, VMID: {task.proxmox_vmid}")
             if _alloc_err and _alloc_err[0]:
                 task.log(f"  Reason: {_alloc_err[0]}")
             _cleanup_copy_isolation(pve_mgr, task.target_node, iso)
@@ -4890,10 +5915,12 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
                 skip = s * bps
                 count = min(bps, total_blocks - skip)
                 if count <= 0: break
+                # ESXi's shell parses the remote command once more: quoted for both
+                remote = f"{NICE} {DD_READ} if={shlex.quote(esxi_path)} skip={skip} count={count} 2>/dev/null"
                 if compress_name != 'none':
                     lines.append(
                         f'{NICE} {SSH_PREFIX} {ssh_fast} {esxi_user}@{esxi_host} '
-                        f'"{NICE} {DD_READ} if={esxi_path} skip={skip} count={count} 2>/dev/null | {esxi_compress}" '
+                        f'{shlex.quote(f"{remote} | {esxi_compress}")} '
                         f'| {pve_decompress} '
                         f'| {NICE} {DD_WRITE_SEEK} of={dev_path} seek={skip} 2>/dev/null &'
                     )
@@ -4901,7 +5928,7 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
                 else:
                     lines.append(
                         f'{NICE} {SSH_PREFIX} {ssh_fast} {esxi_user}@{esxi_host} '
-                        f'"{NICE} {DD_READ} if={esxi_path} skip={skip} count={count} 2>/dev/null" '
+                        f'{shlex.quote(remote)} '
                         f'| {NICE} {DD_WRITE_SEEK} of={dev_path} seek={skip} 2>/dev/null &'
                     )
                     lines.append('pids="$pids $!"')
@@ -4932,16 +5959,17 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
         # ==============================================================
         if not copied:
             task.log(f"  Method 2: SSH single + {compress_name}")
+            remote = f"{NICE} {DD_READ} if={shlex.quote(esxi_path)} 2>/dev/null"
             if compress_name != 'none':
                 pipe = (
                     f'{NICE} {SSH_PREFIX} {ssh_fast} {esxi_user}@{esxi_host} '
-                    f'"{NICE} {DD_READ} if={esxi_path} 2>/dev/null | {esxi_compress}" '
+                    f'{shlex.quote(f"{remote} | {esxi_compress}")} '
                     f'| {pve_decompress} | {NICE} {DD_WRITE_SPARSE} of={dev_path} 2>/dev/null'
                 )
             else:
                 pipe = (
                     f'{NICE} {SSH_PREFIX} {ssh_fast} {esxi_user}@{esxi_host} '
-                    f'"{NICE} {DD_READ} if={esxi_path} 2>/dev/null" '
+                    f'{shlex.quote(remote)} '
                     f'| {NICE} {DD_WRITE_SPARSE} of={dev_path} 2>/dev/null'
                 )
             script = _write_node_script(pve_mgr, task.target_node,
@@ -4971,17 +5999,21 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
         # ==============================================================
         # VERIFY: Quick hash check (xxhash = ~10 GB/s, negligible time)
         # ==============================================================
-        rc_xxh, _, _ = _pve_node_exec(pve_mgr, task.target_node,
-            "which xxhsum >/dev/null 2>&1 || which xxh128sum >/dev/null 2>&1", timeout=3)
+        # verify=off skips this spot check; 'full' never reaches this path (sshfs_boot)
+        rc_xxh = 1
+        if getattr(task, 'verify_mode', 'sample') != 'off':
+            rc_xxh, _, _ = _pve_node_exec(pve_mgr, task.target_node,
+                "which xxhsum >/dev/null 2>&1 || which xxh128sum >/dev/null 2>&1", timeout=3)
         if rc_xxh == 0 and esxi_xxhash and disk_gb < 100:  # Only for disks < 100GB
             task.log(f"  Verifying integrity (xxhash)...")
             # Hash first 64MB + last 64MB (spot check, not full hash)
+            q_esx = shlex.quote(esxi_path)
+            tail_skip = disk_total // 1048576 - 64
+            esx_read = shlex.quote(f"{{ dd if={q_esx} bs=1M count=64 2>/dev/null; "
+                                   f"dd if={q_esx} bs=1M skip={tail_skip} count=64 2>/dev/null; }}")
             verify_body = f"""#!/bin/bash
 # Hash first 64MB + last 64MB on both sides
-ESX_HASH=$({SSH_PREFIX} {ssh_base} {esxi_user}@{esxi_host} "{{
-  dd if={esxi_path} bs=1M count=64 2>/dev/null;
-  dd if={esxi_path} bs=1M skip=$((({disk_total} / 1048576) - 64)) count=64 2>/dev/null;
-}}" | xxhsum 2>/dev/null | awk '{{print $1}}')
+ESX_HASH=$({SSH_PREFIX} {ssh_base} {esxi_user}@{esxi_host} {esx_read} | xxhsum 2>/dev/null | awk '{{print $1}}')
 
 PVE_HASH=$({{
   dd if={dev_path} bs=1M count=64 2>/dev/null;
@@ -5011,15 +6043,41 @@ fi
         
         # Attach to VM
         _pve_node_exec(pve_mgr, task.target_node,
-            f"qm set {task.proxmox_vmid} --{disk_bus}{di} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=15)
+            f"qm set {task.proxmox_vmid} --{disk_bus}{di} {shlex.quote(vol_id)}{task._disk_attach_opts()} 2>&1", timeout=15)
         task.log(f"  Attached {disk_bus}{di}: {vol_id}")
         task.record_disk_volume(di, vol_id)
-
+    
     # Cleanup resource isolation
     _cleanup_copy_isolation(pve_mgr, task.target_node, iso)
     task.log("Resource isolation cleaned up, page cache dropped")
     
     return True
+
+
+def _resolved_bios(task):
+    # JB Nov 2026 (#1268) - 'auto' is a value of its own here: it means take what was detected
+    override = getattr(task, 'bios_override', None)
+    if override and override != 'auto':
+        return override
+    return getattr(task, '_detected_bios', 'seabios')
+
+
+def _efidisk_pre_keys(task):
+    # JB Nov 2026 - what the config step worked out from Secure Boot and the guest counts here too: the live
+    # pivot only looked at Windows, so Secure Boot ticked on a Linux guest came up without the keys
+    decided = (getattr(task, '_pending_efidisk', None) or {}).get('pre_enrolled_keys')
+    if decided:
+        return decided
+    is_win = str(getattr(task, 'ostype_resolved', '') or '').lower().startswith('win') \
+        or str(getattr(task, 'ostype', '') or '').lower().startswith('win')
+    return '1' if is_win else '0'
+
+
+def _log_efidisk_result(task, rc, out, pre_keys):
+    if rc == 0:
+        task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
+    else:
+        _result_warning(task, f"EFI disk could not be allocated, boot entries will not persist: {str(out or '').strip()[-200:]}")
 
 
 def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, esxi_pass,
@@ -5046,10 +6104,15 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     """
     import time
 
+    # this path never stages drivers, and auto mode lands here too, where the form showed
+    # no notice about it
+    if getattr(task, 'install_virtio_drivers', False):
+        _virtio_not_injected(task, "the live mirror boots the VM before the drivers can be staged")
+
     # NS Apr 2026 — resolve bios at function entry. The live-pivot post-mirror block
     # references `bios` (line ~4055) which previously was only defined later in the
     # post-stop-and-restart fallback path. Live pivot returns before that.
-    bios = getattr(task, 'bios_override', None) or getattr(task, '_detected_bios', 'seabios')
+    bios = _resolved_bios(task)
 
     # #562 — sshfs-boot requires the source already stopped (see docstring), so a
     # confirmation hold here would only add downtime: log-and-commit, never block.
@@ -5079,7 +6142,6 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         # This works because QEMU SSH driver connects to a LOCAL sshd/socat proxy
         import random
         tunnel_port = random.randint(10000, 60000)
-        safe_pass = shlex.quote(esxi_pass)
         
         # Generate a local-only key pair (no ESXi deployment needed)
         local_key = f"/tmp/v2p-localkey-{task.id[:8]}"
@@ -5101,15 +6163,18 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     # ================================================================
     # Allocate local target volumes  -- NS Feb 2026
     # ================================================================
-    local_volumes = []  # [(vol_id, dev_path), ...]
+    local_volumes = []  # [(vol_id, dev_path), ...] by disk index; ('', '') for a skipped disk
     for di, desc_file in enumerate(descriptor_files):
+        if task.disk_target(di) is None:
+            local_volumes.append(('', ''))
+            continue
         dk = f'disk{di}'
         disk_total = task.disk_progress[dk]['total']
         
-        task.log(f"Disk {di}: allocating {disk_total / (1024**3):.1f} GB on {task.target_storage}")
+        task.log(f"Disk {di}: allocating {disk_total / (1024**3):.1f} GB on {task.disk_target(di)}")
         
         vol_id, dev_path = _pvesm_alloc_disk(pve_mgr, task.target_node,
-            task.target_storage, task.proxmox_vmid, di, disk_total, mapped_rbd=_rbd_map_sink(task))
+            task.disk_target(di), task.proxmox_vmid, di, disk_total, mapped_rbd=_rbd_map_sink(task))
         
         if vol_id and dev_path:
             task.log(f"  Disk {di}: {vol_id} → {dev_path}")
@@ -5128,6 +6193,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     
     args_parts = []
     for di, desc_file in enumerate(descriptor_files):
+        if task.disk_target(di) is None:
+            continue
         flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
         esxi_path = f"/vmfs/volumes/{datastore}/{vm_dir}/{flat_file}"
         drive_id = f"ssh-disk{di}"
@@ -5155,7 +6222,9 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         # Match the original disk controller so guest OS finds root device
         device_spec = _qemu_device_spec(drive_id, di, disk_bus)
         
-        args_parts.append(f"-drive {drive_spec}")
+        # qemu-server splits the args: line into words like a shell does: a path with a
+        # space stays one word only quoted (the names hold no quote or backslash)
+        args_parts.append(f"-drive {shlex.quote(drive_spec)}")
         args_parts.append(f"-device {device_spec}")
     
     args_line = " ".join(args_parts)
@@ -5212,26 +6281,24 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     esxi_test_path = f"/vmfs/volumes/{datastore}/{vm_dir}/{flat0}"
     
     qemu_ssh_works = False
+    qtest_spec = json.dumps({'file.driver': 'ssh', 'file.host': esxi_host, 'file.port': 22,
+                             'file.path': esxi_test_path, 'file.user': esxi_user,
+                             'file.host-key-check.mode': 'known_hosts',
+                             'file.identity-file': key_path})
     rc_qtest, out_qtest, err_qtest = _pve_node_exec(pve_mgr, task.target_node,
-        f"timeout 10 qemu-img info "
-        f"'json:{{\"file.driver\":\"ssh\","
-        f"\"file.host\":\"{esxi_host}\","
-        f"\"file.port\":22,"
-        f"\"file.path\":\"{esxi_test_path}\","
-        f"\"file.user\":\"{esxi_user}\","
-        f"\"file.host-key-check.mode\":\"known_hosts\","
-        f"\"file.identity-file\":\"{key_path}\"}}' 2>&1",
+        f"timeout 10 qemu-img info {shlex.quote('json:' + qtest_spec)} 2>&1",
         timeout=20, ignore_node_backoff=True)
     qtest_out = (str(out_qtest or '') + str(err_qtest or '')).strip()
     if rc_qtest == 0 and ('virtual size' in qtest_out or 'file format' in qtest_out):
         qemu_ssh_works = True
         task.log("QEMU SSH driver: connection OK")
     else:
-        task.log(f"QEMU SSH driver test failed: {qtest_out[:200]}")
+        task.log(f"QEMU SSH driver test failed: {_qemu_open_reason(task._redact(qtest_out))}")
         # Try alternative: qemu-img with simpler SSH URL syntax
+        import urllib.parse
+        qt2_url = f"ssh://{esxi_user}@{esxi_host}{urllib.parse.quote(esxi_test_path, safe='/')}"
         rc_qt2, out_qt2, err_qt2 = _pve_node_exec(pve_mgr, task.target_node,
-            f"timeout 10 qemu-img info "
-            f"ssh://{esxi_user}@{esxi_host}{esxi_test_path} 2>&1",
+            f"timeout 10 qemu-img info {shlex.quote(qt2_url)} 2>&1",
             timeout=20, ignore_node_backoff=True)
         qt2_out = (str(out_qt2 or '') + str(err_qt2 or '')).strip()
         if rc_qt2 == 0 and ('virtual size' in qt2_out or 'file format' in qt2_out):
@@ -5252,12 +6319,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         import urllib.parse
         # NS Oct 2026 (#1098) - the password sat in the URL as basic auth, so it landed in
         # the args: line of the VM config (served by the config API) and in qemu-img error
-        # text. QEMU reads it from a root-only secret file now, gone when the task ends.
+        # text. QEMU reads it from a root-only secret file now, gone when the task ends
+        # (_scrub_credentials).
         secret_id = 'v2pesxipw'
-        secret_path = f"/run/pegaprox-v2p-{task.id}.secret"
-        _pve_node_exec(pve_mgr, task.target_node,
-            f"umask 077; printf '%s' {shlex.quote(esxi_pass)} > {secret_path}", timeout=5)
-        task._node_secret = (pve_mgr, task.target_node, secret_path)
+        secret_path = _node_secret_file(pve_mgr, task, 'qemu', esxi_pass)
         secret_obj = f"secret,id={secret_id},file={secret_path}"
         ssl_opt = 'on' if getattr(vmware_mgr, 'ssl_verify', False) else 'off'
 
@@ -5279,7 +6344,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             f"'json:{{\"file.driver\":\"https\",\"file.url\":\"{test_url}\","
             f"\"file.username\":\"{esxi_user}\",\"file.password-secret\":\"{secret_id}\","
             f"\"file.sslverify\":\"{ssl_opt}\"}}' 2>&1",
-            timeout=15, ignore_node_backoff=True)
+            timeout=15, ignore_node_backoff=True) if secret_path else \
+            (1, '', 'the secret file for QEMU could not be written on the node')
         ht_out = (str(out_ht or '') + str(err_ht or '')).strip()
         
         if rc_ht == 0 and ('virtual size' in ht_out or 'file format' in ht_out):
@@ -5288,6 +6354,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             
             # Build HTTPS paths for all disks
             for di, desc_file in enumerate(descriptor_files):
+                if task.disk_target(di) is None:
+                    continue
                 flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
                 flat_url = (
                     f"https://{esxi_host}"
@@ -5295,7 +6363,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     f"/{urllib.parse.quote(flat_file, safe='')}"
                     f"?dcPath=ha-datacenter&dsName={ds_name}"
                 )
-                https_flat_paths.append(flat_url)
+                https_flat_paths.append((di, flat_url))
                 disk_sz = task.disk_progress.get(f'disk{di}', {}).get('total', 0)
                 task.log(f"  HTTPS disk {di}: {flat_file} ({disk_sz / (1024**3):.1f} GB)")
             
@@ -5304,7 +6372,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             _pve_node_exec(pve_mgr, task.target_node, f"sed -i '/^boot:/d' {conf_path}", timeout=5)
             
             args_parts = [f"-object {secret_obj}"]
-            for di, flat_url in enumerate(https_flat_paths):
+            for di, flat_url in https_flat_paths:
                 drive_id = f"sshfs-disk{di}"  # Keep same ID for drive-mirror compat
                 # QEMU HTTPS driver -- kernel-level TCP, no FUSE
                 drive_spec = (
@@ -5332,7 +6400,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             
             task.log("HTTPS boot config written")
         else:
-            task.log(f"QEMU HTTPS test failed: {ht_out[:200]}")
+            task.log(f"QEMU HTTPS test failed: {_qemu_open_reason(task._redact(ht_out))}")
     
     # ----------------------------------------------------------------
     # Method 3: SSHFS-backed boot (OpenSSH handles ESXi algorithms)
@@ -5347,25 +6415,28 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         # Verify SSHFS mount is still alive
         sshfs_ok = True
         for di, desc_file in enumerate(descriptor_files):
+            if task.disk_target(di) is None:
+                continue
             flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
             local_fuse_path = f"{mnt_path}/{vm_dir}/{flat_file}"
             
+            q_fuse, q_mnt = shlex.quote(local_fuse_path), shlex.quote(mnt_path)
             rc_chk, out_chk, err_chk = _pve_node_exec(pve_mgr, task.target_node,
                 f"for i in 1 2 3 4 5 6 7 8 9 10; do "
-                f"test -f '{local_fuse_path}' && stat --format='%s' '{local_fuse_path}' && exit 0; "
+                f"test -f {q_fuse} && stat --format='%s' {q_fuse} && exit 0; "
                 f"sleep 1; "
                 f"done; "
                 f"echo NOTFOUND; "
-                f"echo '--- mount ---'; mount | grep '{mnt_path}' 2>&1 || true; "
-                f"echo '--- mnt_path ---'; ls -la '{mnt_path}' 2>&1 || true; "
-                f"echo '--- vm_dir ---'; ls -la '{mnt_path}/{vm_dir}' 2>&1 || true; "
-                f"echo '--- target_file ---'; ls -lh '{local_fuse_path}' 2>&1 || true; "
+                f"echo '--- mount ---'; mount | grep {q_mnt} 2>&1 || true; "
+                f"echo '--- mnt_path ---'; ls -la {q_mnt} 2>&1 || true; "
+                f"echo '--- vm_dir ---'; ls -la {shlex.quote(mnt_path + '/' + vm_dir)} 2>&1 || true; "
+                f"echo '--- target_file ---'; ls -lh {q_fuse} 2>&1 || true; "
                 f"exit 1",
                 timeout=20, ignore_node_backoff=True)
             chk_out = (str(out_chk or '') + str(err_chk or '')).strip()
             
             if rc_chk == 0 and chk_out.isdigit() and int(chk_out) > 0:
-                sshfs_flat_paths.append(local_fuse_path)
+                sshfs_flat_paths.append((di, local_fuse_path))
                 task.log(f"  SSHFS disk {di}: {local_fuse_path} ({int(chk_out) / (1024**3):.1f} GB)")
             else:
                 task.log(f"  SSHFS disk {di}: NOT accessible at {local_fuse_path}; debug: {chk_out[:1500]}")
@@ -5378,7 +6449,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             _pve_node_exec(pve_mgr, task.target_node, f"sed -i '/^boot:/d' {conf_path}", timeout=5)
             
             args_parts = []
-            for di, fuse_path in enumerate(sshfs_flat_paths):
+            for di, fuse_path in sshfs_flat_paths:
                 drive_id = f"sshfs-disk{di}"
                 # QEMU reads from local FUSE path -- OpenSSH handles ESXi connection
                 drive_spec = (
@@ -5391,7 +6462,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     f"detect-zeroes=on"
                 )
                 device_spec = _qemu_device_spec(drive_id, di, disk_bus)
-                args_parts.append(f"-drive {drive_spec}")
+                args_parts.append(f"-drive {shlex.quote(drive_spec)}")
                 args_parts.append(f"-device {device_spec}")
             
             args_line = scsi_prefix + " ".join(args_parts)
@@ -5402,7 +6473,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             
             # Test: can QEMU open the SSHFS file?
             rc_ftest, out_ftest, err_ftest = _pve_node_exec(pve_mgr, task.target_node,
-                f"timeout 30 qemu-img info -f raw '{sshfs_flat_paths[0]}' 2>&1",
+                f"timeout 30 qemu-img info -f raw {shlex.quote(sshfs_flat_paths[0][1])} 2>&1",
                 timeout=40, ignore_node_backoff=True)
             ftest_out = (str(out_ftest or '') + str(err_ftest or '')).strip()
             if 'virtual size' in ftest_out or 'file format' in ftest_out:
@@ -5435,7 +6506,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             nbd_ok = True
             nbd_args_parts = []
             
-            for di, fuse_path in enumerate(sshfs_flat_paths):
+            for di, fuse_path in sshfs_flat_paths:
                 sock_path = f"/tmp/v2p-nbd-{task.proxmox_vmid}-{di}.sock"
                 nbd_sockets.append(sock_path)
                 
@@ -5451,7 +6522,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     f"--format=raw "
                     f"--cache=writeback "
                     f"--aio=threads "
-                    f"'{fuse_path}' 2>&1", timeout=15,
+                    f"{shlex.quote(fuse_path)} 2>&1", timeout=15,
                     ignore_node_backoff=True)
                 ns_out = (str(out_ns or '') + str(err_ns or '')).strip()
                 
@@ -5506,7 +6577,6 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     elif not qemu_ssh_works and not sshfs_boot and not sshfs_flat_paths:
         # SSHFS mount failed entirely -- try remounting
         task.log("SSHFS not available - trying to remount...")
-        safe_pass_r = shlex.quote(esxi_pass)
         sshfs_algo = (
             "ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519 "
             "-o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 "
@@ -5522,23 +6592,26 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         if resolved2 and not resolved2.startswith('/'):
             resolved2 = f"/vmfs/volumes/{resolved2}"
         ds_remount = resolved2 if resolved2 and resolved2.startswith('/vmfs/') else f"/vmfs/volumes/{datastore}"
+        # sshfs reads the password from stdin, which is where it goes
         rc_remount, _, _ = _pve_node_exec(pve_mgr, task.target_node,
             f"fusermount -u {mnt_path} 2>/dev/null; "
             f"mkdir -p {mnt_path} && "
-            f"printf '%s' {safe_pass_r} | sshfs -o password_stdin,"
+            f"sshfs -o password_stdin,"
             f"StrictHostKeyChecking={_node_hkc()},"
             f"reconnect,ServerAliveInterval=15,"
             f"cache=yes,{sshfs_algo} "
             f"{esxi_user}@{esxi_host}:{shlex.quote(ds_remount)} {mnt_path} 2>&1",
-            timeout=20)
+            timeout=20, stdin_data=esxi_pass)
         if rc_remount == 0:
             # Retry with NBD after remount
             for di, desc_file in enumerate(descriptor_files):
+                if task.disk_target(di) is None:
+                    continue
                 flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
                 fp = f"{mnt_path}/{vm_dir}/{flat_file}"
-                rc_t, _, _ = _pve_node_exec(pve_mgr, task.target_node, f"test -f '{fp}'", timeout=5)
+                rc_t, _, _ = _pve_node_exec(pve_mgr, task.target_node, f"test -f {shlex.quote(fp)}", timeout=5)
                 if rc_t == 0:
-                    sshfs_flat_paths.append(fp)
+                    sshfs_flat_paths.append((di, fp))
             task.log(f"SSHFS remounted - {len(sshfs_flat_paths)} disks found")
     
     vm_running_on_ssh = False
@@ -5624,7 +6697,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                             
                             nbd_retry_ok = True
                             nbd_retry_parts = []
-                            for rdi, rfpath in enumerate(sshfs_flat_paths):
+                            for rdi, rfpath in sshfs_flat_paths:
                                 rsock = f"/tmp/v2p-nbd-{task.proxmox_vmid}-{rdi}.sock"
                                 nbd_sockets.append(rsock)
                                 _pve_node_exec(pve_mgr, task.target_node,
@@ -5633,7 +6706,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                                     f"qemu-nbd --fork --persistent "
                                     f"--socket={rsock} --format=raw "
                                     f"--cache=writeback --aio=threads "
-                                    f"'{rfpath}' 2>&1", timeout=15)
+                                    f"{shlex.quote(rfpath)} 2>&1", timeout=15)
                                 time.sleep(1)
                                 rc_rs, _, _ = _pve_node_exec(pve_mgr, task.target_node,
                                     f"test -S {rsock}", timeout=5)
@@ -5818,6 +6891,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         all_started = True
         
         for di in range(len(descriptor_files)):
+            if task.disk_target(di) is None:
+                continue
             dk = f'disk{di}'
             disk_total = task.disk_progress[dk]['total']
             disk_gb = disk_total / (1024**3)
@@ -5826,7 +6901,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             vol_id, dev_path = local_volumes[di]
             if not vol_id or not dev_path:
                 vol_id, dev_path = _pvesm_alloc_disk(pve_mgr, task.target_node,
-                    task.target_storage, task.proxmox_vmid, di, disk_total, mapped_rbd=_rbd_map_sink(task))
+                    task.disk_target(di), task.proxmox_vmid, di, disk_total, mapped_rbd=_rbd_map_sink(task))
                 if vol_id and dev_path:
                     local_volumes[di] = (vol_id, dev_path)
                 else:
@@ -5872,6 +6947,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         import_ok = True
         
         for di, desc_file in enumerate(descriptor_files):
+            if task.disk_target(di) is None:
+                continue
             dk = f'disk{di}'
             disk_total = task.disk_progress[dk]['total']
             disk_gb = disk_total / (1024**3)
@@ -5924,7 +7001,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             vol_id, dev_path = local_volumes[di]
             if not vol_id or not dev_path:
                 vol_id, dev_path = _pvesm_alloc_disk(pve_mgr, task.target_node,
-                    task.target_storage, task.proxmox_vmid, di, disk_total, mapped_rbd=_rbd_map_sink(task))
+                    task.disk_target(di), task.proxmox_vmid, di, disk_total, mapped_rbd=_rbd_map_sink(task))
                 if vol_id and dev_path:
                     local_volumes[di] = (vol_id, dev_path)
                 else:
@@ -5953,8 +7030,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 # dd path — preferred for raw flat-vmdk sources, works on any sector size
                 script_body = (
                     f"#!/bin/bash\n"
-                    f"export TMPDIR='{v2p_tmpdir}'\n"
-                    f"dd if='{sshfs_src}' of='{dev_path}' bs=4M conv=notrunc status=progress "
+                    f"export TMPDIR={shlex.quote(v2p_tmpdir)}\n"
+                    f"dd if={shlex.quote(sshfs_src)} of='{dev_path}' bs=4M conv=notrunc status=progress "
                     f"&> '{progress_log}'\n"
                     f"echo \"EXIT_CODE=$?\" >> '{progress_log}'\n"
                 )
@@ -5963,10 +7040,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 # -W = out-of-order writes (skips O_DIRECT alignment), -T writeback = buffered target IO
                 script_body = (
                     f"#!/bin/bash\n"
-                    f"export TMPDIR='{v2p_tmpdir}'\n"
+                    f"export TMPDIR={shlex.quote(v2p_tmpdir)}\n"
                     f"qemu-img convert -W -U -p -n -t writeback -T writeback "
                     f"-f {src_format} -O raw "
-                    f"'{sshfs_src}' '{dev_path}' "
+                    f"{shlex.quote(sshfs_src)} '{dev_path}' "
                     f"&> '{progress_log}'\n"
                     f"echo \"EXIT_CODE=$?\" >> '{progress_log}'\n"
                 )
@@ -5994,8 +7071,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 task.log(f"  Retrying with minimal dd...")
                 script_body_min = (
                     f"#!/bin/bash\n"
-                    f"export TMPDIR='{v2p_tmpdir}'\n"
-                    f"dd if='{sshfs_src}' of='{dev_path}' bs=4M "
+                    f"export TMPDIR={shlex.quote(v2p_tmpdir)}\n"
+                    f"dd if={shlex.quote(sshfs_src)} of='{dev_path}' bs=4M "
                     f"&> '{progress_log}'\n"
                     f"echo \"EXIT_CODE=$?\" >> '{progress_log}'\n"
                 )
@@ -6194,12 +7271,12 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 _pve_node_exec(pve_mgr, task.target_node,
                     f"sed -i '/^virtio{di}:/d' {conf_path}", timeout=5)
             
-            for di in range(len(descriptor_files)):
+            for di in task.kept_disks(len(descriptor_files)):
                 vol_id = local_volumes[di][0] if di < len(local_volumes) else ''
                 task.record_disk_volume(di, vol_id)
                 if vol_id:
                     rc_set, out_set, _ = _pve_node_exec(pve_mgr, task.target_node,
-                        f"qm set {task.proxmox_vmid} --{disk_bus}{di} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=15)
+                        f"qm set {task.proxmox_vmid} --{disk_bus}{di} {shlex.quote(vol_id)}{task._disk_attach_opts()} 2>&1", timeout=15)
                     task.log(f"  {disk_bus}{di}: {vol_id}")
             
             _pve_node_exec(pve_mgr, task.target_node,
@@ -6231,7 +7308,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         task.log("Falling back to importdisk (requires brief restart)...")
         copy_ok = True
         
-        for di, sshfs_path in enumerate(sshfs_flat_paths):
+        for di, sshfs_path in sshfs_flat_paths:
                 dk = f'disk{di}'
                 disk_total = task.disk_progress[dk]['total']
                 disk_gb = disk_total / (1024**3)
@@ -6261,10 +7338,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                         f"pvesm free {shlex.quote(old_vol)} 2>&1", timeout=15)
                     local_volumes[di] = ('', '')
 
-                task.log(f"  Importing disk {di} ({disk_gb:.1f} GB) → {task.target_storage}")
+                task.log(f"  Importing disk {di} ({disk_gb:.1f} GB) → {task.disk_target(di)}")
                 start_t = time.time()
                 rc_imp, out_imp, err_imp = _pve_node_exec(pve_mgr, task.target_node,
-                    f"TMPDIR={shlex.quote(v2p_tmpdir)} qm importdisk {task.proxmox_vmid} {shlex.quote(import_path)} {shlex.quote(task.target_storage)} --format raw 2>&1",
+                    f"TMPDIR={shlex.quote(v2p_tmpdir)} qm importdisk {task.proxmox_vmid} {shlex.quote(import_path)} {shlex.quote(task.disk_target(di))} --format raw 2>&1",
                     timeout=86400)
                 elapsed = time.time() - start_t
                 out_str = str(out_imp or '').strip()
@@ -6298,6 +7375,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
 
     if not mirror_success and (not vm_running_on_ssh or not copy_ok):
       for di, desc_file in enumerate(descriptor_files):
+        if task.disk_target(di) is None:
+            continue
         dk = f'disk{di}'
         disk_total = task.disk_progress[dk]['total']
         disk_gb = disk_total / (1024**3)
@@ -6307,7 +7386,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         
         if not vol_id or not dev_path:
             vol_id, dev_path = _pvesm_alloc_disk(pve_mgr, task.target_node,
-                task.target_storage, task.proxmox_vmid, di, disk_total, mapped_rbd=_rbd_map_sink(task))
+                task.disk_target(di), task.proxmox_vmid, di, disk_total, mapped_rbd=_rbd_map_sink(task))
             if vol_id and dev_path:
                 local_volumes[di] = (vol_id, dev_path)
             else:
@@ -6333,9 +7412,12 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 sk = s * bps; ct = min(bps, total_blocks - sk)
                 if ct <= 0: break
                 # Always pipe through compress/decompress (if none, they're "cat")
+                # ESXi's shell parses the remote command once more: quoted for both
+                remote = (f"{BG_NICE} {BG_DD_READ} if={shlex.quote(esxi_path)} skip={sk} count={ct} "
+                          f"2>/dev/null | {bg_compress}")
                 lines.append(
                     f'{BG_NICE} ssh {bg_ssh_fast} {esxi_user}@{esxi_host} '
-                    f'"{BG_NICE} {BG_DD_READ} if={esxi_path} skip={sk} count={ct} 2>/dev/null | {bg_compress}" '
+                    f'{shlex.quote(remote)} '
                     f'| {bg_decompress} '
                     f'| {BG_NICE} {BG_DD_SEEK} of={dev_path} seek={sk} 2>/dev/null &'
                 )
@@ -6421,7 +7503,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 f"sed -i '/^{disk_bus}{di}:/d' {conf_path}", timeout=5)
         
         # Write disk and boot lines directly to config file
-        for di in range(len(descriptor_files)):
+        for di in task.kept_disks(len(descriptor_files)):
             vol_id = local_volumes[di][0] if di < len(local_volumes) else ''
             task.record_disk_volume(di, vol_id)
             if vol_id:
@@ -6451,19 +7533,17 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             rc_ef, _, _ = _pve_node_exec(pve_mgr, task.target_node,
                 f"grep -q '^efidisk0:' {conf_path}", timeout=5)
             if rc_ef != 0:
-                _is_win = str(getattr(task, 'ostype_resolved', '') or '').lower().startswith('win') \
-                          or str(getattr(task, 'ostype', '') or '').lower().startswith('win')
-                pre_keys = '1' if _is_win else '0'
-                _pve_node_exec(pve_mgr, task.target_node,
+                pre_keys = _efidisk_pre_keys(task)
+                rc_alloc, out_alloc, _ = _pve_node_exec(pve_mgr, task.target_node,
                     f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                     timeout=15)
-                task.log(f"  EFI disk allocated (pre-enrolled-keys={pre_keys})")
+                _log_efidisk_result(task, rc_alloc, out_alloc, pre_keys)
             try:
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
             except Exception as _se:
                 task.log(f"  sector-size emulation skipped: {_se}")
             try:
-                _register_uefi_fallback_loader(pve_mgr, task)
+                _register_uefi_fallback_loader(pve_mgr, task, guest_running=True)
             except Exception as _fe:
                 task.log(f"  EFI fallback loader skipped: {_fe}")
             # VirtIO injection intentionally NOT called here — VM is live (sshfs_boot
@@ -6549,14 +7629,14 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
 
             # 2) write the local vol_id refs the live-pivot mirrored to
             attached_count = 0
-            for di in range(len(descriptor_files)):
+            for di in task.kept_disks(len(descriptor_files)):
                 vol_id = local_volumes[di][0] if di < len(local_volumes) else ''
                 task.record_disk_volume(di, vol_id)
                 if not vol_id:
                     task.log(f"  WARNING: post-pivot no volume for disk {di} — skipping")
                     continue
                 rc_at, out_at, _ = _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=15)
+                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {shlex.quote(vol_id)}{task._disk_attach_opts()} 2>&1", timeout=15)
                 at_out = str(out_at or '').strip()
                 if rc_at == 0 and 'error' not in at_out.lower():
                     task.log(f"  Disk {di}: {disk_bus}{di} → {vol_id} ✓ (persisted)")
@@ -6584,7 +7664,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         # Old logic: `all(...)` required every disk to succeed → if one failed, none got attached
         task.log("Attaching volumes...")
         attached_count = 0
-        for di in range(len(descriptor_files)):
+        for di in task.kept_disks(len(descriptor_files)):
             vol_id = local_volumes[di][0] if di < len(local_volumes) else ''
             task.record_disk_volume(di, vol_id)
             if not vol_id:
@@ -6595,7 +7675,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             _pve_node_exec(pve_mgr, task.target_node,
                 f"sed -i '/^unused.*{escaped_vol}/d' {conf_path}", timeout=5)
             rc_at, out_at, _ = _pve_node_exec(pve_mgr, task.target_node,
-                f"qm set {task.proxmox_vmid} --{disk_bus}{di} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=15)
+                f"qm set {task.proxmox_vmid} --{disk_bus}{di} {shlex.quote(vol_id)}{task._disk_attach_opts()} 2>&1", timeout=15)
             at_out = str(out_at or '').strip()
             if rc_at == 0 and 'error' not in at_out.lower():
                 task.log(f"  Disk {di}: {disk_bus}{di} → {vol_id} ✓")
@@ -6615,7 +7695,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 unused_vol = um.group(2)
                 di = unused_idx  # map unused0 → disk0, etc.
                 rc_rescue, out_rescue, _ = _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {unused_vol} 2>&1", timeout=15)
+                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {unused_vol}{task._disk_attach_opts()} 2>&1", timeout=15)
                 if rc_rescue == 0:
                     task.log(f"  Rescued unused{unused_idx} → {disk_bus}{di}: {unused_vol} ✓")
                     attached_count += 1
@@ -6664,10 +7744,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 efi_line = ''
 
             if not efi_line:
-                _pve_node_exec(pve_mgr, task.target_node,
+                rc_alloc, out_alloc, _ = _pve_node_exec(pve_mgr, task.target_node,
                     f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                     timeout=15)
-                task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
+                _log_efidisk_result(task, rc_alloc, out_alloc, pre_keys)
             task.log(f"  BIOS: ovmf, Machine: q35 ✓")
 
         # NS Apr 2026 — apply 4K-LUN sector emulation + UEFI fallback loader on the
@@ -6757,6 +7837,9 @@ def _maybe_convert_disks_to_qcow2(pve_mgr, task):
         return
     vmid = task.proxmox_vmid
     storage = task.target_storage
+    # with per-disk storages each disk is converted where it lies
+    disk_stores = {storage} | {e['storage'] for e in (getattr(task, 'disk_map', None) or {}).values()
+                               if e.get('storage') and not e.get('skip')}
     try:
         rc, out, _ = _pve_node_exec(pve_mgr, task.target_node,
             f"qm config {vmid} 2>&1", timeout=20)
@@ -6770,18 +7853,19 @@ def _maybe_convert_disks_to_qcow2(pve_mgr, task):
             if not m or 'media=cdrom' in line:
                 continue
             key, volspec = m.group(1), m.group(2)
-            # only our just-migrated data volumes on the target storage
-            if volspec.startswith(f"{storage}:") and 'vm-' in volspec and 'disk' in volspec:
-                keys.append(key)
+            # only our just-migrated data volumes on the target storage(s)
+            vol_store = volspec.split(':', 1)[0]
+            if vol_store in disk_stores and ':' in volspec and 'vm-' in volspec and 'disk' in volspec:
+                keys.append((key, vol_store))
         if not keys:
             return
-        for key in keys:
+        for key, vol_store in keys:
             task.log(f"  Converting {key} → qcow2 (requested format)…")
             moved = False
             # PVE renamed the subcommand over versions; try both forms. A wrong
             # form errors instantly (usage error, no copy started), so this is cheap.
-            for cmd in (f"qm move-disk {vmid} {key} {shlex.quote(storage)} --format qcow2 --delete 1 2>&1",
-                        f"qm disk move {vmid} {key} {shlex.quote(storage)} --format qcow2 --delete 1 2>&1"):
+            for cmd in (f"qm move-disk {vmid} {key} {shlex.quote(vol_store)} --format qcow2 --delete 1 2>&1",
+                        f"qm disk move {vmid} {key} {shlex.quote(vol_store)} --format qcow2 --delete 1 2>&1"):
                 rcm, outm, _ = _pve_node_exec(pve_mgr, task.target_node, cmd, timeout=21600)
                 o = str(outm or '').strip(); ol = o.lower()
                 if rcm == 0 and 'error' not in ol and 'unable' not in ol:
@@ -6811,9 +7895,13 @@ def _do_offline_qemuimg_copy(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     else:
         task.log("SSH key not available - using sshpass for transfer")
     
-    ok = _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
-                             datastore, vm_dir, descriptor_files, disk_bus)
-    
+    pass_file = None if key_path else _node_secret_file(pve_mgr, task, 'copy', esxi_pass)
+    try:
+        ok = _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
+                                 datastore, vm_dir, descriptor_files, disk_bus, pass_file=pass_file)
+    finally:
+        _drop_node_secret(pve_mgr, task, pass_file)
+
     if key_path:
         _cleanup_temp_ssh_key(pve_mgr, task.target_node, key_path, esxi_host, esxi_user)
     _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
@@ -6828,7 +7916,7 @@ def _do_offline_qemuimg_copy(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     # NS Apr 2026: OVMF/EFI post-copy fix — same logic as NZD path.
     # Previously the offline copy path never reset bios/machine/efidisk after disk import,
     # so the corrupted initial efidisk0 from qm create stayed and the VM couldn't boot.
-    bios = getattr(task, 'bios_override', None) or getattr(task, '_detected_bios', 'seabios')
+    bios = _resolved_bios(task)
     if bios == 'ovmf':
         _pve_node_exec(pve_mgr, task.target_node,
             f"qm set {task.proxmox_vmid} --bios ovmf --machine q35 2>&1", timeout=10)
@@ -6859,10 +7947,10 @@ def _do_offline_qemuimg_copy(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
             efi_line = ''
 
         if not efi_line:
-            _pve_node_exec(pve_mgr, task.target_node,
+            rc_alloc, out_alloc, _ = _pve_node_exec(pve_mgr, task.target_node,
                 f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                 timeout=15)
-            task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
+            _log_efidisk_result(task, rc_alloc, out_alloc, pre_keys)
         task.log(f"  BIOS: ovmf, Machine: q35 ✓")
 
     # honour qcow2 selection while the VM is still stopped (disks at rest)
@@ -6997,6 +8085,24 @@ def _monitor_disk_write(pve_mgr, node, vol_path, disk_size, task, disk_key, stop
         stop_evt.wait(5)
 
 
+def _copy_complete(task, how, output, copied, size):
+    # JB Nov 2026 - 90% used to count as done, and a disk with its last tenth missing went on to completed
+    status = re.search(r'(?:PIPE|RC)=(\d+)/(\d+)', output)
+    if not status:
+        # every copy command prints its exit status, output without one was cut off or never came
+        task.log(f"  {how} incomplete: {copied} of {size} bytes, no exit status in the output")
+        return False
+    failed = status.groups() != ('0', '0')
+    if copied >= size and not failed:
+        return True
+    task.log(f"  {how} incomplete: {copied} of {size} bytes" + (f", {status.group(0)}" if failed else ""))
+    return False
+
+
+# a descriptor is a few hundred bytes of text, a disk with its data in that file is not
+_DESCRIPTOR_ONLY_BELOW = 1024 * 1024
+
+
 def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore, vm_dir, desc_file, disk_index):
     """Transfer a flat VMDK from ESXi to Proxmox storage.
 
@@ -7007,7 +8113,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
 
     Returns (vol_id, vol_path) on success or (None, None) on failure.
     """
-    import re, base64, urllib.parse
+    import re, urllib.parse
     
     flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
     esxi_flat_path = f"/vmfs/volumes/{datastore}/{vm_dir}/{flat_file}"
@@ -7025,6 +8131,9 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
         return None, None
     
     flat_size = int(out.strip())
+    if flat_file == desc_file and flat_size < _DESCRIPTOR_ONLY_BELOW:
+        task.log(f"  {desc_file} is only a descriptor ({flat_size} bytes) and its data file was not found")
+        return None, None
     flat_size_gb = flat_size / (1024**3)
     size_kb = (flat_size + 1023) // 1024
     task.log(f"  Source: {flat_file} ({flat_size_gb:.1f} GB)")
@@ -7058,18 +8167,22 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     task.log(f"  Datastore: {ds_name}")
     
     # 3. Allocate raw volume on Proxmox using robust helper
+    storage = task.disk_target(disk_index)
+    if storage is None:
+        task.log(f"  Disk {disk_index} is skipped, nothing to copy")
+        return None, None
     _alloc_err = []
     vol_id, vol_path = _pvesm_alloc_disk(pve_mgr, task.target_node,
-        task.target_storage, task.proxmox_vmid, disk_index, flat_size, errbuf=_alloc_err, mapped_rbd=_rbd_map_sink(task))
+        storage, task.proxmox_vmid, disk_index, flat_size, errbuf=_alloc_err, mapped_rbd=_rbd_map_sink(task))
     if not vol_id or not vol_path:
         # surface pvesm error for debugging (#132, #529)
         rc_dbg, out_dbg, _ = _pve_node_exec(pve_mgr, task.target_node,
-            f"pvesm status --storage {shlex.quote(task.target_storage)} 2>&1", timeout=10)
+            f"pvesm status --storage {shlex.quote(storage)} 2>&1", timeout=10)
         task.log(f"  Disk allocation failed for disk {disk_index}")
         # #529: the real reason from pvesm alloc, not just storage health
         if _alloc_err and _alloc_err[0]:
             task.log(f"  Reason: {_alloc_err[0]}")
-        task.log(f"  Storage: {task.target_storage} | pvesm: {str(out_dbg or '').strip()[:200]}")
+        task.log(f"  Storage: {storage} | pvesm: {str(out_dbg or '').strip()[:200]}")
         return None, None
     task.log(f"  Allocated: {vol_id}")
     task.log(f"  Target: {vol_path}")
@@ -7082,17 +8195,19 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     
     # 6. Store credentials on Proxmox node
     # NS Oct 2026 (#1029) - both in /run, 0600 from creation: curl writes the jar (an ESXi
-    # session) with the default umask, and a /tmp name could be taken first
-    auth_file = f"/run/pegaprox-v2p-{task.id}-auth-{disk_index}"
+    # session) with the default umask, and a /tmp name could be taken first. The login is
+    # a curl config file written from stdin, so the password is on no command line, curl's
+    # included, and a space in it is no word break.
     cookie_jar = f"/run/pegaprox-v2p-{task.id}-cookies-{disk_index}"
-    b64auth = base64.b64encode(f"{esxi_user}:{esxi_pass}".encode()).decode()
-    _pve_node_exec(pve_mgr, task.target_node,
-        f"umask 077; echo '{b64auth}' | base64 -d > {auth_file} && : > {cookie_jar}", timeout=10)
+    auth_file = _node_secret_file(pve_mgr, task, f"curl-{disk_index}",
+                                  _curl_login_config(esxi_user, esxi_pass))
+    curl_login = f"-K {auth_file}" if auth_file else ''
+    _pve_node_exec(pve_mgr, task.target_node, f"umask 077; : > {cookie_jar}", timeout=10)
 
     # 7. Establish cookie session
     task.log(f"  Establishing ESXi session...")
     _pve_node_exec(pve_mgr, task.target_node,
-        f"curl -sk --user $(cat {auth_file}) "
+        f"curl -sk {curl_login} "
         f"-c {cookie_jar} -o /dev/null "
         f"'https://{esxi_host}/folder?dcPath=ha-datacenter&dsName={ds_param}' 2>/dev/null",
         timeout=15)
@@ -7103,7 +8218,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     
     # Try cookie+auth (most likely to work)
     test_cmd = (
-        f"curl -sk -b {cookie_jar} --user $(cat {auth_file}) -r 0-1048575 "
+        f"curl -sk -b {cookie_jar} {curl_login} -r 0-1048575 "
         f"-o {test_file} -w 'HTTP=%{{http_code}} DL=%{{size_download}}' "
         f"'{url}' 2>/dev/null && "
         f"echo ' FSIZE='$(stat -c%s {test_file} 2>/dev/null || echo 0)"
@@ -7133,7 +8248,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     if test_bytes == 0:
         task.log(f"  0 bytes - running verbose curl diagnostic...")
         diag_cmd = (
-            f"curl -vsk -b {cookie_jar} --user $(cat {auth_file}) -r 0-1023 "
+            f"curl -vsk -b {cookie_jar} {curl_login} -r 0-1023 "
             f"'{url}' 2>&1 | head -40"
         )
         rc_d, out_d, _ = _pve_node_exec(pve_mgr, task.target_node, diag_cmd, timeout=15)
@@ -7179,7 +8294,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
             dd_log = f"/tmp/v2p-{task.id}-dl-{disk_index}.log"
 
             dl_cmd = (
-                f"curl -sk -b {cookie_jar} --user $(cat {auth_file}) "
+                f"curl -sk -b {cookie_jar} {curl_login} "
                 f"--connect-timeout 30 --max-time 86400 "
                 f"'{url}' 2>/dev/null "
                 f"| dd of='{vol_path}' bs=4M status=progress 2>{dd_log}; "
@@ -7201,11 +8316,10 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
             _bytes_all = re.findall(r'(\d+) bytes', dl_out)
             if _bytes_all:
                 downloaded = int(_bytes_all[-1])
-            if downloaded >= flat_size * 0.9:
+            if _copy_complete(task, 'HTTPS', dl_out, downloaded, flat_size):
                 dl_success = True
                 task.log(f"  HTTPS OK: {downloaded/(1024**3):.2f} GB")
             else:
-                task.log(f"  HTTPS incomplete: {downloaded/(1024**3):.2f} GB")
                 # Surface stderr tail when the dl is short — saves a re-bundle round
                 err_tail = (err_dl or '').strip()
                 if err_tail:
@@ -7222,33 +8336,40 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
             _pve_node_exec(pve_mgr, task.target_node,
                 "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1", timeout=30)
 
-            safe_p = shlex.quote(esxi_pass)
             dd_log2 = f"/tmp/v2p-{task.id}-sshdd-{disk_index}.log"
+            # sshpass reads the password from its 0600 file: SSHPASS=<pw> in the command
+            # was on the node shell's command line for the whole copy
+            pass_file = _node_secret_file(pve_mgr, task, f"ssh-{disk_index}", esxi_pass)
+            q_pass = shlex.quote(pass_file or '')
+            # ESXi's shell parses the remote command once more: quoted for both
+            remote = f"dd if={shlex.quote(esxi_flat_path)} bs=4M"
 
             ssh_cmd = (
-                f"SSHPASS={safe_p} sshpass -e ssh -o StrictHostKeyChecking={_node_hkc()} "  # NS Feb 2026 - env var instead of -p
+                f"sshpass -f {q_pass} ssh -o StrictHostKeyChecking={_node_hkc()} "
                 f"-o ConnectTimeout=15 "
                 f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
                 f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
                 f"{esxi_user}@{esxi_host} "
-                f"\"dd if={shlex.quote(esxi_flat_path)} bs=4M\" 2>/dev/null "
+                f"{shlex.quote(remote)} 2>/dev/null "
                 f"| dd of='{vol_path}' bs=4M status=progress 2>{dd_log2}; "
                 f"echo PIPE=${{PIPESTATUS[0]}}/${{PIPESTATUS[1]}}; "
-                f"cat {dd_log2}; rm -f {dd_log2}"
+                f"rm -f {q_pass}; cat {dd_log2}; rm -f {dd_log2}"
             )
             # MK May 2026 (#438 follow-up): capture stderr — sshpass + ssh
             # failure modes (auth denied, host key mismatch, missing binary)
             # land on stderr, not stdout. The previous `_` discard meant the
             # task log showed only "SSH: " with empty tail and no actionable
             # diagnostic.
-            rc_s, out_s, err_s = _pve_node_exec(pve_mgr, task.target_node, ssh_cmd, timeout=86400)
+            rc_s, out_s, err_s = (_pve_node_exec(pve_mgr, task.target_node, ssh_cmd, timeout=86400)
+                                  if pass_file else (1, '', 'the password file could not be written on the node'))
+            _drop_node_secret(pve_mgr, task, pass_file)
             ssh_out = str(out_s or '').strip()
             task.log(f"  SSH: {ssh_out[-250:]}")
 
             _bytes_all2 = re.findall(r'(\d+) bytes', ssh_out)  # #538: last line, not first
-            if _bytes_all2:
-                downloaded = int(_bytes_all2[-1])
-            if downloaded >= flat_size * 0.9:
+            # this attempt's own count, never what an earlier method got
+            downloaded = int(_bytes_all2[-1]) if _bytes_all2 else 0
+            if _copy_complete(task, 'SSH', ssh_out, downloaded, flat_size):
                 dl_success = True
                 task.log(f"  SSH OK: {downloaded/(1024**3):.2f} GB")
             else:
@@ -7265,19 +8386,19 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
             sshfs_src = f"/tmp/v2p-{task.id}/{vm_dir}/{flat_file}"
             task.log(f"  SSHFS dd from {sshfs_src}...")
             rc_chk, out_chk, _ = _pve_node_exec(pve_mgr, task.target_node,
-                f"ls -la '{sshfs_src}' 2>&1", timeout=10)
+                f"ls -la {shlex.quote(sshfs_src)} 2>&1", timeout=10)
             if rc_chk == 0:
                 dd_log3 = f"/tmp/v2p-{task.id}-dd3-{disk_index}.log"
                 # MK May 2026 (#438 follow-up): capture stderr for the dd-via-SSHFS
                 # path too — same anti-pattern as METHOD 1 + 2 above.
                 rc_dd, out_dd, err_dd = _pve_node_exec(pve_mgr, task.target_node,
-                    f"dd if='{sshfs_src}' of='{vol_path}' bs=4M status=progress 2>{dd_log3}; "
+                    f"dd if={shlex.quote(sshfs_src)} of='{vol_path}' bs=4M status=progress 2>{dd_log3}; echo RC=$?/0; "
                     f"cat {dd_log3}; rm -f {dd_log3}", timeout=86400)
                 dd_out = str(out_dd or '').strip()
                 task.log(f"  SSHFS: {dd_out[-200:]}")
                 _bytes_all3 = re.findall(r'(\d+) bytes', dd_out)  # #538: last, not first
                 downloaded = int(_bytes_all3[-1]) if _bytes_all3 else 0
-                if downloaded >= flat_size * 0.9:
+                if _copy_complete(task, 'SSHFS', dd_out, downloaded, flat_size):
                     dl_success = True
                 else:
                     err_tail = (err_dd or '').strip()
@@ -7289,9 +8410,9 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     finally:
         _stop_mon.set()
         _mon_t.join(timeout=3)
-
-    # Cleanup
-    _pve_node_exec(pve_mgr, task.target_node, f"rm -f {auth_file} {cookie_jar}", timeout=5)
+        # Cleanup
+        _drop_node_secret(pve_mgr, task, auth_file)
+        _pve_node_exec(pve_mgr, task.target_node, f"rm -f {cookie_jar}", timeout=5)
 
     if not dl_success:
         task.log(f"  ALL methods failed ({downloaded} of {flat_size} bytes)")
@@ -7300,6 +8421,10 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
         _pve_node_exec(pve_mgr, task.target_node, f"pvesm free '{vol_id}' 2>/dev/null", timeout=30)
         return None, None
 
+    # what this copy read, for verify=full and the post-copy fixes
+    if not isinstance(getattr(task, '_copy_sources', None), dict):
+        task._copy_sources = {}
+    task._copy_sources[disk_index] = (esxi_flat_path, flat_size)
     task.record_disk_volume(disk_index, vol_id)
     return vol_id, vol_path
 
@@ -7363,6 +8488,254 @@ def _pve_block_checksums_at(pve_mgr, node, vol_path, blocks, size_bytes):
     return [by_block[i] for i in blocks]
 
 
+def _full_check_timeout(size_bytes):
+    # both sides read the whole disk once; a slow 20 MiB/s, never under 10 min, never over a week
+    return min(7 * 86400, max(600, int(size_bytes or 0) // (20 * 1024 ** 2) + 300))
+
+
+def _volume_format(vol_id):
+    """How Proxmox reads a volume: a file volume names its format in the extension, a
+    block volume is raw (the copy allocates raw)."""
+    name = str(vol_id or '').rsplit(':', 1)[-1]
+    for fmt in ('qcow2', 'vmdk'):
+        if name.endswith('.' + fmt):
+            return fmt
+    return 'raw'
+
+
+def _target_block_sums_script(vol_path, fmt, size_bytes, stop_file=None):
+    """Node script printing the md5 of every DELTA_BLOCK_SIZE block of the first size_bytes
+    bytes the guest will see, one per line, then VERIFY_DONE.
+
+    A raw volume, file or block device, is read as it is. A qcow2 or vmdk file is attached
+    read-only through qemu-nbd, so the sums are of the guest's bytes and not of the
+    container. The last block stops at size_bytes: an LV is rounded up to its extent size and
+    what lies past the disk is not part of it. Once stop_file exists the script removes it
+    and ends with STOPPED before its next block (the ESXi side failed, nobody waits for it)."""
+    if fmt not in ('raw', 'qcow2', 'vmdk'):
+        raise ValueError(f'unknown volume format {fmt!r}')
+    size = int(size_bytes)
+    n = (size + DELTA_BLOCK_SIZE - 1) // DELTA_BLOCK_SIZE
+    return (
+        "#!/bin/bash\n"
+        "set -o pipefail\n"
+        f"VOL={shlex.quote(str(vol_path))}\n"
+        f"FMT={fmt}\n"
+        f"SIZE={size}\n"
+        f"BS={DELTA_BLOCK_SIZE}\n"
+        f"N={n}\n"
+        + (f"STOP={shlex.quote(str(stop_file))}\n" if stop_file else "STOP=\n") +
+        "SRC=\"$VOL\"; NBD=\"\"\n"
+        "cleanup() { [ -n \"$NBD\" ] && qemu-nbd --disconnect \"$NBD\" >/dev/null 2>&1; true; }\n"
+        "trap cleanup EXIT\n"
+        "if [ \"$FMT\" != raw ]; then\n"
+        "  [ -f \"$VOL\" ] || { echo NOT_A_FILE; exit 3; }\n"
+        "  command -v qemu-nbd >/dev/null 2>&1 || { echo NO_QEMU_NBD; exit 3; }\n"
+        "  modprobe nbd max_part=0 >/dev/null 2>&1 || true\n"
+        "  for n in $(seq 0 15); do\n"
+        "    [ -b \"/dev/nbd$n\" ] || continue\n"
+        "    [ \"$(cat /sys/block/nbd$n/size 2>/dev/null)\" = 0 ] || continue\n"
+        "    if timeout 60 qemu-nbd --read-only --format=\"$FMT\" --connect=\"/dev/nbd$n\" \"$VOL\" >/dev/null 2>&1; then\n"
+        "      NBD=\"/dev/nbd$n\"; break\n"
+        "    fi\n"
+        "  done\n"
+        "  [ -n \"$NBD\" ] || { echo NBD_CONNECT_FAILED; exit 3; }\n"
+        "  for t in 1 2 3 4 5 6 7 8 9 10; do\n"
+        "    [ \"$(blockdev --getsize64 \"$NBD\" 2>/dev/null || echo 0)\" -gt 0 ] && break; sleep 1\n"
+        "  done\n"
+        "  SRC=\"$NBD\"\n"
+        "fi\n"
+        "if [ -b \"$SRC\" ]; then HAVE=$(blockdev --getsize64 \"$SRC\" 2>/dev/null)\n"
+        "elif [ -f \"$SRC\" ]; then HAVE=$(stat -c %s \"$SRC\" 2>/dev/null)\n"
+        "else echo NOT_READABLE; exit 3; fi\n"
+        "[ -n \"$HAVE\" ] && [ \"$HAVE\" -ge \"$SIZE\" ] || { echo \"SHORT ${HAVE:-unknown}\"; exit 4; }\n"
+        "i=0\n"
+        "while [ $i -lt $N ]; do\n"
+        "  if [ -n \"$STOP\" ] && [ -e \"$STOP\" ]; then rm -f \"$STOP\"; echo STOPPED; exit 6; fi\n"
+        "  REM=$((SIZE - i * BS)); [ $REM -gt $BS ] && REM=$BS\n"
+        "  dd if=\"$SRC\" bs=$BS skip=$i count=$REM iflag=fullblock,count_bytes 2>/dev/null "
+        "| md5sum | cut -d' ' -f1 || exit 5\n"
+        "  i=$((i + 1))\n"
+        "done\n"
+        "echo VERIFY_DONE\n"
+    )
+
+
+def _esxi_block_sums_command(path, n, stop_file):
+    """The ESXi side of a full check: the size of the source file, then the md5 of each
+    block. It ends before its next block once stop_file exists (the node side failed and
+    nobody waits for the rest), and once the channel it prints to is gone."""
+    q, qs = shlex.quote(path), shlex.quote(stop_file)
+    return (f"stat -c '%s' {q} 2>/dev/null || exit 2; i=0; while [ $i -lt {n} ]; do "
+            f"if [ -e {qs} ]; then rm -f {qs}; exit 9; fi; "
+            f"dd if={q} bs={DELTA_BLOCK_SIZE} skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1 || exit 1; "
+            f"i=$((i+1)); done")
+
+
+# how long a full check waits for the other side to stop once one side failed
+_FULL_CHECK_STOP_GRACE = 120
+
+
+def _full_check_disk(pve_mgr, task, esxi_host, esxi_user, esxi_pass, i, vol_id, vol_path):
+    """Compare every byte of disk i on Proxmox with the ESXi file its copy was read from.
+
+    Both sides hash the same 256 MiB blocks at the same time, the ESXi side over SSH, the
+    node side through _target_block_sums_script. Returns (True, block sums) or (False, why);
+    anything that cannot be read counts as a failure.
+
+    MK Oct 2026 - the first side that fails ends the check: the other one is told to stop
+    and is waited for only as long as it takes to get there. It used to hash on to the end
+    of the disk, and an offline source could not be started again while ESXi still read
+    its disk."""
+    import secrets
+    from pegaprox.core import ha
+    src = (getattr(task, '_copy_sources', None) or {}).get(i)
+    if not src:
+        return False, 'there is no record of the file the copy was read from'
+    esxi_path, size = src
+    size = int(size or 0)
+    if size <= 0:
+        return False, f'the source size of {esxi_path} is unknown'
+    n = (size + DELTA_BLOCK_SIZE - 1) // DELTA_BLOCK_SIZE
+    fmt = _volume_format(vol_id)
+    limit = _full_check_timeout(size)
+    task.log(f"  Disk {i}: comparing {size / 1024 ** 3:.2f} GiB ({n} blocks) of {vol_id} ({fmt}) "
+             f"with {os.path.basename(esxi_path)} on ESXi")
+    tag = secrets.token_hex(8)
+    stops = {'esxi': f"/tmp/pegaprox-fc-{tag}.stop", 'node': f"/run/pegaprox-fc-{tag}.stop"}
+    script = _write_node_script(pve_mgr, task.target_node,
+                                _target_block_sums_script(vol_path, fmt, size, stop_file=stops['node']),
+                                f"fullcheck-{task.id[:8]}-d{i}", timeout=15)
+    if not script:
+        return False, 'the check script could not be written on the node'
+
+    got = {}
+    cond = threading.Condition()
+
+    def _done(side, res):
+        with cond:
+            got[side] = res
+            cond.notify_all()
+
+    def _esxi_side():
+        try:
+            # a stat and md5 over the source file, a read. This thread carries no job mark,
+            # so in an automatic group it says so
+            with ha.reading():
+                res = _ssh_exec(esxi_host, esxi_user, esxi_pass,
+                                _esxi_block_sums_command(esxi_path, n, stops['esxi']), timeout=limit)
+        except Exception as e:
+            res = (1, '', str(e))
+        _done('esxi', res)
+
+    def _node_side():
+        try:
+            res = _pve_node_exec(pve_mgr, task.target_node, f"bash {script} 2>&1", timeout=limit)
+        except Exception as e:
+            res = (1, '', str(e))
+        _done('node', res)
+
+    def _node_answer(res):
+        rc_n, out_n, _ = res
+        lines = [l.strip() for l in str(out_n or '').splitlines() if l.strip()]
+        if rc_n != 0 or not lines or lines[-1] != 'VERIFY_DONE':
+            return None, f"Proxmox side could not be read (rc={rc_n}): {' '.join(lines[-2:])[:200]}"
+        return lines[:-1], None
+
+    def _esxi_answer(res):
+        rc_e, out_e, err_e = res
+        lines = [l.strip() for l in str(out_e or '').splitlines() if l.strip()]
+        if rc_e != 0 or not lines or not lines[0].isdigit():
+            return None, f"ESXi side could not be read (rc={rc_e}): {str(err_e or '').strip()[:200]}"
+        return lines, None
+
+    answer = {'node': _node_answer, 'esxi': _esxi_answer}
+
+    def _wait(until, budget):
+        # counts the waits that ran out: a jump of the wall clock neither cuts this short
+        # nor stretches it
+        waited = 0
+        with cond:
+            while not until() and waited < budget:
+                if not cond.wait(5):
+                    waited += 5
+
+    def _failed():
+        for side in ('node', 'esxi'):
+            if side in got and answer[side](got[side])[1]:
+                return side
+        return None
+
+    t0 = time.time()
+    # the node side carries this job's mark: in an automatic group it asks as the job does
+    threading.Thread(target=_esxi_side, daemon=True).start()
+    threading.Thread(target=ha.carry(_node_side), daemon=True).start()
+    try:
+        _wait(lambda: _failed() or len(got) == 2, limit + 60)
+        with cond:
+            failed, have = _failed(), dict(got)
+        if failed or len(have) < 2:
+            # stop what still runs and give it the time to get to its next block
+            told = [s for s in ('esxi', 'node') if s not in have]
+            for side in told:
+                try:
+                    if side == 'esxi':
+                        _ssh_exec(esxi_host, esxi_user, esxi_pass, f"touch {shlex.quote(stops['esxi'])}", timeout=30)
+                    else:
+                        _pve_node_exec(pve_mgr, task.target_node, f"touch {shlex.quote(stops['node'])}", timeout=15)
+                except Exception as e:
+                    task.log(f"  Disk {i}: the {side} side could not be told to stop: {e}")
+            _wait(lambda: len(got) == 2, _FULL_CHECK_STOP_GRACE)
+            with cond:
+                have = dict(got)
+            for side in [s for s in ('esxi', 'node') if s not in have]:
+                task.log(f"  Disk {i}: the {side} side did not stop within {_FULL_CHECK_STOP_GRACE}s, "
+                         f"it ends at its next block")
+            # a side that ended before it saw its stop file leaves the file behind
+            if 'esxi' in told and 'esxi' in have and have['esxi'][0] != 9:
+                try:
+                    _ssh_exec(esxi_host, esxi_user, esxi_pass, f"rm -f {shlex.quote(stops['esxi'])}", timeout=30)
+                except Exception:
+                    pass
+            if 'node' in told and 'node' in have and have['node'][0] != 6:
+                _pve_node_exec(pve_mgr, task.target_node, f"rm -f {shlex.quote(stops['node'])}", timeout=10)
+            if failed:
+                return False, answer[failed](have[failed])[1]
+            return False, f"the {' and the '.join(told)} side did not finish within {limit + 60}s"
+    finally:
+        _pve_node_exec(pve_mgr, task.target_node, f"rm -f {script}", timeout=10)
+
+    node_sums, _ = _node_answer(have['node'])
+    esxi_lines, _ = _esxi_answer(have['esxi'])
+    if int(esxi_lines[0]) != size:
+        return False, f"the source is {esxi_lines[0]} bytes now, the copy read {size}"
+    esxi_sums = esxi_lines[1:]
+    if len(node_sums) != n or len(esxi_sums) != n:
+        return False, f"expected {n} block sums, got {len(node_sums)} from Proxmox and {len(esxi_sums)} from ESXi"
+    bad = [b for b in range(n) if node_sums[b] != esxi_sums[b]]
+    if bad:
+        return False, (f"{len(bad)} of {n} blocks differ from the source, the first at byte "
+                       f"{bad[0] * DELTA_BLOCK_SIZE}")
+    task.log(f"  Disk {i}: all {n} blocks match the source ({time.time() - t0:.0f}s)")
+    return True, node_sums
+
+
+def _full_check(pve_mgr, task, esxi_host, esxi_user, esxi_pass, vols, what):
+    """verify=full over {disk index: (vol_id, vol_path)}: (ok, why, {index: block sums}).
+    Stops at the first disk that does not match."""
+    task.log(f"=== FULL CHECK ({what}): every copied disk against its source ===")
+    sums = {}
+    for i in sorted(vols):
+        vol_id, vol_path = vols[i]
+        ok, res = _full_check_disk(pve_mgr, task, esxi_host, esxi_user, esxi_pass, i, vol_id, vol_path)
+        if not ok:
+            task.log(f"  Disk {i}: FULL CHECK FAILED - {res}")
+            return False, f"Full check failed on disk {i}: {res}", sums
+        sums[i] = res
+    task.log(f"=== FULL CHECK PASSED: {len(sums)} disk(s) match their source ===")
+    return True, '', sums
+
+
 def _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
                         esxi_flat_path, vol_path, flat_size, disk_index,
                         pve_checksums=None):
@@ -7374,8 +8747,6 @@ def _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     If pve_checksums is provided, skips Proxmox checksum computation (pre-computed).
     Returns True on success, False on failure.
     """
-    import base64
-    
     BLOCK_SIZE = DELTA_BLOCK_SIZE  # 256 MB blocks (fewer checksums = faster downtime)
     num_blocks = (flat_size + BLOCK_SIZE - 1) // BLOCK_SIZE
     bs_mb = BLOCK_SIZE // (1024 * 1024)
@@ -7434,13 +8805,12 @@ def _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
         return True
     
     # 4. Transfer only changed blocks via SSH dd
-    # Write password file on Proxmox node
-    b64pass = base64.b64encode(esxi_pass.encode()).decode()
-    # in /run and 0600 from the first byte, like the auth file of the HTTPS fallback
-    pass_file = f"/run/pegaprox-v2p-{task.id}-delta-pass"
-    _pve_node_exec(pve_mgr, task.target_node,
-        f"umask 077; echo '{b64pass}' | base64 -d > {pass_file}",
-        timeout=10)
+    # Password file on the node, in /run and 0600 from the first byte. It goes there over
+    # stdin: an echo of it, base64 or not, was on the command line of the write.
+    pass_file = _node_secret_file(pve_mgr, task, f"delta-{disk_index}", esxi_pass)
+    if not pass_file:
+        task.log("  The password file for the block copy could not be written on the node")
+        return False
     
     # Build a script that transfers all differing blocks
     # MK Oct 2026 (#1124) - a pipe read returns at most 64 KiB and count=1 took that as the
@@ -7448,17 +8818,20 @@ def _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     # complete, pipefail makes a failed ssh count instead of an empty write that exits 0.
     xfer_lines = ['#!/bin/bash', 'set -o pipefail', 'ERRORS=0']
     _hk = _node_hkc()
+    q_flat, q_pass = shlex.quote(esxi_flat_path), shlex.quote(pass_file)
     for i in diff_blocks:
+        # ESXi's shell parses the remote command once more: quoted for both
+        remote = f"dd if={q_flat} bs={BLOCK_SIZE} skip={i} count=1 2>/dev/null"
         xfer_lines.append(
-            f"sshpass -f {pass_file} ssh -o StrictHostKeyChecking={_hk} "
+            f"sshpass -f {q_pass} ssh -o StrictHostKeyChecking={_hk} "
             f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
             f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
             f"{esxi_user}@{esxi_host} "
-            f"\"dd if={shlex.quote(esxi_flat_path)} bs={BLOCK_SIZE} skip={i} count=1 2>/dev/null\" "
+            f"{shlex.quote(remote)} "
             f"| dd of={shlex.quote(vol_path)} bs={BLOCK_SIZE} seek={i} count=1 conv=notrunc iflag=fullblock 2>/dev/null "
             f"|| ERRORS=$((ERRORS+1))"
         )
-    xfer_lines.append(f'rm -f {pass_file}')
+    xfer_lines.append(f'rm -f {q_pass}')
     xfer_lines.append('echo "DELTA_DONE errors=$ERRORS"')
     xfer_lines.append('exit $ERRORS')
     
@@ -7476,8 +8849,9 @@ def _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     task.log(f"  Delta result: rc={rc_x}, {result[-200:]}")
 
     # Cleanup
-    _pve_node_exec(pve_mgr, task.target_node,
-        f"rm -f {script_file or ''} {pass_file}", timeout=5)
+    if script_file:
+        _pve_node_exec(pve_mgr, task.target_node, f"rm -f {script_file}", timeout=5)
+    _drop_node_secret(pve_mgr, task, pass_file)
 
     if not (rc_x == 0 or 'DELTA_DONE errors=0' in result):
         return False

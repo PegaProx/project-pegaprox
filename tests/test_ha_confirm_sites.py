@@ -209,8 +209,8 @@ def _site_scheduled_task(monkeypatch):
 def _site_prune(monkeypatch):
     from pegaprox.api.snapshots import _prune
     mgr = MagicMock()
-    mgr.list_snapshots.return_value = [{'name': 'pegaprox-p1-old', 'snaptime': 1}]
-    _prune(mgr, 'n1', 101, 'qemu', {'id': 'p1', 'retention_count': 0, 'retention_days': 0})
+    mgr.list_snapshots.return_value = [{'name': 'pegaprox-p1-old', 'snaptime': 1}, {'name': 'pegaprox-p1-new', 'snaptime': 2}]
+    _prune(mgr, 'n1', 101, 'qemu', {'id': 'p1', 'retention_count': 1, 'retention_days': 0})
     return mgr.delete_snapshot.call_count
 
 

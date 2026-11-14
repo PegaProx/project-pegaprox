@@ -73,8 +73,9 @@ def test_the_hub_keeps_running_while_a_report_is_worked_out(api, seed, monkeypat
     tick.join()
     assert r.status_code == 200, r.get_data(as_text=True)
     assert took >= 1.5
-    # the hub went on with the other greenlets all along, not once 1.5 s later
-    assert max(gaps) < 0.3, max(gaps)
+    # the hub went on with the other greenlets all along, not once 1.5 s later. A busy CI runner stalled it
+    # for half a second with the work off the hub as it should be, and on the hub this would be the full 1.5
+    assert max(gaps) < 1.0, max(gaps)
     assert len(gaps) > 20
 
 

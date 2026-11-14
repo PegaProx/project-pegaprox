@@ -90,6 +90,7 @@ def test_lxc_add_disk_defaults_mount_path_when_missing():
 def test_qemu_add_disk_keeps_scsi_key():
     # regression fence: the coercion must NOT touch QEMU disks.
     m = _mgr()
+    m._api_get.return_value = _Resp(200, data={'scsi0': 'local-lvm:vm-100-disk-0,size=32G'})
     m._api_put.return_value = _Resp(200, text='')
 
     res = m.add_disk('pve1', 100, 'qemu',

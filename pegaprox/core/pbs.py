@@ -95,6 +95,33 @@ class _PinnedFingerprintAdapter(requests.adapters.HTTPAdapter):
         return super().proxy_manager_for(proxy, **proxy_kwargs)
 
 
+class RedirectRefused(requests.exceptions.RequestException):
+    """The PBS answered with a redirect, which PegaProx does not follow."""
+
+
+def _refuse_redirects(session):
+    """Every request of `session` stops at a redirect and raises RedirectRefused.
+
+    The PBS API sends none. One that arrived would take the call to a host
+    pbs_target_refusal never saw, or down to plain http where the fingerprint pin has no
+    say, and a 307 sends the body along, the password of the ticket login included.
+    Session.get() asks for redirects itself, so the wrapper overrides whatever it is given.
+    """
+    request = session.request
+
+    def no_redirects(method, url, *args, **kwargs):
+        kwargs['allow_redirects'] = False
+        resp = request(method, url, *args, **kwargs)
+        code = getattr(resp, 'status_code', None)
+        if code in (301, 302, 303, 307, 308):
+            resp.close()
+            raise RedirectRefused(f'PBS answered with a redirect (HTTP {code}), which PegaProx '
+                                  f'does not follow', response=resp)
+        return resp
+    session.request = no_redirects
+    return session
+
+
 class PBSManager:
     """Manages connection to a Proxmox Backup Server instance
     
@@ -144,6 +171,7 @@ class PBSManager:
         # MK Oct 2026 - no path from a request is folded into another endpoint (as for PVE)
         from pegaprox.utils.sanitization import refuse_climbing_paths
         refuse_climbing_paths(self._session)
+        _refuse_redirects(self._session)
         # an automatic leader that lost its lease changes nothing on the PBS (#625)
         from pegaprox.core import ha_transport
         ha_transport.guard_session(self._session)
@@ -167,6 +195,12 @@ class PBSManager:
         self.last_error = ''
         self.last_status = {}
         self._lock = threading.Lock()
+        # #1156 - what retry_disconnected() below goes by
+        self._connect_tried = 0.0      # time.monotonic() at the start of the last connect()
+        self._auth_refused = False     # that connect() got an answer, and it was a no
+        self._retry_delay = 0
+        self._retry_tries = 0
+        self._retry_said = ''
         
         # Disable SSL warnings if not verifying
         if not self.ssl_verify:
@@ -177,16 +211,24 @@ class PBSManager:
         # bare "2001:db8::10:8007" is no URL, requests could not even parse it
         return f"https://{_url_host(self.host)}:{self.port}/api2/json"
     
-    def connect(self) -> bool:
+    def connect(self, quiet=False) -> bool:
         """Authenticate with PBS server
         
         NS: Try API token first (stateless), fall back to ticket auth
+        `quiet` is for the background retry (#1156), which logs what changed itself
+        instead of the same failure every few minutes.
         """
+        self._connect_tried = time.monotonic()
+        self._auth_refused = False
+        info = logging.debug if quiet else logging.info
+        warn = logging.debug if quiet else logging.warning
+        error = logging.debug if quiet else logging.error
         try:
             if self._using_api_token:
                 if not self._token_secret:
                     self.last_error = "API token secret missing"
-                    logging.warning(f"[PBS:{self.name}] {self.last_error}")
+                    self._auth_refused = True
+                    warn(f"[PBS:{self.name}] {self.last_error}")
                     self.connected = False
                     return False
                 # API Token auth - just verify it works
@@ -196,11 +238,12 @@ class PBSManager:
                     self.connected = True
                     self.last_error = ''
                     data = resp.json().get('data', {})
-                    logging.info(f"[PBS:{self.name}] Connected via API token (version {data.get('version', '?')})")
+                    info(f"[PBS:{self.name}] Connected via API token (version {data.get('version', '?')})")
                     return True
                 else:
                     self.last_error = f"API token auth failed: HTTP {resp.status_code}"
-                    logging.warning(f"[PBS:{self.name}] {self.last_error}")
+                    self._auth_refused = resp.status_code in (401, 403)
+                    warn(f"[PBS:{self.name}] {self.last_error}")
                     self.connected = False
                     return False
             else:
@@ -222,25 +265,26 @@ class PBSManager:
                     
                     self.connected = True
                     self.last_error = ''
-                    logging.info(f"[PBS:{self.name}] Connected via ticket auth (user: {self.user})")
+                    info(f"[PBS:{self.name}] Connected via ticket auth (user: {self.user})")
                     return True
                 else:
                     self.last_error = f"Ticket auth failed: HTTP {resp.status_code}"
+                    self._auth_refused = resp.status_code in (401, 403)
                     if self.api_token_id:
                         # a token id without its secret falls back to the password login
                         self.last_error += " (API token ID set, but no token secret)"
-                    logging.warning(f"[PBS:{self.name}] {self.last_error}")
+                    warn(f"[PBS:{self.name}] {self.last_error}")
                     self.connected = False
                     return False
                     
         except requests.exceptions.ConnectionError as e:
             self.last_error = f"Connection failed: {_url_host(self.host)}:{self.port}"
-            logging.error(f"[PBS:{self.name}] {self.last_error}")
+            error(f"[PBS:{self.name}] {self.last_error}")
             self.connected = False
             return False
         except Exception as e:
             self.last_error = str(e)
-            logging.error(f"[PBS:{self.name}] Connect error: {e}")
+            error(f"[PBS:{self.name}] Connect error: {e}")
             self.connected = False
             return False
     
@@ -250,8 +294,11 @@ class PBSManager:
             if time.time() - self._ticket_time > 5400:  # 90 min
                 self.connect()
     
-    def api_get(self, path: str, params: dict = None, timeout: int = 30) -> dict:
-        """GET request to PBS API"""
+    def api_get(self, path: str, params: dict = None, timeout: int = 30, expected=()) -> dict:
+        """GET request to PBS API
+
+        `expected` are error statuses the caller handles itself, logged at debug only.
+        """
         self._ensure_ticket()
         try:
             url = f"{self.base_url}/{path.lstrip('/')}"
@@ -264,7 +311,8 @@ class PBSManager:
                     resp = self._session.get(url, params=params, timeout=timeout)
                     if resp.status_code == 200:
                         return resp.json()
-            logging.warning(f"[PBS:{self.name}] GET {path} → {resp.status_code}")
+            log = logging.debug if resp.status_code in expected else logging.warning
+            log(f"[PBS:{self.name}] GET {path} → {resp.status_code}")
             return {'error': f"HTTP {resp.status_code}", 'status_code': resp.status_code}
         except Exception as e:
             logging.error(f"[PBS:{self.name}] GET {path} failed: {e}")
@@ -707,10 +755,34 @@ class PBSManager:
         return self.api_get(f'/nodes/localhost/tasks/{upid}/log')
     
     # ── Jobs ──
-    
+
+    # MK Nov 2026 (#801) - when a PBS before 3.3 last refused sync-direction (monotonic)
+    _sync_direction_refused = None
+
     def get_sync_jobs(self) -> dict:
-        """List sync jobs with their schedules and last-run status."""
-        return self.api_get('/admin/sync')
+        """List sync jobs of both directions with their schedules and last-run status.
+
+        PBS 3.3 added jobs that push, and /admin/sync lists only the pulling ones unless
+        sync-direction=all asks for every job. An older PBS has no such parameter (all its
+        jobs pull) and answers it with a 400, so the plain list is read instead. That
+        answer is kept for an hour, the jobs are polled every 30 s. The 400 is expected
+        there and no warning.
+        """
+        refused = self._sync_direction_refused
+        if refused is None or time.monotonic() - refused > 3600:
+            result = self.api_get('/admin/sync', params={'sync-direction': 'all'}, expected=(400,))
+            if isinstance(result, dict) and result.get('status_code') == 400:
+                result = self.api_get('/admin/sync')
+                if isinstance(result, dict) and isinstance(result.get('data'), list):
+                    self._sync_direction_refused = time.monotonic()
+        else:
+            result = self.api_get('/admin/sync')
+        rows = result.get('data') if isinstance(result, dict) else None
+        if isinstance(rows, list):
+            # PBS leaves the field out for its default, pull
+            result['data'] = [{**job, 'sync-direction': job.get('sync-direction') or 'pull'}
+                              if isinstance(job, dict) else job for job in rows]
+        return result
     
     def get_verify_jobs(self) -> dict:
         """List verify jobs with their schedules and last-run status."""
@@ -721,7 +793,7 @@ class PBSManager:
         return self.api_get('/admin/prune')
     
     def run_sync_job(self, job_id: str) -> dict:
-        """Manually trigger a sync job"""
+        """Manually trigger a sync job, pull or push (PBS looks the direction up by id)"""
         return self.api_post(f'/admin/sync/{job_id}/run')
     
     def run_verify_job(self, job_id: str) -> dict:
@@ -1215,6 +1287,107 @@ def load_pbs_servers(only=None):
         logging.info(f"[PBS] Loaded {len(rows)} PBS servers ({sum(1 for m in pbs_managers.values() if m.connected)} connected)")
     except Exception as e:
         logging.warning(f"[PBS] Failed to load PBS servers: {e}")
+
+
+# ── Reconnect (#1156) ──
+#
+# NS Oct 2026 - connect() ran at the start and on the add, edit and test routes, and the
+# API calls only log in again on a 401. A PBS that did not answer that one connect (its
+# VM still booting while PegaProx was already up) stayed "not connected" until PegaProx
+# was restarted. One loop for every server now tries a disconnected one again: 30 s after
+# the attempt that failed, then twice as long each time, 5 min at most. A PBS that did
+# answer and turned the login down waits the full 5 min every time, asking more often
+# does not fix a password. The loop runs wherever the managers run, a standby with the
+# live view too: a login and GET /version change nothing on the PBS.
+
+RETRY_FIRST = 30
+RETRY_MAX = 300
+RETRY_TICK = 10
+
+_retry_wake = threading.Event()
+_retry_thread = None
+
+
+def _retry_wait(mgr):
+    """Seconds after its last connect() before a disconnected manager is tried again."""
+    if getattr(mgr, '_auth_refused', False):
+        return RETRY_MAX
+    return getattr(mgr, '_retry_delay', 0) or RETRY_FIRST
+
+
+def retry_disconnected(now=None):
+    """One pass of the loop: every enabled manager that is not connected and has waited
+    long enough gets one connect(), one after the other, the longest waiting first. A
+    server deleted, disabled or rebuilt (edit route, standby reload) since the pass
+    started is left alone. Logs when something changed, not every attempt. Returns how
+    many it tried."""
+    now = time.monotonic() if now is None else now
+    due = []
+    for pbs_id, mgr in list(pbs_managers.items()):
+        if not getattr(mgr, 'enabled', True):
+            continue
+        if mgr.connected:
+            if getattr(mgr, '_retry_said', ''):
+                # back through the edit or test route, or a login after a 401
+                logging.warning(f"[PBS:{mgr.name}] connected again")
+            mgr._retry_delay, mgr._retry_tries, mgr._retry_said = 0, 0, ''
+            continue
+        if now - getattr(mgr, '_connect_tried', 0.0) >= _retry_wait(mgr):
+            due.append((getattr(mgr, '_connect_tried', 0.0), pbs_id, mgr))
+
+    tried = 0
+    for _at, pbs_id, mgr in sorted(due, key=lambda d: d[0]):
+        if pbs_managers.get(pbs_id) is not mgr or not mgr.enabled or mgr.connected:
+            continue
+        tried += 1
+        mgr._retry_tries = getattr(mgr, '_retry_tries', 0) + 1
+        ok = mgr.connect(quiet=True)
+        if pbs_managers.get(pbs_id) is not mgr:
+            continue
+        if ok:
+            n = mgr._retry_tries
+            logging.warning(f"[PBS:{mgr.name}] reconnected after {n} {'retry' if n == 1 else 'retries'}")
+            mgr._retry_delay, mgr._retry_tries, mgr._retry_said = 0, 0, ''
+            continue
+        mgr._retry_delay = min(RETRY_MAX, _retry_wait(mgr) * 2)
+        said = 'refused' if mgr._auth_refused else 'down'
+        if said == mgr._retry_said:
+            continue
+        mgr._retry_said = said
+        if said == 'refused':
+            logging.warning(f"[PBS:{mgr.name}] {mgr.last_error} - the PBS turns the login down, "
+                            f"trying again every {RETRY_MAX // 60} min. Check the user, password "
+                            f"or API token of this server")
+        else:
+            logging.warning(f"[PBS:{mgr.name}] still not connected ({mgr.last_error}), trying "
+                            f"again in the background, at most every {RETRY_MAX // 60} min")
+    return tried
+
+
+def reconnect_soon(mgr):
+    """A route found `mgr` not connected. Somebody is looking at it, so its next try comes
+    RETRY_FIRST after the last one instead of up to RETRY_MAX. Only wakes the loop, never
+    connects here and never waits; a refused login keeps its wait."""
+    if getattr(mgr, 'enabled', True) and not getattr(mgr, '_auth_refused', False):
+        mgr._retry_delay = RETRY_FIRST
+        _retry_wake.set()
+
+
+def _retry_loop():
+    while True:
+        _retry_wake.wait(RETRY_TICK)
+        _retry_wake.clear()
+        try:
+            retry_disconnected()
+        except Exception as e:
+            logging.warning(f"[PBS] reconnect pass failed: {e}")
+
+
+def start_reconnect_loop():
+    global _retry_thread
+    if _retry_thread is None or not _retry_thread.is_alive():
+        _retry_thread = threading.Thread(target=_retry_loop, daemon=True, name='pbs-reconnect')
+        _retry_thread.start()
 
 
 def save_pbs_server(pbs_id: str, config: dict):

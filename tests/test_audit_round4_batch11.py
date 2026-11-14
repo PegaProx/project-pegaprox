@@ -46,7 +46,10 @@ _CONTENT = [
 
 def test_storage_content_scoped(api, seed):
     u = _pool_user(seed)
-    api.set_manager('cluster_1', _mgr_with_get(api, _CONTENT))
+    m = api.set_manager('cluster_1', _mgr_with_get(api, _CONTENT))
+    # MK Nov 2026 (#1218) - a confined caller lists the storage of a node its guests run on
+    m.get_vm_resources.return_value = [{'vmid': 100, 'node': 'n1', 'type': 'qemu'},
+                                       {'vmid': 200, 'node': 'n1', 'type': 'qemu'}]
     body = api.as_user(u).get('/api/clusters/cluster_1/nodes/n1/storage/local/content').get_json()
     volids = sorted(r['volid'] for r in body)
     assert 'local:vm-100-disk-0' in volids, "own VM's disk must stay"

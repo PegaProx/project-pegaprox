@@ -91,7 +91,7 @@ def test_no_console_path_hardcodes_the_api_port(_vms_source=None):
 def test_a_token_cluster_presents_its_token_when_reusing_the_browser_ticket():
     """#955. There is no password to log in with, and the vncproxy ticket the
     browser holds was minted under the token, so the token is what PVE expects."""
-    h = vms._pve_console_ws_auth(_TokenCluster(), 'pve:8006',
+    h = vms._pve_console_ws_auth(_TokenCluster(),
                                  fresh_ticket=None, reuse_manager_auth=True)
 
     assert h['Authorization'] == f'PVEAPIToken={_TokenCluster._api_token}'
@@ -101,7 +101,7 @@ def test_a_token_cluster_presents_its_token_when_reusing_the_browser_ticket():
 def test_a_password_cluster_presents_the_managers_own_ticket_when_reusing():
     """#945.2. Not a freshly minted one - PVE bound the vncproxy ticket to the
     manager's session, and a second login produces a different one."""
-    h = vms._pve_console_ws_auth(_PasswordCluster(), 'pve:8006',
+    h = vms._pve_console_ws_auth(_PasswordCluster(),
                                  fresh_ticket='A-DIFFERENT-FRESH-TICKET',
                                  reuse_manager_auth=True)
 
@@ -112,16 +112,18 @@ def test_a_password_cluster_presents_the_managers_own_ticket_when_reusing():
 def test_without_passthrough_the_fresh_ticket_is_the_right_one():
     """The counterweight: when WE issued the vncproxy call, our own ticket is
     exactly what PVE expects, and nothing here may break that."""
-    h = vms._pve_console_ws_auth(_PasswordCluster(), 'pve:8006',
+    h = vms._pve_console_ws_auth(_PasswordCluster(),
                                  fresh_ticket='OURS', reuse_manager_auth=False)
     assert h['Cookie'] == 'PVEAuthCookie=OURS'
     assert 'Authorization' not in h
 
 
-def test_the_host_header_names_what_we_actually_dial():
-    h = vms._pve_console_ws_auth(_TokenCluster(), '127.0.0.1:43111',
-                                 fresh_ticket=None, reuse_manager_auth=True)
-    assert h['Host'] == '127.0.0.1:43111'
+def test_the_auth_headers_leave_the_host_to_websocket_client():
+    """This asserted a Host header in the helper's dict. websocket-client always writes
+    its own Host from the URL or its host option, so that made two, and pveproxy refuses
+    a duplicate header (#1329); test_console_host_header_1329.py counts what goes out."""
+    h = vms._pve_console_ws_auth(_TokenCluster(), fresh_ticket=None, reuse_manager_auth=True)
+    assert 'Host' not in h
 
 
 def test_a_cluster_with_neither_token_nor_ticket_sends_no_credential():
@@ -131,7 +133,7 @@ def test_a_cluster_with_neither_token_nor_ticket_sends_no_credential():
         _using_api_token = False
         _api_token = None
         _ticket = None
-    h = vms._pve_console_ws_auth(_Bare(), 'pve:8006', fresh_ticket=None,
+    h = vms._pve_console_ws_auth(_Bare(), fresh_ticket=None,
                                  reuse_manager_auth=True)
     assert 'Authorization' not in h and 'Cookie' not in h
 
@@ -202,8 +204,9 @@ def test_both_places_that_describe_a_cluster_to_the_subprocess_carry_the_port():
 
 def test_cluster_creds_reports_the_port_the_cluster_is_actually_on(api, seed):
     # this endpoint authenticates off the session COOKIE (it is called by the
-    # subprocess, which has no header to send), so it is driven directly here
-    # instead of through the header-based client the other tests use
+    # subprocess, which sends no X-Session-ID), so it is driven directly here
+    # instead of through the header-based client the other tests use; the
+    # subprocess proves itself with the console server header
     seed.user('root', role='admin')
     mgr = api.make_fake_manager()
     mgr.host = '10.77.10.55'
@@ -218,7 +221,9 @@ def test_cluster_creds_reports_the_port_the_cluster_is_actually_on(api, seed):
         sid = create_session('root', 'admin')
     client = api.app.test_client()
     client.set_cookie('session', sid, domain='localhost')
-    r = client.get('/api/internal/cluster-creds/cluster_1')
+    from pegaprox.api.realtime import CONSOLE_SERVER_HEADER, console_server_secret
+    r = client.get('/api/internal/cluster-creds/cluster_1',
+                   headers={CONSOLE_SERVER_HEADER: console_server_secret()})
     assert r.status_code == 200, r.data
     assert r.get_json().get('api_port') == 18006
 

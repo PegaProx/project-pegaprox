@@ -53,6 +53,9 @@ EXCLUDED_PREFIX = os.path.join('pegaprox', 'core') + os.sep
 TAKES_RESOLVED_IP = {
     ('pegaprox/api/ceph.py', '_rbd_cmd'),
     ('pegaprox/api/ceph.py', '_rbd_batch'),
+    # the stored key's leg of _pve_node_exec, which refuses a name the cluster's node list
+    # does not hold and takes the address from _get_node_ip (#1224)
+    ('pegaprox/utils/ssh.py', '_stored_key_exec'),
 }
 
 

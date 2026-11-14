@@ -13,6 +13,7 @@ from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.rbac import user_can_access_vm
 from pegaprox.api.helpers import check_cluster_access, caller_is_scoped
+from pegaprox.utils.sanitization import validate_hostname
 from pegaprox.core.xhm import (
     XHMigrationTask, plan_xcpng_to_pve, plan_pve_to_xcpng,
     _run_xcpng_to_pve, _run_pve_to_xcpng,
@@ -121,12 +122,15 @@ def xhm_plan():
         result = plan_esxi_to_pve(source_cluster, source_vmid, target_cluster)
     elif src_type == 'esxi' and tgt_type == 'xcpng':
         result = plan_esxi_to_xcpng(source_cluster, source_vmid, target_cluster)
-    elif src_type == 'xcpng':
+    elif src_type == 'xcpng' and tgt_type == 'proxmox':
         result = plan_xcpng_to_pve(source_cluster, source_vmid, target_cluster)
     elif tgt_type == 'xcpng':
         source_node = request.args.get('source_node', '')
         if not source_node:
             return jsonify({'error': 'source_node required for Proxmox source'}), 400
+        # MK Nov 2026 - it goes into the API paths of the source's config and status reads
+        if not validate_hostname(source_node):
+            return jsonify({'error': 'Invalid node name'}), 400
         result = plan_pve_to_xcpng(source_cluster, source_node, source_vmid, target_cluster)
     else:
         return jsonify({'error': f'Unsupported migration: {src_type} -> {tgt_type}'}), 400
@@ -151,6 +155,13 @@ def xhm_start():
     from pegaprox.utils.sanitization import validate_storage_name
     if not validate_storage_name(data['target_storage']):
         return jsonify({'error': 'Invalid target_storage name. Must be alphanumeric with hyphens, underscores, or dots only.'}), 400
+    # MK Nov 2026 - {source network or NIC index: target network}. Anything else failed the
+    # migration half way, after the guest and its disks were already made on the target
+    _nm = data.get('network_map')
+    if _nm is not None and not (isinstance(_nm, dict) and all(
+            isinstance(k, str) and (v is None or isinstance(v, str)) for k, v in _nm.items())):
+        return jsonify({'error': 'network_map maps a source network or NIC index to a target network name',
+                        'code': 'INVALID_FIELD', 'field': 'network_map'}), 400
 
     # Authorization: check source cluster access
     ok, err = check_cluster_access(data['source_cluster'])
@@ -197,7 +208,7 @@ def xhm_start():
         direction = 'esxi_to_pve'
     elif src_type == 'esxi' and tgt_type == 'xcpng':
         direction = 'esxi_to_xcpng'
-    elif src_type == 'xcpng' and tgt_type != 'xcpng':
+    elif src_type == 'xcpng' and tgt_type == 'proxmox':
         direction = 'xcpng_to_pve'
     elif src_type != 'xcpng' and tgt_type == 'xcpng':
         direction = 'pve_to_xcpng'
@@ -206,6 +217,14 @@ def xhm_start():
 
     if direction in ('xcpng_to_pve', 'esxi_to_pve') and not data.get('target_node'):
         return jsonify({'error': 'target_node is required for migration to Proxmox'}), 400
+    # MK Nov 2026 - a node of the Proxmox VE side goes into the API paths the task calls there
+    # (the new guest and its config on the target, the config reads on the source). An XCP-ng
+    # host keeps its free name, it is never part of a path
+    for _key, _pve in (('source_node', direction == 'pve_to_xcpng'),
+                       ('target_node', direction in ('xcpng_to_pve', 'esxi_to_pve'))):
+        _v = data.get(_key)
+        if _pve and _v not in (None, '') and not (isinstance(_v, str) and validate_hostname(_v)):
+            return jsonify({'error': 'Invalid node name'}), 400
 
     # MK Oct 2026 - the copy is a new guest on the target, the size of its source. It counts
     # for the tenant quota unless it only moves between two clusters the tenant has
@@ -231,7 +250,8 @@ def xhm_start():
         # the id the gates above checked, not the raw one (it reaches qm destroy)
         source_vmid=str(vmid_int),
         target_cluster=data['target_cluster'],
-        target_node=data['target_node'],
+        # only a Proxmox target needs one (checked above), an XCP-ng pool places the VM itself
+        target_node=data.get('target_node') or '',
         target_storage=data['target_storage'],
         vm_name=data.get('vm_name', ''),
         config=data,
@@ -261,7 +281,7 @@ def xhm_start():
     user = request.session.get('user', 'admin') if hasattr(request, 'session') else 'admin'
     log_audit(user, 'xhm.migration.started',
               f"XHM {direction}: {data.get('vm_name', data['source_vmid'])} -> "
-              f"{data['target_cluster']}/{data['target_node']}")
+              f"{data['target_cluster']}/{task.target_node}")
 
     return jsonify({
         'migration_id': mid,

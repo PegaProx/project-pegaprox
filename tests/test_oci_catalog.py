@@ -773,6 +773,81 @@ def test_a_blocking_quota_refuses(api, admin, monkeypatch):
     assert not pve.posts
 
 
+def _quota_of_ten(monkeypatch, rbac):
+    monkeypatch.setattr(rbac, 'check_tenant_quota', lambda *a, **kw: {
+        'ok': True, 'enforce': 'block', 'violations': [], 'usage': {}, 'quota': {'vms': 10}})
+
+
+_CT = {'vms': 1, 'cores': 1, 'memory_gb': 0.25, 'disk_gb': 2}
+
+
+def test_the_quota_hold_names_the_id_the_container_was_made_with(api, admin, monkeypatch):
+    """105 was free at the deploy, a lower id was freed during the pull and the create took
+    100. Once CT 100 shows, the hold is gone: the tenant is not counted for it twice."""
+    import pegaprox.utils.rbac as rbac
+    _quota_of_ten(monkeypatch, rbac)
+    FakePve(nextid=(105, 100)).manager(api)
+    job = _job(_deploy(admin))
+    assert job['status'] == 'completed', job['error']
+    assert job['vmid'] == 100
+    held = [h for h in rbac._quota_holds.values() if h['tenant'] == rbac.DEFAULT_TENANT_ID]
+    assert [sorted(h['vmids']) for h in held] == [[100]]
+    assert rbac._pending_usage(rbac.DEFAULT_TENANT_ID, {'cluster_1': {100: _CT}})['vms'] == 0
+
+
+def test_a_guest_on_the_id_picked_first_does_not_end_the_hold(api, admin, monkeypatch):
+    """Someone else took 105 during the pull, the container became 106. A cluster that
+    shows guest 105 but no CT 106 yet still counts the hold."""
+    import pegaprox.utils.rbac as rbac
+    _quota_of_ten(monkeypatch, rbac)
+    FakePve(nextid=(105, 106)).manager(api)
+    job = _job(_deploy(admin))
+    assert job['vmid'] == 106
+    other = {'vms': 1, 'cores': 4, 'memory_gb': 8, 'disk_gb': 32}
+    assert rbac._pending_usage(rbac.DEFAULT_TENANT_ID, {'cluster_1': {105: other}})['vms'] == 1
+
+
+def test_two_deploys_in_flight_keep_their_quota_until_each_container_shows(api, seed, monkeypatch):
+    """/cluster/nextid reserves nothing, so two deploys of one tenant pulling at once are
+    both told 105. The first container taking 105 must not free the quota the second still
+    holds while it pulls."""
+    import pegaprox.utils.rbac as rbac
+    monkeypatch.setattr(oci, '_spawn', lambda job_id: None)       # both stay in flight
+    seed.db.execute('''INSERT INTO clusters (id, name, host, user, pass_encrypted)
+                       VALUES ('cluster_1', 'cluster_1', '10.0.0.1', 'root@pam', 'x')''')
+    seed.db.save_tenant('acme', {'id': 'acme', 'name': 'Acme', 'clusters': ['cluster_1'],
+                                 'quota_enforcement': 'block', 'quota_max_vms': 2,
+                                 'quota_max_cores': 0, 'quota_max_memory_gb': 0, 'quota_max_disk_gb': 0})
+    rbac.invalidate_tenants_cache()
+    tina = api.as_user(seed.user('tina', role='admin', tenant_id='acme'))
+    rows = []
+    m = FakePve().manager(api)
+    m.get_vm_resources = lambda max_age=0: list(rows)
+    m.get_next_vmid.side_effect = lambda: {
+        'success': True, 'vmid': min(set(range(105, 200)) - {r['vmid'] for r in rows})}
+
+    a = _job(_deploy(tina, hostname='a'))
+    b = _job(_deploy(tina, hostname='b'))
+    assert a['vmid'] == b['vmid'] == 105
+    assert _deploy(tina, hostname='c').status_code == 403         # 2 held of 2
+
+    # a makes CT 105 and the cluster shows it, b is still pulling
+    oci._run(a['id'])
+    assert a['status'] == 'completed' and a['vmid'] == 105, a['error']
+    rows.append({'vmid': 105, 'node': 'pve1', 'type': 'lxc', 'maxcpu': 1,
+                 'maxmem': 256 * 1024 ** 2, 'maxdisk': 2 * 1024 ** 3})
+    r = _deploy(tina, hostname='c')
+    assert r.status_code == 403, r.get_data(as_text=True)
+
+    # b creates on what is free by then, and its hold names that id from the create on
+    oci._run(b['id'])
+    assert b['status'] == 'completed', b['error']
+    assert b['vmid'] == 106
+    hb = rbac._quota_holds[b['_hold']]
+    assert sorted(hb['vmids']) == [106]
+    assert rbac._pending_usage('acme', {'cluster_1': {105: _CT, 106: _CT}})['vms'] == 0
+
+
 # --- standby (#625) ------------------------------------------------------------------------------
 
 def test_a_standby_creates_nothing(ha_env, seed):  # noqa: F811

@@ -33,6 +33,7 @@
                         lastRun: job['last-run-endtime'] ?? null,
                         disabled: Boolean(job.disable),
                         state: job['last-run-state'] ?? '', nextRun: job['next-run'] ?? null,
+                        direction: kind === 'sync' ? (job['sync-direction'] || 'pull') : '',
                     });
                 }
             }
@@ -48,6 +49,29 @@
             const warn = /^(TASK )?WARNINGS/i.test(s);
             return <span data-pbs-run-state={ok ? 'ok' : warn ? 'warning' : 'error'} title={s}
                 className={`${ok ? 'text-green-400' : warn ? 'text-yellow-400' : 'text-red-400'} break-all`}>{s}</span>;
+        }
+
+        // LW Nov 2026 - since PBS 3.3 a sync job pulls into its store or pushes out of it (#801).
+        // store is always the local datastore, remote / remote-store the other end; a job
+        // without a remote syncs from a datastore on the same PBS
+        function pbsSyncEnds(job) {
+            const local = job?.store || '-';
+            const other = job?.remote ? `${job.remote} / ${job['remote-store'] || '-'}` : (job?.['remote-store'] || '-');
+            return job?.['sync-direction'] === 'push' ? { source: local, target: other } : { source: other, target: local };
+        }
+
+        // asType: the whole Type label beside a datastore, so the text names the sync as well
+        function PbsSyncDirection({ direction, asType }) {
+            const { t } = useTranslation();
+            const push = direction === 'push';
+            const Icon = push ? Icons.Upload : Icons.Download;
+            const text = asType
+                ? (push ? (t('pbsSyncPushJob') || 'Push sync') : (t('pbsSyncPullJob') || 'Pull sync'))
+                : (push ? (t('pbsSyncPush') || 'Push') : (t('pbsSyncPull') || 'Pull'));
+            return <span data-pbs-sync-direction={push ? 'push' : 'pull'}
+                className={asType ? 'inline-flex items-center gap-1 whitespace-nowrap' : 'inline-flex items-center gap-1 text-gray-300 font-normal whitespace-nowrap'}>
+                <Icon /> {text}
+            </span>;
         }
 
         function PbsJobReadError({ kind }) {
@@ -102,7 +126,9 @@
                                 {rows.map((row, i) => (
                                     <tr key={`${row.kind}:${row.id}:${i}`} data-pbs-schedule-kind={row.kind}
                                         className="border-b border-proxmox-border/50">
-                                        <td className="p-3 text-white font-medium">{labels[row.kind]}</td>
+                                        <td className="p-3 text-white font-medium">
+                                            {row.direction ? <PbsSyncDirection direction={row.direction} asType /> : labels[row.kind]}
+                                        </td>
                                         <td className="p-3 text-gray-300">{row.id || '-'}</td>
                                         <td className="p-3 text-gray-400">
                                             {row.schedule || (t('manual') || 'Manual')}
@@ -132,7 +158,7 @@
         }
 
         // Task Bar Component with Task Viewer
-        function TaskBar({ tasks, onClear, onClose, onCancel, onRefresh, clusterId, autoExpandEnabled = true }) {
+        function TaskBar({ tasks, onClear, onClose, onCancel, onRefresh, clusterId, clusterName = '', autoExpandEnabled = true, crNav }) {
             const { t } = useTranslation();
             const [expanded, setExpanded] = useState(false);
             const [selectedTask, setSelectedTask] = useState(null);
@@ -140,6 +166,7 @@
             const [taskLogLoading, setTaskLogLoading] = useState(false);
             const [filter, setFilter] = useState('all'); // all, running, error, today
             const { getAuthHeaders } = useAuth();
+            const { isCorpRedesigned } = useLayout();
             const seenRunningIds = React.useRef(null);  // #738: UPIDs already seen running (null = not yet seeded)
             
             // LW: Resizable height - Feb 2026
@@ -302,6 +329,122 @@
                 fetchTaskLog(task);
             };
             
+            // Task Detail Modal - LW Oct 2026: one render for both, so the redesigned task center shows
+            // the same dialog with its own log, state colour and cluster (o); without o it is the classic one
+            const renderTaskDetail = (task, o = {}) => {
+                if (!task) return task;
+                const log = o.log !== undefined ? o.log : taskLog;
+                const logLoading = o.loading !== undefined ? o.loading : taskLogLoading;
+                const close = o.close || (() => setSelectedTask(null));
+                const look = o.tone || (task.status === 'running' ? 'info' : task.status === 'failed' || task.status === 'error' ? 'error' : /^WARNINGS/.test(task.status || '') ? 'warning' : 'success');
+                return (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={close}>
+                        <div className="w-full max-w-3xl bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                            {/* Header */}
+                            <div className="flex items-center justify-between p-4 border-b border-proxmox-border bg-proxmox-dark">
+                                <div className="flex items-center gap-3">
+                                    <span className={`w-3 h-3 rounded-full ${
+                                        look === 'info' ? 'bg-blue-500 animate-pulse' :
+                                        look === 'error' ? 'bg-red-500' :
+                                        look === 'warning' ? 'bg-yellow-500' :
+                                        'bg-green-500'
+                                    }`} />
+                                    <div>
+                                        <h3 className="text-white font-semibold">
+                                            {formatTaskType(task.type)} {task.vmid ? `(${task.vmid})` : ''}
+                                        </h3>
+                                        <p className="text-xs text-gray-400">
+                                            {task.node} • {task.pegaprox_user || (task.user ? task.user.split('@')[0] : '-')}
+                                        </p>
+                                    </div>
+                                </div>
+                                <button onClick={close} className="p-2 hover:bg-proxmox-border rounded" aria-label={o.close ? t('close') : undefined}>
+                                    <Icons.X />
+                                </button>
+                            </div>
+                            
+                            {/* Info Grid */}
+                            <div className="p-4 border-b border-proxmox-border grid grid-cols-4 gap-4 text-sm">
+                                <div>
+                                    <span className="text-gray-500 block">{t('status')}</span>
+                                    <span className={`font-medium ${
+                                        look === 'info' ? 'text-blue-400' :
+                                        look === 'error' ? 'text-red-400' :
+                                        look === 'warning' ? 'text-yellow-400' :
+                                        'text-green-400'
+                                    }`}>{o.statusText || task.status || '-'}</span>
+                                </div>
+                                <div>
+                                    <span className="text-gray-500 block">{t('startTime')}</span>
+                                    <span className="text-white">
+                                        {task.starttime ? fmtDate(task.starttime * 1000) : '-'}
+                                    </span>
+                                </div>
+                                <div>
+                                    <span className="text-gray-500 block">{t('endTime')}</span>
+                                    <span className="text-white">
+                                        {task.endtime ? fmtDate(task.endtime * 1000) : '-'}
+                                    </span>
+                                </div>
+                                <div>
+                                    <span className="text-gray-500 block">{t('duration')}</span>
+                                    <span className="text-white">{o.duration || formatDuration(task.starttime, task.endtime)}</span>
+                                </div>
+                            </div>
+                            {o.progress}
+                            
+                            {/* Task Log */}
+                            <div className="p-4">
+                                <div className="flex items-center justify-between mb-2">
+                                    <span className="text-sm text-gray-400">{t('taskOutput')}</span>
+                                    <button 
+                                        onClick={() => (o.refresh ? o.refresh() : fetchTaskLog(task))}
+                                        className="text-xs text-gray-400 hover:text-white"
+                                        aria-label={o.refresh ? t('refresh') : undefined}
+                                    >
+                                        <Icons.RefreshCw />
+                                    </button>
+                                </div>
+                                <div className={`h-64 overflow-auto rounded-lg font-mono text-xs p-3 ${
+                                    look === 'error'
+                                        ? 'bg-red-500/5 border border-red-500/20 text-red-300'
+                                        : 'bg-proxmox-darker border border-proxmox-border text-gray-300'
+                                }`} tabIndex={o.refresh ? 0 : undefined} aria-label={o.refresh ? t('taskOutput') : undefined}>
+                                    {logLoading ? (
+                                        <span className="text-gray-500">{t('loading')}...</span>
+                                    ) : (
+                                        <pre className="whitespace-pre-wrap">{log || task.error || task.exitstatus || t('noOutput')}</pre>
+                                    )}
+                                </div>
+                            </div>
+                            
+                            {/* Actions */}
+                            {task.status === 'running' && onCancel && (
+                                <div className="p-4 border-t border-proxmox-border bg-proxmox-dark">
+                                    <button
+                                        onClick={() => { (o.cancel || onCancel)(task); close(); }}
+                                        className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-white text-sm"
+                                    >
+                                        {t('cancelTask')}
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                );
+            };
+            const taskDetail = renderTaskDetail(selectedTask);
+
+            // LW Oct 2026 - Corporate Redesigned: the same list, open state and dialog, its own bar and drawer
+            if (isCorpRedesigned) {
+                return (
+                    <CrTaskCenter tasks={safeTasks} expanded={expanded} setExpanded={setExpanded}
+                        clusterId={clusterId} clusterName={clusterName} onRefresh={onRefresh}
+                        onClose={onClose} onCancel={onCancel} formatTaskType={formatTaskType} formatDuration={formatDuration}
+                        renderDetail={renderTaskDetail} nav={crNav} />
+                );
+            }
+
             return (
                 <div 
                     className={`pp-taskbar fixed bottom-0 left-0 right-0 z-40 transition-all ${isResizing ? '' : 'duration-300'}`}
@@ -322,97 +465,7 @@
                     )}
                     
                     {/* Task Detail Modal */}
-                    {selectedTask && (
-                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={() => setSelectedTask(null)}>
-                            <div className="w-full max-w-3xl bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden" onClick={e => e.stopPropagation()}>
-                                {/* Header */}
-                                <div className="flex items-center justify-between p-4 border-b border-proxmox-border bg-proxmox-dark">
-                                    <div className="flex items-center gap-3">
-                                        <span className={`w-3 h-3 rounded-full ${
-                                            selectedTask.status === 'running' ? 'bg-blue-500 animate-pulse' :
-                                            selectedTask.status === 'failed' || selectedTask.status === 'error' ? 'bg-red-500' :
-                                            'bg-green-500'
-                                        }`} />
-                                        <div>
-                                            <h3 className="text-white font-semibold">
-                                                {formatTaskType(selectedTask.type)} {selectedTask.vmid ? `(${selectedTask.vmid})` : ''}
-                                            </h3>
-                                            <p className="text-xs text-gray-400">
-                                                {selectedTask.node} • {selectedTask.pegaprox_user || (selectedTask.user ? selectedTask.user.split('@')[0] : '-')}
-                                            </p>
-                                        </div>
-                                    </div>
-                                    <button onClick={() => setSelectedTask(null)} className="p-2 hover:bg-proxmox-border rounded">
-                                        <Icons.X />
-                                    </button>
-                                </div>
-                                
-                                {/* Info Grid */}
-                                <div className="p-4 border-b border-proxmox-border grid grid-cols-4 gap-4 text-sm">
-                                    <div>
-                                        <span className="text-gray-500 block">{t('status')}</span>
-                                        <span className={`font-medium ${
-                                            selectedTask.status === 'running' ? 'text-blue-400' :
-                                            selectedTask.status === 'failed' || selectedTask.status === 'error' ? 'text-red-400' :
-                                            'text-green-400'
-                                        }`}>{selectedTask.status || '-'}</span>
-                                    </div>
-                                    <div>
-                                        <span className="text-gray-500 block">{t('startTime')}</span>
-                                        <span className="text-white">
-                                            {selectedTask.starttime ? fmtDate(selectedTask.starttime * 1000) : '-'}
-                                        </span>
-                                    </div>
-                                    <div>
-                                        <span className="text-gray-500 block">{t('endTime')}</span>
-                                        <span className="text-white">
-                                            {selectedTask.endtime ? fmtDate(selectedTask.endtime * 1000) : '-'}
-                                        </span>
-                                    </div>
-                                    <div>
-                                        <span className="text-gray-500 block">{t('duration')}</span>
-                                        <span className="text-white">{formatDuration(selectedTask.starttime, selectedTask.endtime)}</span>
-                                    </div>
-                                </div>
-                                
-                                {/* Task Log */}
-                                <div className="p-4">
-                                    <div className="flex items-center justify-between mb-2">
-                                        <span className="text-sm text-gray-400">{t('taskOutput')}</span>
-                                        <button 
-                                            onClick={() => fetchTaskLog(selectedTask)}
-                                            className="text-xs text-gray-400 hover:text-white"
-                                        >
-                                            <Icons.RefreshCw />
-                                        </button>
-                                    </div>
-                                    <div className={`h-64 overflow-auto rounded-lg font-mono text-xs p-3 ${
-                                        selectedTask.status === 'failed' || selectedTask.status === 'error'
-                                            ? 'bg-red-500/5 border border-red-500/20 text-red-300'
-                                            : 'bg-proxmox-darker border border-proxmox-border text-gray-300'
-                                    }`}>
-                                        {taskLogLoading ? (
-                                            <span className="text-gray-500">{t('loading')}...</span>
-                                        ) : (
-                                            <pre className="whitespace-pre-wrap">{taskLog || selectedTask.error || selectedTask.exitstatus || t('noOutput')}</pre>
-                                        )}
-                                    </div>
-                                </div>
-                                
-                                {/* Actions */}
-                                {selectedTask.status === 'running' && onCancel && (
-                                    <div className="p-4 border-t border-proxmox-border bg-proxmox-dark">
-                                        <button
-                                            onClick={() => { onCancel(selectedTask); setSelectedTask(null); }}
-                                            className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-white text-sm"
-                                        >
-                                            {t('cancelTask')}
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    )}
+                    {taskDetail}
                     
                     <div className="h-full bg-proxmox-darker border-t border-proxmox-border flex flex-col">
                         {/* Header Bar */}
@@ -519,7 +572,9 @@
                                                 // ('OK' = success, anything else = failure). #590: failed backups came back
                                                 // as 'stopped' + a non-OK exitstatus and slipped through to the green bucket.
                                                 const _ex = task.exitstatus || '';
-                                                const isFailed = task.status === 'failed' || task.status === 'error' || (!isRunning && _ex && _ex !== 'OK');
+                                                // "WARNINGS: n" ended, like in Proxmox: yellow, not red
+                                                const isWarn = !isRunning && /^WARNINGS/.test(_ex);
+                                                const isFailed = task.status === 'failed' || task.status === 'error' || (!isRunning && _ex && _ex !== 'OK' && !isWarn);
                                                 
                                                 return (
                                                     <tr 
@@ -531,6 +586,7 @@
                                                             <span className={`inline-block w-2 h-2 rounded-full ${
                                                                 isRunning ? 'bg-blue-500 animate-pulse' :
                                                                 isFailed ? 'bg-red-500' :
+                                                                isWarn ? 'bg-yellow-500' :
                                                                 'bg-green-500'
                                                             }`} />
                                                         </td>
@@ -553,9 +609,11 @@
                                                             <span className={`px-2 py-0.5 rounded text-xs ${
                                                                 isRunning ? 'bg-blue-500/20 text-blue-400' : 
                                                                 isFailed ? 'bg-red-500/20 text-red-400' : 
+                                                                isWarn ? 'bg-yellow-500/20 text-yellow-400' :
                                                                 'bg-green-500/20 text-green-400'
-                                                            }`}>
-                                                                {task.status || '-'}
+                                                            }`} title={_ex && _ex !== task.status ? _ex : undefined}>
+                                                                {/* a failed task says what Proxmox said, not just 'failed' */}
+                                                                {isFailed && _ex ? _ex : (task.status || '-')}
                                                             </span>
                                                         </td>
                                                     </tr>
@@ -777,7 +835,7 @@
         // Indexes: clusters, VMs, storage (from resources), and a curated action list.
         // Keyboard-first: ↑/↓ to move, enter to pick, esc to close.
         function CommandPalette({ t, clusters, clusterResources, clusterMetrics, selectedCluster,
-                                   onClose, onPickCluster, onPickVm, onAction, authFetch, onPickHit }) {
+                                   onClose, onPickCluster, onPickVm, onAction, authFetch, onPickHit, extraActions }) {
             const [query, setQuery] = useState('');
             const [highlight, setHighlight] = useState(0);
             const inputRef = useRef(null);
@@ -864,6 +922,8 @@
                     ['goto-automation', t('automation') || 'Automation', 'Zap'],
                     ['goto-reports', t('reports') || 'Reports', 'FileText'],
                     ['goto-plugins', t('plugins') || 'Plugins', 'Package'],
+                    // LW Nov 2026 - [id, title, icon] of a layout's own (Corporate Redesigned: the blueprints, #1220)
+                    ...(extraActions || []),
                     ['settings',      t('settings') || 'Settings', 'Settings'],
                     ['profile',       t('userProfile') || 'Profile', 'User'],
                     ['logout',        t('logout') || 'Log out', 'Power'],
@@ -875,7 +935,7 @@
                     });
                 });
                 return out;
-            }, [clusters, clusterResources, clusterMetrics, selectedCluster, onPickCluster, onPickVm, onAction, t]);
+            }, [clusters, clusterResources, clusterMetrics, selectedCluster, onPickCluster, onPickVm, onAction, extraActions, t]);
 
             // Fuzzy-ish scoring: substring > prefix > word boundary. Simple but fast.
             const results = React.useMemo(() => {
@@ -1406,7 +1466,7 @@
         }
 
         // Cluster Sidebar Item Component - NS Jan 2026
-        function ClusterSidebarItem({ cluster, idx, selectedCluster, setSelectedCluster, nodeAlerts, clusterGroups, isAdmin, handleDeleteCluster, setShowAssignGroup, setRenamingCluster, setRenameValue, setReconfigureCluster, t, getAuthHeaders, fetchClusters, addToast, isCorporate, expandedSidebarClusters, toggleSidebarCluster, onContextMenu, hwHealth, onCheckConnection }) {
+        function ClusterSidebarItem({ cluster, idx, selectedCluster, setSelectedCluster, nodeAlerts, clusterGroups, isAdmin, handleDeleteCluster, setShowAssignGroup, setRenamingCluster, setRenameValue, setReconfigureCluster, t, getAuthHeaders, fetchClusters, addToast, isCorporate, expandedSidebarClusters, toggleSidebarCluster, onContextMenu, hwHealth, onCheckConnection, treeItem }) {
             const offlineNodesCount = Object.values(nodeAlerts || {})
                 .filter(alert => alert.cluster_id === cluster.id && alert.status === 'offline')
                 .length;
@@ -1429,7 +1489,12 @@
                     <div
                         onClick={() => setSelectedCluster(cluster)}
                         tabIndex={0}
-                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedCluster(cluster); } }}
+                        role={treeItem ? 'treeitem' : undefined} aria-level={treeItem ? 1 : undefined}
+                        aria-expanded={treeItem ? !!isExpanded : undefined} aria-selected={treeItem ? isSelected : undefined}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedCluster(cluster); }
+                            else if (treeItem) crTreeKey(e, !!isExpanded, () => toggleSidebarCluster && toggleSidebarCluster(cluster.id));
+                        }}
                         onContextMenu={(e) => { e.preventDefault(); onContextMenu?.('cluster', cluster, {x: e.clientX, y: e.clientY}); }}
                         className="corp-tree-item cursor-pointer flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5"
                         style={isSelected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: 'var(--corp-text-secondary)'}}
@@ -2040,12 +2105,631 @@
             );
         }
 
+        // LW Oct 2026 - ESXi bulk migration: the settings every guest shares, a NIC and disk
+        // row per guest, a review that is a dry run of exactly the request Start sends, and the
+        // run with a line per guest. The run lives on the server (core/esxi_bulk.py), closing
+        // this window does not stop it.
+        const ESXI_BULK_MODES = [
+            ['vmkfstools_clone', 'transferModeVmkClone'], ['auto', 'transferModeAuto'],
+            ['sshfs_boot', 'transferModeSshfsBoot'], ['snapshot_zero', 'transferModeSnapshotZero'],
+            ['offline', 'transferModeOffline'],
+        ];
+        const ESXI_BULK_ITEM_STYLE = {
+            wait: 'bg-proxmox-dark text-gray-400', starting: 'bg-blue-500/20 text-blue-400',
+            migrating: 'bg-blue-500/20 text-blue-400', done: 'bg-green-500/20 text-green-400',
+            failed: 'bg-red-500/20 text-red-400', skipped: 'bg-yellow-500/10 text-yellow-300',
+            cancelled: 'bg-gray-500/20 text-gray-400', unknown: 'bg-gray-500/20 text-gray-400',
+        };
+
+        function esxiBulkGib(b, t) {
+            return (b === null || b === undefined) ? t('v2pReviewUnknown') : `${(b / 1073741824).toFixed(1)} GiB`;
+        }
+
+        function esxiBulkStateLabel(t, state) {
+            const key = {wait: 'esxiBulkStateWait', starting: 'esxiBulkStateStarting', migrating: 'esxiBulkStateMigrating',
+                         done: 'esxiBulkStateDone', failed: 'esxiBulkStateFailed', skipped: 'esxiBulkStateSkipped',
+                         cancelled: 'esxiBulkStateCancelled', unknown: 'esxiBulkStateUnknown'}[state];
+            return key ? t(key) : state;
+        }
+
+        function esxiBulkRunLabel(t, state) {
+            const key = {running: 'esxiBulkRunRunning', done: 'esxiBulkRunDone', cancelled: 'esxiBulkRunCancelled',
+                         stopped: 'esxiBulkRunStopped'}[state];
+            return key ? t(key) : state;
+        }
+
+        function EsxiBulkMigrate({ server, vms, runId, onClose, onStarted, authFetch, addToast, t, haReadOnly }) {
+            const [step, setStep] = React.useState(runId ? 'run' : 'settings');
+            const [guests, setGuests] = React.useState(vms || []);
+            const [targets, setTargets] = React.useState(null);
+            const [targetsError, setTargetsError] = React.useState('');
+            const [form, setForm] = React.useState({
+                target_cluster: '', target_node: '', target_storage: '', network_bridge: 'vmbr0', net_vlan_tag: '',
+                transfer_mode: 'vmkfstools_clone', verify: 'sample', start_after: true, remove_source: false,
+                wait_for_confirmation: false, preserve_mac: true, esxi_user: 'root', width: 2,
+            });
+            const [password, setPassword] = React.useState('');
+            const [rows, setRows] = React.useState({});
+            const [openGuest, setOpenGuest] = React.useState(null);
+            const [check, setCheck] = React.useState(null);
+            const [checkKey, setCheckKey] = React.useState('');
+            const [checking, setChecking] = React.useState(false);
+            const [starting, setStarting] = React.useState(false);
+            const [currentRun, setCurrentRun] = React.useState(runId || null);
+            const [run, setRun] = React.useState(null);
+            const [runError, setRunError] = React.useState('');
+            const set = (patch) => setForm(f => ({...f, ...patch}));
+            const base = `${API_URL}/vmware/${encodeURIComponent(server.id)}`;
+
+            // the clusters, nodes and storages to pick from: what the plan of the first guest lists
+            React.useEffect(() => {
+                if (runId || !guests.length) return undefined;
+                let live = true;
+                (async () => {
+                    const r = await authFetch(`${base}/vms/${encodeURIComponent(guests[0].id)}/migration-plan`);
+                    const d = r ? await r.json().catch(() => null) : null;
+                    if (!live) return;
+                    if (r && r.ok && d) setTargets(d.targets || []);
+                    else setTargetsError((d && d.error) || t('esxiBulkError'));
+                })();
+                return () => { live = false; };
+            }, []);
+
+            React.useEffect(() => {
+                if (!currentRun) return undefined;
+                let live = true, timer = null;
+                const load = async () => {
+                    const r = await authFetch(`${API_URL}/vmware/bulk-migrate/${encodeURIComponent(currentRun)}`);
+                    const d = r ? await r.json().catch(() => null) : null;
+                    if (!live) return;
+                    if (r && r.ok && d && d.run) {
+                        setRun(d.run);
+                        setRunError('');
+                        if (d.run.state === 'running') timer = setTimeout(load, 4000);
+                    } else if (r && r.status === 404) {
+                        setRunError(t('esxiBulkRunGone'));
+                    } else {
+                        timer = setTimeout(load, 8000);
+                    }
+                };
+                load();
+                return () => { live = false; clearTimeout(timer); };
+            }, [currentRun]);
+
+            const target = (targets || []).find(x => x.cluster_id === form.target_cluster);
+            const nodeStorages = (target?.storages || {})[form.target_node] || [];
+
+            // a guest's own NICs and disks go along only where something differs from the settings
+            const mapsOf = (id) => {
+                const r = rows[id];
+                const out = {};
+                if (r && r.nics.some(n => n.bridge || String(n.vlan ?? '').trim() !== '' || n.skip)) {
+                    out.nic_map = r.nics.map(n => {
+                        const row = {index: n.index, skip: !!n.skip};
+                        if (n.bridge) row.bridge = n.bridge;
+                        if (String(n.vlan ?? '').trim() !== '') row.vlan = String(n.vlan).trim();
+                        return row;
+                    });
+                }
+                if (r && r.disks.some(x => x.storage || x.skip)) {
+                    out.disk_map = r.disks.map(x => {
+                        const row = {index: x.index, skip: x.index === 0 ? false : !!x.skip};
+                        if (x.storage) row.storage = x.storage;
+                        return row;
+                    });
+                }
+                return out;
+            };
+            const buildBody = (dryRun) => {
+                const body = {...form, width: Number(form.width) || 1,
+                    vms: guests.map(g => {
+                        const m = mapsOf(g.id);
+                        return Object.keys(m).length ? {vm_id: g.id, ...m} : g.id;
+                    })};
+                if (String(form.net_vlan_tag ?? '').trim() === '') delete body.net_vlan_tag;
+                else body.net_vlan_tag = String(form.net_vlan_tag).trim();
+                if (!form.esxi_user) delete body.esxi_user;
+                if (dryRun) body.dry_run = true;
+                else body.esxi_password = password;
+                return body;
+            };
+            const current = !!check && checkKey === JSON.stringify(buildBody(true));
+            const canCheck = !!(form.target_cluster && form.target_node && form.target_storage && guests.length);
+
+            const runCheck = async (next) => {
+                const key = JSON.stringify(buildBody(true));
+                setChecking(true);
+                try {
+                    const r = await authFetch(`${base}/bulk-migrate`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'}, body: key
+                    });
+                    const d = r ? await r.json().catch(() => ({})) : {};
+                    if (r && r.ok) {
+                        setCheck(d);
+                        // a row per NIC and disk of each guest, seeded once from what the check found
+                        setRows(prev => {
+                            const out = {...prev};
+                            for (const it of (d.items || [])) {
+                                if (out[it.vm_id] || !((it.nics || []).length || (it.disks || []).length)) continue;
+                                out[it.vm_id] = {
+                                    nics: (it.nics || []).map(n => ({index: n.index, bridge: '', vlan: '', skip: false})),
+                                    disks: (it.disks || []).map(x => ({index: x.index, storage: '', skip: false})),
+                                };
+                            }
+                            return out;
+                        });
+                    } else {
+                        setCheck({ok: false, errors: [(d && d.error) || t('esxiBulkError')], warnings: [],
+                                  items: (d && d.items) || [], storages: []});
+                    }
+                } catch (e) {
+                    setCheck({ok: false, errors: [`${t('esxiBulkError')}: ${e.message}`], warnings: [], items: [], storages: []});
+                } finally {
+                    setCheckKey(key);
+                    setChecking(false);
+                    if (next) setStep(next);
+                }
+            };
+
+            const start = async () => {
+                if (haReadOnly || !current || !check?.ok || !password) return;
+                setStarting(true);
+                try {
+                    const r = await authFetch(`${base}/bulk-migrate`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildBody(false))
+                    });
+                    const d = r ? await r.json().catch(() => ({})) : {};
+                    if (r && r.status === 202 && d.run) {
+                        setPassword('');
+                        setRun(d.run);
+                        setCurrentRun(d.run.id);
+                        setStep('run');
+                        addToast(t('esxiBulkStartedToast'), 'success');
+                        if (onStarted) onStarted(d.run);
+                    } else {
+                        if (d && d.items) setCheck({...d, ok: false, errors: [d.error, ...(d.errors || [])].filter(Boolean)});
+                        addToast((d && d.error) || t('esxiBulkError'), 'error');
+                    }
+                } catch (e) {
+                    addToast(`${t('esxiBulkError')}: ${e.message}`, 'error');
+                } finally {
+                    setStarting(false);
+                }
+            };
+
+            const cancelRun = async () => {
+                if (haReadOnly || !run || !confirm(t('esxiBulkCancelConfirm'))) return;
+                const r = await authFetch(`${API_URL}/vmware/bulk-migrate/${encodeURIComponent(run.id)}/cancel`, {method: 'POST'});
+                const d = r ? await r.json().catch(() => ({})) : {};
+                if (r && r.ok && d.run) {
+                    setRun(d.run);
+                    addToast(t('esxiBulkCancelled'), 'success');
+                } else {
+                    addToast((d && d.error) || t('esxiBulkError'), 'error');
+                }
+            };
+
+            const cutover = async (mid, what) => {
+                if (haReadOnly) return;
+                const r = await authFetch(`${API_URL}/vmware/migrations/${encodeURIComponent(mid)}/${what}`, {method: 'POST'});
+                const d = r ? await r.json().catch(() => ({})) : {};
+                addToast(r && r.ok ? (what === 'confirm-cutover' ? t('commitSwitchover') : t('cancelMigration'))
+                    : ((d && d.error) || t('esxiBulkError')), r && r.ok ? 'success' : 'error');
+            };
+
+            const setNic = (id, i, patch) => setRows(prev => ({...prev, [id]: {...prev[id], nics: prev[id].nics.map((n, j) => j === i ? {...n, ...patch} : n)}}));
+            const setDisk = (id, i, patch) => setRows(prev => ({...prev, [id]: {...prev[id], disks: prev[id].disks.map((x, j) => j === i ? {...x, ...patch} : x)}}));
+            const checkItems = Object.fromEntries(((check && check.items) || []).map(it => [it.vm_id, it]));
+            const bridges = (check && check.available && check.available.bridges) || [];
+            const storages = (check && check.available && check.available.storages) || [];
+            const fullHere = !['sshfs_boot', 'snapshot_zero'].includes(form.transfer_mode);
+            const input = 'w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm';
+            const small = 'px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-xs disabled:opacity-40';
+            const tabs = [['settings', t('esxiBulkStepSettings')], ['guests', t('esxiBulkStepGuests')],
+                          ['review', t('v2pReview')], ['run', t('esxiBulkStepRun')]];
+
+            const guestLine = (g) => {
+                const it = checkItems[g.id];
+                const errs = (it && it.errors) || [];
+                return (
+                    <span className={`text-xs px-1.5 py-0.5 rounded ${!it ? 'bg-proxmox-dark text-gray-400' : errs.length ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'}`}>
+                        {!it ? '-' : errs.length ? t('esxiBulkGuestProblems').replace('{n}', errs.length) : t('esxiBulkGuestOk')}
+                    </span>
+                );
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+                    <div className="bg-proxmox-card border border-emerald-500/30 rounded-2xl p-6 w-full max-w-3xl max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()} data-esxi-bulk>
+                        <div className="flex items-start justify-between gap-3 mb-1">
+                            <h3 className="text-lg font-bold text-white">{t('esxiBulkTitle')}</h3>
+                            <button onClick={onClose} className="text-gray-500 hover:text-white" title={t('close')}><Icons.X className="w-4 h-4" /></button>
+                        </div>
+                        <p className="text-xs text-gray-500 mb-3">
+                            {t('esxiBulkGuests').replace('{n}', runId ? (run ? run.total : '...') : guests.length).replace('{server}', server.name || server.host || server.id)}
+                        </p>
+                        <div className="flex gap-1 mb-4 border-b border-proxmox-border pb-2">
+                            {tabs.map(([id, label]) => {
+                                const off = id === 'run' ? !currentRun : (!!currentRun || ((id === 'guests' || id === 'review') && !check));
+                                return (
+                                    <button key={id} disabled={off} onClick={() => {
+                                        setStep(id);
+                                        if (id === 'review' && !current && canCheck) runCheck();
+                                    }} className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all disabled:opacity-40 ${step === id ? 'bg-emerald-500/20 text-emerald-400' : 'text-gray-500 hover:text-gray-300'}`}>{label}</button>
+                                );
+                            })}
+                        </div>
+
+                        {step === 'settings' && (
+                            <div className="space-y-3">
+                                <div className="flex flex-wrap gap-1">
+                                    {guests.map(g => (
+                                        <span key={g.id} className="text-xs px-2 py-0.5 rounded bg-proxmox-dark text-gray-300">{g.name || g.id}</span>
+                                    ))}
+                                </div>
+                                {targetsError && <div className="text-xs text-red-400">{targetsError}</div>}
+                                {!targets && !targetsError && <div className="text-xs text-gray-400">{t('esxiBulkLoadingTargets')}</div>}
+                                {targets && (
+                                    <div className="grid grid-cols-3 gap-3">
+                                        <div>
+                                            <label className="text-xs text-gray-500 mb-1 block">{t('targetCluster')}</label>
+                                            <select value={form.target_cluster} onChange={e => set({target_cluster: e.target.value, target_node: '', target_storage: ''})} className={input}>
+                                                <option value="">{t('esxiBulkPick')}</option>
+                                                {targets.map(x => <option key={x.cluster_id} value={x.cluster_id}>{x.cluster_name}</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-gray-500 mb-1 block">{t('targetNode')}</label>
+                                            <select value={form.target_node} disabled={!target} onChange={e => set({target_node: e.target.value, target_storage: ''})} className={input}>
+                                                <option value="">{t('esxiBulkPick')}</option>
+                                                {(target?.nodes || []).map(n => <option key={n} value={n}>{n}</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="text-xs text-gray-500 mb-1 block">{t('targetStorage')}</label>
+                                            <select value={form.target_storage} disabled={!form.target_node} onChange={e => set({target_storage: e.target.value})} className={input}>
+                                                <option value="">{t('esxiBulkPick')}</option>
+                                                {nodeStorages.map(s => <option key={s} value={s}>{s}</option>)}
+                                            </select>
+                                        </div>
+                                    </div>
+                                )}
+                                <div className="grid grid-cols-3 gap-3">
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('esxiBulkBridge')}</label>
+                                        <input value={form.network_bridge} onChange={e => set({network_bridge: e.target.value.trim()})} className={input} />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('esxiBulkVlan')}</label>
+                                        <input type="number" min="1" max="4094" value={form.net_vlan_tag} onChange={e => set({net_vlan_tag: e.target.value})} placeholder="-" className={input} />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('esxiBulkWidth')}</label>
+                                        <select value={form.width} onChange={e => set({width: Number(e.target.value)})} className={input}>
+                                            {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}</option>)}
+                                        </select>
+                                    </div>
+                                </div>
+                                <p className="text-xs text-gray-500">{t('esxiBulkWidthHint')}</p>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('transferMode')}</label>
+                                        <select value={form.transfer_mode} onChange={e => set({transfer_mode: e.target.value, verify: form.verify === 'full' && ['sshfs_boot', 'snapshot_zero'].includes(e.target.value) ? 'sample' : form.verify})} className={input}>
+                                            {ESXI_BULK_MODES.map(([v, k]) => <option key={v} value={v}>{t(k)}</option>)}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('v2pVerify')}</label>
+                                        <select value={form.verify} onChange={e => set({verify: e.target.value})} className={input}>
+                                            {fullHere && <option value="full">{t('v2pVerifyFull')}</option>}
+                                            <option value="sample">{t('v2pVerifySample')}</option>
+                                            <option value="off">{t('v2pVerifyOff')}</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                {!fullHere && <p className="text-xs text-gray-500">{t('v2pVerifyFullNotHere')}</p>}
+                                <div className="flex flex-wrap items-center gap-4">
+                                    <label className="flex items-center gap-2 text-sm text-gray-400">
+                                        <input type="checkbox" checked={form.start_after} onChange={e => set({start_after: e.target.checked})} className="rounded" />
+                                        {t('xhmStartAfter')}
+                                    </label>
+                                    <label className="flex items-center gap-2 text-sm text-gray-400">
+                                        <input type="checkbox" checked={form.preserve_mac} onChange={e => set({preserve_mac: e.target.checked})} className="rounded" />
+                                        {t('esxiBulkPreserveMac')}
+                                    </label>
+                                    <label className="flex items-center gap-2 text-sm text-gray-400">
+                                        <input type="checkbox" checked={form.remove_source} onChange={e => set({remove_source: e.target.checked})} className="rounded" />
+                                        {t('esxiBulkRemoveSource')}
+                                    </label>
+                                </div>
+                                <label className="flex items-start gap-2 text-sm text-gray-400 bg-proxmox-dark border border-proxmox-border rounded-lg p-3 cursor-pointer">
+                                    <input type="checkbox" checked={form.wait_for_confirmation} onChange={e => set({wait_for_confirmation: e.target.checked})} className="rounded mt-0.5" />
+                                    <span>
+                                        <span className="text-gray-200">{t('waitForConfirmation')}</span>
+                                        <span className="block text-xs text-gray-500 mt-0.5">{t('esxiBulkWaitHint')}</span>
+                                    </span>
+                                </label>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('esxiBulkSshUser')}</label>
+                                        <input value={form.esxi_user} onChange={e => set({esxi_user: e.target.value.trim()})} placeholder="root" className={input} />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-500 mb-1 block">{t('esxiBulkPassword')}</label>
+                                        <input type="password" autoComplete="new-password" value={password} onChange={e => setPassword(e.target.value)} placeholder="ESXi password" className={input} />
+                                    </div>
+                                </div>
+                                <p className="text-xs text-gray-500">{t('esxiBulkPasswordHint')}</p>
+                                <div className="flex justify-end">
+                                    <button onClick={() => runCheck('guests')} disabled={!canCheck || checking}
+                                        className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
+                                        {checking ? t('esxiBulkChecking') : t('esxiBulkCheck')}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {step === 'guests' && (
+                            <div className="space-y-2">
+                                <p className="text-xs text-gray-500">{t('esxiBulkGuestsIntro')}</p>
+                                {guests.map(g => {
+                                    const it = checkItems[g.id] || {};
+                                    const r = rows[g.id];
+                                    const open = openGuest === g.id;
+                                    const own = Object.keys(mapsOf(g.id)).length > 0;
+                                    return (
+                                        <div key={g.id} className="border border-proxmox-border rounded-lg" data-esxi-bulk-guest={g.id}>
+                                            <button onClick={() => setOpenGuest(open ? null : g.id)} className="w-full flex items-center gap-2 p-2 text-left">
+                                                <Icons.ChevronRight className="w-3.5 h-3.5 text-gray-500" style={open ? {transform: 'rotate(90deg)'} : {}} />
+                                                <span className="text-sm text-white truncate min-w-0">{it.name || g.name || g.id}</span>
+                                                {own && <span className="text-xs text-emerald-400">{t('esxiBulkOwnChoices')}</span>}
+                                                <span className="ml-auto">{guestLine(g)}</span>
+                                            </button>
+                                            {open && (
+                                                <div className="p-2 pt-0 space-y-2">
+                                                    {(it.errors || []).map((e, i) => <div key={i} className="text-xs text-red-400">- {e}</div>)}
+                                                    {r && r.nics.length > 0 && (
+                                                        <div>
+                                                            <div className="text-xs text-gray-500 mb-1">{t('v2pNetworkPerNic')}</div>
+                                                            {r.nics.map((n, i) => {
+                                                                const src = (it.nics || [])[i] || {};
+                                                                return (
+                                                                    <div key={n.index} className="flex flex-wrap items-center gap-2 text-xs text-gray-300 py-1">
+                                                                        <span className="font-mono">net{n.index}</span>
+                                                                        <span className="text-gray-400 truncate min-w-0">{src.source_network || src.label || ''}</span>
+                                                                        <span className="flex-1" />
+                                                                        <select value={n.bridge} disabled={n.skip} onChange={e => setNic(g.id, i, {bridge: e.target.value})} className={small}>
+                                                                            <option value="">{t('v2pJobBridge')} ({form.network_bridge || 'vmbr0'})</option>
+                                                                            {bridges.map(b => <option key={b.name} value={b.name}>{b.name}{b.kind === 'bridge' ? '' : ` (${b.kind})`}</option>)}
+                                                                        </select>
+                                                                        <input type="number" min="1" max="4094" value={n.vlan} disabled={n.skip} onChange={e => setNic(g.id, i, {vlan: e.target.value})}
+                                                                            placeholder={form.net_vlan_tag ? String(form.net_vlan_tag) : 'VLAN'} className={`w-20 ${small}`} />
+                                                                        <label className="flex items-center gap-1 text-gray-400">
+                                                                            <input type="checkbox" checked={n.skip} onChange={e => setNic(g.id, i, {skip: e.target.checked})} className="rounded" />
+                                                                            {t('v2pSkip')}
+                                                                        </label>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                    {r && r.disks.length > 0 && (
+                                                        <div>
+                                                            <div className="text-xs text-gray-500 mb-1">{t('v2pStoragePerDisk')}</div>
+                                                            {r.disks.map((x, i) => {
+                                                                const src = (it.disks || [])[i] || {};
+                                                                return (
+                                                                    <div key={x.index} className="flex flex-wrap items-center gap-2 text-xs text-gray-300 py-1">
+                                                                        <span className="truncate min-w-0">{src.label || `Disk ${x.index + 1}`} <span className="text-gray-500">({esxiBulkGib(src.size_bytes, t)}{x.index === 0 ? `, ${t('v2pBootDisk')}` : ''})</span></span>
+                                                                        <span className="flex-1" />
+                                                                        <select value={x.storage} disabled={x.skip} onChange={e => setDisk(g.id, i, {storage: e.target.value})} className={small}>
+                                                                            <option value="">{t('v2pJobBridge')} ({form.target_storage})</option>
+                                                                            {storages.filter(s => s.storage !== form.target_storage).map(s => <option key={s.storage} value={s.storage}>{s.storage}</option>)}
+                                                                        </select>
+                                                                        {x.index !== 0 && (
+                                                                            <label className="flex items-center gap-1 text-gray-400">
+                                                                                <input type="checkbox" checked={x.skip} onChange={e => setDisk(g.id, i, {skip: e.target.checked})} className="rounded" />
+                                                                                {t('v2pSkip')}
+                                                                            </label>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                                <div className="flex justify-end">
+                                    <button onClick={() => { setStep('review'); if (!current) runCheck(); }} disabled={!canCheck || checking}
+                                        className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
+                                        {t('v2pReviewToStart')}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {step === 'review' && (
+                            <div className="space-y-3">
+                                <p className="text-xs text-gray-500">{t('esxiBulkReviewIntro')}</p>
+                                {checking && <div className="text-xs text-gray-400">{t('esxiBulkChecking')}</div>}
+                                {!checking && check && (
+                                    <div className="space-y-3">
+                                        {!current && (
+                                            <div className="p-2 rounded border border-yellow-500/30 bg-yellow-500/10 text-xs text-yellow-300">{t('v2pReviewStale')}</div>
+                                        )}
+                                        {check.ok ? (
+                                            <div className="p-2 rounded border border-emerald-500/40 text-xs text-emerald-400">{t('esxiBulkReviewOk')}</div>
+                                        ) : (
+                                            <div className="p-2 rounded border border-proxmox-border bg-red-500/10 text-xs text-red-300">
+                                                <div className="font-semibold mb-1">{t('esxiBulkReviewFailed')}</div>
+                                                {(check.errors || []).map((e, i) => <div key={i}>- {e}</div>)}
+                                            </div>
+                                        )}
+                                        {(check.warnings || []).length > 0 && (
+                                            <div className="p-2 rounded border border-yellow-500/30 text-xs text-yellow-300">
+                                                <div className="font-semibold mb-1">{t('v2pReviewWarnings')}</div>
+                                                {check.warnings.map((w, i) => <div key={i}>- {w}</div>)}
+                                            </div>
+                                        )}
+                                        <div className="divide-y divide-proxmox-border/50 border border-proxmox-border rounded-lg">
+                                            {(check.items || []).map(it => (
+                                                <div key={it.vm_id} className="p-2 text-xs" data-esxi-bulk-review={it.vm_id}>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-sm text-white truncate min-w-0">{it.name || (guests.find(g => g.id === it.vm_id) || {}).name || it.vm_id}</span>
+                                                        <span className={`px-1.5 py-0.5 rounded ${it.ok ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>{it.ok ? t('esxiBulkGuestOk') : t('esxiBulkGuestProblems').replace('{n}', (it.errors || []).length)}</span>
+                                                        {!it.ok && guests.length > 1 && (
+                                                            <button onClick={() => setGuests(gs => gs.filter(g => g.id !== it.vm_id))} className="ml-auto text-gray-400 hover:text-white underline">{t('esxiBulkLeaveOut')}</button>
+                                                        )}
+                                                    </div>
+                                                    {(it.errors || []).map((e, i) => <div key={i} className="text-red-300">- {e}</div>)}
+                                                    {(it.warnings || []).map((w, i) => <div key={i} className="text-yellow-300">- {w}</div>)}
+                                                    {(it.nics || []).length > 0 && (
+                                                        <div className="text-gray-400 mt-1">{t('v2pReviewNics')}: {it.nics.map(n => n.skip ? `${n.net} ${t('v2pSkipped')}` : `${n.net} ${n.bridge}${n.vlan ? ` tag ${n.vlan}` : ''}`).join(', ')}</div>
+                                                    )}
+                                                    {(it.disks || []).length > 0 && (
+                                                        <div className="text-gray-400">{t('v2pReviewDisks')}: {it.disks.map(x => `${x.label} ${esxiBulkGib(x.size_bytes, t)} ${x.skip ? t('v2pSkipped') : x.storage}`).join(', ')}</div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                        {(check.storages || []).length > 0 && (
+                                            <div>
+                                                <div className="text-xs text-gray-400 font-semibold mb-1">{t('esxiBulkStorageTogether')}</div>
+                                                {check.storages.map(st => (
+                                                    <div key={st.storage} className={`flex flex-wrap gap-2 text-xs ${st.ok ? 'text-gray-300' : 'text-red-300'}`}>
+                                                        <span className="font-mono">{st.storage}</span>
+                                                        <span className="text-gray-500">{t('esxiBulkGuestsCount').replace('{n}', st.guests)}</span>
+                                                        <span className="ml-auto">{esxiBulkGib(st.needed_bytes, t)} {t('v2pReviewNeeded')} / {esxiBulkGib(st.avail_bytes, t)} {t('v2pReviewFree')}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                                {!password && <p className="text-xs text-yellow-300">{t('esxiBulkNeedPassword')}</p>}
+                                <div className="flex items-center gap-2">
+                                    <button onClick={() => runCheck()} disabled={checking || !canCheck}
+                                        className="px-3 py-1.5 rounded-lg bg-proxmox-dark border border-proxmox-border text-gray-300 text-xs disabled:opacity-50">
+                                        {t('v2pReviewCheckAgain')}
+                                    </button>
+                                    <span className="flex-1" />
+                                    {!haReadOnly && (
+                                        <button onClick={start} disabled={starting || checking || !current || !check?.ok || !password}
+                                            className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50" data-esxi-bulk-start>
+                                            {starting ? t('esxiBulkStarting') : t('esxiBulkStart').replace('{n}', guests.length)}
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {step === 'run' && (
+                            <div className="space-y-3">
+                                <p className="text-xs text-gray-500">{t('esxiBulkRunIntro')}</p>
+                                {runError && <div className="text-xs text-red-400">{runError}</div>}
+                                {!run && !runError && <div className="text-xs text-gray-400">...</div>}
+                                {run && (
+                                    <div className="space-y-3">
+                                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                                            <span className={`px-2 py-0.5 rounded font-semibold ${run.state === 'running' ? 'bg-blue-500/20 text-blue-400' : run.state === 'done' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>{esxiBulkRunLabel(t, run.state)}</span>
+                                            {Object.entries(run.counts || {}).map(([s, n]) => (
+                                                <span key={s} className="text-gray-400">{esxiBulkStateLabel(t, s)}: {n}</span>
+                                            ))}
+                                            <span className="text-gray-500">{run.settings?.target_cluster}/{run.settings?.target_node}/{run.settings?.target_storage}</span>
+                                            {run.cancelled_by && <span className="text-yellow-300">{t('esxiBulkCancelledBy').replace('{user}', run.cancelled_by)}</span>}
+                                            {run.reason && <span className="text-red-300">{run.reason}</span>}
+                                        </div>
+                                        {run.state === 'running' && !run.holds_password && <p className="text-xs text-gray-500">{t('esxiBulkPasswordDropped')}</p>}
+                                        <div className="divide-y divide-proxmox-border/50 border border-proxmox-border rounded-lg">
+                                            {(run.items || []).map(it => (
+                                                <div key={it.vm_id} className="p-2 text-xs" data-esxi-bulk-item={it.vm_id}>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-sm text-white truncate min-w-0">{it.name || it.vm_id}</span>
+                                                        <span className={`px-1.5 py-0.5 rounded ${ESXI_BULK_ITEM_STYLE[it.state] || 'bg-proxmox-dark text-gray-400'}`}>{esxiBulkStateLabel(t, it.state)}</span>
+                                                        {it.state === 'migrating' && it.phase && <span className="text-gray-400">{it.phase === 'awaiting_confirmation' ? t('phaseAwaitingConfirmation') : it.phase}</span>}
+                                                        {it.migration_id && <span className="ml-auto font-mono text-gray-500">{t('esxiBulkMigrationId').replace('{id}', it.migration_id)}{it.proxmox_vmid ? ` / VM ${it.proxmox_vmid}` : ''}</span>}
+                                                    </div>
+                                                    {it.state === 'migrating' && (
+                                                        <div className="flex items-center gap-2 mt-1">
+                                                            <div className="flex-1 h-1.5 bg-proxmox-dark rounded-full overflow-hidden">
+                                                                <div className="h-full rounded-full bg-emerald-400 transition-all" style={{width: `${it.progress || 0}%`}} />
+                                                            </div>
+                                                            <span className="text-gray-500 w-8 text-right">{it.progress || 0}%</span>
+                                                        </div>
+                                                    )}
+                                                    {it.note && <div className={it.state === 'failed' ? 'text-red-300 mt-1' : 'text-gray-400 mt-1'}>{it.note}</div>}
+                                                    {it.state === 'migrating' && it.phase === 'awaiting_confirmation' && !haReadOnly && (
+                                                        <div className="flex items-center gap-2 mt-2">
+                                                            <button onClick={() => cutover(it.migration_id, 'confirm-cutover')} className="px-2 py-1 rounded bg-emerald-500/20 text-emerald-400 text-xs">{t('commitSwitchover')}</button>
+                                                            <button onClick={() => cutover(it.migration_id, 'cancel-cutover')} className="px-2 py-1 rounded bg-red-500/10 text-red-300 text-xs">{t('cancelMigration')}</button>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                        {run.may_cancel && !haReadOnly && (
+                                            <div className="flex items-center gap-3">
+                                                <button onClick={cancelRun} className="px-3 py-1.5 rounded-lg bg-red-500/10 text-red-300 text-xs font-medium" data-esxi-bulk-cancel>{t('esxiBulkCancelRest')}</button>
+                                                <span className="text-xs text-gray-500">{t('esxiBulkCancelHint')}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // the bulk runs of one ESXi server, on its Tasks tab
+        function EsxiBulkRuns({ serverId, authFetch, t, onOpen }) {
+            const [runs, setRuns] = React.useState(null);
+            React.useEffect(() => {
+                let live = true, timer = null;
+                const load = async () => {
+                    const r = await authFetch(`${API_URL}/vmware/bulk-migrate?vmware_id=${encodeURIComponent(serverId)}`);
+                    const d = r && r.ok ? await r.json().catch(() => null) : null;
+                    if (!live) return;
+                    if (d && Array.isArray(d.runs)) setRuns(d.runs);
+                    timer = setTimeout(load, 30000);
+                };
+                load();
+                return () => { live = false; clearTimeout(timer); };
+            }, [serverId]);
+            if (!runs || !runs.length) return null;
+            return (
+                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden" data-esxi-bulk-runs>
+                    <div className="p-4 border-b border-proxmox-border">
+                        <h3 className="text-sm font-semibold text-gray-400 uppercase flex items-center gap-2">
+                            <Icons.FolderInput className="w-4 h-4 text-emerald-400" /> {t('esxiBulkRuns')} ({runs.length})
+                        </h3>
+                    </div>
+                    <div className="divide-y divide-proxmox-border/50">
+                        {runs.map(run => (
+                            <button key={run.id} onClick={() => onOpen(run.id)} className="w-full p-3 flex flex-wrap items-center gap-3 text-left hover:bg-proxmox-hover/30">
+                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${run.state === 'running' ? 'bg-blue-500/20 text-blue-400' : run.state === 'done' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>{esxiBulkRunLabel(t, run.state)}</span>
+                                <span className="text-sm text-white">{t('esxiBulkGuestsCount').replace('{n}', run.total)}</span>
+                                <span className="text-xs text-gray-500">{run.settings?.target_cluster}/{run.settings?.target_node}</span>
+                                <span className="text-xs text-gray-400">{Object.entries(run.counts || {}).map(([s, n]) => `${esxiBulkStateLabel(t, s)}: ${n}`).join(', ')}</span>
+                                <span className="ml-auto text-xs text-gray-500">{run.user} {new Date(run.created * 1000).toLocaleString()}</span>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
         // NS: Mar 2026 - Topology View redesign (#142)
         // SVG bezier connectors, donut gauges, card elevation
         // MK: added diagram view with pan/zoom + export capability
-        function TopologyView({ clusterName, nodes, resources, pbsServers, isCorporate, onVmClick, clusterId, multiCluster }) {
+        function TopologyView({ clusterName, nodes, resources, pbsServers, isCorporate, onVmClick, clusterId, multiCluster, onNodeClick, onClusterClick, onGuestOpen }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
+            const { isCorpRedesigned } = useLayout();
 
             // NS: Snapshot props on mount — topology layout stays frozen until component re-mounts
             // Prevents SSE metric updates from causing constant re-layout/jumping
@@ -2148,6 +2832,7 @@
             // NS: cluster-wide affinity rules (fetched lazily — only when diagram is open)
             const [affinityRules, setAffinityRules] = useState([]);
             const [showAffinity, setShowAffinity] = useState(false);
+            const [affinityUnread, setAffinityUnread] = useState(false);
             // NS May 2026 — storage / network tier toggles. Default OFF so diagram
             // stays uncluttered for users who don't care about infra layers.
             const [showStorage, setShowStorage] = useState(() => {
@@ -2899,6 +3584,22 @@
             const vbX = (effSvgW - vbW) / 2 - pan.x / zoom;
             const vbY = (effSvgH - vbH) / 2 - pan.y / zoom;
 
+            // LW Oct 2026 - Corporate Redesigned draws the same snapshot and answers its own way
+            if (isCorpRedesigned) {
+                return (
+                    <CrTopology multi={isMultiCluster || Array.isArray(multiCluster)} clusterId={clusterId} clusterName={clusterName}
+                        frozenNodes={frozenNodes} frozenResources={frozenResources} frozenPbs={frozenPbs}
+                        frozenMultiCluster={frozenMultiCluster} revision={topoRevision} onRefresh={refreshTopology}
+                        networkData={networkData} storageData={storageData} buildStorages={buildStorageList}
+                        vmStorages={vmStoragesAll} vmBridges={vmBridgesAll}
+                        showStorage={showStorage} onToggleStorage={toggleStorageTier}
+                        showNetwork={showNetwork} onToggleNetwork={toggleNetworkTier}
+                        affinityRules={affinityRules} setAffinityRules={setAffinityRules}
+                        showAffinity={showAffinity} setShowAffinity={setShowAffinity}
+                        onVmClick={onGuestOpen || onVmClick} onNodeClick={onNodeClick} onClusterClick={onClusterClick} />
+                );
+            }
+
             return (
                 <div className={isCorporate
                     ? 'corp-topo-frame'
@@ -3051,11 +3752,19 @@
                                 <button
                                     onClick={() => {
                                         // lazy-fetch affinity rules the first time the user opens the toggle
+                                        // no authFetch in this view, the click used to throw before it toggled
                                         if (!showAffinity && affinityRules.length === 0 && clusterId) {
-                                            authFetch(`${API_URL}/clusters/${clusterId}/affinity-rules`)
-                                                .then(r => r && r.ok ? r.json() : null)
-                                                .then(d => setAffinityRules(Array.isArray(d) ? d : (d?.rules || [])))
-                                                .catch(() => {});
+                                            fetch(`${API_URL}/clusters/${clusterId}/affinity-rules`, {
+                                                headers: getAuthHeaders(), credentials: 'include'
+                                            })
+                                                .then(r => r.ok ? r.json() : null)
+                                                .then(d => {
+                                                    const rules = Array.isArray(d) ? d : d?.rules;
+                                                    // a refused or failed read is not "no rules"
+                                                    setAffinityUnread(!Array.isArray(rules) || !!d?.error);
+                                                    setAffinityRules(Array.isArray(rules) ? rules : []);
+                                                })
+                                                .catch(() => setAffinityUnread(true));
                                         }
                                         setShowAffinity(v => !v);
                                     }}
@@ -3068,6 +3777,11 @@
                                     title={t('toggleAffinityEdges') || 'Show / hide affinity rule connections'}>
                                     {showAffinity ? '●' : '○'} {t('affinity') || 'Affinity'}
                                 </button>
+                                {showAffinity && affinityUnread && (
+                                    <span role="status" data-affinity-unread="1" style={{fontSize: 11, color: '#f7b428'}}>
+                                        {t('affinityRulesUnread')}
+                                    </span>
+                                )}
                                 <button
                                     onClick={toggleLegend}
                                     style={{
@@ -4357,7 +5071,7 @@
                                     )}
                                     <div className="grid grid-cols-2 gap-2">
                                         <div>
-                                            <label className="text-xs text-gray-400 block mb-1">{t('snapKeepCount') || 'Keep last N'}</label>
+                                            <label className="text-xs text-gray-400 block mb-1">{t('snapKeepCount') || 'Keep last N (0=off)'}</label>
                                             <input type="number" min="0" value={editing.retention_count}
                                                 onChange={e => setEditing({...editing, retention_count: e.target.value})}
                                                 className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white" />
@@ -4369,6 +5083,10 @@
                                                 className="w-full px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-sm text-white" />
                                         </div>
                                     </div>
+                                    {/* LW Nov 2026 - save sends a blank or 0 as 0, and 0 and 0 prune nothing */}
+                                    {!editing.prune_only && !(parseInt(editing.retention_count) > 0) && !(parseInt(editing.retention_days) > 0) && (
+                                        <p className="text-xs text-yellow-400" data-snap-keep-all="">{t('snapKeepAll') || 'Both are 0: this policy keeps every snapshot it takes and deletes none.'}</p>
+                                    )}
                                     <label className="flex items-center gap-2 text-sm text-gray-300">
                                         <input type="checkbox" checked={!!editing.include_ram}
                                             onChange={e => setEditing({...editing, include_ram: e.target.checked})} />
@@ -4631,10 +5349,13 @@
 
         // MK May 2026 — Network Topology Visualization. Plain SVG, no D3 dep.
         // Three rows: cluster → nodes → bridges → VMs (grouped under bridge).
-        function TopologyTab({ clusterId, authFetch, addToast, t }) {
+        function TopologyTab({ clusterId, authFetch, addToast, t, cluster, nav }) {
+            const { isCorpRedesigned } = useLayout();
             const [graph, setGraph] = React.useState(null);
             const [loading, setLoading] = React.useState(false);
             const [highlight, setHighlight] = React.useState(null);
+            // LW Nov 2026 - whether the last read came back; Corporate Redesigned says so, classic draws what it has
+            const [readErr, setReadErr] = React.useState(null);
 
             const refresh = async () => {
                 if (!clusterId) return;
@@ -4642,6 +5363,7 @@
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/topology`).then(x => x?.json()).catch(() => null);
                     if (r && r.nodes) setGraph(r);
+                    setReadErr(r && r.nodes ? null : { why: (r && typeof r.error === 'string' && r.error) || '' });
                 } finally { setLoading(false); }
             };
             React.useEffect(() => { refresh(); /* eslint-disable-line */ }, [clusterId]);
@@ -4826,6 +5548,16 @@
                     (l.target === highlight && l.source === id)
                 );
             };
+
+            // LW Nov 2026 - Corporate Redesigned draws the same read as node lanes and an interface table (cr_modules.js)
+            if (isCorpRedesigned) {
+                const own = graph && (!graph.cluster || !graph.cluster.id || graph.cluster.id === clusterId) ? graph : null;
+                return (
+                    <CrBoundary key={clusterId} id="net-topology">
+                        <CrNetTopo cluster={cluster || { id: clusterId }} graph={own} loading={loading} readErr={readErr} onRefresh={refresh} nav={nav} />
+                    </CrBoundary>
+                );
+            }
 
             return (
                 <div className="space-y-4">
@@ -5017,9 +5749,13 @@
 
         // MK May 2026 — Power & Carbon Tracking. Same shape as Cost Dashboard
         // (rates editor + summary + per-VM table) but in kWh / kg CO₂.
-        function PowerCarbonTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin }) {
+        function PowerCarbonTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin, cluster, nav }) {
             // the admin buttons here change things: on a standby they are the active's (#625)
             const { haReadOnly } = useAuth();
+            const { isCorpRedesigned } = useLayout();
+            // LW Nov 2026 - whether the last summary read came back; Corporate Redesigned says so, classic keeps the last figures
+            const [readErr, setReadErr] = React.useState(null);
+            const [rowsErr, setRowsErr] = React.useState(null);
             const canAct = isAdmin && !haReadOnly;
             const [summary, setSummary] = React.useState(null);
             const [rows, setRows] = React.useState([]);
@@ -5046,7 +5782,10 @@
                     ]);
                     if (mine !== asked.current) return;
                     if (s && !s.error) setSummary(s);
+                    setReadErr(s && !s.error ? null : { why: (s && typeof s.error === 'string' && s.error) || '' });
                     if (p && p.rows) setRows(p.rows);
+                    // LW Nov 2026 - the per guest read on its own: Corporate Redesigned says it failed, not "no VMs"
+                    setRowsErr(p && Array.isArray(p.rows) ? null : { why: (p && typeof p.error === 'string' && p.error) || '' });
                 } finally { if (mine === asked.current) setLoading(false); }
             };
             React.useEffect(() => { refresh(); /* eslint-disable-line */ }, [clusterId, days]);
@@ -5314,6 +6053,21 @@
                     addToast('PDF export failed', 'error');
                 }
             };
+
+            // LW Nov 2026 - Corporate Redesigned draws the same reads, rates and host profiles (cr_modules.js); every
+            // write is the handler above
+            if (isCorpRedesigned) {
+                const own = summary && (!summary.cluster_id || summary.cluster_id === clusterId) ? summary : null;
+                return (
+                    <CrBoundary key={clusterId} id="power">
+                        <CrPower cluster={cluster || { id: clusterId, name: clusterName }} summary={own} rows={own ? rows : []} loading={loading} readErr={readErr} rowsErr={rowsErr}
+                            days={days} onDays={setDays} canAct={canAct} onRefresh={refresh} onRates={openRates} rateForm={rateForm} setRateForm={setRateForm}
+                            showRates={showRates} onCloseRates={() => setShowRates(false)} onSaveRates={saveRates} savingRates={savingRates}
+                            onHosts={openHosts} hostForm={hostForm} setHost={setHost} onCloseHosts={() => setHostForm(null)} onSaveHosts={saveHosts}
+                            savingHosts={savingHosts} onCsv={exportCsv} onPdf={exportPdf} nav={nav} />
+                    </CrBoundary>
+                );
+            }
 
             return (
                 <div className="space-y-4">
@@ -5634,9 +6388,13 @@
             );
         }
 
-        function CostDashboardTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin }) {
+        function CostDashboardTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin, cluster, nav }) {
             // the admin buttons here change things: on a standby they are the active's (#625)
             const { haReadOnly } = useAuth();
+            const { isCorpRedesigned } = useLayout();
+            // LW Nov 2026 - whether the last summary read came back; Corporate Redesigned says so, classic keeps the last figures
+            const [readErr, setReadErr] = React.useState(null);
+            const [rowsErr, setRowsErr] = React.useState(null);
             const canAct = isAdmin && !haReadOnly;
             const [summary, setSummary] = React.useState(null);
             const [rows, setRows] = React.useState([]);
@@ -5659,7 +6417,10 @@
                     ]);
                     if (mine !== asked.current) return;
                     if (s && !s.error) setSummary(s);
+                    setReadErr(s && !s.error ? null : { why: (s && typeof s.error === 'string' && s.error) || '' });
                     if (p && p.rows) setRows(p.rows);
+                    // LW Nov 2026 - the per guest read on its own: Corporate Redesigned says it failed, not "no VMs"
+                    setRowsErr(p && Array.isArray(p.rows) ? null : { why: (p && typeof p.error === 'string' && p.error) || '' });
                 } finally { if (mine === asked.current) setLoading(false); }
             };
 
@@ -5849,6 +6610,19 @@
                     addToast('PDF export failed', 'error');
                 }
             };
+
+            // LW Nov 2026 - Corporate Redesigned draws the same reads and rates (cr_modules.js); the write is saveRates above
+            if (isCorpRedesigned) {
+                const own = summary && (!summary.cluster_id || summary.cluster_id === clusterId) ? summary : null;
+                return (
+                    <CrBoundary key={clusterId} id="costs">
+                        <CrCosts cluster={cluster || { id: clusterId, name: clusterName }} summary={own} rows={own ? rows : []} loading={loading} readErr={readErr} rowsErr={rowsErr}
+                            days={days} onDays={setDays} canAct={canAct} onRefresh={refresh} onRates={openRates} rateForm={rateForm} setRateForm={setRateForm}
+                            showRates={showRates} onCloseRates={() => setShowRates(false)} onSaveRates={saveRates} savingRates={savingRates}
+                            onCsv={exportCsv} onPdf={exportPdf} nav={nav} />
+                    </CrBoundary>
+                );
+            }
 
             return (
                 <div className="space-y-4">
@@ -6358,10 +7132,12 @@
         // firewall, ha_rules, backup_jobs, access).
         // Admin can rescan, set baseline, acknowledge/promote events.
         const DRIFT_KINDS = ['vm_config', 'storage', 'network', 'cluster_options', 'firewall', 'ha_rules', 'backup_jobs', 'access'];
-        function DriftTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin }) {
+        function DriftTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin, crNav, crFocus, onCrFocus }) {
             // the admin buttons here change things: a standby hands them to the active (#625)
             const { haReadOnly } = useAuth();
             const canAct = isAdmin && !haReadOnly;
+            // LW Oct 2026 - Corporate Redesigned draws its own page (CrDrift) with its own reads
+            const { isCorpRedesigned } = useLayout();
             const [status, setStatus] = React.useState(null);
             const [events, setEvents] = React.useState([]);
             const [filter, setFilter] = React.useState('open');
@@ -6376,9 +7152,33 @@
             const [catFilter, setCatFilter] = React.useState('');
             const [policy, setPolicy] = React.useState([]);
             const [allowDraft, setAllowDraft] = React.useState({});
+            // NS Nov 2026 - how the last read of status and findings went: null before the first
+            // answer, then { ok, error }. A read that failed is no empty list
+            const [readState, setReadState] = React.useState(null);
+            // the same for the policy checks, which have their own read
+            const [policyRead, setPolicyRead] = React.useState(null);
+            // every refresh takes a number; an answer whose number is no longer the latest (another
+            // cluster, another filter, a second click) is dropped instead of drawn over a newer one
+            const readSeq = React.useRef(0);
+            const clusterNow = React.useRef(clusterId);
+            clusterNow.current = clusterId;
+            const shownFor = React.useRef(clusterId);
+
+            // another cluster picked: the last one's counts, rows and checks go before the paint,
+            // and whatever of it is still on the way is dropped
+            React.useLayoutEffect(() => {
+                if (shownFor.current === clusterId) return;
+                shownFor.current = clusterId;
+                readSeq.current++;
+                setStatus(null); setEvents([]); setPolicy([]); setPolicyRead(null);
+                setReadState(null); setExpanded({}); setAllowDraft({}); setBusy(false);
+            }, [clusterId]);
 
             const refresh = async () => {
-                if (!clusterId) return;
+                // a handler of the last cluster that ends after the switch asks for nothing
+                if (!clusterId || isCorpRedesigned || clusterNow.current !== clusterId) return;
+                const mine = ++readSeq.current;
+                const stale = () => mine !== readSeq.current;
                 setBusy(true);
                 try {
                     const q = `status=${filter}&limit=200` + (kindFilter ? `&kind=${kindFilter}` : '') + (catFilter ? `&category=${catFilter}` : '');
@@ -6387,23 +7187,33 @@
                         authFetch(`${API_URL}/clusters/${clusterId}/drift/events?${q}`),
                         authFetch(`${API_URL}/clusters/${clusterId}/drift/policy`),
                     ]);
+                    if (stale()) return;
                     const away = (await haLeaderAway(sr)) || (await haLeaderAway(er));
+                    if (stale()) return;
                     setLeaderAway(away);
                     if (away) { setStatus(null); setEvents([]); setPolicy([]); return; }
                     const s = await sr?.json().catch(() => null);
                     const e = await er?.json().catch(() => null);
                     const pj = await pr?.json().catch(() => null);
-                    if (s && !s.error) setStatus(s);
-                    if (e && e.events) setEvents(e.events);
-                    if (pj && pj.checks) {
-                        setPolicy(pj.checks);
+                    if (stale()) return;
+                    // what failed is dropped, so neither old counts nor old rows stand in for it
+                    const statusOk = !!(sr && sr.ok && s && !s.error);
+                    const eventsOk = !!(er && er.ok && e && Array.isArray(e.events));
+                    const policyOk = !!(pr && pr.ok && pj && Array.isArray(pj.checks));
+                    const why = (j) => (j && typeof j.error === 'string' ? j.error : '');
+                    setStatus(statusOk ? s : null);
+                    setEvents(eventsOk ? e.events : []);
+                    setReadState({ ok: statusOk && eventsOk, error: (!eventsOk && why(e)) || (!statusOk && why(s)) || '' });
+                    setPolicy(policyOk ? pj.checks : []);
+                    setPolicyRead({ ok: policyOk, error: policyOk ? '' : why(pj) });
+                    if (policyOk) {
                         setAllowDraft(d => {
                             const next = { ...d };
                             pj.checks.forEach(c => { if (c.allow && next[c.id] === undefined) next[c.id] = c.allow.join(', '); });
                             return next;
                         });
                     }
-                } finally { setBusy(false); }
+                } finally { if (!stale()) setBusy(false); }
             };
 
             // again when forwarding comes or goes: the list is the leader's then, or not
@@ -6423,7 +7233,10 @@
                     } else {
                         addToast(t('driftPolicySaveFailed') || 'Policy not saved', 'error');
                     }
+                    // LW Oct 2026 - the answer, for a caller that shows what the server said
+                    return r;
                 } catch (e) { addToast(t('driftPolicySaveFailed') || 'Policy not saved', 'error'); }
+                return null;
             };
 
             const markIncident = async (ev, flag) => {
@@ -6452,7 +7265,19 @@
                         body: JSON.stringify({ seed: status && status.baselines === 0 }),
                     });
                     if (r?.ok) {
-                        const j = await r.json();
+                        const j = await r.json().catch(() => ({}));
+                        // a skipped scan answers 200 as well (cluster offline, nothing answered, one
+                        // already running): it compared nothing, so it is no "Scan complete"
+                        if (j.ok !== true) {
+                            const why = j.error === 'cluster offline' ? (t('clusterOffline') || 'Cluster unreachable')
+                                : j.error === 'cluster did not answer' ? (t('driftSkipNoAnswer') || 'Cluster did not answer')
+                                : j.error === 'a scan of this cluster is already running' ? (t('driftScanRunning') || 'A scan of this cluster is already running')
+                                : (j.error || '');
+                            const head = j.status === 'skipped' ? (t('driftScanSkipped') || 'Scan skipped, nothing was compared')
+                                : (t('driftScanFailed') || 'Scan failed');
+                            addToast(why ? `${head}: ${why}` : head, j.status === 'skipped' ? 'warning' : 'error');
+                            return;
+                        }
                         const m = j.seeded_baselines > 0
                             ? `${t('driftSeeded') || 'baseline seeded'}: ${j.seeded_baselines}`
                             : `${j.events_count || 0} ${t('driftEvents') || 'events'}`;
@@ -6551,6 +7376,16 @@
                 return String(v).slice(0, 200);
             };
 
+            if (isCorpRedesigned) {
+                return (
+                    <CrBoundary id="drift">
+                        <CrDrift clusterId={clusterId} clusterName={clusterName} authFetch={authFetch} addToast={addToast} t={t}
+                            savePolicy={savePolicy} kindLabel={kindLabel} catLabel={catLabel} nav={crNav}
+                            focus={crFocus} onFocusDone={onCrFocus} />
+                    </CrBoundary>
+                );
+            }
+
             return (
                 <div className="space-y-4">
                     <div className="flex items-center justify-between flex-wrap gap-2">
@@ -6560,7 +7395,7 @@
                                 {t('driftDetection') || 'Config Drift Detection'}
                             </h2>
                             <p className="text-xs text-gray-500 mt-0.5">
-                                {t('driftDetectionDesc') || 'Snapshots cluster config nightly. Flags any change vs the admin-set baseline.'}
+                                {t('driftDetectionDesc') || 'Snapshots cluster config every 6 hours. Flags any change vs the admin-set baseline.'}
                             </p>
                         </div>
                         <div className="flex gap-2">
@@ -6698,16 +7533,46 @@
                         </div>
                     )}
 
+                    {!leaderAway && policyRead && !policyRead.ok && (
+                        <div data-drift-policy-read-failed className="bg-proxmox-card border border-red-500/30 rounded-xl p-3 text-sm">
+                            <div className="text-red-400">{t('driftPolicyReadFailed') || 'The policy checks could not be read.'}</div>
+                            {policyRead.error && <div className="text-xs text-gray-500 mt-1">{policyRead.error}</div>}
+                        </div>
+                    )}
+
+                    {!leaderAway && readState && !readState.ok && (
+                        <div data-drift-read-failed className="bg-proxmox-card border border-red-500/30 rounded-xl p-6 text-center text-sm">
+                            <div className="text-red-400">{t('driftReadFailed') || 'The drift status or events could not be read, so this view does not know whether the cluster matches its baseline.'}</div>
+                            {readState.error && <div className="text-xs text-gray-500 mt-1">{readState.error}</div>}
+                            <button onClick={refresh} disabled={busy}
+                                className="mt-3 px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white disabled:opacity-50">
+                                {t('retry') || 'Retry'}
+                            </button>
+                        </div>
+                    )}
+
                     {leaderAway ? (
                         <div data-ha-leader-away="drift" className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-400">
                             {t('pgHaLeaderAwayView')}
                         </div>
-                    ) : events.length === 0 ? (
-                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-500">
-                            {filter === 'open' ? (t('driftNoOpen') || 'No open drift events. Cluster matches baseline.')
-                                              : (t('driftNoEvents') || 'No events for this filter.')}
+                    ) : events.length === 0 ? (!readState ? (
+                        <div data-drift-empty="loading" className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-500">
+                            {t('loading') || 'Loading...'}
                         </div>
-                    ) : (
+                    ) : readState.ok && status && (
+                        // "matches baseline" only for the whole open list, every kind compared.
+                        // status too: the setters above render one by one outside an event.
+                        // The kinds live in memory: after a start nothing was compared until the
+                        // first scan, which is its own case and not "some kinds were not"
+                        <div data-drift-empty className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-500">
+                            {filter !== 'open' || kindFilter || catFilter ? (t('driftNoEvents') || 'No events for this filter.')
+                                : !status.last_scan_at || !Object.keys(status.kinds || {}).length
+                                    ? (t('driftNoScanYet') || 'No scan has run since this server started. Use Scan now.')
+                                : status.baselines > 0 && DRIFT_KINDS.every(k => (status.kinds || {})[k] === 'checked')
+                                    ? (t('driftNoOpen') || 'No open drift events. Cluster matches baseline.')
+                                    : (t('driftNoOpenUnchecked') || 'No open drift events, but not every kind was compared with a baseline.')}
+                        </div>
+                    )) : (
                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl divide-y divide-proxmox-border/40">
                             {events.map(ev => {
                                 const open = expanded[ev.id];
@@ -7225,11 +8090,21 @@
                 default: return e.title || e.kind;
             }
         }
+        // what Corporate Redesigned's table (CrTimeline, cr_nodemisc.js) needs to say the same as this list
+        const TL_SHARED = Object.freeze({ kinds: TL_KINDS, ranges: TL_RANGES, views: TL_VIEWS, text: tlText, fill: tlFill });
 
-        function TimelineView({ clusterId, node, vmid, authFetch, t, compact, onOpenGuest, onOpenNode, onOpenTab }) {
+        function TimelineView({ clusterId, node, vmid, authFetch, t, compact, onOpenGuest, onOpenNode, onOpenTab, pick }) {
+            const { isCorpRedesigned } = useLayout();
             const [hours, setHours] = React.useState(24);
-            const [kind, setKind] = React.useState('');
-            const [severity, setSeverity] = React.useState('');
+            // LW Nov 2026 - pick: a kind and a severity to start with ({kind, severity, seq}), taken again when seq changes
+            const [kind, setKind] = React.useState((pick && pick.kind) || '');
+            const [severity, setSeverity] = React.useState((pick && pick.severity) || '');
+            const pickSeq = pick ? pick.seq : null;
+            React.useEffect(() => {
+                if (pickSeq == null) return;
+                setKind(pick.kind || '');
+                setSeverity(pick.severity || '');
+            }, [pickSeq]);
             const [rows, setRows] = React.useState([]);
             const [next, setNext] = React.useState(null);
             const [sources, setSources] = React.useState({});
@@ -7284,6 +8159,21 @@
             }, [load]);
 
             if (!clusterId) return null;
+            const evidence = !node && vmid == null ? (
+                <TimelineEvidence clusterId={clusterId} authFetch={authFetch} t={t}
+                    getQuery={() => ({ from: from.current || new Date(Date.now() - hours * 3600 * 1000).toISOString(), kinds: kind, severity })} />
+            ) : null;
+            // LW Nov 2026 - Corporate Redesigned draws the same reads, filters and pages as a table (cr_nodemisc.js)
+            if (isCorpRedesigned) {
+                return (
+                    <CrTimeline scope={vmid != null ? 'guest' : node ? 'node' : 'cluster'} node={node} hours={hours} kind={kind}
+                        severity={severity} onHours={setHours} onKind={setKind} onSeverity={setSeverity} rows={rows} next={next}
+                        sources={sources} linkWindow={linkWindow} loaded={loaded} failed={failed} loading={loading} leaderAway={leaderAway}
+                        open={open} onToggle={id => setOpen(o => ({ ...o, [id]: !o[id] }))} onRefresh={() => load(null)}
+                        onMore={b => load(b)} compact={compact} evidence={evidence} onOpenGuest={onOpenGuest}
+                        onOpenNode={onOpenNode} onOpenTab={onOpenTab} tl={TL_SHARED} />
+                );
+            }
             const selectCls = 'bg-proxmox-dark border border-proxmox-border rounded-lg px-2 py-1 text-xs text-gray-300';
             const when = (ts) => { const d = new Date(ts); return isNaN(d) ? (ts || '') : d.toLocaleString(); };
             const before = (s) => s >= 60 ? tlFill(t, 'tlMinBefore', { m: Math.round(s / 60) }) : tlFill(t, 'tlSecBefore', { s });
@@ -7326,10 +8216,7 @@
                             </button>
                         </div>
                     </div>
-                    {!node && vmid == null && (
-                        <TimelineEvidence clusterId={clusterId} authFetch={authFetch} t={t}
-                            getQuery={() => ({ from: from.current || new Date(Date.now() - hours * 3600 * 1000).toISOString(), kinds: kind, severity })} />
-                    )}
+                    {evidence}
                     {leaderAway && <div className="text-xs text-yellow-400" data-tl-leader-away>{t('pgHaLeaderAwayView')}</div>}
                     {failed && <div className="text-xs text-red-400" data-tl-error>{t('tlLoadError')}</div>}
                     {!loaded && !failed && !leaderAway && <div className="text-xs text-gray-500">{t('loading')}...</div>}
@@ -7366,7 +8253,7 @@
                                                     className="flex items-center gap-1 text-blue-400 hover:text-blue-300"><Icons.Monitor />{guestLabel(e)}</button>
                                             ) : <span className="flex items-center gap-1 text-gray-400"><Icons.Monitor />{guestLabel(e)}</span>)}
                                             {view && (
-                                                <button type="button" onClick={() => onOpenTab(view)} data-tl-open-view={view}
+                                                <button type="button" onClick={() => onOpenTab(view, e)} data-tl-open-view={view}
                                                     className="flex items-center gap-1 text-blue-400 hover:text-blue-300"><Icons.ExternalLink />{t('tlOpenView')}</button>
                                             )}
                                         </div>
@@ -7412,6 +8299,19 @@
         // Topbar bell button: shows unread count + popover (enable/disable, test,
         // recent inbox). Subscribes via SW + VAPID, persists subscription on the
         // server. Wake-up pushes hit the SW, which fetches /api/push/inbox.
+        // JB Nov 2026 - the blur of the Modern header makes the header what fixed means, so a catcher inside it ends at its
+        // lower edge. One stays for the header, one on the body takes the page: 49 is under the header, over the page.
+        // Corporate has no blur, its catcher covers the window already.
+        function HeaderDropdownCatcher({ onClose }) {
+            const blurred = document.body.getAttribute('data-layout') !== 'corporate';
+            return (
+                <>
+                    <div className="fixed inset-0 z-40" onClick={onClose} />
+                    {blurred && ReactDOM.createPortal(<div className="fixed inset-0" style={{ zIndex: 49 }} onClick={onClose} />, document.body)}
+                </>
+            );
+        }
+
         function PushBellButton({ authFetch, addToast, t }) {
             // clearing the inbox goes through the active like any change (#625)
             const { haReadOnly } = useAuth();
@@ -7564,7 +8464,7 @@
 
                     {open && (
                         <>
-                            <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+                            <HeaderDropdownCatcher onClose={() => setOpen(false)} />
                             <div className="absolute right-0 top-full mt-2 w-80 bg-proxmox-card border border-proxmox-border rounded-xl shadow-xl z-50 overflow-hidden">
                                 <div className="px-3 py-2 border-b border-proxmox-border flex items-center justify-between">
                                     <div className="text-sm font-semibold text-white">{t('notifications') || 'Notifications'}</div>
@@ -9953,12 +10853,436 @@
             );
         }
 
+        // LW Oct 2026 - what the Harden PVE Node tab says about each control, by source. One
+        // place for the tab, its PDF and the custom profile editor
+        function hardeningControlInfo(t) {
+            // CIS Debian 12 Benchmark v1.1.0 item refs (Proxmox is Debian-based). NS 2026-06-15: web-verified + renumbered off the old Distribution-Independent/Debian-10 scheme.
+            const cisControls = {
+                fs_modules: { ref: '1.1.1.1-1.1.1.5', title: t('cisFs') || 'Disable Unused Filesystem Modules', desc: t('cisFsDesc') || 'Prevents loading of rarely-used filesystem kernel modules (cramfs, freevxfs, hfs, hfsplus, jffs2)', impact: t('cisFsImpact') || 'None - VMs and containers unaffected' },
+                core_dumps: { ref: '1.5.3', title: t('cisCoreDumps') || 'Disable Core Dumps', desc: t('cisCoreDumpsDesc') || 'Prevents the system from creating memory dumps when programs crash that can contain passwords and keys', impact: t('cisCoreDumpsImpact') || 'None - VM crashes still logged normally' },
+                mount_options: { ref: '1.1.2.1-1.1.2.5', title: t('cisMounts') || 'Mount Options Hardening', desc: t('cisMountsDesc') || 'Applies nodev, nosuid, noexec to /tmp, /var/tmp, /dev/shm to prevent privilege escalation', impact: t('cisMountsImpact') || 'No impact on cluster operations or VMs' },
+                cron_hardening: { ref: '2.4.1.2-2.4.2.1', title: t('cisCron') || 'Cron/At Access Hardening', desc: t('cisCronDesc') || 'Restricts job scheduler access to root only, preventing persistence attacks', impact: t('cisCronImpact') || 'None - PVE scheduled tasks run as root' },
+                net_protocols: { ref: '3.2.1-3.2.4', title: t('cisNet') || 'Disable Unused Network Protocols', desc: t('cisNetDesc') || 'Prevents loading of rarely-used network protocols (dccp, sctp, rds, tipc)', impact: t('cisNetImpact') || 'None - not used by Proxmox' },
+                journald: { ref: '6.2.1.1.5-6.2.1.1.6', title: t('cisJournald') || 'Journald Hardening', desc: t('cisJournaldDesc') || 'Configures persistent, compressed logging that survives reboots for forensic analysis', impact: t('cisJournaldImpact') || 'Better forensic capabilities' },
+                ssh_perms: { ref: '5.1.1-5.1.3', title: t('cisSshPerms') || 'SSH File Permissions', desc: t('cisSshPermsDesc') || 'Sets secure permissions (600) on SSH config and host keys', impact: t('cisSshPermsImpact') || 'None - SSH works normally' },
+                ssh_crypto: { ref: '5.1.6, 5.1.12, 5.1.15', title: t('cisSshCrypto') || 'SSH Cryptographic Hardening', desc: t('cisSshCryptoDesc') || 'Configures SSH to use only strong ciphers (AES-GCM/CTR), secure key exchange (Curve25519), and strong MACs (SHA2-ETM)', impact: t('cisSshCryptoImpact') || 'Very old SSH clients may not connect' },
+                sshd_hardening: { ref: '5.1.x (#433)', title: t('cisSshdHardening') || 'SSH Access Hardening', desc: t('cisSshdHardeningDesc') || 'Key-only root (PermitRootLogin prohibit-password), MaxAuthTries 4, X11Forwarding off, idle timeout, no empty passwords. PasswordAuthentication is left untouched so password users are not locked out.', impact: t('cisSshdHardeningImpact') || 'Root password login disabled (key login keeps working). Reversible via Rollback Selected.' },
+                pam_nullok_removal: { ref: '5.3.3.4.1 (#434)', title: t('cisPamNullok') || 'Remove PAM nullok (block empty passwords)', desc: t('cisPamNullokDesc') || 'Strips the nullok flag from every /etc/pam.d/* file so accounts with a blank password can no longer authenticate.', impact: t('cisPamNullokImpact') || 'Accounts with empty passwords can no longer log in. Reversible via Rollback Selected.' },
+                pam_faillock: { ref: '5.3.3.1.1-5.3.3.1.2', title: t('cisPam') || 'Account Lockout (pam_faillock)', desc: t('cisPamDesc') || 'Locks accounts after 5 failed login attempts, auto-unlocks after 10 minutes. Root excluded.', impact: t('cisPamImpact') || 'Works alongside Fail2Ban for defense in depth' },
+                shell_timeout: { ref: '5.4.3.2', title: t('cisTimeout') || 'Shell Timeout', desc: t('cisTimeoutDesc') || 'Automatically logs out inactive shell sessions after 15 minutes', impact: t('cisTimeoutImpact') || 'Only interactive SSH sessions affected' },
+                file_perms: { ref: '7.1.1-7.1.7', title: t('cisFilePerms') || 'System File Permissions', desc: t('cisFilePermsDesc') || 'Sets correct permissions on /etc/passwd, /etc/shadow, /etc/group, /etc/gshadow', impact: t('cisFilePermsImpact') || 'No impact - standard Linux hardening' },
+            };
+            // Lynis recommendations
+            const lynisControls = {
+                backup_dns: { ref: 'NETW-2705', title: t('lynDns') || 'Backup Nameserver', desc: t('lynDnsDesc') || 'Ensures at least 2 DNS nameservers are configured for redundancy (configurable)', impact: t('lynDnsImpact') || 'Prevents DNS outages' },
+                postfix_banner: { ref: 'MAIL-8818', title: t('lynPostfix') || 'Postfix Banner Hardening', desc: t('lynPostfixDesc') || 'Removes software version information from mail server banner to prevent version disclosure', impact: t('lynPostfixImpact') || 'None - only hides version string' },
+                pw_hash_rounds: { ref: 'AUTH-9230', title: t('lynPwHash') || 'Password Hashing Rounds', desc: t('lynPwHashDesc') || 'Increases SHA password hashing iterations (5000-500000 rounds), making brute-force attacks significantly slower', impact: t('lynPwHashImpact') || 'Only affects new/changed passwords' },
+                pw_quality: { ref: 'AUTH-9262', title: t('lynPwQuality') || 'PAM Password Quality', desc: t('lynPwQualityDesc') || 'Enforces strong password policies: min 12 chars, uppercase, lowercase, digit, special char. Installs libpam-pwquality.', impact: t('lynPwQualityImpact') || 'Users must set stronger passwords' },
+                pw_aging: { ref: 'AUTH-9286', title: t('lynPwAging') || 'Password Aging', desc: t('lynPwAgingDesc') || 'Forces password changes every 365 days with 30-day warning period. Root excluded.', impact: t('lynPwAgingImpact') || 'Users must change passwords annually' },
+                pw_history: { ref: 'AUTH-9290', title: t('lynPwHistory') || 'Password History', desc: t('lynPwHistoryDesc') || 'Prevents reuse of the last 24 passwords via pam_pwhistory.', impact: t('lynPwHistoryImpact') || 'Users cannot reuse recent passwords' },
+                default_umask: { ref: 'AUTH-9328', title: t('lynUmask') || 'Default Umask (027)', desc: t('lynUmaskDesc') || 'Tightens default file permissions so new files are only readable by owner and group, not everyone', impact: t('lynUmaskImpact') || 'New files more restrictive by default' },
+                pkg_cleanup: { ref: 'PKGS-7346', title: t('lynPkgCleanup') || 'Old Package Cleanup', desc: t('lynPkgCleanupDesc') || 'Removes leftover configuration files from previously uninstalled packages', impact: t('lynPkgCleanupImpact') || 'None - removes unused config remnants' },
+                debsums: { ref: 'PKGS-7370', title: t('lynDebsums') || 'Package Verification (debsums)', desc: t('lynDebsumsDesc') || 'Installs debsums to verify package file integrity and detect corrupted or tampered system files', impact: t('lynDebsumsImpact') || 'None - read-only verification tool' },
+                login_banners: { ref: 'BANN-7126', title: t('lynBanners') || 'Login Banners', desc: t('lynBannersDesc') || 'Displays legal warning banner before login, required by compliance frameworks (PCI-DSS, HIPAA)', impact: t('lynBannersImpact') || 'None - cosmetic only' },
+                file_integrity: { ref: 'FINT-4350', title: t('lynAide') || 'File Integrity Monitoring (AIDE)', desc: t('lynAideDesc') || 'Creates database of file checksums to detect unauthorized changes to system binaries and configs', impact: t('lynAideImpact') || 'Initial DB build runs in background' },
+                process_acct: { ref: 'ACCT-9622', title: t('lynAcct') || 'Process Accounting', desc: t('lynAcctDesc') || 'Logs information about every process execution for forensic analysis (use lastcomm to view)', impact: t('lynAcctImpact') || 'Minimal overhead' },
+                sysstat: { ref: 'ACCT-9626', title: t('lynSysstat') || 'System Statistics (sysstat)', desc: t('lynSysstatDesc') || 'Collects CPU, memory, disk I/O and network statistics over time (use sar for historical data)', impact: t('lynSysstatImpact') || 'Minimal overhead - helps diagnose issues' },
+                usb_storage: { ref: 'USB-1000', title: t('lynUsb') || 'Disable USB/Firewire Storage', desc: t('lynUsbDesc') || 'Prevents loading of USB and Firewire storage drivers to block data theft. Keyboards/mice still work.', impact: t('lynUsbImpact') || 'USB drives will not be recognized' },
+                restrict_compilers: { ref: 'HRDN-7222', title: t('lynCompilers') || 'Restrict Compiler Access', desc: t('lynCompilersDesc') || 'Limits compiler (gcc, g++, make) usage to root only, preventing attackers from compiling exploit code', impact: t('lynCompilersImpact') || 'Non-root users cannot compile' },
+                apt_show_versions: { ref: 'PKGS-7394', title: t('lynAptShow') || 'Patch Management (apt-show-versions)', desc: t('lynAptShowDesc') || 'Installs apt-show-versions for quick overview of installed packages and their update status', impact: t('lynAptShowImpact') || 'None - read-only query tool' },
+                pam_tmpdir: { ref: 'DEB-0280', title: t('lynTmpdir') || 'Isolate /tmp per Session', desc: t('lynTmpdirDesc') || 'Creates isolated temporary directories for each user session, preventing /tmp race condition attacks', impact: t('lynTmpdirImpact') || 'None - only affects interactive sessions' },
+            };
+            // STIG (DoD) controls
+            const stigControls = {
+                session_limit: { ref: 'UBTU-24-200000', title: t('stigSession') || 'Concurrent Session Limit', desc: t('stigSessionDesc') || 'Limits each user to max 10 concurrent login sessions. Root excluded for cluster operations.', impact: t('stigSessionImpact') || 'No impact - root has unlimited sessions' },
+                inactive_accounts: { ref: 'UBTU-24-200260', title: t('stigInactive') || 'Disable Inactive Accounts', desc: t('stigInactiveDesc') || 'Automatically disables user accounts after 35 days without login. Root and service accounts excluded.', impact: t('stigInactiveImpact') || 'Unused accounts disabled after 35 days' },
+                remove_legacy_svcs: { ref: 'UBTU-24-100030', title: t('stigLegacy') || 'Remove Insecure Legacy Services', desc: t('stigLegacyDesc') || 'Removes telnet, rsh, talk, ntalk, nis packages that transmit data including passwords in cleartext', impact: t('stigLegacyImpact') || 'None - Proxmox uses SSH exclusively' },
+                audit_boot: { ref: 'UBTU-24-102010', title: t('stigAuditBoot') || 'Audit at Boot', desc: t('stigAuditBootDesc') || 'Adds audit=1 kernel parameter to enable auditing from the first moment of boot, closing the early-boot logging gap', impact: t('stigAuditBootImpact') || 'Minimal - ~1-2s longer boot time. Reboot required.', reboot: true },
+                audit_rules: { ref: 'Extended', title: t('stigAuditRules') || 'Privileged Command Logging', desc: t('stigAuditRulesDesc') || 'Comprehensive logging of sudo/su/passwd, permission changes, account modifications, kernel module loading, network config, and /etc/pve/ changes', impact: t('stigAuditRulesImpact') || 'Minimal - only audits human users (auid>=1000)' },
+                aide_audit_protect: { ref: 'AIDE+Audit', title: t('stigAideAudit') || 'Audit Tool Protection (AIDE)', desc: t('stigAideAuditDesc') || 'Adds audit binaries (auditd, ausearch, aureport) to AIDE file integrity monitoring with SHA512 checksums. Requires AIDE.', impact: t('stigAideAuditImpact') || 'None - only monitors audit tool binaries' },
+                mem_protection: { ref: 'Kernel', title: t('stigMemProt') || 'Memory Protection - Kernel Hardening', desc: t('stigMemProtDesc') || 'Kernel parameters: init_on_alloc=1, init_on_free=1, page_alloc.shuffle=1, slab_nomerge. Prevents info leaks and use-after-free attacks.', impact: t('stigMemProtImpact') || '~1-3% performance overhead. Reboot required.', reboot: true },
+                audit_immutable: { ref: 'V-270832', title: t('stigAuditLock') || 'Audit Rules Immutable', desc: t('stigAuditLockDesc') || 'Locks audit configuration with -e 2 flag. Rules cannot be modified without reboot, preventing attackers from disabling auditing.', impact: t('stigAuditLockImpact') || 'Audit rule changes require reboot' },
+            };
+            // PegaProx recommendations
+            const pegaControls = {
+                apparmor: { ref: 'MAC', title: t('pegaApparmor') || 'AppArmor (Mandatory Access Control)', desc: t('pegaApparmorDesc') || 'Enables AppArmor and enforces all profiles. Restricts what programs can access even if compromised - adds a security layer beyond standard file permissions.', impact: t('pegaApparmorImpact') || 'None for standard PVE - custom services may need profiles' },
+                disable_services: { ref: 'SVC', title: t('pegaDisableSvc') || 'Disable Unnecessary Services', desc: t('pegaDisableSvcDesc') || 'Stops and disables bluetooth, CUPS (printing), and Avahi (mDNS). Fewer running services means less attack surface.', impact: t('pegaDisableSvcImpact') || 'No local printing or Bluetooth - irrelevant for servers' },
+                sysctl_hardening: { ref: 'NET+Kernel', title: t('pegaSysctl') || 'Sysctl Network & Kernel Hardening', desc: t('pegaSysctlDesc') || 'Applies 20+ sysctl parameters: IP spoofing protection, ICMP redirect blocking, SYN flood defense, ASLR, dmesg restriction, ptrace scope, symlink protection.', impact: t('pegaSysctlImpact') || 'None - standard production server hardening' },
+                auditd_service: { ref: 'Audit', title: t('pegaAuditd') || 'Enable Audit Daemon (auditd)', desc: t('pegaAuditdDesc') || 'Installs and enables auditd for system event logging. Pair with STIG "Privileged Command Logging" for comprehensive audit rules.', impact: t('pegaAuditdImpact') || 'Minimal overhead - prerequisite for audit rules' },
+                // MK Apr 2026 - brute-force protection for SSH + PVE Web-UI
+                pve_fail2ban: { ref: 'Brute-Force', title: t('pegaFail2ban') || 'fail2ban - SSH + PVE Web-UI', desc: t('pegaFail2banDesc') || 'Installs fail2ban with jails for sshd and Proxmox Web-UI/API authentication. Policy: 5 failed logins in 10 minutes trigger a 24h IP ban. File-marker /etc/fail2ban/jail.d/pegaprox-pve.conf makes re-apply safe.', impact: t('pegaFail2banImpact') || 'Negligible - reads /var/log/daemon.log + /var/log/auth.log. Review banned IPs with `fail2ban-client status proxmox`.' },
+                // MK Apr 2026 - Recovery control. Detects + repairs the broken PAM stack
+                // (pam_pwhistory.so use_authtok without preceding pam_pwquality.so) that
+                // triggers "Authentication token manipulation error" on every passwd.
+                pam_password_repair: { ref: 'Recovery', title: t('cmPamPasswordRepair') || 'Repair PAM password stack (recovery)', desc: t('pegaPamRepairDesc') || 'Detects a broken /etc/pam.d/common-password where pam_pwhistory.so was inserted with use_authtok but no pam_pwquality.so is in front of it. Fix: inserts pam_pwquality.so BEFORE pwhistory if libpam-pwquality is installed, otherwise strips use_authtok so pwhistory prompts itself. A timestamped backup is saved as common-password.bak.repair-<ts>. Idempotent - re-running on a healthy system is a no-op.', impact: t('pegaPamRepairImpact') || 'No impact on healthy systems. Restores ability to change passwords on systems where it was broken.' },
+            };
+            // NS Apr 2026 - VS-NfD informational checks (audit-only, apply is no-op).
+            // BSI Grundschutz expects documented operator decision per environment.
+            const vsnfdControls = {
+                vsnfd_disk_encryption: { ref: 'BSI VS-NfD', title: t('vsnfdDiskEnc') || 'Disk encryption (LUKS / ZFS native)', desc: t('vsnfdDiskEncDesc') || 'Reports whether root/data volumes use LUKS or ZFS native encryption. Audit-only - must be configured at install time.', impact: t('vsnfdInformational') || 'Informational only - no auto-apply' },
+                vsnfd_audit_retention: { ref: 'BSI Grundschutz', title: t('vsnfdAuditRet') || 'journald retention ≥ 6 months', desc: t('vsnfdAuditRetDesc') || 'Checks journald MaxRetentionSec is set to at least 6 months. BSI requires audit log retention ≥ 180 days.', impact: t('vsnfdInformational') || 'Informational only - no auto-apply' },
+                vsnfd_journald_size: { ref: 'BSI Grundschutz', title: t('vsnfdJournaldSize') || 'journald SystemMaxUse ≥ 1G', desc: t('vsnfdJournaldSizeDesc') || 'Ensures journald can keep enough log volume to satisfy retention requirements.', impact: t('vsnfdInformational') || 'Informational only - no auto-apply' },
+                vsnfd_secure_boot: { ref: 'BSI VS-NfD', title: t('vsnfdSecureBoot') || 'UEFI Secure Boot enabled', desc: t('vsnfdSecureBootDesc') || 'Reports whether the firmware enforces signed boot loaders. Cannot be toggled live - must be enabled in firmware.', impact: t('vsnfdInformational') || 'Informational only - no auto-apply' },
+                vsnfd_kernel_lockdown: { ref: 'BSI VS-NfD', title: t('vsnfdLockdown') || 'Kernel lockdown (integrity / confidentiality)', desc: t('vsnfdLockdownDesc') || 'Checks /sys/kernel/security/lockdown. BSI recommends "integrity" or "confidentiality". Set via kernel cmdline lockdown=integrity at boot.', impact: t('vsnfdInformational') || 'Informational only - no auto-apply' },
+                vsnfd_password_min_12: { ref: 'BSI Grundschutz', title: t('vsnfdPwMin12') || 'Password minlen ≥ 12 (BSI)', desc: t('vsnfdPwMin12Desc') || 'BSI requires minimum 12-character passwords (stricter than CIS-L1\'s 8). Configure via pwquality minlen.', impact: t('vsnfdInformational') || 'Informational only - set via pw_quality CIS control' },
+            };
+            return {
+                cisControls, lynisControls, stigControls, pegaControls, vsnfdControls,
+                groups: [
+                    { src: 'cis', name: 'CIS Debian Linux 13 Benchmark', cls: 'text-blue-400', ctrls: cisControls },
+                    { src: 'lynis', name: 'Lynis Security Auditing', cls: 'text-purple-400', ctrls: lynisControls },
+                    { src: 'stig', name: 'STIG - DoD Security Technical Implementation Guide', cls: 'text-amber-400', ctrls: stigControls },
+                    { src: 'pega', name: 'PegaProx ' + (t('recommendations') || 'Recommendations'), cls: 'text-orange-400', ctrls: pegaControls },
+                    { src: 'vsnfd', name: 'VS-NfD / BSI Grundschutz', cls: 'text-emerald-400', ctrls: vsnfdControls },
+                ],
+            };
+        }
+
+        // what the templated controls take when nothing is typed in, as CIS_CHECKS has it
+        const HARDEN_PARAM_DEFAULTS = {
+            backup_dns: { dns1: '1.1.1.1', dns2: '9.9.9.9' },
+            pam_faillock: { service_user: '' },
+            pw_aging: { service_user: '' },
+            session_limit: { service_user: '' },
+            inactive_accounts: { service_user: '' },
+        };
+
+        // the built-in profiles a custom one can start from; cis-l2 runs what cis-l1 runs
+        const HARDEN_BUILTIN_NAMES = {
+            'cis-l1': 'CIS Level 1', bsi: 'BSI IT-Grundschutz', iso: 'ISO 27001 (Annex A)', nis2: 'NIS2 / KRITIS',
+            'vs-nfd': 'VS-NfD (BSI)', dr: 'Diffusion Restreinte (ANSSI II 901)', rgs: 'RGS (ANSSI-BP-028)',
+            cmmc1: 'CMMC L1 (FAR 52.204-21)', cmmc2: 'CMMC L2 / NIST 800-171', nist53: 'NIST 800-53 (Mod)', stig: 'DISA STIG',
+        };
+
+        // LW Oct 2026 - the param values of the Harden tab for a profile select value: the
+        // defaults, and over them what a custom profile saved
+        function hardenParamsFor(value, custom) {
+            const out = JSON.parse(JSON.stringify(HARDEN_PARAM_DEFAULTS));
+            const p = String(value || '').startsWith('custom:') && (custom || []).find(x => `custom:${x.id}` === value);
+            Object.entries((p && p.params) || {}).forEach(([cid, vals]) => { out[cid] = { ...(out[cid] || {}), ...vals }; });
+            return out;
+        }
+
+        // LW Oct 2026 - editor of one custom hardening profile. draft: {id?, name, description,
+        // controls, params, dropped_controls?, error?}; without an id it saves a new one. The server
+        // checks it all again, its sentence lands under the list as it comes
+        function HardeningProfileEditor({ draft, data, authFetch, t, onCancel, onSaved }) {
+            const catalog = data?.catalog || [];
+            const limits = data?.limits || {};
+            const byId = Object.fromEntries(catalog.map(c => [c.id, c]));
+            const [name, setName] = useState(draft.name || '');
+            const [description, setDescription] = useState(draft.description || '');
+            const [picked, setPicked] = useState(() =>
+                Object.fromEntries((draft.controls || []).filter(id => byId[id]).map(id => [id, true])));
+            const [params, setParams] = useState(() => JSON.parse(JSON.stringify(draft.params || {})));
+            const [search, setSearch] = useState('');
+            const [error, setError] = useState(draft.error || '');
+            const [saving, setSaving] = useState(false);
+            const unknown = [...new Set((draft.controls || []).filter(id => !byId[id]).concat(draft.dropped_controls || []))];
+
+            // grouped like the tab; a control the tab has no title for yet goes last
+            const info = hardeningControlInfo(t);
+            const grouped = new Set();
+            const groups = info.groups.map(g => {
+                const ids = Object.keys(g.ctrls).filter(id => byId[id]);
+                ids.forEach(id => grouped.add(id));
+                return { ...g, ids };
+            });
+            const rest = catalog.map(c => c.id).filter(id => !grouped.has(id));
+            if (rest.length) groups.push({ src: 'other', name: t('hpOther'), cls: 'text-gray-400', ctrls: {}, ids: rest });
+            const q = search.trim().toLowerCase();
+            const shown = groups.map(g => ({ ...g, ids: g.ids.filter(id => !q || [id, g.ctrls[id]?.title, g.ctrls[id]?.ref, g.ctrls[id]?.desc]
+                .some(s => String(s || '').toLowerCase().includes(q))) })).filter(g => g.ids.length);
+            const pickedCount = catalog.filter(c => picked[c.id]).length;
+            const pickShown = (on) => setPicked(prev => {
+                const next = { ...prev };
+                shown.forEach(g => g.ids.forEach(id => { next[id] = on; }));
+                return next;
+            });
+            const setParam = (id, key, value) => setParams(p => ({ ...p, [id]: { ...(p[id] || {}), [key]: value } }));
+
+            const save = async () => {
+                const body = { name: name.trim(), description, controls: catalog.map(c => c.id).filter(id => picked[id]), params: {} };
+                if (!body.name) { setError(t('hpNeedName')); return; }
+                if (!body.controls.length) { setError(t('hpNeedControl')); return; }
+                body.controls.forEach(id => (byId[id].param_keys || []).forEach(key => {
+                    const v = String(params[id]?.[key] ?? '').trim();
+                    if (v) body.params[id] = { ...(body.params[id] || {}), [key]: v };
+                }));
+                setSaving(true);
+                setError('');
+                const r = await authFetch(draft.id ? `${API_URL}/hardening/profiles/${draft.id}` : `${API_URL}/hardening/profiles`, {
+                    method: draft.id ? 'PUT' : 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const d = r ? await r.json().catch(() => ({})) : {};
+                if (r && r.ok) { onSaved(d.profile); return; }
+                setSaving(false);
+                setError(d.error || (r ? `HTTP ${r.status}` : t('hpSaveFailed')));
+            };
+
+            const field = 'w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white';
+            return (
+                <div className="space-y-3" data-hp-editor>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <label className="block text-xs text-gray-400">
+                            {t('name')}
+                            <input value={name} maxLength={limits.name || 64} onChange={e => setName(e.target.value)}
+                                className={`${field} mt-1`} data-hp-name />
+                        </label>
+                        <label className="block text-xs text-gray-400">
+                            {t('description')}
+                            <textarea value={description} rows={2} maxLength={limits.description || 500}
+                                onChange={e => setDescription(e.target.value)} className={`${field} mt-1`} data-hp-description />
+                        </label>
+                    </div>
+                    {unknown.length > 0 && (
+                        <p className="text-xs text-amber-400" data-hp-unknown>{fillText(t('hpStoredDropped'), { ids: unknown.join(', ') })}</p>
+                    )}
+                    <div className="flex items-center gap-3 flex-wrap">
+                        <div className="relative flex-1 min-w-0">
+                            <Icons.Search className="w-4 h-4 text-gray-500 absolute left-3 top-1/2 transform -translate-y-1/2" />
+                            <input value={search} onChange={e => setSearch(e.target.value)} placeholder={t('hpSearch')}
+                                className={`${field} pl-10`} data-hp-search />
+                        </div>
+                        <span className="text-xs text-gray-400" data-hp-count>{fillText(t('hpSelectedOf'), { n: pickedCount, total: catalog.length })}</span>
+                        <button type="button" onClick={() => pickShown(true)} className="text-xs text-blue-400 hover:text-blue-300">{t('hpSelectShown')}</button>
+                        <button type="button" onClick={() => pickShown(false)} className="text-xs text-gray-500 hover:text-gray-400">{t('hpClearShown')}</button>
+                    </div>
+                    <div className="max-h-[60vh] overflow-y-auto space-y-4 pr-1">
+                        {shown.length === 0 && <p className="text-xs text-gray-500">{t('hpNoMatch')}</p>}
+                        {shown.map(g => (
+                            <div key={g.src}>
+                                <h4 className={`text-xs font-semibold mb-1.5 ${g.cls}`}>{g.name}</h4>
+                                <div className="space-y-1">
+                                    {g.ids.map(id => {
+                                        const ctrl = g.ctrls[id] || {};
+                                        const keys = byId[id].param_keys || [];
+                                        const on = !!picked[id];
+                                        return (
+                                            <div key={id} className={`rounded-lg border px-3 py-2 ${on ? 'border-orange-500/40 bg-proxmox-dark' : 'border-proxmox-border'}`} data-hp-control={id}>
+                                                <label className="flex items-start gap-2 cursor-pointer">
+                                                    <input type="checkbox" checked={on} onChange={e => setPicked(p => ({ ...p, [id]: e.target.checked }))}
+                                                        className="mt-0.5 w-4 h-4 rounded border-gray-600 bg-proxmox-dark accent-proxmox-orange" />
+                                                    <span className="min-w-0">
+                                                        <span className="text-sm text-white">{ctrl.title || id}</span>
+                                                        {ctrl.ref && <span className="ml-2 text-[10px] font-mono text-gray-500">{ctrl.ref}</span>}
+                                                        <span className="block text-[11px] font-mono text-gray-600">{id}</span>
+                                                    </span>
+                                                </label>
+                                                {on && keys.length > 0 && (
+                                                    <div className="flex items-center gap-2 flex-wrap mt-2 ml-6">
+                                                        {keys.map(key => key === 'service_user' ? (
+                                                            <React.Fragment key={key}>
+                                                                <span className="text-xs text-gray-500">{t('exemptUsers')}:</span>
+                                                                {['root', 'pegaprox'].map(u => (
+                                                                    <span key={u} className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30" title={t('alwaysExempt')}>{u}</span>
+                                                                ))}
+                                                                <span className="text-xs text-gray-500">{t('plusOptional')}:</span>
+                                                                <input value={params[id]?.[key] ?? ''} maxLength={limits.value || 256} placeholder={t('extraServiceUsers')}
+                                                                    onChange={e => setParam(id, key, e.target.value)} data-hp-param={`${id}.${key}`}
+                                                                    className="w-44 px-2 py-0.5 text-xs bg-proxmox-dark border border-proxmox-border rounded text-white" />
+                                                            </React.Fragment>
+                                                        ) : (
+                                                            <React.Fragment key={key}>
+                                                                <span className="text-xs text-gray-500">{key === 'dns1' ? 'DNS 1' : key === 'dns2' ? 'DNS 2' : key}:</span>
+                                                                <input value={params[id]?.[key] ?? ''} maxLength={limits.value || 256} placeholder={(byId[id].defaults || {})[key] || ''}
+                                                                    onChange={e => setParam(id, key, e.target.value)} data-hp-param={`${id}.${key}`}
+                                                                    className="w-28 px-2 py-0.5 text-xs bg-proxmox-dark border border-proxmox-border rounded text-white" />
+                                                            </React.Fragment>
+                                                        ))}
+                                                        <span className="text-[11px] text-gray-600">{t('hpParamDefault')}</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    {error && <p role="alert" className="text-sm text-red-400" data-hp-error>{error}</p>}
+                    <div className="flex justify-end gap-2">
+                        <button type="button" onClick={onCancel} disabled={saving} className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">{t('cancel')}</button>
+                        <button type="button" onClick={save} disabled={saving} data-hp-save
+                            className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 text-white text-sm rounded flex items-center gap-1.5">
+                            {saving ? <Icons.RotateCw /> : <Icons.Check />}
+                            {t('save')}
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - Manage profiles: the custom hardening profiles with edit, duplicate, export
+        // and delete, a new one (empty or from a built-in profile) and the import of an exported
+        // file. Opened with a draft (Save selection as profile) it is the editor alone
+        function HardeningProfilesDialog({ data, draft, authFetch, addToast, t, onClose, onChanged }) {
+            const [editor, setEditor] = useState(draft || null);
+            const [startFrom, setStartFrom] = useState('');
+            const [deleting, setDeleting] = useState(null);
+            const [error, setError] = useState('');
+            const [busy, setBusy] = useState(false);
+            const custom = data?.custom || [];
+            const nameMax = data?.limits?.name || 64;
+            const max = data?.limits?.profiles || 100;
+            const full = custom.length >= max;
+
+            const open = (d) => { setError(''); setDeleting(null); setEditor(d); };
+            const closeEditor = () => { if (draft) onClose(); else setEditor(null); };
+            const saved = (profile) => {
+                addToast(t('hpSaved'), 'success');
+                onChanged(profile);
+                closeEditor();
+            };
+            const startNew = () => {
+                const b = (data?.builtin || []).find(x => x.id === startFrom);
+                open({ name: '', description: '', controls: b ? b.controls : [], params: {} });
+            };
+            // cut by code points like the server counts; a UTF-16 slice can split an emoji in two
+            const duplicate = (p) => open({ name: Array.from(fillText(t('hpCopyName'), { name: p.name })).slice(0, nameMax).join(''),
+                                            description: p.description, controls: p.controls, params: p.params });
+            const exportOne = (p) => {
+                const slug = p.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || p.id;
+                downloadJson(`pegaprox-hardening-profile-${slug}.json`, {
+                    format: data.format, version: data.format_version, name: p.name,
+                    description: p.description, controls: p.controls, params: p.params,
+                });
+            };
+            const answer = async (r) => (r ? await r.json().catch(() => ({})) : {});
+            const failed = (r, d) => setError(d.error || (r ? `HTTP ${r.status}` : t('hpSaveFailed')));
+            const remove = async (p) => {
+                setBusy(true);
+                setError('');
+                const r = await authFetch(`${API_URL}/hardening/profiles/${p.id}`, { method: 'DELETE' });
+                const d = await answer(r);
+                setBusy(false);
+                if (!(r && r.ok)) { failed(r, d); return; }
+                setDeleting(null);
+                addToast(t('hpDeleted'), 'success');
+                onChanged(null, p.id);
+            };
+            // the file goes to the server as it is, which checks the format marker and the rest.
+            // One that passed and only has a taken name opens in the editor to be renamed
+            const importFile = async (file) => {
+                if (!file) return;
+                setError('');
+                let body = null;
+                try { if (file.size <= 1024 * 1024) body = JSON.parse(await file.text()); } catch (_) { body = null; }
+                if (!body || typeof body !== 'object' || Array.isArray(body)) { setError(t('hpImportNotJson')); return; }
+                setBusy(true);
+                const r = await authFetch(`${API_URL}/hardening/profiles`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                const d = await answer(r);
+                setBusy(false);
+                if (r && r.ok) { addToast(t('hpImported'), 'success'); onChanged(d.profile); return; }
+                if (r && r.status === 409 && !full) {
+                    open({ name: String(body.name || ''), description: typeof body.description === 'string' ? body.description : '',
+                           controls: Array.isArray(body.controls) ? body.controls : [],
+                           params: body.params && typeof body.params === 'object' ? body.params : {},
+                           error: t('hpImportNameTaken') });
+                    return;
+                }
+                failed(r, d);
+            };
+
+            const btn = 'flex items-center gap-1 px-2 py-1 text-xs text-gray-300 hover:text-white border border-proxmox-border rounded disabled:opacity-40';
+            return (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" onClick={() => { if (!editor && !busy) onClose(); }}>
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 w-full max-w-3xl max-h-[90vh] overflow-y-auto"
+                        onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" data-hp-dialog>
+                        <div className="flex items-start justify-between gap-3 mb-3">
+                            <div className="min-w-0">
+                                <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                                    <Icons.Shield /> {editor ? (editor.id ? t('hpEditTitle') : t('hpNew')) : t('hpDialogTitle')}
+                                </h3>
+                                {!editor && <p className="text-xs text-gray-500 mt-1">{t('hpDialogHint')}</p>}
+                            </div>
+                            <button type="button" onClick={onClose} className="text-gray-400 hover:text-white" title={t('close')} aria-label={t('close')}><Icons.X /></button>
+                        </div>
+                        {editor ? (
+                            <HardeningProfileEditor key={editor.id || 'new'} draft={editor} data={data} authFetch={authFetch} t={t}
+                                onCancel={closeEditor} onSaved={saved} />
+                        ) : (
+                            <>
+                                <div className="flex items-center gap-2 flex-wrap mb-3">
+                                    <select value={startFrom} onChange={e => setStartFrom(e.target.value)} disabled={full}
+                                        className="bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-1.5 text-sm" data-hp-start>
+                                        <option value="">{t('hpStartFrom')}: {t('hpStartEmpty')}</option>
+                                        {(data?.builtin || []).filter(b => HARDEN_BUILTIN_NAMES[b.id]).map(b => (
+                                            <option key={b.id} value={b.id}>{t('hpStartFrom')}: {HARDEN_BUILTIN_NAMES[b.id]}</option>
+                                        ))}
+                                    </select>
+                                    <button type="button" onClick={startNew} disabled={full} data-hp-new
+                                        className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 text-white text-sm rounded flex items-center gap-1.5">
+                                        <Icons.Plus /> {t('hpNew')}
+                                    </button>
+                                    <label className={`${btn} py-1.5 ${full || busy ? 'opacity-50' : 'cursor-pointer'}`}>
+                                        <Icons.Upload /> {t('hpImport')}
+                                        <input type="file" accept="application/json,.json" className="hidden" disabled={full || busy} data-hp-import
+                                            onChange={e => { importFile(e.target.files && e.target.files[0]); e.target.value = ''; }} />
+                                    </label>
+                                    <span className="text-xs text-gray-500 ml-auto" data-hp-total>{fillText(t('hpCount'), { n: custom.length, max })}</span>
+                                </div>
+                                {error && <p role="alert" className="text-sm text-red-400 mb-3" data-hp-error>{error}</p>}
+                                {custom.length === 0 ? (
+                                    <p className="text-sm text-gray-500 py-6 text-center">{t('hpNone')}</p>
+                                ) : (
+                                    <div className="space-y-2" data-hp-list>
+                                        {custom.map(p => (
+                                            <div key={p.id} className="bg-proxmox-dark border border-proxmox-border rounded-lg p-3" data-hp-row={p.id}>
+                                                <div className="flex items-start justify-between gap-3 flex-wrap">
+                                                    <div className="min-w-0 flex-1">
+                                                        <p className="text-sm font-medium text-white break-all">{p.name}</p>
+                                                        {p.description && <p className="text-xs text-gray-400 mt-0.5 whitespace-pre-wrap">{p.description}</p>}
+                                                        <p className="text-[11px] text-gray-500 mt-1">
+                                                            {fillText(t('hpControlsCount'), { n: p.controls.length })}
+                                                            {p.updated_at && <> · {fillText(t('hpUpdated'), { when: new Date(p.updated_at).toLocaleString() })}</>}
+                                                            {p.updated_by && <> · {p.updated_by}</>}
+                                                        </p>
+                                                        {(p.dropped_controls || []).length > 0 && (
+                                                            <p className="text-[11px] text-amber-400 mt-1">{fillText(t('hpStoredDropped'), { ids: p.dropped_controls.join(', ') })}</p>
+                                                        )}
+                                                    </div>
+                                                    {deleting === p.id ? (
+                                                        <div className="flex items-center gap-2 flex-wrap" data-hp-confirm>
+                                                            <span className="text-xs text-red-300">{fillText(t('hpDeleteConfirm'), { name: p.name })}</span>
+                                                            <button type="button" onClick={() => remove(p)} disabled={busy}
+                                                                className="px-3 py-1 text-xs rounded bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white">{t('delete')}</button>
+                                                            <button type="button" onClick={() => setDeleting(null)} className={btn}>{t('cancel')}</button>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="flex items-center gap-1 flex-wrap">
+                                                            <button type="button" className={btn} onClick={() => open({ ...p })}><Icons.Edit /> {t('edit')}</button>
+                                                            <button type="button" className={btn} onClick={() => duplicate(p)} disabled={full}><Icons.Copy /> {t('hpDuplicate')}</button>
+                                                            <button type="button" className={btn} onClick={() => exportOne(p)}><Icons.Download /> {t('hpExport')}</button>
+                                                            <button type="button" className={`${btn} hover:text-red-400`} onClick={() => { setError(''); setDeleting(p.id); }}><Icons.Trash /> {t('delete')}</button>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
         function ComplianceDashboardTab({ clusters, selectedCluster, authFetch, addToast, t, isCorporate, user }) {
             const [profile, setProfile] = useState('cis-l1');
             const [results, setResults] = useState({});  // {clusterId: {nodeName: {controls, score}}}
             const [loadingCluster, setLoadingCluster] = useState(null);
             const [auditCounts, setAuditCounts] = useState(null);
             const [refreshTick, setRefreshTick] = useState(0);
+            // LW Oct 2026 - the custom hardening profiles, offered next to the built-in ones
+            const [customProfiles, setCustomProfiles] = useState(null);
+            // LW Oct 2026 - Corporate Redesigned: its own page, and when this browser last got the answers
+            const { isCorpRedesigned } = useLayout();
+            const [checkedAt, setCheckedAt] = useState(null);
 
             // #717 — the server answers with a machine code; the sentence the operator reads
             // is chosen here, so it lands in their language. The English error/hint the API
@@ -9970,23 +11294,55 @@
 
             const sshReason = (info) => ({
                 SSH_NO_CREDENTIALS: [t('sshNoCredentials'), t('sshNoCredentialsHint')],
+                // LW Nov 2026 - SSH switched off for the cluster, and a node list that could not be read
+                SSH_DISABLED:       [t('cmpSshOff'),        t('cmpSshOffHint')],
+                NODES_UNREAD:       [t('cmpNodesUnread').replace('{code}', info?.error ? `HTTP ${info.error}` : t('crAlNoAnswer')), t('cmpNodesUnreadHint')],
                 NODE_BACKOFF:       [t('sshNodeBackoff'),   t('sshNodeBackoffHint')],
                 SSH_FAILED:         [t('sshFailed'),        t('sshFailedHint')],
             }[info?.code] || [info?.error, info?.hint]);
 
             // Fetch hardening data for one cluster (all nodes)
+            // LW Nov 2026 - each check is an SSH audit of one node: CMP_PARALLEL run at a time and the page
+            // gets every answer as it comes (in node order), with how many are in. A cause that is the
+            // whole cluster's (no credentials, SSH switched off) stops asking the rest. A node list that
+            // could not be read is said as such, not drawn as a cluster nobody checked. A newer run (another
+            // profile, Refresh) makes the answers of the one before go nowhere
+            const CMP_PARALLEL = 6;
+            const cmpRun = useRef({});
+            const [cmpProgress, setCmpProgress] = useState(null);  // {cid, done, total}
             const fetchCluster = async (cluster) => {
                 if (!cluster) return;
-                setLoadingCluster(cluster.id);
+                const cid = cluster.id;
+                const run = (cmpRun.current[cid] || 0) + 1;
+                cmpRun.current[cid] = run;
+                const current = () => cmpRun.current[cid] === run;
+                setLoadingCluster(cid);
                 try {
-                    const nodesRes = await authFetch(`${API_URL}/clusters/${cluster.id}/nodes`);
-                    if (!nodesRes || !nodesRes.ok) return;
-                    const nodesData = await nodesRes.json();
-                    const nodes = (nodesData?.data || nodesData || []).map(n => n.node).filter(Boolean);
+                    const nodesRes = await authFetch(`${API_URL}/clusters/${cid}/nodes`);
+                    if (!current()) return;
+                    const nodesData = nodesRes && nodesRes.ok ? await nodesRes.json().catch(() => null) : null;
+                    const list = nodesData && (Array.isArray(nodesData) ? nodesData : nodesData.data);
+                    if (!Array.isArray(list)) {
+                        setResults(prev => ({ ...prev, [cid]: { _cluster: { error: nodesRes ? nodesRes.status : '', code: 'NODES_UNREAD' } } }));
+                        setCmpProgress(null);
+                        return;
+                    }
+                    const nodes = list.map(n => n && n.node).filter(Boolean);
                     const perNode = {};
-                    for (const n of nodes) {
+                    let stop = null;
+                    let done = 0;
+                    const publish = () => {
+                        if (!current()) return;
+                        const ordered = {};
+                        nodes.forEach(n => { if (perNode[n]) ordered[n] = perNode[n]; });
+                        if (stop) ordered._cluster = stop;
+                        setResults(prev => ({ ...prev, [cid]: ordered }));
+                        setCmpProgress({ cid, done, total: nodes.length });
+                    };
+                    setCmpProgress({ cid, done: 0, total: nodes.length });
+                    const checkOne = async (n) => {
                         try {
-                            const r = await authFetch(`${API_URL}/clusters/${cluster.id}/nodes/${n}/hardening?profile=${encodeURIComponent(profile)}`);
+                            const r = await authFetch(`${API_URL}/clusters/${cid}/nodes/${n}/hardening?profile=${encodeURIComponent(profile)}`);
                             if (!r || !r.ok) {
                                 // #717 — the reason is in the body. Carry it so the node shows a
                                 // sentence rather than "err 502", and when the cause is the whole
@@ -9996,14 +11352,11 @@
                                 try {
                                     const body = r ? await r.json() : null;
                                     if (body) info = { error: body.error || info.error, code: body.code,
-                                                       hint: body.hint, clusterWide: !!body.cluster_wide };
+                                                       hint: body.hint, clusterWide: !!body.cluster_wide || body.code === 'SSH_DISABLED' };
                                 } catch (_) {}
                                 perNode[n] = info;
-                                if (info.clusterWide) {
-                                    setResults(prev => ({ ...prev, [cluster.id]: { ...perNode, _cluster: info } }));
-                                    return;
-                                }
-                                continue;
+                                if (info.clusterWide && !stop) stop = info;
+                                return;
                             }
                             const d = await r.json();
                             const ctrls = d.controls || {};
@@ -10015,10 +11368,22 @@
                         } catch (e) {
                             perNode[n] = { error: String(e) };
                         }
-                    }
-                    setResults(prev => ({ ...prev, [cluster.id]: perNode }));
+                    };
+                    let next = 0;
+                    const worker = async () => {
+                        while (next < nodes.length && !stop && current()) {
+                            const n = nodes[next++];
+                            await checkOne(n);
+                            done++;
+                            publish();
+                        }
+                    };
+                    await Promise.all(Array.from({ length: Math.min(CMP_PARALLEL, nodes.length) }, worker));
+                    if (!current()) return;
+                    publish();
+                    if (!stop) setCheckedAt(Date.now());
                 } finally {
-                    setLoadingCluster(null);
+                    if (current()) setLoadingCluster(l => (l === cid ? null : l));
                 }
             };
 
@@ -10049,6 +11414,20 @@
                 if (selectedCluster?.id) fetchCluster(selectedCluster);
                 fetchAuditCounts();
             }, [refreshTick, profile, selectedCluster?.id]);
+
+            useEffect(() => {
+                let gone = false;
+                authFetch(`${API_URL}/hardening/profiles`)
+                    .then(r => (r && r.ok ? r.json() : null))
+                    .then(d => { if (!gone) setCustomProfiles((d && d.custom) || []); })
+                    .catch(() => { if (!gone) setCustomProfiles([]); });
+                return () => { gone = true; };
+            }, [refreshTick]);
+            const customSel = profile.startsWith('custom:') ? (customProfiles || []).find(p => `custom:${p.id}` === profile) : null;
+            // a profile deleted meanwhile falls back to the default instead of failing on every node
+            useEffect(() => {
+                if (customProfiles && profile.startsWith('custom:') && !customSel) setProfile('cis-l1');
+            }, [customProfiles, profile]);
 
             const totalClusters = selectedCluster ? 1 : 0;
             // Aggregate only over the selected cluster's nodes
@@ -10323,7 +11702,7 @@
                 const now = new Date();
                 const isoTime = now.toISOString();
                 const reportingPeriod = `Snapshot at ${isoTime}`;
-                const profileLabel = profile === 'vs-nfd' ? 'VS-NfD' : profile.toUpperCase();
+                const profileLabel = customSel ? customSel.name : profile === 'vs-nfd' ? 'VS-NfD' : profile.toUpperCase();
 
                 // ──────────────────────────────────────────────────────────
                 // 1. Cover page metadata
@@ -10690,6 +12069,19 @@
                 addToast(t('reportReady') || 'Report ready', 'success');
             };
 
+            if (isCorpRedesigned) {
+                return (
+                    <CrCompliance t={t} selectedCluster={selectedCluster} profile={profile} setProfile={setProfile}
+                        customProfiles={customProfiles} customSel={customSel}
+                        perNode={selectedCluster ? results[selectedCluster.id] : null}
+                        loading={!!selectedCluster && loadingCluster === selectedCluster.id} checkedAt={checkedAt}
+                        progress={cmpProgress && selectedCluster && cmpProgress.cid === selectedCluster.id ? cmpProgress : null}
+                        frameworks={frameworks} frameworkScore={frameworkScore} verdictOf={verdictOf} sshReason={sshReason}
+                        titles={allTitles} overallScore={overallScore} onRefresh={() => setRefreshTick(x => x + 1)}
+                        onReport={downloadFrameworkReport} auditCounts={auditCounts} />
+                );
+            }
+
             return (
                 <div className={isCorporate ? 'p-4 space-y-4' : 'space-y-6'}>
                     {/* Header */}
@@ -10717,6 +12109,11 @@
                                 <option value="vs-nfd">VS-NfD (BSI Grundschutz)</option>
                                 <option value="dr">Diffusion Restreinte (ANSSI II 901)</option>
                                 <option value="rgs">RGS (ANSSI-BP-028)</option>
+                                {(customProfiles || []).length > 0 && (
+                                    <optgroup label={t('hpCustomProfiles')}>
+                                        {customProfiles.map(p => <option key={p.id} value={`custom:${p.id}`}>{p.name}</option>)}
+                                    </optgroup>
+                                )}
                             </select>
                             <button
                                 onClick={() => setRefreshTick(t => t + 1)}
@@ -10735,6 +12132,23 @@
                                 {selectedCluster ? clusterLabel(selectedCluster) : (t('noClusterSelected') || 'No cluster selected')}
                             </p>
                         </div>
+                        {/* LW Oct 2026 - the selected custom profile scored over its own controls */}
+                        {customSel && (() => {
+                            const s = frameworkScore(customSel);
+                            return (
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4" data-hp-score>
+                                    <p className="text-xs text-gray-500 mb-1 truncate" title={customSel.description || customSel.name}>
+                                        {t('hpCustomProfile')}: <span className="text-gray-300">{customSel.name}</span>
+                                    </p>
+                                    <p className={`text-3xl font-bold ${scoreColor(s.score)}`}>{s.score == null ? '-' : `${s.score}%`}</p>
+                                    {/* the cloud layout's t() gives nothing back where the English value is the key */}
+                                    <p className="text-xs text-gray-500 mt-1">{s.passed}/{s.total} {t('controls') || 'controls'}</p>
+                                    {s.notChecked > 0 && (
+                                        <p className="text-[11px] text-gray-400" title={t('hardenNotCheckedHint')}>{s.notChecked} {t('hardenNotChecked') || 'not checked'}</p>
+                                    )}
+                                </div>
+                            );
+                        })()}
                     </div>
 
                     {/* Framework cards — split by region. Each has a Download Report button. */}
@@ -10884,7 +12298,7 @@
                         </button>
                         <span className="text-gray-500">•</span>
                         <span className="text-gray-500">
-                            {t('complianceProfileNote') || 'Profile: '}<span className="text-gray-300">{profile === 'vs-nfd' ? 'VS-NfD (BSI Grundschutz)' : profile.toUpperCase()}</span>
+                            {t('complianceProfileNote') || 'Profile: '}<span className="text-gray-300">{customSel ? customSel.name : profile === 'vs-nfd' ? 'VS-NfD (BSI Grundschutz)' : profile.toUpperCase()}</span>
                         </span>
                     </div>
                 </div>
@@ -11050,6 +12464,9 @@
             const srBusy = (status) => status === 'running' || status === 'cancelling';
             const srActive = (status) => srBusy(status) || status === 'testing';
             const getClusterName = (id) => clusterLabel(clusters.find(cl => cl.id === id)) || id;
+            // LW Nov 2026 - a job can keep the replica under a VMID of its own, which is what an
+            // emergency failover starts; it also tells two jobs of one guest apart
+            const srJobLabel = (j) => `${j.schedule}, ${fillText(t('srOnTargetAs'), { cluster: getClusterName(j.target_cluster), vmid: j.target_vmid || j.vmid })}`;
             const rpoColor = (vm) => {
                 if (!vm.last_replication) return 'text-gray-500';
                 const hrs = (Date.now() - new Date(vm.last_replication).getTime()) / 3600000;
@@ -11167,11 +12584,19 @@
             }, [planDetail?.id, srSubTab]);
 
             // actions
+            // JB Nov 2026 - a second click before the answer made a second plan: the route has no duplicate check
+            const creatingPlan = useRef(false);
             const handleCreatePlan = async () => {
+                if (creatingPlan.current) return;
                 if (!createForm.name || !createForm.source_cluster || !createForm.target_cluster) { addToast('Name + clusters required', 'error'); return; }
-                const r = await authFetch(`${API_URL}/site-recovery/plans`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(createForm) });
-                if (r && r.ok) { addToast(t('createPlan') + ' OK'); setShowCreateModal(false); setCreateForm({ name: '', source_cluster: '', target_cluster: '' }); fetchPlans(); }
-                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Failed', 'error'); }
+                creatingPlan.current = true;
+                try {
+                    const r = await authFetch(`${API_URL}/site-recovery/plans`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(createForm) });
+                    if (r && r.ok) { addToast(t('createPlan') + ' OK'); setShowCreateModal(false); setCreateForm({ name: '', source_cluster: '', target_cluster: '' }); fetchPlans(); }
+                    else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Failed', 'error'); }
+                } finally {
+                    creatingPlan.current = false;
+                }
             };
             const handleDeletePlan = async (planId, force) => {
                 const msg = force ? (t('forceDeletePlan') || 'Force-delete this stuck plan?') : (t('deletePlan') + '?');
@@ -11428,6 +12853,7 @@
             const handleUpdateVm = async (vmId, field, value) => {
                 const r = await authFetch(`${API_URL}/site-recovery/plans/${planDetail.id}/vms/${vmId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ [field]: value }) });
                 if (r && r.ok) fetchPlanDetail(planDetail.id);
+                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || t('saveFailed'), 'error'); }
                 setEditingVm(null);
             };
             // save mappings
@@ -11454,6 +12880,13 @@
                 const grouped = {};
                 (pd.vms || []).forEach(vm => { const g = vm.boot_group ?? 0; if (!grouped[g]) grouped[g] = []; grouped[g].push(vm); });
                 const sortedGroups = Object.entries(grouped).sort(([a],[b]) => Number(a) - Number(b));
+                // the jobs a guest row can link: its own between the plan's clusters, one pass
+                const jobsById = {}, jobsOf = {};
+                replJobs.forEach(j => {
+                    jobsById[j.id] = j;
+                    if (j.source_cluster === pd.source_cluster && j.target_cluster === pd.target_cluster) (jobsOf[j.vmid] = jobsOf[j.vmid] || []).push(j);
+                });
+                const drName = getClusterName(pd.target_cluster);
 
                 return (
                     <div className="space-y-4">
@@ -11468,7 +12901,7 @@
                             <div className="flex items-center gap-2 flex-wrap">
                                 {canFailover && <button onClick={() => handleReadiness(pd.id)} disabled={actionRunning} className="px-3 py-1.5 text-xs rounded-lg bg-gray-600/50 text-gray-300 hover:bg-gray-600 disabled:opacity-40">{t('readinessCheck')}</button>}
                                 {canFailover && <button onClick={() => startDrDrill(pd)} disabled={actionRunning} className="px-3 py-1.5 text-xs rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 disabled:opacity-40">{t('drDrillRun') || 'DR Drill'}</button>}
-                                {canFailover && <button onClick={() => handleAction(pd.id, 'test', t('confirmFailover'))} disabled={actionRunning || srBusy(pd.status)} className="px-3 py-1.5 text-xs rounded-lg bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30 disabled:opacity-40">{t('testFailover')}</button>}
+                                {canFailover && <button onClick={() => handleAction(pd.id, 'test', t('confirmTestFailover'))} disabled={actionRunning || srBusy(pd.status)} className="px-3 py-1.5 text-xs rounded-lg bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30 disabled:opacity-40">{t('testFailover')}</button>}
                                 {canFailover && <button onClick={() => handleAction(pd.id, 'failover', t('confirmFailover'))} disabled={actionRunning || srBusy(pd.status)} className="px-3 py-1.5 text-xs rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-40">{t('plannedFailover')}</button>}
                                 {canFailover && <button data-sr-action="emergency" onClick={() => setGuestPick('emergency')} disabled={actionRunning || srBusy(pd.status) || pd.failover_state === 'all'} className="px-3 py-1.5 text-xs rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-40">{t('emergencyFailover')}</button>}
                                 {canFailover && pd.failed_over_count > 0 && <button data-sr-action="failback" onClick={() => setGuestPick('failback')} disabled={actionRunning || srBusy(pd.status)} className="px-3 py-1.5 text-xs rounded-lg bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 disabled:opacity-40">{t('failback')}</button>}
@@ -11525,13 +12958,13 @@
                                             {gIdx > 0 && <span className="text-xs text-gray-500 flex items-center gap-1"><Icons.Clock className="w-3 h-3" />{t('bootDelay')}: {groupVms[0]?.boot_delay || 30}s</span>}
                                         </div>
                                         <table className="w-full text-sm">
-                                            <thead><tr className="text-left text-gray-500 text-xs"><th className="px-4 py-2">VMID</th><th className="py-2">{t('name')||'Name'}</th><th className="py-2">{t('srGuestLocation')}</th><th className="py-2">{t('bootGroup')}</th><th className="py-2">{t('bootDelay')}</th><th className="py-2">{t('rpo')}</th><th className="py-2 w-10"></th></tr></thead>
+                                            <thead><tr className="text-left text-gray-500 text-xs"><th className="px-4 py-2">VMID</th><th className="py-2">{t('name')||'Name'}</th><th className="py-2">{t('srGuestLocation')}</th><th className="py-2">{t('bootGroup')}</th><th className="py-2">{t('bootDelay')}</th><th className="py-2">{t('srLinkedJob')}</th><th className="py-2">{t('rpo')}</th><th className="py-2 w-10"></th></tr></thead>
                                             <tbody>
                                                 {groupVms.map(vm => (
                                                     <tr key={vm.id} className="border-t border-proxmox-border/30 hover:bg-proxmox-hover/30">
                                                         <td className="px-4 py-2 font-mono text-xs">{vm.vmid}</td>
                                                         <td className="py-2">{vm.vm_name || '-'}</td>
-                                                        <td className="py-2" data-sr-guest-location={vm.vmid}><SrGuestPlace vm={vm} t={t} /></td>
+                                                        <td className="py-2" data-sr-guest-location={vm.vmid}><SrGuestPlace vm={vm} t={t} target={drName} /></td>
                                                         <td className="py-2">{editingVm?.id === vm.id && editingVm?.field === 'boot_group'
                                                             ? <input type="number" className="w-16 bg-proxmox-dark border border-proxmox-border rounded px-1 py-0.5 text-xs" defaultValue={vm.boot_group} autoFocus onBlur={e => handleUpdateVm(vm.id, 'boot_group', parseInt(e.target.value))} onKeyDown={e => e.key === 'Enter' && handleUpdateVm(vm.id, 'boot_group', parseInt(e.target.value))} />
                                                             : <span className="cursor-pointer hover:text-proxmox-orange" onClick={() => canManage && setEditingVm({id: vm.id, field: 'boot_group'})}>{vm.boot_group}</span>
@@ -11539,6 +12972,15 @@
                                                         <td className="py-2">{editingVm?.id === vm.id && editingVm?.field === 'boot_delay'
                                                             ? <input type="number" className="w-16 bg-proxmox-dark border border-proxmox-border rounded px-1 py-0.5 text-xs" defaultValue={vm.boot_delay} autoFocus onBlur={e => handleUpdateVm(vm.id, 'boot_delay', parseInt(e.target.value))} onKeyDown={e => e.key === 'Enter' && handleUpdateVm(vm.id, 'boot_delay', parseInt(e.target.value))} />
                                                             : <span className="cursor-pointer hover:text-proxmox-orange" onClick={() => canManage && setEditingVm({id: vm.id, field: 'boot_delay'})}>{vm.boot_delay}s</span>
+                                                        }</td>
+                                                        <td className="py-2 text-xs" data-sr-guest-job={vm.vmid}>{editingVm?.id === vm.id && editingVm?.field === 'replication_job_id'
+                                                            ? <select className="bg-proxmox-dark border border-proxmox-border rounded px-1 py-0.5 text-xs max-w-48" defaultValue={vm.replication_job_id || ''} autoFocus onChange={e => handleUpdateVm(vm.id, 'replication_job_id', e.target.value)} onBlur={() => setEditingVm(null)}>
+                                                                <option value="">{t('srNoJobLinked')}</option>
+                                                                {(jobsOf[vm.vmid] || []).map(j => <option key={j.id} value={j.id}>{srJobLabel(j)}</option>)}
+                                                            </select>
+                                                            : <span className={canManage ? 'cursor-pointer hover:text-proxmox-orange' : ''} onClick={() => canManage && setEditingVm({id: vm.id, field: 'replication_job_id'})}>
+                                                                {!vm.replication_job_id ? <span className="text-gray-500">{t('srNoJobLinked')}</span> : jobsById[vm.replication_job_id] ? srJobLabel(jobsById[vm.replication_job_id]) : <span className="font-mono">{vm.replication_job_id}</span>}
+                                                            </span>
                                                         }</td>
                                                         <td className="py-2">{vm.failed_over
                                                             ? <span className="text-xs text-gray-500">{t('srReplicationHeld')}</span>
@@ -11627,7 +13069,7 @@
                                                         <thead><tr className="text-gray-500"><th className="text-left pb-1">VMID</th><th className="text-left pb-1">{t('name')||'Name'}</th><th className="text-left pb-1">Status</th><th className="text-left pb-1">Error</th></tr></thead>
                                                         <tbody>{Object.entries(results).map(([vmid, r]) => (
                                                             <tr key={vmid} className="border-t border-proxmox-border/30" data-sr-result={vmid}>
-                                                                <td className="py-1 font-mono">{vmid}</td><td className="py-1">{r.vm_name || '-'}</td>
+                                                                <td className="py-1"><span className="font-mono">{vmid}</span>{r.dr_vmid != null && String(r.dr_vmid) !== vmid && <span className="text-gray-500" data-sr-result-dr={r.dr_vmid}> {fillText(t('srOnTargetAs'), { cluster: getClusterName(pd.target_cluster), vmid: r.dr_vmid })}</span>}</td><td className="py-1">{r.vm_name || '-'}</td>
                                                                 <td className="py-1">{r.skipped ? <span className="text-gray-400">{t('skipped')}</span> : r.success ? <span className="text-green-400">OK</span> : <span className="text-red-400">Failed</span>}</td>
                                                                 <td className="py-1 text-gray-500">{r.skipped ? (r.reason === 'not failed over' ? t('srSkipNotFailedOver') : t('srSkipFailedOver')) : (r.error || '-')}</td>
                                                             </tr>
@@ -11685,7 +13127,7 @@
                                     </div>
                                     <select value={addVmForm.replication_job_id} onChange={e => setAddVmForm(f => ({...f, replication_job_id: e.target.value}))} className="w-full bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-sm">
                                         <option value="">{t('linkReplication') || 'Link Replication Job (optional)'}</option>
-                                        {replJobs.filter(j => j.vmid == addVmForm.vmid && j.source_cluster === planDetail.source_cluster && j.target_cluster === planDetail.target_cluster).map(j => <option key={j.id} value={j.id}>{j.schedule} → {getClusterName(j.target_cluster)}</option>)}
+                                        {replJobs.filter(j => j.vmid == addVmForm.vmid && j.source_cluster === planDetail.source_cluster && j.target_cluster === planDetail.target_cluster).map(j => <option key={j.id} value={j.id}>{srJobLabel(j)}</option>)}
                                     </select>
                                     <div className="flex justify-end gap-2">
                                         <button onClick={() => setShowAddVmModal(false)} className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">{t('cancel') || 'Cancel'}</button>
@@ -11886,13 +13328,19 @@
             );
         }
 
-        function SrGuestPlace({ vm, t }) {
+        // target: the DR cluster's name, for the VMID the guest runs under there when it is
+        // not its own (an emergency failover starts the replica a job keeps elsewhere)
+        function SrGuestPlace({ vm, t, target }) {
             if (!vm.failed_over) return <span className="text-xs text-gray-500">{t('srGuestAtSource')}</span>;
+            const there = target && vm.failed_over_vmid && vm.failed_over_vmid !== vm.vmid ? vm.failed_over_vmid : null;
             return (
-                <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400"
-                    title={`${vm.failed_over}${vm.failed_over_at ? ', ' + fmtDate(vm.failed_over_at) : ''}`}>
-                    {t('srGuestFailedOver')}
-                </span>
+                <>
+                    <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400"
+                        title={`${vm.failed_over}${vm.failed_over_at ? ', ' + fmtDate(vm.failed_over_at) : ''}`}>
+                        {t('srGuestFailedOver')}
+                    </span>
+                    {there && <span className="text-xs text-gray-500" data-sr-guest-dr-vmid={there}> {fillText(t('srOnTargetAs'), { cluster: target, vmid: there })}</span>}
+                </>
             );
         }
 
@@ -13024,7 +14472,7 @@
         }
 
         function PegaProxDashboard() {
-            const { t } = useTranslation();
+            const { t, language } = useTranslation();
             const { user, sessionId, logout, getAuthHeaders, isAdmin, passwordExpiry, updatePreferences, ha, haReadOnly, haStandby, haConsolesElsewhere, haServing, refreshHa } = useAuth();
             // #625: a standby shows the clusters read-only, or none at all with its live view off.
             // Since forwarding, haReadOnly holds only while it does not forward, haStandby on
@@ -13041,7 +14489,9 @@
             // not can(): the auto-install routes also refuse tenant/cluster-confined callers
             // (capped admins included), the server folds that into this flag for us
             const canAutoInstall = !!user?.autoinstall_access;
-            const { isCorporate, isCloud } = useLayout(); // LW: Feb 2026 - corporate layout / NS 2026-06: + cloud (Preview)
+            const { isCorporate, isCorpRedesigned, isCloud, layoutLocked } = useLayout(); // LW: Feb 2026 - corporate layout / NS 2026-06: + cloud (Preview)
+            // LW Nov 2026 - the redesign formats numbers and dates in the language drawn here (cr.js)
+            if (isCorpRedesigned) crUiLocale(language);
             const [clusters, setClusters] = useState([]);
             const [clusterGroups, setClusterGroups] = useState([]); // NS Jan 2026 - for grouping
             const [collapsedGroups, setCollapsedGroups] = useState({}); // Track which groups are collapsed
@@ -13063,6 +14513,15 @@
             const [knownNodes, setKnownNodes] = useState({}); // NS: Track all nodes ever seen to show offline ones
             const [clusterResources, setClusterResources] = useState([]);
             const [clusterDatastores, setClusterDatastores] = useState({ shared: [], local: {} }); // LW: Mar 2026 - sidebar datastore list
+            // LW Nov 2026 - how the last /datastores read of each cluster ended ({ ok, at, msg }), Corporate Redesigned says a failed one.
+            // The ref has every read (its time decides against the Datastore tab's own read), the state only a change, so a
+            // poll that ends as the one before draws nothing
+            const [crDsReads, setCrDsReads] = useState({});
+            const crDsReadsRef = useRef({});
+            const crNoteDsRead = (cid, next) => {
+                crDsReadsRef.current = { ...crDsReadsRef.current, [cid]: next };
+                setCrDsReads(prev => (prev[cid] && prev[cid].ok === next.ok && prev[cid].msg === next.msg ? prev : { ...prev, [cid]: next }));
+            };
             const [clusterNetworks, setClusterNetworks] = useState([]); // NS: Mar 2026 - network view
             const [loadingNetworks, setLoadingNetworks] = useState(false);
             const [lastUpdate, setLastUpdate] = useState(null);
@@ -13156,6 +14615,9 @@
             const [pbsActiveTab, setPbsActiveTab] = useState('dashboard');
             // NS May 2026 — VM backup status map (vmid -> {status, last_age, ...})
             const [vmsBackupStatus, setVmsBackupStatus] = useState({});
+            // LW Oct 2026 - Corporate Redesigned: which cluster the map above is of, when it was read,
+            // and the status of a read that failed since (the map keeps its last answer)
+            const [vmsBackupFor, setVmsBackupFor] = useState(null);
             // NS May 2026 — running backup progress pane (UPID + node)
             const [activeBackupProgress, setActiveBackupProgress] = useState(null);  // {upid, node}
             // listen for cross-component events to open the progress pane
@@ -13244,7 +14706,7 @@
             const [showVmwareClone, setShowVmwareClone] = useState(false);
             const [vmwareCloneName, setVmwareCloneName] = useState('');
             const [showVmwareDelete, setShowVmwareDelete] = useState(false);
-            const [vmwareConfigEdit, setVmwareConfigEdit] = useState({ cpu: '', memory: '', notes: '', cpu_hot_add: false, memory_hot_add: false });
+            const [vmwareConfigEdit, setVmwareConfigEdit] = useState({});  // only what the user changed
             const [vmwareConfigSaving, setVmwareConfigSaving] = useState(false);
             const [showVmwareMigrate, setShowVmwareMigrate] = useState(false);
             const [vmwareMigrationPlan, setVmwareMigrationPlan] = useState(null);
@@ -13270,8 +14732,20 @@
                 // /var/lib/vz/template/iso/.
                 install_virtio_drivers:false, virtio_iso_path:'',
             });
-            const [migrateWizardStep, setMigrateWizardStep] = useState('target'); // target, hardware, advanced
+            const [migrateWizardStep, setMigrateWizardStep] = useState('target'); // target, hardware, advanced, review
             const [vmwareMigrateLoading, setVmwareMigrateLoading] = useState(false);
+            // LW Oct 2026 - per NIC / per disk rows of the ESXi wizard and its review step. The
+            // review is a dry run of the same request; Start sends exactly what it checked.
+            const [v2pNicRows, setV2pNicRows] = useState([]);
+            const [v2pDiskRows, setV2pDiskRows] = useState([]);
+            const [v2pReview, setV2pReview] = useState(null);
+            const [v2pReviewKey, setV2pReviewKey] = useState('');
+            const [v2pReviewLoading, setV2pReviewLoading] = useState(false);
+            const [v2pInventory, setV2pInventory] = useState(null);
+            // LW Oct 2026 - the guests ticked in the ESXi VM list, and the bulk dialog: {vms} to
+            // set one up, {runId} to follow one
+            const [esxiBulkSel, setEsxiBulkSel] = useState([]);
+            const [esxiBulk, setEsxiBulk] = useState(null);
             const [vmwareConsoleUrl, setVmwareConsoleUrl] = useState(null);
             const [showVmwareConsole, setShowVmwareConsole] = useState(false);
             const [vmwareHealthData, setVmwareHealthData] = useState(null);
@@ -13534,8 +15008,20 @@
             const [showTaskBar, setShowTaskBar] = useState(true);  // localStorage.getItem('showTaskBar') !== 'false'
             const [actionLoading, setActionLoading] = useState({});
             const [warningBannerDismissed, setWarningBannerDismissed] = useState(false);
+            // LW Nov 2026 - classic Corporate only gets fixes from now on. The bar under its header
+            // says so until it is closed in this browser, the header button stays
+            const [corpClassicNoticeClosed, setCorpClassicNoticeClosed] = useState(() => {
+                try { return localStorage.getItem('corp-classic-notice') === 'closed'; } catch (_) { return false; }
+            });
+            // LW Nov 2026 - the kind and severity the alert strip of Corporate Redesigned opens the Timeline with
+            const [crTimelinePick, setCrTimelinePick] = useState(null);
             // LW: Feb 2026 - corporate sidebar resize
             const [sidebarWidth, setSidebarWidth] = useState(() => parseInt(localStorage.getItem('corp-sidebar-w')) || 224);
+            // LW Oct 2026 - Corporate Redesigned keeps its own width and fold state (cr.js)
+            const [crSidebarW, setCrSidebarW] = useState(crSidebarWidth);
+            const [crSidebarFolded, setCrSidebarFolded] = useState(() => crRead('cr-sidebar-collapsed') === '1');
+            const crSetSidebarW = (w) => { setCrSidebarW(w); crWrite('cr-sidebar-w', w); };
+            const crFoldSidebar = (folded) => { setCrSidebarFolded(folded); crWrite('cr-sidebar-collapsed', folded ? '1' : '0'); };
             // #189 - on phones the sidebar is an off-canvas drawer. Purely visual, CSS drives it.
             const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
             // Close the drawer whenever navigation actually lands somewhere. Watching the
@@ -13547,6 +15033,19 @@
                 // the global views set no selection, so they never closed the drawer
                 sidebarTopology, sidebarWorldmap, sidebarXHM, sidebarMultiSdn, sidebarAutoInstall, sidebarGuests,
             ]);
+            // JB Nov 2026 - a dialog opened from the drawer opens under it, z-index 50 against 1200, so nothing in it
+            // can be reached. Same reasoning as above: watch for the dialog, not the dozens of buttons that open one.
+            useEffect(() => {
+                if (!mobileSidebarOpen) return;
+                const dialog = '.fixed.inset-0:not(.pointer-events-none):not(.z-40), .modal-backdrop, .corp-vm-modal-overlay';
+                const watch = new MutationObserver((changes) => {
+                    for (const c of changes) for (const n of c.addedNodes) {
+                        if (n.nodeType === 1 && (n.matches(dialog) || n.querySelector(dialog))) { setMobileSidebarOpen(false); return; }
+                    }
+                });
+                watch.observe(document.body, { childList: true, subtree: true });
+                return () => watch.disconnect();
+            }, [mobileSidebarOpen]);
             const sidebarResizing = useRef(false);
             const wsRef = useRef(null);
             const retryCount = useRef(0);  // unused but might need later
@@ -13631,6 +15130,22 @@
             const globalSearchRef = React.useRef(null);
             const globalSearchTimerRef = React.useRef(null);
             const [highlightedVm, setHighlightedVm] = useState(null);  // {vmid, node} - for scrolling to VM in table
+            // LW Nov 2026 - a guest Modern opens in the detail view of its cluster's guest list ({clusterId, vmid, type}, #1229).
+            // It waits there for the list of that cluster and is dropped once the user moves on
+            const [openGuestDetail, setOpenGuestDetail] = useState(null);
+            useEffect(() => {
+                if (openGuestDetail && (openGuestDetail.clusterId !== selectedCluster?.id || activeTab !== 'resources' || resourcesSubTab !== 'management')) setOpenGuestDetail(null);
+            }, [selectedCluster?.id, activeTab, resourcesSubTab]);
+            // Modern has no guest view of its own: a guest picked in All Guests or an overview opens
+            // there, from the top of the page. The list of the cluster shown before is emptied first,
+            // so a guest with the same ID there is never the one picked. Without a type the ID alone
+            // finds it, it is unique in a cluster
+            const askGuestDetail = (cluster, guest) => {
+                if (isCorporate) return;
+                if (selectedCluster?.id !== cluster.id) setClusterResources([]);
+                setOpenGuestDetail({ clusterId: cluster.id, vmid: guest.vmid, type: guest.type || null });
+                window.scrollTo(0, 0);
+            };
             
             // NS: User Favorites state
             const [favorites, setFavorites] = useState({ vms: [], nodes: [], clusters: [] });
@@ -13686,6 +15201,8 @@
             const EVENT_ALERT_METRICS = ['task_failed', 'ceph_health', 'ceph_osd_latency', 'replication', 'replication_rpo', 'snapshot_age', 'backup_coverage', 'zfs_health', 'clock_drift', 'restart_loop', 'qdevice'];
             // LW Oct 2026 - a guest without a restore test that passed within so many days
             EVENT_ALERT_METRICS.push('restore_test_age');
+            // one alert per QNetd host the cluster votes through, for the cluster as a whole
+            EVENT_ALERT_METRICS.push('qnetd');
             const [sessionExpired, setSessionExpired] = useState(false);  // our own 401 -> clear "session expired" overlay instead of silent failure
             const [clusterAffinityRules, setClusterAffinityRules] = useState([]);
             const [showAffinityModal, setShowAffinityModal] = useState(false);
@@ -13699,13 +15216,7 @@
             // NS Apr 2026 — backend hardcodes `root` and `pegaprox` as always-exempted
             // for the 4 lockout/aging controls. service_user param is for ADDITIONAL
             // accounts only (e.g. monitoring agents) — empty by default.
-            const [hardenParams, setHardenParams] = useState({
-                backup_dns: { dns1: '1.1.1.1', dns2: '9.9.9.9' },
-                pam_faillock:      { service_user: '' },
-                pw_aging:          { service_user: '' },
-                session_limit:     { service_user: '' },
-                inactive_accounts: { service_user: '' },
-            });
+            const [hardenParams, setHardenParams] = useState(() => hardenParamsFor(''));
             const [hardenResults, setHardenResults] = useState(null);
             // NS Apr 2026 (#322): verbose audit output
             const [hardenVerbose, setHardenVerbose] = useState(false);
@@ -13721,6 +15232,10 @@
             const [hardenConfirm, setHardenConfirm] = useState(null); // {toApply, needsAccessAck, needsLockoutAck}
             const [hardenAccessAck, setHardenAccessAck] = useState(false);
             const [hardenLockoutAck, setHardenLockoutAck] = useState(false);
+            // LW Oct 2026 - custom hardening profiles (GET /api/hardening/profiles) and the manage
+            // dialog, {draft} while it is open
+            const [hardenProfiles, setHardenProfiles] = useState(null);
+            const [hardenProfilesDlg, setHardenProfilesDlg] = useState(null);
 
             // Custom Scripts state - MK Jan 2026
             const [customScripts, setCustomScripts] = useState([]);
@@ -13734,11 +15249,16 @@
             
             // NS: Reports/Analytics state
             const [reportData, setReportData] = useState(null);
+            const [reportFailed, setReportFailed] = useState(false);
             const [reportPeriod, setReportPeriod] = useState('day');
             const [reportLoading, setReportLoading] = useState(false);
-            const [topVms, setTopVms] = useState([]);
+            // the top lists: null until the first answer, false when the read failed
+            const [topVms, setTopVms] = useState(null);
+            const [topVmsMem, setTopVmsMem] = useState(null);
             const [reportSubTab, setReportSubTab] = useState('summary');
             const [complianceSubTab, setComplianceSubTab] = useState('hardening');
+            // LW Oct 2026 - Corporate Redesigned: the drift finding a timeline row asked to open
+            const [crDriftFocus, setCrDriftFocus] = useState(null);
             // NS Oct 2026 - hardening and drift read with admin.audit or node.maintenance, the change
             // plans with changes.view; each account gets the sub tabs it can read
             const complianceSubs = [
@@ -13756,10 +15276,13 @@
             const [cveScanLoading, setCveScanLoading] = useState(false);
             const [cveExpandedNodes, setCveExpandedNodes] = useState({});
             const [debsecanInstalling, setDebsecanInstalling] = useState(false);
+            // LW Nov 2026 - why the last scan failed ({ code, reason }); Corporate Redesigned shows it with a retry
+            const [cveError, setCveError] = useState(null);
 
             // MK: clear stale CVE results when switching clusters
             useEffect(() => {
                 setCveResults(null);
+                setCveError(null);
                 setCveScanLoading(false);
                 setCveExpandedNodes({});
                 setDebsecanInstalling(false);
@@ -13861,7 +15384,13 @@
             useEffect(() => { vmwareSelectedVmRef.current = vmwareSelectedVm; }, [vmwareSelectedVm]);
             useEffect(() => { vmwareSelectedMigrationRef.current = vmwareSelectedMigration; }, [vmwareSelectedMigration]);
 
-            const addToast = (message, type = 'success') => {
+            // JB Nov 2026 - the EVPN and ESXi views call this with (title, detail, type): the detail ended up as
+            // the type, so the reason a server gave was never shown and every toast came out in the info colour
+            const addToast = (message, type = 'success', typeAfterDetail) => {
+                if (typeAfterDetail) {
+                    if (type) message = `${message}: ${type}`;
+                    type = typeAfterDetail;
+                }
                 const id = Date.now() + Math.random();
                 // the same message twice at once says nothing new (authFetch and its caller
                 // both report a standby refusal, #625). The newer one replaces the older and
@@ -14148,8 +15677,9 @@
                     if (idx > 0) all[idx - 1].focus();
                 };
 
+                const crTree = isCorpRedesigned;
                 return (
-                    <div className="ml-5 corp-inline-tree">
+                    <div className="ml-5 corp-inline-tree" role={crTree ? 'group' : undefined}>
                         {/* Nodes first */}
                         {filteredNodes.map(({ name: nodeName, metrics: nodeMetrics, online: nodeOnline }) => {
                             const isMaint = nodeMetrics?.maintenance_mode;
@@ -14163,10 +15693,12 @@
                                     tabIndex={0}
                                     onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }}
                                     onContextMenu={(e) => { e.preventDefault(); setCtxMenu({type: 'node', target: {nodeName, clusterId, online: nodeOnline, maintenance: isMaint}, position: {x: e.clientX, y: e.clientY}}); }}
+                                    role={crTree ? 'treeitem' : undefined} aria-level={crTree ? 2 : undefined} aria-selected={crTree ? isNodeSelected : undefined}
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }
                                         else if (e.key === 'ArrowDown') treeNavDown(e);
                                         else if (e.key === 'ArrowUp') treeNavUp(e);
+                                        else if (crTree) crTreeKey(e);
                                     }}
                                     style={isNodeSelected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: nodeOnline ? 'var(--corp-text-secondary)' : 'var(--corp-text-muted)'}}
                                     onMouseEnter={(e) => {
@@ -14205,10 +15737,12 @@
                                     className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
                                     tabIndex={0}
                                     onClick={openQ}
+                                    role={crTree ? 'treeitem' : undefined} aria-level={crTree ? 2 : undefined} aria-selected={crTree ? isQSelected : undefined}
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter') { e.preventDefault(); openQ(); }
                                         else if (e.key === 'ArrowDown') treeNavDown(e);
                                         else if (e.key === 'ArrowUp') treeNavUp(e);
+                                        else if (crTree) crTreeKey(e);
                                     }}
                                     style={isQSelected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: 'var(--corp-text-secondary)'}}
                                     onMouseEnter={(e) => { if (!isQSelected) { e.currentTarget.style.background = 'var(--color-hover)'; e.currentTarget.style.color = 'var(--color-text)'; } }}
@@ -14230,10 +15764,12 @@
                                     tabIndex={0}
                                     onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                     onContextMenu={(e) => { e.preventDefault(); setCtxMenu({type: 'vm', target: {...vm, _clusterId: clusterId}, position: {x: e.clientX, y: e.clientY}}); }}
+                                    role={crTree ? 'treeitem' : undefined} aria-level={crTree ? 2 : undefined} aria-selected={crTree ? isVmSelected : undefined}
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }
                                         else if (e.key === 'ArrowDown') treeNavDown(e);
                                         else if (e.key === 'ArrowUp') treeNavUp(e);
+                                        else if (crTree) crTreeKey(e);
                                     }}
                                     className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
                                     data-vmid={vm.name ? vm.vmid : undefined}
@@ -14537,13 +16073,27 @@
                 const sharedStores = (cDatastores.shared || []).sort((a, b) => (a.storage || '').localeCompare(b.storage || ''));
                 const localByNode = Object.entries(cDatastores.local || {}).sort(([a], [b]) => a.localeCompare(b));
                 const sharedNames = new Set(sharedStores.map(s => s.storage)); // avoid dupes under node sections
+                // LW Nov 2026 - Corporate Redesigned: a failed read is said with a retry, never "No datastores"
+                const crDsFail = isCorpRedesigned && crDsReads[clusterId] && crDsReads[clusterId].ok === false ? crDsReads[clusterId] : null;
 
-                if (sharedStores.length === 0 && localByNode.length === 0) {
+                if (sharedStores.length === 0 && localByNode.length === 0 && !crDsFail) {
                     return (
                         <div className="ml-5 py-1 text-[12px]" style={{color: '#728b9a', fontStyle: 'italic'}}>
                             {t('noDatastores') || 'No datastores'}
                         </div>
                     );
+                }
+
+                // LW Oct 2026 - Corporate Redesigned: the same rows and the same way in, with meter and state
+                if (isCorpRedesigned) {
+                    return <CrDsTree clusterId={clusterId} shared={sharedStores} local={localByNode} skip={sharedNames}
+                        picked={selectedSidebarDatastore} fail={crDsFail} onRetry={() => fetchClusterDatastores(clusterId)}
+                        onOpen={(store, node) => {
+                            if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId));
+                            setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId });
+                            setSelectedSidebarVm(null); setSelectedSidebarNode(null);
+                            setActiveTab('datastore');
+                        }} />;
                 }
 
                 const renderStoreItem = (store, node) => {
@@ -15156,8 +16706,11 @@
             // ============================================
             
             const [snapshotsLoading, setSnapshotsLoading] = useState(false);
+            // LW Nov 2026 - why the last overview read failed ({why}), for Corporate Redesigned; classic never draws it
+            const [snapshotsReadErr, setSnapshotsReadErr] = useState(null);
             const fetchGlobalSnapshots = async (clusterId = null, filterDate = null) => {
                 setSnapshotsLoading(true);
+                setSnapshotsReadErr(null);
                 try {
                     const body = {};
                     if (clusterId) body.cluster_id = clusterId;
@@ -15173,10 +16726,13 @@
                         const data = await res.json();
                         setGlobalSnapshots(data.snapshots ?? data ?? []);
                     } else {
+                        const d = res ? await res.json().catch(() => null) : null;
+                        setSnapshotsReadErr({ why: [d && typeof d.error === 'string' ? d.error : '', res ? `HTTP ${res.status}` : ''].filter(Boolean).join(' - ') });
                         setGlobalSnapshots([]);
                     }
                 } catch (err) {
                     console.error('Snapshot fetch failed:', err);
+                    setSnapshotsReadErr({ why: err && err.message ? err.message : '' });
                     setGlobalSnapshots([]);
                 }
                 setSnapshotsLoading(false);
@@ -15559,8 +17115,15 @@
             };
 
             // NS #501 — currently-firing incidents (ack + escalation)
-            const loadActiveAlerts = async (clusterId) => {
+            const loadActiveAlerts = async (clusterId, force) => {
                 if (!clusterId) return;
+                // LW Nov 2026 - Corporate Redesigned reads them through the store the alert strip and the
+                // Datacenter page share (one read per cluster and minute, again at once after a write);
+                // the list below takes the answer as this read did (crAutoAlerts)
+                if (isCorpRedesigned) {
+                    crAlertsRead(authFetch, clusterId, force);
+                    return;
+                }
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/active-alerts`);
                     setActiveAlertsAway(await haLeaderAway(r));
@@ -15568,11 +17131,21 @@
                     else setActiveAlerts([]);
                 } catch (e) { setActiveAlerts([]); }
             };
+            const crAutoAlerts = crUseAlertsStore(isCorpRedesigned && activeTab === 'automation' ? (selectedCluster?.id || null) : null);
+            // LW Nov 2026 - a failed read of them is said above the list (with Retry) instead of an empty list
+            const [crAutoAlertsUnread, setCrAutoAlertsUnread] = useState(null);
+            useEffect(() => {
+                if (!crAutoAlerts) { setCrAutoAlertsUnread(null); return; }
+                const v = crAlAutomationView(crAutoAlerts);
+                setActiveAlertsAway(v.away);
+                setActiveAlerts(v.rows);
+                setCrAutoAlertsUnread(v.unread);
+            }, [crAutoAlerts]);
             const ackAlert = async (firedId) => {
                 if (!selectedCluster?.id) return;
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${selectedCluster.id}/active-alerts/${firedId}/ack`, { method: 'POST' });
-                    if (r && r.ok) { addToast(t('alertAcked') || 'Alert acknowledged', 'success'); loadActiveAlerts(selectedCluster.id); }
+                    if (r && r.ok) { addToast(t('alertAcked') || 'Alert acknowledged', 'success'); loadActiveAlerts(selectedCluster.id, true); }
                 } catch (e) { console.error('Failed to ack alert:', e); }
             };
 
@@ -15597,7 +17170,7 @@
                     if (r && r.ok) {
                         addToast(t('alertMuteDone'), 'success');
                         loadAlertMutes(selectedCluster.id);
-                        loadActiveAlerts(selectedCluster.id);
+                        loadActiveAlerts(selectedCluster.id, true);
                     } else if (r) {
                         const d = await r.json().catch(() => ({}));
                         addToast(d.error || t('error') || 'Error', 'error');
@@ -15611,7 +17184,7 @@
                     if (r && r.ok) {
                         addToast(t('alertUnmuteDone'), 'success');
                         setAlertMutes(prev => prev.filter(m => m.id !== muteId));
-                        loadActiveAlerts(selectedCluster.id);
+                        loadActiveAlerts(selectedCluster.id, true);
                     }
                 } catch (e) { console.error('Failed to lift mute:', e); }
             };
@@ -15653,6 +17226,7 @@
                 if (alert.metric === 'clock_drift') return t('clockDriftSummary').replace('{n}', n);
                 if (alert.metric === 'restart_loop') return t('restartLoopSummary').replace('{n}', n).replace('{m}', alert.restart_window_minutes || 15);
                 if (alert.metric === 'qdevice') return t('qdeviceAlertSummary');
+                if (alert.metric === 'qnetd') return t('qnetdAlertSummary');
                 if (alert.metric === 'ceph_osd_latency') return t('cephOsdLatencySummary').replace('{n}', n);
                 if (alert.metric === 'replication_rpo') return Number(n) > 0 ? t('replicationRpoSummary').replace('{n}', n) : t('replicationRpoSummaryAuto');
                 if (alert.metric === 'restore_test_age') {
@@ -15666,20 +17240,29 @@
             // Cluster Affinity Rules Functions - NS Jan 2026
             // ============================================
             
+            // LW Nov 2026 - why the last read failed ({why}), for Corporate Redesigned; classic never draws it
+            const [affinityReadErr, setAffinityReadErr] = useState(null);
+            const [affinityLoading, setAffinityLoading] = useState(false);
             const loadClusterAffinityRules = async (clusterId) => {
                 if (!clusterId) return;
+                setAffinityReadErr(null);
+                setAffinityLoading(true);
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/affinity-rules`);
                     if (response && response.ok) {
                         const data = await response.json();
                         setClusterAffinityRules(data.rules || []);
                     } else {
+                        const d = response ? await response.json().catch(() => null) : null;
+                        setAffinityReadErr({ why: [d && typeof d.error === 'string' ? d.error : '', response ? `HTTP ${response.status}` : ''].filter(Boolean).join(' - ') });
                         setClusterAffinityRules([]);
                     }
                 } catch (err) {
                     console.error('Failed to load affinity rules:', err);
+                    setAffinityReadErr({ why: err && err.message ? err.message : '' });
                     setClusterAffinityRules([]);
                 }
+                setAffinityLoading(false);
             };
             
             const createClusterAffinityRule = async (ruleData) => {
@@ -15708,10 +17291,12 @@
                     });
                     if (response && response.ok) {
                         setClusterAffinityRules(prev => prev.filter(r => r.id !== ruleId));
+                        return true;
                     }
                 } catch (err) {
                     console.error('Failed to delete affinity rule:', err);
                 }
+                return false;  // classic ignores it, Corporate Redesigned says the rule is still there
             };
             
             // ============================================
@@ -15719,24 +17304,32 @@
             // Now cluster-based, not global
             // ============================================
             
-            const loadReportSummary = async (period = 'day', clusterId = null) => {
+            // LW Oct 2026 - range ({from, to}): a read of the Corporate Redesigned summary for a preset
+            // the period cannot name, or for its zoom; it leaves the classic state alone. Every read
+            // hands back { ok, status, body }, so that page tells a refusal from an empty history
+            const loadReportSummary = async (period = 'day', clusterId = null, range = null) => {
                 const clId = clusterId || selectedCluster?.id;
                 if (!clId) return;
-                
-                setReportLoading(true);
+
+                if (!range) setReportLoading(true);
+                let read = { ok: false, status: 0, body: null };
                 try {
-                    const response = await authFetch(`${API_URL}/clusters/${clId}/reports/summary?period=${period}`);
+                    const query = range ? `from=${Math.floor(range.from)}&to=${Math.ceil(range.to)}` : `period=${period}`;
+                    const response = await authFetch(`${API_URL}/clusters/${clId}/reports/summary?${query}`);
                     if (response && response.ok) {
                         const data = await response.json();
-                        setReportData(data);
+                        if (!range) { setReportData(data); setReportFailed(false); }
+                        read = { ok: true, status: response.status, body: data };
                     } else {
-                        setReportData(null);
+                        if (!range) { setReportData(null); setReportFailed(true); }
+                        if (response) read = { ok: false, status: response.status, body: await response.json().catch(() => null) };
                     }
                 } catch (err) {
                     console.error('Failed to load report:', err);
-                    setReportData(null);
+                    if (!range) { setReportData(null); setReportFailed(true); }
                 }
-                setReportLoading(false);
+                if (!range) setReportLoading(false);
+                return read;
             };
             
             // LW Oct 2026 - the CPU and memory charts of the report zoom together. The report is
@@ -15747,6 +17340,30 @@
                 metrics: { cpu: d.cpu?.samples || [], memory: d.memory?.samples || [] },
             } : null;
             const reportSeries = React.useMemo(() => reportToSeries(reportData), [reportData]);
+            // NS (Nov 2026): the figures of the tiles, null where the server says it could not read
+            // them (live.unread: the cluster is not connected, the node status or the guest list
+            // did not answer). A stored sample still counts for CPU and memory.
+            const reportNow = React.useMemo(() => {
+                if (!reportData) return null;
+                const live = reportData.live || {}, unread = live.unread || [];
+                const stored = m => (reportData[m]?.samples?.length || 0) > 0;
+                const nodes = !unread.includes('nodes'), guests = !unread.includes('guests');
+                return {
+                    cpu: (stored('cpu') || nodes) ? (reportData.cpu?.current ?? live.cpu_percent ?? 0) : null,
+                    memory: (stored('memory') || nodes) ? (reportData.memory?.current ?? live.mem_percent ?? 0) : null,
+                    // a live 0 running is a figure, not a reason to show an older snapshot's count
+                    vms: guests ? (live.vms_running ?? reportData.vms_running?.current ?? 0) : null,
+                    cts: guests ? (live.cts_running ?? 0) : null,
+                };
+            }, [reportData]);
+            // where a gauge would be: the same room, a dash and why
+            const reportUnreadGauge = (label, what) => (
+                <div className="gauge-container flex flex-col items-center justify-center" data-report-unread={what}>
+                    <span className="text-3xl font-bold text-gray-500">-</span>
+                    <span className="text-xs text-gray-400 mt-1 font-medium">{label}</span>
+                    <span className="text-[11px] text-gray-500 text-center">{t('reportValueUnread')}</span>
+                </div>
+            );
             const reportZoom = useChartZoom({
                 preset: reportPeriod, loaded: reportSeries, resetKey: selectedCluster?.id,
                 loadRange: (from, to) => authFetch(`${API_URL}/clusters/${selectedCluster?.id}/reports/summary?from=${Math.floor(from)}&to=${Math.ceil(to)}`)
@@ -15756,18 +17373,20 @@
             const loadTopVms = async (metric = 'cpu', limit = 10, clusterId = null) => {
                 const clId = clusterId || selectedCluster?.id;
                 if (!clId) return;
-                
+                // the memory list is a ranking of its own: the ten busiest CPUs re-sorted by memory left
+                // out the guests with the most memory in use
+                const put = metric === 'memory' ? setTopVmsMem : setTopVms;
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clId}/reports/top-vms?metric=${metric}&limit=${limit}`);
                     if (response && response.ok) {
                         const data = await response.json();
-                        setTopVms(data);
+                        put(Array.isArray(data) ? data : false);
                     } else {
-                        setTopVms([]);
+                        put(false);
                     }
                 } catch (err) {
                     console.error('Failed to load top VMs:', err);
-                    setTopVms([]);
+                    put(false);
                 }
             };
             
@@ -15779,6 +17398,7 @@
 
                 setCveScanLoading(true);
                 setCveResults(null);
+                setCveError(null);
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clId}/reports/cve-scan`, {
                         method: 'POST'
@@ -15787,12 +17407,15 @@
                         const data = await response.json();
                         setCveResults(data);
                     } else {
-                        const errData = await response?.json().catch(() => null);
-                        const reason = errData?.error || errData?.message || `HTTP ${response?.status}`;
+                        // authFetch answers null for a lost or aborted connection: no status to name
+                        const errData = response ? await response.json().catch(() => null) : null;
+                        const reason = errData?.error || errData?.message || (response ? `HTTP ${response.status}` : t('cveScanNoAnswer'));
+                        setCveError({ code: response ? response.status : 0, reason });
                         addToast((t('cveScanFailed') || 'CVE scan failed') + ': ' + reason, 'error');
                     }
                 } catch (err) {
                     console.error('CVE scan error:', err);
+                    setCveError({ code: 0, reason: err.message || t('cveScanNoAnswer') });
                     addToast((t('cveScanFailed') || 'CVE scan failed') + ': ' + err.message, 'error');
                 }
                 setCveScanLoading(false);
@@ -15824,6 +17447,15 @@
                 setDebsecanInstalling(false);
             };
 
+            // NS Nov 2026 - controls whose apply changes nothing on the node, the server answers them
+            // noop. The catalog of GET /api/hardening/profiles marks them; a server without that field
+            // gets the old list: the informational VS-NfD group and net_protocols, which fs_modules covers
+            const hardenNoopIds = () => {
+                const catalog = Array.isArray(hardenProfiles?.catalog) ? hardenProfiles.catalog : [];
+                if (catalog.some(c => c && 'noop' in c)) return new Set(catalog.filter(c => c && c.noop).map(c => c.id));
+                return new Set(['net_protocols', ...Object.keys(hardeningControlInfo(t).vsnfdControls)]);
+            };
+
             // CIS hardening check/apply
             const checkHardening = async (nodeName, verbose = false, profile = '') => {
                 if (!selectedCluster?.id || !nodeName) return;
@@ -15843,12 +17475,13 @@
                         setHardenStatus(data);
                         // pre-select all controls that are NOT yet applied
                         const sel = {};
+                        const noop = hardenNoopIds();
                         Object.entries(data.controls || {}).forEach(([id, v]) => {
                             // verbose: v is {status, evidence}, non-verbose: v is bool. LW Oct 2026 -
                             // null is a control that was not checked: its state is unknown, so it
                             // is not ticked for an apply on its own
                             const applied = (v && typeof v === 'object') ? v.status : v;
-                            if (applied === false) sel[id] = true;
+                            if (applied === false && !noop.has(id)) sel[id] = true;
                         });
                         setHardenSelected(sel);
                     } else {
@@ -15891,6 +17524,7 @@
                 // ones like fail2ban). Per-control HTTP overhead is negligible vs. SSH runtime.
                 const accumulated = {};
                 let appliedOk = 0;
+                let refused = '';
                 try {
                     for (let i = 0; i < toApply.length; i++) {
                         const ctrlId = toApply[i];
@@ -15914,14 +17548,23 @@
                             } else {
                                 const errData = await resp?.json().catch(() => ({}));
                                 accumulated[ctrlId] = { success: false, error: errData?.error || `HTTP ${resp?.status}` };
+                                // not a Proxmox VE cluster: every control gets the same answer
+                                if (errData?.code === 'PVE_ONLY') refused = errData.error;
                             }
                         } catch (perCtrlErr) {
                             accumulated[ctrlId] = { success: false, error: String(perCtrlErr) };
                         }
                         // Live UI update — show per-control result as it lands
                         setHardenResults({ ...accumulated });
+                        if (refused) break;
                     }
-                    addToast(`${appliedOk}/${toApply.length} ${t('controlsApplied') || 'controls applied'}`, appliedOk === toApply.length ? 'success' : 'warning');
+                    // success only counts what ran and passed its check afterwards; the ones that
+                    // change nothing (noop) are not applied and get named apart
+                    const noopCount = Object.values(accumulated).filter(r => r.noop).length;
+                    if (refused) addToast(refused, 'error');
+                    else addToast(`${appliedOk}/${toApply.length} ${t('controlsApplied') || 'controls applied'}`
+                        + (noopCount ? ` · ${fillText(t('hardenNoopCount'), { n: noopCount })}` : ''),
+                        appliedOk === toApply.length ? 'success' : 'warning');
                     // refresh status
                     checkHardening(hardenNode, hardenVerbose, hardenProfile);
                 } catch (e) {
@@ -15950,7 +17593,11 @@
                         const data = await resp.json();
                         setHardenResults({ ...(data.results || {}) });
                         const n = data.restored || 0;
-                        addToast(`${n}/${toRoll.length} ${t('controlsRolledBack') || 'controls rolled back'}`, n === toRoll.length ? 'success' : 'warning');
+                        // restored counts full rollbacks only; one that brought back some of its files is named apart
+                        const partial = Object.values(data.results || {}).filter(r => r && r.partial).length;
+                        addToast(`${n}/${toRoll.length} ${t('controlsRolledBack') || 'controls rolled back'}`
+                            + (partial ? ` · ${fillText(t('hardenRollbackPartialCount'), { n: partial })}` : ''),
+                            n === toRoll.length ? 'success' : 'warning');
                         checkHardening(hardenNode, hardenVerbose, hardenProfile);
                     } else {
                         const errData = await resp?.json().catch(() => ({}));
@@ -15963,6 +17610,62 @@
                 }
             };
 
+            // LW Oct 2026 - custom hardening profiles, read when the tab opens and after a change.
+            // Without node.maintenance the route answers 403 and the tab keeps the built-in ones
+            const loadHardenProfiles = async () => {
+                const r = await authFetch(`${API_URL}/hardening/profiles`);
+                const d = r && r.ok ? await r.json().catch(() => null) : null;
+                if (d) setHardenProfiles(d);
+                return d;
+            };
+            useEffect(() => {
+                if (activeTab === 'automation' && automationSubTab === 'hardening') loadHardenProfiles();
+            }, [activeTab, automationSubTab]);
+            // LW Nov 2026 - only Corporate Redesigned has the updates tab
+            useEffect(() => {
+                if (!isCorpRedesigned && activeTab === 'updates') setActiveTab('settings');
+            }, [isCorpRedesigned, activeTab]);
+            // the Timeline filters the alert strip picked hold for that one visit of that cluster
+            const crPickCid = selectedCluster ? selectedCluster.id : null;
+            useEffect(() => {
+                setCrTimelinePick(p => (p && (activeTab !== 'timeline' || p.cid !== crPickCid) ? null : p));
+            }, [activeTab, crPickCid]);
+            // a selected profile that is gone (deleted here or elsewhere) falls back to all controls
+            useEffect(() => {
+                if (hardenProfiles && hardenProfile.startsWith('custom:')
+                    && !(hardenProfiles.custom || []).some(p => `custom:${p.id}` === hardenProfile)) {
+                    setHardenProfile('');
+                    setHardenStatus(null);
+                    setHardenSelected({});
+                    setHardenParams(hardenParamsFor(''));
+                }
+            }, [hardenProfiles]);
+            const canManageHardenProfiles = !!hardenProfiles?.can_manage && !haReadOnly;
+            // picking a custom profile brings its values into the param inputs, leaving one puts
+            // the defaults back; between built-in ones they stay as typed
+            const pickHardenProfile = (value) => {
+                if (value.startsWith('custom:') || hardenProfile.startsWith('custom:')) {
+                    setHardenParams(hardenParamsFor(value, hardenProfiles?.custom));
+                }
+                setHardenProfile(value);
+            };
+            const hardenProfilesChanged = async (profile) => {
+                const d = await loadHardenProfiles();
+                if (d && profile && hardenProfile === `custom:${profile.id}`) setHardenParams(hardenParamsFor(hardenProfile, d.custom));
+            };
+            // Save selection as profile: the ticked controls and what was typed in for them. A
+            // value that is the default stays out, so the profile keeps following the default
+            const saveHardenSelection = () => {
+                const catalog = Object.fromEntries((hardenProfiles?.catalog || []).map(c => [c.id, c]));
+                const controls = Object.keys(hardenSelected).filter(id => hardenSelected[id] && catalog[id]);
+                const params = {};
+                controls.forEach(id => (catalog[id].param_keys || []).forEach(key => {
+                    const v = String(hardenParams[id]?.[key] ?? '').trim();
+                    if (v && v !== String((catalog[id].defaults || {})[key] ?? '')) params[id] = { ...(params[id] || {}), [key]: v };
+                }));
+                setHardenProfilesDlg({ draft: { name: '', description: '', controls, params } });
+            };
+
             // Load favorites and summary on mount
             useEffect(() => {
                 if (user) {
@@ -15973,12 +17676,15 @@
             }, [user]);
             
             // Load reports when tab changes to reports OR cluster changes
+            // LW Oct 2026 - the Corporate Redesigned summary reads for itself while it is open, and
+            // ranks from the guest list, so it needs no top-vms read
             useEffect(() => {
-                if (activeTab === 'reports' && selectedCluster?.id) {
+                if (activeTab === 'reports' && selectedCluster?.id && !isCorpRedesigned) {
                     loadReportSummary(reportPeriod, selectedCluster.id);
                     loadTopVms('cpu', 10, selectedCluster.id);
+                    loadTopVms('memory', 10, selectedCluster.id);
                 }
-            }, [activeTab, reportPeriod, selectedCluster?.id]);
+            }, [activeTab, reportPeriod, selectedCluster?.id, isCorpRedesigned]);
             
             // Load automation data when tab changes to automation OR cluster changes
             useEffect(() => {
@@ -16190,12 +17896,13 @@
             };
 
             // Cancel a running task
-            const cancelTask = async (task) => {
-                if (!selectedCluster || !task || !task.upid || !task.node) return;
+            // LW Oct 2026 - the redesigned task center lists other clusters' tasks too and names the cluster
+            const cancelTask = async (task, clusterId = selectedCluster?.id) => {
+                if (!clusterId || !task || !task.upid || !task.node) return;
 
                 try {
                     const response = await authFetch(
-                        `${API_URL}/clusters/${selectedCluster.id}/nodes/${task.node}/tasks/${encodeURIComponent(task.upid)}`,
+                        `${API_URL}/clusters/${clusterId}/nodes/${task.node}/tasks/${encodeURIComponent(task.upid)}`,
                         { method: 'DELETE' }
                     );
                     
@@ -16205,6 +17912,7 @@
                         setTasks(prev => prev.map(t => 
                             t && t.upid === task.upid ? { ...t, status: 'cancelled' } : t
                         ));
+                        if (crTaskFeed.active) crTaskFeed.mark(clusterId, task.upid, { status: 'cancelled' });
                     } else {
                         const err = await response?.json();
                         addToast(err?.error || t('taskCancelFailed'), 'error');
@@ -16224,6 +17932,8 @@
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/tasks`);
                     if (response && response.ok) {
                         const data = await response.json();
+                        // LW Oct 2026 - the redesigned task center tells loading from empty by this answer
+                        if (crTaskFeed.active) crTaskFeed.loaded(clusterId, data);
                         // a cluster switch since this was asked makes it another cluster's list,
                         // the initial fetch too, which skips the timestamp check below
                         if (gen !== taskFetchGen.current || selectedClusterRef.current?.id !== clusterId) return;
@@ -16260,11 +17970,18 @@
                                     .slice(0, 50);
                             });
                         }
+                    } else if (crTaskFeed.active) {
+                        crTaskFeed.failed(clusterId, response ? response.status : 0);
                     }
                 } catch (err) {
+                    if (crTaskFeed.active) crTaskFeed.failed(clusterId, 0);
                     console.error('fetching tasks:', err);
                 }
             };
+
+            // LW Oct 2026 - Corporate Redesigned: the task feed stays on while the variant is, so a hidden
+            // task bar still knows what the reads answered when it comes back
+            useEffect(() => (isCorpRedesigned ? crTaskFeed.attach() : undefined), [isCorpRedesigned]);
 
             // Fetch tasks when cluster changes
             useEffect(() => {
@@ -16306,9 +18023,18 @@
                 let isClosing = false;
                 let sseToken = null;
                 let tokenRefreshInterval = null;
+                // LW Nov 2026 - after a server restart the tab asked for a token several times a second until
+                // someone signed in again: a refused token left the old one in use, the stream answered 401 with
+                // it, and the health check started the backoff over every 10 s. Now our own 401 on the token
+                // ends it (sessionGone, the session overlay), a token request that may work later comes back
+                // with the backoff, and an answer without a token (a standby) still means "no stream, poll instead"
+                let sessionGone = false;
+                let tokenFailed = false;
+                let connecting = false;
                 
                 // Get SSE token (more secure than session ID in URL)
                 const getSseToken = async () => {
+                    tokenFailed = false;
                     try {
                         const resp = await authFetch(`${API_URL}/sse/token`, { method: 'POST' });
                         if (resp && resp.ok) {
@@ -16317,19 +18043,42 @@
                             console.log('SSE token obtained (expires in', data.expires_in, 's)');
                             return true;
                         }
+                        sseToken = null;
+                        // worth another try later: no answer, a busy or failing server. A 403 or 404 stays as it is
+                        tokenFailed = !resp || resp.status >= 500 || resp.status === 429;
+                        // authFetch leaves /sse alone, so the token read says it here
+                        const body = resp && resp.status === 401 ? await resp.json().catch(() => null) : null;
+                        if (PegaProxApiErrors.sessionLost(body)) {
+                            sessionGone = true;
+                            setSessionExpired(true);
+                        }
                     } catch (e) {
+                        tokenFailed = true;
                         console.warn('Failed to get SSE token, falling back to session:', e);
                     }
                     return false;
                 };
                 
+                // one retry at a time, with the backoff: the error handler, a failed token request and the
+                // health check all come through here
+                const scheduleRetry = () => {
+                    if (isClosing || sessionGone || reconnectTimeout) return;
+                    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+                    reconnectAttempts++;
+                    console.log(`SSE: Reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
+                    reconnectTimeout = setTimeout(() => { reconnectTimeout = null; connectSSE(); }, delay);
+                };
+                
                 const connectSSE = async () => {
-                    if (isClosing) return;
+                    if (isClosing || sessionGone || connecting) return;
                     
                     console.log('Connecting to SSE...');
                     
                     // Try to get SSE token first (preferred - doesn't expose session in logs)
+                    connecting = true;
                     await getSseToken();
+                    connecting = false;
+                    if (isClosing || sessionGone) return;
                     
                     // Use token if available, otherwise skip
                     let sseUrl;
@@ -16343,6 +18092,10 @@
                     } else {
                         // LW Mar 2026 - don't expose session ID in URL, just skip SSE
                         console.warn('SSE: Token unavailable, skipping SSE connection');
+                        // a refusal that will not change lets the closed stream go, or the health check
+                        // would ask again for it every round
+                        if (tokenFailed) scheduleRetry();
+                        else eventSource = null;
                         return;
                     }
                     
@@ -16392,6 +18145,8 @@
                                 sseClientIdRef.current = data.client_id;
                                 console.log('SSE authenticated, client:', data.client_id);
                             } else if (data.type === 'tasks') {
+                                // LW Oct 2026 - the redesigned task center keeps every cluster's frame for its All clusters view
+                                if (crTaskFeed.active) crTaskFeed.push(data.cluster_id, data.data);
                                 // Tasks kommen mit cluster_id - nur vom aktuellen Cluster anzeigen
                                 if (currentCluster && data.cluster_id === currentCluster.id) {
                                     if (Array.isArray(data.data)) {
@@ -16714,17 +18469,8 @@
                             eventSource.close();
                         }
                         
-                        if (!isClosing) {
-                            // NS: Get fresh token before reconnecting
-                            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
-                            reconnectAttempts++;
-                            console.log(`SSE: Reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
-                            reconnectTimeout = setTimeout(async () => {
-                                // Get fresh token first
-                                await getSseToken();
-                                connectSSE();
-                            }, delay);
-                        }
+                        // NS: Get fresh token before reconnecting (connectSSE asks for it)
+                        if (!isClosing) scheduleRetry();
                     };
                 };
                 
@@ -16734,17 +18480,18 @@
                 // NS May 2026 — also: if SSE looks "open" but no messages for >30s,
                 // server-side broadcast loop is stuck — force-reconnect anyway.
                 const healthCheckInterval = setInterval(() => {
-                    if (isClosing) return;
+                    if (isClosing || sessionGone || connecting || reconnectTimeout) return;
                     const sinceLast = Date.now() - (lastSseMessageAt.current || 0);
                     const looksClosed = eventSource?.readyState === EventSource.CLOSED;
                     const wedged = lastSseMessageAt.current > 0 && sinceLast > 30000;
                     if (looksClosed || wedged) {
                         console.log(`SSE: ${looksClosed ? 'closed' : 'wedged ('+Math.round(sinceLast/1000)+'s no msg)'}, reconnecting`);
-                        reconnectAttempts = 0;
                         if (eventSource) {
                             try { eventSource.close(); } catch (_) {}
                         }
-                        connectSSE();
+                        // a stream that went quiet while open starts over at once; a closed one keeps its backoff
+                        if (looksClosed) scheduleRetry();
+                        else { reconnectAttempts = 0; connectSSE(); }
                     }
                 }, 10000);
                 
@@ -17620,6 +19367,8 @@
             
             // Watch VM detail via SSE (replaces 10s polling)
             useEffect(() => {
+                // what was typed for one guest is not saved on the next
+                setVmwareConfigEdit({});
                 if (selectedVMware?.id && vmwareSelectedVm) {
                     // Initial fetch
                     fetchVMwareVmDetail(selectedVMware.id, vmwareSelectedVm);
@@ -17713,16 +19462,31 @@
                 } catch(e) { addToast('Error', e.message, 'error'); }
             };
             
+            // LW Nov 2026 - what the guest has now: the settings tab shows it under the user's
+            // changes, and a save sends only what differs. The form started at empty notes and
+            // both switches off and a save sent all of it, so a CPU change wiped the notes of
+            // the guest and turned hot-add off
+            const vmwareConfigNow = (vm) => ({
+                cpu: vm?.cpu?.count || vm?.cpu_count || vm?.num_cpu || 0,
+                memory: vm?.memory?.size_MiB || vm?.memory_size_MiB || vm?.memory_mb || 0,
+                notes: vm?.annotation || vm?.notes || vm?.config?.annotation || '',
+                cpu_hot_add: !!vm?.cpu?.hot_add_enabled,
+                memory_hot_add: !!vm?.memory?.hot_add_enabled,
+            });
+
             // VMware VM Config Save
             const handleVmwareConfigSave = async (vmId) => {
                 setVmwareConfigSaving(true);
                 try {
+                    const now = vmwareConfigNow(vmwareVmDetail);
+                    const edit = vmwareConfigEdit;
+                    const cpu = parseInt(edit.cpu), memory = parseInt(edit.memory);
                     const payload = {};
-                    if (vmwareConfigEdit.cpu) payload.cpu_count = parseInt(vmwareConfigEdit.cpu);
-                    if (vmwareConfigEdit.memory) payload.memory_mb = parseInt(vmwareConfigEdit.memory);
-                    if (vmwareConfigEdit.notes !== undefined && vmwareConfigEdit.notes !== null) payload.notes = vmwareConfigEdit.notes;
-                    if (vmwareConfigEdit.cpu_hot_add !== undefined) payload.cpu_hot_add = vmwareConfigEdit.cpu_hot_add;
-                    if (vmwareConfigEdit.memory_hot_add !== undefined) payload.memory_hot_add = vmwareConfigEdit.memory_hot_add;
+                    if (cpu > 0 && cpu !== now.cpu) payload.cpu_count = cpu;
+                    if (memory > 0 && memory !== now.memory) payload.memory_mb = memory;
+                    if (edit.notes !== undefined && edit.notes !== now.notes) payload.notes = edit.notes;
+                    if (edit.cpu_hot_add !== undefined && edit.cpu_hot_add !== now.cpu_hot_add) payload.cpu_hot_add = edit.cpu_hot_add;
+                    if (edit.memory_hot_add !== undefined && edit.memory_hot_add !== now.memory_hot_add) payload.memory_hot_add = edit.memory_hot_add;
                     
                     if (Object.keys(payload).length === 0) {
                         addToast('No changes', 'warning');
@@ -17736,6 +19500,7 @@
                     });
                     if (resp?.ok) {
                         addToast('VM configuration updated', 'success');
+                        setVmwareConfigEdit({});
                         fetchVMwareVmDetail(selectedVMware.id, vmId);
                         fetchVMwareVms(selectedVMware.id);
                     } else {
@@ -17785,6 +19550,14 @@
                     const resp = await authFetch(`${API_URL}/vmware/${selectedVMware.id}/vms/${vmId}/migration-plan`);
                     if (resp?.ok) {
                         const data = await resp.json();
+                        const src = data.source || {};
+                        setV2pNicRows((src.nics || []).map((n, i) => ({index: i, bridge: '', vlan: '', skip: false})));
+                        setV2pDiskRows((src.disks || []).map((d, i) => ({index: i, storage: '', skip: false})));
+                        setV2pReview(null);
+                        setV2pReviewKey('');
+                        setV2pInventory(null);
+                        setMigrateWizardStep('target');
+                        setVmwareMigrateForm(f => ({...f, verify: ''}));
                         setVmwareMigrationPlan(data);
                         setShowVmwareMigrate(true);
                     } else {
@@ -17795,13 +19568,106 @@
                 finally { setVmwareMigrateLoading(false); }
             };
             
-            // Start VMware Migration
+            // another server, another set of guests
+            useEffect(() => { setEsxiBulkSel([]); setEsxiBulk(null); }, [selectedVMware?.id]);
+            const esxiVmId = (vm) => vm.vm || vm.vm_id || vm.id;
+            // what the VM list shows right now (filter and search), for "select all"
+            const esxiShownVmIds = () => vmwareVms
+                .filter(vm => vmwareFilter === 'running' ? vm.power_state === 'POWERED_ON'
+                    : vmwareFilter === 'stopped' ? vm.power_state !== 'POWERED_ON' : true)
+                .filter(vm => !vmwareSearch || (vm.name || '').toLowerCase().includes(vmwareSearch.toLowerCase())
+                    || (vm.guest_os || '').toLowerCase().includes(vmwareSearch.toLowerCase()))
+                .map(esxiVmId);
+            const openEsxiBulk = () => setEsxiBulk({vms: esxiBulkSel.map(id => {
+                const vm = vmwareVms.find(v => esxiVmId(v) === id) || {};
+                return {id, name: vm.name || id};
+            })});
+
+            // verify: full by default for a cold migration (offline copy, or a VM
+            // that is off) where the mode can do it, the spot check otherwise; a pick wins
+            const v2pVerifyFor = (form, plan) => {
+                const fullOk = !['sshfs_boot', 'snapshot_zero'].includes(form.transfer_mode);
+                const cold = form.transfer_mode === 'offline' || plan?.source?.power_state === 'POWERED_OFF';
+                return form.verify || (cold && fullOk ? 'full' : 'sample');
+            };
+            const buildVmwareMigrateBody = (dryRun) => {
+                const body = {...vmwareMigrateForm, verify: v2pVerifyFor(vmwareMigrateForm, vmwareMigrationPlan)};
+                // the support note is the page's business; ticking it must not make a review stale
+                delete body.oc_acknowledge;
+                if (v2pNicRows.length) body.nic_map = v2pNicRows.map(r => {
+                    const row = {index: r.index, skip: !!r.skip};
+                    if (r.bridge) row.bridge = r.bridge;
+                    // no vlan key = the default tag above; the server checks the value
+                    if (String(r.vlan ?? '').trim() !== '') row.vlan = String(r.vlan).trim();
+                    return row;
+                });
+                if (v2pDiskRows.length) body.disk_map = v2pDiskRows.map(r => {
+                    const row = {index: r.index, skip: r.index === 0 ? false : !!r.skip};
+                    if (r.storage) row.storage = r.storage;
+                    return row;
+                });
+                if (dryRun) {
+                    body.dry_run = true;
+                    delete body.esxi_password;
+                }
+                return body;
+            };
+            const v2pReviewIsCurrent = () => !!v2pReview && v2pReviewKey === JSON.stringify(buildVmwareMigrateBody(true));
+            const reviewVmwareMigration = async (vmId) => {
+                const key = JSON.stringify(buildVmwareMigrateBody(true));
+                setV2pReviewLoading(true);
+                try {
+                    const resp = await authFetch(`${API_URL}/vmware/${selectedVMware.id}/vms/${vmId}/migrate`, {
+                        method: 'POST', headers: {'Content-Type':'application/json'}, body: key
+                    });
+                    const data = await resp?.json().catch(() => ({})) || {};
+                    if (resp?.ok) {
+                        setV2pReview(data);
+                        if (data.available) setV2pInventory(data.available);
+                    } else {
+                        setV2pReview({ok: false, errors: [data.error || t('v2pReviewError')], warnings: [],
+                                      nics: [], disks: [], storages: []});
+                    }
+                } catch(e) {
+                    setV2pReview({ok: false, errors: [`${t('v2pReviewError')}: ${e.message}`], warnings: [],
+                                  nics: [], disks: [], storages: []});
+                } finally {
+                    setV2pReviewKey(key);
+                    setV2pReviewLoading(false);
+                }
+            };
+            // the bridges and storages the target node offers, for the NIC and disk rows: a dry
+            // run without maps answers with them (the same list the server checks against)
+            useEffect(() => {
+                const f = vmwareMigrateForm;
+                if (!showVmwareMigrate || !selectedVMware || !vmwareSelectedVm || !f.target_cluster || !f.target_node || !f.target_storage) {
+                    setV2pInventory(null);
+                    return;
+                }
+                let gone = false;
+                (async () => {
+                    try {
+                        const resp = await authFetch(`${API_URL}/vmware/${selectedVMware.id}/vms/${vmwareSelectedVm}/migrate`, {
+                            method: 'POST', headers: {'Content-Type':'application/json'},
+                            body: JSON.stringify({target_cluster: f.target_cluster, target_node: f.target_node,
+                                                  target_storage: f.target_storage, dry_run: true})
+                        });
+                        const data = resp?.ok ? await resp.json().catch(() => null) : null;
+                        if (!gone) setV2pInventory(data?.available || null);
+                    } catch(e) {
+                        if (!gone) setV2pInventory(null);
+                    }
+                })();
+                return () => { gone = true; };
+            }, [showVmwareMigrate, vmwareSelectedVm, vmwareMigrateForm.target_cluster, vmwareMigrateForm.target_node, vmwareMigrateForm.target_storage]);
+
+            // Start the ESXi migration - only from the review step, with the body it checked
             const startVmwareMigration = async (vmId) => {
                 try {
                     setVmwareMigrateLoading(true);
                     const resp = await authFetch(`${API_URL}/vmware/${selectedVMware.id}/vms/${vmId}/migrate`, {
                         method: 'POST', headers: {'Content-Type':'application/json'},
-                        body: JSON.stringify(vmwareMigrateForm)
+                        body: JSON.stringify(buildVmwareMigrateBody(false))
                     });
                     if (resp?.ok) {
                         const data = await resp.json();
@@ -17912,6 +19778,10 @@
                     if (r?.ok) setXhmMigrationDetail(await r.json());
                 } catch(e) {}
             };
+            // LW Nov 2026 - a plan into Proxmox (from XCP-ng or ESXi) asks node, storage and bridges,
+            // one into XCP-ng (from Proxmox or ESXi) an SR. Only xcpng_to_pve and pve_to_xcpng were
+            // named, so an ESXi plan had no storage to pick and its Start stayed off
+            const xhmToPve = (plan) => !!plan && String(plan.direction || '').endsWith('_to_pve');
             const fetchXhmPlan = async () => {
                 if (!xhmForm.source_cluster || !xhmForm.source_vmid || !xhmForm.target_cluster) return;
                 setXhmLoading(true);
@@ -17997,13 +19867,16 @@
                     const resp = await authFetch(`${API_URL}/vmware/${selectedVMware.id}/vms/${vmId}/console`, { method: 'POST' });
                     if (resp?.ok) {
                         const data = await resp.json();
+                        // LW Nov 2026 - only the two schemes the server builds, anything else takes the fallback below
+                        const webUrl = typeof data.web_url === 'string' && /^https:\/\//i.test(data.web_url) ? data.web_url : '';
+                        const vmrcUrl = typeof data.vmrc_url === 'string' && /^vmrc:\/\//i.test(data.vmrc_url) ? data.vmrc_url : '';
                         // Priority: web_url (works in browser) > vmrc_url > url (websocket)
-                        if (data.web_url) {
-                            window.open(data.web_url, '_blank', 'width=1024,height=768,menubar=no,toolbar=no');
+                        if (webUrl) {
+                            window.open(webUrl, '_blank', 'width=1024,height=768,menubar=no,toolbar=no');
                             addToast(`Console opened for VM`, 'success');
-                        } else if (data.vmrc_url) {
+                        } else if (vmrcUrl) {
                             // Try VMRC protocol link
-                            window.location.href = data.vmrc_url;
+                            window.location.href = vmrcUrl;
                             addToast('Opening VMRC...', 'info');
                         } else if (data.url) {
                             // WebSocket URL -- need WebMKS viewer (fallback: open ESXi UI)
@@ -18190,7 +20063,11 @@
                                 } else if (!statusResp || statusResp.status === 503 || statusResp.status === 504 || statusResp.status === 502) {
                                     // #594: a null here means the request aborted (timeout) or the network
                                     // failed — treat a slow cluster the same as a 5xx and back it off.
-                                    bumpBackoff();
+                                    // A 502 that names the reads Proxmox refused came back at once, there is
+                                    // no load to take off it: poll it next round like a good one
+                                    const said = statusResp && statusResp.status === 502
+                                        ? await statusResp.json().catch(() => null) : null;
+                                    if (!(said && Array.isArray(said.unread))) bumpBackoff();
                                 }
 
                                 // get vms/cts for the top guests table + topology
@@ -18297,8 +20174,16 @@
                         for (const x of arr) map[x.vmid] = x;
                         if (selectedClusterRef.current?.id !== clusterId) return;
                         setVmsBackupStatus(map);
+                        setVmsBackupFor({ cluster: clusterId, at: Date.now() });
+                    } else if (selectedClusterRef.current?.id === clusterId) {
+                        setVmsBackupFor(prev => ({ cluster: clusterId, at: prev && prev.cluster === clusterId ? prev.at : null, failed: r ? r.status : 0 }));
                     }
-                } catch (_) { /* keep last */ }
+                } catch (_) {
+                    /* keep last */
+                    if (selectedClusterRef.current?.id === clusterId) {
+                        setVmsBackupFor(prev => ({ cluster: clusterId, at: prev && prev.cluster === clusterId ? prev.at : null, failed: 0 }));
+                    }
+                }
             };
 
             const fetchClusterResources = async (clusterId) => {
@@ -18401,11 +20286,19 @@
                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/datastores`, { timeout: POLL_TIMEOUT_MS });
                     if (res && res.ok) {
                         const dsData = await res.json();
+                        crNoteDsRead(clusterId, { ok: true, at: Date.now() });
                         setSidebarClusterData(prev => ({ ...prev, [clusterId]: { ...(prev[clusterId] || {}), datastores: dsData } }));
                         if (selectedClusterRef.current?.id !== clusterId) return;
                         setClusterDatastores(dsData);
+                    } else {
+                        const body = res ? await res.json().catch(() => null) : null;
+                        const msg = res ? [body && typeof body.error === 'string' ? body.error : '', `HTTP ${res.status}`].filter(Boolean).join(' - ') : t('crDriftOffline');
+                        crNoteDsRead(clusterId, { ok: false, at: Date.now(), msg });
                     }
-                } catch (e) { /* not critical for sidebar */ }
+                } catch (e) {
+                    /* not critical for sidebar */
+                    crNoteDsRead(clusterId, { ok: false, at: Date.now(), msg: t('crLoadFailed') });
+                }
             };
 
             // NS: keep storage fresh for clusters expanded in the sidebar (not just the
@@ -19114,7 +21007,12 @@
                                 full: cloneConfig.full,
                                 target_node: cloneConfig.target_node,
                                 target_storage: cloneConfig.target_storage,
-                                description: cloneConfig.description
+                                description: cloneConfig.description,
+                                // JB Nov 2026 - the dialog asks for these and the route applies them, and they stopped here
+                                // NS Nov 2026 - Proxmox takes sshkeys urlencoded, one key a line with a closing newline
+                                ...Object.fromEntries(['ciuser', 'cipassword', 'sshkeys', 'ipconfig0', 'nameserver', 'searchdomain']
+                                    .filter(k => String(cloneConfig[k] || '').trim())
+                                    .map(k => [k, k === 'sshkeys' ? encodeURIComponent(cloneConfig[k].trim() + '\n') : cloneConfig[k]]))
                             })
                         }
                     );
@@ -19122,6 +21020,7 @@
                     if (response && response.ok) {
                         const result = await response.json();
                         addToast(result.message || `${t('cloneStarted') || 'Clone started'}: ${vm.vmid} ↑ ${cloneConfig.newid}`);
+                        if (result.cloudinit_warning) addToast(result.cloudinit_warning, 'error');
                         setDashCloneVm(null);
                         setTimeout(() => fetchClusterResources(selectedCluster.id), 3000);
                         return true;   // #702 — signal success so the table-view modal can self-close
@@ -19244,6 +21143,9 @@
             const [lxcShellVm, setLxcShellVm] = useState(null);
             const [corpMetricsVm, setCorpMetricsVm] = useState(null); // LW: Feb 2026 - metrics modal for corporate view
             const [configVm, setConfigVm] = useState(null);
+            // LW Oct 2026 - the tab the configuration opens on (Corporate Redesigned links to one)
+            const [configTab, setConfigTab] = useState(null);
+            const [crDsSub, setCrDsSub] = useState(null);
             // NS: Mar 2026 - dashboard-level modals triggered from context menu + CorporateVmDetailView
             const [dashMigrateVm, setDashMigrateVm] = useState(null);
             const [dashCloneVm, setDashCloneVm] = useState(null);
@@ -19315,14 +21217,16 @@
                 });
             };
 
-            const handleOpenConfig = (resource) => {
+            const handleOpenConfig = (resource, tab) => {
                 setConfigVm(resource);
+                setConfigTab(typeof tab === 'string' ? tab : null);
             };
 
             const handleCloseConfig = () => {
                 // NS: Feb 2026 - Refresh correct cluster's resources after config changes
                 const cId = configVm?._clusterId || selectedCluster?.id;
                 setConfigVm(null);
+                setConfigTab(null);
                 if (cId) fetchClusterResources(cId);
             };
 
@@ -19372,6 +21276,10 @@
                             setSelectedCluster(cluster);
                             setPendingCreateVm({ type: 'lxc', clusterId: cluster.id });
                         }},
+                        // LW Nov 2026 (#1220) - Corporate Redesigned: the blueprints of the Blueprints & Images sub tab
+                        ...(isCorpRedesigned && (!cluster.cluster_type || cluster.cluster_type === 'proxmox') ? [
+                            { perm: 'vm.create', label: t('crBpNavDeploy'), icon: <Icons.Template className="w-3.5 h-3.5" />, onClick: () => crTaskNav.openBlueprints(cluster.id) },
+                        ] : []),
                         { separator: true },
                         { perm: 'cluster.config', label: t('renameCluster') || 'Rename', icon: <Icons.Edit className="w-3.5 h-3.5" />, onClick: () => { setRenamingCluster(cluster); setRenameValue(cluster.display_name || cluster.name || ''); } },
                         { perm: 'cluster.config', label: t('assignToGroup') || 'Assign to Group', icon: <Icons.FolderPlus className="w-3.5 h-3.5" />, onClick: () => setShowAssignGroup(cluster) },
@@ -19537,11 +21445,13 @@
                                 label: p.poolid,
                                 icon: <Icons.Folder className="w-3.5 h-3.5" style={{color: '#E86F2D'}} />,
                                 onClick: async () => {
+                                    // JB Nov 2026 (#1238) - the members routes, not PUT /pools/<id>: that one edits
+                                    // the pool itself and needs admin.users, these ask pool.assign and check the guest
                                     try {
-                                        const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(p.poolid)}`, {
-                                            method: 'PUT',
+                                        const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(p.poolid)}/members`, {
+                                            method: 'POST',
                                             headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ add_members: [vm.vmid] })
+                                            body: JSON.stringify({ vmid: vm.vmid, type: vm.type || 'qemu' })
                                         });
                                         if (res && res.ok) {
                                             addToast(`${vm.name || vm.vmid} → ${p.poolid}`, 'success');
@@ -19560,10 +21470,8 @@
                                 const currentPool = poolsForCluster.find(p => (p.members || []).some(m => String(m.vmid || m.id) === String(vm.vmid)));
                                 if (!currentPool) { addToast('VM is not in a pool', 'info'); return; }
                                 try {
-                                    const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(currentPool.poolid)}`, {
-                                        method: 'PUT',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ remove_members: [vm.vmid] })
+                                    const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(currentPool.poolid)}/members/${vm.vmid}`, {
+                                        method: 'DELETE'
                                     });
                                     if (res && res.ok) {
                                         addToast(`${vm.name || vm.vmid} removed from ${currentPool.poolid}`, 'success');
@@ -19722,7 +21630,9 @@
                             t={t}
                             authFetch={authFetch}
                             addToast={addToast}
-                            onExitCloud={() => updatePreferences({ ui_layout: 'modern', theme: 'proxmoxDark' })}
+                            /* #1189 - no way out of a pinned Cloud: the Exit Cloud item only
+                               shows with a handler */
+                            onExitCloud={layoutLocked ? undefined : () => updatePreferences({ ui_layout: 'modern', theme: 'proxmoxDark' })}
                             onOpenSettings={() => setShowSettings(true)}
                             onOpenProfile={() => setShowProfile(true)}
                             onOpenApiReference={() => setShowApiReference(true)}
@@ -19792,6 +21702,591 @@
                 );
             }
 
+            // LW Oct 2026 - the header controls as values: the classic header below and the
+            // Corporate Redesigned header (CrHeader) render the very same elements
+            const hdrDrawerToggle = (
+                <button className="pp-drawer-toggle"
+                    aria-label={t('toggleNavigation') || 'Toggle navigation'}
+                    aria-expanded={mobileSidebarOpen}
+                    onClick={() => setMobileSidebarOpen(o => !o)}>
+                    <span /><span /><span />
+                </button>
+            );
+            const hdrLogo = (
+                <button
+                    onClick={() => { setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); }}
+                    className={`flex items-center ${isCorporate ? 'gap-2' : 'gap-4'} hover:opacity-80 transition-opacity`}
+                    title={t('allClustersOverview') || 'All Clusters Overview'}
+                >
+                    {/* PegaProx Logo */}
+                    <img
+                        src={getLogoSrc()}
+                        alt="PegaProx"
+                        className={`${isCorporate ? 'w-8 h-8' : 'w-12 h-12 rounded-xl'} object-contain`}
+                        onError={(e) => {
+                            e.target.style.display = 'none';
+                            e.target.nextSibling.style.display = 'flex';
+                        }}
+                    />
+                    <div className={`${isCorporate ? 'w-6 h-6 bg-proxmox-orange' : 'w-10 h-10 rounded-xl bg-gradient-to-br from-proxmox-orange to-orange-600 shadow-lg glow-orange'} items-center justify-center hidden`}>
+                        <svg viewBox="0 0 24 24" className={`${isCorporate ? 'w-3.5 h-3.5' : 'w-6 h-6'} text-white`} fill="currentColor">
+                            <path d="M12 2C9.5 2 7 3.5 6 6c-1.5 0-3 1-3 3 0 1.5 1 2.5 2 3l1 6c0 1 1 2 2 2h8c1 0 2-1 2-2l1-6c1-.5 2-1.5 2-3 0-2-1.5-3-3-3-1-2.5-3.5-4-6-4zm0 2c2 0 3.5 1 4 3H8c.5-2 2-3 4-3zM5 9h14c.5 0 1 .5 1 1s-.5 1.5-1 2l-1 5H6l-1-5c-.5-.5-1-1-1-2s.5-1 1-1zm7 1a2 2 0 100 4 2 2 0 000-4z"/>
+                        </svg>
+                    </div>
+                    {isCorporate ? (
+                        <span className="text-[13px] font-semibold">PegaProx</span>
+                    ) : (
+                        <div className="text-left">
+                            <h1 className="text-xl font-bold">PegaProx</h1>
+                            <p className="text-xs text-gray-500">{t('clusterManagement')}</p>
+                        </div>
+                    )}
+                </button>
+            );
+            const hdrSearch = (
+                <div className="relative pp-header-search">
+                    <div className={`flex items-center ${isCorporate ? 'bg-[#17242b]' : 'bg-proxmox-dark'} border border-proxmox-border rounded-lg overflow-hidden focus-within:border-proxmox-orange/50 transition-colors`}>
+                        <Icons.Search className="w-4 h-4 ml-3 text-gray-500 flex-shrink-0" />
+                        <input
+                            ref={globalSearchRef}
+                            type="text"
+                            placeholder={isCorporate ? (t('searchAllInventories') || 'Search in all inventories...') : (t('searchAllClusters') || 'Search all clusters...')}
+                            value={globalSearchQuery}
+                            onChange={(e) => {
+                                setGlobalSearchQuery(e.target.value);
+                                debouncedSearch(e.target.value);
+                            }}
+                            onFocus={() => setShowGlobalSearch(true)}
+                            onKeyDown={(e) => {
+                                const items = globalSearchResults?.results || [];
+                                if (e.key === 'ArrowDown') {
+                                    e.preventDefault();
+                                    setGlobalSearchIndex(prev => Math.min(prev + 1, Math.min(items.length - 1, 19)));
+                                } else if (e.key === 'ArrowUp') {
+                                    e.preventDefault();
+                                    setGlobalSearchIndex(prev => Math.max(prev - 1, 0));
+                                } else if (e.key === 'Enter' && items.length > 0) {
+                                    e.preventDefault();
+                                    navigateToResult(items[globalSearchIndex]);
+                                } else if (e.key === 'Escape') {
+                                    setShowGlobalSearch(false);
+                                    e.target.blur();
+                                }
+                            }}
+                            className={`${isCorporate ? 'w-48 md:w-72 lg:w-96 px-2 py-1' : 'w-48 md:w-72 lg:w-80 px-2 py-2'} bg-transparent text-white placeholder-gray-500 focus:outline-none text-sm`}
+                        />
+                        {/* above the click-away layer of the open dropdown */}
+                        <span className="relative z-50 mr-2 flex items-center flex-shrink-0">
+                            <SearchSyntaxHelp t={t} onPick={(example) => {
+                                setGlobalSearchQuery(example);
+                                performGlobalSearch(example);
+                                setShowGlobalSearch(true);
+                                globalSearchRef.current?.focus();
+                            }} />
+                        </span>
+                        {globalSearchLoading ? (
+                            <Icons.RotateCw className="w-4 h-4 mr-3 text-gray-400 animate-spin flex-shrink-0" />
+                        ) : (
+                            <kbd className={`hidden md:inline-flex mr-3 px-1.5 py-0.5 text-xs rounded border flex-shrink-0 ${isCorporate ? 'text-[#5a7a8a] bg-[#1a2e38] border-[#344955]' : 'text-gray-500 bg-proxmox-dark border-proxmox-border'}`}>
+                                {navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl+'}K
+                            </kbd>
+                        )}
+                    </div>
+                    
+                    {/* Search Results Dropdown */}
+                    {showGlobalSearch && globalSearchResults && (
+                        <>
+                            <HeaderDropdownCatcher onClose={() => setShowGlobalSearch(false)} />
+                            <div className={`pp-search-results absolute top-full right-0 md:left-0 mt-2 w-[28rem] max-h-[32rem] overflow-y-auto z-50 ${isCorporate ? 'rounded-md border-2' : 'bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl'}`} style={isCorporate ? {background: '#243542', borderColor: '#49afd9', boxShadow: '0 8px 32px rgba(0,0,0,0.5)'} : {}}>
+                                {/* Header with count and prefix hints */}
+                                <div className="p-3 border-b border-proxmox-border">
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-sm text-gray-400">
+                                            {globalSearchResults.count} {t('results') || 'results'}
+                                            {globalSearchResults.query?.startsWith('tag:') && ' (Tag-Suche)'}
+                                        </span>
+                                        <button onClick={() => setShowGlobalSearch(false)} className="text-gray-500 hover:text-white">
+                                            <Icons.X className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                    {globalSearchResults.syntaxError && (
+                                        <div data-search-syntax-error className="text-xs text-red-400 mt-1">
+                                            {searchSyntaxMessage(t, globalSearchResults.syntaxError)}
+                                        </div>
+                                    )}
+                                    {/* MK: clickable tag pills for quick filtering */}
+                                    {/* LW Oct 2026 - a pill completes the last term (after AND/OR too), the rest stays */}
+                                    {globalSearchResults.tag_suggestions?.length > 0 && (globalSearchResults.tag_complete || !globalSearchQuery.startsWith('tag:')) && (
+                                        <div className="flex flex-wrap gap-1 mt-2">
+                                            <span className="text-xs text-gray-500 mr-1">Tags:</span>
+                                            {globalSearchResults.tag_suggestions.slice(0, 6).map((tag, i) => (
+                                                <button key={i} data-search-tag-pill={tag} onClick={() => {
+                                                    const next = searchWithTag(globalSearchResults, tag);
+                                                    setGlobalSearchQuery(next);
+                                                    performGlobalSearch(next);
+                                                }} className="px-1.5 py-0.5 text-xs rounded bg-proxmox-orange/20 text-proxmox-orange hover:bg-proxmox-orange/30 transition-colors">
+                                                    {tag}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                                {globalSearchResults.syntaxError ? null : globalSearchResults.results.length === 0 ? (
+                                    <div className="p-6 text-center text-gray-500">
+                                        <Icons.Search className="mx-auto mb-2 opacity-50" />
+                                        <p>{t('noResults') || 'No results'}</p>
+                                        <p className="text-xs mt-2 text-gray-600">
+                                            Tipp: tag:web, node:pve1, ip:192.168
+                                        </p>
+                                    </div>
+                                ) : (
+                                    <div className="divide-y divide-proxmox-border">
+                                        {globalSearchResults.results.slice(0, 20).map((result, idx) => (
+                                            <div
+                                                key={idx}
+                                                className={`p-3 hover:bg-proxmox-hover cursor-pointer flex items-center gap-3 transition-colors ${idx === globalSearchIndex ? 'bg-proxmox-orange/10 border-l-2 border-proxmox-orange' : 'border-l-2 border-transparent'}`}
+                                                onClick={() => navigateToResult(result)}
+                                                onMouseEnter={() => setGlobalSearchIndex(idx)}
+                                            >
+                                                <span className="text-lg flex-shrink-0">
+                                                    {result.type === 'node' ? '🖧' : result.type === 'ct' ? '📦' : '🖥️'}
+                                                </span>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center gap-2 flex-wrap">
+                                                        <span className="font-medium truncate">{result.name}</span>
+                                                        {result.vmid && (
+                                                            <span className="text-xs text-gray-500">#{result.vmid}</span>
+                                                        )}
+                                                        <span className={`px-1.5 py-0.5 text-xs rounded ${
+                                                            result.status === 'running' ? 'bg-green-500/20 text-green-400' :
+                                                            result.status === 'stopped' ? 'bg-gray-500/20 text-gray-400' :
+                                                            'bg-yellow-500/20 text-yellow-400'
+                                                        }`}>
+                                                            {result.status}
+                                                        </span>
+                                                        {result.match_field === 'tag' && (
+                                                            <span className="px-1.5 py-0.5 text-xs rounded bg-purple-500/20 text-purple-400">Tag-Match</span>
+                                                        )}
+                                                        {/* LW Oct 2026 - a hit by MAC, notes or an address other than the one shown below */}
+                                                        {SEARCH_INDEX_FIELDS.includes(result.match_field) && result.match_value && result.match_value !== result.ip && (
+                                                            <span className="px-1.5 py-0.5 text-xs rounded bg-purple-500/20 text-purple-400 truncate max-w-full" data-search-match={result.match_field}>
+                                                                {searchMatchLabel(t, result.match_field)}: {result.match_value}{result.match_net ? ` (${result.match_net})` : ''}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <div className="text-xs text-gray-500 flex items-center gap-2 mt-0.5">
+                                                        <span>{result.cluster_name}</span>
+                                                        {result.node && <span>• {result.node}</span>}
+                                                        {result.ip && <span>• {result.ip}</span>}
+                                                    </div>
+                                                    {/* tags - highlight matching ones in orange */}
+                                                    {result.tags && (
+                                                        <div className="flex flex-wrap gap-1 mt-1">
+                                                            {(Array.isArray(result.tags) ? result.tags : result.tags.split(';')).filter(t => t.trim()).slice(0, 4).map((tag, i) => (
+                                                                <span key={i} className={`px-1.5 py-0.5 text-xs rounded ${
+                                                                    (globalSearchResults.highlight || globalSearchQuery.toLowerCase().replace('tag:', '').split(',')).some(q => q.trim() && tag.trim().toLowerCase().includes(q.trim()))
+                                                                    ? 'bg-proxmox-orange/30 text-proxmox-orange ring-1 ring-proxmox-orange/50'
+                                                                    : 'bg-proxmox-dark text-gray-400'
+                                                                }`}>
+                                                                    {tag.trim()}
+                                                                </span>
+                                                            ))}
+                                                            {(Array.isArray(result.tags) ? result.tags : result.tags.split(';')).filter(t => t.trim()).length > 4 && (
+                                                                <span className="px-1.5 py-0.5 text-xs rounded bg-proxmox-dark text-gray-500">
+                                                                    +{(Array.isArray(result.tags) ? result.tags : result.tags.split(';')).filter(t => t.trim()).length - 4}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        toggleFavorite(result.type, result.cluster_id, result.vmid, result.type === 'vm' ? 'qemu' : 'lxc', result.name);
+                                                    }}
+                                                    className="p-1 hover:bg-proxmox-dark rounded text-gray-500 hover:text-yellow-400 flex-shrink-0"
+                                                    title={t('toggleFavorite') || 'Toggle favorite'}
+                                                >
+                                                    <Icons.Star className={`w-4 h-4 ${isFavorite(result.type, result.cluster_id, result.vmid, result.name) ? 'fill-yellow-400 text-yellow-400' : ''}`} />
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                {/* Keyboard hints */}
+                                {globalSearchResults.results.length > 0 && (
+                                    <div className="p-2 border-t border-proxmox-border text-xs text-gray-500 flex items-center gap-3">
+                                        <span className="flex items-center gap-1">
+                                            <kbd className="px-1 py-0.5 bg-proxmox-dark rounded text-gray-400">↑↓</kbd>
+                                            navigate
+                                        </span>
+                                        <span className="flex items-center gap-1">
+                                            <kbd className="px-1.5 py-0.5 bg-proxmox-dark rounded text-gray-400">↵</kbd>
+                                            {t('pressEnterToOpen') || 'jump to VM'}
+                                        </span>
+                                        <span className="flex items-center gap-1">
+                                            <kbd className="px-1 py-0.5 bg-proxmox-dark rounded text-gray-400">esc</kbd>
+                                            close
+                                        </span>
+                                    </div>
+                                )}
+                                {/* Keyboard hint */}
+                                {globalSearchResults.results.length > 0 && (
+                                    <div className="p-2 border-t border-proxmox-border text-xs text-gray-500 flex items-center gap-2">
+                                        <kbd className="px-1.5 py-0.5 bg-proxmox-dark rounded text-gray-400">↑µ</kbd>
+                                        <span>{t('pressEnterToOpen') || 'Press Enter to jump to VM'}</span>
+                                    </div>
+                                )}
+                            </div>
+                        </>
+                    )}
+                </div>
+            );
+            // not under a pinned Corporate: the server refuses the switch there (#1189)
+            const offerCorpRedesigned = isCorporate && !isCorpRedesigned && !layoutLocked;
+            // the palette stays, the redesign is Corporate underneath. useLayout paints it again
+            // for the new layout from corp-theme, so a 'system' choice survives the switch
+            const switchToCorpRedesigned = async () => {
+                const result = await updatePreferences({ ui_layout: 'corporate-redesigned' });
+                if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutCorporateRedesigned')}`, 'success');
+                else addToast(result.error || t('saveError'), 'error');
+            };
+            const hdrCorpSwitch = offerCorpRedesigned && (
+                <button type="button" data-corp-switch="" onClick={switchToCorpRedesigned}
+                    className="flex items-center gap-1 px-2 py-0.5 rounded border border-proxmox-border text-[12px] text-gray-300 hover:text-white hover:border-proxmox-orange/50 transition-colors whitespace-nowrap"
+                    title={t('corpClassicSwitchTitle')}>
+                    {t('layoutCorporateRedesigned')}
+                    <Icons.ArrowRight className="w-3.5 h-3.5" />
+                </button>
+            );
+            const hdrThemeToggle = isCorporate && (
+                <button
+                    onClick={() => {
+                        const order = { system: 'light', light: 'dark', dark: 'system' };
+                        const next = order[corpMode] || 'system';
+                        const theme = next === 'system' ? 'system'
+                                    : (next === 'light' ? 'corporateLight' : 'corporateDark');
+                        // in system mode applyTheme() owns data-corp-theme and the
+                        // local toggle must stop claiming to know better
+                        if (next === 'system') {
+                            localStorage.removeItem('corp-theme');
+                        } else {
+                            document.body.dataset.corpTheme = next === 'light' ? 'light' : '';
+                            localStorage.setItem('corp-theme', next === 'light' ? 'light' : '');
+                        }
+                        applyTheme(theme);
+                        setCorpMode(next);
+                        setCorpLight(next === 'light' ||
+                            (next === 'system' && document.body.dataset.corpTheme === 'light'));
+                        // MK May 2026 - also persist on server so checkSession on next
+                        // F5 doesn't apply a stale user.theme that mismatches the local
+                        // corp-theme toggle (caused taskbar bg-proxmox-dark/50 to render
+                        // light-on-dark when toggle and server preference drifted).
+                        // LW Oct 2026 (#1189) - not while an admin pins Corporate over the
+                        // user's own layout: the stored theme is that layout's and would
+                        // paint it in a Corporate palette once the lock is lifted. The
+                        // pinned Corporate goes by corp-theme in this browser anyway.
+                        if (layoutLocked && user?.ui_layout !== 'corporate' && user?.ui_layout !== 'corporate-redesigned') return;
+                        fetch(`${API_URL}/user/preferences`, {
+                            method: 'PUT', credentials: 'include',
+                            headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                            body: JSON.stringify({ theme })
+                        }).catch(() => {});
+                    }}
+                    className="p-1.5 rounded hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+                    title={corpMode === 'system' ? (t('lightMode') || 'Light Mode')
+                         : corpMode === 'light' ? (t('darkMode') || 'Dark Mode')
+                         : (t('followSystem') || 'Follow system')}
+                >
+                    {corpMode === 'system' ? <Icons.Monitor />
+                     : corpMode === 'light' ? <Icons.Moon /> : <Icons.Sun />}
+                </button>
+            );
+            const hdrSettings = isAdmin && (
+                <button
+                    onClick={() => setShowSettings(true)}
+                    className={`${isCorporate ? 'p-1' : 'p-2.5'} bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors text-gray-400 hover:text-white`}
+                    title={t('pegaproxSettings')}
+                >
+                    <Icons.Settings className={isCorporate ? 'w-4 h-4' : undefined} />
+                </button>
+            );
+            const hdrTaskToggle = !showTaskBar && (
+                <button
+                    onClick={() => setShowTaskBar(true)}
+                    className="relative flex items-center gap-2 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors"
+                    title={t('tasks')}
+                    data-cr-tasks-show={isCorpRedesigned ? '' : undefined}
+                >
+                    <Icons.Layers />
+                    {tasks.filter(task => task && task.status === 'running').length > 0 && (
+                        <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-500 rounded-full text-xs flex items-center justify-center animate-pulse">
+                            {tasks.filter(task => task && task.status === 'running').length}
+                        </span>
+                    )}
+                    {tasks.filter(task => task && (task.status === 'failed' || task.status === 'error')).length > 0 && (
+                        <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full text-xs flex items-center justify-center">
+                            {tasks.filter(task => task && (task.status === 'failed' || task.status === 'error')).length}
+                        </span>
+                    )}
+                </button>
+            );
+            const hdrUserMenu = (
+                <div className="relative z-50">
+                    <button
+                        onClick={() => setShowUserMenu(!showUserMenu)}
+                        data-user-menu=""
+                        className={`flex items-center gap-2 ${isCorporate ? 'px-2 py-1' : 'px-3 py-2'} bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors`}
+                    >
+                        <UserAvatar
+                            user={user}
+                            sizeClass={isCorporate ? 'w-6 h-6' : 'w-8 h-8'}
+                            textClass={isCorporate ? 'text-[11px]' : 'text-sm'}
+                        />
+                        {!isCorporate && <span className="text-sm text-gray-300 hidden sm:inline">{user?.display_name || user?.username}</span>}
+                        <Icons.ChevronDown className={isCorporate ? 'w-3 h-3' : undefined} />
+                    </button>
+                    
+                    {showUserMenu && (
+                        <>
+                            <HeaderDropdownCatcher onClose={() => setShowUserMenu(false)} />
+                            <div className="absolute right-0 top-full mt-2 w-56 bg-proxmox-card border border-proxmox-border rounded-xl shadow-xl z-50 overflow-hidden">
+                                <div className="p-3 border-b border-proxmox-border">
+                                    <p className="font-medium text-white">{user?.display_name || user?.username}</p>
+                                    <p className="text-xs text-gray-400">{user?.role === 'admin' ? t('roleAdmin') : user?.role === 'user' ? t('roleUser') : t('roleViewer')}</p>
+                                </div>
+                                <div className="py-1">
+                                    <button
+                                        onClick={() => {
+                                            setShowUserMenu(false);
+                                            setShowProfile(true);
+                                        }}
+                                        className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
+                                    >
+                                        <Icons.User />
+                                        {t('myProfile')}
+                                    </button>
+                                    {isAdmin && (
+                                        <button
+                                            onClick={() => {
+                                                setShowUserMenu(false);
+                                                setShowSettings(true);
+                                            }}
+                                            className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
+                                        >
+                                            <Icons.Settings />
+                                            {t('pegaproxSettings')}
+                                        </button>
+                                    )}
+                                    {/* MK May 2026 - discoverability: hotkey list */}
+                                    <button
+                                        onClick={() => { setShowUserMenu(false); setShowShortcutsModal(true); }}
+                                        className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
+                                    >
+                                        <Icons.Keyboard />
+                                        <span className="flex-1">{t('keyboardShortcuts') || 'Keyboard shortcuts'}</span>
+                                        <kbd className="text-[10px] opacity-60 px-1 rounded" style={{ border: '1px solid #485764' }}>?</kbd>
+                                    </button>
+                                    <button
+                                        onClick={() => { setShowUserMenu(false); setShowApiReference(true); }}
+                                        className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
+                                    >
+                                        <Icons.Book />
+                                        {t('apiRefTitle')}
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            setShowUserMenu(false);
+                                            logout();
+                                        }}
+                                        className="w-full px-4 py-2 text-left text-red-400 hover:bg-red-500/10 transition-colors flex items-center gap-2"
+                                    >
+                                        <Icons.LogOut />
+                                        {t('logout')}
+                                    </button>
+                                </div>
+                            </div>
+                        </>
+                    )}
+                </div>
+            );
+
+            // LW Oct 2026 - Corporate Redesigned: the context picker and the breadcrumb trail as
+            // data, read from the same state as the classic trail in the header below
+            // the backup server or ESXi host on screen, and leaving both (the state keeps its old name)
+            const crServer = selectedPBS ? { kind: 'pbs', name: selectedPBS.name } : (selectedVMware ? { kind: 'esxi', name: selectedVMware.name } : null);
+            const crLeaveServers = () => { setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
+            // the inventory as an ARIA tree (only the node/guest view is a tree)
+            const crSideTree = isCorpRedesigned && sidebarViewMode === 'tree';
+            const crGoAll = () => {
+                crLeaveServers(); setSelectedCluster(null);
+                setSidebarTopology(false); setSidebarWorldmap(false); setSidebarXHM(false);
+                setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false);
+            };
+            const crClearPick = () => {
+                setSelectedSidebarVm(null); setSelectedSidebarNode(null);
+                setSelectedSidebarDatastore(null); setSelectedSidebarQdevice(null);
+            };
+            // the task center of the redesign: where a row leads (out of every global view into its
+            // cluster) and the inventory it checks first. Lists are what the server let this user see
+            const crIntoCluster = (cid) => {
+                const cl = clusters.find(c => c.id === cid);
+                if (!cl) return null;
+                crLeaveServers();
+                setSidebarTopology(false); setSidebarWorldmap(false); setSidebarXHM(false);
+                setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false);
+                setSelectedCluster(cl);
+                setExpandedSidebarClusters(prev => ({...prev, [cl.id]: true}));
+                return cl;
+            };
+            const crTaskNav = isCorpRedesigned ? {
+                clusters, authFetch, may: can,
+                guestsOf: (cid) => (selectedCluster && selectedCluster.id === cid ? clusterResources
+                    : (sidebarClusterData[cid]?.resources || allClusterGuests[cid] || null)),
+                nodesOf: (cid) => (selectedCluster && selectedCluster.id === cid ? clusterMetrics : (sidebarClusterData[cid]?.metrics || null)),
+                storesOf: (cid) => (selectedCluster && selectedCluster.id === cid ? clusterDatastores : (sidebarClusterData[cid]?.datastores || null)),
+                // which lists of a cluster came back once: the empty seed of a cluster switch or a failed read is not "none"
+                listsRead: (cid) => {
+                    const d = sidebarClusterData[cid] || {};
+                    return { guests: Array.isArray(d.resources) || Array.isArray(allClusterGuests[cid]),
+                             nodes: !!(d.metrics && typeof d.metrics === 'object'), stores: !!(d.datastores && typeof d.datastores === 'object') };
+                },
+                openGuest: (cid, guest) => {
+                    const cl = crIntoCluster(cid);
+                    if (!cl) return;
+                    setSelectedSidebarVm({...guest, _clusterId: cl.id}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null);
+                    setActiveTab('resources'); setResourcesSubTab('management');
+                },
+                openNode: (cid, name) => {
+                    if (!crIntoCluster(cid)) return;
+                    setSelectedSidebarNode({ name, clusterId: cid }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null);
+                    setActiveTab('overview');
+                },
+                openStorage: (cid, store, node) => {
+                    if (!crIntoCluster(cid)) return;
+                    setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId: cid });
+                    setSelectedSidebarVm(null); setSelectedSidebarNode(null);
+                    setActiveTab('datastore');
+                },
+                openCluster: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('overview'); } },
+                openBulkRun: (id) => setBulkRunOpen(id),
+                // a module page of a cluster: Reports > Insights / What-if, Compliance > Drift, a Datacenter section
+                openReports: (cid, sub) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('reports'); setReportSubTab(sub || 'summary'); } },
+                openCompliance: (cid, sub) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('compliance'); if (sub) setComplianceSubTab(sub); } },
+                openDatacenter: (cid, section) => { if (crIntoCluster(cid)) { crClearPick(); setDatacenterSection(section || null); setActiveTab('datacenter'); } },
+                // LW Nov 2026 - the QDevice view of a cluster, as its sidebar entry opens it
+                openQdevice: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setSelectedSidebarQdevice(cid); setActiveTab('overview'); } },
+                // LW Nov 2026 - the alert strip: Automation > Alerts of a cluster, and its Timeline with a kind and a severity picked
+                openAlerts: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('alerts'); } },
+                // LW Nov 2026 (#1220) - Automation > Blueprints & Images of a cluster (the Resources button, the cluster menu, Ctrl+K)
+                openBlueprints: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('templates'); } },
+                openTimeline: (cid, pick) => {
+                    if (!crIntoCluster(cid)) return;
+                    crClearPick();
+                    setCrTimelinePick(p => ({ cid, kind: (pick && pick.kind) || '', severity: (pick && pick.severity) || '', seq: ((p && p.seq) || 0) + 1 }));
+                    setActiveTab('timeline');
+                },
+            } : undefined;
+            // LW Nov 2026 (#1220) - where the blueprints of Modern lead (blueprints.js): Automation > Blueprints &
+            // Templates of a cluster, and the guest list of its cluster for a guest a deploy made
+            const mdBpNav = !isCorporate ? {
+                nodesOf: (cid) => (selectedCluster && selectedCluster.id === cid ? clusterMetrics : (sidebarClusterData[cid]?.metrics || null)),
+                // from the top of the page, where the tab bar and the section start
+                openBlueprints: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('templates'); window.scrollTo(0, 0); } },
+                openGuest: (cid, guest) => {
+                    const cl = clusters.find(c => c.id === cid);
+                    if (!cl || !guest) return;
+                    askGuestDetail(cl, guest);
+                    crIntoCluster(cid);
+                    setSelectedSidebarVm({...guest, _clusterId: cl.id}); setSelectedSidebarNode(null);
+                    setActiveTab('resources'); setResourcesSubTab('management');
+                },
+            } : undefined;
+            const crGlobalView = sidebarTopology ? (t('topologyView') || 'Topology')
+                : sidebarWorldmap ? (t('worldMap') || 'World Map')
+                : sidebarGuests ? t('allGuestsTitle')
+                : sidebarXHM ? (t('xhmTitle') || 'Hypervisor Migration')
+                : sidebarMultiSdn ? (t('mcevpnTitle') || 'Multi-Cluster EVPN')
+                : sidebarAutoInstall ? t('autoInstall') : '';
+            const crCrumbs = [];
+            if (isCorpRedesigned) {
+                crCrumbs.push({ key: 'all', label: t('breadcrumbAll') || 'All', icon: <Icons.Database />, onClick: crGoAll });
+                if (crGlobalView) crCrumbs.push({ key: 'view', label: crGlobalView });
+                // LW Nov 2026 - the group stays in the state when the sidebar picks a cluster or server elsewhere:
+                // it is in the trail only on its own overview or above one of its clusters
+                if (selectedGroup && !crServer && (!selectedCluster || selectedCluster.group_id === selectedGroup.id)) {
+                    crCrumbs.push({ key: 'group', label: selectedGroup.name, icon: <Icons.Folder /> });
+                }
+                if (crServer) crCrumbs.push({ key: crServer.kind, label: crServer.name, icon: crServer.kind === 'pbs' ? <Icons.Shield /> : <Icons.Cloud /> });
+                if (selectedCluster) {
+                    crCrumbs.push({ key: 'cluster', label: clusterLabel(selectedCluster), icon: <Icons.Server />,
+                                    onClick: () => { crClearPick(); setActiveTab('overview'); } });
+                    if (activeTab) {
+                        // a plugin tab is named after its plugin, two tabs have their own key
+                        const plugin = String(activeTab).startsWith('plugin:') && (enabledPlugins || []).find(p => `plugin:${p.id}` === activeTab);
+                        const label = plugin ? (plugin.name || plugin.id) : t({ timeline: 'tlTab', 'site-recovery': 'siteRecovery', updates: 'crUpdTab' }[activeTab] || activeTab);
+                        crCrumbs.push({ key: 'tab', label, onClick: crClearPick });
+                    }
+                    if (selectedSidebarQdevice && activeTab === 'overview') crCrumbs.push({ key: 'qdevice', label: t('qdeviceTitle'), icon: <Icons.Scale /> });
+                    if (selectedSidebarNode && activeTab === 'overview') crCrumbs.push({ key: 'node', label: selectedSidebarNode.name, icon: <Icons.Server /> });
+                    if (selectedSidebarVm && activeTab === 'resources') {
+                        crCrumbs.push({ key: 'guest', label: selectedSidebarVm.name || `${selectedSidebarVm.type === 'lxc' ? 'CT' : 'VM'} ${selectedSidebarVm.vmid}`,
+                                        icon: selectedSidebarVm.type === 'lxc' ? <Icons.Box /> : <Icons.Monitor /> });
+                    }
+                    if (selectedSidebarDatastore && activeTab === 'datastore') crCrumbs.push({ key: 'datastore', label: selectedSidebarDatastore.name, icon: <Icons.Database /> });
+                    // the sub tab of the reports and compliance tabs, as their strips name it
+                    const sub = activeTab === 'reports' ? ({ summary: t('summary') || 'Summary', cve: t('cveScanner') || 'CVE Scanner', insights: t('insights') || 'Insights',
+                                                             costs: t('costDashboard') || 'Costs', power: t('powerTitle') || 'Power & Carbon', topology: t('topologyTitle') || 'Topology',
+                                                             whatif: t('whatifTitle'), 'api-health': t('apiHealth') || 'API Health' })[reportSubTab]
+                        : activeTab === 'compliance' ? (complianceSubs.find(x => x.id === complianceSub) || {}).label : null;
+                    if (sub && sub !== (crCrumbs[crCrumbs.length - 1] || {}).label) crCrumbs.push({ key: 'sub', label: sub });
+                }
+            }
+
+            // LW Oct 2026 - the tabs of a cluster, for the classic strip and for the one of
+            // Corporate Redesigned
+            const clusterTabList = (() => {
+                // NS May 2026 (#381) - splice plugin frontend tabs between
+                // the management Plugins tab and Settings. Plugin tabs only
+                // render when the manifest declared has_frontend AND the
+                // server normalised frontend_route to /api/plugins/<id>/...
+                // (server-side validation in pegaprox/api/plugins.py).
+                // #642 - and only on the clusters it was limited to
+                const pluginFrontendTabs = (enabledPlugins || [])
+                    .filter(p => p && p.has_frontend && p.frontend_route)
+                    .filter(p => pluginAppliesToCluster(p, selectedCluster?.id))
+                    .map(p => ({
+                        id: `plugin:${p.id}`,
+                        label: p.name || p.id,  // shown verbatim
+                        icon: Icons.Package,
+                        _plugin: p,
+                    }));
+                return [
+                    { id: 'overview', labelKey: 'overview', icon: Icons.Activity },
+                    { id: 'resources', labelKey: 'resources', icon: Icons.Server },
+                    { id: 'datacenter', labelKey: 'datacenter', icon: Icons.HardDrive },
+                    { id: 'datastore', labelKey: 'datastore', icon: Icons.Database },
+                    { id: 'automation', labelKey: 'automation', icon: Icons.Zap },
+                    { id: 'reports', labelKey: 'reports', icon: Icons.BarChart },
+                    { id: 'timeline', labelKey: 'tlTab', icon: Icons.Clock },
+                    { id: 'compliance', labelKey: 'compliance', icon: Icons.Lock },
+                    { id: 'site-recovery', labelKey: 'siteRecovery', icon: Icons.Shield },
+                    { id: 'plugins', labelKey: 'plugins', icon: Icons.Package },
+                    ...pluginFrontendTabs,
+                    // LW Nov 2026 - Corporate Redesigned draws the update manager here, not in Settings
+                    ...(isCorpRedesigned ? [{ id: 'updates', labelKey: 'crUpdTab', icon: Icons.Download }] : []),
+                    { id: 'settings', labelKey: 'settings', icon: Icons.Settings },
+                ];
+            })().filter(tab => {
+                // #390 - admin role always passes (matches backend has_permission shortcut).
+                if (tab.id === 'site-recovery') return can('site_recovery.view');
+                if (tab.id === 'plugins') return can('plugins.view');
+                // compliance only reads, so a standby keeps it (#625)
+                if (tab.id === 'compliance') return holds('admin.audit') || holds('node.maintenance') || holds('changes.view');
+                if (typeof tab.id === 'string' && tab.id.startsWith('plugin:')) return can('plugins.view');
+                return true;
+            });
+
             // NS #727 — Firefox drives text-selection autoscroll into overflow:hidden boxes
             // (Chrome doesn't), which can shove the whole shell off-screen horizontally with no
             // scrollbar left to recover it. overflow-x:clip pins the shell on the x-axis; y stays
@@ -19805,7 +22300,8 @@
                     <HaCopiesBanner onOpenHa={openHaSettings} />
                     <HaLeaderBanner onOpenHa={openHaSettings} />
 
-                    {/* Node Offline Alert Banner */}
+                    {/* Node Offline Alert Banner (LW Nov 2026 - the alert strip of Corporate Redesigned takes its place there) */}
+                    {!isCorpRedesigned && (
                     <NodeAlertBanner 
                         alerts={nodeAlerts} 
                         currentClusterId={selectedCluster?.id}
@@ -19815,12 +22311,18 @@
                             return newAlerts;
                         })}
                     />
+                    )}
                     
                     {/* Background gradient mesh - hidden in corporate mode via CSS */}
                     {!isCorporate && <div className="fixed inset-0 gradient-mesh pointer-events-none" />}
                     
                     {/* LW: Feb 2026 - header, compact in corporate */}
                     {/* LW: Mar 2026 - z-50 so search dropdown renders above content area (#corp-search-overlap) */}
+                    {isCorpRedesigned ? (
+                        <CrHeader drawerToggle={hdrDrawerToggle} logo={hdrLogo} search={hdrSearch}
+                            themeToggle={hdrThemeToggle} settings={hdrSettings} taskToggle={hdrTaskToggle}
+                            userMenu={hdrUserMenu} crumbs={crCrumbs} onOpenPalette={() => setShowCommandPalette(true)} />
+                    ) : (
                     <header className={`sticky top-0 z-50 border-b border-proxmox-border ${isCorporate ? 'bg-proxmox-darker' : 'bg-proxmox-dark/80 backdrop-blur-xl'}`}>
                         <div className={`${isCorporate ? 'max-w-full px-3 py-1' : 'max-w-[1600px] mx-auto px-6 py-4'}`}>
                             <div className="flex items-center justify-between pp-header-row">
@@ -19828,41 +22330,8 @@
                                 <div className="flex items-center gap-3">
                                 {/* #189 - drawer toggle. In the header so it is always reachable and
                                     can never paint on top of the content. Hidden above 820px. */}
-                                <button className="pp-drawer-toggle"
-                                    aria-label={t('toggleNavigation') || 'Toggle navigation'}
-                                    aria-expanded={mobileSidebarOpen}
-                                    onClick={() => setMobileSidebarOpen(o => !o)}>
-                                    <span /><span /><span />
-                                </button>
-                                <button
-                                    onClick={() => { setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); }}
-                                    className={`flex items-center ${isCorporate ? 'gap-2' : 'gap-4'} hover:opacity-80 transition-opacity`}
-                                    title={t('allClustersOverview') || 'All Clusters Overview'}
-                                >
-                                    {/* PegaProx Logo */}
-                                    <img
-                                        src={getLogoSrc()}
-                                        alt="PegaProx"
-                                        className={`${isCorporate ? 'w-8 h-8' : 'w-12 h-12 rounded-xl'} object-contain`}
-                                        onError={(e) => {
-                                            e.target.style.display = 'none';
-                                            e.target.nextSibling.style.display = 'flex';
-                                        }}
-                                    />
-                                    <div className={`${isCorporate ? 'w-6 h-6 bg-proxmox-orange' : 'w-10 h-10 rounded-xl bg-gradient-to-br from-proxmox-orange to-orange-600 shadow-lg glow-orange'} items-center justify-center hidden`}>
-                                        <svg viewBox="0 0 24 24" className={`${isCorporate ? 'w-3.5 h-3.5' : 'w-6 h-6'} text-white`} fill="currentColor">
-                                            <path d="M12 2C9.5 2 7 3.5 6 6c-1.5 0-3 1-3 3 0 1.5 1 2.5 2 3l1 6c0 1 1 2 2 2h8c1 0 2-1 2-2l1-6c1-.5 2-1.5 2-3 0-2-1.5-3-3-3-1-2.5-3.5-4-6-4zm0 2c2 0 3.5 1 4 3H8c.5-2 2-3 4-3zM5 9h14c.5 0 1 .5 1 1s-.5 1.5-1 2l-1 5H6l-1-5c-.5-.5-1-1-1-2s.5-1 1-1zm7 1a2 2 0 100 4 2 2 0 000-4z"/>
-                                        </svg>
-                                    </div>
-                                    {isCorporate ? (
-                                        <span className="text-[13px] font-semibold">PegaProx</span>
-                                    ) : (
-                                        <div className="text-left">
-                                            <h1 className="text-xl font-bold">PegaProx</h1>
-                                            <p className="text-xs text-gray-500">{t('clusterManagement')}</p>
-                                        </div>
-                                    )}
-                                </button>
+                                {hdrDrawerToggle}
+                                {hdrLogo}
                                 {/* LW: Feb 2026 - corporate breadcrumb, MK: Mar 2026 icons + segment classes */}
                                 {isCorporate && (
                                     <div className="flex items-center gap-1 text-[13px] ml-1 border-l border-proxmox-border pl-3">
@@ -19876,7 +22345,7 @@
                                             <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className="corp-breadcrumb-current"><Icons.Server className="w-3 h-3" />{selectedCluster.display_name || selectedCluster.name}</span></>
                                         )}
                                         {activeTab && selectedCluster && (
-                                            <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className={(selectedSidebarVm || selectedSidebarNode || selectedSidebarDatastore || selectedSidebarQdevice) ? 'corp-breadcrumb-segment' : 'corp-breadcrumb-current'} onClick={() => { if (selectedSidebarVm) setSelectedSidebarVm(null); if (selectedSidebarNode) setSelectedSidebarNode(null); if (selectedSidebarDatastore) setSelectedSidebarDatastore(null); if (selectedSidebarQdevice) setSelectedSidebarQdevice(null); }}>{t(activeTab === 'timeline' ? 'tlTab' : activeTab)}</span></>
+                                            <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className={(selectedSidebarVm || selectedSidebarNode || selectedSidebarDatastore || selectedSidebarQdevice) ? 'corp-breadcrumb-segment' : 'corp-breadcrumb-current'} onClick={() => { if (selectedSidebarVm) setSelectedSidebarVm(null); if (selectedSidebarNode) setSelectedSidebarNode(null); if (selectedSidebarDatastore) setSelectedSidebarDatastore(null); if (selectedSidebarQdevice) setSelectedSidebarQdevice(null); }}>{t({ timeline: 'tlTab', 'site-recovery': 'siteRecovery' }[activeTab] || activeTab)}</span></>
                                         )}
                                         {selectedSidebarQdevice && activeTab === 'overview' && (
                                             <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className="corp-breadcrumb-current" data-qdevice-crumb=""><Icons.Scale className="w-3 h-3" />{t('qdeviceTitle')}</span></>
@@ -19895,243 +22364,12 @@
                                 </div>
                                 <div className={`flex items-center pp-header-actions ${isCorporate ? 'gap-2 justify-end' : 'gap-3'}`}>
                                     {/* NS: Global Search - now with tag search + ctrl+k, LW: fixed width in corporate */}
-                                    <div className="relative pp-header-search">
-                                        <div className={`flex items-center ${isCorporate ? 'bg-[#17242b]' : 'bg-proxmox-dark'} border border-proxmox-border rounded-lg overflow-hidden focus-within:border-proxmox-orange/50 transition-colors`}>
-                                            <Icons.Search className="w-4 h-4 ml-3 text-gray-500 flex-shrink-0" />
-                                            <input
-                                                ref={globalSearchRef}
-                                                type="text"
-                                                placeholder={isCorporate ? (t('searchAllInventories') || 'Search in all inventories...') : (t('searchAllClusters') || 'Search all clusters...')}
-                                                value={globalSearchQuery}
-                                                onChange={(e) => {
-                                                    setGlobalSearchQuery(e.target.value);
-                                                    debouncedSearch(e.target.value);
-                                                }}
-                                                onFocus={() => setShowGlobalSearch(true)}
-                                                onKeyDown={(e) => {
-                                                    const items = globalSearchResults?.results || [];
-                                                    if (e.key === 'ArrowDown') {
-                                                        e.preventDefault();
-                                                        setGlobalSearchIndex(prev => Math.min(prev + 1, Math.min(items.length - 1, 19)));
-                                                    } else if (e.key === 'ArrowUp') {
-                                                        e.preventDefault();
-                                                        setGlobalSearchIndex(prev => Math.max(prev - 1, 0));
-                                                    } else if (e.key === 'Enter' && items.length > 0) {
-                                                        e.preventDefault();
-                                                        navigateToResult(items[globalSearchIndex]);
-                                                    } else if (e.key === 'Escape') {
-                                                        setShowGlobalSearch(false);
-                                                        e.target.blur();
-                                                    }
-                                                }}
-                                                className={`${isCorporate ? 'w-48 md:w-72 lg:w-96 px-2 py-1' : 'w-48 md:w-72 lg:w-80 px-2 py-2'} bg-transparent text-white placeholder-gray-500 focus:outline-none text-sm`}
-                                            />
-                                            {/* above the click-away layer of the open dropdown */}
-                                            <span className="relative z-50 mr-2 flex items-center flex-shrink-0">
-                                                <SearchSyntaxHelp t={t} onPick={(example) => {
-                                                    setGlobalSearchQuery(example);
-                                                    performGlobalSearch(example);
-                                                    setShowGlobalSearch(true);
-                                                    globalSearchRef.current?.focus();
-                                                }} />
-                                            </span>
-                                            {globalSearchLoading ? (
-                                                <Icons.RotateCw className="w-4 h-4 mr-3 text-gray-400 animate-spin flex-shrink-0" />
-                                            ) : (
-                                                <kbd className={`hidden md:inline-flex mr-3 px-1.5 py-0.5 text-xs rounded border flex-shrink-0 ${isCorporate ? 'text-[#5a7a8a] bg-[#1a2e38] border-[#344955]' : 'text-gray-500 bg-proxmox-dark border-proxmox-border'}`}>
-                                                    {navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl+'}K
-                                                </kbd>
-                                            )}
-                                        </div>
-                                        
-                                        {/* Search Results Dropdown */}
-                                        {showGlobalSearch && globalSearchResults && (
-                                            <>
-                                                <div className="fixed inset-0 z-40" onClick={() => setShowGlobalSearch(false)} />
-                                                <div className={`pp-search-results absolute top-full right-0 md:left-0 mt-2 w-[28rem] max-h-[32rem] overflow-y-auto z-50 ${isCorporate ? 'rounded-md border-2' : 'bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl'}`} style={isCorporate ? {background: '#243542', borderColor: '#49afd9', boxShadow: '0 8px 32px rgba(0,0,0,0.5)'} : {}}>
-                                                    {/* Header with count and prefix hints */}
-                                                    <div className="p-3 border-b border-proxmox-border">
-                                                        <div className="flex justify-between items-center">
-                                                            <span className="text-sm text-gray-400">
-                                                                {globalSearchResults.count} {t('results') || 'results'}
-                                                                {globalSearchResults.query?.startsWith('tag:') && ' (Tag-Suche)'}
-                                                            </span>
-                                                            <button onClick={() => setShowGlobalSearch(false)} className="text-gray-500 hover:text-white">
-                                                                <Icons.X className="w-4 h-4" />
-                                                            </button>
-                                                        </div>
-                                                        {globalSearchResults.syntaxError && (
-                                                            <div data-search-syntax-error className="text-xs text-red-400 mt-1">
-                                                                {searchSyntaxMessage(t, globalSearchResults.syntaxError)}
-                                                            </div>
-                                                        )}
-                                                        {/* MK: clickable tag pills for quick filtering */}
-                                                        {/* LW Oct 2026 - a pill completes the last term (after AND/OR too), the rest stays */}
-                                                        {globalSearchResults.tag_suggestions?.length > 0 && (globalSearchResults.tag_complete || !globalSearchQuery.startsWith('tag:')) && (
-                                                            <div className="flex flex-wrap gap-1 mt-2">
-                                                                <span className="text-xs text-gray-500 mr-1">Tags:</span>
-                                                                {globalSearchResults.tag_suggestions.slice(0, 6).map((tag, i) => (
-                                                                    <button key={i} data-search-tag-pill={tag} onClick={() => {
-                                                                        const next = searchWithTag(globalSearchResults, tag);
-                                                                        setGlobalSearchQuery(next);
-                                                                        performGlobalSearch(next);
-                                                                    }} className="px-1.5 py-0.5 text-xs rounded bg-proxmox-orange/20 text-proxmox-orange hover:bg-proxmox-orange/30 transition-colors">
-                                                                        {tag}
-                                                                    </button>
-                                                                ))}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                    {globalSearchResults.syntaxError ? null : globalSearchResults.results.length === 0 ? (
-                                                        <div className="p-6 text-center text-gray-500">
-                                                            <Icons.Search className="mx-auto mb-2 opacity-50" />
-                                                            <p>{t('noResults') || 'No results'}</p>
-                                                            <p className="text-xs mt-2 text-gray-600">
-                                                                Tipp: tag:web, node:pve1, ip:192.168
-                                                            </p>
-                                                        </div>
-                                                    ) : (
-                                                        <div className="divide-y divide-proxmox-border">
-                                                            {globalSearchResults.results.slice(0, 20).map((result, idx) => (
-                                                                <div
-                                                                    key={idx}
-                                                                    className={`p-3 hover:bg-proxmox-hover cursor-pointer flex items-center gap-3 transition-colors ${idx === globalSearchIndex ? 'bg-proxmox-orange/10 border-l-2 border-proxmox-orange' : 'border-l-2 border-transparent'}`}
-                                                                    onClick={() => navigateToResult(result)}
-                                                                    onMouseEnter={() => setGlobalSearchIndex(idx)}
-                                                                >
-                                                                    <span className="text-lg flex-shrink-0">
-                                                                        {result.type === 'node' ? '🖧' : result.type === 'ct' ? '📦' : '🖥️'}
-                                                                    </span>
-                                                                    <div className="flex-1 min-w-0">
-                                                                        <div className="flex items-center gap-2 flex-wrap">
-                                                                            <span className="font-medium truncate">{result.name}</span>
-                                                                            {result.vmid && (
-                                                                                <span className="text-xs text-gray-500">#{result.vmid}</span>
-                                                                            )}
-                                                                            <span className={`px-1.5 py-0.5 text-xs rounded ${
-                                                                                result.status === 'running' ? 'bg-green-500/20 text-green-400' :
-                                                                                result.status === 'stopped' ? 'bg-gray-500/20 text-gray-400' :
-                                                                                'bg-yellow-500/20 text-yellow-400'
-                                                                            }`}>
-                                                                                {result.status}
-                                                                            </span>
-                                                                            {result.match_field === 'tag' && (
-                                                                                <span className="px-1.5 py-0.5 text-xs rounded bg-purple-500/20 text-purple-400">Tag-Match</span>
-                                                                            )}
-                                                                            {/* LW Oct 2026 - a hit by MAC, notes or an address other than the one shown below */}
-                                                                            {SEARCH_INDEX_FIELDS.includes(result.match_field) && result.match_value && result.match_value !== result.ip && (
-                                                                                <span className="px-1.5 py-0.5 text-xs rounded bg-purple-500/20 text-purple-400 truncate max-w-full" data-search-match={result.match_field}>
-                                                                                    {searchMatchLabel(t, result.match_field)}: {result.match_value}{result.match_net ? ` (${result.match_net})` : ''}
-                                                                                </span>
-                                                                            )}
-                                                                        </div>
-                                                                        <div className="text-xs text-gray-500 flex items-center gap-2 mt-0.5">
-                                                                            <span>{result.cluster_name}</span>
-                                                                            {result.node && <span>• {result.node}</span>}
-                                                                            {result.ip && <span>• {result.ip}</span>}
-                                                                        </div>
-                                                                        {/* tags - highlight matching ones in orange */}
-                                                                        {result.tags && (
-                                                                            <div className="flex flex-wrap gap-1 mt-1">
-                                                                                {(Array.isArray(result.tags) ? result.tags : result.tags.split(';')).filter(t => t.trim()).slice(0, 4).map((tag, i) => (
-                                                                                    <span key={i} className={`px-1.5 py-0.5 text-xs rounded ${
-                                                                                        (globalSearchResults.highlight || globalSearchQuery.toLowerCase().replace('tag:', '').split(',')).some(q => q.trim() && tag.trim().toLowerCase().includes(q.trim()))
-                                                                                        ? 'bg-proxmox-orange/30 text-proxmox-orange ring-1 ring-proxmox-orange/50'
-                                                                                        : 'bg-proxmox-dark text-gray-400'
-                                                                                    }`}>
-                                                                                        {tag.trim()}
-                                                                                    </span>
-                                                                                ))}
-                                                                                {(Array.isArray(result.tags) ? result.tags : result.tags.split(';')).filter(t => t.trim()).length > 4 && (
-                                                                                    <span className="px-1.5 py-0.5 text-xs rounded bg-proxmox-dark text-gray-500">
-                                                                                        +{(Array.isArray(result.tags) ? result.tags : result.tags.split(';')).filter(t => t.trim()).length - 4}
-                                                                                    </span>
-                                                                                )}
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
-                                                                    <button
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation();
-                                                                            toggleFavorite(result.type, result.cluster_id, result.vmid, result.type === 'vm' ? 'qemu' : 'lxc', result.name);
-                                                                        }}
-                                                                        className="p-1 hover:bg-proxmox-dark rounded text-gray-500 hover:text-yellow-400 flex-shrink-0"
-                                                                        title={t('toggleFavorite') || 'Toggle favorite'}
-                                                                    >
-                                                                        <Icons.Star className={`w-4 h-4 ${isFavorite(result.type, result.cluster_id, result.vmid, result.name) ? 'fill-yellow-400 text-yellow-400' : ''}`} />
-                                                                    </button>
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    )}
-                                                    {/* Keyboard hints */}
-                                                    {globalSearchResults.results.length > 0 && (
-                                                        <div className="p-2 border-t border-proxmox-border text-xs text-gray-500 flex items-center gap-3">
-                                                            <span className="flex items-center gap-1">
-                                                                <kbd className="px-1 py-0.5 bg-proxmox-dark rounded text-gray-400">↑↓</kbd>
-                                                                navigate
-                                                            </span>
-                                                            <span className="flex items-center gap-1">
-                                                                <kbd className="px-1.5 py-0.5 bg-proxmox-dark rounded text-gray-400">↵</kbd>
-                                                                {t('pressEnterToOpen') || 'jump to VM'}
-                                                            </span>
-                                                            <span className="flex items-center gap-1">
-                                                                <kbd className="px-1 py-0.5 bg-proxmox-dark rounded text-gray-400">esc</kbd>
-                                                                close
-                                                            </span>
-                                                        </div>
-                                                    )}
-                                                    {/* Keyboard hint */}
-                                                    {globalSearchResults.results.length > 0 && (
-                                                        <div className="p-2 border-t border-proxmox-border text-xs text-gray-500 flex items-center gap-2">
-                                                            <kbd className="px-1.5 py-0.5 bg-proxmox-dark rounded text-gray-400">↑µ</kbd>
-                                                            <span>{t('pressEnterToOpen') || 'Press Enter to jump to VM'}</span>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </>
-                                        )}
-                                    </div>
+                                    {hdrSearch}
+
+                                    {hdrCorpSwitch}
                                     
                                     {/* light/dark toggle for corporate */}
-                                    {isCorporate && (
-                                        <button
-                                            onClick={() => {
-                                                const order = { system: 'light', light: 'dark', dark: 'system' };
-                                                const next = order[corpMode] || 'system';
-                                                const theme = next === 'system' ? 'system'
-                                                            : (next === 'light' ? 'corporateLight' : 'corporateDark');
-                                                // in system mode applyTheme() owns data-corp-theme and the
-                                                // local toggle must stop claiming to know better
-                                                if (next === 'system') {
-                                                    localStorage.removeItem('corp-theme');
-                                                } else {
-                                                    document.body.dataset.corpTheme = next === 'light' ? 'light' : '';
-                                                    localStorage.setItem('corp-theme', next === 'light' ? 'light' : '');
-                                                }
-                                                applyTheme(theme);
-                                                setCorpMode(next);
-                                                setCorpLight(next === 'light' ||
-                                                    (next === 'system' && document.body.dataset.corpTheme === 'light'));
-                                                // MK May 2026 — also persist on server so checkSession on next
-                                                // F5 doesn't apply a stale user.theme that mismatches the local
-                                                // corp-theme toggle (caused taskbar bg-proxmox-dark/50 to render
-                                                // light-on-dark when toggle and server preference drifted).
-                                                fetch(`${API_URL}/user/preferences`, {
-                                                    method: 'PUT', credentials: 'include',
-                                                    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                                                    body: JSON.stringify({ theme })
-                                                }).catch(() => {});
-                                            }}
-                                            className="p-1.5 rounded hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
-                                            title={corpMode === 'system' ? (t('lightMode') || 'Light Mode')
-                                                 : corpMode === 'light' ? (t('darkMode') || 'Dark Mode')
-                                                 : (t('followSystem') || 'Follow system')}
-                                        >
-                                            {corpMode === 'system' ? <Icons.Monitor />
-                                             : corpMode === 'light' ? <Icons.Moon /> : <Icons.Sun />}
-                                        </button>
-                                    )}
+                                    {hdrThemeToggle}
 
                                     {/* language switcher + settings */}
                                     {!isCorporate && <LanguageSwitcher />}
@@ -20141,15 +22379,7 @@
                                         <PushBellButton authFetch={authFetch} addToast={addToast} t={t} />
                                     )}
 
-                                    {isAdmin && (
-                                        <button
-                                            onClick={() => setShowSettings(true)}
-                                            className={`${isCorporate ? 'p-1' : 'p-2.5'} bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors text-gray-400 hover:text-white`}
-                                            title={t('pegaproxSettings')}
-                                        >
-                                            <Icons.Settings className={isCorporate ? 'w-4 h-4' : undefined} />
-                                        </button>
-                                    )}
+                                    {hdrSettings}
 
                                     {/* Live Status Indicator (corporate: status in bottom panel) */}
                                     {!isCorporate && (
@@ -20172,7 +22402,7 @@
                                             </button>
                                             {showAddDropdown && (
                                                 <>
-                                                    <div className="fixed inset-0 z-40" onClick={() => setShowAddDropdown(false)} />
+                                                    <HeaderDropdownCatcher onClose={() => setShowAddDropdown(false)} />
                                                     <div className="absolute right-0 top-full mt-2 w-64 bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl z-50 overflow-hidden animate-scale-in">
                                                         {[
                                                             { id: 'proxmox', label: 'Proxmox VE', desc: t('pveClusterDesc') || 'Virtual machines & containers', icon: Icons.Server, color: 'text-orange-400', bg: 'bg-orange-500/10' },
@@ -20205,114 +22435,50 @@
                                     )}
                                     
                                     {/* Task Bar Toggle — brings the bar back after it's been closed (#648; show it whenever the bar is hidden so there's no dead end, per si458's #649) */}
-                                    {!showTaskBar && (
-                                        <button
-                                            onClick={() => setShowTaskBar(true)}
-                                            className="relative flex items-center gap-2 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors"
-                                            title={t('tasks')}
-                                        >
-                                            <Icons.Layers />
-                                            {tasks.filter(task => task && task.status === 'running').length > 0 && (
-                                                <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-500 rounded-full text-xs flex items-center justify-center animate-pulse">
-                                                    {tasks.filter(task => task && task.status === 'running').length}
-                                                </span>
-                                            )}
-                                            {tasks.filter(task => task && (task.status === 'failed' || task.status === 'error')).length > 0 && (
-                                                <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full text-xs flex items-center justify-center">
-                                                    {tasks.filter(task => task && (task.status === 'failed' || task.status === 'error')).length}
-                                                </span>
-                                            )}
-                                        </button>
-                                    )}
+                                    {hdrTaskToggle}
                                     
                                     {/* LW: Feb 2026 - user menu, compact in corporate */}
-                                    <div className="relative z-50">
-                                        <button
-                                            onClick={() => setShowUserMenu(!showUserMenu)}
-                                            data-user-menu=""
-                                            className={`flex items-center gap-2 ${isCorporate ? 'px-2 py-1' : 'px-3 py-2'} bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors`}
-                                        >
-                                            <UserAvatar
-                                                user={user}
-                                                sizeClass={isCorporate ? 'w-6 h-6' : 'w-8 h-8'}
-                                                textClass={isCorporate ? 'text-[11px]' : 'text-sm'}
-                                            />
-                                            {!isCorporate && <span className="text-sm text-gray-300 hidden sm:inline">{user?.display_name || user?.username}</span>}
-                                            <Icons.ChevronDown className={isCorporate ? 'w-3 h-3' : undefined} />
-                                        </button>
-                                        
-                                        {showUserMenu && (
-                                            <>
-                                                <div className="fixed inset-0 z-40" onClick={() => setShowUserMenu(false)} />
-                                                <div className="absolute right-0 top-full mt-2 w-56 bg-proxmox-card border border-proxmox-border rounded-xl shadow-xl z-50 overflow-hidden">
-                                                    <div className="p-3 border-b border-proxmox-border">
-                                                        <p className="font-medium text-white">{user?.display_name || user?.username}</p>
-                                                        <p className="text-xs text-gray-400">{user?.role === 'admin' ? t('roleAdmin') : user?.role === 'user' ? t('roleUser') : t('roleViewer')}</p>
-                                                    </div>
-                                                    <div className="py-1">
-                                                        <button
-                                                            onClick={() => {
-                                                                setShowUserMenu(false);
-                                                                setShowProfile(true);
-                                                            }}
-                                                            className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
-                                                        >
-                                                            <Icons.User />
-                                                            {t('myProfile')}
-                                                        </button>
-                                                        {isAdmin && (
-                                                            <button
-                                                                onClick={() => {
-                                                                    setShowUserMenu(false);
-                                                                    setShowSettings(true);
-                                                                }}
-                                                                className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
-                                                            >
-                                                                <Icons.Settings />
-                                                                {t('pegaproxSettings')}
-                                                            </button>
-                                                        )}
-                                                        {/* MK May 2026 — discoverability: hotkey list */}
-                                                        <button
-                                                            onClick={() => { setShowUserMenu(false); setShowShortcutsModal(true); }}
-                                                            className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
-                                                        >
-                                                            <Icons.Keyboard />
-                                                            <span className="flex-1">{t('keyboardShortcuts') || 'Keyboard shortcuts'}</span>
-                                                            <kbd className="text-[10px] opacity-60 px-1 rounded" style={{ border: '1px solid #485764' }}>?</kbd>
-                                                        </button>
-                                                        <button
-                                                            onClick={() => { setShowUserMenu(false); setShowApiReference(true); }}
-                                                            className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
-                                                        >
-                                                            <Icons.Book />
-                                                            {t('apiRefTitle')}
-                                                        </button>
-                                                        <button
-                                                            onClick={() => {
-                                                                setShowUserMenu(false);
-                                                                logout();
-                                                            }}
-                                                            className="w-full px-4 py-2 text-left text-red-400 hover:bg-red-500/10 transition-colors flex items-center gap-2"
-                                                        >
-                                                            <Icons.LogOut />
-                                                            {t('logout')}
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            </>
-                                        )}
-                                    </div>
+                                    {hdrUserMenu}
                                 </div>
                             </div>
                         </div>
                     </header>
+                    )}
+
+                    {/* LW Nov 2026 - Corporate Redesigned: one strip in the flow under the header for the node,
+                        cluster and hardware banners, the active alerts of the selected cluster and the live link */}
+                    {isCorpRedesigned && (
+                        <CrBoundary id="alerts">
+                            <CrAlertStrip clusters={clusters} status={allClusterMetrics} selectedId={selectedCluster?.id || null}
+                                nodes={clusterMetrics} sideData={sidebarClusterData} haAlerts={nodeAlerts} live={wsConnected} nav={crTaskNav} />
+                        </CrBoundary>
+                    )}
+
+                    {offerCorpRedesigned && !corpClassicNoticeClosed && (
+                        <div className="corp-info-banner" data-corp-classic-notice="">
+                            <div className="flex items-center gap-2">
+                                <Icons.Info className="w-4 h-4 flex-shrink-0" />
+                                <span>{t('corpClassicDeprecated')}</span>
+                            </div>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                                <button type="button" className="corp-info-action" onClick={switchToCorpRedesigned}>
+                                    {t('corpClassicSwitchNow')}
+                                </button>
+                                <button type="button" className="corp-info-dismiss" onClick={() => {
+                                    setCorpClassicNoticeClosed(true);
+                                    try { localStorage.setItem('corp-classic-notice', 'closed'); } catch (_) {}
+                                }}>
+                                    {t('dismiss') || 'DISMISS'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
 
                     {/* LW: Feb 2026 - corporate warning banner */}
                     {/* NS May 2026 (#380): include affected cluster/node names in the
                         message so admins know WHICH ones are down. Truncate long lists
                         with "+N more" so the banner doesn't blow up at scale. */}
-                    {isCorporate && !warningBannerDismissed && (() => {
+                    {isCorporate && !isCorpRedesigned && !warningBannerDismissed && (() => {
                         const fmt = (template, vars) => String(template).replace(/\{(\w+)\}/g, (_, k) => vars[k] != null ? vars[k] : '');
                         const truncateNames = (names, max = 3) => {
                             if (!names || names.length === 0) return '';
@@ -20365,11 +22531,32 @@
                         {mobileSidebarOpen && <div className="pp-drawer-backdrop" onClick={() => setMobileSidebarOpen(false)} />}
                         <div className={`flex pp-main-row ${isCorporate ? 'gap-0' : 'gap-6'}`}>
                             {/* LW: Feb 2026 - sidebar, resizable in corporate */}
-                            <div className={`pp-sidebar ${mobileSidebarOpen ? 'pp-sidebar-open' : ''} ${isCorporate ? 'flex-shrink-0 corporate-sidebar' : 'w-72 flex-shrink-0'}`} style={isCorporate ? {width: sidebarWidth + 'px'} : undefined}>
+                            <div className={`pp-sidebar ${mobileSidebarOpen ? 'pp-sidebar-open' : ''} ${isCorporate ? 'flex-shrink-0 corporate-sidebar' : 'w-72 flex-shrink-0'}${isCorpRedesigned ? (crSidebarFolded ? ' cr-sidebar cr-sidebar-folded' : ' cr-sidebar') : ''}`}
+                                style={isCorporate ? {width: (isCorpRedesigned ? (crSidebarFolded ? CR_SIDEBAR.rail : crSidebarW) : sidebarWidth) + 'px'} : undefined}
+                                {...(isCorpRedesigned ? { role: 'navigation', 'aria-label': t('crInventory') } : {})}>
                                 {/* #189 - the drawer covers the header, so the header toggle cannot close it */}
                                 <button className="pp-drawer-close"
                                     aria-label={t('close') || 'Close'}
                                     onClick={() => setMobileSidebarOpen(false)}>&times;</button>
+                                {/* LW Oct 2026 - Corporate Redesigned: folded to a rail of icons */}
+                                {isCorpRedesigned && crSidebarFolded && (
+                                    <CrSidebarRail active={sidebarViewMode} onView={setSidebarViewMode} onExpand={() => crFoldSidebar(false)}
+                                        // LW Nov 2026 - the Tools section of the unfolded sidebar, same conditions
+                                        tools={clusters.length > 0 ? [
+                                            { id: 'guests', show: true, active: sidebarGuests, label: t('allGuestsTitle'), onClick: openGuests, icon: Icons.Monitor },
+                                            { id: 'topology', show: true, active: sidebarTopology, label: t('topologyView') || 'Topology', onClick: openTopology, icon: Icons.Network },
+                                            { id: 'worldmap', show: true, active: sidebarWorldmap, label: t('worldMap') || 'World Map', onClick: openWorldmap, icon: Icons.Globe },
+                                            { id: 'autoinstall', show: canAutoInstall && !haStandby, active: sidebarAutoInstall, label: t('autoInstall'), onClick: () => openAutoInstall(), icon: Icons.Disc },
+                                            { id: 'xhm', show: hasXhmPair, active: sidebarXHM, label: t('xhmTitle') || 'Hypervisor Migration', onClick: openXhm, icon: Icons.FolderInput },
+                                            { id: 'mcevpn', show: clusters.length >= 2, active: sidebarMultiSdn, label: t('mcevpnTitle') || 'Multi-Cluster EVPN', onClick: openMultiSdn, icon: Icons.Layers },
+                                        ].filter(tool => tool.show) : []}
+                                        views={[
+                                            { id: 'tree', icon: Icons.Server, label: t('treeView') || 'Hosts & VMs' },
+                                            { id: 'pools', icon: Icons.Folder, label: t('poolView') || 'Pools' },
+                                            { id: 'datastores', icon: Icons.Database, label: t('datastoreView') || 'Datastores' },
+                                            { id: 'networks', icon: Icons.Network, label: t('networkView') || 'Networks' },
+                                        ]} />
+                                )}
                                 <div className={`sticky top-6 ${isCorporate ? 'space-y-0.5 px-1 py-2' : 'space-y-3 pr-1'} pb-4`} style={{ maxHeight: 'calc(100vh - 3rem)', overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'thin', scrollbarColor: '#4a4a4a transparent' }}>
                                     {/* LW: view switcher (tree/pools/datastores) - horizontal icon toggle */}
                                     {isCorporate && (
@@ -20389,6 +22576,12 @@
                                                     <view.icon className="w-4 h-4" />
                                                 </button>
                                             ))}
+                                            {isCorpRedesigned && (
+                                                <button type="button" className="cr-side-fold" onClick={() => crFoldSidebar(true)}
+                                                    data-cr-fold="" aria-label={t('crCollapseSidebar')} title={t('crCollapseSidebar')}>
+                                                    <Icons.ChevronLeft className="w-4 h-4" />
+                                                </button>
+                                            )}
                                         </div>
                                     )}
                                     {/* LW: Mar 2026 - sidebar quick-filter + NS: type chips */}
@@ -20660,6 +22853,8 @@
                                                             <button
                                                                 onClick={() => setCollapsedGroups(prev => ({...prev, [group.id]: !prev[group.id]}))}
                                                                 className="w-4 h-4 flex items-center justify-center text-gray-500 hover:text-white"
+                                                                aria-label={isCorpRedesigned ? (isCollapsed ? t('crExpandNamed') : t('crCollapseNamed')).replace('{name}', group.name) : undefined}
+                                                                aria-expanded={isCorpRedesigned ? !isCollapsed : undefined}
                                                             >
                                                                 {isCollapsed ? <Icons.ChevronRight className="w-3 h-3" /> : <Icons.ChevronDown className="w-3 h-3" />}
                                                             </button>
@@ -20676,7 +22871,8 @@
                                                         
                                                         {/* Group Clusters */}
                                                         {!isCollapsed && (
-                                                            <div className={isCorporate ? 'ml-5 space-y-0' : 'ml-4 space-y-1.5'}>
+                                                            <div className={isCorporate ? 'ml-5 space-y-0' : 'ml-4 space-y-1.5'}
+                                                                role={crSideTree ? 'tree' : undefined} aria-label={crSideTree ? group.name : undefined}>
                                                                 {groupClusters.map((cluster, idx) => (
                                                                     <React.Fragment key={cluster.id}>
                                                                         <ClusterSidebarItem
@@ -20702,6 +22898,7 @@
                                                                             hwHealth={allClusterMetrics[cluster.id]?.data?.hardware?.health}
                                                                             onContextMenu={(type, target, pos) => setCtxMenu({type, target, position: pos})}
                                                                             onCheckConnection={setConnCheckCluster}
+                                                                            treeItem={crSideTree}
                                                                         />
                                                                         {sidebarViewMode === 'datastores' ? renderDatastoreTree(cluster.id) : sidebarViewMode === 'pools' ? renderPoolTree(cluster.id) : sidebarViewMode === 'networks' ? renderNetworkTree(cluster.id) : renderInlineNodeTree(cluster.id)}
                                                                         {expandedSidebarClusters[cluster.id] && <div className="h-px my-0.5" style={{background: 'var(--corp-border-subtle)', marginLeft: '20px'}} />}
@@ -20719,9 +22916,11 @@
                                                 if (ungroupedClusters.length === 0) return null;
                                                 
                                                 return (
-                                                    <div className={isCorporate ? (clusterGroups.length > 0 ? 'space-y-0 pt-3' : 'space-y-0') : 'space-y-1.5'}>
+                                                    <div className={isCorporate ? (clusterGroups.length > 0 ? 'space-y-0 pt-3' : 'space-y-0') : 'space-y-1.5'}
+                                                        role={crSideTree ? 'tree' : undefined} aria-label={crSideTree ? (clusterGroups.length > 0 ? t('ungrouped') : t('crInventory')) : undefined}>
                                                         {clusterGroups.length > 0 && (
-                                                            <div className={`flex items-center gap-2 px-2 ${isCorporate ? 'py-0.5' : 'py-1.5'} text-gray-500`}>
+                                                            <div className={`flex items-center gap-2 px-2 ${isCorporate ? 'py-0.5' : 'py-1.5'} text-gray-500`}
+                                                                aria-hidden={crSideTree || undefined}>
                                                                 <Icons.Server className={isCorporate ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
                                                                 <span className="text-xs uppercase tracking-wider">{t('ungrouped')}</span>
                                                             </div>
@@ -20751,6 +22950,7 @@
                                                                     hwHealth={allClusterMetrics[cluster.id]?.data?.hardware?.health}
                                                                     onContextMenu={(type, target, pos) => setCtxMenu({type, target, position: pos})}
                                                                     onCheckConnection={setConnCheckCluster}
+                                                                    treeItem={crSideTree}
                                                                 />
                                                                 {sidebarViewMode === 'datastores' ? renderDatastoreTree(cluster.id) : sidebarViewMode === 'pools' ? renderPoolTree(cluster.id) : sidebarViewMode === 'networks' ? renderNetworkTree(cluster.id) : renderInlineNodeTree(cluster.id)}
                                                                         {expandedSidebarClusters[cluster.id] && <div className="h-px my-0.5" style={{background: 'var(--corp-border-subtle)', marginLeft: '20px'}} />}
@@ -21075,9 +23275,12 @@
                                 </div>
                             </div>
                             {/* LW: sidebar resize handle */}
-                            {isCorporate && (
+                            {isCorporate && (isCorpRedesigned ? (
+                                <CrSidebarHandle width={crSidebarW} collapsed={crSidebarFolded} onCommit={crSetSidebarW}
+                                    onToggle={() => crFoldSidebar(!crSidebarFolded)} />
+                            ) : (
                                 <div className="corp-resize-handle" onMouseDown={handleSidebarResizeStart} title="Drag to resize" />
-                            )}
+                            ))}
                             {/* NS: hover tooltip popover */}
                             {sidebarTooltip && (() => {
                                 const { type, data, pos } = sidebarTooltip;
@@ -21122,53 +23325,20 @@
                                 }
                                 return null;
                             })()}
-                            <div className={`flex-1 min-w-0 ${isCorporate ? 'px-3 py-2' : ''}`}>
+                            <div className={`flex-1 min-w-0 ${isCorporate ? 'px-3 py-2' : ''}${isCorpRedesigned ? ' cr-main' : ''}`}
+                                id={isCorpRedesigned ? 'cr-main' : undefined} tabIndex={isCorpRedesigned ? -1 : undefined}>
                                 {selectedCluster ? (
                                     <div key={selectedCluster?.id} className={isCorporate ? 'space-y-3 corp-content-fade' : 'space-y-6'}>
                                         {/* LW: Feb 2026 - tabs, underline in corporate vs pills in modern */}
+                                        {isCorpRedesigned ? (
+                                            <CrTabs id="cluster" active={activeTab} onChange={setActiveTab} label={clusterLabel(selectedCluster)}
+                                                tabs={clusterTabList.map(tab => ({ id: tab.id, label: tab.labelKey ? t(tab.labelKey) : tab.label, icon: <tab.icon /> }))} />
+                                        ) : (
                                         <div className={isCorporate
                                             ? 'corp-tab-strip'
                                             : 'flex items-center gap-1 p-1 bg-proxmox-card border border-proxmox-border rounded-xl w-fit flex-wrap'
                                         }>
-                                            {(() => {
-                                                // NS May 2026 (#381) — splice plugin frontend tabs between
-                                                // the management Plugins tab and Settings. Plugin tabs only
-                                                // render when the manifest declared has_frontend AND the
-                                                // server normalised frontend_route to /api/plugins/<id>/...
-                                                // (server-side validation in pegaprox/api/plugins.py).
-                                                // #642 - and only on the clusters it was limited to
-                                                const pluginFrontendTabs = (enabledPlugins || [])
-                                                    .filter(p => p && p.has_frontend && p.frontend_route)
-                                                    .filter(p => pluginAppliesToCluster(p, selectedCluster?.id))
-                                                    .map(p => ({
-                                                        id: `plugin:${p.id}`,
-                                                        label: p.name || p.id,  // shown verbatim
-                                                        icon: Icons.Package,
-                                                        _plugin: p,
-                                                    }));
-                                                return [
-                                                    { id: 'overview', labelKey: 'overview', icon: Icons.Activity },
-                                                    { id: 'resources', labelKey: 'resources', icon: Icons.Server },
-                                                    { id: 'datacenter', labelKey: 'datacenter', icon: Icons.HardDrive },
-                                                    { id: 'datastore', labelKey: 'datastore', icon: Icons.Database },
-                                                    { id: 'automation', labelKey: 'automation', icon: Icons.Zap },
-                                                    { id: 'reports', labelKey: 'reports', icon: Icons.BarChart },
-                                                    { id: 'timeline', labelKey: 'tlTab', icon: Icons.Clock },
-                                                    { id: 'compliance', labelKey: 'compliance', icon: Icons.Lock },
-                                                    { id: 'site-recovery', labelKey: 'siteRecovery', icon: Icons.Shield },
-                                                    { id: 'plugins', labelKey: 'plugins', icon: Icons.Package },
-                                                    ...pluginFrontendTabs,
-                                                    { id: 'settings', labelKey: 'settings', icon: Icons.Settings },
-                                                ];
-                                            })().filter(tab => {
-                                                // #390 — admin role always passes (matches backend has_permission shortcut).
-                                                if (tab.id === 'site-recovery') return can('site_recovery.view');
-                                                if (tab.id === 'plugins') return can('plugins.view');
-                                                // compliance only reads, so a standby keeps it (#625)
-                                                if (tab.id === 'compliance') return holds('admin.audit') || holds('node.maintenance') || holds('changes.view');
-                                                if (typeof tab.id === 'string' && tab.id.startsWith('plugin:')) return can('plugins.view');
-                                                return true;
-                                            }).map(tab => (
+                                            {clusterTabList.map(tab => (
                                                 <button
                                                     key={tab.id}
                                                     onClick={() => setActiveTab(tab.id)}
@@ -21186,6 +23356,7 @@
                                                 </button>
                                             ))}
                                         </div>
+                                        )}
 
                                         {/* Overview Tab */}
                                         {activeTab === 'overview' && (
@@ -21196,6 +23367,7 @@
                                                 node={selectedSidebarNode.name}
                                                 clusterId={selectedSidebarNode.clusterId}
                                                 clusterHost={selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster?.host : (clusters.find(c => c.id === selectedSidebarNode.clusterId)?.host || '')}
+                                                clusterName={clusterLabel(selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster : clusters.find(c => c.id === selectedSidebarNode.clusterId))}
                                                 clusterMetrics={selectedSidebarNode.clusterId === selectedCluster?.id ? clusterMetrics : (sidebarClusterData[selectedSidebarNode.clusterId]?.metrics || {})}
                                                 clusterResources={selectedSidebarNode.clusterId === selectedCluster?.id ? clusterResources : (sidebarClusterData[selectedSidebarNode.clusterId]?.resources || [])}
                                                 onBack={() => setSelectedSidebarNode(null)}
@@ -21205,18 +23377,28 @@
                                                 onStartUpdate={handleStartUpdate}
                                                 onSelectVm={(vm) => { setSelectedSidebarVm({...vm, _clusterId: selectedSidebarNode.clusterId}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                                 addToast={addToast}
+                                                crKind={isCorpRedesigned ? ((clusters.find(c => c.id === selectedSidebarNode.clusterId) || {}).cluster_type || 'proxmox') : undefined}
                                             />
                                             ) : isCorporate && selectedSidebarQdevice ? (
                                             <QdeviceDetail
                                                 corporate
                                                 q={qdeviceByCluster[selectedSidebarQdevice]}
+                                                clusterId={selectedSidebarQdevice}
                                                 clusterName={(clusters.find(c => c.id === selectedSidebarQdevice) || {}).display_name || (clusters.find(c => c.id === selectedSidebarQdevice) || {}).name || ''}
                                                 onClose={() => setSelectedSidebarQdevice(null)}
+                                                onChanged={() => fetchQdevice(selectedSidebarQdevice)}
                                             />
                                             ) : (
                                             <div className={isCorporate ? 'space-y-3' : 'grid grid-cols-1 xl:grid-cols-3 gap-6'}>
                                                 {/* LW: Mar 2026 - content header strip for corporate overview */}
-                                                {isCorporate && selectedCluster && (
+                                                {isCorporate && selectedCluster && (isCorpRedesigned ? (
+                                                    <CrClusterHeader cluster={selectedCluster} status={allClusterMetrics[selectedCluster.id]?.data}
+                                                        healthBadge={selectedCluster.connected && <ClusterHealthBadge clusterId={selectedCluster.id} authFetch={authFetch} apiUrl={API_URL} />}
+                                                        onRefresh={() => { const cid = selectedCluster.id; fetchClusterMetrics(cid); fetchClusterResources(cid); fetchClusterDatastores(cid); fetchClusterNetworks(cid); fetchClusterPools(cid); fetchTasks(cid); }}
+                                                        onRename={haReadOnly ? undefined : () => { setRenamingCluster(selectedCluster); setRenameValue(selectedCluster.display_name || selectedCluster.name || ''); }}
+                                                        onReconfigure={!haReadOnly && isAdmin ? () => setReconfigureCluster(selectedCluster) : undefined}
+                                                        onDelete={!haReadOnly && isAdmin ? () => handleDeleteCluster(selectedCluster.id) : undefined} />
+                                                ) : (
                                                     <div className="corp-content-header">
                                                         <div className="flex items-center gap-2">
                                                             <Icons.Database className="w-4 h-4" style={{color: 'var(--corp-accent)'}} />
@@ -21243,11 +23425,12 @@
                                                                 <ClusterHealthBadge clusterId={selectedCluster.id} authFetch={authFetch} apiUrl={API_URL} />
                                                             )}
                                                         </div>
-                                                        <button onClick={() => loadTabData('overview')} className="text-xs" style={{color: 'var(--corp-text-muted)', background: 'none', border: 'none', cursor: 'pointer'}}>
+                                                        {/* NS Nov 2026 - loadTabData only exists in the node modal, the click threw; same reads as the Cloud shell's refresh */}
+                                                        <button onClick={() => { const cid = selectedCluster.id; fetchClusterMetrics(cid); fetchClusterResources(cid); fetchClusterDatastores(cid); fetchClusterNetworks(cid); fetchClusterPools(cid); fetchTasks(cid); }} className="text-xs" style={{color: 'var(--corp-text-muted)', background: 'none', border: 'none', cursor: 'pointer'}}>
                                                             <Icons.RotateCw className="w-3 h-3 inline mr-1" />{t('refreshData') || 'Refresh'}
                                                         </button>
                                                     </div>
-                                                )}
+                                                ))}
                                                 {/* NS: cluster overview summary cards with donut gauges */}
                                                 {isCorporate && selectedCluster && (() => {
                                                     const metrics = Object.values(clusterMetrics).filter(m => m && m.cpu_percent != null);
@@ -21262,12 +23445,10 @@
                                                     const usedMem = metrics.reduce((s, m) => s + (m.mem_used || (m.memory && m.memory.used) || 0), 0);
                                                     const memPct = totalMem > 0 ? (usedMem / totalMem) * 100 : 0;
                                                     // NS: sum ALL datastores (shared + local per node), not just shared
-                                                    const allDs = [...((clusterDatastores && clusterDatastores.shared) || [])];
-                                                    Object.values((clusterDatastores && clusterDatastores.local) || {}).forEach(nodeDs => {
-                                                        (nodeDs || []).forEach(d => allDs.push(d));
-                                                    });
-                                                    let totalStorage = allDs.reduce((s, d) => s + (d.total || 0), 0);
-                                                    let usedStorage = allDs.reduce((s, d) => s + (d.used || 0), 0);
+                                                    // LW Oct 2026 (#1159) - but only those that take guest disks, no PBS
+                                                    const guestDs = guestStorageTotals(clusterDatastores);
+                                                    let totalStorage = guestDs.total;
+                                                    let usedStorage = guestDs.used;
                                                     // fallback to node disk metrics if datastores haven't loaded
                                                     if (totalStorage === 0 && metrics.length > 0) {
                                                         totalStorage = metrics.reduce((s, m) => s + (m.disk_total || 0), 0);
@@ -21288,6 +23469,17 @@
                                                             </svg>
                                                         );
                                                     };
+                                                    if (isCorpRedesigned) {
+                                                        const cpuKnown = (_dcRes && _dcRes.cpu && _dcRes.cpu.percent != null) || metrics.length > 0;
+                                                        return (
+                                                            <CrClusterSummary cpu={cpuKnown ? avgCpu : null} cpuSub={`${metrics.length} ${t('nodes').toLowerCase()}`}
+                                                                mem={totalMem > 0 ? { used: usedMem, total: totalMem, pct: memPct } : null}
+                                                                storage={totalStorage > 0 ? { used: usedStorage, total: totalStorage, pct: storagePct } : null}
+                                                                guests={{ running: runningVms, total: allVms.length }}>
+                                                                <CapacityOutlookCard clusterId={selectedCluster?.id} t={t} getAuthHeaders={getAuthHeaders} />
+                                                            </CrClusterSummary>
+                                                        );
+                                                    }
                                                     return (
                                                         <div className="corp-overview-grid">
                                                             <div className="corp-overview-card">
@@ -21337,6 +23529,10 @@
                                                     const clusterStatus = allClusterMetrics[selectedCluster.id]?.data?.cluster;
                                                     // #326: standalone nodes have no corosync -> no quorum concept, don't show red badge
                                                     const isStandalone = clusterStatus?.standalone === true;
+                                                    // no status read yet (or every read refused): no guess from the node rows,
+                                                    // that is when the quorum is most in doubt. A read status without quorate
+                                                    // (XCP-ng) keeps the guess it always had
+                                                    const quorumUnread = !clusterStatus;
                                                     const isQuorate = clusterStatus?.quorate != null ? !!clusterStatus.quorate : onlineCount > (totalNodes || onlineCount) / 2;
                                                     return (
                                                         <div className="corp-services-bar">
@@ -21350,6 +23546,8 @@
                                                                 <span className="corp-svc-label">{isStandalone ? 'Mode' : 'Quorum'}</span>
                                                                 {isStandalone ? (
                                                                     <span className="corp-badge" style={{background: 'rgba(56,139,253,0.12)', color: '#58a6ff', border: '1px solid rgba(56,139,253,0.25)', fontSize: 11, padding: '0 5px'}}>Standalone</span>
+                                                                ) : quorumUnread ? (
+                                                                    <span className="corp-badge corp-quorum-unread" style={{color: 'var(--corp-text-muted)', border: '1px solid var(--corp-border-medium)', fontSize: 11, padding: '0 5px'}}>-</span>
                                                                 ) : (
                                                                     <span className="corp-badge" style={isQuorate
                                                                         ? {background: 'rgba(96,181,21,0.12)', color: '#60b515', border: '1px solid rgba(96,181,21,0.25)', fontSize: 11, padding: '0 5px'}
@@ -21372,7 +23570,27 @@
                                                 <div className={isCorporate ? '' : 'xl:col-span-2 space-y-6'}>
                                                     {/* LW: Feb 2026 - corporate uses compact node rows */}
                                                     <div>
-                                                        <h2 className={`font-semibold text-gray-400 uppercase tracking-wider ${isCorporate ? 'text-xs mb-2' : 'text-sm mb-4'}`}>{t('nodes')}</h2>
+                                                        <div className={`flex items-center justify-between gap-2 ${isCorporate ? 'mb-2' : 'mb-4'}`}>
+                                                            <h2 className={`font-semibold text-gray-400 uppercase tracking-wider ${isCorporate ? 'text-xs' : 'text-sm'}`}>{t('nodes')}</h2>
+                                                            {/* LW Oct 2026 - a cluster without a QDevice can get one here (an admin, the QNetd routes answer) */}
+                                                            <QdeviceSetupButton
+                                                                clusterId={selectedCluster.id}
+                                                                clusterName={selectedCluster.display_name || selectedCluster.name || ''}
+                                                                q={selectedCluster.cluster_type === 'xcpng' ? null : qdeviceByCluster[selectedCluster.id]}
+                                                                nodeCount={(Object.keys(clusterMetrics).length + Object.entries(knownNodes).filter(([n, d]) => d && d.status === 'offline' && !clusterMetrics[n]).length) || null}
+                                                                corporate={isCorporate}
+                                                                onChanged={() => fetchQdevice(selectedCluster.id)}
+                                                            />
+                                                        </div>
+                                                        {/* LW Oct 2026 - what a QDevice gives a cluster of an even node count that has none, until hidden */}
+                                                        <QdeviceHint
+                                                            clusterId={selectedCluster.id}
+                                                            clusterName={selectedCluster.display_name || selectedCluster.name || ''}
+                                                            q={selectedCluster.cluster_type === 'xcpng' ? null : qdeviceByCluster[selectedCluster.id]}
+                                                            nodeCount={(Object.keys(clusterMetrics).length + Object.entries(knownNodes).filter(([n, d]) => d && d.status === 'offline' && !clusterMetrics[n]).length) || null}
+                                                            corporate={isCorporate}
+                                                            onChanged={() => fetchQdevice(selectedCluster.id)}
+                                                        />
                                                         {isCorporate ? (
                                                         <div className="border border-proxmox-border bg-proxmox-card">
                                                             {/* Corporate: compact node rows */}
@@ -21550,8 +23768,10 @@
                                                         {!isCorporate && qdeviceOpen && (
                                                             <QdeviceDetail
                                                                 q={qdeviceByCluster[qdeviceOpen]}
+                                                                clusterId={qdeviceOpen}
                                                                 clusterName={(clusters.find(c => c.id === qdeviceOpen) || {}).display_name || (clusters.find(c => c.id === qdeviceOpen) || {}).name || ''}
                                                                 onClose={() => setQdeviceOpen(null)}
+                                                                onChanged={() => fetchQdevice(qdeviceOpen)}
                                                             />
                                                         )}
                                                         {Object.keys(clusterMetrics).length === 0 && Object.keys(nodeAlerts).length === 0 && (
@@ -21642,12 +23862,12 @@
                                                                     if (d < 86400) return `${Math.floor(d / 3600)}h ${t('timeAgo')}`;
                                                                     return `${Math.floor(d / 86400)}d ${t('timeAgo')}`;
                                                                 };
-                                                                const statusColor = (s) => s === 'running' ? '#49afd9' : s === 'OK' || s === 'ok' ? '#60b515' : s === 'error' || s === 'failed' ? '#f54f47' : '#728b9a';
+                                                                const statusColor = (s) => s === 'running' ? '#49afd9' : s === 'OK' || s === 'ok' ? '#60b515' : s === 'error' || s === 'failed' ? '#f54f47' : /^WARNINGS/.test(s || '') ? '#f7b428' : '#728b9a';
                                                                 return (
                                                                     <div>
                                                                         {recent.map((task, i) => (
                                                                             <div key={task.upid || i} className="corp-tasks-item">
-                                                                                <span className="corp-tasks-status" style={{background: statusColor((task.status !== 'running' && task.exitstatus && task.exitstatus !== 'OK') ? 'failed' : (task.status || task.exitstatus))}}></span>
+                                                                                <span className="corp-tasks-status" style={{background: statusColor((task.status !== 'running' && task.exitstatus && task.exitstatus !== 'OK' && !/^WARNINGS/.test(task.exitstatus)) ? 'failed' : (task.status || task.exitstatus))}}></span>
                                                                                 <span className="corp-tasks-desc">{task.type || task.worker_type || '?'}{task.id ? ` ${task.id}` : ''}</span>
                                                                                 <span className="corp-tasks-node">{task.node || ''}</span>
                                                                                 <span className="corp-tasks-time">{relTime(task.starttime || task.pstart)}</span>
@@ -21661,8 +23881,9 @@
                                                 )}
 
                                                 <div className={isCorporate ? 'space-y-3' : 'space-y-6'}>
-                                                    {/* Cluster Health */}
-                                                    <ClusterHealth metrics={clusterMetrics} isCorporate={isCorporate} />
+                                                    {/* Cluster Health - with the Ceph status of a connected Proxmox cluster (#948) */}
+                                                    <ClusterHealth metrics={clusterMetrics} isCorporate={isCorporate} authFetch={authFetch}
+                                                        clusterId={selectedCluster && selectedCluster.connected && (selectedCluster.cluster_type || 'proxmox') === 'proxmox' ? selectedCluster.id : null} />
 
                                                     {/* Migration History */}
                                                     <div className={isCorporate
@@ -21687,6 +23908,8 @@
                                                     <CorporateVmDetailView
                                                         vm={selectedSidebarVm}
                                                         clusterId={selectedSidebarVm._clusterId || selectedCluster.id}
+                                                        clusterType={(clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster).cluster_type || 'proxmox'}
+                                                        clusterName={clusterLabel(clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster)}
                                                         onAction={handleVmAction}
                                                         onOpenConsole={handleOpenConsole}
                                                         onOpenSpice={handleOpenSpice}
@@ -21703,10 +23926,22 @@
                                                         onShowMetrics={(vm) => setCorpMetricsVm(vm)}
                                                         addToast={addToast}
                                                         authFetch={authFetch}
+                                                        backupStatus={isCorpRedesigned ? vmsBackupStatus : undefined}
+                                                        backupFor={isCorpRedesigned ? vmsBackupFor : undefined}
+                                                        crKind={isCorpRedesigned ? ((clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || {}).cluster_type || 'proxmox') : undefined}
+                                                        crNav={crTaskNav}
+                                                        crOpen={isCorpRedesigned ? (what, cid) => {
+                                                            // LW Oct 2026 - the module behind a line of the guest's health
+                                                            if (!crIntoCluster(cid)) return;
+                                                            crClearPick();
+                                                            if (what === 'ha') { setDatacenterSection('ha'); setActiveTab('datacenter'); }
+                                                            else if (what === 'drift') { setComplianceSubTab('drift'); setActiveTab('compliance'); }
+                                                            else { setCrDsSub(what); setActiveTab('datastore'); }
+                                                        } : undefined}
                                                     />
                                                 ) : (<>
                                                 {/* Sub-Tab Navigation */}
-                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex items-center gap-1 border-b border-proxmox-border pb-2'}>
+                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex pp-wrap-narrow items-center gap-1 border-b border-proxmox-border pb-2'}>
                                                     <button
                                                         onClick={() => setResourcesSubTab('management')}
                                                         className={isCorporate
@@ -21797,6 +24032,8 @@
                                                             onBulkDone={() => { const cid = selectedCluster.id; setTimeout(() => fetchClusterResources(cid), 1500); }}
                                                             favorites={favorites}
                                                             onToggleFavorite={toggleGuestFavorite}
+                                                            openGuest={openGuestDetail}
+                                                            onOpenGuestDone={() => setOpenGuestDetail(null)}
                                                             onVmNavigate={isCorporate ? (vm) => {
                                                                 setSelectedSidebarVm({...vm, _clusterId: selectedCluster.id});
                                                                 setSelectedSidebarNode(null);
@@ -21806,14 +24043,15 @@
                                                             } : undefined}
                                                         />
                                                         
-                                                        {/* Create VM/CT Buttons - not on a standby (#625), the export stays */}
-                                                        <div className={`flex gap-3 ${isCorporate ? 'mt-2' : 'mt-4'}`}>
+                                                        {/* Create VM/CT Buttons - not on a standby (#625), the export stays.
+                                                            LW Nov 2026 (#1220) - Modern wraps whole buttons when the row runs out of width */}
+                                                        <div className={`flex gap-3 ${isCorporate ? 'mt-2' : 'mt-4 flex-wrap'}`}>
                                                             {!haReadOnly && (<>
                                                             <button
                                                                 onClick={() => setShowCreateVm('qemu')}
                                                                 className={isCorporate
                                                                     ? 'flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-[13px] text-white hover:bg-blue-700 border border-blue-700'
-                                                                    : 'flex items-center gap-2 px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 transition-colors'
+                                                                    : 'flex items-center gap-2 px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 transition-colors whitespace-nowrap'
                                                                 }
                                                             >
                                                                 <Icons.Plus className={isCorporate ? 'w-3 h-3' : ''} />
@@ -21823,12 +24061,28 @@
                                                                 onClick={() => setShowCreateVm('lxc')}
                                                                 className={isCorporate
                                                                     ? 'flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 text-[13px] text-white hover:bg-purple-700 border border-purple-700'
-                                                                    : 'flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-lg text-white hover:bg-purple-700 transition-colors'
+                                                                    : 'flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-lg text-white hover:bg-purple-700 transition-colors whitespace-nowrap'
                                                                 }
                                                             >
                                                                 <Icons.Plus className={isCorporate ? 'w-3 h-3' : ''} />
                                                                 {t('createContainer')}
                                                             </button>
+                                                            {/* LW Nov 2026 (#1220) - Corporate Redesigned: a guest from a blueprint, picked on Automation > Blueprints & Images */}
+                                                            {isCorpRedesigned && can('vm.create') && (
+                                                                <button type="button" onClick={() => crTaskNav.openBlueprints(selectedCluster.id)}
+                                                                    className="corp-vm-btn corp-vm-btn-ghost" data-cr-bp-nav="resources">
+                                                                    <Icons.Template className="w-3 h-3" />
+                                                                    {t('crBpNavDeploy')}
+                                                                </button>
+                                                            )}
+                                                            {/* LW Nov 2026 (#1220) - Modern: the same way to Automation > Blueprints & Templates */}
+                                                            {!isCorporate && can('vm.create') && (!selectedCluster.cluster_type || selectedCluster.cluster_type === 'proxmox') && (
+                                                                <button type="button" onClick={() => mdBpNav.openBlueprints(selectedCluster.id)} data-bp-nav="resources"
+                                                                    className="flex items-center gap-2 px-4 py-2 bg-proxmox-darker rounded-lg bp-fg hover:bg-proxmox-hover border border-proxmox-border transition-colors whitespace-nowrap">
+                                                                    <Icons.Template className="w-4 h-4" />
+                                                                    {t('crBpNavDeploy')}
+                                                                </button>
+                                                            )}
                                                             </>)}
                                                             {/* LW Oct 2026 - quick CSV export of the current VM list, with the inventory of each guest (ui.js) */}
                                                             <InventoryCsvButton
@@ -21838,7 +24092,7 @@
                                                                 addToast={addToast}
                                                                 className={isCorporate
                                                                     ? 'corp-vm-btn corp-vm-btn-ghost disabled:opacity-50'
-                                                                    : 'flex items-center gap-2 px-4 py-2 bg-proxmox-darker rounded-lg text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors'
+                                                                    : 'flex items-center gap-2 px-4 py-2 bg-proxmox-darker rounded-lg text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors whitespace-nowrap'
                                                                 }
                                                                 label={t('exportCsv') || 'Export CSV'}
                                                             />
@@ -21847,7 +24101,18 @@
                                                 )}
                                                 
                                                 {/* Snapshot Overview Sub-Tab @gyptazy */}
-                                                {resourcesSubTab === 'snapshots' && (
+                                                {/* LW Nov 2026 - Corporate Redesigned: the same list, read, filter, selection and deletes as a table */}
+                                                {resourcesSubTab === 'snapshots' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="snapshots">
+                                                        <CrSnapOverview cluster={selectedCluster} rows={globalSnapshots} loading={snapshotsLoading} readErr={snapshotsReadErr}
+                                                            filterDate={snapshotFilterDate} onFilterDate={setSnapshotFilterDate}
+                                                            onFilter={() => applySnapshotFilter(selectedCluster.id)} onRefresh={() => fetchGlobalSnapshots(selectedCluster.id)}
+                                                            canDelete={canDeleteSnaps} selected={selectedSnaps} onSelect={setSelectedSnaps} keyOf={snapKey}
+                                                            onDelete={(snap) => deleteGlobalSnapshot(snap, selectedCluster.id)}
+                                                            onDeleteSelected={() => deleteSelectedSnapshots(selectedCluster.id)} nav={crTaskNav} />
+                                                    </CrBoundary>
+                                                )}
+                                                {resourcesSubTab === 'snapshots' && !isCorpRedesigned && (
                                                     <div className={isCorporate
                                                         ? 'corp-snap-overview'
                                                         : 'bg-proxmox-card border border-proxmox-border rounded-xl p-6 space-y-4'
@@ -22314,6 +24579,12 @@
                                                             setSelectedSidebarDatastore(null);
                                                             setExpandedSidebarClusters(prev => ({...prev, [selectedCluster.id]: true}));
                                                         } : undefined}
+                                                        onNodeClick={isCorpRedesigned ? (cid, name) => {
+                                                            setSelectedSidebarNode({ name, clusterId: cid });
+                                                            setSelectedSidebarVm(null);
+                                                            setSelectedSidebarDatastore(null);
+                                                            setActiveTab('overview');
+                                                        } : undefined}
                                                     />
                                                 )}
                                                 </>)}
@@ -22323,12 +24594,19 @@
                                         {/* Datacenter Tab */}
                                         {activeTab === 'datacenter' && (
                                             <DatacenterTab clusterId={selectedCluster.id} addToast={addToast}
-                                                initialSection={datacenterSection} onSectionShown={() => setDatacenterSection(null)} />
+                                                initialSection={datacenterSection} onSectionShown={() => setDatacenterSection(null)}
+                                                crDc={isCorpRedesigned ? { cluster: selectedCluster, entry: allClusterMetrics[selectedCluster.id], metrics: clusterMetrics,
+                                                    guests: clusterResources, stores: clusterDatastores, qdevice: qdeviceByCluster[selectedCluster.id], nav: crTaskNav } : undefined} />
                                         )}
 
                                         {/* Datastore Tab */}
                                         {activeTab === 'datastore' && (
-                                            <DatastoreTab clusterId={selectedCluster.id} addToast={addToast} initialStorage={selectedSidebarDatastore?.name || null} initialNode={selectedSidebarDatastore?.node || null} sharedDatastoreData={clusterDatastores} />
+                                            <DatastoreTab clusterId={selectedCluster.id} addToast={addToast} initialStorage={selectedSidebarDatastore?.name || null} initialNode={selectedSidebarDatastore?.node || null} initialPick={selectedSidebarDatastore} sharedDatastoreData={clusterDatastores}
+                                                guests={isCorpRedesigned ? clusterResources : undefined}
+                                                crTasks={isCorpRedesigned ? tasks : undefined}
+                                                sharedDatastoreRead={isCorpRedesigned ? crDsReadsRef.current[selectedCluster.id] : undefined}
+                                                crSub={isCorpRedesigned ? crDsSub : undefined} onCrSubShown={isCorpRedesigned ? () => setCrDsSub(null) : undefined}
+                                                onOpenGuest={isCorpRedesigned ? (g) => crTaskNav.openGuest(selectedCluster.id, g) : undefined} />
                                         )}
 
                                         {/* Automation Tab - NS Jan 2026 - Combines Schedules, Tags, Alerts, Affinity, Scripts */}
@@ -22337,7 +24615,7 @@
                                                 {/* LW: Feb 2026 - sub-tab nav, corporate underline style */}
                                                 <div className={isCorporate
                                                     ? 'corp-tab-strip'
-                                                    : 'flex items-center gap-1 border-b border-proxmox-border pb-2'
+                                                    : 'flex pp-wrap-narrow items-center gap-1 border-b border-proxmox-border pb-2'
                                                 }>
                                                     {[
                                                         { id: 'schedules', label: t('scheduledActions') || 'Schedules', icon: Icons.Clock },
@@ -22347,9 +24625,9 @@
                                                         { id: 'scripts', label: t('customScripts') || 'Scripts', icon: Icons.Terminal },
                                                         { id: 'snapshots', label: t('snapPoliciesTitle') || 'Snapshots', icon: Icons.Camera },
                                                         { id: 'replication', label: t('replicationOverview') || 'Replication', icon: Icons.RefreshCw },
-                                                        { id: 'templates', label: t('templateLibrary') || 'Templates', icon: Icons.Package },
+                                                        { id: 'templates', label: isCorpRedesigned ? t('crBpNavTab') : isCorporate ? (t('templateLibrary') || 'Templates') : t('bpNavTab'), icon: Icons.Package },
                                                         { id: 'apps', label: t('ociTabLabel'), icon: Icons.Container },
-                                                        { id: 'hardening', label: t('hardenNode') || 'Harden PVE Node', icon: Icons.Shield }
+                                                        { id: 'hardening', label: t('hardenNode') || 'Harden PVE Node', icon: Icons.Shield },
                                                     ].map(sub => (
                                                         <button
                                                             key={sub.id}
@@ -22523,6 +24801,18 @@
                                                                 <span>{t('pgHaLeaderAwayView')}</span>
                                                             </div>
                                                         )}
+                                                        {isCorpRedesigned && crAutoAlertsUnread && (
+                                                            <div data-cr-auto-alerts-unread={crAutoAlertsUnread.code || 0} role="alert" className="flex items-center gap-2 p-3 rounded-lg border border-proxmox-border bg-proxmox-dark text-sm text-gray-400">
+                                                                <Icons.AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                                                                <span className="min-w-0">{t('crAutoAlertsUnread').replace('{code}', crAutoAlertsUnread.code && crAutoAlertsUnread.code < 300 && crAutoAlertsUnread.error ? crAutoAlertsUnread.error : crAutoAlertsUnread.code ? `HTTP ${crAutoAlertsUnread.code}` : t('crAlNoAnswer'))}</span>
+                                                                {selectedCluster?.id && (
+                                                                    <button type="button" onClick={() => loadActiveAlerts(selectedCluster.id, true)} data-cr-auto-alerts-retry=""
+                                                                        className="ml-auto px-3 py-1.5 text-xs bg-proxmox-dark hover:bg-proxmox-hover border border-proxmox-border rounded-lg shrink-0">
+                                                                        {t('retry')}
+                                                                    </button>
+                                                                )}
+                                                            </div>
+                                                        )}
                                                         {activeAlerts.length > 0 && (
                                                             <div className="space-y-2">
                                                                 <div className="text-sm font-semibold text-gray-300 flex items-center gap-2">
@@ -22676,6 +24966,14 @@
 
                                                 {/* Affinity Sub-Tab */}
                                                 {automationSubTab === 'affinity' && (
+                                                    /* LW Nov 2026 - Corporate Redesigned: the same rules, dialog and DELETE as a table */
+                                                    isCorpRedesigned && selectedCluster?.id ? (
+                                                    <CrBoundary key={selectedCluster.id} id="affinity">
+                                                        <CrAffinity cluster={selectedCluster} rules={clusterAffinityRules} readErr={affinityReadErr} loading={affinityLoading} canEdit={!haReadOnly}
+                                                            onNew={() => setShowAffinityModal(true)} onDelete={deleteClusterAffinityRule}
+                                                            onRefresh={() => loadClusterAffinityRules(selectedCluster.id)} nav={crTaskNav} />
+                                                    </CrBoundary>
+                                                    ) : (
                                                     <div className="space-y-4">
                                                         <div className="flex justify-between items-center">
                                                             <p className="text-sm text-gray-400">{t('affinityDesc') || 'Keep VMs together or separate across nodes'}</p>
@@ -22716,6 +25014,7 @@
                                                             </div>
                                                         )}
                                                     </div>
+                                                    )
                                                 )}
                                                 
                                                 {/* Custom Scripts Sub-Tab */}
@@ -22883,8 +25182,21 @@
                                                     />
                                                 )}
 
+                                                {/* LW Nov 2026 (#1220) - Corporate Redesigned: Blueprints & Images, the blueprints deployed to any cluster,
+                                                    the images of the library and what was deployed or built (cr_images.js) in place of the library cards */}
+                                                {automationSubTab === 'templates' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="blueprints">
+                                                        <CrBlueprintsTab cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
+                                                            canRead={holds('vm.create')} canWrite={can('vm.create')} isAdmin={isAdmin} nav={crTaskNav} />
+                                                    </CrBoundary>
+                                                )}
+                                                {/* LW Nov 2026 (#1220) - Modern: the blueprints above the library cards (blueprints.js) */}
+                                                {automationSubTab === 'templates' && !isCorporate && selectedCluster?.id && (
+                                                    <Blueprints key={selectedCluster.id} cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
+                                                        canRead={holds('vm.create')} canWrite={can('vm.create')} nav={mdBpNav} />
+                                                )}
                                                 {/* NS May 2026 — Cloud-Init Template Library sub-tab */}
-                                                {automationSubTab === 'templates' && (
+                                                {automationSubTab === 'templates' && !isCorpRedesigned && (
                                                     <TemplatesLibraryTab
                                                         clusterId={selectedCluster?.id}
                                                         clusterName={selectedCluster?.name}
@@ -22906,8 +25218,24 @@
                                                     />
                                                 )}
 
+                                                {/* LW Nov 2026 - Corporate Redesigned draws its own Harden tab on the same routes,
+                                                    node, profile and values; the profile dialog is the classic one */}
+                                                {automationSubTab === 'hardening' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="harden">
+                                                        <CrHarden selectedCluster={selectedCluster} nodes={Object.keys(clusterMetrics).sort()} metrics={clusterMetrics}
+                                                            node={hardenNode} setNode={setHardenNode} profile={hardenProfile} pickProfile={pickHardenProfile}
+                                                            profiles={hardenProfiles} canManage={canManageHardenProfiles}
+                                                            onManage={() => setHardenProfilesDlg({})} onSaveSelection={(draft) => setHardenProfilesDlg({ draft })}
+                                                            params={hardenParams} setParams={setHardenParams} authFetch={authFetch}
+                                                            dialogs={hardenProfilesDlg && hardenProfiles ? (
+                                                                <HardeningProfilesDialog data={hardenProfiles} draft={hardenProfilesDlg.draft}
+                                                                    authFetch={authFetch} addToast={addToast} t={t}
+                                                                    onClose={() => setHardenProfilesDlg(null)} onChanged={hardenProfilesChanged} />
+                                                            ) : null} />
+                                                    </CrBoundary>
+                                                )}
                                                 {/* Harden PVE Node Sub-Tab - MK Mar 2026 */}
-                                                {automationSubTab === 'hardening' && (
+                                                {automationSubTab === 'hardening' && !isCorpRedesigned && (
                                                     <div className="space-y-4">
                                                         <div className="flex justify-between items-start">
                                                             <div>
@@ -22920,7 +25248,7 @@
                                                         <div className="flex items-center gap-3 flex-wrap">
                                                             <select
                                                                 value={hardenNode}
-                                                                onChange={e => { setHardenNode(e.target.value); setHardenStatus(null); setHardenResults(null); setHardenSelected({}); setHardenProfile(''); }}
+                                                                onChange={e => { setHardenNode(e.target.value); setHardenStatus(null); setHardenResults(null); setHardenSelected({}); pickHardenProfile(''); }}
                                                                 className="bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm flex-1 max-w-xs"
                                                             >
                                                                 <option value="">{t('selectNode') || 'Select a node...'}</option>
@@ -22941,7 +25269,7 @@
                                                                 Same profile list as the Compliance Dashboard so audits match. */}
                                                             <select
                                                                 value={hardenProfile}
-                                                                onChange={e => { setHardenProfile(e.target.value); setHardenStatus(null); setHardenSelected({}); }}
+                                                                onChange={e => { pickHardenProfile(e.target.value); setHardenStatus(null); setHardenSelected({}); }}
                                                                 className="bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
                                                                 title={t('hardenProfileHint') || 'Filter controls by compliance framework. All controls = full CIS+Lynis+STIG+PegaProx set.'}>
                                                                 <option value="">{t('hardenProfileAll') || 'All controls'}</option>
@@ -22961,7 +25289,18 @@
                                                                     <option value="nist53">NIST 800-53 (Mod)</option>
                                                                     <option value="stig">DISA STIG</option>
                                                                 </optgroup>
+                                                                {(hardenProfiles?.custom || []).length > 0 && (
+                                                                    <optgroup label={t('hpCustomProfiles')}>
+                                                                        {hardenProfiles.custom.map(p => <option key={p.id} value={`custom:${p.id}`}>{p.name}</option>)}
+                                                                    </optgroup>
+                                                                )}
                                                             </select>
+                                                            {canManageHardenProfiles && (
+                                                                <button type="button" onClick={() => setHardenProfilesDlg({})} data-hp-manage
+                                                                    className="px-3 py-2 rounded-lg text-sm border border-proxmox-border text-gray-300 hover:text-white hover:bg-proxmox-hover flex items-center gap-2">
+                                                                    <Icons.Settings /> {t('hpManage')}
+                                                                </button>
+                                                            )}
                                                             {/* NS Apr 2026 (#322): verbose audit toggle */}
                                                             <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer" title={t('verboseHint') || 'Include raw check output per control — useful for audit reports'}>
                                                                 <input type="checkbox" checked={hardenVerbose} onChange={e => setHardenVerbose(e.target.checked)}
@@ -22980,76 +25319,8 @@
                                                         )}
 
                                                         {hardenStatus && !hardenLoading && (() => {
-                                                            // CIS Debian 12 Benchmark v1.1.0 item refs (Proxmox is Debian-based). NS 2026-06-15: web-verified + renumbered off the old Distribution-Independent/Debian-10 scheme.
-                                                            const cisControls = {
-                                                                fs_modules: { ref: '1.1.1.1-1.1.1.5', title: t('cisFs') || 'Disable Unused Filesystem Modules', desc: t('cisFsDesc') || 'Prevents loading of rarely-used filesystem kernel modules (cramfs, freevxfs, hfs, hfsplus, jffs2)', impact: t('cisFsImpact') || 'None - VMs and containers unaffected' },
-                                                                core_dumps: { ref: '1.5.3', title: t('cisCoreDumps') || 'Disable Core Dumps', desc: t('cisCoreDumpsDesc') || 'Prevents the system from creating memory dumps when programs crash that can contain passwords and keys', impact: t('cisCoreDumpsImpact') || 'None - VM crashes still logged normally' },
-                                                                mount_options: { ref: '1.1.2.1-1.1.2.5', title: t('cisMounts') || 'Mount Options Hardening', desc: t('cisMountsDesc') || 'Applies nodev, nosuid, noexec to /tmp, /var/tmp, /dev/shm to prevent privilege escalation', impact: t('cisMountsImpact') || 'No impact on cluster operations or VMs' },
-                                                                cron_hardening: { ref: '2.4.1.2-2.4.2.1', title: t('cisCron') || 'Cron/At Access Hardening', desc: t('cisCronDesc') || 'Restricts job scheduler access to root only, preventing persistence attacks', impact: t('cisCronImpact') || 'None - PVE scheduled tasks run as root' },
-                                                                net_protocols: { ref: '3.2.1-3.2.4', title: t('cisNet') || 'Disable Unused Network Protocols', desc: t('cisNetDesc') || 'Prevents loading of rarely-used network protocols (dccp, sctp, rds, tipc)', impact: t('cisNetImpact') || 'None - not used by Proxmox' },
-                                                                journald: { ref: '6.2.1.1.5-6.2.1.1.6', title: t('cisJournald') || 'Journald Hardening', desc: t('cisJournaldDesc') || 'Configures persistent, compressed logging that survives reboots for forensic analysis', impact: t('cisJournaldImpact') || 'Better forensic capabilities' },
-                                                                ssh_perms: { ref: '5.1.1-5.1.3', title: t('cisSshPerms') || 'SSH File Permissions', desc: t('cisSshPermsDesc') || 'Sets secure permissions (600) on SSH config and host keys', impact: t('cisSshPermsImpact') || 'None - SSH works normally' },
-                                                                ssh_crypto: { ref: '5.1.6, 5.1.12, 5.1.15', title: t('cisSshCrypto') || 'SSH Cryptographic Hardening', desc: t('cisSshCryptoDesc') || 'Configures SSH to use only strong ciphers (AES-GCM/CTR), secure key exchange (Curve25519), and strong MACs (SHA2-ETM)', impact: t('cisSshCryptoImpact') || 'Very old SSH clients may not connect' },
-                                                                sshd_hardening: { ref: '5.1.x (#433)', title: t('cisSshdHardening') || 'SSH Access Hardening', desc: t('cisSshdHardeningDesc') || 'Key-only root (PermitRootLogin prohibit-password), MaxAuthTries 4, X11Forwarding off, idle timeout, no empty passwords. PasswordAuthentication is left untouched so password users are not locked out.', impact: t('cisSshdHardeningImpact') || 'Root password login disabled (key login keeps working). Reversible via Rollback Selected.' },
-                                                                pam_nullok_removal: { ref: '5.3.3.4.1 (#434)', title: t('cisPamNullok') || 'Remove PAM nullok (block empty passwords)', desc: t('cisPamNullokDesc') || 'Strips the nullok flag from every /etc/pam.d/* file so accounts with a blank password can no longer authenticate.', impact: t('cisPamNullokImpact') || 'Accounts with empty passwords can no longer log in. Reversible via Rollback Selected.' },
-                                                                pam_faillock: { ref: '5.3.3.1.1-5.3.3.1.2', title: t('cisPam') || 'Account Lockout (pam_faillock)', desc: t('cisPamDesc') || 'Locks accounts after 5 failed login attempts, auto-unlocks after 10 minutes. Root excluded.', impact: t('cisPamImpact') || 'Works alongside Fail2Ban for defense in depth' },
-                                                                shell_timeout: { ref: '5.4.3.2', title: t('cisTimeout') || 'Shell Timeout', desc: t('cisTimeoutDesc') || 'Automatically logs out inactive shell sessions after 15 minutes', impact: t('cisTimeoutImpact') || 'Only interactive SSH sessions affected' },
-                                                                file_perms: { ref: '7.1.1-7.1.7', title: t('cisFilePerms') || 'System File Permissions', desc: t('cisFilePermsDesc') || 'Sets correct permissions on /etc/passwd, /etc/shadow, /etc/group, /etc/gshadow', impact: t('cisFilePermsImpact') || 'No impact - standard Linux hardening' },
-                                                            };
-                                                            // Lynis recommendations
-                                                            const lynisControls = {
-                                                                backup_dns: { ref: 'NETW-2705', title: t('lynDns') || 'Backup Nameserver', desc: t('lynDnsDesc') || 'Ensures at least 2 DNS nameservers are configured for redundancy (configurable)', impact: t('lynDnsImpact') || 'Prevents DNS outages' },
-                                                                postfix_banner: { ref: 'MAIL-8818', title: t('lynPostfix') || 'Postfix Banner Hardening', desc: t('lynPostfixDesc') || 'Removes software version information from mail server banner to prevent version disclosure', impact: t('lynPostfixImpact') || 'None - only hides version string' },
-                                                                pw_hash_rounds: { ref: 'AUTH-9230', title: t('lynPwHash') || 'Password Hashing Rounds', desc: t('lynPwHashDesc') || 'Increases SHA password hashing iterations (5000-500000 rounds), making brute-force attacks significantly slower', impact: t('lynPwHashImpact') || 'Only affects new/changed passwords' },
-                                                                pw_quality: { ref: 'AUTH-9262', title: t('lynPwQuality') || 'PAM Password Quality', desc: t('lynPwQualityDesc') || 'Enforces strong password policies: min 12 chars, uppercase, lowercase, digit, special char. Installs libpam-pwquality.', impact: t('lynPwQualityImpact') || 'Users must set stronger passwords' },
-                                                                pw_aging: { ref: 'AUTH-9286', title: t('lynPwAging') || 'Password Aging', desc: t('lynPwAgingDesc') || 'Forces password changes every 365 days with 30-day warning period. Root excluded.', impact: t('lynPwAgingImpact') || 'Users must change passwords annually' },
-                                                                pw_history: { ref: 'AUTH-9290', title: t('lynPwHistory') || 'Password History', desc: t('lynPwHistoryDesc') || 'Prevents reuse of the last 24 passwords via pam_pwhistory.', impact: t('lynPwHistoryImpact') || 'Users cannot reuse recent passwords' },
-                                                                default_umask: { ref: 'AUTH-9328', title: t('lynUmask') || 'Default Umask (027)', desc: t('lynUmaskDesc') || 'Tightens default file permissions so new files are only readable by owner and group, not everyone', impact: t('lynUmaskImpact') || 'New files more restrictive by default' },
-                                                                pkg_cleanup: { ref: 'PKGS-7346', title: t('lynPkgCleanup') || 'Old Package Cleanup', desc: t('lynPkgCleanupDesc') || 'Removes leftover configuration files from previously uninstalled packages', impact: t('lynPkgCleanupImpact') || 'None - removes unused config remnants' },
-                                                                debsums: { ref: 'PKGS-7370', title: t('lynDebsums') || 'Package Verification (debsums)', desc: t('lynDebsumsDesc') || 'Installs debsums to verify package file integrity and detect corrupted or tampered system files', impact: t('lynDebsumsImpact') || 'None - read-only verification tool' },
-                                                                login_banners: { ref: 'BANN-7126', title: t('lynBanners') || 'Login Banners', desc: t('lynBannersDesc') || 'Displays legal warning banner before login, required by compliance frameworks (PCI-DSS, HIPAA)', impact: t('lynBannersImpact') || 'None - cosmetic only' },
-                                                                file_integrity: { ref: 'FINT-4350', title: t('lynAide') || 'File Integrity Monitoring (AIDE)', desc: t('lynAideDesc') || 'Creates database of file checksums to detect unauthorized changes to system binaries and configs', impact: t('lynAideImpact') || 'Initial DB build runs in background' },
-                                                                process_acct: { ref: 'ACCT-9622', title: t('lynAcct') || 'Process Accounting', desc: t('lynAcctDesc') || 'Logs information about every process execution for forensic analysis (use lastcomm to view)', impact: t('lynAcctImpact') || 'Minimal overhead' },
-                                                                sysstat: { ref: 'ACCT-9626', title: t('lynSysstat') || 'System Statistics (sysstat)', desc: t('lynSysstatDesc') || 'Collects CPU, memory, disk I/O and network statistics over time (use sar for historical data)', impact: t('lynSysstatImpact') || 'Minimal overhead - helps diagnose issues' },
-                                                                usb_storage: { ref: 'USB-1000', title: t('lynUsb') || 'Disable USB/Firewire Storage', desc: t('lynUsbDesc') || 'Prevents loading of USB and Firewire storage drivers to block data theft. Keyboards/mice still work.', impact: t('lynUsbImpact') || 'USB drives will not be recognized' },
-                                                                restrict_compilers: { ref: 'HRDN-7222', title: t('lynCompilers') || 'Restrict Compiler Access', desc: t('lynCompilersDesc') || 'Limits compiler (gcc, g++, make) usage to root only, preventing attackers from compiling exploit code', impact: t('lynCompilersImpact') || 'Non-root users cannot compile' },
-                                                                apt_show_versions: { ref: 'PKGS-7394', title: t('lynAptShow') || 'Patch Management (apt-show-versions)', desc: t('lynAptShowDesc') || 'Installs apt-show-versions for quick overview of installed packages and their update status', impact: t('lynAptShowImpact') || 'None - read-only query tool' },
-                                                                pam_tmpdir: { ref: 'DEB-0280', title: t('lynTmpdir') || 'Isolate /tmp per Session', desc: t('lynTmpdirDesc') || 'Creates isolated temporary directories for each user session, preventing /tmp race condition attacks', impact: t('lynTmpdirImpact') || 'None - only affects interactive sessions' },
-                                                            };
-                                                            // STIG (DoD) controls
-                                                            const stigControls = {
-                                                                session_limit: { ref: 'UBTU-24-200000', title: t('stigSession') || 'Concurrent Session Limit', desc: t('stigSessionDesc') || 'Limits each user to max 10 concurrent login sessions. Root excluded for cluster operations.', impact: t('stigSessionImpact') || 'No impact - root has unlimited sessions' },
-                                                                inactive_accounts: { ref: 'UBTU-24-200260', title: t('stigInactive') || 'Disable Inactive Accounts', desc: t('stigInactiveDesc') || 'Automatically disables user accounts after 35 days without login. Root and service accounts excluded.', impact: t('stigInactiveImpact') || 'Unused accounts disabled after 35 days' },
-                                                                remove_legacy_svcs: { ref: 'UBTU-24-100030', title: t('stigLegacy') || 'Remove Insecure Legacy Services', desc: t('stigLegacyDesc') || 'Removes telnet, rsh, talk, ntalk, nis packages that transmit data including passwords in cleartext', impact: t('stigLegacyImpact') || 'None - Proxmox uses SSH exclusively' },
-                                                                audit_boot: { ref: 'UBTU-24-102010', title: t('stigAuditBoot') || 'Audit at Boot', desc: t('stigAuditBootDesc') || 'Adds audit=1 kernel parameter to enable auditing from the first moment of boot, closing the early-boot logging gap', impact: t('stigAuditBootImpact') || 'Minimal - ~1-2s longer boot time. Reboot required.', reboot: true },
-                                                                audit_rules: { ref: 'Extended', title: t('stigAuditRules') || 'Privileged Command Logging', desc: t('stigAuditRulesDesc') || 'Comprehensive logging of sudo/su/passwd, permission changes, account modifications, kernel module loading, network config, and /etc/pve/ changes', impact: t('stigAuditRulesImpact') || 'Minimal - only audits human users (auid>=1000)' },
-                                                                aide_audit_protect: { ref: 'AIDE+Audit', title: t('stigAideAudit') || 'Audit Tool Protection (AIDE)', desc: t('stigAideAuditDesc') || 'Adds audit binaries (auditd, ausearch, aureport) to AIDE file integrity monitoring with SHA512 checksums. Requires AIDE.', impact: t('stigAideAuditImpact') || 'None - only monitors audit tool binaries' },
-                                                                mem_protection: { ref: 'Kernel', title: t('stigMemProt') || 'Memory Protection - Kernel Hardening', desc: t('stigMemProtDesc') || 'Kernel parameters: init_on_alloc=1, init_on_free=1, page_alloc.shuffle=1, slab_nomerge. Prevents info leaks and use-after-free attacks.', impact: t('stigMemProtImpact') || '~1-3% performance overhead. Reboot required.', reboot: true },
-                                                                audit_immutable: { ref: 'V-270832', title: t('stigAuditLock') || 'Audit Rules Immutable', desc: t('stigAuditLockDesc') || 'Locks audit configuration with -e 2 flag. Rules cannot be modified without reboot, preventing attackers from disabling auditing.', impact: t('stigAuditLockImpact') || 'Audit rule changes require reboot' },
-                                                            };
-                                                            // PegaProx recommendations
-                                                            const pegaControls = {
-                                                                apparmor: { ref: 'MAC', title: t('pegaApparmor') || 'AppArmor (Mandatory Access Control)', desc: t('pegaApparmorDesc') || 'Enables AppArmor and enforces all profiles. Restricts what programs can access even if compromised — adds a security layer beyond standard file permissions.', impact: t('pegaApparmorImpact') || 'None for standard PVE — custom services may need profiles' },
-                                                                disable_services: { ref: 'SVC', title: t('pegaDisableSvc') || 'Disable Unnecessary Services', desc: t('pegaDisableSvcDesc') || 'Stops and disables bluetooth, CUPS (printing), and Avahi (mDNS). Fewer running services means less attack surface.', impact: t('pegaDisableSvcImpact') || 'No local printing or Bluetooth — irrelevant for servers' },
-                                                                sysctl_hardening: { ref: 'NET+Kernel', title: t('pegaSysctl') || 'Sysctl Network & Kernel Hardening', desc: t('pegaSysctlDesc') || 'Applies 20+ sysctl parameters: IP spoofing protection, ICMP redirect blocking, SYN flood defense, ASLR, dmesg restriction, ptrace scope, symlink protection.', impact: t('pegaSysctlImpact') || 'None — standard production server hardening' },
-                                                                auditd_service: { ref: 'Audit', title: t('pegaAuditd') || 'Enable Audit Daemon (auditd)', desc: t('pegaAuditdDesc') || 'Installs and enables auditd for system event logging. Pair with STIG "Privileged Command Logging" for comprehensive audit rules.', impact: t('pegaAuditdImpact') || 'Minimal overhead — prerequisite for audit rules' },
-                                                                // MK Apr 2026 — brute-force protection for SSH + PVE Web-UI
-                                                                pve_fail2ban: { ref: 'Brute-Force', title: t('pegaFail2ban') || 'fail2ban — SSH + PVE Web-UI', desc: t('pegaFail2banDesc') || 'Installs fail2ban with jails for sshd and Proxmox Web-UI/API authentication. Policy: 5 failed logins in 10 minutes trigger a 24h IP ban. File-marker /etc/fail2ban/jail.d/pegaprox-pve.conf makes re-apply safe.', impact: t('pegaFail2banImpact') || 'Negligible — reads /var/log/daemon.log + /var/log/auth.log. Review banned IPs with `fail2ban-client status proxmox`.' },
-                                                                // MK Apr 2026 — Recovery control. Detects + repairs the broken PAM stack
-                                                                // (pam_pwhistory.so use_authtok without preceding pam_pwquality.so) that
-                                                                // triggers "Authentication token manipulation error" on every passwd.
-                                                                pam_password_repair: { ref: 'Recovery', title: t('cmPamPasswordRepair') || 'Repair PAM password stack (recovery)', desc: t('pegaPamRepairDesc') || 'Detects a broken /etc/pam.d/common-password where pam_pwhistory.so was inserted with use_authtok but no pam_pwquality.so is in front of it. Fix: inserts pam_pwquality.so BEFORE pwhistory if libpam-pwquality is installed, otherwise strips use_authtok so pwhistory prompts itself. A timestamped backup is saved as common-password.bak.repair-<ts>. Idempotent — re-running on a healthy system is a no-op.', impact: t('pegaPamRepairImpact') || 'No impact on healthy systems. Restores ability to change passwords on systems where it was broken.' },
-                                                            };
-                                                            // NS Apr 2026 — VS-NfD informational checks (audit-only, apply is no-op).
-                                                            // BSI Grundschutz expects documented operator decision per environment.
-                                                            const vsnfdControls = {
-                                                                vsnfd_disk_encryption: { ref: 'BSI VS-NfD', title: t('vsnfdDiskEnc') || 'Disk encryption (LUKS / ZFS native)', desc: t('vsnfdDiskEncDesc') || 'Reports whether root/data volumes use LUKS or ZFS native encryption. Audit-only — must be configured at install time.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
-                                                                vsnfd_audit_retention: { ref: 'BSI Grundschutz', title: t('vsnfdAuditRet') || 'journald retention ≥ 6 months', desc: t('vsnfdAuditRetDesc') || 'Checks journald MaxRetentionSec is set to at least 6 months. BSI requires audit log retention ≥ 180 days.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
-                                                                vsnfd_journald_size: { ref: 'BSI Grundschutz', title: t('vsnfdJournaldSize') || 'journald SystemMaxUse ≥ 1G', desc: t('vsnfdJournaldSizeDesc') || 'Ensures journald can keep enough log volume to satisfy retention requirements.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
-                                                                vsnfd_secure_boot: { ref: 'BSI VS-NfD', title: t('vsnfdSecureBoot') || 'UEFI Secure Boot enabled', desc: t('vsnfdSecureBootDesc') || 'Reports whether the firmware enforces signed boot loaders. Cannot be toggled live — must be enabled in firmware.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
-                                                                vsnfd_kernel_lockdown: { ref: 'BSI VS-NfD', title: t('vsnfdLockdown') || 'Kernel lockdown (integrity / confidentiality)', desc: t('vsnfdLockdownDesc') || 'Checks /sys/kernel/security/lockdown. BSI recommends "integrity" or "confidentiality". Set via kernel cmdline lockdown=integrity at boot.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
-                                                                vsnfd_password_min_12: { ref: 'BSI Grundschutz', title: t('vsnfdPwMin12') || 'Password minlen ≥ 12 (BSI)', desc: t('vsnfdPwMin12Desc') || 'BSI requires minimum 12-character passwords (stricter than CIS-L1\'s 8). Configure via pwquality minlen.', impact: t('vsnfdInformational') || 'Informational only — set via pw_quality CIS control' },
-                                                            };
+                                                            // LW Oct 2026 - the title maps live in hardeningControlInfo, the profile editor reads them too
+                                                            const { cisControls, lynisControls, stigControls, pegaControls, vsnfdControls } = hardeningControlInfo(t);
                                                             const controls = hardenStatus.controls || {};
                                                             // NS Apr 2026: verbose result is {status, evidence, command}, non-verbose is bool
                                                             const _isApplied = v => typeof v === 'object' ? v?.status === true : v === true;
@@ -23069,7 +25340,8 @@
                                                                 const notChecked = (id in controls) && _notChecked(ctrlData);
                                                                 const evidence = isVerboseData ? (ctrlData.evidence || '') : '';
                                                                 const checkCmd = isVerboseData ? (ctrlData.command || '') : '';
-                                                                const failed = hardenResults?.[id]?.success === false;
+                                                                // a noop answer is "nothing to apply", not a failed apply
+                                                                const failed = hardenResults?.[id]?.success === false && !hardenResults[id].noop;
                                                                 // NS Apr 2026 — three live states during apply:
                                                                 //   inFlight = this control is currently being applied (spinner)
                                                                 //   queued   = selected but not yet processed (dim badge)
@@ -23119,7 +25391,7 @@
                                                                                 {applied && <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded">{t('applied') || 'Applied'}</span>}
                                                                                 {notChecked && <span className="text-xs bg-gray-500/20 text-gray-300 px-2 py-0.5 rounded" title={(isVerboseData && ctrlData.not_checked) || t('hardenNotCheckedHint') || 'The check did not return a result, so it is neither passed nor failed and the score leaves it out'}>{t('hardenNotCheckedBadge') || 'Not checked'}</span>}
                                                                                 {applied && info.reboot && <span className="text-xs bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded font-semibold">{t('rebootRequired') || 'Reboot required'}</span>}
-                                                                                {failed && <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded">{t('failed') || 'Failed'}</span>}
+                                                                                {failed && <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded" title={hardenResults[id].error || undefined}>{t('failed') || 'Failed'}</span>}
                                                                             </div>
                                                                             <p className="text-xs text-gray-400 mt-1">{info.desc}</p>
                                                                             <p className="text-xs text-gray-600 mt-0.5">{t('pveImpact') || 'PVE Impact'}: {info.impact}</p>
@@ -23245,7 +25517,7 @@
                                                                         const v = controls[id];
                                                                         const isObj = v && typeof v === 'object';
                                                                         const applied = isObj ? v.status === true : v === true;
-                                                                        const failed = hardenResults?.[id]?.success === false;
+                                                                        const failed = hardenResults?.[id]?.success === false && !hardenResults[id].noop;
                                                                         return [info.ref || '-', info.title || id, statusLbl(applied, failed, (id in controls) && _notChecked(v)), (info.impact || '').slice(0, 90)];
                                                                     });
                                                                     blocks.push({
@@ -23283,7 +25555,7 @@
                                                             return (
                                                             <>
                                                                 {/* summary bar */}
-                                                                <div className="flex items-center gap-4 bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                                                                <div className="flex pp-wrap-narrow items-center gap-4 bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                     <div className="flex-1">
                                                                         <div className="flex items-center gap-2 mb-2">
                                                                             <span className="text-sm font-medium">{hardenNode}</span>
@@ -23296,10 +25568,16 @@
                                                                                     · {notCheckedCount} {t('hardenNotChecked') || 'not checked'}
                                                                                 </span>
                                                                             )}
+                                                                            {hardenStatus.profile_name && (
+                                                                                <span className="text-xs px-2 py-0.5 rounded bg-orange-500/10 text-orange-300 border border-orange-500/30 truncate max-w-xs" data-hp-ran>{hardenStatus.profile_name}</span>
+                                                                            )}
                                                                         </div>
                                                                         <div className="w-full bg-gray-700 rounded-full h-2">
                                                                             <div className={`h-2 rounded-full transition-all ${appliedCount === totalCount ? 'bg-green-500' : appliedCount > totalCount / 2 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{width: `${totalCount > 0 ? (appliedCount / totalCount * 100) : 0}%`}} />
                                                                         </div>
+                                                                        {(hardenStatus.dropped_controls || []).length > 0 && (
+                                                                            <p className="text-xs text-amber-400 mt-2" data-hp-dropped>{fillText(t('hpDroppedNote'), { ids: hardenStatus.dropped_controls.join(', ') })}</p>
+                                                                        )}
                                                                     </div>
                                                                     {/* MK Apr 2026: export buttons */}
                                                                     <button onClick={exportHardenPng}
@@ -23310,6 +25588,13 @@
                                                                         className="px-2.5 py-1 text-xs rounded border border-proxmox-border text-gray-400 hover:text-white hover:border-gray-500 whitespace-nowrap"
                                                                         title={t('exportPdf') || 'Export as PDF'}
                                                                     >PDF</button>
+                                                                    {canManageHardenProfiles && (
+                                                                        <button onClick={saveHardenSelection} disabled={hardenApplying} data-hp-save-selection
+                                                                            className="px-2.5 py-1 text-xs rounded border border-proxmox-border text-gray-400 hover:text-white hover:border-gray-500 whitespace-nowrap flex items-center gap-1"
+                                                                            title={t('hpSaveSelectionHint')}>
+                                                                            <Icons.Save /> {t('hpSaveSelection')}
+                                                                        </button>
+                                                                    )}
                                                                     {!haReadOnly && (<>
                                                                     <button
                                                                         onClick={applyHardening}
@@ -23448,7 +25733,8 @@
                                                                     <div className="flex gap-3 text-xs">
                                                                         <button onClick={() => {
                                                                             const sel = {};
-                                                                            Object.entries(controls).forEach(([id, v]) => { const applied = (v && typeof v === 'object') ? v.status : v; if (applied === false) sel[id] = true; });
+                                                                            const noop = hardenNoopIds();
+                                                                            Object.entries(controls).forEach(([id, v]) => { const applied = (v && typeof v === 'object') ? v.status : v; if (applied === false && !noop.has(id)) sel[id] = true; });
                                                                             setHardenSelected(sel);
                                                                         }} className="text-blue-400 hover:text-blue-300">{t('selectAll') || 'Select all'}</button>
                                                                         <button onClick={() => setHardenSelected({})} className="text-gray-500 hover:text-gray-400">{t('deselectAll') || 'Deselect all'}</button>
@@ -23466,6 +25752,12 @@
                                                                 <p className="text-gray-600 text-sm">{t('hardenEmptyDesc') || 'PegaProx checks which CIS controls are already applied and lets you enable the remaining ones.'}</p>
                                                             </div>
                                                         )}
+
+                                                        {hardenProfilesDlg && hardenProfiles && (
+                                                            <HardeningProfilesDialog data={hardenProfiles} draft={hardenProfilesDlg.draft}
+                                                                authFetch={authFetch} addToast={addToast} t={t}
+                                                                onClose={() => setHardenProfilesDlg(null)} onChanged={hardenProfilesChanged} />
+                                                        )}
                                                     </div>
                                                 )}
                                             </div>
@@ -23475,7 +25767,7 @@
                                         {activeTab === 'reports' && (
                                             <div className="space-y-6">
                                                 {/* LW: use the same corp tab-strip as Automation/the other sections (was a one-off blue underline) */}
-                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex gap-2 border-b border-proxmox-border pb-2'}>
+                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex pp-wrap-narrow gap-2 border-b border-proxmox-border pb-2'}>
                                                     {[
                                                         { id: 'summary', label: t('summary') || 'Summary', icon: Icons.BarChart },
                                                         { id: 'cve', label: t('cveScanner') || 'CVE Scanner', icon: Icons.Shield },
@@ -23504,8 +25796,19 @@
                                                     ))}
                                                 </div>
 
+                                                {/* LW Oct 2026 - Corporate Redesigned: the summary with its own read states, the
+                                                    rankings and guest counts from the guest list the dashboard holds */}
+                                                {reportSubTab === 'summary' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="reports">
+                                                    <CrReportsSummary cluster={selectedCluster} load={loadReportSummary}
+                                                        guests={clusterResources} nodes={clusterMetrics} nav={crTaskNav}
+                                                        guestsRead={Array.isArray(sidebarClusterData[selectedCluster.id]?.resources) || Array.isArray(allClusterGuests[selectedCluster.id])}
+                                                        onSub={setReportSubTab} onTab={setActiveTab} />
+                                                    </CrBoundary>
+                                                )}
+
                                                 {/* Summary Sub-Tab */}
-                                                {reportSubTab === 'summary' && (
+                                                {reportSubTab === 'summary' && !isCorpRedesigned && (
                                                     <div className="space-y-6">
                                                         <div className="flex justify-end">
                                                             <div className="flex items-center gap-2">
@@ -23533,7 +25836,7 @@
                                                                     </button>
                                                                 ))}
                                                                 <button
-                                                                    onClick={() => { loadReportSummary(reportPeriod); loadTopVms(); }}
+                                                                    onClick={() => { loadReportSummary(reportPeriod); loadTopVms(); loadTopVms('memory'); }}
                                                                     className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"
                                                                     title={t('refresh') || 'Refresh'}
                                                                 >
@@ -23574,8 +25877,11 @@
                                                                 <button
                                                                     onClick={() => {
                                                                         const period = reportPeriod === 'hour' ? 'Last Hour' : reportPeriod === 'day' ? 'Last 24h' : 'Last Week';
-                                                                        const topCpuRows = topVms.slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${((vm.cpu||0)*100).toFixed(1)}%`]);
-                                                                        const topMemRows = [...topVms].sort((a,b)=>(b.mem_percent||0)-(a.mem_percent||0)).slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${(vm.mem_percent||0).toFixed(1)}%`]);
+                                                                        // a list or figure that was not read says so, it is no 0 and no empty list
+                                                                        const unreadRow = [['-', 'Could not be read', '-']];
+                                                                        const said = (v, unit = '') => v == null ? '-' : `${v}${unit}`;
+                                                                        const topCpuRows = Array.isArray(topVms) ? topVms.slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${((vm.cpu||0)*100).toFixed(1)}%`]) : unreadRow;
+                                                                        const topMemRows = Array.isArray(topVmsMem) ? topVmsMem.slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${(vm.mem_percent||0).toFixed(1)}%`]) : unreadRow;
                                                                         generatePegaProxPDF({
                                                                             title: 'Cluster Report',
                                                                             subtitle: period,
@@ -23583,10 +25889,10 @@
                                                                             filename: `pegaprox-report-${selectedCluster?.name || 'cluster'}.pdf`,
                                                                             content: [
                                                                                 { type: 'stats', data: [
-                                                                                    { label: 'CPU', value: `${reportData?.cpu?.current || 0}%`, color: '#3b82f6' },
-                                                                                    { label: 'Memory', value: `${reportData?.memory?.current || 0}%`, color: '#22c55e' },
-                                                                                    { label: 'VMs', value: String(reportData?.live?.vms_running || 0), color: '#f97316' },
-                                                                                    { label: 'Containers', value: String(reportData?.live?.cts_running || 0), color: '#a855f7' },
+                                                                                    { label: 'CPU', value: said(reportNow?.cpu, '%'), color: '#3b82f6' },
+                                                                                    { label: 'Memory', value: said(reportNow?.memory, '%'), color: '#22c55e' },
+                                                                                    { label: 'VMs', value: said(reportNow?.vms), color: '#f97316' },
+                                                                                    { label: 'Containers', value: said(reportNow?.cts), color: '#a855f7' },
                                                                                 ]},
                                                                                 { type: 'spacer', height: 4 },
                                                                                 { type: 'table', title: 'Top VMs by CPU', columns: ['#', 'VM', 'CPU'], rows: topCpuRows },
@@ -23608,12 +25914,25 @@
                                                             </div>
                                                         ) : (
                                                             <div id="report-summary-content" className="space-y-6">
+                                                                {/* a summary that could not be read shows no 0 % and no 0 VMs */}
+                                                                {reportFailed && (
+                                                                    <div data-report-unread="summary" className="bg-proxmox-card border border-yellow-500/30 rounded-xl p-4 flex flex-wrap items-center gap-3 text-sm text-yellow-400">
+                                                                        <Icons.AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                                                                        <span className="flex-1 min-w-0">{t('reportUnread')}</span>
+                                                                        <button onClick={() => loadReportSummary(reportPeriod)}
+                                                                            className="px-3 py-1 text-xs rounded border border-proxmox-border text-gray-300 hover:text-white hover:border-gray-500">
+                                                                            {t('retry') || 'Retry'}
+                                                                        </button>
+                                                                    </div>
+                                                                )}
                                                                 {/* Live Metrics — Gauge circles + counters */}
-                                                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                                                {reportNow && <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                                                     {/* CPU Gauge */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center">
-                                                                        <Gauge value={reportData?.cpu?.current || reportData?.live?.cpu_percent || 0} label="CPU" color="#3b82f6" />
-                                                                        {reportData?.data_points > 0 && (
+                                                                        {reportNow.cpu != null
+                                                                            ? <Gauge value={reportNow.cpu} label="CPU" color="#3b82f6" />
+                                                                            : reportUnreadGauge('CPU', 'cpu')}
+                                                                        {reportData?.data_points > 0 && reportData?.cpu?.avg != null && (
                                                                             <div className="text-[11px] text-gray-500 mt-1">
                                                                                 avg {reportData?.cpu?.avg || 0}% &middot; {reportData?.cpu?.min || 0}%-{reportData?.cpu?.max || 0}%
                                                                             </div>
@@ -23624,8 +25943,10 @@
                                                                     </div>
                                                                     {/* Memory Gauge */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center">
-                                                                        <Gauge value={reportData?.memory?.current || reportData?.live?.mem_percent || 0} label="Memory" color="#22c55e" />
-                                                                        {reportData?.data_points > 0 && (
+                                                                        {reportNow.memory != null
+                                                                            ? <Gauge value={reportNow.memory} label="Memory" color="#22c55e" />
+                                                                            : reportUnreadGauge('Memory', 'memory')}
+                                                                        {reportData?.data_points > 0 && reportData?.memory?.avg != null && (
                                                                             <div className="text-[11px] text-gray-500 mt-1">
                                                                                 avg {reportData?.memory?.avg || 0}% &middot; {reportData?.memory?.min || 0}%-{reportData?.memory?.max || 0}%
                                                                             </div>
@@ -23636,18 +25957,20 @@
                                                                     </div>
                                                                     {/* VMs count */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center justify-center">
-                                                                        <div className="text-4xl font-bold text-orange-400">{reportData?.live?.vms_running || reportData?.vms_running?.current || 0}</div>
+                                                                        <div className={`text-4xl font-bold ${reportNow.vms == null ? 'text-gray-500' : 'text-orange-400'}`} data-report-unread={reportNow.vms == null ? 'vms' : undefined}>{reportNow.vms ?? '-'}</div>
                                                                         <div className="text-sm text-gray-500 mt-1">VMs {t('running').toLowerCase()}</div>
+                                                                        {reportNow.vms == null && <div className="text-[11px] text-gray-500 mt-0.5">{t('reportValueUnread')}</div>}
                                                                         {reportData?.vms_running?.samples?.length > 2 && (
                                                                             <div className="mt-2"><Sparkline data={reportData.vms_running.samples} width={80} height={20} color="#f97316" /></div>
                                                                         )}
                                                                     </div>
                                                                     {/* Container count */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center justify-center">
-                                                                        <div className="text-4xl font-bold text-purple-400">{reportData?.live?.cts_running || 0}</div>
+                                                                        <div className={`text-4xl font-bold ${reportNow.cts == null ? 'text-gray-500' : 'text-purple-400'}`} data-report-unread={reportNow.cts == null ? 'cts' : undefined}>{reportNow.cts ?? '-'}</div>
                                                                         <div className="text-sm text-gray-500 mt-1">Container</div>
+                                                                        {reportNow.cts == null && <div className="text-[11px] text-gray-500 mt-0.5">{t('reportValueUnread')}</div>}
                                                                     </div>
-                                                                </div>
+                                                                </div>}
 
                                                                 {/* Timeline Charts — CPU & Memory over time */}
                                                                 {reportData?.timestamps?.length > 2 && reportData?.cpu?.samples?.length > 2 && (
@@ -23694,7 +26017,9 @@
                                                                             {t('topVmsCpu') || 'Highest CPU Usage'}
                                                                         </h3>
                                                                         <div className="space-y-1.5">
-                                                                            {topVms.length > 0 ? topVms.slice(0, 5).map((vm, idx) => {
+                                                                            {topVms === false ? (
+                                                                                <p className="text-gray-500 text-center py-4 text-sm" data-report-unread="top-cpu">{t('reportValueUnread')}</p>
+                                                                            ) : topVms?.length > 0 ? topVms.slice(0, 5).map((vm, idx) => {
                                                                                 const cpuPct = Math.min((vm.cpu || 0) * 100, 100);
                                                                                 const barColor = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#eab308' : '#3b82f6';
                                                                                 return (
@@ -23708,7 +26033,7 @@
                                                                                     </div>
                                                                                     <span className="font-mono text-xs w-10 text-right font-bold" style={{color: barColor}}>{cpuPct.toFixed(0)}%</span>
                                                                                 </div>);
-                                                                            }) : (
+                                                                            }) : topVms && (
                                                                                 <p className="text-gray-500 text-center py-4 text-sm">{t('noRunningVms') || 'No running VMs'}</p>
                                                                             )}
                                                                         </div>
@@ -23721,7 +26046,9 @@
                                                                             {t('topVmsMem') || 'Highest Memory Usage'}
                                                                         </h3>
                                                                         <div className="space-y-1.5">
-                                                                            {topVms.length > 0 ? [...topVms].sort((a, b) => (b.mem_percent || 0) - (a.mem_percent || 0)).slice(0, 5).map((vm, idx) => {
+                                                                            {topVmsMem === false ? (
+                                                                                <p className="text-gray-500 text-center py-4 text-sm" data-report-unread="top-mem">{t('reportValueUnread')}</p>
+                                                                            ) : topVmsMem?.length > 0 ? topVmsMem.slice(0, 5).map((vm, idx) => {
                                                                                 const memPct = Math.min(vm.mem_percent || 0, 100);
                                                                                 const barColor = memPct > 80 ? '#ef4444' : memPct > 50 ? '#eab308' : '#22c55e';
                                                                                 return (
@@ -23735,7 +26062,7 @@
                                                                                     </div>
                                                                                     <span className="font-mono text-xs w-10 text-right font-bold" style={{color: barColor}}>{memPct.toFixed(0)}%</span>
                                                                                 </div>);
-                                                                            }) : (
+                                                                            }) : topVmsMem && (
                                                                                 <p className="text-gray-500 text-center py-4 text-sm">{t('noRunningVms') || 'No running VMs'}</p>
                                                                             )}
                                                                         </div>
@@ -23774,7 +26101,15 @@
                                                 )}
 
                                                 {/* CVE Scanner Sub-Tab */}
-                                                {reportSubTab === 'cve' && (
+                                                {/* LW Nov 2026 - Corporate Redesigned: the scan state and the two POSTs of this tab, drawn as tiles and a node table */}
+                                                {reportSubTab === 'cve' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="cve">
+                                                    <CrCveScan cluster={selectedCluster} results={cveResults} error={cveError} loading={cveScanLoading} installing={debsecanInstalling}
+                                                        readOnly={haReadOnly} onScan={() => runCveScan()} onInstall={() => installDebsecan()}
+                                                        onOpenUpdates={() => setActiveTab('updates')} nav={crTaskNav} />
+                                                    </CrBoundary>
+                                                )}
+                                                {reportSubTab === 'cve' && !isCorpRedesigned && (
                                                     <div className="space-y-6">
                                                         <div className="flex justify-between items-center">
                                                             <div className="flex items-center gap-2">
@@ -23831,7 +26166,7 @@
                                                                                             type: 'table',
                                                                                             title: `${node.node} — ${node.cve_count || 0} CVEs, ${node.total_count || 0} updates`,
                                                                                             columns: ['CVE', 'Package', 'Severity', 'Fix'],
-                                                                                            rows: node.cves.map(c => [c.cve_id || '-', c.package || '-', c.severity || '-', c.fix_type || '-'])
+                                                                                            rows: node.cves.map(c => [c.cve || '-', c.package || '-', c.urgency || '-', c.fix_type || '-'])
                                                                                         });
                                                                                     }
                                                                                 });
@@ -24039,7 +26374,8 @@
                                                                                                 <tbody>
                                                                                                     {node.cves.sort((a, b) => {
                                                                                                         const order = { high: 0, medium: 1, low: 2 };
-                                                                                                        return (order[a.urgency] || 1) - (order[b.urgency] || 1);
+                                                                                                        // high is 0, so || would file it with medium
+                                                                                                        return (order[a.urgency] ?? 1) - (order[b.urgency] ?? 1);
                                                                                                     }).map((cve, cIdx) => (
                                                                                                         <tr key={cIdx} className={`border-b border-proxmox-border/50 ${
                                                                                                             cve.urgency === 'high' ? 'bg-red-500/5' : ''
@@ -24161,8 +26497,18 @@
                                                     </div>
                                                 )}
 
+                                                {/* LW Oct 2026 - Corporate Redesigned: forecast and right-sizing read apart, top
+                                                    talkers and rollups from the guest lists the dashboard holds */}
+                                                {reportSubTab === 'insights' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="insights">
+                                                    <CrInsights cluster={selectedCluster} clusters={clusters}
+                                                        authFetch={authFetch} addToast={addToast} isAdmin={isAdmin} nav={crTaskNav}
+                                                        onOpenConfig={(g) => handleOpenConfig({ ...g, _clusterId: selectedCluster.id }, g.type === 'lxc' ? 'resources' : 'hardware')} />
+                                                    </CrBoundary>
+                                                )}
+
                                                 {/* MK May 2026 — Insights as Reports sub-tab */}
-                                                {reportSubTab === 'insights' && (
+                                                {reportSubTab === 'insights' && !isCorpRedesigned && (
                                                     <InsightsTab
                                                         clusterId={selectedCluster?.id}
                                                         clusterName={selectedCluster?.name}
@@ -24182,6 +26528,8 @@
                                                         addToast={addToast}
                                                         t={t}
                                                         isAdmin={isAdmin}
+                                                        cluster={selectedCluster}
+                                                        nav={crTaskNav}
                                                     />
                                                 )}
 
@@ -24194,6 +26542,8 @@
                                                         addToast={addToast}
                                                         t={t}
                                                         isAdmin={isAdmin}
+                                                        cluster={selectedCluster}
+                                                        nav={crTaskNav}
                                                     />
                                                 )}
 
@@ -24204,16 +26554,24 @@
                                                         authFetch={authFetch}
                                                         addToast={addToast}
                                                         t={t}
+                                                        cluster={selectedCluster}
+                                                        nav={crTaskNav}
                                                     />
                                                 )}
 
-                                                {/* LW Oct 2026 - what-if simulator of the cluster */}
-                                                {reportSubTab === 'whatif' && selectedCluster?.id && (
-                                                    <WhatIfTab clusterId={selectedCluster.id} authFetch={authFetch} />
+                                                {/* LW Oct 2026 - what-if simulator of the cluster; Corporate Redesigned draws its own
+                                                    page on the same routes, with the capacity figures of Insights beside it */}
+                                                {reportSubTab === 'whatif' && selectedCluster?.id && (isCorpRedesigned
+                                                    ? <CrBoundary key={selectedCluster.id} id="whatif"><CrWhatIf cluster={selectedCluster} authFetch={authFetch} nav={crTaskNav} onSub={setReportSubTab} /></CrBoundary>
+                                                    : <WhatIfTab clusterId={selectedCluster.id} authFetch={authFetch} />
                                                 )}
 
                                                 {/* MK May 2026 — API latency dashboard */}
-                                                {reportSubTab === 'api-health' && selectedCluster?.id && (
+                                                {/* LW Nov 2026 - Corporate Redesigned: the same route and poll, with a state for no samples */}
+                                                {reportSubTab === 'api-health' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="api-health"><CrApiHealth cluster={selectedCluster} authFetch={authFetch} /></CrBoundary>
+                                                )}
+                                                {reportSubTab === 'api-health' && !isCorpRedesigned && selectedCluster?.id && (
                                                     <ApiLatencyDashboard
                                                         clusterId={selectedCluster.id}
                                                         authFetch={authFetch}
@@ -24237,6 +26595,7 @@
                                                     clusterId={selectedCluster.id}
                                                     authFetch={authFetch}
                                                     t={t}
+                                                    pick={isCorpRedesigned && crTimelinePick && crTimelinePick.cid === selectedCluster.id ? crTimelinePick : undefined}
                                                     onOpenGuest={(vmid) => {
                                                         const guest = (clusterResources || []).find(r => Number(r.vmid) === Number(vmid));
                                                         if (!guest) return;
@@ -24253,7 +26612,19 @@
                                                         setSelectedSidebarVm(null);
                                                         setSelectedSidebarNode({ name, clusterId: selectedCluster.id });
                                                     }}
-                                                    onOpenTab={(tab) => setActiveTab(tab)}
+                                                    onOpenTab={(tab, ev) => {
+                                                        // LW Nov 2026 - Corporate Redesigned keeps the update manager on its own tab, a run opens its history
+                                                        if (isCorpRedesigned && ev && ev.kind === 'rolling_update') {
+                                                            crUpdWantTab(selectedCluster.id, 'history');
+                                                            setActiveTab('updates');
+                                                            return;
+                                                        }
+                                                        setActiveTab(tab);
+                                                        if (isCorpRedesigned && ev && ev.kind === 'drift' && ev.source) {
+                                                            setComplianceSubTab('drift');
+                                                            setCrDriftFocus({ cluster: selectedCluster.id, id: ev.source.id, status: (ev.params || {}).status });
+                                                        }
+                                                    }}
                                                 />
                                             </div>
                                         )}
@@ -24262,7 +26633,7 @@
                                             <div className="space-y-4">
                                                 <div className={isCorporate
                                                     ? 'corp-tab-strip'
-                                                    : 'flex items-center gap-1 border-b border-proxmox-border pb-2'
+                                                    : 'flex pp-wrap-narrow items-center gap-1 border-b border-proxmox-border pb-2'
                                                 }>
                                                     {complianceSubs.map(sub => (
                                                         <button
@@ -24306,11 +26677,14 @@
                                                 {complianceSub === 'drift' && (
                                                     <DriftTab
                                                         clusterId={selectedCluster?.id}
-                                                        clusterName={selectedCluster?.name}
+                                                        clusterName={selectedCluster ? clusterLabel(selectedCluster) : undefined}
                                                         authFetch={authFetch}
                                                         addToast={addToast}
                                                         t={t}
                                                         isAdmin={isAdmin}
+                                                        crNav={crTaskNav}
+                                                        crFocus={isCorpRedesigned ? crDriftFocus : undefined}
+                                                        onCrFocus={isCorpRedesigned ? setCrDriftFocus : undefined}
                                                     />
                                                 )}
                                             </div>
@@ -24424,6 +26798,15 @@
                                                 </div>
                                             );
                                         })()}
+
+                                        {/* LW Nov 2026 - the update manager of Corporate Redesigned, its own tab beside Settings:
+                                            the classic routes, nothing read from the nodes before a click; a CVE scan of this
+                                            session lends it the security class the update list does not carry */}
+                                        {activeTab === 'updates' && isCorpRedesigned && selectedCluster?.id && (
+                                            <CrBoundary key={selectedCluster.id} id="updates">
+                                                <CrUpdates cluster={selectedCluster} metrics={clusterMetrics} nav={crTaskNav} authFetch={authFetch} cve={cveResults} />
+                                            </CrBoundary>
+                                        )}
 
                                         {/* Settings Tab */}
                                         {activeTab === 'settings' && (
@@ -25001,15 +27384,15 @@
 
                                                 {/* Update Manager Section */}
                                                 <div className="lg:col-span-2" data-update-manager>
-                                                    <UpdateManagerSection key={selectedCluster.id} clusterId={selectedCluster.id} addToast={addToast} />
+                                                    {isCorpRedesigned
+                                                        ? <CrUpdatesLink onOpen={() => setActiveTab('updates')} />
+                                                        : <UpdateManagerSection key={selectedCluster.id} clusterId={selectedCluster.id} clusterName={selectedCluster.display_name || selectedCluster.name} addToast={addToast} />}
                                                 </div>
                                                 
                                                 {/* SMBIOS Auto-Configurator Section */}
                                                 <div className={`lg:col-span-2 ${isCorporate ? 'border border-proxmox-border p-4' : 'bg-proxmox-card border border-proxmox-border rounded-xl p-6'}`}>
-                                                    <SmbiosAutoConfigSection 
-                                                        clusterId={selectedCluster?.id} 
-                                                        selectedCluster={selectedCluster}
-                                                        updateConfig={updateConfig}
+                                                    <SmbiosAutoConfigSection
+                                                        clusterId={selectedCluster?.id}
                                                         addToast={addToast}
                                                     />
                                                 </div>
@@ -25877,15 +28260,15 @@
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="border-b border-proxmox-border text-gray-500 text-xs">
-                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">{t('pbsStore') || 'Store'}</th><th className="text-left p-3">{t('pbsRemote') || 'Remote'}</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th><th className="text-left p-3">{t('status') || 'Status'}</th><th className="text-left p-3">{t('pbsNextRun') || 'Next Run'}</th>
+                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">{t('pbsSyncDirection') || 'Direction'}</th><th className="text-left p-3">{t('source') || 'Source'} → {t('target') || 'Target'}</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th><th className="text-left p-3">{t('status') || 'Status'}</th><th className="text-left p-3">{t('pbsNextRun') || 'Next Run'}</th>
                                                                     {isAdmin && <th className="text-right p-3">{t('actions') || 'Actions'}</th>}
                                                                 </tr></thead>
                                                                 <tbody>
-                                                                    {(pbsJobs.sync || []).map((job, i) => (
+                                                                    {(pbsJobs.sync || []).map((job, i) => { const ends = pbsSyncEnds(job); return (
                                                                         <tr key={i} className="border-b border-proxmox-border/50 hover:bg-proxmox-hover/30">
                                                                             <td className="p-3 text-white font-medium">{job.id}</td>
-                                                                            <td className="p-3 text-gray-300">{job.store}</td>
-                                                                            <td className="p-3 text-gray-400">{job.remote || '-'} / {job['remote-store'] || '-'}</td>
+                                                                            <td className="p-3"><PbsSyncDirection direction={job['sync-direction']} /></td>
+                                                                            <td className="p-3 text-gray-300">{ends.source} <span className="text-gray-500">→</span> {ends.target}</td>
                                                                             <td className="p-3 text-gray-400">{job.schedule || (t('manual') || 'manual')}</td>
                                                                             <td className="p-3 text-gray-500">{job['last-run-endtime'] ? fmtDate(job['last-run-endtime'] * 1000) : '-'}</td>
                                                                             <td className="p-3"><PbsRunState state={job['last-run-state']} /></td>
@@ -25898,7 +28281,7 @@
                                                                                 </td>
                                                                             )}
                                                                         </tr>
-                                                                    ))}
+                                                                    ); })}
                                                                 </tbody>
                                                             </table>
                                                         </div>
@@ -26597,6 +28980,12 @@
                                             </div>
                                         )}
                                         
+                                        {esxiBulk && (
+                                            <EsxiBulkMigrate key={esxiBulk.runId || 'new'} server={selectedVMware} vms={esxiBulk.vms || []} runId={esxiBulk.runId || null}
+                                                onClose={() => setEsxiBulk(null)} onStarted={() => { setEsxiBulkSel([]); fetchVmwareMigrations(); }}
+                                                authFetch={authFetch} addToast={addToast} t={t} haReadOnly={haReadOnly} />
+                                        )}
+
                                         {vmwareActiveTab === 'vms' && !vmwareSelectedVm && (
                                             <div className="space-y-4">
                                                 {/* LW: search + filter */}
@@ -26626,6 +29015,19 @@
                                                     </div>
                                                 </div>
                                                 
+                                                {/* LW Oct 2026 - what is ticked goes into one bulk migration */}
+                                                {!haReadOnly && esxiBulkSel.length > 0 && (
+                                                    <div className="flex flex-wrap items-center gap-3 p-2 bg-proxmox-card border border-emerald-500/30 rounded-lg" data-esxi-bulk-bar>
+                                                        <span className="text-sm text-white">{t('esxiBulkSelected').replace('{n}', esxiBulkSel.length)}</span>
+                                                        <button onClick={openEsxiBulk} disabled={esxiBulkSel.length > 200}
+                                                            className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-xs font-medium disabled:opacity-50">
+                                                            {t('esxiBulkMigrate')}
+                                                        </button>
+                                                        <button onClick={() => setEsxiBulkSel([])} className="text-xs text-gray-400 hover:text-white">{t('esxiBulkClear')}</button>
+                                                        {esxiBulkSel.length > 200 && <span className="text-xs text-yellow-300">{t('esxiBulkTooMany')}</span>}
+                                                    </div>
+                                                )}
+
                                                 {/* VM Table */}
                                                 {vmwareLoading && vmwareVms.length === 0 ? (
                                                     <div className="text-center py-12 text-gray-500">{t('esxiLoadingVms')}</div>
@@ -26634,6 +29036,18 @@
                                                         <table className={isCorporate ? 'corp-datagrid' : 'w-full'}>
                                                             <thead>
                                                                 <tr className={isCorporate ? '' : 'border-b border-proxmox-border'}>
+                                                                    {!haReadOnly && (() => {
+                                                                        const shown = esxiShownVmIds();
+                                                                        const all = shown.length > 0 && shown.every(id => esxiBulkSel.includes(id));
+                                                                        return (
+                                                                            <th className={isCorporate ? 'text-left' : 'text-left p-3'} style={{width: 36}}>
+                                                                                <input type="checkbox" checked={all} title={t('esxiBulkSelectAll')} data-esxi-bulk-all
+                                                                                    onChange={e => setEsxiBulkSel(sel => e.target.checked
+                                                                                        ? [...sel, ...shown.filter(id => !sel.includes(id))]
+                                                                                        : sel.filter(id => !shown.includes(id)))} className="rounded" />
+                                                                            </th>
+                                                                        );
+                                                                    })()}
                                                                     <th className={isCorporate ? 'text-left' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('status')}</th>
                                                                     <th className={isCorporate ? 'text-left' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('name')}</th>
                                                                     <th className={isCorporate ? 'text-left' : 'text-left p-3 text-xs font-semibold text-gray-500 uppercase'}>{t('esxiGuestOs')}</th>
@@ -26665,6 +29079,12 @@
                                                                         
                                                                         return (
                                                                             <tr key={vm.vm || vm.vm_id || vm.id} className="border-b border-proxmox-border/50 hover:bg-proxmox-hover/50 cursor-pointer transition-colors" onClick={() => setVmwareSelectedVm(vm.vm || vm.vm_id || vm.id)}>
+                                                                                {!haReadOnly && (
+                                                                                    <td className="p-3" onClick={e => e.stopPropagation()}>
+                                                                                        <input type="checkbox" checked={esxiBulkSel.includes(esxiVmId(vm))} title={t('esxiBulkSelectVm')} data-esxi-bulk-pick={esxiVmId(vm)}
+                                                                                            onChange={e => setEsxiBulkSel(sel => e.target.checked ? [...sel, esxiVmId(vm)] : sel.filter(id => id !== esxiVmId(vm)))} className="rounded" />
+                                                                                    </td>
+                                                                                )}
                                                                                 <td className="p-3">
                                                                                     <div className={`w-3 h-3 rounded-full ${isOn ? 'bg-green-400 shadow-lg shadow-green-400/30' : isSuspended ? 'bg-yellow-400' : 'bg-gray-500'}`} title={vm.power_state} />
                                                                                 </td>
@@ -26963,10 +29383,9 @@
                                                             
                                                             {/* Settings Tab -- Editable VM Configuration */}
                                                             {vmwareVmTab === 'settings' && (() => {
-                                                                // Initialize edit form from VM detail
-                                                                const initCpu = vmwareConfigEdit.cpu || cpuCount || 1;
-                                                                const initMem = vmwareConfigEdit.memory || memGB * 1024 || 2048;
-                                                                const initNotes = vmwareConfigEdit.notes !== undefined && vmwareConfigEdit.notes !== '' ? vmwareConfigEdit.notes : (vm.annotation || vm.notes || vm.config?.annotation || '');
+                                                                // what the guest has, under what the user changed
+                                                                const cfgNow = vmwareConfigNow(vm);
+                                                                const cfgForm = { ...cfgNow, ...vmwareConfigEdit };
                                                                 const perfData = vm.performance || {};
                                                                 
                                                                 // #625: on a standby the settings show, but nothing here saves
@@ -27022,16 +29441,16 @@
                                                                                     <div className="pt-2 border-t border-proxmox-border/50 space-y-2">
                                                                                         <label className="flex items-center justify-between cursor-pointer">
                                                                                             <span className="text-sm text-gray-400">{t('cpuHotAdd')}</span>
-                                                                                            <div onClick={() => setVmwareConfigEdit(p => ({...p, cpu_hot_add: !p.cpu_hot_add}))}
-                                                                                                className={`w-10 h-5 rounded-full transition-colors cursor-pointer flex items-center ${vmwareConfigEdit.cpu_hot_add ? 'bg-emerald-500' : 'bg-gray-700'}`}>
-                                                                                                <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${vmwareConfigEdit.cpu_hot_add ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                                                                                            <div onClick={() => setVmwareConfigEdit(p => ({...p, cpu_hot_add: !(p.cpu_hot_add ?? cfgNow.cpu_hot_add)}))}
+                                                                                                className={`w-10 h-5 rounded-full transition-colors cursor-pointer flex items-center ${cfgForm.cpu_hot_add ? 'bg-emerald-500' : 'bg-gray-700'}`}>
+                                                                                                <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${cfgForm.cpu_hot_add ? 'translate-x-5' : 'translate-x-0.5'}`} />
                                                                                             </div>
                                                                                         </label>
                                                                                         <label className="flex items-center justify-between cursor-pointer">
                                                                                             <span className="text-sm text-gray-400">{t('memoryHotAdd')}</span>
-                                                                                            <div onClick={() => setVmwareConfigEdit(p => ({...p, memory_hot_add: !p.memory_hot_add}))}
-                                                                                                className={`w-10 h-5 rounded-full transition-colors cursor-pointer flex items-center ${vmwareConfigEdit.memory_hot_add ? 'bg-emerald-500' : 'bg-gray-700'}`}>
-                                                                                                <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${vmwareConfigEdit.memory_hot_add ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                                                                                            <div onClick={() => setVmwareConfigEdit(p => ({...p, memory_hot_add: !(p.memory_hot_add ?? cfgNow.memory_hot_add)}))}
+                                                                                                className={`w-10 h-5 rounded-full transition-colors cursor-pointer flex items-center ${cfgForm.memory_hot_add ? 'bg-emerald-500' : 'bg-gray-700'}`}>
+                                                                                                <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${cfgForm.memory_hot_add ? 'translate-x-5' : 'translate-x-0.5'}`} />
                                                                                             </div>
                                                                                         </label>
                                                                                     </div>
@@ -27045,7 +29464,7 @@
                                                                                         <Icons.FileText className="w-4 h-4" /> {t('notes')}
                                                                                     </h3>
                                                                                     <textarea
-                                                                                        value={vmwareConfigEdit.notes !== undefined && vmwareConfigEdit.notes !== '' ? vmwareConfigEdit.notes : (vm.annotation || vm.notes || vm.config?.annotation || '')}
+                                                                                        value={cfgForm.notes}
                                                                                         onChange={e => setVmwareConfigEdit(p => ({...p, notes: e.target.value}))}
                                                                                         placeholder={t('vmDescriptionNotesPlaceholder')}
                                                                                         rows={4}
@@ -27137,7 +29556,7 @@
                                                                         {/* Save Button */}
                                                                         {!haReadOnly && (
                                                                         <div className="flex justify-end gap-3">
-                                                                            <button onClick={() => setVmwareConfigEdit({ cpu: '', memory: '', notes: '', cpu_hot_add: false, memory_hot_add: false })}
+                                                                            <button onClick={() => setVmwareConfigEdit({})}
                                                                                 className="px-4 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-white text-sm">
                                                                                 {t('resetChanges')}
                                                                             </button>
@@ -27380,6 +29799,9 @@
                                                                                             </div>
                                                                                         )}
                                                                                         {m.current_step && <div className="text-xs text-gray-500 mt-1">{m.current_step}</div>}
+                                                                                        {(m.warnings || []).map((w, i) => (
+                                                                                            <div key={i} data-v2p-warnings className="text-xs text-yellow-300 mt-1 flex items-start gap-1"><Icons.AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" /><span>{w}</span></div>
+                                                                                        ))}
                                                                                         {m.phase === 'awaiting_confirmation' && !haReadOnly && (
                                                                                             <div className="mt-2 flex items-center gap-2">
                                                                                                 <span className="text-xs text-amber-300 flex-1">{t('awaitingCutoverShort') || 'Ready to switch over — source still running.'}</span>
@@ -27454,8 +29876,11 @@
 
                                                             {/* LW: 3-step wizard tabs */}
                                                             <div className="flex gap-1 mb-4 border-b border-proxmox-border pb-2">
-                                                                {[{id:'target',label:t('target'),icon:'🎯'},{id:'hardware',label:t('hardware'),icon:'🔧'},{id:'advanced',label: t('advanced'),icon:'⚙️'}].map(tab => (
-                                                                    <button key={tab.id} onClick={() => setMigrateWizardStep(tab.id)}
+                                                                {[{id:'target',label:t('target'),icon:'🎯'},{id:'hardware',label:t('hardware'),icon:'🔧'},{id:'advanced',label: t('advanced'),icon:'⚙️'},{id:'review',label: t('v2pReview'),icon:'🔎'}].map(tab => (
+                                                                    <button key={tab.id} onClick={() => {
+                                                                        setMigrateWizardStep(tab.id);
+                                                                        if (tab.id === 'review' && !v2pReviewIsCurrent() && vmwareMigrateForm.target_storage) reviewVmwareMigration(vmwareSelectedVm);
+                                                                    }}
                                                                         className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${migrateWizardStep === tab.id ? 'bg-emerald-500/20 text-emerald-400' : 'text-gray-500 hover:text-gray-300'}`}
                                                                     >{tab.icon} {tab.label}</button>
                                                                 ))}
@@ -27504,6 +29929,40 @@
                                                                         </select>
                                                                     </div>
                                                                 )}
+
+                                                                {/* storage per disk; empty = the target storage above */}
+                                                                {vmwareMigrateForm.target_storage && v2pDiskRows.length > 0 && (
+                                                                    <div>
+                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('v2pStoragePerDisk')}</label>
+                                                                        <div className="space-y-1 p-2 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                                            {v2pDiskRows.map((row, i) => {
+                                                                                const d = (vmwareMigrationPlan?.source?.disks || [])[row.index] || {};
+                                                                                const opts = v2pInventory?.storages?.map(st => st.storage)
+                                                                                    || ((vmwareMigrationPlan.targets || []).find(tg => tg.cluster_id === vmwareMigrateForm.target_cluster)?.storages?.[vmwareMigrateForm.target_node] || []);
+                                                                                const setRow = (patch) => setV2pDiskRows(rows => rows.map((r, j) => j === i ? {...r, ...patch} : r));
+                                                                                return (
+                                                                                    <div key={row.index} className="flex flex-wrap items-center gap-2 text-xs text-gray-300 py-1">
+                                                                                        <span className="min-w-0 flex-1 truncate" title={d.vmdk_file || ''}>
+                                                                                            {d.label || `Disk ${row.index + 1}`} <span className="text-gray-500">({d.capacity_gb ?? '?'} GB{row.index === 0 ? `, ${t('v2pBootDisk')}` : ''})</span>
+                                                                                        </span>
+                                                                                        <select value={row.storage} disabled={row.skip} onChange={e => setRow({storage: e.target.value})}
+                                                                                            className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-xs disabled:opacity-40">
+                                                                                            <option value="">{t('v2pJobBridge')} ({vmwareMigrateForm.target_storage})</option>
+                                                                                            {opts.filter(n => n !== vmwareMigrateForm.target_storage).map(n => <option key={n} value={n}>{n}</option>)}
+                                                                                        </select>
+                                                                                        {row.index !== 0 && (
+                                                                                            <label className="flex items-center gap-1 text-gray-400">
+                                                                                                <input type="checkbox" checked={row.skip} onChange={e => setRow({skip: e.target.checked})} className="rounded" />
+                                                                                                {t('v2pSkip')}
+                                                                                            </label>
+                                                                                        )}
+                                                                                    </div>
+                                                                                );
+                                                                            })}
+                                                                        </div>
+                                                                        <p className="text-[11px] text-gray-500 mt-1">{t('v2pStoragePerDiskHint')}</p>
+                                                                    </div>
+                                                                )}
                                                                 
                                                                 {/* ESXi SSH User (#602: hosters like LiquidWeb don't hand out root — the
                                                                     backend already honours esxi_user, this just exposes it in the wizard) */}
@@ -27540,26 +29999,53 @@
                                                                     </select>
                                                                 </div>
 
-                                                                {/* NICs from VMware */}
+                                                                {/* NICs of the ESXi VM: bridge, VLAN and skip per NIC */}
                                                                 {vmwareMigrationPlan?.source?.nics?.length > 0 && (
                                                                     <div>
-                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('networkInterfaces')} ({vmwareMigrationPlan.source.nics.length} detected)</label>
-                                                                        <div className="space-y-1 p-2 bg-proxmox-dark rounded-lg border border-proxmox-border max-h-32 overflow-y-auto">
-                                                                            {vmwareMigrationPlan.source.nics.map((nic, i) => (
-                                                                                <div key={i} className="flex items-center gap-2 text-xs text-gray-300 py-1">
-                                                                                    <span className="text-green-400">●</span>
-                                                                                    <span className="font-mono">{nic.pve_model || nic.type}</span>
-                                                                                    <span className="text-gray-500">—</span>
-                                                                                    <span className="text-gray-400">{nic.network || 'N/A'}</span>
-                                                                                    {nic.mac_address && <span className="text-gray-600 font-mono ml-auto">{nic.mac_address}</span>}
-                                                                                </div>
-                                                                            ))}
+                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('v2pNetworkPerNic')} ({vmwareMigrationPlan.source.nics.length})</label>
+                                                                        <div className="space-y-1 p-2 bg-proxmox-dark rounded-lg border border-proxmox-border max-h-60 overflow-y-auto">
+                                                                            {v2pNicRows.map((row, i) => {
+                                                                                const nic = vmwareMigrationPlan.source.nics[row.index] || {};
+                                                                                const setRow = (patch) => setV2pNicRows(rows => rows.map((r, j) => j === i ? {...r, ...patch} : r));
+                                                                                return (
+                                                                                    <div key={row.index} className="flex flex-wrap items-center gap-2 text-xs text-gray-300 py-1">
+                                                                                        <span className={row.skip ? 'text-gray-600' : 'text-green-400'}>●</span>
+                                                                                        <span className="font-mono">net{row.index}</span>
+                                                                                        <span className="text-gray-400 truncate max-w-[150px]" title={nic.network || ''}>{nic.network || 'N/A'}</span>
+                                                                                        {nic.mac_address && <span className="text-gray-600 font-mono">{nic.mac_address}</span>}
+                                                                                        <span className="flex-1" />
+                                                                                        {v2pInventory?.bridges ? (
+                                                                                            <select value={row.bridge} disabled={row.skip} onChange={e => setRow({bridge: e.target.value})}
+                                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-xs disabled:opacity-40">
+                                                                                                <option value="">{t('v2pJobBridge')} ({vmwareMigrateForm.network_bridge || 'vmbr0'})</option>
+                                                                                                {v2pInventory.bridges.map(b => <option key={b.name} value={b.name}>{b.name}{b.kind === 'bridge' ? '' : ` (${b.kind})`}</option>)}
+                                                                                            </select>
+                                                                                        ) : (
+                                                                                            <input value={row.bridge} disabled={row.skip} onChange={e => setRow({bridge: e.target.value.trim()})}
+                                                                                                placeholder={vmwareMigrateForm.network_bridge || 'vmbr0'}
+                                                                                                className="w-24 px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-xs disabled:opacity-40" />
+                                                                                        )}
+                                                                                        <input type="number" min="1" max="4094" value={row.vlan} disabled={row.skip} onChange={e => setRow({vlan: e.target.value})}
+                                                                                            placeholder={vmwareMigrateForm.net_vlan_tag ? String(vmwareMigrateForm.net_vlan_tag) : 'VLAN'}
+                                                                                            className="w-20 px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-xs disabled:opacity-40" />
+                                                                                        <label className="flex items-center gap-1 text-gray-400">
+                                                                                            <input type="checkbox" checked={row.skip} onChange={e => setRow({skip: e.target.checked})} className="rounded" />
+                                                                                            {t('v2pSkip')}
+                                                                                        </label>
+                                                                                    </div>
+                                                                                );
+                                                                            })}
                                                                         </div>
+                                                                        <p className="text-[11px] text-gray-500 mt-1">{t('v2pNetworkPerNicHint')}</p>
                                                                         <label className="flex items-center gap-2 text-xs text-gray-400 mt-2">
                                                                             <input type="checkbox" checked={vmwareMigrateForm.preserve_mac} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, preserve_mac: e.target.checked})} className="rounded" />
                                                                             Preserve MAC addresses
                                                                         </label>
                                                                     </div>
+                                                                )}
+
+                                                                {vmwareMigrationPlan?.source && !(vmwareMigrationPlan.source.nics || []).length && (
+                                                                    <p className="text-xs text-gray-500">{t('v2pNoNicsOnSource')}</p>
                                                                 )}
 
                                                                 {/* Transfer Mode — NS Apr 2026: added 'sshfs_boot' as recommended default
@@ -27581,6 +30067,22 @@
                                                                         {vmwareMigrateForm.transfer_mode === 'snapshot_zero' && (t('transferModeSnapshotZeroDesc') || 'ESXi snapshot rotation — VM stays running through pre-sync + iterative delta sync, only ~10s downtime at cutover. ⚠️ May not work on your system (e.g. ESXi 6.x or VMFS6 with strict locking) — requires ESXi setup that releases base-VMDK lock after snapshot.')}
                                                                         {vmwareMigrateForm.transfer_mode === 'offline' && (t('transferModeOfflineDesc') || 'Stops ESXi VM, copies disks via SSH dd, then starts on Proxmox (full downtime ~ disk-size / network-speed)')}
                                                                     </p>
+                                                                </div>
+
+                                                                {/* verify mode: full compares every block before the start */}
+                                                                <div>
+                                                                    <label className="text-xs text-gray-500 mb-1 block">{t('v2pVerify')}</label>
+                                                                    <select value={v2pVerifyFor(vmwareMigrateForm, vmwareMigrationPlan)} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, verify: e.target.value})}
+                                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
+                                                                        <option value="full">{t('v2pVerifyFull')}</option>
+                                                                        <option value="sample">{t('v2pVerifySample')}</option>
+                                                                        <option value="off">{t('v2pVerifyOff')}</option>
+                                                                    </select>
+                                                                    {v2pVerifyFor(vmwareMigrateForm, vmwareMigrationPlan) === 'full' && (
+                                                                        ['sshfs_boot', 'snapshot_zero'].includes(vmwareMigrateForm.transfer_mode)
+                                                                            ? <p className="text-xs text-red-400 mt-1">{t('v2pVerifyFullNotHere')}</p>
+                                                                            : <p className="text-xs text-gray-400 mt-1 leading-relaxed">{t('v2pVerifyFullDesc')}</p>
+                                                                    )}
                                                                 </div>
                                                                 
                                                                 {/* Options */}
@@ -27620,6 +30122,11 @@
                                                             {migrateWizardStep === 'hardware' && (
                                                             <div className="space-y-3">
                                                                 <p className="text-xs text-gray-500 mb-2">Auto-detected from ESXi. Override if needed.</p>
+                                                                {/* LW Oct 2026 - who may migrate the guest but not view it gets no hardware
+                                                                    with the plan; Auto still reads it from ESXi when the migration starts */}
+                                                                {vmwareMigrationPlan.source?.details === false && (
+                                                                    <p className="text-xs text-yellow-300 mb-2" data-v2p-details-hidden>{t('v2pSourceDetailsHidden')}</p>
+                                                                )}
                                                                 <div className="grid grid-cols-2 gap-3">
                                                                     <div>
                                                                         <label className="text-xs text-gray-500 mb-1 block">BIOS / Firmware</label>
@@ -27654,7 +30161,7 @@
                                                                     </div>
                                                                     <div>
                                                                         <label className="text-xs text-gray-500 mb-1 block">Disk Bus</label>
-                                                                        <select value={vmwareMigrateForm.disk_bus} onChange={e => setVmwareMigrateForm(f => ({...f, disk_bus: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white">
+                                                                        <select value={vmwareMigrateForm.disk_bus} onChange={e => setVmwareMigrateForm(f => ({...f, disk_bus: e.target.value, disk_ssd: e.target.value === 'virtio' ? false : f.disk_ssd}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white">
                                                                             <option value="auto">Auto ({vmwareMigrationPlan.source?.hardware?.disk_bus || 'scsi'})</option>
                                                                             <option value="scsi">SCSI</option>
                                                                             <option value="sata">SATA</option>
@@ -27705,7 +30212,7 @@
                                                                     </div>
                                                                     <div>
                                                                         <label className="text-xs text-gray-500 mb-1 block">Memory (MB)</label>
-                                                                        <input type="number" min="128" value={vmwareMigrateForm.memory || vmwareMigrationPlan.source?.memory?.size_MiB || 2048}
+                                                                        <input type="number" min="128" value={vmwareMigrateForm.memory || vmwareMigrationPlan.source?.memory?.size_MiB || vmwareMigrationPlan.source?.memory_mb || 2048}
                                                                             onChange={e => setVmwareMigrateForm(f => ({...f, memory: parseInt(e.target.value)||2048}))}
                                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white" />
                                                                     </div>
@@ -27764,10 +30271,13 @@
                                                                             <input type="checkbox" checked={vmwareMigrateForm.disk_iothread} onChange={e => setVmwareMigrateForm(f => ({...f, disk_iothread: e.target.checked}))} className="rounded" />
                                                                             IO Thread (per-disk)
                                                                         </label>
-                                                                        <label className="flex items-center gap-2 text-xs text-gray-400">
-                                                                            <input type="checkbox" checked={vmwareMigrateForm.disk_ssd} onChange={e => setVmwareMigrateForm(f => ({...f, disk_ssd: e.target.checked}))} className="rounded" />
-                                                                            {t('ssdEmulation')}
-                                                                        </label>
+                                                                        {/* LW Nov 2026 - VirtIO Block has no SSD emulation, the disks attach without it */}
+                                                                        {vmwareMigrateForm.disk_bus !== 'virtio' && (
+                                                                            <label className="flex items-center gap-2 text-xs text-gray-400">
+                                                                                <input type="checkbox" checked={vmwareMigrateForm.disk_ssd} onChange={e => setVmwareMigrateForm(f => ({...f, disk_ssd: e.target.checked}))} className="rounded" />
+                                                                                {t('ssdEmulation')}
+                                                                            </label>
+                                                                        )}
                                                                         <div>
                                                                             <label className="text-xs text-gray-500 mb-1 block">Discard (TRIM)</label>
                                                                             <select value={vmwareMigrateForm.disk_discard} onChange={e => setVmwareMigrateForm(f => ({...f, disk_discard: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded px-2 py-1.5 text-xs text-white">
@@ -27851,6 +30361,89 @@
                                                             </div>
                                                             )}
                                                             
+                                                            {/* === STEP 4: REVIEW === LW Oct 2026 - a dry run of the request, Start only from here */}
+                                                            {migrateWizardStep === 'review' && (() => {
+                                                                const rv = v2pReview;
+                                                                const gib = (b) => (b === null || b === undefined) ? t('v2pReviewUnknown') : `${(b / 1073741824).toFixed(1)} GiB`;
+                                                                const current = v2pReviewIsCurrent();
+                                                                return (
+                                                                <div className="space-y-3">
+                                                                    <p className="text-xs text-gray-500">{t('v2pReviewIntro')}</p>
+                                                                    {v2pReviewLoading && <div className="text-xs text-gray-400">{t('v2pReviewChecking')}</div>}
+                                                                    {!v2pReviewLoading && rv && (
+                                                                        <div className="space-y-3">
+                                                                            {!current && (
+                                                                                <div className="p-2 rounded border border-yellow-500/40 text-xs text-yellow-300" style={{background:'rgba(234,179,8,0.07)'}}>{t('v2pReviewStale')}</div>
+                                                                            )}
+                                                                            {rv.ok ? (
+                                                                                <div className="p-2 rounded border border-emerald-500/40 text-xs text-emerald-400" style={{background:'rgba(16,185,129,0.07)'}}>{t('v2pReviewOk')}</div>
+                                                                            ) : (
+                                                                                <div className="p-2 rounded border border-red-500/30 text-xs text-red-300" style={{background:'rgba(239,68,68,0.07)'}}>
+                                                                                    <div className="font-semibold mb-1">{t('v2pReviewFailed')}</div>
+                                                                                    {(rv.errors || []).map((e, i) => <div key={i}>- {e}</div>)}
+                                                                                </div>
+                                                                            )}
+                                                                            {(rv.warnings || []).length > 0 && (
+                                                                                <div className="p-2 rounded border border-yellow-500/30 text-xs text-yellow-200/80">
+                                                                                    <div className="font-semibold mb-1">{t('v2pReviewWarnings')}</div>
+                                                                                    {rv.warnings.map((w, i) => <div key={i}>- {w}</div>)}
+                                                                                </div>
+                                                                            )}
+                                                                            {(rv.nics || []).length > 0 && (
+                                                                                <div>
+                                                                                    <div className="text-xs text-gray-400 font-semibold mb-1">{t('v2pReviewNics')}</div>
+                                                                                    <div className="space-y-0.5 text-xs">
+                                                                                        {rv.nics.map(n => (
+                                                                                            <div key={n.index} className={`flex flex-wrap gap-2 ${n.skip ? 'text-gray-600 line-through' : 'text-gray-300'}`}>
+                                                                                                <span className="font-mono">{n.net}</span>
+                                                                                                <span className="text-gray-500">{n.source_network || n.label}</span>
+                                                                                                <span className="ml-auto font-mono">{n.skip ? t('v2pSkipped') : `${n.bridge}${n.vlan ? ` tag ${n.vlan}` : ` (${t('v2pReviewNoTag')})`}`}</span>
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                </div>
+                                                                            )}
+                                                                            {(rv.disks || []).length > 0 && (
+                                                                                <div>
+                                                                                    <div className="text-xs text-gray-400 font-semibold mb-1">{t('v2pReviewDisks')}</div>
+                                                                                    <div className="space-y-0.5 text-xs">
+                                                                                        {rv.disks.map(d => (
+                                                                                            <div key={d.index} className={`flex flex-wrap gap-2 ${d.skip ? 'text-gray-600 line-through' : 'text-gray-300'}`}>
+                                                                                                <span>{d.label}{d.boot ? ` (${t('v2pBootDisk')})` : ''}</span>
+                                                                                                <span className="text-gray-500">{gib(d.size_bytes)}</span>
+                                                                                                <span className="ml-auto font-mono">{d.skip ? t('v2pSkipped') : d.storage}</span>
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                </div>
+                                                                            )}
+                                                                            {(rv.storages || []).length > 0 && (
+                                                                                <div>
+                                                                                    <div className="text-xs text-gray-400 font-semibold mb-1">{t('v2pReviewStorages')}</div>
+                                                                                    <div className="space-y-0.5 text-xs">
+                                                                                        {rv.storages.map(st => (
+                                                                                            <div key={st.storage} className={`flex flex-wrap gap-2 ${st.ok ? 'text-gray-300' : 'text-red-300'}`}>
+                                                                                                <span className="font-mono">{st.storage}</span>
+                                                                                                <span className="text-gray-500">{st.type}</span>
+                                                                                                <span className="ml-auto">{gib(st.needed_bytes)} {t('v2pReviewNeeded')} / {gib(st.avail_bytes)} {t('v2pReviewFree')}</span>
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                </div>
+                                                                            )}
+                                                                            {rv.verify && (
+                                                                                <div className="text-xs text-gray-400">{t('v2pVerify')}: <span className="text-gray-200">{rv.verify === 'full' ? t('v2pVerifyFull') : rv.verify === 'off' ? t('v2pVerifyOff') : t('v2pVerifySample')}</span></div>
+                                                                            )}
+                                                                        </div>
+                                                                    )}
+                                                                    <button onClick={() => reviewVmwareMigration(vmwareSelectedVm)} disabled={v2pReviewLoading || !vmwareMigrateForm.target_storage}
+                                                                        className="px-3 py-1.5 rounded-lg bg-proxmox-dark border border-proxmox-border text-gray-300 text-xs disabled:opacity-50">
+                                                                        {t('v2pReviewCheckAgain')}
+                                                                    </button>
+                                                                </div>
+                                                                );
+                                                            })()}
+
                                                             {/* NS Apr 2026, MK May 2026 — VirtIO MSI bulk install (opt-in). Off by default.
                                                                 Checks for virtio-win.iso on the Proxmox node, copies the official
                                                                 virtio-win-gt-x64.msi onto the disk and registers a SYSTEM-context
@@ -27937,13 +30530,23 @@
 
                                                             <div className="flex gap-2 justify-end mt-4">
                                                                 <button onClick={() => setShowVmwareMigrate(false)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 text-sm">{t('cancel')}</button>
-                                                                <button
-                                                                    onClick={() => startVmwareMigration(vmwareSelectedVm)}
-                                                                    disabled={!vmwareMigrateForm.target_cluster || !vmwareMigrateForm.target_node || !vmwareMigrateForm.target_storage || !vmwareMigrateForm.esxi_password || !vmwareMigrateForm.oc_acknowledge || vmwareMigrateLoading}
-                                                                    title={!vmwareMigrateForm.oc_acknowledge ? (t('v2pSupportAckRequired') || 'Bitte den Hinweis kurz bestätigen') : ''}
-                                                                    className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
-                                                                    {vmwareMigrateLoading ? t('starting') : t('xhmStartMigration')}
-                                                                </button>
+                                                                {migrateWizardStep !== 'review' ? (
+                                                                    <button
+                                                                        onClick={() => { setMigrateWizardStep('review'); if (!v2pReviewIsCurrent()) reviewVmwareMigration(vmwareSelectedVm); }}
+                                                                        disabled={!vmwareMigrateForm.target_cluster || !vmwareMigrateForm.target_node || !vmwareMigrateForm.target_storage || v2pReviewLoading}
+                                                                        title={t('v2pReviewStartHint')}
+                                                                        className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
+                                                                        {t('v2pReviewToStart')}
+                                                                    </button>
+                                                                ) : (
+                                                                    <button
+                                                                        onClick={() => startVmwareMigration(vmwareSelectedVm)}
+                                                                        disabled={!vmwareMigrateForm.target_cluster || !vmwareMigrateForm.target_node || !vmwareMigrateForm.target_storage || !vmwareMigrateForm.esxi_password || !vmwareMigrateForm.oc_acknowledge || vmwareMigrateLoading || v2pReviewLoading || !v2pReview?.ok || !v2pReviewIsCurrent()}
+                                                                        title={!vmwareMigrateForm.oc_acknowledge ? (t('v2pSupportAckRequired') || 'Bitte den Hinweis kurz bestätigen') : (!v2pReviewIsCurrent() ? t('v2pReviewStale') : '')}
+                                                                        className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
+                                                                        {vmwareMigrateLoading ? t('starting') : t('xhmStartMigration')}
+                                                                    </button>
+                                                                )}
                                                             </div>
                                                         </div>
                                                     </div>
@@ -28296,6 +30899,7 @@
                                         {/* Tasks & Events Tab */}
                                         {vmwareActiveTab === 'tasks' && (
                                             <div className="space-y-4">
+                                                <EsxiBulkRuns serverId={selectedVMware.id} authFetch={authFetch} t={t} onOpen={id => setEsxiBulk({runId: id})} />
                                                 {/* Active Migrations */}
                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                     <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
@@ -28321,6 +30925,7 @@
                                                                             </div>
                                                                             <div className="flex items-center gap-3">
                                                                                 {m.total_downtime_seconds != null && <span className="text-xs text-gray-500">{t('downtime')}: {m.total_downtime_seconds}s</span>}
+                                                                                {(m.warnings || []).length > 0 && <span data-v2p-warnings title={m.warnings.join('\n')} className="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-500/20 text-yellow-300 flex items-center gap-1"><Icons.AlertTriangle className="w-3 h-3" />{t('migrationWarnings')}: {m.warnings.length}</span>}
                                                                                 <span className={`px-2 py-0.5 rounded text-xs font-semibold ${m.status === 'completed' ? 'bg-green-500/20 text-green-400' : m.status === 'failed' ? 'bg-red-500/20 text-red-400' : m.status === 'cancelled' ? 'bg-gray-500/20 text-gray-400' : 'bg-blue-500/20 text-blue-400'}`}>{m.status}</span>
                                                                             </div>
                                                                         </div>
@@ -28400,6 +31005,13 @@
                                                         </div>
                                                         {vmwareMigrationDetail.error && <div className="p-3 bg-red-500/10 border-t border-red-500/20 text-red-400 text-xs">{t('error')}: {vmwareMigrationDetail.error}</div>}
                                                         {vmwareMigrationDetail.status === 'completed' && <div className="p-3 bg-green-500/10 border-t border-green-500/20 text-green-400 text-xs">✓ {t('migrationCompleted')} VMID: {vmwareMigrationDetail.proxmox_vmid}{vmwareMigrationDetail.total_downtime_seconds ? ` - ${t('downtime')}: ${vmwareMigrationDetail.total_downtime_seconds}s` : ''}</div>}
+                                                        {/* LW Nov 2026 - what the run left undone, e.g. VirtIO drivers not injected (#1245) */}
+                                                        {(vmwareMigrationDetail.warnings || []).length > 0 && (
+                                                            <div data-v2p-warnings className="p-3 bg-yellow-500/10 border-t border-yellow-500/20 text-yellow-300 text-xs space-y-1">
+                                                                <div className="flex items-center gap-1.5 font-semibold"><Icons.AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />{t('migrationWarnings')}</div>
+                                                                {vmwareMigrationDetail.warnings.map((w, i) => <div key={i}>{w}</div>)}
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 )}
                                                 
@@ -28452,7 +31064,7 @@
                                         clusterGroups={clusterGroups}
                                         topGuests={topGuests}
                                         onSelectCluster={(cluster) => { setSelectedGroup(null); setSelectedCluster(cluster); }}
-                                        onSelectVm={(cluster, vmid, node, guest) => { setSelectedGroup(null); setSelectedCluster(cluster); setSelectedSidebarVm({...(guest || { vmid, node, type: 'qemu' }), _clusterId: cluster.id}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
+                                        onSelectVm={(cluster, vmid, node, guest) => { askGuestDetail(cluster, guest || { vmid }); setSelectedGroup(null); setSelectedCluster(cluster); setSelectedSidebarVm({...(guest || { vmid, node, type: 'qemu' }), _clusterId: cluster.id}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                         onOpenSettings={() => setShowGroupSettings(selectedGroup)}
                                         authFetch={authFetch}
                                         API_URL={API_URL}
@@ -28490,6 +31102,7 @@
                                                                     name: n,
                                                                     status: 'online',  // VMs implies node is up
                                                                     cpu_percent: 0, mem_percent: 0,
+                                                                    _derived: true,
                                                                 });
                                                             }
                                                         }
@@ -28503,6 +31116,7 @@
                                                             name: `node-${i + 1}`,
                                                             status: i < onl ? 'online' : 'offline',
                                                             cpu_percent: 0, mem_percent: 0,
+                                                            _placeholder: true,
                                                         }));
                                                     }
                                                     const clusterPbs = pbsServers.filter(p =>
@@ -28524,6 +31138,36 @@
                                                         setSidebarTopology(false);
                                                     }
                                                 }}
+                                                onGuestOpen={isCorpRedesigned ? (vm) => {
+                                                    const cl = clusters.find(c => c.id === vm._clusterId);
+                                                    if (!cl) return;
+                                                    setSelectedCluster(cl);
+                                                    setSelectedSidebarVm({...vm, _clusterId: cl.id});
+                                                    setSelectedSidebarNode(null);
+                                                    setSelectedSidebarDatastore(null);
+                                                    setActiveTab('resources');
+                                                    setResourcesSubTab('management');
+                                                    setExpandedSidebarClusters(prev => ({...prev, [cl.id]: true}));
+                                                    setSidebarTopology(false);
+                                                } : undefined}
+                                                onNodeClick={isCorpRedesigned ? (cid, name) => {
+                                                    const cl = clusters.find(c => c.id === cid);
+                                                    if (!cl) return;
+                                                    setSelectedCluster(cl);
+                                                    setSelectedSidebarNode({ name, clusterId: cid });
+                                                    setSelectedSidebarVm(null);
+                                                    setSelectedSidebarDatastore(null);
+                                                    setActiveTab('overview');
+                                                    setExpandedSidebarClusters(prev => ({...prev, [cid]: true}));
+                                                    setSidebarTopology(false);
+                                                } : undefined}
+                                                onClusterClick={isCorpRedesigned ? (cid) => {
+                                                    const cl = clusters.find(c => c.id === cid);
+                                                    if (!cl) return;
+                                                    setSelectedCluster(cl);
+                                                    setActiveTab('overview');
+                                                    setSidebarTopology(false);
+                                                } : undefined}
                                             />
                                             {clusters.filter(c => c.connected).length === 0 && (
                                                 <div className="p-8 text-center text-sm" style={{color: 'var(--corp-text-muted)'}}>
@@ -28610,8 +31254,8 @@
                                                                     : cl?.type === 'esxi' || cl?.cluster_type === 'esxi' ? 'esxi' : 'proxmox';
                                                                 const srcHv = getHvType(srcCluster);
                                                                 const tgtHv = getHvType(c);
-                                                                // must be different hypervisor type
-                                                                if (srcHv === tgtHv) return null;
+                                                                // must be different hypervisor type, and no migration lands on ESXi
+                                                                if (srcHv === tgtHv || tgtHv === 'esxi') return null;
                                                                 const label = tgtHv === 'xcpng' ? 'XCP-ng' : tgtHv === 'esxi' ? 'ESXi' : 'Proxmox';
                                                                 return <option key={c.id} value={c.id}>{c.display_name || c.name} ({label})</option>;
                                                             })}
@@ -28675,7 +31319,7 @@
                                                     <div className="border border-purple-500/20 rounded-xl p-4 space-y-4">
                                                         <div className="flex items-center gap-2 text-sm text-white font-medium">
                                                             <span>{xhmPlan.source.name}</span>
-                                                            <span className="text-purple-400">{xhmPlan.direction === 'xcpng_to_pve' ? '→ Proxmox' : '→ XCP-ng'}</span>
+                                                            <span className="text-purple-400">{xhmToPve(xhmPlan) ? '→ Proxmox' : '→ XCP-ng'}</span>
                                                         </div>
                                                         <div className="grid grid-cols-4 gap-2 text-center">
                                                             <div className="bg-proxmox-dark rounded-lg p-2">
@@ -28705,7 +31349,7 @@
                                                         </div>
 
                                                         {/* Target selection */}
-                                                        {xhmPlan.direction === 'xcpng_to_pve' && xhmPlan.targets && (
+                                                        {xhmToPve(xhmPlan) && xhmPlan.targets && (
                                                             <div className="space-y-2">
                                                                 <div>
                                                                     <label className="text-xs text-gray-500 mb-1 block">{t('xhmTargetNode') || 'Target Node'}</label>
@@ -28725,7 +31369,7 @@
                                                                 )}
                                                             </div>
                                                         )}
-                                                        {xhmPlan.direction === 'pve_to_xcpng' && xhmPlan.targets && (
+                                                        {!xhmToPve(xhmPlan) && xhmPlan.targets && (
                                                             <div>
                                                                 <label className="text-xs text-gray-500 mb-1 block">{t('xhmTargetStorage') || 'Target Storage'}</label>
                                                                 <select value={xhmForm.target_storage} onChange={e => setXhmForm({...xhmForm, target_storage: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
@@ -28745,7 +31389,7 @@
                                                                     <div key={i} className="flex items-center gap-2 mb-1">
                                                                         <span className="text-xs text-gray-400 w-28 truncate">{net.bridge || net.network || `net${i}`}</span>
                                                                         <span className="text-gray-600">→</span>
-                                                                        {xhmPlan.direction === 'xcpng_to_pve' ? (
+                                                                        {xhmToPve(xhmPlan) ? (
                                                                             <select value={xhmForm.network_map[net.network || net.bridge || String(i)] || ''} onChange={e => setXhmForm({...xhmForm, network_map: {...xhmForm.network_map, [net.network || net.bridge || String(i)]: e.target.value}})} className="flex-1 px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-xs">
                                                                                 <option value="">vmbr0 (default)</option>
                                                                                 {(xhmPlan.targets[0]?.bridges?.[xhmForm.target_node] || ['vmbr0']).map(b => <option key={b} value={b}>{b}</option>)}
@@ -28773,7 +31417,7 @@
                                                             </label>
                                                         </div>
 
-                                                        {!haReadOnly && <button onClick={startXhmMigration} disabled={xhmLoading || !xhmForm.target_storage || (xhmPlan?.direction === 'xcpng_to_pve' && !xhmForm.target_node)} className="w-full py-2.5 rounded-lg bg-purple-500 text-white font-medium hover:bg-purple-600 disabled:opacity-50 text-sm">
+                                                        {!haReadOnly && <button onClick={startXhmMigration} disabled={xhmLoading || !xhmForm.target_storage || (xhmToPve(xhmPlan) && !xhmForm.target_node)} className="w-full py-2.5 rounded-lg bg-purple-500 text-white font-medium hover:bg-purple-600 disabled:opacity-50 text-sm">
                                                             {xhmLoading ? 'Starting...' : (t('xhmStartMigration') || 'Start Migration')}
                                                         </button>}
                                                     </div>
@@ -28793,7 +31437,7 @@
                                                         {xhmMigrations.map(m => {
                                                             const isActive = m.status === 'running';
                                                             const phases = ['planning','transfer','creating','attaching','completed'];
-                                                            const phaseLabel = {planning:'Planning', transfer:'Transfer', creating:'Creating', attaching:'Attaching', completed:'Done', failed:'Failed'};
+                                                            const phaseLabel = {planning: t('phasePlanning'), transfer: t('phaseTransfer'), creating: t('phaseCreating'), attaching: t('phaseAttaching'), completed: t('done'), failed: t('failed')};
                                                             const dirLabel = m.direction === 'xcpng_to_pve' ? 'XCP→PVE' : 'PVE→XCP';
                                                             return (
                                                                 <div key={m.id} className={`p-4 hover:bg-proxmox-hover/30 cursor-pointer ${xhmSelectedMigration === m.id ? 'bg-purple-500/5 border-l-2 border-l-purple-400' : ''}`}
@@ -28843,12 +31487,12 @@
                                             {xhmSelectedMigration && xhmMigrationDetail && (
                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                     <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
-                                                        <h3 className="text-sm font-semibold text-white">Migration Log - {xhmMigrationDetail.vm_name} <span className="text-gray-500 font-normal">({xhmSelectedMigration})</span></h3>
-                                                        <button onClick={() => setXhmSelectedMigration(null)} className="text-xs text-gray-500 hover:text-white px-2 py-1 rounded bg-proxmox-dark">Close</button>
+                                                        <h3 className="text-sm font-semibold text-white">{t('migrationLog')} - {xhmMigrationDetail.vm_name} <span className="text-gray-500 font-normal">({xhmSelectedMigration})</span></h3>
+                                                        <button onClick={() => setXhmSelectedMigration(null)} className="text-xs text-gray-500 hover:text-white px-2 py-1 rounded bg-proxmox-dark">{t('close')}</button>
                                                     </div>
                                                     {xhmMigrationDetail.disk_progress && Object.keys(xhmMigrationDetail.disk_progress).length > 0 && (
                                                         <div className="p-4 border-b border-proxmox-border/50 space-y-2">
-                                                            <div className="text-xs text-gray-500 uppercase font-semibold">Disk Transfer</div>
+                                                            <div className="text-xs text-gray-500 uppercase font-semibold">{t('diskTransfer')}</div>
                                                             {Object.entries(xhmMigrationDetail.disk_progress).map(([key, dp]) => (
                                                                 <div key={key}>
                                                                     <div className="flex justify-between text-xs text-gray-400 mb-0.5">
@@ -28920,6 +31564,7 @@
                                         addToast={addToast}
                                         onBulkMigrate={handleBulkMigrate}
                                         onOpenGuest={(cluster, guest) => {
+                                            askGuestDetail(cluster, guest);
                                             setSelectedCluster(cluster);
                                             setSelectedSidebarVm({...guest, _clusterId: cluster.id});
                                             setSelectedSidebarNode(null);
@@ -28938,6 +31583,7 @@
                                         addToast={addToast}
                                         onSelectCluster={setSelectedCluster}
                                         onSelectVm={(cluster, vmid, node, guest) => {
+                                            askGuestDetail(cluster, guest || { vmid });
                                             setSelectedCluster(cluster);
                                             setSelectedSidebarVm({...(guest || { vmid, node, type: 'qemu' }), _clusterId: cluster.id});
                                             setSelectedSidebarNode(null);
@@ -28945,20 +31591,30 @@
                                             setResourcesSubTab('management');
                                         }}
                                         onOpenClusterTab={(cluster, tab, section) => {
+                                            // LW Nov 2026 - Corporate Redesigned has its update manager in a tab of its own
+                                            const crUpd = isCorpRedesigned && section === 'updates';
+                                            if (crUpd) tab = 'updates';
                                             setSelectedCluster(cluster);
                                             setSelectedSidebarVm(null);
                                             setSelectedSidebarNode(null);
                                             setSelectedSidebarDatastore(null);
                                             setDatacenterSection(tab === 'datacenter' ? section : null);
                                             setActiveTab(tab);
+                                            // LW Oct 2026 - Corporate Redesigned: the section of a reports or compliance link is its sub tab
+                                            if (isCorpRedesigned && section && tab === 'reports') setReportSubTab(section);
+                                            if (isCorpRedesigned && section && tab === 'compliance') setComplianceSubTab(section);
                                             // the update manager sits further down the settings tab
-                                            if (section === 'updates') setTimeout(() => {
+                                            if (section === 'updates' && !crUpd) setTimeout(() => {
                                                 const el = document.querySelector('[data-update-manager]');
                                                 if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
                                             }, 300);
                                         }}
                                         onAutoInstall={user?.autoinstall_access === 'manage' ? () => openAutoInstall({ wizard: true }) : undefined}
                                         onOpenGuests={openGuests}
+                                        onOpenTopology={isCorpRedesigned ? openTopology : undefined}
+                                        recentEvents={corpEventLog}
+                                        canAudit={holds('admin.audit')}
+                                        authFetch={authFetch}
                                     />
                                 )}
                             </div>
@@ -29312,6 +31968,7 @@
                             onClose={handleCloseConfig}
                             addToast={addToast}
                             isCorporate={isCorporate}
+                            initialTab={configTab || undefined}
                         />
                     )}
 
@@ -29527,7 +32184,7 @@
 
                     {/* Console tab bar — only when 2+ open or when one is open and minimisable */}
                     {consoleStack.length >= 2 && (
-                        <div style={{
+                        <div className={isCorpRedesigned ? 'cr-console-tabs' : undefined} style={{
                             position: 'fixed', bottom: 0, left: 0, right: 0,
                             zIndex: 60, pointerEvents: 'none',
                             display: 'flex', justifyContent: 'center',
@@ -30025,6 +32682,17 @@
                             })()}
                             <div className="corp-status-bar-item">
                                 {(() => {
+                                    // LW Nov 2026 - Corporate Redesigned on All Clusters: the guests of every cluster with a
+                                    // current status, as the dashboard tiles count them (no cluster is selected, so the list
+                                    // below would say 0/0)
+                                    if (isCorpRedesigned && !selectedCluster) {
+                                        const s = crInventory(clusters, allClusterMetrics, { now: Date.now() }).sum;
+                                        if (!s.vms && !s.cts) return <span data-cr-status-guests="">- VMs</span>;
+                                        const run = (s.vms ? s.vms.running : 0) + (s.cts ? s.cts.running : 0);
+                                        const all = (s.vms ? s.vms.total : 0) + (s.cts ? s.cts.total : 0);
+                                        return <span data-cr-status-guests="" title={s.uncounted.length ? crFill(t('crDashUncountedHint'), { clusters: s.uncounted.join(', ') }) : undefined}>
+                                            <strong>{run}</strong>/{all} VMs{s.uncounted.length ? ' *' : ''}</span>;
+                                    }
                                     const vms = clusterResources.filter(r => r.type === 'qemu' || r.type === 'lxc');
                                     const running = vms.filter(r => r.status === 'running').length;
                                     return <span><strong>{running}</strong>/{vms.length} VMs</span>;
@@ -30337,7 +33005,7 @@
                                     </div>
                                     
                                     {/* Target Type Selection */}
-                                    {alertMetricSel !== 'ceph_health' && (
+                                    {alertMetricSel !== 'ceph_health' && alertMetricSel !== 'qnetd' && (
                                     <div className="grid grid-cols-2 gap-3">
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">{t('targetType') || 'Apply to'}</label>
@@ -30378,6 +33046,8 @@
                                                 <option value="restart_loop">{t('restartLoopTitle')}</option>
                                                 <option value="qdevice">{t('qdeviceAlertTitle')}</option>
                                                 <option value="restore_test_age">{t('restoreTestAgeTitle')}</option>
+                                                {/* LW Oct 2026 - an administrator's rule, like the QNetd hosts it watches */}
+                                                {(isAdmin || alertMetricSel === 'qnetd') && <option value="qnetd">{t('qnetdAlertTitle')}</option>}
                                             </select>
                                         </div>
                                         {alertMetricSel === 'rolling_update' ? (
@@ -30397,6 +33067,7 @@
                                                     : alertMetricSel === 'ceph_osd_latency' ? t('cephOsdLatencyHelp')
                                                     : alertMetricSel === 'replication_rpo' ? t('replicationRpoHelp')
                                                     : alertMetricSel === 'restore_test_age' ? t('restoreTestAgeHelp')
+                                                    : alertMetricSel === 'qnetd' ? `${t('qnetdAlertHelp')} ${t('qnetdAlertAdminNote')}`
                                                     : t('alertSnapHelp')}
                                             </div>
                                         ) : <>
@@ -31008,6 +33679,8 @@
                             onClose={() => setShowCommandPalette(false)}
                             authFetch={authFetch}
                             onPickHit={(hit) => { setShowCommandPalette(false); navigateToResult(hit); }}
+                            extraActions={(isCorpRedesigned || !isCorporate) && can('vm.create') && clusters.some(c => !c.cluster_type || c.cluster_type === 'proxmox')
+                                ? [['cr-blueprints', t('crBpNavDeploy'), 'Template']] : undefined}
                             onPickCluster={(c) => { setSelectedCluster(c); setActiveTab('overview'); setShowCommandPalette(false); }}
                             onPickVm={(vm) => {
                                 const c = clusters.find(cl => cl.id === vm._clusterId);
@@ -31029,6 +33702,12 @@
                                 else if (id === 'goto-reports') setActiveTab('reports');
                                 else if (id === 'goto-plugins') setActiveTab('plugins');
                                 else if (id === 'goto-settings') setActiveTab('settings');
+                                else if (id === 'cr-blueprints' && (crTaskNav || mdBpNav)) {
+                                    // the open cluster, else the first Proxmox VE one (Modern too, #1220)
+                                    const pve = (c) => !!c && (!c.cluster_type || c.cluster_type === 'proxmox');
+                                    const c = pve(selectedCluster) ? selectedCluster : clusters.find(pve);
+                                    if (c) (crTaskNav || mdBpNav).openBlueprints(c.id);
+                                }
                             }}
                         />
                     )}
@@ -31041,11 +33720,14 @@
                     {showApiReference && <ApiReferenceModal onClose={() => setShowApiReference(false)} />}
 
                     {/* NS — connection-loss banner only after WS is dropped >4s */}
+                    {/* LW Nov 2026 - Corporate Redesigned says it in its alert strip */}
+                    {!isCorpRedesigned && (
                     <div style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 95, pointerEvents: 'none' }}>
                         <div style={{ pointerEvents: 'auto' }}>
                             <ConnectionLostBanner connected={wsConnected} />
                         </div>
                     </div>
+                    )}
 
                     {/* NS May 2026 — live backup progress pane */}
                     {activeBackupProgress && selectedCluster && (
@@ -31602,7 +34284,9 @@
                             onCancel={cancelTask}
                             onRefresh={() => selectedCluster && fetchTasks(selectedCluster.id)}
                             clusterId={selectedCluster?.id}
+                            clusterName={selectedCluster ? clusterLabel(selectedCluster) : ''}
                             autoExpandEnabled={user?.taskbar_auto_expand !== false}
+                            crNav={crTaskNav}
                         />
                     )}
                 </div>
@@ -31758,14 +34442,18 @@
             const { t } = useTranslation();
             const { user, updatePreferences } = useAuth();
             const [saving, setSaving] = useState(false);
+            const [locked, setLocked] = useState(false);
 
             const pickLayout = async (layout) => {
                 setSaving(true);
                 try {
                     // Cloud brings its own theme, as when it is picked under My Profile
-                    await updatePreferences(layout === 'cloud'
+                    const result = await updatePreferences(layout === 'cloud'
                         ? { ui_layout: 'cloud', theme: 'cloud', layout_chosen: true }
                         : { ui_layout: layout, layout_chosen: true });
+                    // #1189 - pinned by the admin. The refusal brings the lock along and the
+                    // pinned layout takes over, until then say why nothing happened
+                    setLocked(result?.code === 'UI_LOCKED');
                 } catch(e) {
                     console.error('layout pick failed', e);
                 }
@@ -31774,7 +34462,7 @@
 
             return (
                 <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[100] p-4">
-                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-2xl shadow-2xl">
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-3xl shadow-2xl">
                         <div className="p-6">
                             <div className="flex items-center gap-3 mb-2">
                                 <div className="p-2 bg-proxmox-orange/20 rounded-lg">
@@ -31788,7 +34476,9 @@
                                 {t('layoutSelectionDesc') || 'Choose your preferred interface style. You can change this anytime under My Profile \u2192 Layout Style.'}
                             </p>
 
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+                            {/* LW Nov 2026 - Corporate Redesigned takes the place of classic Corporate, which
+                                only someone already on it still sees here */}
+                            <div className={`grid grid-cols-1 sm:grid-cols-2 ${user?.ui_layout === 'corporate' ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-4 mb-4`}>
                                 {/* Modern */}
                                 <button
                                     onClick={() => pickLayout('modern')}
@@ -31817,35 +34507,71 @@
                                 </button>
 
                                 {/* Corporate */}
+                                {user?.ui_layout === 'corporate' && (
+                                    <button
+                                        onClick={() => pickLayout('corporate')}
+                                        disabled={saving}
+                                        className={`p-4 rounded-xl border-2 transition-all hover:scale-[1.03] text-left ${
+                                            user?.ui_layout === 'corporate'
+                                                ? 'border-proxmox-orange ring-2 ring-proxmox-orange/30'
+                                                : 'border-proxmox-border hover:border-gray-500'
+                                        } disabled:opacity-60`}
+                                    >
+                                        <div className="h-20 rounded mb-3 relative overflow-hidden bg-proxmox-dark border border-proxmox-border">
+                                            <div className="absolute left-0 top-0 bottom-0 w-6 bg-proxmox-card border-r border-proxmox-border">
+                                                <div className="mt-2 ml-1.5 space-y-1">
+                                                    <div className="w-3 h-0.5 bg-gray-500" />
+                                                    <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                                    <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                                    <div className="w-3 h-0.5 bg-gray-500" />
+                                                    <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                                </div>
+                                            </div>
+                                            <div className="absolute right-2 top-2 left-8 h-2.5 bg-proxmox-card border-b border-proxmox-border flex items-end gap-1.5 px-1">
+                                                <div className="w-4 h-0.5 bg-proxmox-orange" />
+                                                <div className="w-4 h-0.5 bg-gray-600" />
+                                                <div className="w-4 h-0.5 bg-gray-600" />
+                                            </div>
+                                            <div className="absolute right-2 top-6 left-8 bottom-2 bg-proxmox-card border border-proxmox-border" />
+                                        </div>
+                                        <div className="text-center">
+                                            <span className="text-sm font-medium text-white">{t('layoutCorporate') || 'Corporate'}</span>
+                                            <p className="text-xs text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
+                                        </div>
+                                    </button>
+                                )}
+                                {/* LW Nov 2026 - Corporate Redesigned, offered from the first login on as under My Profile */}
                                 <button
-                                    onClick={() => pickLayout('corporate')}
+                                    onClick={() => pickLayout('corporate-redesigned')}
                                     disabled={saving}
+                                    data-layout-pick="corporate-redesigned"
                                     className={`p-4 rounded-xl border-2 transition-all hover:scale-[1.03] text-left ${
-                                        user?.ui_layout === 'corporate'
+                                        user?.ui_layout === 'corporate-redesigned'
                                             ? 'border-proxmox-orange ring-2 ring-proxmox-orange/30'
                                             : 'border-proxmox-border hover:border-gray-500'
                                     } disabled:opacity-60`}
                                 >
-                                    <div className="h-20 rounded mb-3 relative overflow-hidden bg-proxmox-dark border border-proxmox-border">
-                                        <div className="absolute left-0 top-0 bottom-0 w-6 bg-proxmox-card border-r border-proxmox-border">
-                                            <div className="mt-2 ml-1.5 space-y-1">
-                                                <div className="w-3 h-0.5 bg-gray-500" />
-                                                <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
-                                                <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
-                                                <div className="w-3 h-0.5 bg-gray-500" />
-                                                <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                    <div className="h-20 rounded mb-3 relative overflow-hidden border" style={{ background: '#17242c', borderColor: '#344954' }}>
+                                        <div className="absolute left-0 right-0 top-0 h-2.5" style={{ background: '#1c2c35', borderBottom: '1px solid #344954' }}>
+                                            <div className="absolute top-0.5 left-1.5 w-4 h-1" style={{ background: '#55b6d0' }} />
+                                        </div>
+                                        <div className="absolute left-0 top-2.5 bottom-0 w-6" style={{ background: '#1c2c35', borderRight: '1px solid #344954' }}>
+                                            <div className="mt-1.5 ml-1.5 space-y-1">
+                                                <div className="w-3 h-0.5" style={{ background: '#55b6d0' }} />
+                                                <div className="w-2.5 h-0.5 ml-1" style={{ background: '#718792' }} />
+                                                <div className="w-2.5 h-0.5 ml-1" style={{ background: '#718792' }} />
                                             </div>
                                         </div>
-                                        <div className="absolute right-2 top-2 left-8 h-2.5 bg-proxmox-card border-b border-proxmox-border flex items-end gap-1.5 px-1">
-                                            <div className="w-4 h-0.5 bg-proxmox-orange" />
-                                            <div className="w-4 h-0.5 bg-gray-600" />
-                                            <div className="w-4 h-0.5 bg-gray-600" />
+                                        <div className="absolute right-2 left-8 bottom-2 space-y-1" style={{ top: 16, background: '#20333e', border: '1px solid #293d47' }}>
+                                            <div className="h-1.5" style={{ background: '#263c47' }} />
+                                            <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                            <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                            <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
                                         </div>
-                                        <div className="absolute right-2 top-6 left-8 bottom-2 bg-proxmox-card border border-proxmox-border" />
                                     </div>
                                     <div className="text-center">
-                                        <span className="text-sm font-medium text-white">{t('layoutCorporate') || 'Corporate'}</span>
-                                        <p className="text-xs text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
+                                        <span className="text-sm font-medium text-white">{t('layoutCorporateRedesigned')}</span>
+                                        <p className="text-xs text-gray-500 mt-0.5">{t('layoutCorporateRedesignedDesc')}</p>
                                     </div>
                                 </button>
                                 {/* LW Oct 2026 - Cloud, offered from the first login on as under My Profile */}
@@ -31876,6 +34602,11 @@
                                 </button>
                             </div>
 
+                            {locked && (
+                                <p className="text-xs text-yellow-400 text-center mb-2" data-ui-lock="layout">
+                                    {t('uiLayoutLockedHint') || 'Layout set by your administrator'}
+                                </p>
+                            )}
                             <p className="text-xs text-gray-500 text-center">
                                 {t('layoutSelectionHint') || 'You can change this anytime under My Profile \u2192 Layout Style'}
                             </p>
@@ -32016,7 +34747,7 @@
         }
 
         function App() {
-            const { user, loading, requires2FASetup, needsSetup } = useAuth();
+            const { user, loading, requires2FASetup, needsSetup, layoutLock } = useAuth();
             // #767 — read once; a popup must not re-evaluate this on every render
             const consoleKey = useMemo(() => {
                 try { return new URLSearchParams(window.location.search).get('console'); }
@@ -32067,6 +34798,11 @@
                 return <StandaloneConsole consoleKey={consoleKey} />;
             }
 
+            // LW Oct 2026 (#1189) - an admin pinned the layout, there is no choice to make
+            if (layoutLock) {
+                return <PegaProxDashboard />;
+            }
+
             // LW: Show layout picker on first login (before dashboard)
             if (!user.layout_chosen) {
                 return (
@@ -32080,19 +34816,28 @@
             return <PegaProxDashboard />;
         }
 
-        ReactDOM.render(
-            <LanguageProvider>
-                <AuthProvider>
-                    <App />
-                </AuthProvider>
-            </LanguageProvider>,
-            document.getElementById('root')
-        );
-        
-        // LW: Hide loading screen after React renders
-        const loadingScreen = document.getElementById('loading-screen');
-        if (loadingScreen) {
-            loadingScreen.style.opacity = '0';
-            loadingScreen.style.transition = 'opacity 0.3s ease';
-            setTimeout(() => loadingScreen.remove(), 300);
+        function mountApp() {
+            ReactDOM.render(
+                <LanguageProvider>
+                    <AuthProvider>
+                        <App />
+                    </AuthProvider>
+                </LanguageProvider>,
+                document.getElementById('root')
+            );
+
+            // LW: Hide loading screen after React renders
+            const loadingScreen = document.getElementById('loading-screen');
+            if (loadingScreen) {
+                loadingScreen.style.opacity = '0';
+                loadingScreen.style.transition = 'opacity 0.3s ease';
+                setTimeout(() => loadingScreen.remove(), 300);
+            }
         }
+
+        // LW Nov 2026 - first the language the page opens in (contexts.js), so a German login form
+        // does not start out in English. English waits for nothing, and a file that takes longer
+        // than 4 s comes in after the page started in English.
+        const openingLoad = openingLanguageLoad(4000);
+        if (openingLoad) openingLoad.then(mountApp);
+        else mountApp();

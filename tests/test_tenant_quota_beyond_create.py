@@ -253,7 +253,8 @@ def test_esxi_landing(api, seed):
     import pegaprox.globals as g
     us = _users(seed)
     _tenant(seed.db)
-    _mgr(api)
+    # the start asks target_node against the node list a real manager has (#1224)
+    _mgr(api).nodes = {'pve1': {'node': 'pve1', 'status': 'online'}}
     esx = types.SimpleNamespace(host='10.0.0.9', ensure_connected=lambda: None,
                                 get_vm=lambda vid: {'data': {'name': 'web', 'cpu': {'count': 2, 'sockets': 1, 'cores_per_socket': 2},
                                                              'memory': {'size_MiB': 2048},

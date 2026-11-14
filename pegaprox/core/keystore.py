@@ -11,7 +11,8 @@ Order of precedence (highest first):
   3. PEGAPROX_KEY_FILE          — env var pointing to a custom location
   4. /etc/pegaprox/secret.key   — system-service install default
   5. ~/.config/pegaprox/secret.key — user install default
-  6. CONFIG_DIR/secret.key      — legacy fallback (deprecation-warned)
+  6. CONFIG_DIR/.pegaprox.key   - legacy fallback (deprecation-warned); the same file is
+                                  the Fernet key core/db.py reads old fields with
 
 All file-based candidates must be chmod 0600 (owner-only) or 0640 (owner +
 group-read, which is what the system-service install uses so the systemd
@@ -49,6 +50,8 @@ from typing import Optional
 
 _LOG = logging.getLogger(__name__)
 _CACHE_LOCK = threading.Lock()
+# Tier 4, a name so the tests can point it elsewhere
+SYSTEM_KEY_PATH = Path('/etc/pegaprox/secret.key')
 _CACHED: Optional["MasterKey"] = None
 
 
@@ -86,10 +89,11 @@ def load_master_key() -> MasterKey:
             return _CACHED
         _CACHED = _resolve()
         if _CACHED.is_legacy:
+            # MK Nov 2026 - copy, not move: the old file is also db.fernet (see _recommendation_for)
             _LOG.warning(
-                "[KEYSTORE] master key loaded from legacy location %s — "
-                "recommended: move to /etc/pegaprox/secret.key or use systemd "
-                "LoadCredentialEncrypted. See docs/SECURITY.md.",
+                "[KEYSTORE] master key loaded from legacy location %s - "
+                "recommended: copy it to /etc/pegaprox/secret.key and keep the old file, "
+                "or use systemd LoadCredentialEncrypted. See docs/SECURITY.md.",
                 _CACHED.source_path,
             )
         else:
@@ -105,17 +109,55 @@ def reset_cache() -> None:
         _CACHED = None
 
 
+def peek_master_key() -> Optional[MasterKey]:
+    """The key load_master_key() would use, or None where there is none yet. Never
+    creates one and never caches."""
+    if _CACHED is not None:
+        return _CACHED
+    return _resolve(generate=False)
+
+
 def health_status() -> dict:
-    """Returned by the /api/security/keystore-status endpoint so the
-    admin UI can render the health-indicator pill."""
+    """What `pegaprox_multi_cluster.py --keystore-status` prints.
+
+    MK Nov 2026 - it only reads. It used to resolve like the server and so generate a key
+    when it found none: run as root from another directory it left a fresh key in
+    <cwd>/config, and run before the first start it made the service's own key, owned by
+    root and unreadable for the service. Paths are absolute, so a status taken in the
+    wrong directory shows where it looked."""
+    st = _key_status()
+    # MK Nov 2026 (#1226) - a key in place says little when the SQLCipher package does not
+    # load and the database it is for stays plain
+    from pegaprox.core import dbcrypto
+    st['sqlcipher_error'] = dbcrypto.SQLCIPHER_ERROR
+    problem = dbcrypto.sqlcipher_problem()
+    if problem:
+        field = 'recommendation' if st['ok'] else 'message'
+        st[field] = f'{st[field]} {problem}' if st.get(field) else problem
+    return st
+
+
+def _key_status() -> dict:
+    config_dir = os.path.abspath(os.path.dirname(str(_legacy_key_path())) or '.')
     try:
-        mk = load_master_key()
+        mk = peek_master_key()
     except Exception as e:
-        return {'ok': False, 'source': 'error', 'message': str(e)}
+        return {'ok': False, 'source': 'error', 'message': str(e), 'config_dir': config_dir}
+    if mk is None:
+        return {
+            'ok': False,
+            'source': 'none',
+            'source_path': None,
+            'config_dir': config_dir,
+            'message': (f"No master key found, also not in {config_dir}. PegaProx creates one "
+                        "there on its first start. If it has run before, this looked in the wrong "
+                        "place: run it as the service user from the directory the service runs in."),
+        }
     return {
         'ok': True,
         'source': mk.source,
-        'source_path': mk.source_path,
+        'source_path': os.path.abspath(mk.source_path) if mk.source_path else None,
+        'config_dir': config_dir,
         'is_legacy': mk.is_legacy,
         'tier': _tier_for_source(mk.source),
         'recommendation': _recommendation_for(mk),
@@ -144,7 +186,7 @@ def _safe_is_file(p: Path) -> bool:
         return False
 
 
-def _resolve() -> MasterKey:
+def _resolve(generate: bool = True) -> Optional[MasterKey]:
     # Tier 1: PEGAPROX_DB_KEY env (Docker / k8s / explicit)
     if env_val := os.environ.get('PEGAPROX_DB_KEY'):
         return _from_env_value(env_val, source='env:PEGAPROX_DB_KEY')
@@ -163,8 +205,8 @@ def _resolve() -> MasterKey:
         if _safe_is_file(p):
             return _from_file(p, source='env:PEGAPROX_KEY_FILE')
 
-    # Tier 4: /etc/pegaprox/secret.key (system-service install default)
-    p = Path('/etc/pegaprox/secret.key')
+    # Tier 4: /etc/pegaprox/secret.key (what deploy.sh sets up)
+    p = SYSTEM_KEY_PATH
     if _safe_is_file(p):
         return _from_file(p, source='/etc/pegaprox/secret.key')
 
@@ -173,15 +215,16 @@ def _resolve() -> MasterKey:
     if _safe_is_file(p):
         return _from_file(p, source='user-config')
 
-    # Tier 6 (legacy): CONFIG_DIR/secret.key — warned-on-use
+    # Tier 6 (legacy): CONFIG_DIR/.pegaprox.key, warned-on-use
     legacy = _legacy_key_path()
     if _safe_is_file(legacy):
         mk = _from_file(legacy, source='legacy:CONFIG_DIR', strict_perms=False)
         return MasterKey(mk.key_b64, mk.key_raw, mk.source, mk.source_path, is_legacy=True)
 
-    # Nothing exists — generate at legacy location for back-compat with
-    # 0.9.9.x installs.  A subsequent operator-initiated `pegaprox secure-key
-    # migrate` moves it to a Tier-4 path.
+    # Nothing exists: generate at the legacy location for back-compat with 0.9.9.x
+    # installs. Moving it to Tier 4 is a manual step, _recommendation_for says how
+    if not generate:
+        return None
     return _generate_at(legacy, source='generated:CONFIG_DIR', is_legacy=True)
 
 
@@ -239,8 +282,13 @@ def _generate_at(path: Path, source: str, is_legacy: bool = False) -> MasterKey:
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, key_b64)
+        # MK Nov 2026 - on disk, and its name with it, before anything is sealed with it: a
+        # power cut soon after a first start left an empty key beside a database that is
+        # encrypted with it
+        os.fsync(fd)
     finally:
         os.close(fd)
+    _sync_dir(path.parent)
     try:
         os.chmod(path, 0o600)
     except Exception as e:
@@ -252,13 +300,28 @@ def _generate_at(path: Path, source: str, is_legacy: bool = False) -> MasterKey:
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 def _legacy_key_path() -> Path:
-    """The 0.9.9.x default location — CONFIG_DIR/secret.key.
+    """The 0.9.9.x default location, CONFIG_DIR/.pegaprox.key (constants.KEY_FILE).
     Imported lazily to avoid circular imports with pegaprox.constants."""
     try:
         from pegaprox.constants import KEY_FILE
         return Path(KEY_FILE)
     except Exception:
         return Path('config') / 'secret.key'
+
+
+def _sync_dir(path: Path) -> None:
+    """fsync the directory `path`, so a file just made in it is still there after a power
+    cut. Best effort: a filesystem that cannot sync a directory is no reason to refuse."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError as e:
+        _LOG.warning("[KEYSTORE] could not sync the directory %s: %s", path, e)
+    finally:
+        os.close(fd)
 
 
 def _enforce_perms(path: Path) -> None:
@@ -330,11 +393,18 @@ def _tier_for_source(source: str) -> int:
 
 def _recommendation_for(mk: MasterKey) -> Optional[str]:
     if mk.is_legacy:
+        where = os.path.abspath(mk.source_path) if mk.source_path else 'the config directory'
+        # MK Nov 2026 - it said to delete the old file after the copy. That file is also
+        # db.fernet: deleting it makes db.py create a new one, and old field values sealed
+        # with it can no longer be read
         return (
-            "Master key in CONFIG_DIR is the legacy default. "
-            "Run `pegaprox secure-key migrate` to move it to "
-            "/etc/pegaprox/secret.key, or set up systemd LoadCredentialEncrypted "
-            "for the strongest at-rest protection."
+            "The master key sits in the config directory, next to the database it protects. "
+            f"To move it out: stop PegaProx, copy {where} to /etc/pegaprox/secret.key "
+            "(mode 0640, owner root, group of the service user), start PegaProx and check that "
+            "this status shows /etc/pegaprox/secret.key. Do not delete the old file: the "
+            "database layer reads old field values with it too, so a backup of the config "
+            "directory still holds the key and has to be kept as secret (docs/SECURITY.md). "
+            "systemd LoadCredentialEncrypted is the strongest option."
         )
     if _tier_for_source(mk.source) >= 4:
         return (

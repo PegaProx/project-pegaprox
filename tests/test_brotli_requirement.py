@@ -12,6 +12,11 @@ from packaging.requirements import Requirement
 
 REPO = Path(__file__).resolve().parent.parent
 
+# every release before the fix, not only the last one: a line like `brotli!=1.2.0`
+# shuts out 1.2.0 and still lets an install sit on 1.1.0
+BROKEN_BROTLI = ('1.0.9', '1.1.0', '1.2.0')
+BROKEN_BROTLICFFI = ('1.0.9.2', '1.1.0.0', '1.2.0.0', '1.2.0.2')
+
 
 def _lines_for(name, implementation):
     env = {'python_version': '3.12', 'sys_platform': 'linux', 'platform_machine': 'x86_64',
@@ -31,7 +36,8 @@ def test_cpython_installs_cannot_stay_on_the_broken_brotli():
     reqs = _lines_for('brotli', 'CPython')
     assert reqs, 'no brotli line applies on CPython'
     for r in reqs:
-        assert not r.specifier.contains('1.2.0'), str(r)
+        for v in BROKEN_BROTLI:
+            assert not r.specifier.contains(v), f'{r} still allows {v}'
         assert r.specifier.contains('1.2.1'), str(r)
 
 
@@ -39,5 +45,6 @@ def test_pypy_installs_cannot_stay_on_the_broken_brotlicffi():
     reqs = _lines_for('brotlicffi', 'PyPy')
     assert reqs, 'no brotlicffi line applies on PyPy'
     for r in reqs:
-        assert not r.specifier.contains('1.2.0.2'), str(r)
+        for v in BROKEN_BROTLICFFI:
+            assert not r.specifier.contains(v), f'{r} still allows {v}'
         assert r.specifier.contains('1.2.1.0'), str(r)

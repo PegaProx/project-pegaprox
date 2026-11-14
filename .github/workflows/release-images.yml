@@ -126,11 +126,14 @@ jobs:
           echo "Repo-Poll wird übersprungen. Es wird die aktuell neueste pegaprox-Version installiert."
 
   # ----------------------------------------------------------------------
-  # 2) LXC-Template per distrobuilder (Snap) + Smoke-Test
+  # 2) LXC-Template per distrobuilder + Smoke-Test
   # ----------------------------------------------------------------------
   build-lxc:
     needs: prepare
-    runs-on: ubuntu-latest
+    # NS Oct 2026 - ubuntu-latest moved to 26.04, where qemu-user-static is only a virtual
+    # package and apt refuses to pick a provider. 1.4.0 built here on 24.04; stay on it until
+    # the tools step is ported.
+    runs-on: ubuntu-24.04
     # NS Aug 2026 — arm64 builds under qemu emulation and is flaky; a failed arm64 leg must NOT
     # block the amd64 release. publish attaches whatever artifacts exist (glob), so a missing
     # arm64 asset is fine; amd64 has no continue-on-error, so a real amd64 failure still blocks.
@@ -154,15 +157,33 @@ jobs:
         with:
           image: docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
 
+      # NS Nov 2026 - distrobuilder built from its source at the 3.1 release, the version the
+      # snap had: the snap is gone from the store ('snap "distrobuilder" not found') and noble
+      # builds no package of it. Its Makefile does nothing but go install; the commit and its
+      # go.sum pin what gets built, go-version is the toolchain line of its go.mod
+      - name: Go für distrobuilder
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.23.2'
+          cache: false
+
       - name: Tools installieren
         run: |
           sudo apt-get update
+          # python3-pip for the wheel download of build-sqlcipher3-deb.sh, dpkg-deb is there anyway
           sudo apt-get install -y \
-            debootstrap rsync systemd-container curl xz-utils qemu-user-static binfmt-support
+            debootstrap rsync systemd-container curl xz-utils qemu-user-static binfmt-support python3-pip
           sudo update-binfmts --enable qemu-aarch64 || true
-          sudo snap install distrobuilder --classic
-          export PATH="$PATH:/snap/bin"
+          GOBIN="$RUNNER_TEMP/gobin" go install \
+            github.com/lxc/distrobuilder/distrobuilder@0544a2d247d92f10c5635dde612f17dcbda42449
+          sudo install -m 0755 "$RUNNER_TEMP/gobin/distrobuilder" /usr/local/bin/distrobuilder
           distrobuilder --version
+
+      # NS Nov 2026 (#1226) - python3-sqlcipher3 is a C extension, one package per architecture.
+      # Built for this leg from the wheels apt.pegaprox.com pins, with its script; the files
+      # section of the definition copies it into the rootfs.
+      - name: python3-sqlcipher3 bauen
+        run: bash packaging/apt/build-sqlcipher3-deb.sh "${{ matrix.arch }}" "$RUNNER_TEMP/sqlcipher3-deb"
 
       - name: distrobuilder-Definition schreiben
         run: |
@@ -213,8 +234,15 @@ jobs:
                   - systemd-sysv
                 action: install
 
+          files:
+            # the python3-sqlcipher3 of the step before. distrobuilder copies files after
+            # post-packages, so the install below runs at post-files, with it in place
+            - generator: copy
+              source: ${RUNNER_TEMP}/sqlcipher3-deb/python3-sqlcipher3.deb
+              path: /var/cache/pegaprox-image/python3-sqlcipher3.deb
+
           actions:
-            - trigger: post-packages
+            - trigger: post-files
               action: |-
                 #!/bin/sh
                 set -eu
@@ -243,6 +271,18 @@ jobs:
                 sha256sum -c /tmp/deb.sha256
                 dpkg -i python3-flask-sock_0.7.1_all.deb
                 dpkg -i python3-xenapi_26.8.1_all.deb
+                # ahead of pegaprox, which depends on it. Not the one on the CDN: that one says
+                # Architecture all and holds the x86_64 module only
+                dpkg -i /var/cache/pegaprox-image/python3-sqlcipher3.deb
+                rm -rf /var/cache/pegaprox-image
+                # and the same package of the repo below never replaces it: 0.6.4 sorts under
+                # ours, a later upload there would not, and apt upgrade would take it on arm64
+                cat > /etc/apt/preferences.d/pegaprox-sqlcipher3 <<'PIN'
+                Explanation: the image brings python3-sqlcipher3 built for its architecture
+                Package: python3-sqlcipher3
+                Pin: origin packages.gyptazy.com
+                Pin-Priority: -1
+                PIN
                 install -d -m 0755 /etc/apt/keyrings
                 curl -fsSL https://git.gyptazy.com/api/packages/gyptazy/debian/repository.key \\
                   -o /etc/apt/keyrings/gyptazy.asc
@@ -263,7 +303,6 @@ jobs:
 
       - name: rootfs bauen
         run: |
-          export PATH="$PATH:/snap/bin"
           sudo --preserve-env=PATH "$(command -v distrobuilder)" \
             build-lxc packaging/lxc/pegaprox-lxc.yaml \
             -o image.release=${DEBIAN_RELEASE} \
@@ -313,16 +352,36 @@ jobs:
             tail -n 40 /tmp/nspawn.log || true
             echo "----- Lauschende Ports auf dem Host -----"
             sudo ss -tlnp || true
+            # what PegaProx says about its database, as the service user in its directory, asked
+            # in the running container before it goes down. systemd-run -M would need a D-Bus in
+            # there and this rootfs has none; nsenter's --wd opens the directory on the host,
+            # hence the cd in the shell
+            LEADER=$(sudo machinectl show pegaprox-test --property=Leader --value 2>/dev/null || true)
+            if [ -n "$LEADER" ]; then
+              timeout 120 sudo nsenter --target "$LEADER" --mount --uts --ipc --pid -- sh -c \
+                'cd /var/lib/pegaprox && exec runuser -u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper --keystore-status' \
+                > "$RUNNER_TEMP/keystore-status.json" || true
+            else
+              echo "::error::the container pegaprox-test is not running any more, nothing to ask about its database"
+            fi
             sudo machinectl poweroff pegaprox-test 2>/dev/null || true
             sleep 3
             sudo machinectl terminate pegaprox-test 2>/dev/null || true
           else
+            # the same in the running container (under qemu, so with time to spare)
+            timeout 300 sudo docker exec -u pegaprox -w /var/lib/pegaprox pegaprox-test \
+              /usr/bin/pegaprox/pegaprox-wrapper --keystore-status > "$RUNNER_TEMP/keystore-status.json" || true
             echo "----- Container-Logs -----"
             sudo docker logs pegaprox-test || true
             sudo docker rm -f pegaprox-test 2>/dev/null || true
           fi
+          echo "----- --keystore-status -----"
+          cat "$RUNNER_TEMP/keystore-status.json" || true
 
           [ "$OK" -eq 1 ] || { echo "::error::PegaProx kam im LXC nicht hoch"; exit 1; }
+          # port 5000 answers on plain SQLite too. On arm64 this fails the leg, and with it the
+          # upload of its template (continue-on-error: the amd64 release goes out without it)
+          python3 -I packaging/apt/smoke_backend.py "$RUNNER_TEMP/keystore-status.json"
           echo "LXC Smoke-Test erfolgreich."
 
       - name: Template umbenennen
@@ -364,7 +423,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             qemu-utils qemu-system-x86 qemu-system-arm qemu-efi-aarch64 \
-            cloud-image-utils curl
+            cloud-image-utils curl python3-pip
+
+      # NS Nov 2026 (#1226) - as in build-lxc; the first-boot installer takes it from the image
+      - name: python3-sqlcipher3 bauen
+        run: bash packaging/apt/build-sqlcipher3-deb.sh "${{ matrix.arch }}" "$RUNNER_TEMP/sqlcipher3-deb"
 
       - name: Debian Cloud-Image laden + Checksum verifizieren
         run: |
@@ -410,6 +473,15 @@ jobs:
           cat > gyptazy.list <<GYPTLIST
           deb [signed-by=/etc/apt/keyrings/gyptazy.asc] https://packages.gyptazy.com/api/packages/gyptazy/debian ${DEBIAN_RELEASE} main
           GYPTLIST
+          # in the image from the start, as the source above: that repo's python3-sqlcipher3
+          # (Architecture all, x86_64 module) never replaces the one built here, not even
+          # when a later upload there sorts above it
+          cat > gyptazy.pref <<'GYPTPREF'
+          Explanation: the image brings python3-sqlcipher3 built for its architecture
+          Package: python3-sqlcipher3
+          Pin: origin packages.gyptazy.com
+          Pin-Priority: -1
+          GYPTPREF
 
           # ==================================================================
           # First-Boot-Installer: apt-Paket + User + SSH
@@ -433,9 +505,17 @@ jobs:
           sha256sum -c /tmp/deb.sha256
           dpkg -i python3-flask-sock_0.7.1_all.deb
           dpkg -i python3-xenapi_26.8.1_all.deb
+          # the python3-sqlcipher3 the workflow built for this arch, ahead of pegaprox: apt
+          # would take the Architecture all one of the third-party repo, which holds the
+          # x86_64 module only (and is pinned away, see gyptazy.pref)
+          dpkg -i /var/cache/pegaprox-image/python3-sqlcipher3.deb
+          rm -f /var/cache/pegaprox-image/python3-sqlcipher3.deb
           apt-get -y install sudo sqlite3 ca-certificates curl qemu-guest-agent
           apt-get -y install pegaprox sshpass
           systemctl enable pegaprox || true
+          # what PegaProx says about its database; the workflow checks it after this boot
+          (cd /var/lib/pegaprox && runuser -u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper --keystore-status) \
+            > /var/cache/pegaprox-image/keystore-status.json || true
 
           # --- Login-User mit sudo ---
           if ! id pegaprox_admin >/dev/null 2>&1; then
@@ -508,12 +588,24 @@ jobs:
             [[ $in =~ ^[0-9]+$ ]] && [ "$in" -ge 0 ] && [ "$in" -le 32 ] && { echo "$in"; return; }
             local c; c=$(mask_to_cidr "$in"); [ -n "$c" ] && echo "$c"
           }
-          find_db() {
-            for db in /var/lib/pegaprox/pegaprox.db /var/lib/pegaprox/config/pegaprox.db \
-                      /etc/pegaprox/pegaprox.db /usr/lib/pegaprox/config/pegaprox.db \
-                      /opt/PegaProx/config/pegaprox.db; do
-              [ -f "$db" ] && { echo "$db"; return; }
+          # MK Nov 2026 - systemd-resolved hands a short name (esx01) to the DNS servers only with
+          # a search domain on the link itself; one set only in resolved.conf is not appended there
+          valid_domains() {
+            local d
+            for d in $1; do
+              [[ $d =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]] || return 1
             done
+          }
+          ask_domains() {
+            while true; do
+              read -p "Search domain, optional (e.g. example.lan): " DOMAINS
+              valid_domains "$DOMAINS" && break; echo -e "${R}Invalid domain${N}"
+            done
+          }
+          # NS Nov 2026 - through PegaProx itself, as its user in its directory: the sqlite3 CLI
+          # cannot open the SQLCipher database the appliance has
+          set_port() {
+            (cd /var/lib/pegaprox && runuser -u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper --set-port "$1")
           }
 
           [ "$EUID" -ne 0 ] && { echo -e "${R}Please run as root: sudo pegaprox-setup${N}"; exit 1; }
@@ -555,9 +647,12 @@ jobs:
             while true; do read -p "Subnet (24 or 255.255.255.0): " SIN; SUBNET=$(parse_subnet "$SIN"); [ -n "$SUBNET" ] && break; echo -e "${R}Invalid subnet${N}"; done
             while true; do read -p "Gateway (e.g. 192.168.1.1): " GATEWAY; validate_ip "$GATEWAY" && break; echo -e "${R}Invalid gateway${N}"; done
             while true; do read -p "DNS (e.g. 8.8.8.8 1.1.1.1): " DNS; validate_ip "$(echo $DNS | awk '{print $1}')" && break; echo -e "${R}Invalid DNS${N}"; done
-            echo -e "${Y}Summary:${N} $IFACE  $IP_ADDR/$SUBNET  gw $GATEWAY  dns $DNS"
+            ask_domains
+            echo -e "${Y}Summary:${N} $IFACE  $IP_ADDR/$SUBNET  gw $GATEWAY  dns $DNS${DOMAINS:+  search $DOMAINS}"
             read -p "Correct? [Y/n]: " ok
             case "$ok" in [Nn]*) echo "Aborted."; exit 1;; esac
+          else
+            ask_domains
           fi
 
           echo ""
@@ -582,13 +677,17 @@ jobs:
           mkdir -p /etc/systemd/network
           rm -f /etc/systemd/network/*.network 2>/dev/null || true
 
+          # /etc/resolv.conf is the stub of systemd-resolved, which takes DNS= and Domains=
+          # from this file; anything written into resolv.conf itself was gone within seconds
           if [ "$USE_DHCP" = true ]; then
-            printf '[Match]\nName=%s\n\n[Network]\nDHCP=yes\n' "$IFACE" > /etc/systemd/network/10-pegaprox.network
+            { printf '[Match]\nName=%s\n\n[Network]\nDHCP=yes\n' "$IFACE"
+              if [ -n "$DOMAINS" ]; then printf 'Domains=%s\n' "$DOMAINS"; fi
+            } > /etc/systemd/network/10-pegaprox.network
           else
             { printf '[Match]\nName=%s\n\n[Network]\nAddress=%s/%s\nGateway=%s\n' "$IFACE" "$IP_ADDR" "$SUBNET" "$GATEWAY"
               for d in $DNS; do printf 'DNS=%s\n' "$d"; done
+              if [ -n "$DOMAINS" ]; then printf 'Domains=%s\n' "$DOMAINS"; fi
             } > /etc/systemd/network/10-pegaprox.network
-            { echo "# Generated by PegaProx Setup"; for d in $DNS; do echo "nameserver $d"; done; } > /etc/resolv.conf
           fi
           systemctl disable networking 2>/dev/null || true
           systemctl enable systemd-networkd 2>/dev/null || true
@@ -606,16 +705,11 @@ jobs:
           sleep 8
 
           if [ "$ACCESS_PORT" != 5000 ]; then
-            DB=$(find_db)
-            if [ -n "$DB" ]; then
-              if sqlite3 "$DB" "INSERT OR REPLACE INTO server_settings (key, value) VALUES ('port','$ACCESS_PORT');" 2>/dev/null; then
-                systemctl restart pegaprox 2>/dev/null || true; sleep 4
-                echo -e "${G}Port set to $ACCESS_PORT${N}"
-              else
-                echo -e "${Y}Could not set port automatically - please set it in the settings.${N}"
-              fi
+            if set_port "$ACCESS_PORT"; then
+              systemctl restart pegaprox 2>/dev/null || true; sleep 4
+              echo -e "${G}Port set to $ACCESS_PORT${N}"
             else
-              echo -e "${Y}Database not found - set the port under Settings > Server.${N}"
+              echo -e "${Y}Could not set port automatically - please set it under Settings > Server.${N}"
             fi
           fi
 
@@ -653,21 +747,24 @@ jobs:
           IP="${PEGAPROX_IP:-}"; CIDR="${PEGAPROX_CIDR:-24}"; GW="${PEGAPROX_GW:-}"
           DNS="${PEGAPROX_DNS:-8.8.8.8 8.8.4.4}"; DHCP="${PEGAPROX_DHCP:-false}"
           FORCE="${PEGAPROX_FORCE:-false}"; IFACE="${PEGAPROX_IFACE:-}"; PORT="${PEGAPROX_PORT:-5000}"
+          DOMAINS="${PEGAPROX_DOMAIN:-}"
 
           log(){ echo "[$(date '+%H:%M:%S')] $1"; }
           mask_to_cidr(){ case "$1" in 255.255.255.0) echo 24;; 255.255.254.0) echo 23;; 255.255.252.0) echo 22;; 255.255.248.0) echo 21;; 255.255.240.0) echo 20;; 255.255.0.0) echo 16;; 255.0.0.0) echo 8;; *) echo "";; esac; }
-          find_db(){ for db in /var/lib/pegaprox/pegaprox.db /var/lib/pegaprox/config/pegaprox.db /etc/pegaprox/pegaprox.db /usr/lib/pegaprox/config/pegaprox.db /opt/PegaProx/config/pegaprox.db; do [ -f "$db" ] && { echo "$db"; return; }; done; }
+          # the sqlite3 CLI cannot open the SQLCipher database (see pegaprox-setup)
+          set_port(){ (cd /var/lib/pegaprox && runuser -u pegaprox -- /usr/bin/pegaprox/pegaprox-wrapper --set-port "$1"); }
 
           for arg in "$@"; do case $arg in
             --ip=*) IP="${arg#*=}";;
             --cidr=*|--subnet=*|--mask=*) CIDR="${arg#*=}";;
             --gateway=*|--gw=*) GW="${arg#*=}";;
             --dns=*) DNS="${arg#*=}";;
+            --domain=*|--search=*) DOMAINS="${arg#*=}";;
             --interface=*|--iface=*) IFACE="${arg#*=}";;
             --port=*) PORT="${arg#*=}";;
             --dhcp) DHCP=true;;
             --force|-f) FORCE=true;;
-            --help|-h) echo "Usage: pegaprox-setup-auto --ip=X --cidr=24 --gateway=X [--dns='..'] [--port=443] | --dhcp [--force]"; exit 0;;
+            --help|-h) echo "Usage: pegaprox-setup-auto --ip=X --cidr=24 --gateway=X [--dns='..'] [--domain=example.lan] [--port=443] | --dhcp [--domain=..] [--force]"; exit 0;;
           esac; done
 
           [ "$EUID" -ne 0 ] && { log "ERROR: root required"; exit 1; }
@@ -684,6 +781,11 @@ jobs:
             [ -z "$IP" ] && { log "ERROR: --ip required"; exit 1; }
             [ -z "$GW" ] && { log "ERROR: --gateway required"; exit 1; }
           fi
+          # a short host name only resolves with a search domain on the link (see pegaprox-setup)
+          for d in $DOMAINS; do
+            [[ $d =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]] \
+              || { log "ERROR: invalid search domain: $d"; exit 1; }
+          done
 
           log "Interface: $IFACE"
           mkdir -p /etc/cloud/cloud.cfg.d
@@ -691,16 +793,20 @@ jobs:
           mkdir -p /etc/systemd/network
           rm -f /etc/systemd/network/*.network 2>/dev/null || true
 
+          # systemd-resolved takes DNS= and Domains= from this file, /etc/resolv.conf is its stub
           if [ "$DHCP" = "true" ]; then
-            printf '[Match]\nName=%s\n\n[Network]\nDHCP=yes\n' "$IFACE" > /etc/systemd/network/10-pegaprox.network
+            { printf '[Match]\nName=%s\n\n[Network]\nDHCP=yes\n' "$IFACE"
+              if [ -n "$DOMAINS" ]; then printf 'Domains=%s\n' "$DOMAINS"; fi
+            } > /etc/systemd/network/10-pegaprox.network
             log "DHCP configured on $IFACE"
           else
             { printf '[Match]\nName=%s\n\n[Network]\nAddress=%s/%s\nGateway=%s\n' "$IFACE" "$IP" "$CIDR" "$GW"
               for d in $DNS; do printf 'DNS=%s\n' "$d"; done
+              if [ -n "$DOMAINS" ]; then printf 'Domains=%s\n' "$DOMAINS"; fi
             } > /etc/systemd/network/10-pegaprox.network
-            { echo "# Generated by PegaProx Setup"; for d in $DNS; do echo "nameserver $d"; done; } > /etc/resolv.conf
             log "Static: $IP/$CIDR gw $GW"
           fi
+          if [ -n "$DOMAINS" ]; then log "Search domain: $DOMAINS"; fi
           systemctl disable networking 2>/dev/null || true
           systemctl enable systemd-networkd 2>/dev/null || true
           systemctl restart systemd-networkd 2>/dev/null || true
@@ -712,12 +818,9 @@ jobs:
           sleep 8
 
           if [ "$PORT" != 5000 ]; then
-            DB=$(find_db || true)
-            if [ -n "$DB" ]; then
-              sqlite3 "$DB" "INSERT OR REPLACE INTO server_settings (key, value) VALUES ('port','$PORT');" 2>/dev/null \
-                && { systemctl restart pegaprox 2>/dev/null || true; sleep 4; log "Port set to $PORT"; } \
-                || log "Could not set port automatically"
-            fi
+            set_port "$PORT" \
+              && { systemctl restart pegaprox 2>/dev/null || true; sleep 4; log "Port set to $PORT"; } \
+              || log "Could not set port automatically"
           fi
 
           if systemctl is-active --quiet pegaprox; then
@@ -778,8 +881,11 @@ jobs:
           sudo mkdir -p /mnt/img/etc/apt/keyrings /mnt/img/etc/pegaprox
           sudo cp gyptazy.asc  /mnt/img/etc/apt/keyrings/gyptazy.asc
           sudo cp gyptazy.list /mnt/img/etc/apt/sources.list.d/gyptazy.list
+          sudo install -D -m 0644 gyptazy.pref /mnt/img/etc/apt/preferences.d/pegaprox-sqlcipher3
 
           sudo cp install-pegaprox.sh /mnt/img/usr/local/sbin/install-pegaprox.sh
+          sudo install -D -m 0644 "$RUNNER_TEMP/sqlcipher3-deb/python3-sqlcipher3.deb" \
+            /mnt/img/var/cache/pegaprox-image/python3-sqlcipher3.deb
           sudo cp pegaprox-setup      /mnt/img/usr/local/bin/pegaprox-setup
           sudo cp pegaprox-setup-auto /mnt/img/usr/local/bin/pegaprox-setup-auto
           sudo chmod 0755 /mnt/img/usr/local/sbin/install-pegaprox.sh \
@@ -895,14 +1001,22 @@ jobs:
           [ -n "$ROOT" ] || { echo "::error::Root-Partition nicht gefunden"; exit 1; }
           sudo mkdir -p /mnt/img
           sudo mount "$ROOT" /mnt/img
+          # what PegaProx said about its database in the smoke boot, checked below once the
+          # image is clean
+          sudo cat /mnt/img/var/cache/pegaprox-image/keystore-status.json > "$RUNNER_TEMP/keystore-status.json" || true
           R=/mnt/img
 
           # PegaProx state: a fresh database, keys and TLS pair on the user's first start
           sudo find "$R/var/lib/pegaprox" -mindepth 1 -delete
+          # NS Nov 2026 (#1226) - and the master key the package put in /etc/pegaprox during
+          # this boot: the unit makes each appliance its own before its first start
+          sudo sh -c "rm -f $R/etc/pegaprox/secret.key $R/etc/pegaprox/secret.key.new.*"
           # the installer ran in the smoke boot; it must not run again on the user's machine
           sudo rm -f "$R/usr/local/sbin/install-pegaprox.sh" \
                      "$R/etc/systemd/system/pegaprox-firstboot.service" \
                      "$R/etc/systemd/system/multi-user.target.wants/pegaprox-firstboot.service"
+          # and what it had from the build: the python3-sqlcipher3 deb, the status of PegaProx
+          sudo rm -rf "$R/var/cache/pegaprox-image"
           # SSH host keys: generated on first boot instead (cloud-init does not run there)
           sudo rm -f "$R"/etc/ssh/ssh_host_*
           sudo tee "$R/etc/systemd/system/pegaprox-ssh-hostkeys.service" >/dev/null <<'UNIT'
@@ -925,18 +1039,29 @@ jobs:
           sudo truncate -s 0 "$R/etc/machine-id"
           [ -L "$R/var/lib/dbus/machine-id" ] || sudo rm -f "$R/var/lib/dbus/machine-id"
           sudo sh -c "rm -rf $R/var/lib/cloud/* $R/var/log/cloud-init*.log"
+          # MK Nov 2026 - cloud-init wrote a netplan file for the smoke boot's NIC (ens3 with
+          # QEMU's default MAC). It matches no user's NIC, and on one with that MAC it would
+          # sort ahead of the wizard's 10-pegaprox.network
+          sudo rm -f "$R/etc/netplan/50-cloud-init.yaml"
           sudo find "$R/var/log/journal" -mindepth 1 -delete 2>/dev/null || true
 
           # refuse to ship if any of it is back
           FAIL=0
           if grep -q '^debian:' "$R/etc/passwd"; then echo "::error::cloud-init default user is in the image"; FAIL=1; fi
           if [ -n "$(sudo ls -A "$R/var/lib/pegaprox")" ]; then echo "::error::/var/lib/pegaprox is not empty"; FAIL=1; fi
+          if sudo sh -c "ls $R/etc/pegaprox/secret.key*" >/dev/null 2>&1; then echo "::error::the master key of the smoke boot is in the image"; FAIL=1; fi
           if ls "$R"/etc/ssh/ssh_host_* >/dev/null 2>&1; then echo "::error::SSH host keys are in the image"; FAIL=1; fi
           if [ -s "$R/etc/machine-id" ]; then echo "::error::machine-id is set"; FAIL=1; fi
+          if [ -e "$R/etc/netplan/50-cloud-init.yaml" ]; then echo "::error::the smoke boot's netplan file is in the image"; FAIL=1; fi
 
           sudo sync
           sudo umount /mnt/img
           sudo qemu-nbd --disconnect /dev/nbd0
+          # port 5000 answered on plain SQLite too. On arm64 this fails the leg before its image
+          # is uploaded (continue-on-error: the amd64 release goes out without it)
+          echo "----- --keystore-status of the smoke boot -----"
+          cat "$RUNNER_TEMP/keystore-status.json" || true
+          python3 -I packaging/apt/smoke_backend.py "$RUNNER_TEMP/keystore-status.json" || FAIL=1
           [ "$FAIL" -eq 0 ] || exit 1
           echo "Image bereinigt."
 
@@ -1107,6 +1232,30 @@ jobs:
         with:
           path: dist
 
+      # NS Nov 2026 - an arm64 leg that failed (its smoke test among others) reads as success
+      # here, continue-on-error, and the upload takes what the globs find. Say which images
+      # did not come; without an amd64 one there is nothing to release.
+      - name: Images vollständig?
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          FAIL=0
+          for ARCH in amd64 arm64; do
+            for F in "pegaprox-$VERSION-lxc-$ARCH.tar.xz" "pegaprox-latest-lxc-$ARCH.tar.xz" \
+                     "pegaprox-$VERSION-vm-$ARCH.qcow2" "pegaprox-vm-$ARCH.qcow2" \
+                     "pegaprox-$VERSION-vm-$ARCH.ova" "pegaprox-latest-vm-$ARCH.ova"; do
+              [ -n "$(find dist -type f -name "$F" -print -quit)" ] && continue
+              if [ "$ARCH" = amd64 ]; then
+                echo "::error::$F is missing, no release without the amd64 images"
+                FAIL=1
+              else
+                echo "::warning::$F is missing: its arm64 build failed, the release goes out without it"
+              fi
+              echo "- \`$F\` is missing from this release" >> "$GITHUB_STEP_SUMMARY"
+            done
+          done
+          [ "$FAIL" -eq 0 ]
+
       - name: Checksums erzeugen
         run: |
           cd dist
@@ -1123,6 +1272,7 @@ jobs:
           subject-path: |
             dist/**/*.qcow2
             dist/**/*.tar.xz
+            dist/**/*.ova
 
       - name: An Release anhängen
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2

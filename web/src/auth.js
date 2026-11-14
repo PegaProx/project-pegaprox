@@ -6,7 +6,7 @@
         // Login Screen Component
         // LW: Keep this simple - first thing users see!
         function LoginScreen() {
-            const { t } = useTranslation();
+            const { t, languageLocked } = useTranslation();
             const { login, error, ldapEnabled, oidcEnabled, oidcButtonText, loginBackground } = useAuth();
             const [username, setUsername] = useState('');
             const [password, setPassword] = useState('');
@@ -347,10 +347,15 @@
                                         )}
                                         {oidcButtonText || 'Sign in with SSO'}
                                     </button>
-                                    {oidcError && (
-                                        <p className="text-red-400 text-xs text-center mt-2">{oidcError}</p>
-                                    )}
                                 </div>
+                            )}
+                            {/* LW Nov 2026 - outside the block above: after a refused callback the
+                                button state may not be known yet (or OIDC is off by now), and the
+                                error went unseen with it */}
+                            {oidcError && (
+                                <p className="text-red-400 text-xs text-center mt-2" role="alert" data-oidc-error="">
+                                    {t('loginError')}: {oidcError}
+                                </p>
                             )}
                             
                             {/* MK: Feb 2026 - LDAP indicator */}
@@ -362,10 +367,12 @@
                             )}
                         </div>
                         
-                        {/* Language Switcher */}
-                        <div className="flex justify-center mt-6">
-                            <LanguageSwitcher />
-                        </div>
+                        {/* Language Switcher, gone while an admin pinned the language (#1167) */}
+                        {!languageLocked && (
+                            <div className="flex justify-center mt-6">
+                                <LanguageSwitcher />
+                            </div>
+                        )}
                         
                         {/* Footer */}
                         <p className="text-center text-gray-500 text-sm mt-6">

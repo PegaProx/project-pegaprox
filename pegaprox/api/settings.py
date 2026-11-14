@@ -22,17 +22,18 @@ from pegaprox.core import ha, rolling_runs
 
 import requests
 from pegaprox.utils.auth import require_auth, load_users, save_users, validate_session, TOTP_AVAILABLE, ARGON2_AVAILABLE, _check_default_password_in_use, verify_password, needs_password_rehash
-from pegaprox.utils.sanitization import sanitize_identifier, sanitize_int, sanitize_csv_field
+from pegaprox.utils.sanitization import sanitize_identifier, sanitize_int, sanitize_csv_field, scrub_session_id
 from pegaprox.utils.ssh import get_ssh_connection_stats
 from pegaprox.utils.concurrent import GEVENT_AVAILABLE
-from pegaprox.utils.audit import log_audit, get_client_ip
+from pegaprox.utils.audit import log_audit, get_client_ip, masked_rows, masked_details
+from pegaprox.utils.index_page import serve_file, serve_index
 from pegaprox.api.helpers import (
     load_server_settings, save_server_settings, check_cluster_access,
     get_login_settings, get_session_timeout, safe_error,
-    acme_dns_config_from_settings, require_unconfined,
+    acme_dns_config_from_settings, require_unconfined, apply_ui_lock, ui_lock,
     evacuation_options, evacuation_options_said, rolling_options_intro, rolling_node_templates,
     rolling_moved_templates, rolling_rules_give_way, rolling_rules_back_on, rolling_in_maintenance,
-    rolling_moved_guests, rolling_wind_down, rolling_guests_left_moved,
+    rolling_moved_guests, rolling_wind_down, rolling_guests_left_moved, UI_LANGUAGE_LOCKS,
 )
 from pegaprox.app import get_allowed_origins, add_allowed_origin
 from pegaprox.globals import _cors_origins_env, _auto_allowed_origins
@@ -365,6 +366,11 @@ def _update_target(install_dir, rel_path):
     return dst
 
 
+# MK: what the updater saves of the install before it writes, and what a rollback puts back
+UPDATE_BACKUP_DIRS = ('pegaprox', 'web', 'static')
+UPDATE_BACKUP_FILES = ('pegaprox_multi_cluster.py', 'version.json', 'requirements.txt')
+
+
 # MK Oct 2026 - the update, the rollback and the restart button hand the restart to
 # `systemctl restart pegaprox` only when this process runs in that unit. A second
 # PegaProx on the host (a test instance started by hand, one in a unit of another name)
@@ -515,7 +521,8 @@ def check_pegaprox_update():
             'latest_build': remote_version.get('build'),
             'release_date': remote_version.get('release_date'),
             'changelog': remote_version.get('changelog', []),
-            'download_url': remote_version.get('download_url', GITHUB_REPO_URL),
+            # MK Nov 2026 - the UI links this as it comes, so only an https page gets through
+            'download_url': ha.valid_https_url(remote_version.get('download_url')) or GITHUB_REPO_URL,
             'update_available': update_available,
             'install_method': _method,
             'in_app_update_supported': _method == 'source',
@@ -672,7 +679,7 @@ def perform_pegaprox_update():
         os.makedirs(backup_path, exist_ok=True)
 
         # MK: backup the stuff that matters, not everything
-        for item in ['pegaprox', 'web', 'static']:
+        for item in UPDATE_BACKUP_DIRS:
             src = os.path.join(install_dir, item)
             if os.path.isdir(src):
                 try:
@@ -680,7 +687,7 @@ def perform_pegaprox_update():
                                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
                 except Exception as e:
                     logging.warning(f"Backup {item}/: {e}")
-        for f in ['pegaprox_multi_cluster.py', 'version.json', 'requirements.txt']:
+        for f in UPDATE_BACKUP_FILES:
             src = os.path.join(install_dir, f)
             if os.path.exists(src):
                 shutil.copy2(src, os.path.join(backup_path, f))
@@ -825,10 +832,18 @@ def perform_pegaprox_update():
                 file_list = [p for p in patterns if '*' not in p and '?' not in p]
             else:
                 # absolute fallback - at least get the essentials
+                # MK Nov 2026 - the page asks for every language but English as a file of
+                # its own (web/Dev/build.sh), by the hash of the build it came with: a new
+                # page next to the old files shows their strings, or English. sw.js caches
+                # them per build, so it comes along with them
                 file_list = [
                     'pegaprox_multi_cluster.py', 'version.json',
                     'requirements.txt', 'deploy.sh', 'update.sh',
-                    'web/index.html', 'web/index.html.original',
+                    'web/index.html', 'web/index.html.original', 'web/sw.js',
+                    'pegaprox/utils/index_page.py',
+                    'web/i18n/de.json', 'web/i18n/es.json', 'web/i18n/fr.json', 'web/i18n/it.json',
+                    'web/i18n/ko.json', 'web/i18n/pl.json', 'web/i18n/pt.json', 'web/i18n/ru.json',
+                    'web/i18n/zh.json',
                 ]
 
             for remote_path in file_list:
@@ -1104,6 +1119,91 @@ def perform_pegaprox_update():
         logging.error(f"Update error: {e}")
         return jsonify({'error': safe_error(e, 'Update failed')}), 500
 
+
+# every install that ran has these two, a backup without one of them is refused
+_ROLLBACK_REQUIRED = ('pegaprox_multi_cluster.py', os.path.join('pegaprox', 'api', 'settings.py'))
+
+
+def _raise(err):
+    raise err
+
+
+def _link_on_the_way(root, rel):
+    """Whether root/rel, or a directory between root and it, is a symbolic link."""
+    path = root
+    for part in rel.split(os.sep):
+        path = os.path.join(path, part)
+        if os.path.islink(path):
+            return True
+        if not os.path.lexists(path):
+            return False
+    return False
+
+
+def _rollback_plan(backup, install):
+    """([(source, target)], None) for every file of an updater backup, or (None, why).
+
+    The updater copies what a link points at, so a backup it wrote holds plain files and
+    directories only. A link in the backup, or on the way to a target in the install,
+    refuses the whole rollback, and so does a backup without the launcher or settings.py:
+    nothing is read or written through a link, and nothing outside the install."""
+    for rel in _ROLLBACK_REQUIRED:
+        src = os.path.join(backup, rel)
+        if _link_on_the_way(backup, rel) or not os.path.isfile(src):
+            return None, f"The backup has no {rel.replace(os.sep, '/')}"
+    rels = [f for f in UPDATE_BACKUP_FILES if os.path.lexists(os.path.join(backup, f))]
+    for top in UPDATE_BACKUP_DIRS:
+        src = os.path.join(backup, top)
+        if not os.path.lexists(src):
+            continue
+        if os.path.islink(src) or not os.path.isdir(src):
+            return None, f"{top} in the backup is no directory"
+        # a directory that cannot be listed stops the plan, it is not left out
+        for base, dirs, files in os.walk(src, onerror=_raise):
+            for name in dirs + files:
+                if os.path.islink(os.path.join(base, name)):
+                    rel = os.path.relpath(os.path.join(base, name), backup)
+                    return None, f"The backup holds a link: {rel.replace(os.sep, '/')}"
+            rels += [os.path.relpath(os.path.join(base, f), backup) for f in files]
+    plan = []
+    for rel in rels:
+        src, dst = os.path.join(backup, rel), os.path.join(install, rel)
+        shown = rel.replace(os.sep, '/')
+        if os.path.islink(src) or not os.path.isfile(src):
+            return None, f"The backup holds something that is no file: {shown}"
+        if os.path.commonpath([install, os.path.abspath(dst)]) != install:
+            return None, f"{shown} is outside the install"
+        if _link_on_the_way(install, rel):
+            return None, f"{shown} in the install is a link"
+        if os.path.isdir(dst):
+            return None, f"{shown} in the install is a directory"
+        plan.append((src, dst))
+    return plan, None
+
+
+def _restore_files(plan):
+    """Copy each file of the plan next to its target, and put them in place once every
+    copy is there: a copy that fails leaves the install as it was."""
+    import tempfile
+    staged = []
+    try:
+        for src, dst in plan:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix='.rollback-', dir=os.path.dirname(dst))
+            os.close(fd)
+            staged.append((tmp, dst))
+            shutil.copy2(src, tmp)
+    except Exception:
+        for tmp, _dst in staged:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise
+    for tmp, dst in staged:
+        os.replace(tmp, dst)
+
+
 @bp.route('/api/pegaprox/update/rollback', methods=['POST'])
 @require_auth(perms=['update.manage'])
 def rollback_pegaprox_update():
@@ -1157,30 +1257,17 @@ def rollback_pegaprox_update():
         if not os.path.exists(backup_path):
             return jsonify({'error': 'Backup not found'}), 404
         
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        current_backend = os.path.abspath(__file__)
-        current_frontend = os.path.join(current_dir, 'index.html')
-        
-        restored = []
-        
-        # Restore backend
-        backup_backend = None
-        for f in os.listdir(backup_path):
-            if f.endswith('.py'):
-                backup_backend = os.path.join(backup_path, f)
-                break
-        
-        if backup_backend and os.path.exists(backup_backend):
-            shutil.copy2(backup_backend, current_backend)
-            restored.append('backend')
-            logging.info(f"Restored backend from {backup_backend}")
-        
-        # Restore frontend
-        backup_frontend = os.path.join(backup_path, 'index.html')
-        if os.path.exists(backup_frontend):
-            shutil.copy2(backup_frontend, current_frontend)
-            restored.append('frontend')
-            logging.info(f"Restored frontend from {backup_frontend}")
+        # MK: the backup is the tree the updater saved, each file goes back where it came from
+        install_dir = os.path.realpath(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        plan, why = _rollback_plan(_real_backup, install_dir)
+        if plan is None:
+            logging.warning(f"Rollback to {backup_name} refused: {why}")
+            return jsonify({'error': f'{why}, nothing was restored'}), 400
+        _restore_files(plan)
+        tops = {os.path.relpath(dst, install_dir).split(os.sep)[0] for _src, dst in plan}
+        restored = ['backend'] + (['frontend'] if tops & {'web', 'static'} else [])
+        logging.info(f"Restored {len(plan)} files from {_real_backup}")
         
         user = getattr(request, 'session', {}).get('user', 'system')
         log_audit(user, 'pegaprox.rollback', f"Rolled back to backup: {backup_name}")
@@ -1465,10 +1552,35 @@ def get_server_settings():
         settings['acme_dns_rfc2136_secret'] = '********'
     if settings.get('acme_dns_cloudflare_token'):
         settings['acme_dns_cloudflare_token'] = '********'
+    # the alert channels have routes of their own too, and their urls and tokens are
+    # masked there; the save of this form never writes them
+    if settings.get('alert_webhooks'):
+        from pegaprox.api.alerts import _mask_channel
+        settings['alert_webhooks'] = [_mask_channel(ch) for ch in settings['alert_webhooks']
+                                      if isinstance(ch, dict)]
     # MK Oct 2026 - the banners have routes of their own, which keep them from an admin
     # limited to a tenant (api/banners.py)
     from pegaprox.api.banners import BANNERS_KEY
     settings.pop(BANNERS_KEY, None)
+    # nor the push keypair: the browsers take the public half from /api/push/vapid-key,
+    # and the private half is sealed like the secrets masked above
+    from pegaprox.api.push import _VAPID_KEY_NAME
+    settings.pop(_VAPID_KEY_NAME, None)
+    # MK Oct 2026 (#1189) - the lock as it is in effect. The form sends these back with every
+    # save of the tab, and a stored value outside the lists would turn each one into a 400
+    lock = ui_lock(settings)
+    settings.update(ui_layout_lock=lock['layout'], ui_language_lock=lock['language'],
+                    ui_lock_admins=lock['admins'])
+    # MK Nov 2026 - what answers plain HTTP right now (app.main), for the line under the
+    # redirect port. Read-only: both save paths below take named fields and leave it out
+    from pegaprox import globals as _g
+    settings['http_redirect_state'] = dict(_g.HTTP_REDIRECT_STATE)
+    # what LDAP runs over as stored, a scheme in the server included, for the note of the
+    # LDAP tab. Read-only as well
+    from pegaprox.utils.ldap import ldap_transport
+    _kind, _checked = ldap_transport(settings.get('ldap_server'), settings.get('ldap_use_ssl'),
+                                     settings.get('ldap_use_starttls'), settings.get('ldap_verify_tls'))
+    settings['ldap_transport'] = {'kind': _kind, 'checked': _checked}
     return jsonify(settings)
 
 
@@ -1487,6 +1599,85 @@ def get_password_policy():
         'require_special': settings.get('password_require_special', False),
         'expiry_days': settings.get('password_expiry_days', 0)
     })
+
+
+@bp.route('/api/interface/lock', methods=['GET'])
+def get_interface_lock():
+    """Layout and language an administrator pinned for everyone (public)
+
+    The login page needs the language before anybody has signed in, so this takes no
+    credential and answers everyone the same three values: layout and language ('' when
+    users choose) and admins (false: administrators are exempt). Whether the lock binds an
+    account is decided by PUT /api/user/preferences, which refuses a change with UI_LOCKED.
+    """
+    # MK Oct 2026 (#1189, #1167) - in PORTAL_ONLY_UNREAD, not PORTAL_ONLY_ENDPOINTS: it reads
+    # no credential and says the same to anyone. A portal account opens / too before the
+    # page sends it on to /portal, and asks for this on the way, cookie included
+    resp = jsonify(ui_lock())
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+def _refuse_confined_lock():
+    """403 unless the caller sees every cluster and no tenant override lowers them where
+    they live. The interface lock is one for the whole installation, like the banners, and
+    takes their bar (api/banners.py). Fails closed."""
+    try:
+        from pegaprox.api.ha import _unconfined
+        from pegaprox.utils.auth import build_authz_user
+        session = getattr(request, 'session', None) or {}
+        if _unconfined(build_authz_user(session.get('user', ''), session)):
+            return None
+    except Exception as e:
+        logging.warning(f"[Settings] could not resolve the caller's cluster scope: {e}")
+    return jsonify({'error': 'The interface lock is set by administrators who are not limited '
+                             'to a tenant or to specific clusters'}), 403
+
+
+def _port_of(value, default):
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _stored_password_moves(data, settings):
+    """The stored SMTP or LDAP password a save would send to another server.
+
+    MK Nov 2026 - the save kept the stored password when the form sent the mask, also when
+    the same save pointed the server somewhere else, and the next mail or login handed it
+    to the new address. It goes to the server it was typed for, as with PBS and the
+    clusters. A save without a user or bind DN is no different: the next save can set one
+    on the server as it is then, and the stored password goes along with it."""
+    def typed(key):
+        return isinstance(data.get(key), str) and data[key] not in ('', '********')
+
+    def now(key, default=''):
+        return str((data[key] if key in data else settings.get(key)) or default).strip()
+
+    def moved(host_key, port_key, default_port):
+        host = now(host_key).lower().rstrip('.') != str(settings.get(host_key) or '').strip().lower().rstrip('.')
+        port = _port_of(data[port_key], default_port) != _port_of(settings.get(port_key), default_port) \
+            if port_key in data else False
+        return host or port
+
+    out = []
+    if settings.get('smtp_password') and not typed('smtp_password') and moved('smtp_host', 'smtp_port', 587):
+        out.append('smtp_password')
+    # an ldap:// or ldaps:// server is compared by the host and port ldap3 takes from it, so
+    # the save that takes the scheme apart (below) does not count as a move
+    if settings.get('ldap_bind_password') and not typed('ldap_bind_password') \
+            and _ldap_endpoint(now('ldap_server'), data['ldap_port'] if 'ldap_port' in data else settings.get('ldap_port')) \
+            != _ldap_endpoint(settings.get('ldap_server'), settings.get('ldap_port')):
+        out.append('ldap_bind_password')
+    return out
+
+
+def _ldap_endpoint(server, port):
+    from pegaprox.utils.ldap import ldap_split_server
+    host, _ssl, url_port = ldap_split_server(server)
+    return host.lower().rstrip('.'), url_port or _port_of(port, 389)
+
 
 @bp.route('/api/settings/server', methods=['POST'])
 @require_auth(perms=['admin.settings'])
@@ -1523,6 +1714,45 @@ def update_server_settings():
                     return jsonify({'error': 'email cannot name Entra accounts: it is the mail '
                                              'attribute, which Entra does not verify. Pick '
                                              'preferred_username or upn.'}), 400
+            
+            # MK Oct 2026 (#1189, #1167) - the interface lock, checked before anything else lands
+            lock_note, lock_error = apply_ui_lock(data, settings)
+            if lock_error:
+                return jsonify({'error': lock_error}), 400
+            # a save that changes nothing of it goes through for anyone the route lets in
+            refused = _refuse_confined_lock() if lock_note else None
+            if refused:
+                return refused
+            # MK Nov 2026 - ldap3 goes by a scheme in the server field, over the LDAPS toggle
+            # and the port. Taken apart here, what is stored says what runs: ldaps:// is LDAPS,
+            # ldap:// is not (STARTTLS stays as chosen)
+            if isinstance(data.get('ldap_server'), str):
+                from pegaprox.utils.ldap import ldap_split_server
+                _host, _scheme_ssl, _url_port = ldap_split_server(data['ldap_server'])
+                if _scheme_ssl is not None:
+                    data['ldap_server'] = _host
+                    data['ldap_use_ssl'] = _scheme_ssl
+                    if _scheme_ssl:
+                        data['ldap_use_starttls'] = False
+                    if _url_port:
+                        data['ldap_port'] = _url_port
+            _stale = _stored_password_moves(data, settings)
+            if _stale:
+                return jsonify({'error': 'Re-enter the ' + ' and the '.join(
+                                    'SMTP password' if k == 'smtp_password' else 'LDAP bind password'
+                                    for k in _stale) + ' to change the server or its port. A server '
+                                    'without a login takes any value there, the password is not sent '
+                                    'without a user or bind DN.',
+                                'code': 'CREDENTIAL_REQUIRED', 'fields': _stale}), 400
+            # MK Nov 2026 - a CA that does not load would only show at the next login, as a
+            # handshake that fails for everyone. Refused here, before anything is stored, and
+            # stored as the certificate blocks alone
+            if 'ldap_ca_cert' in data:
+                from pegaprox.utils.ldap import ldap_ca_cert_clean
+                _ca, _ca_error = ldap_ca_cert_clean(data['ldap_ca_cert'])
+                if _ca_error:
+                    return jsonify({'error': _ca_error, 'code': 'LDAP_CA_CERT_INVALID'}), 400
+                data['ldap_ca_cert'] = _ca
             
             # server config
             if 'domain' in data:
@@ -1678,7 +1908,7 @@ def update_server_settings():
                 settings['smtp_enabled'] = bool(data['smtp_enabled'])
                 logging.info(f"[Settings] Setting smtp_enabled = {settings['smtp_enabled']}")
             if 'smtp_host' in data:
-                settings['smtp_host'] = str(data['smtp_host']).strip()
+                settings['smtp_host'] = str(data['smtp_host'] or '').strip()
                 logging.info(f"[Settings] Setting smtp_host = {settings['smtp_host']}")
             if 'smtp_port' in data:
                 settings['smtp_port'] = max(1, min(65535, int(data['smtp_port'] or 587)))
@@ -1731,7 +1961,11 @@ def update_server_settings():
                 old_se = settings.get('syslog_enabled', True)
                 settings['syslog_enabled'] = bool(data['syslog_enabled'])
                 if old_se != settings['syslog_enabled']:
-                    save_server_settings(settings)  # persist before (re)start so the boot gate agrees
+                    # persist before (re)start so the boot gate agrees. The lock lands with this
+                    # save, whatever the rest of the request does, so its audit line goes now
+                    if save_server_settings(settings) and lock_note:
+                        log_audit(request.session.get('user', 'admin'), 'settings.interface_lock', lock_note)
+                        lock_note = ''
                     try:
                         from pegaprox.background.syslog_server import start_syslog_server, stop_syslog_server
                         start_syslog_server() if settings['syslog_enabled'] else stop_syslog_server()
@@ -1775,6 +2009,7 @@ def update_server_settings():
                 'ldap_default_role': lambda v: str(v).strip() if v else 'viewer',  # NS: Accept custom roles too
                 'ldap_auto_create_users': lambda v: bool(v),
                 'ldap_verify_tls': lambda v: bool(v),  # NS: Mar 2026 - persist TLS cert verification toggle (#108)
+                'ldap_ca_cert': lambda v: str(v or ''),  # checked and cleaned above
             }
             
             # NS: Feb 2026 - Log incoming LDAP data for debugging save issues
@@ -1903,10 +2138,19 @@ def update_server_settings():
                          f"username_claim={_old_claim or 'auto'}->{settings.get('oidc_username_claim') or 'auto'})")
             
         else:
-            # form-data (for file uploads)
+            # form-data (for file uploads). The lock is checked first: further down this branch
+            # writes uploads and may save the settings for the syslog toggle
+            lock_note, lock_error = apply_ui_lock(request.form, settings)
+            if lock_error:
+                return jsonify({'error': lock_error}), 400
+            refused = _refuse_confined_lock() if lock_note else None
+            if refused:
+                return refused
             domain = request.form.get('domain', '')
             port = request.form.get('port', '5000')
-            http_redirect_port = request.form.get('http_redirect_port', '0')
+            # MK Nov 2026 - no fallback for this one: 0 opens port 80 where that is allowed, so
+            # a form without the field switched that on. Without it the stored value stays.
+            http_redirect_port = (request.form.get('http_redirect_port') or '').strip()
             ssl_enabled = request.form.get('ssl_enabled', 'false').lower() == 'true'
             default_theme = request.form.get('default_theme', 'proxmoxDark')
             reverse_proxy = request.form.get('reverse_proxy_enabled', 'false').lower() == 'true'
@@ -1915,7 +2159,7 @@ def update_server_settings():
 
             if settings.get('port') != int(port):
                 restart_required = True
-            if settings.get('http_redirect_port') != int(http_redirect_port):
+            if http_redirect_port and settings.get('http_redirect_port') != int(http_redirect_port):
                 restart_required = True
             if settings.get('ssl_enabled') != ssl_enabled:
                 restart_required = True
@@ -1926,7 +2170,8 @@ def update_server_settings():
 
             settings['domain'] = domain
             settings['port'] = int(port)
-            settings['http_redirect_port'] = int(http_redirect_port)
+            if http_redirect_port:
+                settings['http_redirect_port'] = int(http_redirect_port)
             settings['ssl_enabled'] = ssl_enabled
             settings['reverse_proxy_enabled'] = reverse_proxy
             settings['trusted_proxies'] = trusted_proxies
@@ -1997,7 +2242,10 @@ def update_server_settings():
                 old_syslog_enabled = settings.get('syslog_enabled', True)
                 settings['syslog_enabled'] = request.form['syslog_enabled'] in ('true', '1', 'on')
                 if old_syslog_enabled != settings['syslog_enabled']:
-                    save_server_settings(settings)  # persist before (re)starting so the boot-time gate agrees
+                    # persist before (re)starting so the boot-time gate agrees (#1189: with the lock)
+                    if save_server_settings(settings) and lock_note:
+                        log_audit(request.session.get('user', 'admin'), 'settings.interface_lock', lock_note)
+                        lock_note = ''
                     try:
                         from pegaprox.background.syslog_server import start_syslog_server, stop_syslog_server
                         if settings['syslog_enabled']:
@@ -2070,6 +2318,8 @@ def update_server_settings():
             logging.info("[Settings] Settings saved successfully")
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'settings.server_updated', f"Settings updated (restart_required={restart_required})")
+            if lock_note:
+                log_audit(usr, 'settings.interface_lock', lock_note)
             
             # NS: Feb 2026 - Warn if LDAP enabled but critical fields missing
             warnings = []
@@ -2145,6 +2395,13 @@ def restart_server():
         logging.error(f"Error restarting server: {e}")
         return jsonify({'error': safe_error(e, 'Server restart failed')}), 500
 
+def _acme_pair_needs_restart():
+    """True unless every TLS listener of this process serves the pair on disk now. No
+    listener at all (plain HTTP on purpose) needs a restart for it too."""
+    from pegaprox.utils.served_pair import serves
+    return serves(SSL_CERT_FILE) is not True
+
+
 # MK: Mar 2026 - ACME / Let's Encrypt endpoints (#96)
 @bp.route('/api/settings/acme/status', methods=['GET'])
 @require_auth(perms=['node.certificate'])
@@ -2161,6 +2418,12 @@ def get_acme_status():
 
         settings = load_server_settings()
         cert_info = get_cert_info(ssl_dir)
+        # cert_info is the pair on disk, and the listeners take a new one up themselves.
+        # One that kept an older pair needs a restart, unless the pair on disk does not
+        # load: the start would refuse it too, and cert_error says why
+        from pegaprox.utils.served_pair import serves, load_error
+        stale = serves(SSL_CERT_FILE) is False
+        cert_error = load_error(SSL_CERT_FILE) if stale else ''
 
         return jsonify({
             'acme_enabled': settings.get('acme_enabled', False),
@@ -2184,6 +2447,9 @@ def get_acme_status():
             'acme_directory_url': settings.get('acme_directory_url', ''),
             'domain': settings.get('domain', ''),
             'cert': cert_info,
+            'cert_served': not stale,
+            'restart_required': stale and not cert_error,
+            'cert_error': cert_error,
         })
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get ACME status')}), 500
@@ -2278,10 +2544,9 @@ def request_acme_certificate():
             settings['ssl_enabled'] = True
             save_server_settings(settings)
             log_audit(usr, 'settings.acme_issued', f"Certificate issued for {domain}, expires {result.get('expires', '?')}")
-            # #725 — the new cert is on disk now, but the running TLS context still
-            # holds the old one until the service restarts. Tell the UI, same as the
-            # manual-upload path does, so the operator knows to restart to serve it.
-            result['restart_required'] = True
+            # the new cert is on disk now and the listeners take it up themselves
+            # (utils/served_pair.py), a restart is only needed when one of them did not
+            result['restart_required'] = _acme_pair_needs_restart()
 
         return jsonify(result)
 
@@ -2316,7 +2581,7 @@ def complete_acme_dns_challenge():
             save_server_settings(settings)
             usr = getattr(request, 'session', {}).get('user', 'admin')
             log_audit(usr, 'settings.acme_issued', f"Certificate issued via DNS-01, expires {result.get('expires', '?')}")
-            result['restart_required'] = True   # #725 — restart to serve the new cert
+            result['restart_required'] = _acme_pair_needs_restart()
 
         return jsonify(result)
     except Exception as e:
@@ -2368,13 +2633,18 @@ def _strip_cluster_secrets(cluster):
     the node agents sign their leader question with, and the BMC password of each
     node's fence."""
     _strip_secret_fields(cluster)
-    ha_settings = cluster.get('ha_settings') if isinstance(cluster, dict) else None
+    _strip_ha_secrets(cluster.get('ha_settings') if isinstance(cluster, dict) else None)
+    return cluster
+
+
+def _strip_ha_secrets(ha_settings):
+    """A cluster's HA settings without the agent token and the BMC password of each fence."""
     if isinstance(ha_settings, dict):
         _strip_secret_fields(ha_settings)
         fencing = ha_settings.get('fencing')
         for fence in (fencing.values() if isinstance(fencing, dict) else ()):
             _strip_secret_fields(fence)
-    return cluster
+    return ha_settings
 
 
 def _keep_guarded_ha_settings(cluster, existing):
@@ -2398,6 +2668,222 @@ def _keep_guarded_ha_settings(cluster, existing):
         # the safety rules, whatever flag the row kept from an earlier one
         merged['unsafe_two_node_recovery'] = False
     cluster['ha_settings'] = merged
+
+
+def _keep_ha_secrets(cluster, existing):
+    """The HA secrets of a cluster whose addresses the backup leaves as they are: a blank
+    in the backup keeps the key the self-fence agents sign with, and a fence's BMC password
+    while the fence keeps its type and its BMC. The same rule as the cluster's password.
+
+    An overwrite wrote the backup's HA settings as they were, and a backup without secrets
+    has neither: every installed agent was answered 403 from then on, and a tiebreak node
+    that hears no leader fences itself. A merge has kept them already."""
+    held = existing.get('ha_settings') if isinstance(existing.get('ha_settings'), dict) else {}
+    sent = cluster.get('ha_settings')
+    ha = dict(sent) if isinstance(sent, dict) else {}
+    kept = False
+    token = held.get('agent_token')
+    if not _blank_ha_secret('agent_token', token) and _blank_ha_secret('agent_token', ha.get('agent_token')):
+        ha['agent_token'] = token
+        kept = True
+    held_fences = held.get('fencing') if isinstance(held.get('fencing'), dict) else {}
+    if isinstance(ha.get('fencing'), dict):
+        from pegaprox.api.clusters import _host_key
+        fences = dict(ha['fencing'])
+        for node, new in fences.items():
+            old = held_fences.get(node)
+            if not (isinstance(old, dict) and isinstance(new, dict)):
+                continue
+            # the password goes to the BMC the fence names
+            if (str(new.get('type') or '').lower(), _host_key(new.get('host'))) != \
+                    (str(old.get('type') or '').lower(), _host_key(old.get('host'))):
+                continue
+            secret = set(old) - set(_strip_secret_fields(dict(old)))
+            keep = {k: old[k] for k in secret
+                    if not _blank_ha_secret(k, old[k]) and _blank_ha_secret(k, new.get(k))}
+            if keep:
+                fences[node] = dict(new, **keep)
+                kept = True
+        ha['fencing'] = fences
+    if kept:
+        cluster['ha_settings'] = ha
+
+
+def _drop_ha_secrets(cluster):
+    """A merge over a cluster the backup moves keeps the guarded HA settings, but not the
+    agent key and the fence passwords: the key would go to the nodes at the new address
+    with the next agent install, and a fence would power off a machine that need not be
+    a node of the cluster now."""
+    if isinstance(cluster.get('ha_settings'), dict):
+        # a copy, the answer compares with what the cluster holds
+        cluster['ha_settings'] = _strip_ha_secrets(json.loads(json.dumps(cluster['ha_settings'])))
+
+
+def _ha_secrets_left_empty(cluster, existing):
+    """What of a cluster's HA secrets the restore of its row leaves empty: whether the key
+    the self-fence agents sign with goes, and the nodes whose fence loses its BMC password.
+
+    Both modes keep them while the backup leaves the cluster's addresses (above). A backup
+    that moves the cluster takes none of the stored ones along, a merge either, and one
+    without secrets has neither: every installed agent is then answered 403 and the fence
+    has nothing to log in with. A fence the backup does not have is gone as a whole and
+    needs no password. Returns (token, [node])."""
+    held = existing.get('ha_settings') if isinstance(existing.get('ha_settings'), dict) else {}
+    sent = cluster.get('ha_settings') if isinstance(cluster.get('ha_settings'), dict) else {}
+    token = not _blank_ha_secret('agent_token', held.get('agent_token')) and \
+        _blank_ha_secret('agent_token', sent.get('agent_token'))
+    held_fences = held.get('fencing') if isinstance(held.get('fencing'), dict) else {}
+    sent_fences = sent.get('fencing') if isinstance(sent.get('fencing'), dict) else {}
+    fences = []
+    for node, fence in held_fences.items():
+        new = sent_fences.get(node)
+        if not (isinstance(fence, dict) and isinstance(new, dict)):
+            continue
+        # what the export without secrets leaves out of a fence
+        secret = set(fence) - set(_strip_secret_fields(dict(fence)))
+        if any(not _blank_ha_secret(k, fence[k]) and _blank_ha_secret(k, new.get(k)) for k in secret):
+            fences.append(str(node))
+    return token, sorted(fences)
+
+
+# The sealed secrets of the server settings: the settings that name the server each one is
+# sent to, and whether the settings send it at all
+_RESTORE_SECRETS = {
+    'smtp_password': (('smtp_host', 'smtp_port'),
+                      lambda s: s.get('smtp_host') and s.get('smtp_user')),
+    'ldap_bind_password': (('ldap_server', 'ldap_port'),
+                           lambda s: s.get('ldap_server') and s.get('ldap_bind_dn')),
+    'oidc_client_secret': (('oidc_provider', 'oidc_cloud_environment', 'oidc_tenant_id',
+                            'oidc_authority', 'oidc_client_id'),
+                           lambda s: s.get('oidc_client_id')),
+    'acme_dns_rfc2136_secret': (('acme_dns_rfc2136_nameserver', 'acme_dns_rfc2136_port'),
+                                lambda s: s.get('acme_dns_provider') == 'rfc2136'),
+    # always Cloudflare's API, whatever the zone
+    'acme_dns_cloudflare_token': ((), lambda s: s.get('acme_dns_provider') == 'cloudflare'),
+}
+_CHANNEL_SECRETS = ('url', 'token', 'topic')
+
+
+def _restored_ldap_ca(incoming):
+    """The LDAP CA of a restore goes through the check of the settings save. Cleaned in
+    `incoming`, or taken out of it when it fails, so the one held stays. Returns what to
+    tell then: a CA that does not load fails every TLS login and every later save of the tab.
+    MK Nov 2026"""
+    if not isinstance(incoming, dict) or 'ldap_ca_cert' not in incoming:
+        return None
+    from pegaprox.utils.ldap import ldap_ca_cert_clean
+    pem, error = ldap_ca_cert_clean(incoming['ldap_ca_cert'])
+    if error:
+        incoming.pop('ldap_ca_cert')
+        return f'Server settings: the LDAP CA certificate was not restored, the one held stays. {error}'
+    incoming['ldap_ca_cert'] = pem
+    return None
+
+
+def _blank_secret(value):
+    # a sealed secret is a string; a list or a number in its place carries none either
+    return not isinstance(value, str) or value in ('', '********')
+
+
+_AGENT_KEY = re.compile(r'[0-9a-f]{64}')
+
+
+def _blank_ha_secret(key, value):
+    # the manager makes a new agent key for whatever is not one (core/manager.py _ha_agent_token),
+    # and a BMC password of blanks only is none either
+    if key == 'agent_token':
+        return not (isinstance(value, str) and _AGENT_KEY.fullmatch(value))
+    return _blank_secret(value) or not value.strip()
+
+
+def _restored_secrets(incoming, current, mode):
+    """The secrets a restore of `incoming` stores, and the ones to enter again.
+
+    MK Nov 2026 - a backup without secrets carries them blank. The restore wrote that blank
+    over the stored secret (overwrite), or kept the stored one whatever server the backup
+    pointed it at (merge). A blank now keeps the stored secret while the server it was typed
+    for stays the same, as the settings save does. Once the backup moves the server it goes
+    empty, and the answer names it. An alert channel is kept by its id, one this instance
+    does not know comes back turned off. A push keypair without its private key is not
+    written. Adjusts `incoming` for those two; returns ({setting: value}, to_enter)."""
+    current = current or {}
+    after = dict(current)
+    after.update({k: v for k, v in incoming.items()
+                  if mode != 'merge' or v not in (None, '', [])})
+
+    def server(s, keys):
+        return [str(s.get(k) if s.get(k) is not None else '').strip().lower().rstrip('.') for k in keys]
+
+    secrets, to_enter = {}, []
+    for key, (keys, sent) in _RESTORE_SECRETS.items():
+        if not _blank_secret(incoming.get(key)):
+            continue
+        held = current.get(key)
+        same = server(after, keys) == server(current, keys)
+        secrets[key] = held if held and same else ''
+        if not secrets[key] and sent(after):
+            to_enter.append({'setting': key})
+
+    channels = incoming.get('alert_webhooks')
+    if isinstance(channels, list):
+        live = {ch.get('id'): ch for ch in (current.get('alert_webhooks') or [])
+                if isinstance(ch, dict) and ch.get('id')}
+        out = []
+        for ch in channels:
+            if isinstance(ch, dict) and _blank_secret(ch.get('url')):
+                ch, held = dict(ch), live.get(ch.get('id')) or {}
+                if held.get('url'):
+                    ch.update({k: held[k] for k in _CHANNEL_SECRETS if k in held and _blank_secret(ch.get(k))})
+                else:
+                    # every alert would log a failed send to it until somebody gives it a url
+                    ch.update(url='', enabled=False)
+                    to_enter.append({'channel': str(ch.get('name') or ch.get('id') or '')})
+            out.append(ch)
+        incoming['alert_webhooks'] = out
+
+    from pegaprox.api.push import _VAPID_KEY_NAME
+    kp = incoming.get(_VAPID_KEY_NAME)
+    if _VAPID_KEY_NAME in incoming and not (isinstance(kp, dict) and kp.get('private_pem')):
+        # the browsers subscribed to this instance keep getting their pushes
+        incoming.pop(_VAPID_KEY_NAME)
+    return secrets, to_enter
+
+
+def _cluster_moves(cluster, existing):
+    """What in a backup's row of a cluster that is here takes its stored credential to an
+    address it was not typed for, counted as the cluster edit counts it (api/clusters.py
+    _config_edit_checks): a host or fallback host the cluster does not have, another SSH
+    port, the certificate check turned off. And a node address in the HA settings that the
+    cluster does not have: no route writes those, only a restore."""
+    from pegaprox.api.clusters import _host_key
+    known = {_host_key(existing.get('host'))} | {_host_key(h) for h in existing.get('fallback_hosts') or []}
+    fallback = cluster.get('fallback_hosts') if isinstance(cluster.get('fallback_hosts'), list) else []
+    moved = []
+    if _host_key(cluster.get('host')) not in known:
+        moved.append('host')
+    if any(_host_key(h) not in known for h in fallback):
+        moved.append('fallback_hosts')
+    if _port_of(cluster.get('ssh_port'), 22) != _port_of(existing.get('ssh_port'), 22):
+        moved.append('ssh_port')
+    if existing.get('ssl_verification') and not cluster.get('ssl_verification', True):
+        moved.append('ssl_verification')
+    # the HA node checks log in there with the cluster's root password, and the agent
+    # install may pick one (core/manager.py _ha_get_all_node_ips)
+    if _typed_node_ips(cluster.get('ha_settings')) - _typed_node_ips(existing.get('ha_settings')) - known:
+        moved.append('node_ips')
+    return moved
+
+
+def _typed_node_ips(ha_settings):
+    """The node addresses typed into a cluster's HA settings, as _host_key writes them."""
+    from pegaprox.api.clusters import _host_key
+    typed = ha_settings.get('node_ips') if isinstance(ha_settings, dict) else None
+    out = set()
+    for ips in (typed.values() if isinstance(typed, dict) else ()):
+        out.update(_host_key(ip) for ip in (ips if isinstance(ips, list) else [ips]))
+    # the manager skips an empty one
+    out.discard('')
+    return out
 
 
 @bp.route('/api/config/backup', methods=['POST'])
@@ -2478,9 +2964,17 @@ def backup_config():
             logging.warning("[Backup] Backup password too short")
             return jsonify({'error': 'Backup password must be at least 8 characters'}), 400
         
-        include_secrets = data.get('include_secrets', False)
-        include_users = data.get('include_users', True)
-        include_audit = data.get('include_audit', False)
+        # MK Nov 2026 - read as checkboxes: the string "false" was true, and with it the
+        # export carried every secret and the audit log
+        from pegaprox.api.helpers import _checkbox
+        flags = {}
+        for name, default in (('include_secrets', False), ('include_users', True), ('include_audit', False)):
+            flags[name] = default if data.get(name) is None else _checkbox(data.get(name))
+            if flags[name] is None:
+                return jsonify({'error': f'{name} is true or false', 'code': 'INVALID_FIELD', 'field': name}), 400
+        include_secrets = flags['include_secrets']
+        include_users = flags['include_users']
+        include_audit = flags['include_audit']
         
         database = get_db()
         
@@ -2506,6 +3000,22 @@ def backup_config():
                 backup_data['server_settings']['acme_dns_rfc2136_secret'] = ''
             if 'acme_dns_cloudflare_token' in backup_data['server_settings']:
                 backup_data['server_settings']['acme_dns_cloudflare_token'] = ''
+            # MK Nov 2026 - the others went out sealed as stored, and the alert channels as
+            # they are: a hook url carries its token, an ntfy topic is the feed. Blank, not
+            # left out, so a restore knows they were there (_restored_secrets)
+            _ss = backup_data['server_settings']
+            for _k in _RESTORE_SECRETS:
+                if _k in _ss:
+                    _ss[_k] = ''
+            from pegaprox.api.push import _VAPID_KEY_NAME
+            if isinstance(_ss.get(_VAPID_KEY_NAME), dict):
+                _ss[_VAPID_KEY_NAME] = dict(_ss[_VAPID_KEY_NAME], private_pem='')
+            _hooks = _ss.get('alert_webhooks')
+            if _hooks:
+                # a row that is no object is a bare url, and no channel anything sends to
+                _ss['alert_webhooks'] = [dict(ch, **{k: '' for k in _CHANNEL_SECRETS if k in ch})
+                                         for ch in (_hooks if isinstance(_hooks, list) else [])
+                                         if isinstance(ch, dict)]
         
         # Clusters
         clusters = database.get_all_clusters()
@@ -2567,6 +3077,14 @@ def backup_config():
             backup_data['custom_scripts'] = scripts
         except:
             backup_data['custom_scripts'] = []
+
+        # MK Oct 2026 - the custom node hardening profiles (api/reports.py)
+        try:
+            from pegaprox.api.reports import backup_hardening_profiles
+            backup_data['hardening_profiles'] = backup_hardening_profiles()
+        except Exception as e:
+            logging.warning(f"[Backup] could not read the hardening profiles: {e}")
+            backup_data['hardening_profiles'] = []
         
         # Audit Log (optional, can be large)
         if include_audit:
@@ -2830,17 +3348,32 @@ def restore_config():
                     from pegaprox.core import ha
                     incoming_ss = {k: v for k, v in (data['server_settings'] or {}).items()
                                    if k not in _PROTECTED_CONSENT and k != ha.MEMBER_SETTING}
+                    _ca_error = _restored_ldap_ca(incoming_ss)
+                    if _ca_error:
+                        results['errors'].append(_ca_error)
+                    _secrets, _to_enter = _restored_secrets(incoming_ss, current, mode)
                     if mode == 'merge':
                         # Only update non-empty values
                         for key, value in incoming_ss.items():
                             if value not in [None, '', []]:
                                 current[key] = value
+                        current.update(_secrets)
                         save_server_settings(current)
                     else:
                         for _k in _PROTECTED_CONSENT:
                             if (current or {}).get(_k) is not None:
                                 incoming_ss[_k] = current[_k]
+                        incoming_ss.update(_secrets)
                         save_server_settings(incoming_ss)
+                else:
+                    # the dry run names them as well, it is what the restore dialog shows first
+                    _ca_error = _restored_ldap_ca(dict(data['server_settings'] or {}))
+                    if _ca_error:
+                        results['errors'].append(_ca_error)
+                    _to_enter = _restored_secrets(dict(data['server_settings'] or {}),
+                                                  load_server_settings(), mode)[1]
+                if _to_enter:
+                    results['secrets_to_enter'] = _to_enter
                 results['restored']['server_settings'] = True
             except Exception as e:
                 results['errors'].append(f"Server settings: {str(e)}")
@@ -2879,21 +3412,51 @@ def restore_config():
                         continue
                     
                     existing = database.get_cluster(cluster_id)
+                    moved = _cluster_moves(cluster, existing) if existing else []
+                    cluster_name = str(cluster.get('name') or cluster_id)
                     
                     if existing and mode == 'merge':
-                        # Keep existing passwords if not in backup
-                        # sec (audit): this keyed off 'password_encrypted', which neither the
-                        # backup nor get_cluster() ever emits — the credential lives under 'pass'
-                        # (db.py:2884/2971) and save_cluster reads data.get('pass'). Dead as
-                        # written, and load-bearing now that a "secrets excluded" backup really
-                        # does omit them: without this a merge-restore encrypts '' over every
-                        # cluster password and SSH key.
-                        for _sk in ('pass', 'ssh_key', 'api_token_secret'):
-                            if not cluster.get(_sk) and existing.get(_sk):
-                                cluster[_sk] = existing[_sk]
-                        if not cluster.get('ssh_key_encrypted') and existing.get('ssh_key_encrypted'):
-                            cluster['ssh_key_encrypted'] = existing['ssh_key_encrypted']
                         _keep_guarded_ha_settings(cluster, existing)
+                        if moved:
+                            _drop_ha_secrets(cluster)
+                    # Keep existing passwords if not in backup. The credential lives under
+                    # 'pass' (db.py get_cluster) and save_cluster encrypts what it is given, so
+                    # without this a restore of a backup without secrets writes '' over every
+                    # cluster password and SSH key.
+                    # MK Nov 2026 - an overwrite did write it, and a merge kept them for any
+                    # host the backup named. Both keep them while the backup leaves the
+                    # addresses they go to as they are, else the answer names the cluster
+                    if existing and not moved:
+                        for _sk in ('pass', 'ssh_key', 'api_token_secret'):
+                            if _blank_secret(cluster.get(_sk)) and existing.get(_sk):
+                                cluster[_sk] = existing[_sk]
+                        # the agent key and the fence passwords as well
+                        _keep_ha_secrets(cluster, existing)
+                    if _blank_secret(cluster.get('pass')) and _blank_secret(cluster.get('api_token_secret')):
+                        results.setdefault('secrets_to_enter', []).append({'cluster': cluster_name})
+                    # the nodes' own root passwords go where the cluster says its nodes are, and
+                    # are dropped for such a move whatever the row carries, as the cluster edit
+                    # does (api/clusters.py _drop_node_passwords). Those the backup has for the
+                    # cluster are stored again below
+                    if moved:
+                        from pegaprox.core import node_creds
+                        _nc = data.get('node_credentials')
+                        _nc = _nc.get(cluster_id) if isinstance(_nc, dict) else None
+                        _carried = {n for n, v in (_nc.items() if isinstance(_nc, dict) else ())
+                                    if node_creds.node_name_ok(n) and not node_creds.value_problem(v)}
+                        _lose = [r['node'] for r in node_creds.state(cluster_id)
+                                 if r.get('has_password') and r['node'] not in _carried]
+                        if _lose:
+                            results.setdefault('secrets_to_enter', []).append(
+                                {'cluster': cluster_name, 'nodes': _lose})
+                    if existing:
+                        _token, _fences = _ha_secrets_left_empty(cluster, existing)
+                        if _token:
+                            results.setdefault('secrets_to_enter', []).append(
+                                {'cluster': cluster_name, 'agent_token': True})
+                        if _fences:
+                            results.setdefault('secrets_to_enter', []).append(
+                                {'cluster': cluster_name, 'fences': _fences})
 
                     # NS Oct 2026 - it goes onto the ssh command line; a bad one is not restored
                     from pegaprox.utils.sanitization import validate_ssh_user
@@ -2902,8 +3465,21 @@ def restore_config():
                         cluster['ssh_user'] = ''
                         results['errors'].append(f"Cluster {cluster_id}: ssh_user is not a valid "
                                                  f"user name, the default user is used")
+                    # it goes behind the node names of the UI links, as on the cluster routes
+                    from pegaprox.utils.sanitization import dns_suffix
+                    if 'node_ui_suffix' in cluster:
+                        _sfx = dns_suffix(cluster['node_ui_suffix'] or '')
+                        if _sfx is None:
+                            _sfx = ''
+                            results['errors'].append(f"Cluster {cluster_id}: node_ui_suffix is not a "
+                                                     f"domain name, the node links go without one")
+                        cluster['node_ui_suffix'] = _sfx
 
                     if not dry_run:
+                        if moved:
+                            # before the row lands: a drop that fails restores nothing of it
+                            from pegaprox.api.clusters import _drop_node_passwords
+                            _drop_node_passwords(cluster_id, cluster_name, moved)
                         database.save_cluster(cluster_id, cluster)
                     cluster_count += 1
                 except Exception as e:
@@ -2952,6 +3528,13 @@ def restore_config():
                         continue
                     
                     if not dry_run:
+                        # a backup from before password_changed_at had a column carries no
+                        # date, and an account without one reads as expired. One that comes
+                        # in new starts its clock now, one that is here keeps its own date
+                        if (not u.get('password_changed_at')
+                                and (u.get('auth_source') or 'local') == 'local'
+                                and database.get_user(uname) is None):
+                            u = dict(u, password_changed_at=datetime.now().isoformat())
                         database.save_user(uname, u)
                     user_count += 1
                 except Exception as e:
@@ -3038,6 +3621,17 @@ def restore_config():
             if not dry_run:
                 database.conn.commit()
             results['restored']['cluster_groups'] = group_count
+
+        # MK Oct 2026 - custom hardening profiles, each checked like a new one
+        if 'hardening_profiles' in data:
+            try:
+                from pegaprox.api.reports import restore_hardening_profiles
+                count, why = restore_hardening_profiles(data['hardening_profiles'], username, dry_run)
+                results['restored']['hardening_profiles'] = count
+                results['errors'].extend(why)
+            except Exception as e:
+                logging.warning(f"[Restore] hardening profiles not restored: {e}")
+                results['errors'].append('Hardening profiles: could not be restored')
         
         # Log the restore action
         if not dry_run:
@@ -3393,6 +3987,8 @@ def get_audit_log_api():
         verify_integrity=verify,
         scope=scope,
     )
+    # verified as stored above, handed out with an old cloud-init password masked
+    entries = masked_rows(entries)
 
     if fmt == 'csv':
         # NS Apr 2026 — compliance-ready CSV. Streamed to avoid holding the
@@ -3553,7 +4149,7 @@ def get_cluster_audit_log_api(cluster_id):
 
         filtered = [e for e in filtered if _mentions_accessible(e.get('details', ''))]
 
-    return jsonify(filtered)
+    return jsonify(masked_rows(filtered))
 
 
 @bp.route('/api/audit/integrity', methods=['GET'])
@@ -3759,6 +4355,8 @@ def get_compliance_status():
         score = round(passed / len(checked) * 100, 1) if checked else None
         st = {c['id']: c['status'] for c in controls}
         default_pw = _check_default_password_in_use()
+        # names an installed SQLCipher package that does not load here
+        from pegaprox.core import dbcrypto
 
         return jsonify({
             'compliance_score': score,
@@ -3773,7 +4371,8 @@ def get_compliance_status():
                 'key_exists': key_info.get('exists', False),
                 'key_created': key_info.get('created'),
                 'last_rotation': key_info.get('last_modified'),
-                'backups_count': len(key_info.get('backups', []))
+                'backups_count': len(key_info.get('backups', [])),
+                'sqlcipher_error': dbcrypto.SQLCIPHER_ERROR,
             },
             'session': {
                 'timeout_seconds': settings.get('session_timeout', SESSION_TIMEOUT),
@@ -3792,6 +4391,7 @@ def get_compliance_status():
                 r for r in [
                     'Enable HTTPS with valid certificates (or enable reverse proxy mode if using nginx/Traefik)'
                     if st.get('https_enabled') == 'failed' else None,
+                    dbcrypto.sqlcipher_problem(),
                     'Reduce session timeout to 8 hours or less'
                     if st.get('session_timeout_compliant') == 'failed'
                     and int(settings.get('session_timeout', SESSION_TIMEOUT) or 0) > 28800 else None,
@@ -3872,35 +4472,41 @@ def index():
     a fresh browser (no localStorage yet) hits cdn.jsdelivr while waiting
     for /auth/check to come back. We rewrite a tiny prelude into <head>
     so the loader sees the flag synchronously on its first read.
+
+    MK Nov 2026 - read once, each coding compressed once, a reload gets its 304 and the
+    flag changes the ETag (utils/index_page.py). Every route that sends the page goes there.
     """
-    import os as _os
-    air_gap = bool(load_server_settings().get('air_gap_mode', False))
-    index_path = _os.path.join(WEB_DIR, 'index.html')
-    if not air_gap:
-        return send_from_directory(WEB_DIR, 'index.html')
-    try:
-        with open(index_path, 'r', encoding='utf-8') as f:
-            html = f.read()
-        prelude = (
-            "<script>"
-            "try{localStorage.setItem('pegaprox-air-gap','1');}catch(_){}"
-            "window.__pegaproxAirGap=true;"
-            "</script>"
-        )
-        # inject right after <head> open tag so it precedes everything
-        if '<head>' in html:
-            html = html.replace('<head>', '<head>' + prelude, 1)
-        else:
-            html = prelude + html
-        resp = make_response(html)
-        resp.headers['Content-Type'] = 'text/html; charset=utf-8'
-        # don't let proxies cache an air-gapped response — toggling the flag
-        # off must take effect on the next reload, not whenever the cache decides
-        resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-        return resp
-    except Exception:
-        logging.exception("[index] air-gap prelude injection failed; falling back to plain index.html")
-        return send_from_directory(WEB_DIR, 'index.html')
+    return _send_page()
+
+
+def _send_page():
+    return serve_index(WEB_DIR, bool(load_server_settings().get('air_gap_mode', False)))
+
+
+# MK Nov 2026 - the languages of the page besides English, which the bundle carries itself:
+# web/Dev/build.sh writes them to web/i18n/<lang>.json and puts the first 16 hex of each
+# file's sha256 into the page, which asks for /i18n/<lang>.json?v=<that>. Only these names
+# reach the disk.
+I18N_DIR = 'i18n'
+I18N_LANGS = frozenset(UI_LANGUAGE_LOCKS) - {'en'}
+I18N_HASH_LEN = 16
+I18N_IMMUTABLE = 'public, max-age=31536000, immutable'
+
+
+@bp.route('/i18n/<lang>.json')
+def serve_language_file(lang):
+    """A language file of the web interface
+
+    Public like the page itself, the login form shows in the language too. Kept for good
+    when ?v= names the file as it is now, revalidated by its ETag otherwise.
+    """
+    if lang not in I18N_LANGS:
+        return Response('', status=404, mimetype='application/json')
+    v = request.args.get('v', '')
+
+    def cache_control(digest):
+        return I18N_IMMUTABLE if v == digest[:I18N_HASH_LEN] else 'no-cache'
+    return serve_file(os.path.join(WEB_DIR, I18N_DIR), f'{lang}.json', 'application/json', cache_control)
 
 
 def _plugin_page_here(plugin_id):
@@ -3962,7 +4568,7 @@ def oidc_callback_page():
     Identity providers redirect here with ?code=xxx&state=yyy
     The frontend JS picks up the params and calls the API callback endpoint
     """
-    return send_from_directory(WEB_DIR, 'index.html')
+    return _send_page()
 
 @bp.route('/api/status', methods=['GET'])
 def get_status():
@@ -4101,14 +4707,14 @@ def generate_support_bundle():
             try:
                 db = get_db()
                 cursor = db.conn.cursor()
-                cursor.execute('SELECT timestamp, user, action, details, ip_address FROM audit_log ORDER BY timestamp DESC LIMIT 500')
+                cursor.execute('SELECT timestamp, user, action, details, ip_address, cluster FROM audit_log ORDER BY timestamp DESC LIMIT 500')
                 audit_entries = []
                 for row in cursor.fetchall():
                     audit_entries.append({
                         'timestamp': row[0],
                         'user': row[1],
                         'action': row[2],
-                        'details': row[3],
+                        'details': masked_details(row[3], row[5] or ''),
                         'ip': (row[4][:10] + '...') if row[4] and len(row[4]) > 10 else row[4]
                     })
                 zf.writestr(f"{bundle_prefix}/audit_log.json", json.dumps(audit_entries, indent=2))
@@ -4153,10 +4759,12 @@ def generate_support_bundle():
 
                 from pegaprox.api.alerts import _mask_channel
                 for key, value in settings.items():
-                    if key == 'alert_webhooks' and isinstance(value, list):
-                        # keep id/name/type/enabled for diagnostics, mask the bearer bits
-                        safe_settings[key] = [_mask_channel(c) if isinstance(c, dict) else c
-                                              for c in value]
+                    if key == 'alert_webhooks':
+                        # keep id/name/type/enabled for diagnostics, mask the bearer bits.
+                        # Every row goes through the mask: a row edited by hand as a bare
+                        # url string went into the bundle as it was, token and all.
+                        rows = value if isinstance(value, list) else [value] if value else []
+                        safe_settings[key] = [_mask_channel(c) for c in rows]
                     elif any(s in key.lower() for s in sensitive_keys):
                         safe_settings[key] = '[REDACTED]' if value else ''
                     else:
@@ -4185,9 +4793,18 @@ def generate_support_bundle():
             # 10. Application + Cluster Logs
             # NS: redact sensitive data from all log output
             def _redact_log(line):
+                # older config lines carry a password whole, blanks in it too: the audit
+                # line as cipassword=... up to its end, the logged body as a quoted value
+                end = '\n' if line.endswith('\n') else ''
+                line = masked_details(line[:len(line) - len(end)]) + end
+                line = re.sub(r'''(password['"]?\s*:\s*)(['"])(?:\\.|(?!\2)[^\\])+\2''', r'\1\2[REDACTED]\2', line,
+                              flags=re.IGNORECASE)
                 line = re.sub(r'(password["\']?\s*[:=]\s*["\']?)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
                 line = re.sub(r'(token["\']?\s*[:=]\s*["\']?)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
                 line = re.sub(r'(secret["\']?\s*[:=]\s*["\']?)[^"\'&\s]+', r'\1[REDACTED]', line, flags=re.IGNORECASE)
+                # an XAPI session in a raw VDI url is the XCP-ng pool login; the same helper
+                # as the log record sanitizer, for the lines written before it was there
+                line = scrub_session_id(line)
                 # MK Oct 2026 - mail addresses: alice@corp.example -> ***@corp.example
                 # (a dotted name ending in letters, so root@pam and root@10.0.0.5 stay).
                 # The name before the @ is at most 64 long (RFC 5321): unbounded, every
@@ -4889,11 +5506,13 @@ def _ceph_gate_unsafe(summary, gate):
     hit = [tok for tok in risky if tok in pgs]
     if hit:
         return 'PGs ' + '+'.join(hit)
-    warns = ' '.join(str(w) for w in (summary.get('warnings') or [])).lower()
-    for w in ('degraded data redundancy', 'reduced data availability', 'pgs inactive',
-              'osds down', 'osd down', 'are down', 'insufficient standby', 'insufficient'):
-        if w in warns:
-            return 'warning: ' + w
+    # JB Nov 2026 - `warnings` holds Ceph's check codes, the sentences below never matched one of them
+    warns = ' '.join(str(w) for w in (summary.get('warnings') or [])).upper()
+    for code in ('PG_DEGRADED', 'PG_AVAILABILITY', 'PG_DAMAGED', 'OSD_DOWN', 'OSD_HOST_DOWN', 'OSD_ROOT_DOWN',
+                 'OSD_FULL', 'OBJECT_UNFOUND', 'MON_DOWN', 'FS_DEGRADED', 'MDS_INSUFFICIENT_STANDBY',
+                 'PG_RECOVERY_FULL', 'PG_BACKFILL_FULL'):
+        if code in warns:
+            return 'warning: ' + code
     return None
 
 
@@ -4967,13 +5586,26 @@ def start_rolling_update(cluster_id):
     MK: Fixed GitHub Issue - skip up-to-date nodes and configurable timeout
     
     Parameters (via JSON body):
-    - include_reboot: bool - Whether to reboot nodes after update (default: False)
+    - include_reboot: bool - Whether to reboot nodes after update (default: False), needs node.reboot
     - node_order: list - Custom order of nodes to update
     - skip_up_to_date: bool - Skip nodes that have no updates available (default: True)
     - force_all: bool - Force update all nodes even if up-to-date (default: False)
+    - skip_evacuation: bool - Update without moving the guests off first (default: False, not recommended)
+    - wait_for_reboot: bool - Wait until a rebooted node is back before the next one (default: True)
+    - pause_on_evacuation_error: bool - Pause the run when a guest cannot be moved (default: True)
+    - allow_local_disks: bool - Live-migrate guests on local storage with --with-local-disks
+      instead of skipping them (default: False); the disks are copied over the network
+    - migrate_templates: bool - Move the node's templates with it, offline (default: False, Proxmox only)
+    - relax_anti_affinity: bool - Let negative affinity rules give way during the run (default: False, Proxmox only)
+    - ceph_health_gate: str - 'off', 'degraded' or 'strict': hold the run when Ceph does not
+      come back healthy after a node (default: 'off')
     - evacuation_timeout: int - Timeout in seconds for VM evacuation (default: 1800 = 30 min)
     - update_timeout: int - Timeout in seconds for apt upgrade (default: 900 = 15 min)
     - reboot_timeout: int - Timeout in seconds for node reboot (default: 600 = 10 min)
+      (the three timeouts are clamped to 60-7200)
+    - notify_channels: list - Alert channel ids (GET /api/alert-channels) that get
+      rolling_update.started, rolling_update.paused, rolling_update.interrupted and
+      rolling_update.finished (default: none)
 
     MK Oct 2026 - the run is kept in rolling_update_runs (core/rolling_runs.py) and refused
     while another one of the cluster is running or paused, across restarts too.
@@ -5133,6 +5765,22 @@ def start_rolling_update(cluster_id):
     })
 
 
+def _scheduled_end(mgr, cluster_id, how):
+    """The end of a run a schedule started, in the audit log as the scheduler, whoever
+    continued it in between: by its worker, or by a cancel that took the run down without
+    one. Nothing for a run started by hand. Never raises."""
+    try:
+        done = rolling_runs.current(mgr) or {}
+        if not done.get('scheduled'):
+            return
+        log_audit('scheduler', 'scheduled.rolling_update',
+                  f"Scheduled rolling update {how}: {len(done.get('completed_nodes') or [])} updated, "
+                  f"{len(done.get('skipped_nodes') or [])} skipped, {len(done.get('failed_nodes') or [])} failed",
+                  cluster=getattr(getattr(mgr, 'config', None), 'name', None) or cluster_id)
+    except Exception as e:
+        logging.error(f"[RollingUpdate] audit of the end of the scheduled run of {cluster_id} failed: {e}")
+
+
 # MK Oct 2026 - the worker of a rolling update started by hand, and of every run that goes on
 # after a pause no worker here waited out (a restart, or another instance took over, #625):
 # Continue starts it again with resume = {'index', 'phase'} of the node to go on with, and that
@@ -5177,6 +5825,17 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
         on that comes when no worker waits here any more."""
         _set(status='paused', current_step=step, paused_reason=reason, paused_details=details,
              resume_at=resume_at, log=line)
+        # once per hold, not per look below: the channels that muted their monitoring on the
+        # start hear that the run now waits for a human
+        try:
+            node = (details or {}).get('node') or ''
+            notify_lifecycle('rolling_update.paused',
+                             f"Rolling update paused on {getattr(mgr.config, 'name', None) or cluster_id}",
+                             f"Paused at {node or 'the cluster'} ({reason}): "
+                             f"{(details or {}).get('message') or line}",
+                             cluster_id=cluster_id, severity='warning', channel_ids=notify_channels)
+        except Exception as e:
+            logging.debug(f"[RollingUpdate] paused event of {cluster_id} not sent: {e}")
         while _status() == 'paused':
             time.sleep(2)
         status = _status()
@@ -5213,13 +5872,28 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
 
     def _pending(node_name):
         """How many updates the node has, None when that could not be read."""
-        # First refresh apt/yum cache
+        # First refresh apt/yum cache. MK Oct 2026 (#1135) - Proxmox answers with the UPID of its
+        # apt update and the list is read once that task is through. A fixed 3s was too short for
+        # a slow mirror: the read got the list of the apt update before, and a node with updates
+        # waiting was skipped as up-to-date. A refresh that fails or outlasts the wait does not
+        # stop the run, it goes on with the cached list
+        stale = None
         try:
-            mgr.refresh_node_apt(node_name)
-            # NS: yum makecache takes way longer than apt update
-            time.sleep(10 if is_xcpng else 3)
-        except Exception:
-            pass
+            refreshed = mgr.refresh_node_apt(node_name)
+            if isinstance(refreshed, dict) and refreshed.get('success') is False:
+                stale = refreshed.get('error') or 'the refresh failed'
+            elif isinstance(refreshed, dict) and refreshed.get('task'):
+                if not mgr._wait_for_task(node_name, refreshed['task'], timeout=180):
+                    stale = 'the apt update task failed or took longer than 180s'
+            else:
+                # NS: yum makecache takes way longer than apt update
+                time.sleep(10 if is_xcpng else 3)
+        except Exception as e:
+            stale = str(e) or type(e).__name__
+        if stale:
+            _log(f"⚠ Package lists of {node_name} not refreshed ({str(stale)[:200]}) - "
+                 f"reading the cached list, it may be stale")
+            logging.warning(f"[RollingUpdate] Package refresh on {node_name} failed, reading the cached list: {str(stale)[:200]}")
         try:
             available_updates = mgr.get_node_apt_updates(node_name)
         except Exception as e:
@@ -5227,6 +5901,32 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             logging.warning(f"[RollingUpdate] Update check failed for {node_name}: {e}")
             return None
         return len(available_updates) if available_updates else 0
+
+    def _booted_since(row, since):
+        try:
+            up, since = float(row.get('uptime') or 0), float(since or 0)
+            return bool(up and since and time.time() - up > since)
+        except (TypeError, ValueError):
+            return False
+
+    def _reboot_look(node_name, since):
+        """A node after its reboot was sent: 'down', 'booted' (up, and started after since), 'up'
+        (which proves nothing yet) or None when nothing answered."""
+        try:
+            if is_xcpng:
+                row = mgr.node_reboot_look(node_name)
+            else:
+                # no row says nothing: its details ran out of time, or the read failed
+                row = (mgr.get_node_status() or {}).get(node_name)
+        except Exception:
+            return None
+        if not row:
+            return None
+        if row.get('status') == 'offline':
+            return 'down'
+        if row.get('status') != 'online':
+            return None
+        return 'booted' if _booted_since(row, since) else 'up'
 
     def _recheck(node_name, phase, info):
         """A node no worker followed through its phase (a restart came in between): what it
@@ -5239,13 +5939,8 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
         row = row if isinstance(row, dict) else {}
         online = row.get('status') == 'online'
         held = rolling_in_maintenance(mgr, node_name, ns)
-        rebooted = False
-        try:
-            # booted after the phase began: the reboot happened while nobody watched
-            up, since = float(row.get('uptime') or 0), float(info.get('phase_at') or 0)
-            rebooted = bool(up and since and time.time() - up > since)
-        except (TypeError, ValueError):
-            pass
+        # booted after the phase began: the reboot happened while nobody watched
+        rebooted = _booted_since(row, info.get('phase_at'))
         _log(f"Re-check of {node_name}: {'online' if online else 'not online'}, "
              f"{'in' if held else 'not in'} maintenance" + (', rebooted since' if rebooted else ''))
         if not online:
@@ -5287,6 +5982,7 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
 
         node_rebooted = from_phase == 'rebooting' or bool(info.get('rebooted'))
         back_online = False
+        reboot_waited = 0
 
         # MK: Step 0 - Check if node has updates available (GitHub Issue fix)
         if todo('checking') and skip_up_to_date and not force_all:
@@ -5459,7 +6155,9 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                     _note = ' (reboot sent)' if last_phase == 'wait_online' and getattr(update_task, 'reboot_issued', False) else ''
                     _log(f"Update phase: {last_phase}{_note}")
                 time.sleep(10)
-                update_waited += 10
+                # the reboot has its own timeout, which the task keeps; this one is for the install
+                if getattr(update_task, 'phase', '') != 'wait_online':
+                    update_waited += 10
 
             if _status() == 'cancelled' and update_task.status not in ('completed', 'failed'):
                 _log(f"Cancelled while {node_name} updates - the update goes on on the node until it is done")
@@ -5479,6 +6177,7 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             # then "back online (0s)".
             node_rebooted = include_reboot and getattr(update_task, 'reboot_issued', False)
             back_online = bool(getattr(update_task, 'back_online', False))
+            reboot_waited = getattr(update_task, 'reboot_waited', 0)
             _set(node=(node_name, {'updated': True, 'rebooted': bool(node_rebooted)}), log="✓ Updates installed")
             if include_reboot and not node_rebooted:
                 _log(f"Node {node_name} did not require a reboot - skipping reboot wait")
@@ -5488,24 +6187,25 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 _log(f"✓ {node_name} rebooted during the update and is back online")
 
         if todo('rebooting') and node_rebooted and not back_online:
+            # the phase before this one began before the reboot was sent
+            reboot_since = (((rolling_runs.current(mgr) or {}).get('node_state') or {}).get(node_name) or {}).get('phase_at')
             if from_phase == 'rebooting' and recheck:
                 _phase(node_name, 'rebooting', f"Waiting for {node_name} to come back from its reboot (timeout: {reboot_timeout}s)...")
             else:
                 _phase(node_name, 'rebooting', f"Node {node_name} requires a reboot - rebooting (timeout: {reboot_timeout}s)...")
             _set(add={'rebooting_nodes': node_name})
 
-            # Phase 1: Wait for offline - not for one that went down while nobody watched
-            node_went_offline = from_phase == 'rebooting' and recheck
+            # Phase 1: Wait for offline - not for one that went down while nobody watched, or that
+            # the update task already waited for
+            node_went_offline = (from_phase == 'rebooting' and recheck) or reboot_waited > 0
+            seen_down = False
             offline_waited = 0
             while not node_went_offline and offline_waited < 120 and _status() != 'cancelled':
-                try:
-                    ns = mgr.get_node_status()
-                    if node_name not in ns or ns[node_name].get('status') != 'online':
-                        node_went_offline = True
-                        _log(f"{node_name} is now offline")
-                        break
-                except Exception:
+                look = _reboot_look(node_name, reboot_since)
+                if look in ('down', 'booted'):
                     node_went_offline = True
+                    seen_down = look == 'down'
+                    _log(f"{node_name} is now offline" if seen_down else f"{node_name} has already restarted")
                     break
                 time.sleep(5)
                 offline_waited += 5
@@ -5516,20 +6216,21 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             if wait_for_reboot:
                 # Phase 2: Wait for online
                 _log(f"Waiting for {node_name} to come back online...")
-                waited = 0
+                waited = reboot_waited
                 node_back_online = False
                 while waited < reboot_timeout:
                     if _status() == 'cancelled':
                         break
-                    try:
-                        ns = mgr.get_node_status()
-                        if node_name in ns and ns[node_name].get('status') == 'online':
-                            node_back_online = True
-                            _set(drop={'rebooting_nodes': node_name}, log=f"✓ {node_name} back online ({waited}s)")
-                            time.sleep(10)
-                            break
-                    except Exception:
-                        pass
+                    # JB Nov 2026 - online alone is no proof: a node that has not gone down yet says it,
+                    # and on XCP-ng every host does, and the next node was then pulled
+                    look = _reboot_look(node_name, reboot_since)
+                    if look == 'down':
+                        seen_down = True
+                    elif look == 'booted' or (look == 'up' and seen_down):
+                        node_back_online = True
+                        _set(drop={'rebooting_nodes': node_name}, log=f"✓ {node_name} back online ({waited}s)")
+                        time.sleep(10)
+                        break
                     time.sleep(10)
                     waited += 10
                     if waited % 60 == 0:
@@ -5538,7 +6239,7 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 if not node_back_online and _status() != 'cancelled':
                     status = _hold('reboot_timeout', 'paused_reboot', {
                         'node': node_name, 'timeout': reboot_timeout,
-                        'message': f"{node_name} did not come back online within {reboot_timeout}s. Check manually, then Continue or Cancel."
+                        'message': f"{node_name} was not seen restarting and back online within {reboot_timeout}s. Check manually, then Continue or Cancel."
                     }, {'index': idx, 'phase': 'finishing'}, f"✗ {node_name} reboot timeout ({reboot_timeout}s). Pausing.")
                     if status == 'running':
                         _set(drop={'rebooting_nodes': node_name}, log="▶ Resumed after reboot timeout")
@@ -5563,10 +6264,19 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             _still_in_maint = node_name in mgr.nodes_in_maintenance or (recheck and held)
             if node_rebooted and _still_in_maint:
                 time.sleep(30)
-            if _still_in_maint and not mgr.exit_maintenance_mode(node_name):
-                _log(f"⚠ {node_name} maintenance exit failed (will retry at end of run)")
-            else:
+            exited = not _still_in_maint or mgr.exit_maintenance_mode(node_name)
+            if not exited:
+                # the task mostly takes it out during the wait above, or while this exit runs, and
+                # then this one finds nothing to do. Only a node still in maintenance after it gets
+                # the warning and the retry at the end of the run. The manager's list is what counts
+                # for a Proxmox node (its node status is a cached copy of it); an XCP-ng host stays
+                # disabled through a restart of PegaProx, its list does not
+                exited = not (rolling_in_maintenance(mgr, node_name) if is_xcpng
+                              else node_name in mgr.nodes_in_maintenance)
+            if exited:
                 _set(node=(node_name, {'in_maintenance': False}))
+            else:
+                _log(f"⚠ {node_name} maintenance exit failed (will retry at end of run)")
             _log(f"  → Ceph (if present): noout + norebalance cleared for {node_name}")
 
         if todo('ceph'):
@@ -5761,6 +6471,7 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                  log=["=== Rolling update completed ===", summary])
         logging.info(f"[RollingUpdate] Rolling update {'cancelled' if cancelled else 'completed'}: "
                      f"{completed} updated, {skipped} skipped, {failed} failed")
+        _scheduled_end(mgr, cluster_id, 'cancelled' if cancelled else 'completed')
         # #716 - un-mute, and say whether anyone needs to look
         notify_lifecycle('rolling_update.finished',
                          f"Rolling update {'cancelled' if cancelled else 'finished'} on {mgr.config.name}",
@@ -5774,6 +6485,7 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
         rolling_rules_back_on(mgr, who)   # #954, before the status says the run is over
         _set(status='failed', completed_at=time.strftime('%Y-%m-%d %H:%M:%S'), error=str(e),
              log=f"Rolling update failed: {e}")
+        _scheduled_end(mgr, cluster_id, 'failed')
         # #716 - a run that died is exactly when the on-call wants to be un-muted
         notify_lifecycle('rolling_update.finished',
                          f"Rolling update FAILED on {mgr.config.name}",
@@ -5865,6 +6577,7 @@ def cancel_rolling_update(cluster_id):
             undone = [{'kind': 'error', 'error': safe_error(e, 'Cleanup failed')}]
         rolling_runs.change(manager, status='cancelled', cancel_report=undone, rebooting_nodes=[],
                             log=['=== Rolling update cancelled ==='] + _rolling_report_lines(undone))
+        _scheduled_end(manager, cluster_id, 'cancelled')
     try:
         from pegaprox.utils.webhooks import notify_lifecycle
         notify_lifecycle('rolling_update.finished', f"Rolling update cancelled on {name}",
@@ -6103,6 +6816,10 @@ def get_node_repos(cluster_id, node):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the host's package sources, read like they are changed
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -6460,7 +7177,7 @@ def test_ldap():
     
     config = {
         'enabled': True,  # Force enabled for test
-        'server': data.get('ldap_server', saved.get('ldap_server', '')),
+        'server': str(data.get('ldap_server', saved.get('ldap_server', '')) or '').strip(),
         'port': sanitize_int(data.get('ldap_port', saved.get('ldap_port', 389)), default=389, min_val=1, max_val=65535),
         'use_ssl': data.get('ldap_use_ssl', saved.get('ldap_use_ssl', False)),
         'use_starttls': data.get('ldap_use_starttls', saved.get('ldap_use_starttls', False)),
@@ -6472,20 +7189,45 @@ def test_ldap():
         'email_attribute': data.get('ldap_email_attribute', saved.get('ldap_email_attribute', 'mail')),
         'display_name_attribute': data.get('ldap_display_name_attribute', saved.get('ldap_display_name_attribute', 'displayName')),
         'verify_tls': data.get('ldap_verify_tls', saved.get('ldap_verify_tls', False)),
+        'ca_cert': data.get('ldap_ca_cert', saved.get('ldap_ca_cert', '')),
     }
 
-    # Use saved password if masked
-    if not config['bind_password'] or config['bind_password'] == '********':
-        config['bind_password'] = get_db()._decrypt(saved.get('ldap_bind_password', ''))  # MK: Decrypt stored credential
+    from pegaprox.utils.ldap import (LDAP_REFERRAL_HINT, ldap_bind_answer, ldap_ca_cert_clean,
+                                     ldap_referrals, ldap_split_server, ldap_tls, ldap_tls_hint,
+                                     ldap_transport)
+    config['ca_cert'], _ca_error = ldap_ca_cert_clean(config['ca_cert'])
+    if _ca_error:
+        return jsonify({'error': _ca_error, 'code': 'LDAP_CA_CERT_INVALID'}), 400
+    # MK Nov 2026 - a scheme in the server taken apart the way the save does it, so the test
+    # runs what a save of this form stores
+    _host, _scheme_ssl, _url_port = ldap_split_server(config['server'])
+    if _scheme_ssl is not None:
+        config['server'], config['use_ssl'] = _host, _scheme_ssl
+        if _scheme_ssl:
+            config['use_starttls'] = False
+        if _url_port:
+            config['port'] = _url_port
 
+    # MK Nov 2026 - read as text above (a null or a number had no .strip() below), and an
+    # empty or blank one is turned down before anything is done with the stored password
     if not config['server']:
         return jsonify({'error': 'LDAP server is required'}), 400
 
+    # Use saved password if masked
+    if not config['bind_password'] or config['bind_password'] == '********':
+        # MK Nov 2026 - only for the saved server: a test against another one would hand it
+        # the stored bind password. The SMTP test draws the same line.
+        same = _ldap_endpoint(config['server'], config['port']) == _ldap_endpoint(saved.get('ldap_server'),
+                                                                                 saved.get('ldap_port'))
+        if config['bind_dn'] and saved.get('ldap_bind_password') and not same:
+            return jsonify({'error': 'A bind password is required to test a server other than the saved one',
+                            'code': 'CREDENTIAL_REQUIRED'}), 400
+        config['bind_password'] = get_db()._decrypt(saved.get('ldap_bind_password', '')) if same else ''  # MK: Decrypt stored credential
+
     try:
         import ldap3
-        from ldap3 import Server, Connection, ALL, SUBTREE, Tls
+        from ldap3 import Server, Connection, ALL, SUBTREE
         from ldap3.utils.conv import escape_filter_chars
-        import ssl as ssl_module
     except ImportError:
         return jsonify({'error': 'ldap3 module not installed. Run: pip install ldap3'}), 500
 
@@ -6494,10 +7236,9 @@ def test_ldap():
     try:
         # Step 1: Connect to server
         # MK: Mar 2026 - use verify_tls from config instead of hardcoded CERT_NONE (#108)
-        tls_config = None
-        if config['use_ssl'] or config['use_starttls']:
-            validate = ssl_module.CERT_REQUIRED if config['verify_tls'] else ssl_module.CERT_NONE
-            tls_config = Tls(validate=validate)
+        # MK Nov 2026 - and the pasted CA, built by the same helper the login uses
+        tls_config = ldap_tls(bool(config['use_ssl'] or config['use_starttls']),
+                              config['verify_tls'], config['ca_cert'])
         
         server = Server(config['server'], port=config['port'], 
                        use_ssl=config['use_ssl'], tls=tls_config, 
@@ -6506,12 +7247,16 @@ def test_ldap():
         # Step 2: Bind with service account
         # NS: same fix as ldap_authenticate - starttls before bind!!
         use_starttls = config['use_starttls'] and not config['use_ssl']
+        # no referrals followed with the check on, as in ldap_authenticate; without it they
+        # are, also from LDAPS to a plain ldap:// one, as the login does
+        follow = not ldap_transport(config['server'], config['use_ssl'], config['use_starttls'],
+                                    config['verify_tls'])[1]
         
         if config['bind_dn'] and config['bind_password']:
             conn = Connection(server, user=config['bind_dn'], password=config['bind_password'],
-                            raise_exceptions=True)
+                            raise_exceptions=True, auto_referrals=follow)
         else:
-            conn = Connection(server, raise_exceptions=True)
+            conn = Connection(server, raise_exceptions=True, auto_referrals=follow)
         
         try:
             conn.open()
@@ -6521,8 +7266,17 @@ def test_ldap():
             if use_starttls:
                 conn.start_tls()
                 results['steps'].append({'step': 'STARTTLS', 'status': 'ok'})
+            # MK Nov 2026 - what the passwords of the binds below travel over, once it is up,
+            # read off the connection: a check that failed has raised by now
+            kind = 'ldaps' if getattr(server, 'ssl', False) else \
+                'starttls' if getattr(conn, 'tls_started', False) else 'plain'
+            results['steps'].append(_ldap_transport_step(
+                kind, kind != 'plain' and tls_config is not None and bool(config['verify_tls']),
+                config['ca_cert']))
             
-            conn.bind()
+            # the login counts a bind only when it says so (ldap_authenticate), and so does this
+            if not conn.bind():
+                raise RuntimeError(f'The directory did not accept the bind, it answered {ldap_bind_answer(conn)}')
             
             if config['bind_dn'] and config['bind_password']:
                 results['steps'].append({'step': 'Service account bind', 'status': 'ok', 'detail': config['bind_dn']})
@@ -6532,7 +7286,14 @@ def test_ldap():
             # Step 3: Search base DN
             if config['base_dn']:
                 conn.search(config['base_dn'], '(objectClass=*)', search_scope='BASE', attributes=['objectClass'])  # Issue #70: 'dn' is not a valid attribute
-                results['steps'].append({'step': 'Base DN accessible', 'status': 'ok', 'detail': config['base_dn']})
+                refs = ldap_referrals(conn)
+                if refs:
+                    # another server holds it; with the check on that referral is not followed
+                    results['steps'].append({'step': 'Base DN accessible', 'status': 'warning',
+                                             'detail': f"{config['base_dn']} - referred to {', '.join(refs)}"})
+                    results['hint'] = LDAP_REFERRAL_HINT
+                else:
+                    results['steps'].append({'step': 'Base DN accessible', 'status': 'ok', 'detail': config['base_dn']})
             
             # Step 4: Optional - test user search
             test_username = data.get('test_username', '')
@@ -6552,7 +7313,11 @@ def test_ldap():
                     }
                     results['steps'].append({'step': f'User search: {test_username}', 'status': 'ok', 'detail': user_info})
                 else:
-                    results['steps'].append({'step': f'User search: {test_username}', 'status': 'warning', 'detail': 'User not found'})
+                    refs = ldap_referrals(conn)
+                    results['steps'].append({'step': f'User search: {test_username}', 'status': 'warning',
+                                             'detail': 'User not found' + (f" - referred to {', '.join(refs)}" if refs else '')})
+                    if refs:
+                        results['hint'] = LDAP_REFERRAL_HINT
             
             # LW: Get server info
             results['server_info'] = {
@@ -6577,6 +7342,8 @@ def test_ldap():
         completed = [s['step'] for s in results['steps']]
         if 'Server connection' not in completed:
             failed_step = 'Server connection'
+        elif config['use_starttls'] and not config['use_ssl'] and 'STARTTLS' not in completed:
+            failed_step = 'STARTTLS'
         elif not any('bind' in s.lower() for s in completed):
             failed_step = 'Bind'
         elif 'Base DN accessible' not in completed and config.get('base_dn'):
@@ -6584,5 +7351,27 @@ def test_ldap():
         else:
             failed_step = 'Connection'
         results['steps'].append({'step': failed_step, 'status': 'error', 'detail': str(e)})
+        # until the Transport step a failure is the connection or its TLS. What to do about a
+        # certificate the check refused is the CA field, not switching the check off
+        if 'Transport' not in completed and (config['use_ssl'] or config['use_starttls']):
+            hint = ldap_tls_hint(e, config['server'])
+            if hint:
+                results['hint'] = hint
     
     return jsonify(results)
+
+
+def _ldap_transport_step(kind, checked, ca_cert):
+    """The Transport step of the LDAP test for what the connection runs over ('ldaps',
+    'starttls' or 'plain'): plain text and an unchecked certificate are warnings, a checked
+    one is ok."""
+    if kind == 'plain':
+        return {'step': 'Transport', 'status': 'warning',
+                'detail': 'plain text - passwords cross the network readable'}
+    name = 'LDAPS' if kind == 'ldaps' else 'STARTTLS'
+    if not checked:
+        return {'step': 'Transport', 'status': 'warning',
+                'detail': f'{name} without certificate check - anyone on the path can pose as the directory'}
+    return {'step': 'Transport', 'status': 'ok',
+            'detail': f"{name}, certificate checked against "
+                      + ('the CA certificate in the settings' if ca_cert else 'the system trust store')}

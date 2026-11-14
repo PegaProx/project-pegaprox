@@ -49,12 +49,18 @@ import os
 import sys
 
 USE_GEVENT = os.environ.get('PEGAPROX_NO_GEVENT', '').lower() not in ('1', 'true', 'yes')
+# the QNetd sidecar (`qnetd run|health`) is a plain supervisor with threads: no app, no gevent
+if sys.argv[1:2] == ['qnetd']:
+    USE_GEVENT = False
+# MK Nov 2026 - with --print-key stdout is the key and nothing else, it goes into
+# systemd-creds. The lines below came out after it in a pipe.
+_SAY = sys.stderr if '--print-key' in sys.argv else sys.stdout
 
 if USE_GEVENT:
     try:
         from gevent import monkey
         monkey.patch_all()
-        print("Gevent monkey-patching applied")
+        print("Gevent monkey-patching applied", file=_SAY)
         # NS 2026-06-05 — scale runtime limits for large fleets (30+ clusters /
         # 100+ nodes). The node-status fan-out pools + keep-alive sessions need
         # fd headroom, and gevent's default 10-thread pool (used by the DNS
@@ -68,18 +74,18 @@ if USE_GEVENT:
             _newsoft = _want if _hard == _res.RLIM_INFINITY else min(_want, _hard)
             _res.setrlimit(_res.RLIMIT_NOFILE, (_newsoft, _hard))
             _eff = _res.getrlimit(_res.RLIMIT_NOFILE)[0]
-            print(f"File-descriptor limit: {_eff}")
+            print(f"File-descriptor limit: {_eff}", file=_SAY)
             if _eff < 8192:
-                print(f"WARNING: low fd limit ({_eff}) — for 20+ clusters set LimitNOFILE=65536 in the systemd unit")
+                print(f"WARNING: low fd limit ({_eff}) - for 20+ clusters set LimitNOFILE=65536 in the systemd unit", file=_SAY)
         except Exception as _e:
-            print(f"Could not raise fd limit: {_e}")
+            print(f"Could not raise fd limit: {_e}", file=_SAY)
         try:
             from gevent import get_hub as _ghub
             _tp = int(os.environ.get('PEGAPROX_THREADPOOL_SIZE', '50'))
             _ghub().threadpool.maxsize = _tp
-            print(f"Gevent threadpool size: {_tp}")
+            print(f"Gevent threadpool size: {_tp}", file=_SAY)
         except Exception as _e:
-            print(f"Could not set gevent threadpool size: {_e}")
+            print(f"Could not set gevent threadpool size: {_e}", file=_SAY)
     except ImportError:
         pass
 
@@ -106,9 +112,9 @@ def _disable_simple_websocket_deflate():
                 kw.pop('extensions', None)
                 super().__init__(*a, **kw)
         _swws.AcceptConnection = _NoExtAccept
-        print('[ws-patch] simple-websocket PerMessageDeflate disabled')
+        print('[ws-patch] simple-websocket PerMessageDeflate disabled', file=_SAY)
     except Exception as _e:
-        print(f'[ws-patch] could not disable deflate: {_e}')
+        print(f'[ws-patch] could not disable deflate: {_e}', file=_SAY)
 
 _disable_simple_websocket_deflate()
 
@@ -139,10 +145,10 @@ def print_system_requirements():
 ║  • Use Redis for session storage in multi-node setups (future)               ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║  Network Requirements:                                                        ║
-║  • Port 5000: Main API & Web UI (configurable via PEGAPROX_PORT)             ║
+║  • Port 5000: Main API & Web UI (Settings > Server, or --set-port N)         ║
 ║  • Port 5001: VNC WebSocket (noVNC console) - auto: main_port + 1            ║
 ║  • Port 5002: SSH WebSocket (Node shell) - auto: main_port + 2               ║
-║  • HTTPS recommended (--ssl-cert/--ssl-key or auto-generated)                ║
+║  • HTTPS: own certificate or ACME in Settings > Server, else self-signed     ║
 ║  • Access to all Proxmox nodes on port 8006                                  ║
 ║  • Self-signed certs: Users must accept cert on ports 5001/5002 separately   ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
@@ -164,6 +170,27 @@ def download_static_files():
     return _download()
 
 
+def qnetd_command(args):
+    """`qnetd run|health`: the QNetd sidecar of the Docker setup (docs/qdevice.md). All of it
+    lives in the helper the QNetd hosts run, loaded from this tree."""
+    import importlib.machinery
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(here, 'packaging', 'qnetd', 'pegaprox-qnetd-helper'),
+                 '/usr/lib/pegaprox/qnetd/pegaprox-qnetd-helper'):
+        if os.path.isfile(path):
+            break
+    else:
+        print('pegaprox-qnetd: the QNetd helper is not part of this install', file=sys.stderr)
+        return 1
+    # no __pycache__ next to a helper that also runs as root
+    sys.dont_write_bytecode = True
+    loader = importlib.machinery.SourceFileLoader('pegaprox_qnetd_helper', path)
+    helper = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(helper)
+    return helper.sidecar_main(args)
+
+
 if __name__ == '__main__':
     # MK Oct 2026 (#625) - the witness of an automatic group: same package, a process of
     # its own that never starts the app (the Docker image runs it as the command `witness`)
@@ -176,6 +203,10 @@ if __name__ == '__main__':
                                install=os.environ.get('PEGAPROX_WITNESS_INSTALL')
                                or ('docker' if _in_image else 'manual'),
                                again=[sys.executable, os.path.abspath(__file__), 'witness']))
+    # MK Oct 2026 - the QNetd sidecar: corosync-qnetd plus the helper socket the PegaProx
+    # container signs cluster certificates through. Never starts the app either
+    if len(sys.argv) > 1 and sys.argv[1] == 'qnetd':
+        sys.exit(qnetd_command(sys.argv[2:]))
     if '--requirements' in sys.argv:
         print_system_requirements()
     elif '--download-static' in sys.argv:
@@ -187,6 +218,10 @@ if __name__ == '__main__':
         from pegaprox.cli.migrate_db import main as _migrate_main
         sub_args = [a for a in sys.argv[1:] if a != '--migrate-db']
         sys.exit(_migrate_main(sub_args))
+    elif '--set-port' in sys.argv:
+        # MK Nov 2026 - for the installers, which wrote it with the sqlite3 CLI
+        from pegaprox.cli.set_port import main as _set_port_main
+        sys.exit(_set_port_main([a for a in sys.argv[1:] if a != '--set-port']))
     elif '--print-key' in sys.argv:
         # Print the resolved master key (base64) — for use by `systemd-creds
         # encrypt`, secret-manager handoff, or `.env` setup.  Output goes to
@@ -220,8 +255,10 @@ Options:
   --migrate-db      migrate plain SQLite DB to SQLCipher (see --migrate-db --help)
   --print-key       print the resolved master key (base64) to stdout
   --keystore-status JSON dump of key-source + DB-backend status
+  --set-port N      write the listen port into the database (from the next start on)
   --help, -h        this message
   witness ...       the witness of an automatic group instead (witness --help)
+  qnetd run|health  the QNetd sidecar of the Docker setup (docs/qdevice.md)
 
 Env vars:
   PEGAPROX_DB_KEY            master key (urlsafe-base64 or hex)
@@ -230,7 +267,7 @@ Env vars:
   PEGAPROX_ALLOWED_ORIGINS   cors origins
   PEGAPROX_MAX_REQUEST_SIZE  max API request size (default 10MB)
   PEGAPROX_MAX_UPLOAD_SIZE   max file upload size (default 4GB)
-  PEGAPROX_HTTP_PORT         http port for redirect (default 80)
+  PEGAPROX_HTTP_PORT         extra http port for the redirect (default none)
         """)
     else:
         debug_mode = '--debug' in sys.argv

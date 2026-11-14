@@ -26,9 +26,9 @@ the first hit for the lifetime of the process.
 | 1 | `PEGAPROX_DB_KEY` env var | Docker secrets, k8s, CI | Accepts urlsafe-base64 (44 chars) **or** hex (64 chars) |
 | 2 | `${CREDENTIALS_DIRECTORY}/db-key` | systemd `LoadCredentialEncrypted=` | TPM2- or host-key-bound. Strongest at-rest option |
 | 3 | `PEGAPROX_KEY_FILE` env var → file | Custom path, e.g. NFS mount | chmod 0600 (or 0640 root:pegaprox) |
-| 4 | `/etc/pegaprox/secret.key` | **System-service install default** | chmod **0640** root:pegaprox - group-read required so the systemd unit (running as `pegaprox`) can load it. 0600 root:pegaprox is unreadable for the service. |
+| 4 | `/etc/pegaprox/secret.key` | **`deploy.sh` and Debian package default** | chmod **0640** root:pegaprox - group-read required so the systemd unit (running as `pegaprox`) can load it. 0600 root:pegaprox is unreadable for the service. |
 | 5 | `~/.config/pegaprox/secret.key` | Single-user / dev install | chmod 0600 (owner = user running PegaProx) |
-| 6 | `config/.pegaprox.key` (CONFIG_DIR) | **Legacy** - pre-0.9.9.3 | Triggers deprecation warning on every boot |
+| 6 | `config/.pegaprox.key` (CONFIG_DIR) | **Legacy** - pre-0.9.9.3 | Triggers deprecation warning on every boot. The same file is the Fernet key the database layer reads old field values with, so PegaProx creates it on every install |
 
 The loader **rejects** any file-based tier whose permissions have group-write,
 group-exec, or *any* other-user bits set - an accidentally chmod-755'd key file
@@ -48,11 +48,15 @@ chip or host key - not even root can read it directly without unsealing.
 
 ### Inspecting the active tier
 
+Run it as the service user from the directory the service runs in, because
+`config/` is relative to it (`/opt/PegaProx` for deploy.sh, `/var/lib/pegaprox` for the
+Debian package):
+
 ```bash
-sudo -u pegaprox python3 pegaprox_multi_cluster.py --keystore-status
+cd /opt/PegaProx && sudo -u pegaprox ./venv/bin/python pegaprox_multi_cluster.py --keystore-status
 ```
 
-JSON output:
+It only reads: where it finds no key it says so instead of creating one. JSON output:
 
 ```json
 {
@@ -60,20 +64,53 @@ JSON output:
     "ok": true,
     "source": "/etc/pegaprox/secret.key",
     "source_path": "/etc/pegaprox/secret.key",
+    "config_dir": "/opt/PegaProx/config",
     "is_legacy": false,
     "tier": 4,
-    "recommendation": "Key is outside the DB directory which is good. Consider upgrading to systemd LoadCredentialEncrypted..."
+    "recommendation": "Key is outside the DB directory which is good. Consider upgrading to systemd LoadCredentialEncrypted...",
+    "sqlcipher_error": null
   },
   "db": {
     "backend": "sqlcipher",
     "encrypted_at_rest": true,
-    "cipher": "AES-256-CBC / HMAC-SHA512 (SQLCipher v4)"
+    "cipher": "AES-256-CBC + HMAC-SHA512 (SQLCipher 4)",
+    "files": {
+      "/opt/PegaProx/config/pegaprox.db": "encrypted",
+      "/opt/PegaProx/config/syslog.db": "encrypted"
+    },
+    "note": "Full database encryption is active.",
+    "sqlcipher_error": null
   }
 }
 ```
 
-A green pill in the admin UI's *Security* card consumes the same data via
-`GET /api/security/keystore-status`.
+`files` comes from each file's first 16 bytes (a plain SQLite file starts with
+`SQLite format 3`), so it shows a database that is still plain even where SQLCipher is
+installed; `encrypted_at_rest` is true only when every database found is encrypted.
+
+### The Debian package
+
+The package depends on `python3-sqlcipher3`, so its first start encrypts the database. With
+no key in `/etc/pegaprox` that start would make one in `config/`, next to the database.
+`packaging/debian/master_key.py` puts it there first: the unit runs it as root before every
+start (`ExecStartPre=+`), and the postinst runs it on a host where systemd runs. An image
+built with the package (the appliances) has no systemd running at build time, so each copy
+makes its own key at its first start. What it does, by what it finds:
+
+| State | What happens |
+|---|---|
+| `PEGAPROX_DB_KEY`, a `db-key` credential or an existing `PEGAPROX_KEY_FILE` in the unit (drop-ins included) | Nothing, the key is yours |
+| `/etc/pegaprox/secret.key` there | Kept as it is. A root-owned key the service cannot read (0600, other group) gets 0640 root:pegaprox. A key others can read or write, or one that does not open an encrypted database, stops the start with the reason in the journal. A symlink (the file or `/etc/pegaprox`) is followed as the key store follows it, but what it points to is not changed: if the service cannot read it there, the start stops |
+| No key, no database encrypted yet (fresh install, upgrade on a plain database) | A new key, 0640 root:pegaprox; the next start encrypts the database with it |
+| No key, a database encrypted already (a start with sqlcipher3 before the package did this) | The key that opens it, `~/.config/pegaprox/secret.key` of the service user or `config/.pegaprox.key`, is copied to `/etc/pegaprox/secret.key` byte for byte, never a new one |
+| Anything else (an encrypted database no known key opens, a database file it cannot read) | No key is written, and the start stops with the reason |
+
+The config directory comes from the unit (`WorkingDirectory`, `PEGAPROX_CONFIG_DIR`), so a
+moved one is found. It and the home of the service user are read as the service user, as
+PegaProx reads them. After a copy `config/.pegaprox.key` stays where it is, and with it a
+backup of `config/` still holds the database key. Deleting it makes PegaProx create a new
+one at the next start; field values from before the switch to AES-256-GCM that are still
+sealed with the old one can then no longer be read.
 
 ---
 
@@ -86,23 +123,54 @@ each page carries an HMAC-SHA512 tag.
 
 ### Platform matrix
 
-| Platform | sqlcipher3-binary wheel | Encryption status |
-|----------|------------------------|-------------------|
-| Linux x86_64 | ✅ shipped | **Full DB encryption** |
-| Linux aarch64 | ❌ no wheel | Plain SQLite + field-level Fernet |
-| macOS (any) | ❌ no wheel | Plain SQLite + field-level Fernet |
-| Windows | ❌ no wheel | Plain SQLite + field-level Fernet |
-| Docker `python:3.12-slim` | ✅ (x86_64 base image) | **Full DB encryption** |
+| Platform | Package from requirements.txt | Encryption status |
+|----------|-------------------------------|-------------------|
+| Linux x86_64 | `sqlcipher3-binary` | **Full DB encryption** |
+| Linux aarch64 | `sqlcipher3` (0.6.4 or later, wheels with SQLCipher built in) | **Full DB encryption** |
+| macOS | `sqlcipher3` | **Full DB encryption** |
+| Windows | `sqlcipher3` | **Full DB encryption** |
+| 32-bit ARM (armv7) | none, no wheel | Plain SQLite + field-level AES-256-GCM |
+| Docker image, amd64 and arm64 | as above | **Full DB encryption** |
+| Docker image, arm/v7 | none | Plain SQLite + field-level AES-256-GCM |
+| Debian package from apt.pegaprox.com (once that repository is live), amd64 and arm64 | `python3-sqlcipher3`, built per architecture from the sqlcipher3 wheels | **Full DB encryption** |
+| Debian package from the repository in the README, amd64 | `python3-sqlcipher3` of that repository | **Full DB encryption** |
+| Debian package from the repository in the README, arm64 | that `python3-sqlcipher3` holds the x86_64 module only, the import fails | Plain SQLite + field-level AES-256-GCM |
+| Appliance images (VM, LXC), amd64 and arm64 | `python3-sqlcipher3` the image build makes for its architecture, from the wheels and with the script of apt.pegaprox.com; an image whose PegaProx does not report SQLCipher is not published | **Full DB encryption** |
+
+The two packages install the same `sqlcipher3` module and must never be installed side by
+side; the markers in requirements.txt give every platform one of them at most.
+
+A SQLCipher package that is installed but does not load (the arm64 row above, a build for
+another Python, or an empty `sqlcipher3` directory) is not taken for a missing one. Every
+start writes a warning with the reason and the machine and Python version to the service
+log, `--keystore-status` has the reason in `sqlcipher_error` and says it in the `note` of
+`db` and in the `recommendation` or `message` of `keystore`, and the Compliance tab of the
+settings lists it under Recommendations. The key step of the Debian package, `--migrate-db`
+and `--set-port` name it too. PegaProx then runs on plain SQLite as in the rows above, until
+a package built for that machine and that Python version is installed and PegaProx
+restarted. A database encrypted before (a config directory moved to another machine, a pip
+install replaced by the Debian package) does not open on plain SQLite: the start stops with
+`[FATAL] [DBCRYPTO]`, the reason and `... is encrypted and does not open until ...`.
+
+The appliance images keep the repository in the README for `pegaprox` and pin its
+`python3-sqlcipher3` away (`/etc/apt/preferences.d/pegaprox-sqlcipher3`), so an `apt upgrade`
+does not replace the one built for the image, not even with a later version from there.
+SQLCipher and OpenSSL are built into that module, so on an appliance they are updated with a
+new image, not by apt. Appliance images of 1.4.1 and before come without `python3-sqlcipher3`
+and run on plain SQLite; once a PegaProx that depends on it is installed in them from that
+repository, the rows of that repository above apply. `--keystore-status` shows which backend
+an appliance runs.
 
 The fallback is *not* unencrypted - sensitive fields (cluster passwords,
 2FA secrets, OIDC client secrets, API tokens) are still individually
-Fernet-encrypted with the same master key. The fallback gives up on
+encrypted with AES-256-GCM, under their own key file `config/.pegaprox_aes256.key`. The fallback gives up on
 metadata-at-rest (table names, audit-log timestamps, session IDs).
 
-You can force-disable SQLCipher by uninstalling `sqlcipher3-binary` and
+You can force-disable SQLCipher by uninstalling the SQLCipher package (`sqlcipher3-binary` or `sqlcipher3`) and
 restarting - the connection layer detects the missing module and falls
 back transparently. **Note**: any DB already encrypted will become
-unreadable until the module is reinstalled - there is no automatic
+unreadable until the module is reinstalled, and the start stops with
+`[FATAL] [DBCRYPTO] ... is encrypted and sqlcipher3 is not installed` - there is no automatic
 decrypt-back-to-plain step.
 
 ### Cipher parameters
@@ -148,7 +216,7 @@ longer way back.
 Set `PEGAPROX_DISABLE_AUTO_ENCRYPT=1` in the service environment to skip
 the auto-encrypt step on boot. Useful for: taking your own backup first,
 running custom pre-flight checks, or staying on plain SQLite for a
-debugging window. With opt-out enabled, the field-level Fernet
+debugging window. With opt-out enabled, the field-level AES-256-GCM
 encryption still applies and you can run the manual CLI tool whenever
 you're ready.
 
@@ -201,7 +269,7 @@ somewhere safe right after the migration and delete that copy yourself.
 | Code | Meaning |
 |------|---------|
 | 0 | Migration successful, encrypted DB is now active |
-| 2 | `sqlcipher3` not installed - install `sqlcipher3-binary` first |
+| 2 | `sqlcipher3` not installed, or installed and does not load here (the reason is printed) - install the SQLCipher package of requirements.txt, built for this machine and this Python version, first |
 | 3 | Existing DB already encrypted with a **different** key (refuses to clobber) |
 | 4 | Source DB is corrupt - repair before retrying |
 | 5 | Row-count verification failed - encrypted DB *not* swapped in |
@@ -257,37 +325,53 @@ This is the recommended posture for production Linux deployments.
 
 ### Setup
 
-1. Generate the key (one-time):
+The credential has to hold the key the database is encrypted with now. An install that has
+started with SQLCipher (`deploy.sh`, the Debian package, the appliances) has an encrypted
+database already, and a new key in the credential locks it out: PegaProx then stops at the
+start with `[FATAL] [DBCRYPTO] ... does not unlock it`. So wrap the key it uses. The commands
+run as the service user in the directory the service runs in (`/var/lib/pegaprox` for the
+Debian package, `/opt/PegaProx` for `deploy.sh`, see
+[Inspecting the active tier](#inspecting-the-active-tier)).
+
+1. See which key that is and which databases it encrypts:
 
    ```bash
-   python3 -c 'import secrets, base64;
-   print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())' \
-     | sudo tee /tmp/pegaprox-key.txt
+   # Debian package, appliances:
+   sudo -u pegaprox sh -c 'cd /var/lib/pegaprox && /usr/bin/pegaprox/pegaprox-wrapper --keystore-status'
+   # deploy.sh:
+   cd /opt/PegaProx && sudo -u pegaprox ./venv/bin/python pegaprox_multi_cluster.py --keystore-status
    ```
 
-2. Wrap it with systemd-creds:
+   `keystore.source_path` is the key file, `db.files` the state of each database.
+
+2. Wrap that key with systemd-creds. `--print-key` prints it, so no plaintext copy is
+   written on the way:
 
    ```bash
    # Host-key bound (works everywhere):
-   sudo systemd-creds encrypt --name=db-key /tmp/pegaprox-key.txt \
-        /etc/pegaprox/secret.key.cred
+   sudo -u pegaprox sh -c 'cd /var/lib/pegaprox && /usr/bin/pegaprox/pegaprox-wrapper --print-key' \
+     | sudo systemd-creds encrypt --name=db-key - /etc/pegaprox/secret.key.cred
 
    # TPM2-bound (stronger, requires TPM2 chip):
-   sudo systemd-creds encrypt --name=db-key --with-key=tpm2 \
-        /tmp/pegaprox-key.txt /etc/pegaprox/secret.key.cred
+   sudo -u pegaprox sh -c 'cd /var/lib/pegaprox && /usr/bin/pegaprox/pegaprox-wrapper --print-key' \
+     | sudo systemd-creds encrypt --name=db-key --with-key=tpm2 - /etc/pegaprox/secret.key.cred
    ```
 
-3. **Shred the plaintext copy:**
+   With `deploy.sh`, the first line is
+   `cd /opt/PegaProx && sudo -u pegaprox ./venv/bin/python pegaprox_multi_cluster.py --print-key`.
 
-   ```bash
-   sudo shred -u /tmp/pegaprox-key.txt
-   ```
+3. **Keep an offline copy** of the key file from step 1 (password vault, see
+   [Backup discipline](#backup-discipline)). After step 7 it is the only way back when the
+   credential cannot be unsealed any more.
 
 4. Edit `/etc/systemd/system/pegaprox.service` and add to `[Service]`:
 
    ```ini
    LoadCredentialEncrypted=db-key:/etc/pegaprox/secret.key.cred
    ```
+
+   With the Debian package, put it in a drop-in (`sudo systemctl edit pegaprox`): the unit
+   file is the package's. Its key step leaves the key alone while the unit loads `db-key`.
 
 5. Reload + restart:
 
@@ -296,18 +380,32 @@ This is the recommended posture for production Linux deployments.
    sudo systemctl restart pegaprox
    ```
 
-6. Verify:
+6. Verify that PegaProx started with it. The `[KEYSTORE]` line alone does not show that: it is
+   written before the database is opened.
 
    ```bash
-   journalctl -u pegaprox -n 50 | grep '\[KEYSTORE\]'
+   journalctl -u pegaprox --since -5min | grep -E '\[KEYSTORE\]|\[FATAL\]'
    # → [KEYSTORE] master key source: systemd-credential (/run/credentials/pegaprox.service/db-key)
+   #   and no [FATAL] line
+   systemctl is-active pegaprox
+   # → active, and still a minute later
    ```
 
-7. Once verified, **delete the legacy file** if you migrated from Tier 6:
+   Then log in to the web UI. `[FATAL] [DBCRYPTO] ... does not unlock it` means the credential
+   holds another key: take the `LoadCredentialEncrypted=` line out again, restart, and go back
+   to step 1.
+
+7. Only when step 6 passed and the copy of step 3 is in place, remove the key file the
+   credential replaces, if it is `/etc/pegaprox/secret.key`:
 
    ```bash
-   sudo shred -u /etc/pegaprox/secret.key   # or config/.pegaprox.key
+   sudo shred -u /etc/pegaprox/secret.key
    ```
+
+   Never delete `config/.pegaprox.key`, even where it was the key in step 1: it is also the
+   Fernet key the database layer reads old field values with (see
+   [The Debian package](#the-debian-package)). Where it was the database key, a backup of
+   `config/` still holds that key, so keep such backups as secret as the key.
 
 ### Recovering from a TPM2 reset
 
@@ -325,10 +423,10 @@ exactly this case.
    with new key via `--migrate-db --rotate-from=<old-key-file>`, restart.
    The `--rotate-from` flag is on the roadmap; for now it's manual ATTACH +
    `sqlcipher_export`.
-2. **Field-level Fernet keys are not separately rotated.** Master key
-   rotation does not re-wrap existing Fernet-encrypted fields. This is
-   acceptable since both rely on the same master key - when the master
-   key changes, both layers change together.
+2. **The field key is not rotated with the master key.** Sensitive fields
+   are sealed with their own key file, `config/.pegaprox_aes256.key`, and
+   master key rotation does not re-wrap them. A backup of `config/` holds
+   that key file, so treat it as secret.
 3. **No second-factor at the DB layer.** A compromised host running
    PegaProx can read the DB. Compartmentalization (running clusters in
    separate VMs with separate keys) is the only mitigation.

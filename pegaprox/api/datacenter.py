@@ -18,7 +18,7 @@ from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.sanitization import bounded_list
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, require_unconfined
-from pegaprox.api.helpers import upstream_failure
+from pegaprox.api.helpers import upstream_failure, unread_failure
 from pegaprox.utils.ssh import read_capped as _read_capped
 
 bp = Blueprint('datacenter', __name__)
@@ -93,6 +93,10 @@ def get_datacenter_subscriptions(cluster_id):
     """Get subscription status for all nodes in a cluster."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # every node of the cluster with its server id: not for a caller confined to some guests
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -258,6 +262,10 @@ def get_node_multipath_status(cluster_id, node):
     """Get multipath status for a node - all devices, paths, and their states"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the SAN paths of a host, read over SSH: cluster infrastructure, which no pool or guest grant covers
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -276,6 +284,9 @@ def get_cluster_multipath_status(cluster_id):
     """Get multipath status for entire cluster"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -938,12 +949,97 @@ def login_iscsi_target(cluster_id, node):
 # different formats depending on PVE version. We normalize everything here.
 # ============================================
 
+# MK Nov 2026 - PVE hands the NetBox/phpIPAM token and the PowerDNS key back on every
+# read of /cluster/sdn/ipams and /cluster/sdn/dns. We read with the cluster's own login,
+# so node.view was enough to get them. The SDN tab never shows them, and an update
+# without them keeps the stored one (PVE merges), so they do not leave the server.
+_SDN_PLUGIN_SECRETS = ('token', 'key', 'password', 'secret')
+
+
+def _without_plugin_secrets(entries):
+    if not isinstance(entries, list):
+        return []
+    return [{k: v for k, v in e.items() if k not in _SDN_PLUGIN_SECRETS} if isinstance(e, dict) else e
+            for e in entries]
+
+
+def _plugin_url(u):
+    from urllib.parse import urlsplit
+    try:
+        p = urlsplit(str(u or '').strip())
+        scheme = p.scheme.lower()
+        return (scheme, (p.hostname or '').rstrip('.'), p.port or {'http': 80, 'https': 443}.get(scheme),
+                p.path.rstrip('/'))
+    except ValueError:
+        return None
+
+
+def _plugin_fingerprint(f):
+    # the certificate PVE accepts for that url instead of a CA-signed one, none if unset
+    return str(f or '').strip().upper()
+
+
+# what decides where PVE sends the stored token or key
+_PLUGIN_TARGET = {'url': _plugin_url, 'fingerprint': _plugin_fingerprint}
+
+
+def _plugin_secret_moves(session, entry_url, data, secret, what):
+    """A PUT that points an IPAM or DNS entry at another url, or at another certificate,
+    without its token or key.
+
+    MK Nov 2026 - PVE merges an update, so a PUT with only a new url keeps the stored token
+    (or PowerDNS key), and its update hook calls the new url with it right away. A new
+    fingerprint, or 'delete' dropping it, does the same for whoever holds the other
+    certificate. Since the reads above drop the secret, it goes only to the server it was
+    typed for: a change of either needs it typed again. If we cannot read the current entry
+    we do not guess."""
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Expected a JSON object'}), 400
+    # requests leaves None out of the form body, sends a list item by item and a dict by its
+    # keys. Only a string here is what PVE gets, so the fields this depends on must be one.
+    fields = {k: data[k] for k in (*_PLUGIN_TARGET, 'delete', secret) if data.get(k) is not None}
+    for k, v in fields.items():
+        if not isinstance(v, str):
+            return jsonify({'error': f"'{k}' must be a string"}), 400
+    if fields.get(secret, '').strip():
+        return None
+    dropped = set(re.split(r'[\s,;\0]+', fields.get('delete', '')))
+    changed = [k for k in _PLUGIN_TARGET if k in fields or k in dropped]
+    if not changed:
+        return None
+    current = None
+    try:
+        r = session.get(entry_url, timeout=10)
+        if r.status_code == 200:
+            current = r.json().get('data')
+    except Exception as e:
+        logging.warning(f"[SDN] could not read {what} before the update: {e}")
+    if isinstance(current, dict):
+        new = {k: _PLUGIN_TARGET[k](None if k in dropped else fields.get(k)) for k in changed}
+        if all(new[k] is not None and new[k] == _PLUGIN_TARGET[k](current.get(k)) for k in changed):
+            # PVE takes the PUT only while the entry is still the one compared here
+            seen = current.get('digest')
+            if data.get('digest') not in (None, '', seen):
+                return jsonify({'error': f'This {what} was changed meanwhile, reload it and try again.'}), 409
+            if seen:
+                data['digest'] = seen
+            return None
+    return jsonify({'error': f'Re-enter the {secret} of this {what} to change its url or fingerprint.',
+                    'code': 'CREDENTIAL_REQUIRED'}), 400
+
+
 @bp.route('/api/clusters/<cluster_id>/datacenter/sdn', methods=['GET'])
 @require_auth(perms=['node.view'])
 def get_sdn_overview(cluster_id):
     """Get complete SDN overview including zones, vnets, subnets, controllers, IPAM, DNS"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the SDN of the whole cluster (subnets, controllers, IPAM and DNS plugins) is read, like it is
+    # changed, by no caller confined to some guests. Their NIC dialog gets the vnets with the
+    # bridges of their guest's node (vms.get_network_list_api)
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1059,7 +1155,7 @@ def get_sdn_overview(cluster_id):
             ipam_url = f"https://{host}:{port}/api2/json/cluster/sdn/ipams"
             ipam_resp = session.get(ipam_url, timeout=10)
             if ipam_resp.status_code == 200:
-                result['ipams'] = ipam_resp.json().get('data', [])
+                result['ipams'] = _without_plugin_secrets(ipam_resp.json().get('data', []))
         except:
             pass
         
@@ -1068,7 +1164,7 @@ def get_sdn_overview(cluster_id):
             dns_url = f"https://{host}:{port}/api2/json/cluster/sdn/dns"
             dns_resp = session.get(dns_url, timeout=10)
             if dns_resp.status_code == 200:
-                result['dns'] = dns_resp.json().get('data', [])
+                result['dns'] = _without_plugin_secrets(dns_resp.json().get('data', []))
         except:
             pass
         
@@ -1096,6 +1192,9 @@ def get_sdn_zones(cluster_id):
     """Get SDN zones"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     # MK: 501 means SDN not enabled on this cluster - return empty list instead of error
     manager, error = get_connected_manager(cluster_id)
@@ -1212,6 +1311,9 @@ def get_sdn_vnets(cluster_id):
     """Get SDN VNets"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     # LW: VNets are the main abstraction layer - each vnet belongs to exactly one zone
     manager, error = get_connected_manager(cluster_id)
@@ -1328,6 +1430,9 @@ def get_sdn_subnets(cluster_id, vnet_id):
     """Get subnets for a VNet"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1364,6 +1469,8 @@ def create_sdn_subnet(cluster_id, vnet_id):
     try:
         host, port = manager.host, manager.api_port
         data = request.json or {}
+        # JB Nov 2026 - PVE requires it and neither create dialog sends it, multi_sdn.py always did
+        data['type'] = 'subnet'
         
         url = f"https://{host}:{port}/api2/json/cluster/sdn/vnets/{vnet_id}/subnets"
         response = manager._create_session().post(url, data=data, timeout=10)
@@ -1460,6 +1567,9 @@ def apply_sdn_config(cluster_id):
 def get_sdn_fabrics(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -1558,12 +1668,14 @@ def delete_sdn_fabric(cluster_id, fabric_id):
 
 def _sdn_crud_resource(cluster_id, family, item_id=None):
     """Helper: implements GET/POST/PUT/DELETE for /cluster/sdn/<family>[/{id}].
-    Returns (status_code, response_body|None, error|None). Used by all the
+    Returns the (response, status) pair the route hands on. Used by all the
     routemap + prefixlist routes below.
     """
     manager, error = get_connected_manager(cluster_id)
     if error:
-        return None, error  # error is already a (resp, code) tuple
+        # MK Nov 2026 - error is already the (resp, code) pair, the 404 or the 503 of a
+        # cluster that is not connected; wrapped in (None, error) Flask made a 500 of it
+        return error
     host, port = manager.host, manager.api_port
     base_url = f"https://{host}:{port}/api2/json/cluster/sdn/{family}"
     method = request.method
@@ -1600,6 +1712,9 @@ def _sdn_crud_resource(cluster_id, family, item_id=None):
 def list_sdn_routemaps(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     return _sdn_crud_resource(cluster_id, 'route-maps')
 
 
@@ -1649,6 +1764,9 @@ def delete_sdn_routemap(cluster_id, routemap_id):
 def list_sdn_prefixlists(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     return _sdn_crud_resource(cluster_id, 'prefix-lists')
 
 
@@ -1703,6 +1821,9 @@ def get_sdn_controllers(cluster_id):
     """Get SDN controllers"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1822,6 +1943,9 @@ def get_sdn_ipams(cluster_id):
     """Get SDN IPAM configurations"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1833,7 +1957,7 @@ def get_sdn_ipams(cluster_id):
         response = manager._create_session().get(url, timeout=10)
         
         if response.status_code == 200:
-            return jsonify(response.json().get('data', []))
+            return jsonify(_without_plugin_secrets(response.json().get('data', [])))
         elif response.status_code == 501:
             return jsonify([])
         return upstream_failure(response.status_code, parse_pve_error(response.text))
@@ -1890,7 +2014,11 @@ def update_sdn_ipam(cluster_id, ipam_id):
         data = request.json or {}
         
         url = f"https://{host}:{port}/api2/json/cluster/sdn/ipams/{ipam_id}"
-        response = manager._create_session().put(url, data=data, timeout=10)
+        session = manager._create_session()
+        refused = _plugin_secret_moves(session, url, data, 'token', 'IPAM')
+        if refused:
+            return refused
+        response = session.put(url, data=data, timeout=10)
         
         if response.status_code == 200:
             user = getattr(request, 'session', {}).get('user', 'system')
@@ -1941,6 +2069,9 @@ def get_sdn_dns(cluster_id):
     """Get SDN DNS configurations"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1952,7 +2083,7 @@ def get_sdn_dns(cluster_id):
         response = manager._create_session().get(url, timeout=10)
         
         if response.status_code == 200:
-            return jsonify(response.json().get('data', []))
+            return jsonify(_without_plugin_secrets(response.json().get('data', [])))
         elif response.status_code == 501:
             return jsonify([])
         return upstream_failure(response.status_code, parse_pve_error(response.text))
@@ -2009,7 +2140,11 @@ def update_sdn_dns(cluster_id, dns_id):
         data = request.json or {}
         
         url = f"https://{host}:{port}/api2/json/cluster/sdn/dns/{dns_id}"
-        response = manager._create_session().put(url, data=data, timeout=10)
+        session = manager._create_session()
+        refused = _plugin_secret_moves(session, url, data, 'key', 'DNS server')
+        if refused:
+            return refused
+        response = session.put(url, data=data, timeout=10)
         
         if response.status_code == 200:
             user = getattr(request, 'session', {}).get('user', 'system')
@@ -2059,6 +2194,9 @@ def get_sdn_zone_details(cluster_id, zone_id):
     """Get detailed zone configuration"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2082,6 +2220,9 @@ def get_sdn_vnet_details(cluster_id, vnet_id):
     """Get detailed VNet configuration"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2142,6 +2283,11 @@ def get_node_disks_api(cluster_id, node):
     """Get physical disks on a node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the disks of a host with their serials, SMART, LVM and ZFS: a pool or guest grant is a
+    # claim on guests, not on these (see the ZFS detail below)
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2157,6 +2303,9 @@ def get_node_disk_smart_api(cluster_id, node, disk):
     """Get SMART data for a disk"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2175,12 +2324,17 @@ def get_node_lvm_api(cluster_id, node):
     """Get LVM volume groups on a node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_lvm(node))
+    # MK Nov 2026 - a failed read is an error, not a node without any
+    got = manager.get_node_lvm(node)
+    return unread_failure(got, f'the LVM volume groups of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/disks/lvm', methods=['POST'])
@@ -2219,12 +2373,16 @@ def get_node_lvmthin_api(cluster_id, node):
     """Get LVM-Thin pools on a node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_lvmthin(node))
+    got = manager.get_node_lvmthin(node)
+    return unread_failure(got, f'the LVM-Thin pools of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/disks/lvmthin', methods=['POST'])
@@ -2263,12 +2421,16 @@ def get_node_zfs_api(cluster_id, node):
     """Get ZFS pools on a node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_zfs(node))
+    got = manager.get_node_zfs(node)
+    return unread_failure(got, f'the ZFS pools of node {node}') or jsonify(got)
 
 
 # MK Oct 2026 - one pool in full: the vdev tree with state and error counts, the last
@@ -2515,6 +2677,10 @@ def get_metric_servers(cluster_id):
     """Get configured metric servers (InfluxDB, Graphite) from Proxmox"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # where the cluster sends its metrics: cluster configuration
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:

@@ -1260,6 +1260,26 @@ def test_reach_is_one_version_call_per_cluster_with_node_ha(monkeypatch):
     assert _ha._rt().reach['clusters'] == reach
 
 
+def test_an_ipv6_fallback_host_is_asked_in_brackets():
+    """The API host is down and the one fallback host is an IPv6 address: the URL is
+    prepared the way a real session does it, so an unbracketed address fails there."""
+    import requests
+    asked = []
+
+    class _Session:
+        def get(self, url, timeout):
+            asked.append(requests.Request('GET', url).prepare().url)
+            if '[2001:db8::10]' in url:
+                raise OSError('unreachable')
+            return types.SimpleNamespace(status_code=200)
+    mgr = types.SimpleNamespace(host='[2001:db8::10]', api_port=8006,
+                                config=types.SimpleNamespace(fallback_hosts=['2001:db8::11']),
+                                _create_session=_Session)
+    assert _ha._reaches(mgr) is True
+    assert asked == ['https://[2001:db8::10]:8006/api2/json/version',
+                     'https://[2001:db8::11]:8006/api2/json/version']
+
+
 def test_a_candidate_that_reaches_fewer_clusters_waits_longer(auto, seed):
     auto.form(seed)
     with auto.at('b') as ha:

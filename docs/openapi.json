@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "PegaProx API",
-    "version": "1.4.1",
+    "version": "1.5.0",
     "description": "Multi-cluster management API for Proxmox VE, ESXi and XCP-ng.\n\nGenerated from the live route table. Path, method, parameter, tag and permission information is derived from the application itself. Request and response body schemas are being filled in per resource group and are described as generic objects until then.",
     "license": {
       "name": "AGPL-3.0-only",
@@ -87,6 +87,25 @@
         },
         "summary": "Initiate OIDC login flow - redirects user to identity provider",
         "description": "NS: Generates CSRF state, stores in session, redirects to IdP",
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/auth/oidc/login": {
+      "get": {
+        "operationId": "auth.oidc_login_get",
+        "tags": [
+          "auth"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "Start the OIDC sign-in with a redirect to the identity provider",
+        "description": "For a bookmark or a portal tile (#768): the same state, nonce, PKCE and cookie as\n/api/auth/oidc/authorize, answered with a 302 instead of JSON, redirect_after\nincluded. Without a usable OIDC setup it sends the browser to the login page.",
         "x-pegaprox-auth": "public"
       }
     },
@@ -962,6 +981,52 @@
           }
         },
         "summary": "Admin: Disable 2FA for a user",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "admin.users"
+        ]
+      }
+    },
+    "/api/users/{username}/oidc-binding": {
+      "delete": {
+        "operationId": "users.reset_oidc_binding_delete",
+        "tags": [
+          "users"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Admin: forget the identity provider subject an OIDC / Entra account is bound to.",
+        "description": "MK Nov 2026 - such an account signs in only for the subject stored with it (see\noidc_subject_refusal). After a move to another identity provider, or a provider that\nhands out new subject ids, the admin clears it here and the next sign-in through the\nprovider under exactly this name binds the account again.\n\nNot for an account keyed on its subject (a sign-in without a name made it): it is found\nby the stored sub alone, so it is deleted instead and the next sign-in makes it again.\nAn account keyed on the part before the @ of an address (releases that cut the name\nthere) is found by its sub too, and cannot be told from a provider username without\nan @: the admin is told in the confirmation to delete such an account instead.",
         "parameters": [
           {
             "name": "username",
@@ -11543,6 +11608,67 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/vms/{node}/qemu/{vmid}/pending": {
+      "get": {
+        "operationId": "vms.get_vm_pending_api_get",
+        "tags": [
+          "vms"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "What of a VM's config waits for its next start, as PVE itself reports it. Read only: the keys with a pending value or a pending delete, nothing else.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.view"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/vms/{node}/{vm_type}/{vmid}/lock": {
       "get": {
         "operationId": "vms.get_vm_lock_status_api_get",
@@ -14959,6 +15085,51 @@
         ]
       }
     },
+    "/api/cross-cluster-replications/preflight": {
+      "post": {
+        "operationId": "vms.preflight_cross_cluster_replication_post",
+        "tags": [
+          "vms"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "What creating a cross-cluster replication job would warn about: {source_cluster, vmid, vm_type, target_cluster, source_node}, the last two optional. Only a container is read (its feature flags), a VM is not.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "cluster.config"
+        ]
+      }
+    },
     "/api/cross-cluster-replications/{job_id}": {
       "delete": {
         "operationId": "vms.delete_cross_cluster_replication_delete",
@@ -15125,7 +15296,7 @@
           }
         },
         "summary": "Get available hardware options (CPU types, SCSI controllers, etc.)",
-        "description": "NS: Extended Dec 2025 with machine types",
+        "description": "NS: Extended Dec 2025 with machine types\n\nMK Nov 2026 - ?cluster_id= answers from that cluster: the CPU models (and machine types) are\nread live from one of its nodes, so they follow its PVE version and its custom models. The\nfirst registered cluster used to answer for every dialog, an XCP-ng pool with its two types\nor an ESXi host with none. Without the parameter: the first Proxmox VE cluster the caller\nmay see.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -16181,6 +16352,7 @@
           }
         },
         "summary": "Create a new container on a node",
+        "description": "The body needs a root password ('password', a non-empty string) or an SSH public key\n('ssh_public_keys', or 'ssh_key'), else 400. With only a key no root password is set.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -16604,6 +16776,59 @@
         ],
         "x-pegaprox-permissions": [
           "node.network"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/nodes/{node}/network/changes": {
+      "get": {
+        "operationId": "nodes.get_node_network_changes_api_get",
+        "tags": [
+          "nodes"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The changes that wait for Apply on a node's network, as the diff Proxmox VE sends. Read only.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.view"
         ]
       }
     },
@@ -32176,7 +32401,7 @@
           }
         },
         "summary": "Start near-zero-downtime migration from VMware to Proxmox.",
-        "description": "Required body:\n- target_cluster, target_node, target_storage\n- esxi_password: Root password for ESXi SSH access\n\nOptional:\n- esxi_host: ESXi host IP (default: from VMware server config)\n- esxi_user: SSH username (default: root)\n- esxi_datastore: Datastore name (auto-detected if not set)\n- esxi_vm_dir: VM directory name on datastore (default: VM name)\n- network_bridge, start_after, remove_source\n- wait_for_confirmation (#562): hold before the final switchover and wait for an\n  explicit POST .../confirm-cutover (or .../cancel-cutover). Default false.\n- confirmation_timeout: seconds to wait at that gate before auto-aborting (default 86400).",
+        "description": "Required body:\n- target_cluster, target_node, target_storage\n- esxi_password: Root password for ESXi SSH access\n\nOptional:\n- esxi_host: ESXi host IP (default: from the ESXi server config)\n- esxi_user: SSH username (default: root)\n- esxi_datastore: Datastore name (auto-detected if not set)\n- esxi_vm_dir: VM directory name on datastore (default: VM name)\n- network_bridge, start_after, remove_source\n- wait_for_confirmation (#562): hold before the final switchover and wait for an\n  explicit POST .../confirm-cutover (or .../cancel-cutover). Default false.\n- confirmation_timeout: seconds to wait at that gate before auto-aborting (default 86400).\n- nic_map: [{index, bridge, vlan, skip}] per source NIC, in the order of the migration\n  plan's source.nics. The bridge must exist on the target node (bridge, OVS bridge or an\n  SDN VNet of a zone on that node).\n- disk_map: [{index, storage, skip}] per source disk, in the order of source.disks. The\n  storage must be active on the target node and take images; disk 0 cannot be skipped.\n  EFI and TPM state stay on target_storage.\n- verify: 'sample' (default), 'full' (every copied disk compared with its source before\n  the target starts; Live Clone, Auto and Offline Copy only) or 'off'.\n- dry_run: true checks all of it against the target node and answers 200 with the\n  resolved plan ({ok, errors, warnings, nics, disks, storages, available}); nothing is\n  started and no ESXi password is needed.",
         "parameters": [
           {
             "name": "vmware_id",
@@ -32378,6 +32603,200 @@
         "parameters": [
           {
             "name": "mid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vmware.vm.migrate"
+        ]
+      }
+    },
+    "/api/vmware/{vmware_id}/bulk-migrate": {
+      "post": {
+        "operationId": "vmware.start_vmware_bulk_migration_post",
+        "tags": [
+          "vmware"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Migrate several guests of an ESXi server to Proxmox, a few at a time",
+        "description": "Body: vms (1 to 200 guests: a VM id, or {vm_id, nic_map, disk_map} with the guest's own\nNIC and disk choices as the single migrate route takes them), width (how many migrate at\nonce, 1 to 5, default 1), esxi_password (one for the run), dry_run, and what every guest\nshares: target_cluster, target_node, target_storage (required), network_bridge,\nnet_vlan_tag, transfer_mode, verify, start_after, remove_source (needs vmware.vm.manage\non each guest), wait_for_confirmation, confirmation_timeout, esxi_user, preserve_mac,\nbios, disk_format. Any other key is refused.\n\nEach guest is checked like a dry run of POST .../vms/<vm_id>/migrate: the caller may\nmigrate it, no other migration has it, its NICs and disks fit the target node, and the\nguests together fit the storages and the tenant quota. dry_run: true answers 200 with\nthat check ({ok, errors, warnings, items: one per guest, storages, available}), needs no\npassword and starts nothing. Without it, one guest that does not fit refuses the whole\nrequest (400, with the same items); otherwise the answer is the run (202, {run}), to\nfollow with GET /api/vmware/bulk-migrate/<run_id>.\n\nBefore each guest starts, the run asks all of it again. Each started guest is a normal\nmigration in /api/vmware/migrations. The run lives in this process (a restart ends it),\nand the ESXi password with it: in memory only, dropped once no guest is left to start.",
+        "parameters": [
+          {
+            "name": "vmware_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vmware.vm.migrate"
+        ]
+      }
+    },
+    "/api/vmware/bulk-migrate": {
+      "get": {
+        "operationId": "vmware.list_vmware_bulk_migrations_get",
+        "tags": [
+          "vmware"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "ESXi bulk migrations of the last hours",
+        "description": "The runs the caller started (an admin: every run), newest first, with their counts and\nwithout the guests; ?vmware_id= narrows it to one ESXi server. A run lives in the\nprocess of the instance that started it: a restart ends it.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vmware.vm.migrate"
+        ]
+      }
+    },
+    "/api/vmware/bulk-migrate/{run_id}": {
+      "get": {
+        "operationId": "vmware.get_vmware_bulk_migration_get",
+        "tags": [
+          "vmware"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "One ESXi bulk migration, a line per guest",
+        "description": "Each guest with its state (wait, starting, migrating, done, failed, skipped, cancelled,\nunknown), a note, the migration it became (migration_id, see /api/vmware/migrations),\nits phase and progress; may_cancel says whether the rest can still be cancelled.",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vmware.vm.migrate"
+        ]
+      }
+    },
+    "/api/vmware/bulk-migrate/{run_id}/cancel": {
+      "post": {
+        "operationId": "vmware.cancel_vmware_bulk_migration_post",
+        "tags": [
+          "vmware"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Cancel the rest of an ESXi bulk migration",
+        "description": "Who started it or an admin. No further guest starts and the run drops the ESXi\npassword. Migrations that already started go on to their end: each can still be\ncancelled at its switchover gate (wait_for_confirmation).",
+        "parameters": [
+          {
+            "name": "run_id",
             "in": "path",
             "required": true,
             "schema": {
@@ -32722,7 +33141,7 @@
           }
         },
         "summary": "Get summary report across all clusters",
-        "description": "Query params:\n- period: 'hour', 'day', 'week' (default: day)",
+        "description": "Query params:\n- period: 'hour', 'day', 'week' (default: day)\n\nA cluster's vms_running is null when no snapshot of the window has a guest count.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -32787,7 +33206,7 @@
           }
         },
         "summary": "Get timeline data for charts",
-        "description": "Query params:\n- period: 'hour', 'day', 'week'\n- cluster_id: Optional - filter to specific cluster\n- metric: 'cpu', 'memory', 'vms' (default: all)",
+        "description": "Query params:\n- period: 'hour', 'day', 'week'\n- cluster_id: Optional - filter to specific cluster\n- metric: 'cpu', 'memory', 'vms' (default: all)\n\nA series holds null at a snapshot without that figure (no totals for CPU or memory,\na guest list that was not read for vms).",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -32817,7 +33236,7 @@
           }
         },
         "summary": "Get top VMs by resource usage",
-        "description": "Query params:\n- metric: 'cpu' or 'memory' (default: cpu)\n- limit: Number of results (default: 10)",
+        "description": "Query params:\n- metric: 'cpu' or 'memory' (default: cpu)\n- limit: Number of results (default: 10)\n\nThe body is the list of guests. A cluster whose guest list could not be read (not\nconnected, or the read did not answer) has no rows in it and is named in the\nX-Unread-Clusters header, a JSON list of cluster ids, so a partial ranking does not\npass for the whole one. The header is absent when every cluster was read.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -32999,6 +33418,188 @@
         ],
         "x-pegaprox-permissions": [
           "node.maintenance"
+        ]
+      }
+    },
+    "/api/hardening/profiles": {
+      "get": {
+        "operationId": "reports.list_hardening_profiles_get",
+        "tags": [
+          "reports"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The custom hardening profiles, the built-in ones and the controls both pick from.",
+        "description": "custom: id, name, description, controls, params ({control: {parameter: value}}),\ndropped_controls (stored ids this version has no control for), created_at, updated_at,\nand for those who may manage them created_by and updated_by. builtin: id and the\ncontrols it runs. catalog: per control whether it takes parameters (templated,\nparam_keys, defaults), whether it can be rolled back and whether its apply changes\nnothing on the node (noop). can_manage: whether the caller may create, change and\ndelete custom profiles.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.maintenance"
+        ]
+      },
+      "post": {
+        "operationId": "reports.create_hardening_profile_post",
+        "tags": [
+          "reports"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Save a custom hardening profile.",
+        "description": "Body: name (1-64 characters), description (up to 500, may hold line breaks), controls\n(ids from the catalog), params ({control: {parameter: value}}, only for templated\ncontrols of the profile). A file exported from PegaProx (format\npegaprox-hardening-profile, version 1) is taken as it is. 201 with the profile; 400\nfor a body that does not pass, 409 for a name in use (in any case) or a full list.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.maintenance",
+          "admin.settings"
+        ]
+      }
+    },
+    "/api/hardening/profiles/{profile_id}": {
+      "put": {
+        "operationId": "reports.update_hardening_profile_put",
+        "tags": [
+          "reports"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Change a custom hardening profile.",
+        "description": "The fields the body leaves out stay as they are; left out, params keeps the values of\nthe controls that stay in the profile. Checked like a new one; 404 for an unknown id,\n409 for a name another profile has. changed names the fields that changed.",
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.maintenance",
+          "admin.settings"
+        ]
+      },
+      "delete": {
+        "operationId": "reports.delete_hardening_profile_delete",
+        "tags": [
+          "reports"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Delete a custom hardening profile. 404 for an unknown id.",
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.maintenance",
+          "admin.settings"
         ]
       }
     },
@@ -33358,7 +33959,7 @@
           }
         },
         "summary": "Get report summary for a specific cluster",
-        "description": "Returns both historical data (if available) and current live data\n\nQuery params:\n- period: 'hour', 'day', 'week' (default: day)\n- from, to: unix seconds, instead of period: a range picked on the charts, at full\n  resolution as far as the stored history reaches (a year apart at most)",
+        "description": "Returns both historical data (if available) and current live data\n\nQuery params:\n- period: 'hour', 'day', 'week' (default: day)\n- from, to: unix seconds, instead of period: a range picked on the charts, at full\n  resolution as far as the stored history reaches (a year apart at most)\n\nlive.unread names what the live read did not get ('nodes' for CPU and memory,\n'guests' for the running counts) and is absent after a complete read. Without stored\nsamples, cpu, memory and vms_running then carry null rather than 0.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -33854,6 +34455,25 @@
         },
         "summary": "Get password policy settings (public - needed for password change forms)",
         "description": "NS: Jan 2026 - Returns only password-related settings, no auth required",
+        "x-pegaprox-auth": "public"
+      }
+    },
+    "/api/interface/lock": {
+      "get": {
+        "operationId": "settings.get_interface_lock_get",
+        "tags": [
+          "settings"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "Layout and language an administrator pinned for everyone (public)",
+        "description": "The login page needs the language before anybody has signed in, so this takes no\ncredential and answers everyone the same three values: layout and language ('' when\nusers choose) and admins (false: administrators are exempt). Whether the lock binds an\naccount is decided by PUT /api/user/preferences, which refuses a change with UI_LOCKED.",
         "x-pegaprox-auth": "public"
       }
     },
@@ -34610,6 +35230,35 @@
         "x-pegaprox-auth": "public"
       }
     },
+    "/i18n/{lang}.json": {
+      "get": {
+        "operationId": "settings.serve_language_file_get",
+        "tags": [
+          "settings"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "A language file of the web interface",
+        "description": "Public like the page itself, the login form shows in the language too. Kept for good\nwhen ?v= names the file as it is now, revalidated by its ETag otherwise.",
+        "parameters": [
+          {
+            "name": "lang",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "public"
+      }
+    },
     "/status": {
       "get": {
         "operationId": "settings.status_page_get",
@@ -34934,7 +35583,7 @@
           }
         },
         "summary": "Start a rolling update across all cluster nodes",
-        "description": "MK: Fixed GitHub Issue - skip up-to-date nodes and configurable timeout\n\nParameters (via JSON body):\n- include_reboot: bool - Whether to reboot nodes after update (default: False)\n- node_order: list - Custom order of nodes to update\n- skip_up_to_date: bool - Skip nodes that have no updates available (default: True)\n- force_all: bool - Force update all nodes even if up-to-date (default: False)\n- evacuation_timeout: int - Timeout in seconds for VM evacuation (default: 1800 = 30 min)\n- update_timeout: int - Timeout in seconds for apt upgrade (default: 900 = 15 min)\n- reboot_timeout: int - Timeout in seconds for node reboot (default: 600 = 10 min)\n\nMK Oct 2026 - the run is kept in rolling_update_runs (core/rolling_runs.py) and refused\nwhile another one of the cluster is running or paused, across restarts too.",
+        "description": "MK: Fixed GitHub Issue - skip up-to-date nodes and configurable timeout\n\nParameters (via JSON body):\n- include_reboot: bool - Whether to reboot nodes after update (default: False), needs node.reboot\n- node_order: list - Custom order of nodes to update\n- skip_up_to_date: bool - Skip nodes that have no updates available (default: True)\n- force_all: bool - Force update all nodes even if up-to-date (default: False)\n- skip_evacuation: bool - Update without moving the guests off first (default: False, not recommended)\n- wait_for_reboot: bool - Wait until a rebooted node is back before the next one (default: True)\n- pause_on_evacuation_error: bool - Pause the run when a guest cannot be moved (default: True)\n- allow_local_disks: bool - Live-migrate guests on local storage with --with-local-disks\n  instead of skipping them (default: False); the disks are copied over the network\n- migrate_templates: bool - Move the node's templates with it, offline (default: False, Proxmox only)\n- relax_anti_affinity: bool - Let negative affinity rules give way during the run (default: False, Proxmox only)\n- ceph_health_gate: str - 'off', 'degraded' or 'strict': hold the run when Ceph does not\n  come back healthy after a node (default: 'off')\n- evacuation_timeout: int - Timeout in seconds for VM evacuation (default: 1800 = 30 min)\n- update_timeout: int - Timeout in seconds for apt upgrade (default: 900 = 15 min)\n- reboot_timeout: int - Timeout in seconds for node reboot (default: 600 = 10 min)\n  (the three timeouts are clamped to 60-7200)\n- notify_channels: list - Alert channel ids (GET /api/alert-channels) that get\n  rolling_update.started, rolling_update.paused, rolling_update.interrupted and\n  rolling_update.finished (default: none)\n\nMK Oct 2026 - the run is kept in rolling_update_runs (core/rolling_runs.py) and refused\nwhile another one of the cluster is running or paused, across restarts too.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -35486,6 +36135,7 @@
           }
         },
         "summary": "Get top VMs by resource usage for a specific cluster",
+        "description": "503 when the cluster is not connected or its guest list did not answer, 500 when a\nrow cannot be ranked: an error, no empty list that reads as \"no running VMs\".",
         "parameters": [
           {
             "name": "cluster_id",
@@ -43659,7 +44309,7 @@
           }
         ],
         "x-pegaprox-permissions": [
-          "insights.view"
+          "cluster.view"
         ]
       }
     },
@@ -43996,6 +44646,370 @@
         "parameters": [
           {
             "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "cluster.view"
+        ]
+      }
+    },
+    "/api/blueprints": {
+      "get": {
+        "operationId": "blueprints.list_blueprints_get",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The blueprints the caller sees, newest first: their own tenant's, the admins', and for an admin all of them. Editing is the creator's or an admin's.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.create"
+        ]
+      },
+      "post": {
+        "operationId": "blueprints.create_blueprint_post",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Save a blueprint: source_kind (library, or template: an existing PVE template picked per cluster at the deploy), os (linux/windows; a library image is linux), template_id (a library image, '' for a template source), cores, memory (MB), disk_gb (0 keeps the image's size), cpu, nics [{bridge, vlan, model, firewall}] (1 to 4; for a template source 0 to 4, none keeps the template's own), ciuser, sshkeys, ip_mode (dhcp/static/none), nameserver, searchdomain, ciupgrade, tags, start. Windows keeps no ciuser, sshkeys or searchdomain, and ciupgrade stays on.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.create"
+        ]
+      }
+    },
+    "/api/blueprints/{bp_id}": {
+      "put": {
+        "operationId": "blueprints.update_blueprint_put",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Replace a blueprint's settings (the whole object, as POST takes it).",
+        "parameters": [
+          {
+            "name": "bp_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.create"
+        ]
+      },
+      "delete": {
+        "operationId": "blueprints.delete_blueprint_delete",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Remove a blueprint. VMs deployed from it are not touched.",
+        "parameters": [
+          {
+            "name": "bp_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.create"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/blueprints/{bp_id}/template": {
+      "get": {
+        "operationId": "blueprints.blueprint_template_get",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "What a deploy of this blueprint onto ?node= starts from. A library blueprint: {source_kind: 'library', template: {vmid, node, storage, shared} | null, build_needed}, the template it would clone or that it builds one there first. A template blueprint: {source_kind: 'template', mapped: vmid | null, templates: [{vmid, name, node, ostype, windows, cloudinit, boot_disk, disk_storages, shared, usable_on_node}]}, the cluster's templates the caller may clone whose OS fits (at most 50 read) and the one remembered.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "bp_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.create"
+        ]
+      }
+    },
+    "/api/blueprints/{bp_id}/deploy": {
+      "post": {
+        "operationId": "blueprints.deploy_blueprint_post",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "One VM from a blueprint. Body: {cluster_id, node, storage, name, vmid?, ipconfig0? (only and required with ip_mode static), cipassword? (required for Windows), start?, template_vmid? (a template blueprint: required until one is remembered for the cluster)}. A library blueprint clones the library's template of the image on that node or shared storage, or builds one on the node first; a template blueprint clones the PVE template, remembered for the cluster when the caller may edit the blueprint. A clone from another node goes into shared storage only, as PVE has it. The NIC bridges have to be on the node or SDN VNets, a Windows deploy needs qemu-server 8.2.4 on it. 202 with the deployment to poll and warnings: [str] (also in its log).",
+        "parameters": [
+          {
+            "name": "bp_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.create"
+        ]
+      }
+    },
+    "/api/blueprints/deployments": {
+      "get": {
+        "operationId": "blueprints.list_deployments_get",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Recent blueprint deployments of ?cluster_id=, newest first (50). Without it the ones of every cluster the caller may see (100), each row with its cluster_id.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "cluster.view"
+        ]
+      }
+    },
+    "/api/blueprints/deployments/{dep_id}": {
+      "get": {
+        "operationId": "blueprints.deployment_get",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "One blueprint deployment with its log.",
+        "parameters": [
+          {
+            "name": "dep_id",
             "in": "path",
             "required": true,
             "schema": {
@@ -45161,8 +46175,8 @@
             "sessionId": []
           }
         ],
-        "x-pegaprox-roles": [
-          "admin"
+        "x-pegaprox-permissions": [
+          "admin.audit"
         ]
       }
     },
@@ -45195,8 +46209,8 @@
             "sessionId": []
           }
         ],
-        "x-pegaprox-roles": [
-          "admin"
+        "x-pegaprox-permissions": [
+          "admin.audit"
         ]
       }
     },
@@ -46373,6 +47387,53 @@
         ],
         "x-pegaprox-permissions": [
           "site_recovery.view"
+        ]
+      }
+    },
+    "/api/multi-sdn/prerequisites": {
+      "post": {
+        "operationId": "multi_sdn.check_prerequisites_post",
+        "tags": [
+          "multi_sdn"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Per-node EVPN prerequisite checks for #1154.",
+        "description": "Read-only SSH reads. The caller must reach every member cluster\nunconfined - these probes expose host-level state and IPs, which a\nVM-scoped caller has no business seeing (#1154 review).",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "sdn.manage",
+          "admin.settings"
         ]
       }
     },
@@ -50193,6 +51254,617 @@
         ],
         "x-pegaprox-permissions": [
           "changes.view"
+        ]
+      }
+    },
+    "/api/qnetd/hosts": {
+      "get": {
+        "operationId": "qnetd.list_qnetd_hosts_get",
+        "tags": [
+          "qnetd"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The QNetd hosts, the clusters attached to each and their last status",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      },
+      "post": {
+        "operationId": "qnetd.create_qnetd_host_post",
+        "tags": [
+          "qnetd"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Register a QNetd host",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/qnetd/hosts/{host_id}": {
+      "put": {
+        "operationId": "qnetd.update_qnetd_host_put",
+        "tags": [
+          "qnetd"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Change a QNetd host; password and ssh_key left out stay as they are",
+        "parameters": [
+          {
+            "name": "host_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      },
+      "delete": {
+        "operationId": "qnetd.delete_qnetd_host_delete",
+        "tags": [
+          "qnetd"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Forget a QNetd host. Refused while a cluster votes through it",
+        "parameters": [
+          {
+            "name": "host_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/qnetd/hosts/{host_id}/check": {
+      "post": {
+        "operationId": "qnetd.check_qnetd_host_post",
+        "tags": [
+          "qnetd"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Make the helper usable and corosync-qnetd run: installs or updates the helper of an ssh host where the login may, and runs init unless {\"init\": false}",
+        "parameters": [
+          {
+            "name": "host_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/qnetd/hosts/{host_id}/status": {
+      "get": {
+        "operationId": "qnetd.qnetd_host_status_get",
+        "tags": [
+          "qnetd"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The status of a QNetd host: whether it runs and which clusters are connected (corosync-qnetd-tool -l -v), read at most every 30 s. ?cached=1 never asks the host",
+        "parameters": [
+          {
+            "name": "host_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/qdevice/preflight": {
+      "get": {
+        "operationId": "qnetd.qdevice_preflight_get",
+        "tags": [
+          "qnetd"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "What a QDevice setup of this cluster against ?qnetd_id= would find",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/qdevice/plan": {
+      "get": {
+        "operationId": "qnetd.qdevice_plan_get",
+        "tags": [
+          "qnetd"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "What a QDevice setup of this cluster against ?qnetd_id= would change, with the digest a setup has to agree to. Reads only: nothing is installed or opened anywhere",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/qdevice/setup": {
+      "post": {
+        "operationId": "qnetd.qdevice_setup_post",
+        "tags": [
+          "qnetd"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Set up the QDevice of this cluster against a QNetd host, in the background",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/qdevice/remove": {
+      "post": {
+        "operationId": "qnetd.qdevice_remove_post",
+        "tags": [
+          "qnetd"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Remove the QDevice of this cluster (pvecm qdevice remove on one node)",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/qnetd/hosts/{host_id}/bulk-setup": {
+      "post": {
+        "operationId": "qnetd.qdevice_bulk_setup_post",
+        "tags": [
+          "qnetd"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Set up the QDevice of several clusters against one QNetd host, one after the other. One cluster that fails does not stop the rest",
+        "parameters": [
+          {
+            "name": "host_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/qnetd/jobs": {
+      "get": {
+        "operationId": "qnetd.list_qdevice_jobs_get",
+        "tags": [
+          "qnetd"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The QDevice jobs of this instance, newest first, without their step logs",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/qnetd/jobs/{job_id}": {
+      "get": {
+        "operationId": "qnetd.get_qdevice_job_get",
+        "tags": [
+          "qnetd"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "One QDevice job with its step log",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
         ]
       }
     },

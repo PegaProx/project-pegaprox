@@ -8,6 +8,7 @@ import secrets
 import base64
 import ipaddress
 from datetime import datetime
+from urllib.parse import urlparse
 from flask import Blueprint, jsonify, request, make_response
 
 from pegaprox.constants import *
@@ -30,7 +31,7 @@ from pegaprox.utils.auth import (
     ARGON2_AVAILABLE, TOTP_AVAILABLE,
     mfa_enrolment_state, MFA_DUE, MFA_SKIPPED_ON_STANDBY,
 )
-from pegaprox.utils.audit import log_audit, get_client_ip
+from pegaprox.utils.audit import log_audit, get_client_ip, is_audit_pseudo_actor
 from pegaprox.utils.ldap import (get_ldap_settings, ldap_authenticate, ldap_provision_user,
                                  ldap_build_user_row, LDAP_AUTH_SOURCES)
 from pegaprox.utils.oidc import (
@@ -38,9 +39,10 @@ from pegaprox.utils.oidc import (
     oidc_exchange_code, oidc_decode_id_token, oidc_get_user_info, oidc_name_from_id_token,
     oidc_get_user_groups, oidc_get_user_groups_ex, oidc_map_groups_to_role, oidc_provision_user,
     oidc_derive_username, oidc_build_user_row, OIDC_AUTH_SOURCES, oidc_username_claim_value,
-    oidc_username_claim_refusal, oidc_id_token_verified,
+    oidc_username_claim_refusal, oidc_id_token_verified, oidc_idp_request_target,
+    oidc_subject_refusal, oidc_new_account_refusal,
 )
-from pegaprox.utils.rbac import get_user_permissions, DEFAULT_TENANT_ID
+from pegaprox.utils.rbac import get_user_permissions, DEFAULT_TENANT_ID, portal_only_holds
 from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, get_session_timeout, safe_error, effective_reverse_proxy
 from pegaprox.utils.sanitization import sanitize_identifier, sanitize_username
 from pegaprox.utils.ssh import check_auth_action_rate_limit
@@ -60,15 +62,16 @@ bp = Blueprint('auth', __name__)
 # ============================================================================
     
 
-@bp.route('/api/auth/oidc/authorize', methods=['GET'])
-def oidc_authorize():
-    """Initiate OIDC login flow - redirects user to identity provider
-    
-    NS: Generates CSRF state, stores in session, redirects to IdP
+def _oidc_begin(answer):
+    """Start an OIDC sign-in: state, nonce and PKCE verifier, carried to the callback
+    in the oidc_state cookie. answer(auth_url) builds the response. None when OIDC is
+    off or has no client id, or when answer turns the URL down.
+
+    MK Oct 2026 (#768) - the one start of the JSON route and the redirecting one
     """
     config = get_oidc_settings()
     if not config['enabled'] or not config['client_id']:
-        return jsonify({'error': 'OIDC authentication is not configured'}), 400
+        return None
     
     # NS: Auto-detect redirect URI if not configured
     # never use Origin header - attacker can spoof it to steal OAuth tokens
@@ -87,7 +90,9 @@ def oidc_authorize():
     # Store state in a temporary way (cookie-based since no session yet)
     auth_url, nonce, code_verifier = oidc_build_auth_url(config, state)
 
-    response = make_response(jsonify({'auth_url': auth_url}))
+    response = answer(auth_url)
+    if response is None:
+        return None
     from pegaprox.utils.audit import _is_trusted_proxy
     is_secure = request.is_secure or (_is_trusted_proxy(request.remote_addr) and request.headers.get('X-Forwarded-Proto') == 'https')
     # #188: store state + nonce + PKCE code_verifier in cookie
@@ -112,6 +117,64 @@ def oidc_authorize():
     if _safe_internal_path(redirect_after):
         cookie_val += f":{redirect_after}"
     response.set_cookie('oidc_state', cookie_val, httponly=True, secure=is_secure, samesite='Lax', max_age=600)
+    return response
+
+
+# what a sign-in hears when no account it may use goes by its name; the reason is logged
+_OIDC_UNMATCHED = 'This sign-in could not be matched to a PegaProx account. Contact an administrator.'
+
+
+def _idp_location(url):
+    """Whether url may be the Location of a redirect to the identity provider: an
+    absolute https URL, what the login button accepts too (auth.js). A setup with no
+    authorize endpoint builds '?client_id=...', and that as a Location would send the
+    browser back to the route that answered. A header carries ASCII only.
+    """
+    if not isinstance(url, str) or not url.isascii():
+        return False
+    if any(ord(c) <= 0x20 or ord(c) == 0x7f or c == '\\' for c in url):
+        return False
+    try:
+        u = urlparse(url)
+        u.port  # a port that is no number in range raises here, not while werkzeug builds the header
+        own = urlparse('//' + (request.host or '')).hostname or ''
+    except ValueError:
+        return False
+    if u.scheme != 'https' or not u.hostname or u.username or u.password:
+        return False
+    # an endpoint under /api/auth/ of this very host would bounce the browser round in a circle
+    return not (u.hostname == own and u.path.startswith('/api/auth/'))
+
+
+@bp.route('/api/auth/oidc/authorize', methods=['GET'])
+def oidc_authorize():
+    """Initiate OIDC login flow - redirects user to identity provider
+    
+    NS: Generates CSRF state, stores in session, redirects to IdP
+    """
+    # MK Nov 2026 - the buttons follow this URL, so it passes the rule the login link's
+    # Location does: an absolute https URL of the identity provider, or none at all
+    response = _oidc_begin(lambda auth_url: make_response(jsonify({'auth_url': auth_url}))
+                           if _idp_location(auth_url) else None)
+    if response is None:
+        return jsonify({'error': 'OIDC authentication is not configured'}), 400
+    return response
+
+
+@bp.route('/api/auth/oidc/login', methods=['GET'])
+def oidc_login():
+    """Start the OIDC sign-in with a redirect to the identity provider
+
+    For a bookmark or a portal tile (#768): the same state, nonce, PKCE and cookie as
+    /api/auth/oidc/authorize, answered with a 302 instead of JSON, redirect_after
+    included. Without a usable OIDC setup it sends the browser to the login page.
+    """
+    from flask import redirect as flask_redirect
+    response = _oidc_begin(lambda auth_url: flask_redirect(auth_url, code=302)
+                           if _idp_location(auth_url) else None)
+    if response is None:
+        # the login page and never this route again, so a broken setup cannot loop
+        return flask_redirect('/', code=302)
     return response
 
 
@@ -219,34 +282,49 @@ def oidc_callback():
     if not user_info or not (user_info.get('preferred_username') or user_info.get('email') or user_info.get('sub')):
         return jsonify({'error': 'Could not retrieve user information from provider'}), 401
 
+    def _sid(value):
+        return value if isinstance(value, str) and value else None
+
+    # the ids the verified ID token gives this sign-in. MK Nov 2026 - in both naming modes:
+    # an account stays with the subject it is bound to (oidc_subject_refusal)
+    entra = config.get('provider') == 'entra'
+    verified = oidc_id_token_verified(id_claims)
+    token_ids = set()
+    if verified:
+        token_ids = {_sid(id_claims.get('sub'))}
+        if entra:
+            token_ids.add(_sid(id_claims.get('oid')))   # the id Graph /me answers with
+        token_ids.discard(None)
+
     # NS Oct 2026 (#1149) - the claim the admin picked names the account, or the sign-in
     # stops here: no quiet fallback to another naming scheme
     claim = config.get('username_claim') or ''
     picked_name = None
-    subjects = None
+    if not claim and not _sid(user_info.get('sub')):
+        # MK Nov 2026 - a userinfo answer without a sub (OIDC Core 5.3.2 says it carries one)
+        # is about the subject of this sign-in's verified ID token. Without either there is
+        # nobody to bind an account to, and no account is made or updated
+        if verified and _sid(id_claims.get('sub')):
+            user_info = dict(user_info, sub=id_claims['sub'])
+        else:
+            logging.warning("[OIDC] Sign-in refused: neither the userinfo answer nor a verified "
+                            "ID token carries a subject id")
+            return jsonify({'error': 'Could not retrieve user information from provider'}), 401
+    # with Entra the Graph id when /me answered, else the userinfo sub, plus the token's
+    # sub and oid: a Graph answer that comes and goes locks nobody out
+    subjects = token_ids | ({_sid(user_info.get('sub'))} - {None})
     unmatched = None
     if claim:
-        unmatched = 'This sign-in could not be matched to a PegaProx account. Contact an administrator.'
+        unmatched = _OIDC_UNMATCHED
         no_claim = jsonify({'error': f"This sign-in carries no usable '{claim}' claim. Ask an "
                                      f"administrator to check the OIDC settings and the claims "
                                      f"the identity provider issues."}), 401
-        entra = config.get('provider') == 'entra'
-        if claim == 'email' and (entra or (oidc_id_token_verified(id_claims) and id_claims.get('tid'))):
+        if claim == 'email' and (entra or (verified and id_claims.get('tid'))):
             # what the settings refuse too: Entra's email is the unverified mail attribute. An
             # Entra tenant set up as a generic provider is told by the tenant id in its token.
             logging.warning("[OIDC] Sign-in refused: email cannot name Entra accounts")
             return no_claim
 
-        def _sid(value):
-            return value if isinstance(value, str) and value else None
-
-        verified = oidc_id_token_verified(id_claims)
-        token_ids = set()
-        if verified:
-            token_ids = {_sid(id_claims.get('sub'))}
-            if entra:
-                token_ids.add(_sid(id_claims.get('oid')))   # the id Graph /me answers with
-            token_ids.discard(None)
         subject_info = userinfo_answer
         if isinstance(subject_info, dict) and verified and (
                 set(subject_info) <= {'sub'} or (entra and not _sid(id_claims.get('oid')))):
@@ -278,14 +356,36 @@ def oidc_callback():
                                            groups_complete=groups_complete)
     
     # Step 5: Provision/update local user
+    # MK: this has to match the logic in oidc_provision_user or we get mismatches
+    # (had a bug where "john.doe" here vs "johndoe" in provision caused 403s)
+    users = load_users()
+    derived = oidc_derive_username(user_info, users, name=picked_name)
     if not config['auto_create_users']:
-        # Check if user already exists
-        # MK: this has to match the logic in oidc_provision_user or we get mismatches
-        # (had a bug where "john.doe" here vs "johndoe" in provision caused 403s)
-        users = load_users()
-        check_username = oidc_derive_username(user_info, users, name=picked_name)
-        if check_username not in users:
-            return jsonify({'error': unmatched or 'User account does not exist. Contact an administrator.'}), 403
+        # Check if user already exists. MK Nov 2026 - in the words a held name gets, so the
+        # answer does not tell which names are taken
+        if derived not in users:
+            return jsonify({'error': _OIDC_UNMATCHED}), 403
+    else:
+        # MK Nov 2026 - the background jobs write their audit entries under a few names, and
+        # an account created under one would read those entries as its own. One that exists
+        # already signs in as before.
+        if derived and derived not in users and is_audit_pseudo_actor(derived):
+            logging.warning(f"[OIDC] Sign-in refused: '{derived}' is reserved for entries "
+                            f"PegaProx writes itself")
+            return jsonify({'error': f"The username '{derived}' is reserved for entries PegaProx "
+                                     f"writes itself. Contact an administrator."}), 403
+
+    def _not_this_sign_ins(table):
+        # MK Nov 2026 - an OIDC account of that name bound to another subject, or a new one
+        # the name reaches only through a fold: told apart from a name another identity
+        # source owns, which keeps its own answer
+        if not derived:
+            return False
+        row = table.get(derived)
+        if row is None:
+            return oidc_new_account_refusal(derived, user_info, name=picked_name) is not None
+        return (isinstance(row, dict) and row.get('auth_source', 'local') in OIDC_AUTH_SOURCES
+                and oidc_subject_refusal(derived, row, user_info, subjects, name=picked_name) is not None)
     
     # Determine auth_source label
     provider = config.get('provider', 'oidc')
@@ -303,21 +403,26 @@ def oidc_callback():
         built = oidc_build_user_row(user_info, role_mapping, auth_source, users, name=picked_name,
                                     subjects=subjects)
         user = None  # another source owns the name: the answer below, as on the active
-        if built is None and claim:
-            # NS Oct 2026 (#1149) - with a picked claim a name held by another subject, or one
-            # with no subject stored, answers like a missing account: a standby writes nothing,
-            # so a different answer would let anyone probe which names are taken unseen
+        if built is None and (claim or _not_this_sign_ins(users)):
+            # NS Oct 2026 (#1149) - a name held by another subject (with a picked claim, any
+            # name this sign-in may not use) answers like a missing account: a standby writes
+            # nothing, so a different answer would let anyone probe which names are taken
+            # unseen. MK Nov 2026 - the automatic order binds as well now
             logging.warning("[OIDC] A sign-in on a standby names an account it may not use "
-                            "(another subject's, or none stored) - answered like a missing one")
+                            "(another subject's) - answered like a missing one")
             if not config['auto_create_users']:
-                return jsonify({'error': unmatched}), 403   # what a missing name got above
+                return jsonify({'error': _OIDC_UNMATCHED}), 403   # what a missing name got above
             built = (oidc_derive_username(user_info, users, name=picked_name) or '', None)
         if built is not None:
             username, would_be = built
             row = users.get(username) if would_be is not None else None
-            if not isinstance(row, dict):
+            # MK Nov 2026 - nor a row not bound to a subject yet: the binding is made on the
+            # active, and a standby, which writes nothing, would let every subject of that
+            # name in, again and again
+            unbound = isinstance(row, dict) and not row.get('oidc_sub')
+            if not isinstance(row, dict) or unbound:
                 logging.warning(f"[OIDC] '{username}' signs in on a standby that does not "
-                                f"hold the account yet - refused")
+                                f"hold the account {'bound to a subject ' if unbound else ''}yet - refused")
                 return jsonify({
                     'error': 'Your account is not on this instance yet - sign in on the active '
                              'instance once; it reaches this standby with the next sync.',
@@ -336,11 +441,21 @@ def oidc_callback():
             user = {**row, 'username': username}
             logging.info(f"[OIDC] User '{username}' authenticated via {provider} from {client_ip} (standby, synced row)")
     else:
+        # MK Nov 2026 - a disabled account is refused before anything is written: provisioning
+        # would bind it and store this sign-in's groups first. Asked of a row this sign-in may
+        # use only, so a name held by another subject does not tell that it is disabled
+        held = users.get(derived) if derived else None
+        if (isinstance(held, dict) and not held.get('enabled', True)
+                and oidc_build_user_row(user_info, role_mapping, auth_source, users, name=picked_name,
+                                        subjects=subjects) is not None):
+            return jsonify({'error': 'Account is disabled'}), 403
         user = oidc_provision_user(user_info, role_mapping, auth_source=auth_source, name=picked_name,
                                    subjects=subjects)
     
     # NS: SECURITY - oidc_provision_user returns None if local account would be overwritten
     if not user:
+        if unmatched is None and _not_this_sign_ins(users):
+            return jsonify({'error': _OIDC_UNMATCHED}), 403
         return jsonify({'error': unmatched or 'A local account with this username already exists. Contact an administrator.'}), 403
     
     username = user.get('username', '')
@@ -364,7 +479,18 @@ def oidc_callback():
         user['last_login'] = datetime.now().isoformat()
         save_single_user(username, user)
 
-    log_audit(username, 'auth.oidc.login', f"OIDC login via {provider} from {client_ip}")
+    # MK Nov 2026 - a sign-in whose ID token signature went unchecked says so in the audit
+    # log, with the reason: the admin's switch, or a key set that could not be loaded
+    # (oidc_decode_id_token takes the token on the verified TLS connection then)
+    detail = f"OIDC login via {provider} from {client_ip}"
+    if not id_token_raw:
+        detail += " - no ID token: the token endpoint returned none"
+    elif not verified:
+        detail += " - ID token signature not checked: " + (
+            "oidc_skip_jwt_verification is on" if config.get('oidc_skip_jwt_verification') else
+            "the identity provider's key set (JWKS) could not be loaded, the token was taken "
+            "on the verified TLS connection to the token endpoint")
+    log_audit(username, 'auth.oidc.login', detail)
     
     # NS: Apr 2026 - include portal_only so client portal can validate OIDC users
     fresh_user = users.get(username, user)
@@ -511,6 +637,9 @@ def oidc_test_connection():
         try:
             # MK May 2026 (CodeAnt #504) — same normalisation as Step 2 above.
             validated_jwks_url = sanitize_outbound_url(endpoints['jwks'], allow_private=allow_private_ip)
+            # MK Nov 2026 - with oidc_skip_ssl_verify the same pinned, unverified fetch the
+            # sign-in makes, so the test does not fail where the sign-in works
+            validated_jwks_url, tls_kw = oidc_idp_request_target(config, validated_jwks_url, allow_private_ip)
         except SsrfError as guard_err:
             hint = ''
             if not allow_private_ip and 'private' in str(guard_err).lower():
@@ -519,7 +648,7 @@ def oidc_test_connection():
                             'detail': f"URL rejected by SSRF guard: {guard_err}{hint}"})
             return jsonify({'success': False, 'results': results})
         # NS Oct 2026 - not followed: a redirect target is a URL the guard above never saw
-        resp = requests.get(validated_jwks_url, allow_redirects=False, timeout=10)
+        resp = requests.get(validated_jwks_url, allow_redirects=False, timeout=10, **tls_kw)
         if resp.status_code == 200:
             keys = resp.json().get('keys', [])
             results.append({'step': 'JWKS Endpoint', 'status': 'ok', 'detail': f"Found {len(keys)} signing keys"})
@@ -926,6 +1055,16 @@ def auth_login():
         ldap_result = ldap_authenticate(username, password)
         
         if ldap_result.get('success'):
+            # MK Nov 2026 - the background jobs write their audit entries under a few names,
+            # and an account created under one would read those entries as its own. One that
+            # exists already signs in as before.
+            ldap_name = str(ldap_result.get('username') or username).lower()
+            if (ldap_config['auto_create_users'] and ldap_name not in users_db
+                    and is_audit_pseudo_actor(ldap_name)):
+                logging.warning(f"[LDAP] Refused to create an account named '{ldap_name}': "
+                                f"the name is reserved for entries PegaProx writes itself")
+                return jsonify({'error': f"The username '{ldap_name}' is reserved for entries "
+                                         f"PegaProx writes itself. Contact an administrator."}), 403
             # LW: LDAP auth succeeded - provision/update local user
             if (ldap_config['auto_create_users'] or username in users_db) and ha.is_standby():
                 # MK Sep 2026 (#625) - a standby writes no users row: the next sync puts
@@ -1198,11 +1337,13 @@ def auth_login():
             'taskbar_auto_expand': user.get('taskbar_auto_expand', True),  # NS: Feb 2026
             'sidebar_show_vmid': user.get('sidebar_show_vmid', False),  # NS Jul 2026 — corporate sidebar VMIDs
             'layout_chosen': user.get('layout_chosen', False),
-            'portal_only': user.get('portal_only', False),
+            # MK Oct 2026 - what the server holds the account to: an admin a group mapping
+            # promoted keeps the main UI (rbac.portal_only_holds)
+            'portal_only': portal_only_holds(user),
             'autoinstall_access': autoinstall,  # 'manage' | 'view' | '', same rule as the routes
         },
         'session_id': session_id,
-        'portal_only': user.get('portal_only', False),
+        'portal_only': portal_only_holds(user),
         'default_theme': default_theme,  # NS: Include for frontend fallback
         'reverse_proxy_enabled': effective_reverse_proxy(settings),
         'air_gap_mode': settings.get('air_gap_mode', False),
@@ -1397,9 +1538,10 @@ def auth_check():
         if changed_at:
             try:
                 changed_date = datetime.fromisoformat(changed_at.replace('Z', '+00:00'))
-                # handle naive datetime
+                # a stamp with an offset (the database's own are UTC) goes to local
+                # time first; a naive one is local already
                 if changed_date.tzinfo:
-                    changed_date = changed_date.replace(tzinfo=None)
+                    changed_date = changed_date.astimezone().replace(tzinfo=None)
                 days_since = (datetime.now() - changed_date).days
                 days_until_expiry = expiry_days - days_since
                 
@@ -1466,7 +1608,7 @@ def auth_check():
             'sidebar_show_vmid': user.get('sidebar_show_vmid', False),  # NS Jul 2026 — corporate sidebar VMIDs
             'totp_enabled': user.get('totp_enabled', False),
             'layout_chosen': user.get('layout_chosen', False),
-            'portal_only': user.get('portal_only', False),
+            'portal_only': portal_only_holds(user),
             'autoinstall_access': autoinstall_access(session['user'], session),
         },
         'password_expiry': password_expiry,
@@ -1534,6 +1676,13 @@ def get_cluster_creds_internal(cluster_id):
     if refused:
         return refused
 
+    # MK Nov 2026 - the SSH console server this process started is the only caller, and
+    # it proves that like it does on /api/ws/token/validate (realtime.CONSOLE_SERVER_HEADER).
+    # A browser session alone gets neither the node addresses nor the PVE ticket.
+    from pegaprox.api.realtime import from_console_server
+    if not from_console_server():
+        return jsonify({'error': 'Only the console server asks here', 'code': 'CONSOLE_SERVER_ONLY'}), 403
+
     # Check session from cookie
     session_id = request.cookies.get('session') or request.cookies.get('session_id')
     
@@ -1598,7 +1747,15 @@ def get_cluster_creds_internal(cluster_id):
     if 'node.shell' not in user_perms:
         logging.warning(f"[CLUSTER-CREDS] User {session['user']} lacks node.shell permission")
         return jsonify({'error': 'Permission denied'}), 403
-    
+    # MK Nov 2026 - the legacy session login of the node shell gets its node addresses
+    # here: none on a cluster with SSH switched off. The guest terminal reads the same
+    # answer for its PVE allow-list and says so (console=term); it goes over the PVE API.
+    if request.args.get('console') != 'term':
+        from pegaprox.api.helpers import node_shell_refusal
+        why = node_shell_refusal(mgr)
+        if why:
+            return jsonify({'code': 'SSH_DISABLED', 'error': why}), 409
+
     # Get node IPs - the cluster_host is our reliable fallback
     node_ips = {}
     cluster_host, cluster_port = mgr.host, mgr.api_port
@@ -1751,7 +1908,7 @@ def verify_password_api():
     elif auth_source == 'ldap':
         from pegaprox.utils.ldap import ldap_authenticate
         result = ldap_authenticate(username, password)
-        if 'error' in result:
+        if not result.get('success'):  # only a sign-in the directory confirmed, not "no error"
             return jsonify({'error': 'Invalid password'}), 401
     elif auth_source in ('oidc', 'entra'):
         # NS May 2026: stolen-cookie replay risk — the original "session valid → accept"

@@ -19,18 +19,30 @@
                 } catch { return null; }
             };
 
+            // LW Nov 2026 - only the latest load may fill the tab: an answer that comes in after
+            // a cluster switch or a newer refresh is dropped
+            const loadSeq = useRef(0);
+
             // load networks for this cluster
             const fetchNetworks = async () => {
+                const seq = ++loadSeq.current;
+                const stale = () => seq !== loadSeq.current;
                 setLoading(true);
                 try {
                     const resp = await authFetch(`${API_URL}/clusters/${clusterId}/networks`);
+                    if (stale()) return;
                     if (resp && resp.ok) {
                         const data = await resp.json();
-                        setNetworks(data.networks || []);
-                        // auto-select from sidebar click or pick first
-                        if (data.networks?.length > 0) {
-                            const pick = initialNetwork && data.networks.find(n => n.name === initialNetwork)
-                                ? initialNetwork : (selectedNetwork || data.networks[0].name);
+                        if (stale()) return;
+                        // LW Nov 2026 - an XCP-ng pool used to answer the bare list, take either
+                        const list = Array.isArray(data) ? data : (data?.networks || []);
+                        setNetworks(list);
+                        // auto-select from sidebar click, else keep the pick if this list has it, else the first.
+                        // After a cluster switch selectedNetwork still names a network of the cluster before
+                        if (list.length > 0) {
+                            const has = name => name && list.some(n => n.name === name);
+                            const pick = has(initialNetwork) ? initialNetwork
+                                : has(selectedNetwork) ? selectedNetwork : list[0].name;
                             setSelectedNetwork(pick);
                         }
                     } else {
@@ -38,6 +50,7 @@
                         setNetworks([]);
                     }
                 } catch (err) {
+                    if (stale()) return;
                     console.error('fetch networks:', err);
                     setNetworks([]);
                 }

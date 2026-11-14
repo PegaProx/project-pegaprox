@@ -16,10 +16,33 @@ from pegaprox.models.tasks import balancer_cooldown
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
-from pegaprox.background.scheduler import load_scheduled_tasks, save_scheduled_tasks, execute_scheduled_task
-from pegaprox.api.helpers import get_connected_manager, check_cluster_access
+from pegaprox.background.scheduler import (load_scheduled_tasks, save_scheduled_tasks, execute_scheduled_task,
+                                            task_refusal)
+from pegaprox.utils.sanitization import validate_storage_name, validate_hostname, not_one_path_segment
+from pegaprox.api.helpers import bounded_limit, get_connected_manager, check_cluster_access
 
 bp = Blueprint('history', __name__)
+
+
+def _task_refused(task, storage_given=True):
+    """The 400 answer for a task that cannot be stored as it is, None for one that can.
+    MK Nov 2026 - the storage goes into the backup call, and an action the cluster's tasks
+    cannot run is said here instead of failing every night (scheduler.task_refusal)."""
+    if storage_given and not validate_storage_name(task.get('backup_storage') or 'local'):
+        return jsonify({'error': 'Invalid backup storage name'}), 400
+    # the node and the guest type go into the API path of the snapshot on Proxmox VE; an
+    # XCP-ng host keeps its free name, it is no part of a path there
+    mgr = cluster_managers.get(task.get('cluster_id', ''))
+    if getattr(mgr, 'cluster_type', 'proxmox') not in ('xcpng', 'esxi'):
+        node, kind = task.get('target_node'), task.get('target_type')
+        if node not in (None, '') and not (isinstance(node, str) and validate_hostname(node)):
+            return jsonify({'error': 'Invalid node name'}), 400
+        if kind is not None and (not isinstance(kind, str) or not_one_path_segment(kind)):
+            return jsonify({'error': 'Invalid guest type'}), 400
+    why = task_refusal(task.get('cluster_id', ''), task.get('action', ''))
+    if why:
+        return jsonify({'error': why}), 400
+    return None
 
 @bp.route('/api/scheduled-tasks', methods=['GET'])
 @require_auth(perms=['cluster.view'])
@@ -86,11 +109,14 @@ def create_scheduled_task():
         'schedule_type': data.get('schedule_type', 'daily'),  # hourly, daily, weekly, monthly
         'schedule_time': data.get('schedule_time', '02:00'),
         'schedule_day': data.get('schedule_day', 0),
-        'backup_storage': data.get('backup_storage', 'local'),
+        'backup_storage': data.get('backup_storage') or 'local',
         'enabled': data.get('enabled', True),
         'last_run': None,
         'created': datetime.now().isoformat()
     }
+    refused = _task_refused(new_task)
+    if refused:
+        return refused
     
     config['tasks'].append(new_task)
     save_scheduled_tasks(config)
@@ -109,7 +135,8 @@ def update_scheduled_task(task_id):
     
     for task in config['tasks']:
         if task['id'] == task_id:
-            task.update({
+            changed = dict(task)
+            changed.update({
                 'name': data.get('name', task['name']),
                 'cluster_id': data.get('cluster_id', task['cluster_id']),
                 'target_type': data.get('target_type', task['target_type']),
@@ -122,6 +149,12 @@ def update_scheduled_task(task_id):
                 'backup_storage': data.get('backup_storage', task.get('backup_storage', 'local')),
                 'enabled': data.get('enabled', task['enabled']),
             })
+            # a stored row stays as it is until it is edited; the edit is held to the rules
+            # of a new task (a storage only when it is set)
+            refused = _task_refused(changed, storage_given='backup_storage' in data)
+            if refused:
+                return refused
+            task.update(changed)
             save_scheduled_tasks(config)
             return jsonify(task)
     
@@ -148,7 +181,12 @@ def run_scheduled_task_now(task_id):
     
     for task in config['tasks']:
         if task['id'] == task_id:
-            execute_scheduled_task(task)
+            # MK Nov 2026 - this answered success whatever the task did; a refused or failed
+            # run says so, and leaves last_run alone so the next slot still runs it
+            failed = execute_scheduled_task(task)
+            if failed:
+                status, why = failed
+                return jsonify({'error': why}), status
             # the scheduler compares this stamp with the group's clock, not the host's (#625)
             task['last_run'] = ha.schedule_now().isoformat()
             save_scheduled_tasks(config)
@@ -251,7 +289,8 @@ def get_migration_history():
     # Optional filters
     cluster_id = request.args.get('cluster_id')
     vmid = request.args.get('vmid')
-    limit = int(request.args.get('limit', 100))
+    # JB Nov 2026 - load_migration_history reads 1000 rows at most
+    limit = bounded_limit(request.args.get('limit'), 100, 1000)
     
     migrations = config.get('migrations', [])
     
@@ -504,29 +543,15 @@ def check_affinity_violation(cluster_id: str, vmid: int, target_node: str, vm_no
 def get_affinity_rules(cluster_id=None):
     """Get affinity rules, optionally filtered by cluster"""
     config = load_affinity_rules()
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.api.helpers import affinity_rules_in_view
     if cluster_id:
         # NS Jul 2026 (CodeAnt IDOR) — path-scoped alias: enforce cluster access.
+        # (the GET of this path is served by alerts.get_cluster_affinity_rules, registered first)
         ok, err = check_cluster_access(cluster_id)
         if not ok:
             return err
         config['rules'] = [r for r in config['rules'] if r.get('cluster_id') == cluster_id]
-        # sec (audit): a rule names every VM it groups, so this listed guests the caller cannot
-        # see. Show a confined caller only the rules whose members they may all view.
-        from pegaprox.utils.auth import build_authz_user
-        from pegaprox.utils.rbac import user_can_access_vm
-        from pegaprox.api.helpers import caller_is_scoped
-        _au = build_authz_user(request.session.get('user', ''), request.session)
-        if caller_is_scoped(_au, cluster_id):
-            def _visible(rule):
-                members = rule.get('vm_ids') or rule.get('vms') or []
-                if not members:
-                    return False
-                try:
-                    return all(user_can_access_vm(_au, cluster_id, int(v), 'vm.view') for v in members)
-                except (TypeError, ValueError):
-                    return False
-            config = dict(config)
-            config['rules'] = [r for r in config['rules'] if _visible(r)]
     else:
         # NS Jul 2026 (CodeAnt IDOR) — scope the unfiltered list to reachable clusters.
         from pegaprox.utils.rbac import get_user_clusters
@@ -539,6 +564,10 @@ def get_affinity_rules(cluster_id=None):
         if _allowed is not None:
             config = dict(config)
             config['rules'] = [r for r in config.get('rules', []) if r.get('cluster_id') in _allowed]
+    # a rule names every guest it groups: a confined caller gets the same rules here as on
+    # the cluster route, not every rule of the clusters it reaches
+    _au = build_authz_user(request.session.get('user', ''), request.session)
+    config['rules'] = affinity_rules_in_view(_au, config.get('rules', []), cluster_id)
     return jsonify(config)
 
 @bp.route('/api/affinity-rules', methods=['POST'])
@@ -605,9 +634,10 @@ def update_affinity_rule(rule_id, cluster_id=None):
 @require_auth(roles=[ROLE_ADMIN])
 def delete_affinity_rule(rule_id, cluster_id=None):
     """Delete an affinity rule"""
-    config = load_affinity_rules()
-    config['rules'] = [r for r in config['rules'] if r['id'] != rule_id]
-    save_affinity_rules(config)
+    # MK Nov 2026 - straight from the table: save_affinity_rules only writes the rules it is
+    # handed, so a load/filter/save kept the row and the rule went on being enforced
+    if not get_db().delete_affinity_rule(rule_id, cluster_id):
+        return jsonify({'error': 'Rule not found'}), 404
 
     user = request.session.get('user', 'unknown')
     log_audit(user, 'affinity_rule.deleted', f"Deleted affinity rule: {rule_id}")
@@ -633,6 +663,11 @@ def check_vm_affinity(cluster_id, vmid, target_node):
         return jsonify({'error': 'Permission denied'}), 403
 
     result = check_affinity_violation(cluster_id, vmid, target_node)
+    # the message names the rule's other guests and their node; a confined caller gets the
+    # rule name only, as in the migration preflight
+    from pegaprox.api.helpers import caller_is_scoped
+    if result.get('violation') and caller_is_scoped(_u, cluster_id):
+        result = dict(result, message='')
     return jsonify(result)
 
 

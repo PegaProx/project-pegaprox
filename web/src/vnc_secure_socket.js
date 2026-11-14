@@ -35,6 +35,20 @@
              : new Uint8Array(buf);
     }
 
+    function _concat(parts) {
+        if (parts.length === 1) return parts[0];
+        let n = 0;
+        for (const p of parts) n += p.length;
+        const out = new Uint8Array(n);
+        let off = 0;
+        for (const p of parts) { out.set(p, off); off += p.length; }
+        return out;
+    }
+
+    // pveproxy refuses a client websocket frame over 128 KiB, and the server hands each
+    // polling send to PVE as one frame
+    const POLL_SEND_MAX = 64 * 1024;
+
     class SecureVncSocket {
         // mirror native WebSocket constants
         static get CONNECTING() { return 0; }
@@ -270,6 +284,8 @@
             this._sendSeq = 0;
             this._recvSeq = 0;
             this._recvLoopP = null;
+            this._outQueue = [];      // input noVNC sent while a send POST was out
+            this._sending = false;
 
             this._keyP = window.crypto.subtle.importKey(
                 'raw', _b64ToU8(keyB64), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']
@@ -410,20 +426,53 @@
             return btoa(s);
         }
 
-        async send(data) {
+        send(data) {
             if (this._closed || this._readyState !== 1 || !this._key || !this._pollId) {
                 // could queue, but in practice noVNC waits for `open` event
                 return;
             }
             const u8 = (typeof data === 'string') ? new TextEncoder().encode(data) : _u8(data);
+            // a copy: noVNC rewrites the buffer it hands over for its next message
+            this._outQueue.push(u8.slice());
+            if (!this._sending) this._drainSends();
+        }
+
+        // LW Nov 2026 - one send POST at a time. Side by side they reached the server in
+        // whatever order the connections took, and it refuses any frame but the next number:
+        // after one swap every later frame was refused, input and update requests alike, and
+        // the console froze. What noVNC sends while a POST is out goes along in the next one, up
+        // to POLL_SEND_MAX - RFB is a byte stream, where one message ends does not travel with it.
+        async _drainSends() {
+            this._sending = true;
             try {
-                const frame = await this._encrypt(u8);
-                const b64 = await this._bufToB64(frame);
-                await this._post({ action: 'send', poll_id: this._pollId, data_b64: b64 });
-            } catch (err) {
-                console.error('[PollingVncSocket] send failed:', err);
-                this._dispatch('error', new Event('error'));
+                while (this._outQueue.length && !this._closed) {
+                    const plain = this._nextSend();
+                    try {
+                        const frame = await this._encrypt(plain);
+                        const b64 = await this._bufToB64(frame);
+                        await this._post({ action: 'send', poll_id: this._pollId, data_b64: b64 });
+                    } catch (err) {
+                        console.error('[PollingVncSocket] send failed:', err);
+                        this._dispatch('error', new Event('error'));
+                    }
+                }
+            } finally {
+                this._sending = false;
             }
+        }
+
+        // the front of the queue, at most POLL_SEND_MAX bytes. A part that does not fit is cut
+        // there, so a long paste goes out in several POSTs
+        _nextSend() {
+            const q = this._outQueue;
+            let take = 0, n = 0;
+            while (take < q.length && n + q[take].length <= POLL_SEND_MAX) n += q[take++].length;
+            const parts = q.splice(0, take);
+            if (q.length && n < POLL_SEND_MAX) {
+                parts.push(q[0].subarray(0, POLL_SEND_MAX - n));
+                q[0] = q[0].subarray(POLL_SEND_MAX - n);
+            }
+            return _concat(parts);
         }
 
         close(code, reason) {
@@ -458,41 +507,63 @@
     //   onTransport(t)  — called with 'ws' or 'poll' when committed
     //   forcePolling    — skip WS, go straight to polling (debug)
     //
-    // Returns a Promise resolving to the chosen socket-shaped object.
+    // Returns a Promise resolving to the chosen socket-shaped object. It rejects when
+    // the fallback cannot even start (no console ticket), so the caller shows an error.
     function connectVnc(opts) {
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
             const {
                 wsUrl, pollUrl, wsKey, getPollHandle,
                 wsTimeoutMs = 4000, onTransport, forcePolling,
             } = opts;
 
             let committed = false;
+            let fellBack = false;
             const commit = (sock, kind) => {
                 if (committed) return;
                 committed = true;
                 if (typeof onTransport === 'function') { try { onTransport(kind); } catch(_){} }
                 resolve(sock);
             };
+            const giveUp = (why) => {
+                if (committed) return;
+                committed = true;
+                reject(new Error(why));
+            };
 
             const goPolling = async (reason) => {
-                if (committed) return;
+                // LW Nov 2026 - the timer closes the hanging WSS, and that close lands here
+                // as well. Set before the first await, so only one of them fetches a ticket:
+                // a second vncproxy session on the VM is what the lazy ticket is there to avoid
+                if (committed || fellBack) return;
+                fellBack = true;
                 console.warn('[connectVnc] falling back to HTTP-polling:', reason);
                 if (typeof getPollHandle !== 'function') {
                     console.error('[connectVnc] no getPollHandle provided — cannot fall back');
+                    giveUp('no polling fallback');
                     return;
                 }
                 let handle;
                 try { handle = await getPollHandle(); }
-                catch (e) { console.error('[connectVnc] getPollHandle failed:', e); return; }
+                catch (e) {
+                    console.error('[connectVnc] getPollHandle failed:', e);
+                    giveUp('polling fallback: ' + ((e && e.message) || e));
+                    return;
+                }
                 if (committed) return;
                 if (!handle || !handle.key_b64 || !handle.session_id) {
                     console.error('[connectVnc] getPollHandle returned no usable handle');
+                    giveUp('polling fallback: no usable handle');
                     return;
                 }
                 const ps = new PollingVncSocket(pollUrl, handle.key_b64, handle.session_id, {
                     pveTicket: handle.pve_ticket, pvePort: handle.pve_port,
                 });
-                ps.addEventListener('open', () => commit(ps, 'poll'));
+                // the WSS may still have won in the meantime; a poll socket nobody holds
+                // would keep long-polling until the page goes
+                ps.addEventListener('open', () => {
+                    if (committed) ps.close();
+                    else commit(ps, 'poll');
+                });
                 ps.addEventListener('close', () => {
                     if (!committed) commit(ps, 'poll');
                 });

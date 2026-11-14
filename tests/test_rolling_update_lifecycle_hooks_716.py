@@ -152,4 +152,4 @@ def test_the_label_exists_in_every_language():
     import re
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     body = open(os.path.join(root, 'web', 'src', 'translations.js'), encoding='utf-8').read()
-    assert len(re.findall(r'^\s*notifyChannelsLabel:', body, re.M)) == 9
+    assert len(re.findall(r'^\s*notifyChannelsLabel:', body, re.M)) == 10

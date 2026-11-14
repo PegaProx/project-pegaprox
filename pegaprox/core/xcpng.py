@@ -23,6 +23,7 @@ from pegaprox.core import ha
 from pegaprox.core import ha_transport
 from pegaprox.utils.realtime import broadcast_sse
 from pegaprox.utils.ssh import read_capped as _read_capped
+from pegaprox.utils.sanitization import scrub_session_id
 
 # XenAPI is optional - only needed for XCP-ng clusters
 try:
@@ -111,6 +112,13 @@ def xapi_memory_bytes(value):
     return None if mem is None else max(mem, 128 * 1024 * 1024)
 
 
+def _check_interval(config):
+    """Seconds between balance checks. One stored before the routes checked it (text, None, 0)
+    reads as 300, as in the Proxmox daemon loop: text ended this loop, 0 made it spin."""
+    value = getattr(config, 'check_interval', 300)
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else 300
+
+
 class XcpngManager:
     """
     XCP-ng pool manager - duck-typed to match PegaProxManager's public interface.
@@ -186,6 +194,7 @@ class XcpngManager:
         self._cached_node_dict = {}
         self.last_migration_log = []
         self._vm_migration_cooldown = {}  # {vmid: when the balancer moved it}
+        self._reboot_addrs = {}  # {host: the address node_reboot_look last had from XAPI}
 
         # task tracking - xapi opaque refs -> our task dicts
         self._active_tasks = {}
@@ -357,10 +366,10 @@ class XcpngManager:
                     self.last_run = datetime.now()
                     # MK: balance check on separate timer
                     now_t = time.time()
-                    interval_cfg = getattr(self.config, 'check_interval', 300)
+                    interval_cfg = _check_interval(self.config)
                     auto_migrate = getattr(self.config, 'auto_migrate', False)
                     # a PegaProx standby does not balance (#625)
-                    if auto_migrate and ha.is_active() and now_t - self._last_balance_check >= interval_cfg:
+                    if getattr(self.config, 'enabled', True) and auto_migrate and ha.is_active() and now_t - self._last_balance_check >= interval_cfg:
                         try:
                             self.run_balance_check()
                         except Exception as be:
@@ -375,9 +384,8 @@ class XcpngManager:
             except Exception as e:
                 self.logger.error(f"Loop error: {e}")
 
-            interval = getattr(self.config, 'check_interval', 300)
             # NS: poll more often so tasks show up quickly
-            self.stop_event.wait(min(interval, 15))
+            self.stop_event.wait(min(_check_interval(self.config), 15))
 
     # ──────────────────────────────────────────
     # Cache refresh
@@ -2631,6 +2639,15 @@ class XcpngManager:
         api = self._api()
         if not api:
             return {'success': False, 'error': 'Not connected'}
+        # MK Nov 2026 - the import url takes the session ref itself, as _rrd_fetch reads it.
+        # It used to be api.xenapi._session, but api is the xenapi proxy already and that
+        # is one more method name on it (<XenAPI._Dispatcher for xenapi._session>), so the
+        # PUT never carried a session
+        with self._session_lock:
+            session_ref = self._session._session if self._session else None
+        if not session_ref:
+            return {'success': False, 'error': 'Not connected'}
+        vdi_ref = None
         try:
             # find the ISO SR
             sr_refs = api.SR.get_by_name_label(storage)
@@ -2645,7 +2662,6 @@ class XcpngManager:
             sr_type = api.SR.get_type(sr_ref)
 
             # for ISO SRs, we use HTTP PUT to the host
-            session_ref = api.xenapi._session
             host_url = f"https://{self.host}"
 
             if sr_type == 'iso' or content_type == 'iso':
@@ -2681,8 +2697,17 @@ class XcpngManager:
             else:
                 return {'success': False, 'error': 'Only ISO upload supported for XCP-ng'}
         except Exception as e:
-            self.logger.error(f"upload_to_storage: {e}")
-            return {'success': False, 'error': str(e)}
+            # MK Nov 2026 - a PUT that fails names its url, and the url carries the pool
+            # session. The route sends this error to the browser as it is.
+            err = scrub_session_id(e)
+            self.logger.error(f"upload_to_storage: {err}")
+            # the VDI made for this upload goes too, as on an answer that is no 2xx
+            if vdi_ref:
+                try:
+                    api.VDI.destroy(vdi_ref)
+                except Exception:
+                    pass
+            return {'success': False, 'error': err}
 
     # ──────────────────────────────────────────
     # RRD metrics - NS Mar 2026
@@ -2715,7 +2740,8 @@ class XcpngManager:
                 return None, None
             root = ET.fromstring(resp.text)
         except Exception as e:
-            self.logger.error(f"_rrd_fetch {path}: {e}")
+            # requests puts the url with its params in the text, session_id first
+            self.logger.error(f"_rrd_fetch {path}: {scrub_session_id(e)}")
             return None, None
 
         meta = root.find('meta')
@@ -3253,9 +3279,10 @@ class XcpngManager:
                 time.sleep(3)
         return None
 
-    def _ssh_exec(self, node_name, cmd, timeout=60):
-        """Run command on XCP-ng host via SSH. Returns (exit_code, stdout, stderr)."""
-        host_ip = self._get_host_ip(node_name)
+    def _ssh_exec(self, node_name, cmd, timeout=60, host_ip=None):
+        """Run command on XCP-ng host via SSH. Returns (exit_code, stdout, stderr).
+        host_ip: an address the caller resolved itself, e.g. with member_node_ip."""
+        host_ip = host_ip or self._get_host_ip(node_name)
         ssh = self._ssh_connect(host_ip)
         if not ssh:
             return -1, '', 'SSH connection failed'
@@ -3279,10 +3306,12 @@ class XcpngManager:
     # ──────────────────────────────────────────
 
     def get_node_dns(self, node):
-        """Read DNS config from /etc/resolv.conf."""
+        """Read DNS config from /etc/resolv.conf. A failed read is {'error': ...} (#1163)."""
         rc, out, _ = self._ssh_exec(node, "cat /etc/resolv.conf 2>/dev/null")
         if rc != 0:
-            return {}
+            said = ('The host could not be reached over SSH' if rc == -1
+                    else f'/etc/resolv.conf could not be read (exit code {rc})')
+            return {'error': said, 'upstream_status': None}
         dns_servers = []
         search_domain = ''
         for line in out.splitlines():
@@ -3341,10 +3370,12 @@ class XcpngManager:
 
     def get_node_time(self, node):
         """Get timezone and current time from node."""
-        rc, out, _ = self._ssh_exec(node,
+        rc, out, err = self._ssh_exec(node,
             "timedatectl show --property=Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null; echo '---'; date -Iseconds")
         if rc != 0:
-            return {'timezone': 'UTC'}
+            # MK Nov 2026 - was {'timezone': 'UTC'}: a node we could not read showed as on UTC
+            from pegaprox.core.manager import UnreadDict
+            return UnreadDict(f'read over SSH, it gave no answer: {err or "no output"}'[:300])
         parts = out.split('---')
         tz = parts[0].strip().splitlines()[-1] if parts else 'UTC'
         localtime = parts[1].strip() if len(parts) > 1 else ''
@@ -3386,9 +3417,10 @@ class XcpngManager:
 
     def get_node_network_config(self, node):
         """Return list of network interfaces with IP config - same shape as Proxmox."""
+        from pegaprox.core.manager import UnreadList
         api = self._api()
         if not api:
-            return []
+            return UnreadList('the pool is not connected', offline=True)
         try:
             interfaces = []
             for pif_ref in api.PIF.get_all():
@@ -3443,7 +3475,7 @@ class XcpngManager:
             return sorted(interfaces, key=lambda x: x['iface'])
         except Exception as e:
             self.logger.error(f"get_node_network_config {node}: {e}")
-            return []
+            return UnreadList(f'XAPI did not answer ({type(e).__name__})')
 
     def create_node_network(self, node, iface, iface_type, config):
         """Create a new network (bridge) or VLAN on XCP-ng."""
@@ -3571,10 +3603,13 @@ class XcpngManager:
         return {'success': True, 'message': 'Nothing to revert (XCP-ng applies changes immediately)'}
 
     def get_cluster_networks(self):
-        """Cluster-wide network overview with VM assignments."""
+        """Cluster-wide network overview, in the shape PegaProxManager answers it:
+        {'networks': [...]} with one row per pool network. The network record names no
+        host and no guest, so nodes and vms stay empty and the VIF/PIF counts come along.
+        MK Nov 2026 - was a bare list, which every reader of data.networks took as none"""
         api = self._api()
         if not api:
-            return []
+            return {'networks': [], 'storage_assignments': []}
         try:
             result = []
             for net_ref in api.network.get_all():
@@ -3587,14 +3622,16 @@ class XcpngManager:
                     'name': rec.get('name_label', ''),
                     'bridge': rec.get('bridge', ''),
                     'uuid': rec.get('uuid', ''),
+                    'active': 1,
+                    'nodes': [], 'vms': [],
                     'vif_count': vif_count,
                     'pif_count': pif_count,
                     'mtu': int(rec.get('MTU', 1500)),
                 })
-            return result
+            return {'networks': result, 'storage_assignments': []}
         except Exception as e:
             self.logger.error(f"get_cluster_networks: {e}")
-            return []
+            return {'networks': [], 'storage_assignments': []}
 
     # ──────────────────────────────────────────
     # Node reboot / shutdown - XAPI calls
@@ -3635,7 +3672,10 @@ class XcpngManager:
         """Start async yum update on XCP-ng node."""
         from pegaprox.models.tasks import UpdateTask
 
-        if not force and node_name in self.nodes_in_maintenance:
+        # NS Nov 2026 - without force only a host in maintenance, as on Proxmox VE. This said the
+        # opposite, so a rolling update (which puts the host into maintenance first) got None
+        # for every host unless it forced the update
+        if not force and node_name not in self.nodes_in_maintenance:
             return None
 
         with self.update_lock:
@@ -3715,16 +3755,22 @@ class XcpngManager:
                     pass
                 ssh = None
 
-                # wait for node
-                task.phase = 'wait_online'
-                task.status = 'waiting_online'
-                task.add_output("Waiting for node to come back online...")
-                online = self._wait_for_host_online(node_name, timeout=300)
-                task.back_online = bool(online)
-                if online:
-                    task.add_output(f"{node_name} is back online")
+                # wait for node, unless the rolling update it is in asked not to
+                rolling = getattr(self, '_rolling_update', None) or {}
+                in_run = rolling.get('status') == 'running' and rolling.get('current_node') == node_name
+                if in_run and rolling.get('wait_for_reboot') is False:
+                    task.add_output(f"Not waiting for {node_name}")
                 else:
-                    task.add_output(f"WARNING: {node_name} did not come back within timeout")
+                    task.phase = 'wait_online'
+                    task.status = 'waiting_online'
+                    task.add_output("Waiting for node to come back online...")
+                    reboot_timeout = rolling.get('reboot_timeout') if in_run else None
+                    online = self._wait_for_host_online(node_name, timeout=int(reboot_timeout or 300))
+                    task.back_online = bool(online)
+                    if online:
+                        task.add_output(f"{node_name} is back online")
+                    else:
+                        task.add_output(f"WARNING: {node_name} did not come back within timeout")
 
             task.status = 'completed'
             task.phase = 'done'
@@ -3742,26 +3788,61 @@ class XcpngManager:
                 except Exception:
                     pass
 
-    def _wait_for_host_online(self, node_name, timeout=300):
-        """Wait for XCP-ng host to come back after reboot by polling XAPI."""
-        import socket
-        host_ip = self._get_host_ip(node_name)
-        time.sleep(20)  # give it time to shut down
+    def node_reboot_look(self, node_name):
+        """A host as it is right now, {'status', 'uptime', ...}; None without an answer.
 
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        JB Nov 2026 - the pool master answers for its members and every row says online, so a host
+        that is down still looked up. Its own port says that, and the cached rows hold an old uptime.
+        """
+        import socket
+        # not _get_host_ip: it answers config.host when XAPI does not, and a shut port there says
+        # nothing about a member. The address XAPI gave last is still this host's when the pool
+        # master is down, in its own reboot too
+        if not isinstance(getattr(self, '_reboot_addrs', None), dict):
+            self._reboot_addrs = {}
+        addr = self.member_node_ip(node_name) or self._reboot_addrs.get(node_name)
+        if not addr:
+            return None
+        self._reboot_addrs[node_name] = addr
+        # one connect that fails can be a lost packet: down only when the next one fails too
+        for attempt in range(2):
             try:
-                sock = socket.create_connection((host_ip, 443), timeout=5)
-                sock.close()
-                # brief pause then verify XAPI responds
-                time.sleep(5)
-                api = self._api()
-                if api:
+                socket.create_connection((addr, 443), timeout=5).close()
+                break
+            except OSError:
+                if attempt:
+                    return {'status': 'offline', 'uptime': 0}
+                time.sleep(2)
+        try:
+            api = self._api()
+            rows = self._fetch_nodes(api) if api else []
+        except Exception as e:
+            # a master that restarted has forgotten this session
+            self.logger.debug(f"Looking at {node_name}: {e}")
+            self.is_connected = False
+            return None
+        return next((n for n in rows if n.get('node') == node_name), None)
+
+    def _wait_for_host_online(self, node_name, timeout=300):
+        """Wait for XCP-ng host to come back after reboot: seen down, or booted since the wait began."""
+        # monotonic: the uptime is a duration, and the wall clock can step while we wait
+        start = time.monotonic()
+        seen_down = False
+        while time.monotonic() - start < timeout:
+            try:
+                row = self.node_reboot_look(node_name)
+                if row and row.get('status') != 'online':
+                    seen_down = True
+                elif row and (seen_down or 0 < (row.get('uptime') or 0) < time.monotonic() - start):
                     self._cached_nodes = None
                     return True
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Waiting for {node_name}: {e}")
             time.sleep(10)
+        # a rolling update waits what is left of its timeout, not a whole second one
+        task = self.nodes_updating.get(node_name)
+        if task:
+            task.reboot_waited = timeout
         return False
 
     def get_update_status(self, node_name):
@@ -3782,10 +3863,14 @@ class XcpngManager:
     def get_node_apt_updates(self, node):
         """List pending updates - yum equivalent of apt updates.
         Returns same field names as Proxmox APT so the frontend renders correctly."""
-        rc, out, _ = self._ssh_exec(node, "yum check-update 2>/dev/null", timeout=120)
+        rc, out, err = self._ssh_exec(node, "yum check-update 2>/dev/null", timeout=120)
         # yum check-update returns 100 if updates available, 0 if none
+        # JB Nov 2026 - anything else is no answer. An empty list read as up to date and a rolling update skipped the node,
+        # as the manager of Proxmox raises here
         if rc not in (0, 100):
-            return []
+            # -1 is _ssh_exec's own: no SSH connection, or the command broke off, and err says which
+            why = f'rc={rc}' if rc != -1 else ((err or '').strip().splitlines() or ['no SSH answer'])[0][:200]
+            raise Exception(f"yum check-update on {node} failed ({why})")
         pending = []
         past_header = False
         for line in out.splitlines():
@@ -4102,8 +4187,13 @@ echo DONE""",
                     for cid, ok in results.items()}
         return results
 
-    def apply_node_hardening(self, node_name, controls):
-        """Apply selected CIS controls via SSH."""
+    def apply_node_hardening(self, node_name, controls, params=None):
+        """Apply selected CIS controls via SSH.
+
+        Takes params like the PVE manager, unused: no control here is templated. The
+        shared routes refuse apply and rollback on anything but Proxmox VE before they
+        get here, so this is not reached from the API today.
+        """
         results = {}
         for cid in controls:
             spec = self._CIS_CHECKS.get(cid)
@@ -4118,6 +4208,11 @@ echo DONE""",
                 results[cid] = {'success': False, 'error': out.strip()[-200:] if out else 'No output'}
         return results
 
+    def rollback_node_hardening(self, node_name, controls):
+        """No control here keeps a snapshot, so there is nothing to restore."""
+        return {cid: {'success': False, 'error': 'control has no rollback snapshot (not reversible)'
+                      if cid in self._CIS_CHECKS else 'unknown control'} for cid in controls}
+
     # ──────────────────────────────────────────
     # Node disks & storage repos - NS/LW Mar 2026
     # ──────────────────────────────────────────
@@ -4127,8 +4222,14 @@ echo DONE""",
         # LW: validate node name against injection
         if not re.match(r'^[a-zA-Z0-9\-_.]+$', node):
             return []
+        # resolved strictly, as for the wipe: the pool host's disks must never be listed
+        # under another node, where Wipe Disk would then erase a disk of that node
+        host_ip = self.member_node_ip(node)
+        if not host_ip:
+            return []
         rc, out, _ = self._ssh_exec(node,
-            "lsblk -J -b -o NAME,SIZE,TYPE,MOUNTPOINT,MODEL,SERIAL,ROTA,TRAN,FSTYPE 2>/dev/null")
+            "lsblk -J -b -o NAME,SIZE,TYPE,MOUNTPOINT,MODEL,SERIAL,ROTA,TRAN,FSTYPE 2>/dev/null",
+            host_ip=host_ip)
         if rc != 0 or not out.strip():
             return []
         try:
@@ -4195,19 +4296,34 @@ echo DONE""",
 
     def init_disk_gpt(self, node, disk, uuid=None):
         """Initialize disk with GPT partition table. DESTRUCTIVE."""
+        # the Disks tab sends the devpath, /dev/<name>, as for the wipe
+        if disk.startswith('/dev/'):
+            disk = disk[len('/dev/'):]
         if not re.match(r'^(sd[a-z]+|nvme\d+n\d+|hd[a-z]+|vd[a-z]+)$', disk):
             return {'success': False, 'error': f'Invalid disk: {disk}'}
+        # sgdisk -Z erases the disk just like wipefs, so the host is resolved as strictly
+        host_ip = self.member_node_ip(node)
+        if not host_ip:
+            return {'success': False, 'error': f'{node} is not a host of this pool, nothing was changed'}
         # NS: sgdisk -Z wipes existing, -o creates fresh GPT
         rc, out, err = self._ssh_exec(node,
-            f"sgdisk -Z /dev/{disk} && sgdisk -o /dev/{disk}", timeout=30)
+            f"sgdisk -Z /dev/{disk} && sgdisk -o /dev/{disk}", timeout=30, host_ip=host_ip)
         if rc == 0:
             return {'success': True, 'message': f'GPT initialized on /dev/{disk}'}
         return {'success': False, 'error': err or 'sgdisk failed'}
 
     def wipe_disk(self, node, disk):
+        # the disk list gives devpath as /dev/<name>, and the Disks tab sends that
+        if disk.startswith('/dev/'):
+            disk = disk[len('/dev/'):]
         if not re.match(r'^(sd[a-z]+|nvme\d+n\d+|hd[a-z]+|vd[a-z]+)$', disk):
             return {'success': False, 'error': f'Invalid disk: {disk}'}
-        rc, _, err = self._ssh_exec(node, f"wipefs -a /dev/{disk}", timeout=30)
+        # _get_host_ip answers the pool address for a name it cannot find; a wipe must not
+        # run there, so the host is resolved strictly, as for the node shell (#1143)
+        host_ip = self.member_node_ip(node)
+        if not host_ip:
+            return {'success': False, 'error': f'{node} is not a host of this pool, nothing was wiped'}
+        rc, _, err = self._ssh_exec(node, f"wipefs -a /dev/{disk}", timeout=30, host_ip=host_ip)
         if rc == 0:
             return {'success': True, 'message': f'/dev/{disk} wiped'}
         return {'success': False, 'error': err or 'wipefs failed'}
@@ -4533,33 +4649,63 @@ echo DONE""",
             self.logger.info(f"Remote migration started: VM {vmid} -> pool {tcfg.name}")
             return {'success': True, 'task': task_id}
         except Exception as e:
-            self.logger.error(f"remote_migrate_vm {vmid}: {e}")
-            return {'success': False, 'error': str(e)}
+            # dest holds the session of the other pool, and the route sends this error on
+            err = scrub_session_id(e)
+            self.logger.error(f"remote_migrate_vm {vmid}: {err}")
+            return {'success': False, 'error': err}
 
     # ──────────────────────────────────────────
     # Additional node info stubs
     # ──────────────────────────────────────────
 
     def get_node_summary(self, node):
-        """Node summary - same as get_node_details but flatter."""
-        return self.get_node_details(node)
+        """Node summary - get_node_details plus the keys of the Proxmox summary XAPI has.
+
+        MK Nov 2026 - without pveversion or uptime the node pages took the answer for an
+        empty one (the summary of a node the server could not read). Swap and the root
+        filesystem stay out: XAPI has no such figure, and 0 would read as none."""
+        d = self.get_node_details(node)
+        if not d:
+            return d
+        out = dict(d)
+        out.update(node=node, status='online', kversion=d.get('kernel_version', ''),
+                   cpuinfo={'model': d.get('cpu_model', ''), 'cpus': d.get('cpu_count', 0),
+                            'sockets': d.get('cpu_socket_count', 0)})
+        if d.get('product_version'):
+            # the same text get_node_status sends as pveversion
+            out['pveversion'] = f"{d.get('product_brand') or 'XCP-ng'} {d['product_version']}"
+        total, free = d.get('memory_total') or 0, d.get('memory_free') or 0
+        if total > 0:
+            out['memory'] = {'total': total, 'used': max(total - free, 0), 'free': free}
+        # uptime and load from the node row of the last refresh, no XAPI call of its own;
+        # 0 there is "not read", not a node that just booted
+        row = next((n for n in (self._cached_nodes or []) if n.get('node') == node), None) or {}
+        if isinstance(row.get('uptime'), (int, float)) and row['uptime'] > 0:
+            out['uptime'] = int(row['uptime'])
+        if row.get('_loadavg'):
+            out['loadavg'] = list(row['_loadavg'])
+        return out
 
     def get_node_syslog(self, node, start=0, limit=500):
         """Fetch recent syslog entries via SSH."""
-        rc, out, _ = self._ssh_exec(node,
+        rc, out, err = self._ssh_exec(node,
             f"journalctl --no-pager -n {limit} --output=short-iso 2>/dev/null || tail -n {limit} /var/log/messages 2>/dev/null",
             timeout=15)
-        if rc != 0 or not out:
+        if rc != 0:
+            from pegaprox.core.manager import UnreadList
+            return UnreadList(f'read over SSH, it gave no answer: {err or "no output"}'[:300])
+        if not out:
             return []
         lines = out.strip().splitlines()
         return [{'n': i + start, 't': line} for i, line in enumerate(lines)]
 
     def get_node_certificates(self, node):
         """Read xapi-ssl.pem certificate info."""
-        rc, out, _ = self._ssh_exec(node,
+        rc, out, err = self._ssh_exec(node,
             "openssl x509 -in /etc/xensource/xapi-ssl.pem -noout -subject -enddate -issuer 2>/dev/null")
         if rc != 0:
-            return []
+            from pegaprox.core.manager import UnreadList
+            return UnreadList(f'openssl over SSH gave no answer: {err or "no output"}'[:300])
         info = {}
         for line in out.splitlines():
             if '=' in line:
@@ -4648,7 +4794,10 @@ echo DONE""",
         return tasks  # all tasks are pool-wide anyway
 
     def get_node_task_log(self, node, upid, start=0, limit=50):
-        return self.get_task_log(node, upid, limit)
+        # NS Nov 2026 - a list of lines like the Proxmox manager; the route joins it with
+        # '\n', and the plain str came out one character per line
+        lines = self.get_task_log(node, upid, limit).split('\n')
+        return lines[max(int(start or 0), 0):]
 
     # ──────────────────────────────────────────
     # Proxmox-specific stubs (no-ops for XCP-ng)
@@ -4924,9 +5073,10 @@ echo DONE""",
         threshold = getattr(self.config, 'migration_threshold', 30)
 
         # filter: online, not in maintenance, not excluded
+        excluded = getattr(self.config, 'excluded_nodes', None) or []
         active = {}
         for name, info in node_status.items():
-            if info.get('offline') or info.get('maintenance_mode'):
+            if info.get('offline') or info.get('maintenance_mode') or name in excluded:
                 continue
             active[name] = info
 
@@ -5037,6 +5187,13 @@ echo DONE""",
         vmid = vm_info['vmid']
         source = vm_info['node']
         started = time.time()
+        # JB Nov 2026 - the same dry run the cluster balancer has, a pool moved its guests anyway
+        if getattr(self.config, 'dry_run', False):
+            self.logger.info(f"[BALANCE] [DRY RUN] would migrate VM {vmid} ({vm_info.get('name','')}) "
+                             f"{source} -> {target_node}")
+            if why:
+                record_balance_move(self.id, vm_info, target_node, why, 'dry_run')
+            return True
         try:
             self.logger.info(f"[BALANCE] migrating VM {vmid} ({vm_info.get('name','')}) "
                              f"{source} -> {target_node}")
@@ -5074,8 +5231,8 @@ echo DONE""",
                                     'failed', duration=time.time() - started, note=f"failed: {error}")
         return False
 
-    def run_balance_check(self):
-        """Main balancing cycle - called from _run_loop."""
+    def run_balance_check(self, force=False):
+        """Main balancing cycle - called from _run_loop, force=True is Balance Now."""
         # a PegaProx standby migrates nothing, whoever calls this (#625)
         if not ha.is_active():
             return
@@ -5090,7 +5247,8 @@ echo DONE""",
         self.logger.info(f"[BALANCE] imbalance detected: {max_node} (overloaded) vs {min_node}")
 
         # max migrations per cycle depends on cluster size
-        num_nodes = len([n for n in node_status.values() if not n.get('offline')])
+        excluded = getattr(self.config, 'excluded_nodes', None) or []
+        num_nodes = len([n for name, n in node_status.items() if not n.get('offline') and name not in excluded])
         max_migrations = min(3, max(1, num_nodes // 2))
         migrated = 0
         already_tried = set()
@@ -5117,8 +5275,11 @@ echo DONE""",
             from pegaprox.core.manager import BALANCE_WHY, balance_reason
             candidate[BALANCE_WHY] = balance_reason(
                 'balance', max_node, target, node_status,
-                threshold=getattr(self.config, 'migration_threshold', 30))
+                threshold=getattr(self.config, 'migration_threshold', 30), manual=force)
             ok = self._do_balance_migrate(candidate, target)
+            if ok and getattr(self.config, 'dry_run', False):
+                # nothing moved, so the loads below would not change either
+                continue
             if ok:
                 migrated += 1
                 time.sleep(5)  # brief pause between migrations
@@ -5228,7 +5389,7 @@ echo DONE""",
         return resources
 
     # API token stubs (XAPI uses sessions, not tokens)
-    def create_api_token(self, token_name=''):
+    def create_api_token(self, token_name='', **kw):
         return None
 
     def delete_api_token(self, token_name=''):

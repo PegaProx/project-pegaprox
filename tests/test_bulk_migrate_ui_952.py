@@ -428,7 +428,12 @@ def test_runtime_the_server_refusal_stays_in_the_dialog(real_app, seed):
     """A VM-ACL user who sees more rows than they may move: the route names the guest."""
     seed.tenant('acme', clusters=['cluster_1'])
     seed.vm_acl('cluster_1', 100, users=['portal'])
+    # MK Nov 2026 - one of theirs on pve2, the target: a confined caller moves guests onto
+    # a node of theirs only, and the refusal here is the one about 101
+    seed.vm_acl('cluster_1', 300, users=['portal'])
     app = real_app(user=seed.user('portal', role='user', tenant_id='acme'), layout='modern')
+    with app.pve.lock:
+        app.pve.guests[300] = dict(GUESTS[0], vmid=300, name='there01', node='pve2')
     _open_resources(app, 'modern')
     _tick(app, 100, 101)
     modal = _dialog(app)

@@ -331,5 +331,5 @@ def test_the_new_strings_exist_in_every_language(key):
     'followSystem' on screen rather than as an empty tooltip."""
     body = _src('translations.js')
     import re
-    assert len(re.findall(rf'^\s*{key}:', body, re.M)) == 9, \
-        f'{key} is not in all nine language blocks'
+    assert len(re.findall(rf'^\s*{key}:', body, re.M)) == 10, \
+        f'{key} is not in all ten language blocks'

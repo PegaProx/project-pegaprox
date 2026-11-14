@@ -1,0 +1,3132 @@
+{
+ "offline": {
+  "status": "completed",
+  "log": [
+   [
+    "esxi_ssh",
+    "hostname"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-img >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-img\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-nbd >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-nbd\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshfs >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshfs\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshpass\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "timeout 5 bash -c '</dev/tcp/\"$1\"/\"$2\"' _ esx1.lab 22 2>&1; echo V2P_TCP_RC=$?"
+   ],
+   [
+    "esxi_ssh",
+    "ls -la /vmfs/volumes/ds1/app01/ | grep '.vmdk'"
+   ],
+   [
+    "esxi_ssh",
+    "ls -1 /vmfs/volumes/ds1/app01/*.vmdk 2>/dev/null | grep -v flat | grep -v delta | grep -v ctk | grep -v '\\-0000'"
+   ],
+   [
+    "node",
+    "pve1",
+    "if command -v sshfs >/dev/null 2>&1; then echo PRESENT; else   DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true;   DEBIAN_FRONTEND=noninteractive apt-get install -y sshfs >/tmp/v2p-sshfs-install.log 2>&1;   if command -v sshfs >/dev/null 2>&1; then echo INSTALLED;   else echo FAILED; tail -5 /tmp/v2p-sshfs-install.log 2>/dev/null; fi; fi"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y sshpass >/dev/null 2>&1 || true"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu",
+    [
+     [
+      "agent",
+      "enabled=1"
+     ],
+     [
+      "bios",
+      "ovmf"
+     ],
+     [
+      "boot",
+      "order=scsi0;net0"
+     ],
+     [
+      "cores",
+      2
+     ],
+     [
+      "cpu",
+      "host"
+     ],
+     [
+      "hotplug",
+      "disk,network"
+     ],
+     [
+      "machine",
+      "q35"
+     ],
+     [
+      "memory",
+      2048
+     ],
+     [
+      "name",
+      "app01"
+     ],
+     [
+      "net0",
+      "vmxnet3,bridge=vmbr0,macaddr=00:50:56:aa:00:01,tag=30"
+     ],
+     [
+      "net1",
+      "e1000e,bridge=vmbr0,macaddr=00:50:56:aa:00:02,tag=30"
+     ],
+     [
+      "ostype",
+      "l26"
+     ],
+     [
+      "scsihw",
+      "pvscsi"
+     ],
+     [
+      "sockets",
+      1
+     ],
+     [
+      "tpmstate0",
+      "local-lvm:1,version=v2.0"
+     ],
+     [
+      "vga",
+      "std"
+     ],
+     [
+      "vmid",
+      120
+     ]
+    ]
+   ],
+   [
+    "node",
+    "pve1",
+    "df --output=avail / 2>/dev/null | tail -1"
+   ],
+   [
+    "node",
+    "pve1",
+    "dir=$(pvesm path local-lvm:1 2>/dev/null | xargs dirname 2>/dev/null) && [ -d \"$dir\" ] && echo $dir || echo /var/tmp"
+   ],
+   [
+    "esxi_ssh",
+    "readlink /vmfs/volumes/ds1 2>/dev/null || realpath /vmfs/volumes/ds1 2>/dev/null || ls -ld /vmfs/volumes/ds1 2>/dev/null | awk '{print $NF}'"
+   ],
+   [
+    "node",
+    "pve1",
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+   ],
+   [
+    "node",
+    "pve1",
+    "ls /tmp/v2p-t1/app01/*.vmdk 2>/dev/null | head -20"
+   ],
+   [
+    "esxi_api",
+    "power",
+    "stop",
+    "POWERED_ON"
+   ],
+   [
+    "esxi_ssh",
+    "stat -c'%s' /vmfs/volumes/ds1/app01/app01-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "esxcli storage filesystem list 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "vim-cmd hostsvc/datastore/listsummary 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-0 3G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-curl-0 && cat > /run/pegaprox-v2p-t1-curl-0 && [ \"$(wc -c < /run/pegaprox-v2p-t1-curl-0)\" -eq 17 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; : > /run/pegaprox-v2p-t1-cookies-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -K /run/pegaprox-v2p-t1-curl-0 -c /run/pegaprox-v2p-t1-cookies-0 -o /dev/null 'https://esx1.lab/folder?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-0 -K /run/pegaprox-v2p-t1-curl-0 -r 0-1048575 -o /tmp/v2p-t1-test-0 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-0 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-0 -r 0-1048575 -o /tmp/v2p-t1-test-0 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-0 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -vsk -b /run/pegaprox-v2p-t1-cookies-0 -K /run/pegaprox-v2p-t1-curl-0 -r 0-1023 'https://esx1.lab/folder/app01/app01-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>&1 | head -40"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-t1-test-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-ssh-0 && cat > /run/pegaprox-v2p-t1-ssh-0 && [ \"$(wc -c < /run/pegaprox-v2p-t1-ssh-0)\" -eq 2 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "sshpass -f /run/pegaprox-v2p-t1-ssh-0 ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 root@esx1.lab 'dd if=/vmfs/volumes/ds1/app01/app01-flat.vmdk bs=4M' 2>/dev/null | dd of='/dev/local-lvm/vm-120-disk-0' bs=4M status=progress 2>/tmp/v2p-t1-sshdd-0.log; echo PIPE=${PIPESTATUS[0]}/${PIPESTATUS[1]}; rm -f /run/pegaprox-v2p-t1-ssh-0; cat /tmp/v2p-t1-sshdd-0.log; rm -f /tmp/v2p-t1-sshdd-0.log"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-ssh-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-curl-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-cookies-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi0 local-lvm:vm-120-disk-0,discard=on 2>&1"
+   ],
+   [
+    "esxi_ssh",
+    "stat -c'%s' /vmfs/volumes/ds1/app01/app01_1-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "esxcli storage filesystem list 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "vim-cmd hostsvc/datastore/listsummary 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-1 1G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-1 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-1 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-curl-1 && cat > /run/pegaprox-v2p-t1-curl-1 && [ \"$(wc -c < /run/pegaprox-v2p-t1-curl-1)\" -eq 17 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; : > /run/pegaprox-v2p-t1-cookies-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -K /run/pegaprox-v2p-t1-curl-1 -c /run/pegaprox-v2p-t1-cookies-1 -o /dev/null 'https://esx1.lab/folder?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-1 -K /run/pegaprox-v2p-t1-curl-1 -r 0-1048575 -o /tmp/v2p-t1-test-1 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-1 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-1 -r 0-1048575 -o /tmp/v2p-t1-test-1 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-1 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -vsk -b /run/pegaprox-v2p-t1-cookies-1 -K /run/pegaprox-v2p-t1-curl-1 -r 0-1023 'https://esx1.lab/folder/app01/app01_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>&1 | head -40"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-t1-test-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-ssh-1 && cat > /run/pegaprox-v2p-t1-ssh-1 && [ \"$(wc -c < /run/pegaprox-v2p-t1-ssh-1)\" -eq 2 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "sshpass -f /run/pegaprox-v2p-t1-ssh-1 ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 root@esx1.lab 'dd if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk bs=4M' 2>/dev/null | dd of='/dev/local-lvm/vm-120-disk-1' bs=4M status=progress 2>/tmp/v2p-t1-sshdd-1.log; echo PIPE=${PIPESTATUS[0]}/${PIPESTATUS[1]}; rm -f /run/pegaprox-v2p-t1-ssh-1; cat /tmp/v2p-t1-sshdd-1.log; rm -f /tmp/v2p-t1-sshdd-1.log"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-ssh-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-curl-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-cookies-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi1 local-lvm:vm-120-disk-1,discard=on 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --boot order=scsi0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --efidisk0 local-lvm:1,efitype=4m,pre-enrolled-keys=0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "fusermount -u /tmp/v2p-t1 2>/dev/null; rmdir /tmp/v2p-t1 2>/dev/null"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu/120/status/start",
+    []
+   ]
+  ]
+ },
+ "vmkfstools_clone": {
+  "status": "completed",
+  "log": [
+   [
+    "esxi_ssh",
+    "hostname"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-img >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-img\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-nbd >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-nbd\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshfs >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshfs\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshpass\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "timeout 5 bash -c '</dev/tcp/\"$1\"/\"$2\"' _ esx1.lab 22 2>&1; echo V2P_TCP_RC=$?"
+   ],
+   [
+    "esxi_ssh",
+    "ls -la /vmfs/volumes/ds1/app01/ | grep '.vmdk'"
+   ],
+   [
+    "esxi_ssh",
+    "ls -1 /vmfs/volumes/ds1/app01/*.vmdk 2>/dev/null | grep -v flat | grep -v delta | grep -v ctk | grep -v '\\-0000'"
+   ],
+   [
+    "node",
+    "pve1",
+    "if command -v sshfs >/dev/null 2>&1; then echo PRESENT; else   DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true;   DEBIAN_FRONTEND=noninteractive apt-get install -y sshfs >/tmp/v2p-sshfs-install.log 2>&1;   if command -v sshfs >/dev/null 2>&1; then echo INSTALLED;   else echo FAILED; tail -5 /tmp/v2p-sshfs-install.log 2>/dev/null; fi; fi"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y sshpass >/dev/null 2>&1 || true"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu",
+    [
+     [
+      "agent",
+      "enabled=1"
+     ],
+     [
+      "bios",
+      "ovmf"
+     ],
+     [
+      "boot",
+      "order=scsi0;net0"
+     ],
+     [
+      "cores",
+      2
+     ],
+     [
+      "cpu",
+      "host"
+     ],
+     [
+      "hotplug",
+      "disk,network"
+     ],
+     [
+      "machine",
+      "q35"
+     ],
+     [
+      "memory",
+      2048
+     ],
+     [
+      "name",
+      "app01"
+     ],
+     [
+      "net0",
+      "vmxnet3,bridge=vmbr0,macaddr=00:50:56:aa:00:01,tag=30"
+     ],
+     [
+      "net1",
+      "e1000e,bridge=vmbr0,macaddr=00:50:56:aa:00:02,tag=30"
+     ],
+     [
+      "ostype",
+      "l26"
+     ],
+     [
+      "scsihw",
+      "pvscsi"
+     ],
+     [
+      "sockets",
+      1
+     ],
+     [
+      "tpmstate0",
+      "local-lvm:1,version=v2.0"
+     ],
+     [
+      "vga",
+      "std"
+     ],
+     [
+      "vmid",
+      120
+     ]
+    ]
+   ],
+   [
+    "node",
+    "pve1",
+    "df --output=avail / 2>/dev/null | tail -1"
+   ],
+   [
+    "node",
+    "pve1",
+    "dir=$(pvesm path local-lvm:1 2>/dev/null | xargs dirname 2>/dev/null) && [ -d \"$dir\" ] && echo $dir || echo /var/tmp"
+   ],
+   [
+    "esxi_ssh",
+    "readlink /vmfs/volumes/ds1 2>/dev/null || realpath /vmfs/volumes/ds1 2>/dev/null || ls -ld /vmfs/volumes/ds1 2>/dev/null | awk '{print $NF}'"
+   ],
+   [
+    "node",
+    "pve1",
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+   ],
+   [
+    "node",
+    "pve1",
+    "ls /tmp/v2p-t1/app01/*.vmdk 2>/dev/null | head -20"
+   ],
+   [
+    "esxi_api",
+    "snapshot",
+    "_pegaprox_clone_snap",
+    "POWERED_ON"
+   ],
+   [
+    "esxi_cli",
+    "df -k /vmfs/volumes/ds1 2>/dev/null | tail -1"
+   ],
+   [
+    "esxi_cli",
+    "rm -f /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0.vmdk /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0-flat.vmdk /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0.clonelog /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0.clonepid; nohup vmkfstools -i /vmfs/volumes/ds1/app01/app01.vmdk /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0.vmdk -d thin > /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0.clonelog 2>&1 & echo $! > /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0.clonepid; cat /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0.clonepid"
+   ],
+   [
+    "esxi_cli",
+    "kill -0 4242 2>/dev/null && echo RUN || echo DONE"
+   ],
+   [
+    "esxi_cli",
+    "sed 's/\\r/\\n/g' /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0.clonelog 2>/dev/null | tail -3"
+   ],
+   [
+    "esxi_cli",
+    "stat -c '%s' /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "stat -c'%s' /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "esxcli storage filesystem list 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "vim-cmd hostsvc/datastore/listsummary 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-0 3G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-curl-0 && cat > /run/pegaprox-v2p-t1-curl-0 && [ \"$(wc -c < /run/pegaprox-v2p-t1-curl-0)\" -eq 17 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; : > /run/pegaprox-v2p-t1-cookies-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -K /run/pegaprox-v2p-t1-curl-0 -c /run/pegaprox-v2p-t1-cookies-0 -o /dev/null 'https://esx1.lab/folder?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-0 -K /run/pegaprox-v2p-t1-curl-0 -r 0-1048575 -o /tmp/v2p-t1-test-0 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/_pegaprox_clone_120_0-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-0 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-0 -r 0-1048575 -o /tmp/v2p-t1-test-0 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/_pegaprox_clone_120_0-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-0 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -vsk -b /run/pegaprox-v2p-t1-cookies-0 -K /run/pegaprox-v2p-t1-curl-0 -r 0-1023 'https://esx1.lab/folder/app01/_pegaprox_clone_120_0-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>&1 | head -40"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-t1-test-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-ssh-0 && cat > /run/pegaprox-v2p-t1-ssh-0 && [ \"$(wc -c < /run/pegaprox-v2p-t1-ssh-0)\" -eq 2 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "sshpass -f /run/pegaprox-v2p-t1-ssh-0 ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 root@esx1.lab 'dd if=/vmfs/volumes/ds1/app01/_pegaprox_clone_120_0-flat.vmdk bs=4M' 2>/dev/null | dd of='/dev/local-lvm/vm-120-disk-0' bs=4M status=progress 2>/tmp/v2p-t1-sshdd-0.log; echo PIPE=${PIPESTATUS[0]}/${PIPESTATUS[1]}; rm -f /run/pegaprox-v2p-t1-ssh-0; cat /tmp/v2p-t1-sshdd-0.log; rm -f /tmp/v2p-t1-sshdd-0.log"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-ssh-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-curl-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-cookies-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi0 local-lvm:vm-120-disk-0,discard=on 2>&1"
+   ],
+   [
+    "esxi_cli",
+    "df -k /vmfs/volumes/ds1 2>/dev/null | tail -1"
+   ],
+   [
+    "esxi_cli",
+    "rm -f /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1.vmdk /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1-flat.vmdk /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1.clonelog /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1.clonepid; nohup vmkfstools -i /vmfs/volumes/ds1/app01/app01_1.vmdk /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1.vmdk -d thin > /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1.clonelog 2>&1 & echo $! > /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1.clonepid; cat /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1.clonepid"
+   ],
+   [
+    "esxi_cli",
+    "kill -0 4242 2>/dev/null && echo RUN || echo DONE"
+   ],
+   [
+    "esxi_cli",
+    "sed 's/\\r/\\n/g' /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1.clonelog 2>/dev/null | tail -3"
+   ],
+   [
+    "esxi_cli",
+    "stat -c '%s' /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "stat -c'%s' /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "esxcli storage filesystem list 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "vim-cmd hostsvc/datastore/listsummary 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-1 1G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-1 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-1 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-curl-1 && cat > /run/pegaprox-v2p-t1-curl-1 && [ \"$(wc -c < /run/pegaprox-v2p-t1-curl-1)\" -eq 17 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; : > /run/pegaprox-v2p-t1-cookies-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -K /run/pegaprox-v2p-t1-curl-1 -c /run/pegaprox-v2p-t1-cookies-1 -o /dev/null 'https://esx1.lab/folder?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-1 -K /run/pegaprox-v2p-t1-curl-1 -r 0-1048575 -o /tmp/v2p-t1-test-1 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/_pegaprox_clone_120_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-1 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-1 -r 0-1048575 -o /tmp/v2p-t1-test-1 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/_pegaprox_clone_120_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-1 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -vsk -b /run/pegaprox-v2p-t1-cookies-1 -K /run/pegaprox-v2p-t1-curl-1 -r 0-1023 'https://esx1.lab/folder/app01/_pegaprox_clone_120_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>&1 | head -40"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-t1-test-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-ssh-1 && cat > /run/pegaprox-v2p-t1-ssh-1 && [ \"$(wc -c < /run/pegaprox-v2p-t1-ssh-1)\" -eq 2 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "sshpass -f /run/pegaprox-v2p-t1-ssh-1 ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 root@esx1.lab 'dd if=/vmfs/volumes/ds1/app01/_pegaprox_clone_120_1-flat.vmdk bs=4M' 2>/dev/null | dd of='/dev/local-lvm/vm-120-disk-1' bs=4M status=progress 2>/tmp/v2p-t1-sshdd-1.log; echo PIPE=${PIPESTATUS[0]}/${PIPESTATUS[1]}; rm -f /run/pegaprox-v2p-t1-ssh-1; cat /tmp/v2p-t1-sshdd-1.log; rm -f /tmp/v2p-t1-sshdd-1.log"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-ssh-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-curl-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-cookies-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi1 local-lvm:vm-120-disk-1,discard=on 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "i=0; while [ $i -lt 9 ]; do dd if=/dev/local-lvm/vm-120-disk-0 bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
+   ],
+   [
+    "node",
+    "pve1",
+    "i=0; while [ $i -lt 4 ]; do dd if=/dev/local-lvm/vm-120-disk-1 bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
+   ],
+   [
+    "esxi_api",
+    "power",
+    "stop",
+    "POWERED_ON"
+   ],
+   [
+    "esxi_api",
+    "remove_snapshot",
+    "snapshot-1",
+    "POWERED_OFF"
+   ],
+   [
+    "esxi_cli",
+    "cat /vmfs/volumes/ds1/app01/app01.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_cli",
+    "stat -c '%s' /vmfs/volumes/ds1/app01/app01-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "i=0; while [ $i -lt 9 ]; do dd if=/vmfs/volumes/ds1/app01/app01-flat.vmdk bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
+   ],
+   [
+    "esxi_cli",
+    "cat /vmfs/volumes/ds1/app01/app01_1.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_cli",
+    "stat -c '%s' /vmfs/volumes/ds1/app01/app01_1-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "i=0; while [ $i -lt 4 ]; do dd if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --boot order=scsi0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --efidisk0 local-lvm:1,efitype=4m,pre-enrolled-keys=0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu/120/status/start",
+    []
+   ],
+   [
+    "esxi_cli",
+    "vmkfstools -U /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0.vmdk 2>/dev/null; rm -f /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0.vmdk /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0-flat.vmdk /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0.clonelog /vmfs/volumes/ds1/app01/_pegaprox_clone_120_0.clonepid"
+   ],
+   [
+    "esxi_cli",
+    "vmkfstools -U /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1.vmdk 2>/dev/null; rm -f /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1.vmdk /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1-flat.vmdk /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1.clonelog /vmfs/volumes/ds1/app01/_pegaprox_clone_120_1.clonepid"
+   ],
+   [
+    "node",
+    "pve1",
+    "fusermount -u /tmp/v2p-t1 2>/dev/null; rmdir /tmp/v2p-t1 2>/dev/null"
+   ]
+  ]
+ },
+ "auto_presync": {
+  "status": "completed",
+  "log": [
+   [
+    "esxi_ssh",
+    "hostname"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-img >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-img\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-nbd >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-nbd\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshfs >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshfs\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshpass\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "timeout 5 bash -c '</dev/tcp/\"$1\"/\"$2\"' _ esx1.lab 22 2>&1; echo V2P_TCP_RC=$?"
+   ],
+   [
+    "esxi_ssh",
+    "ls -la /vmfs/volumes/ds1/app01/ | grep '.vmdk'"
+   ],
+   [
+    "esxi_ssh",
+    "ls -1 /vmfs/volumes/ds1/app01/*.vmdk 2>/dev/null | grep -v flat | grep -v delta | grep -v ctk | grep -v '\\-0000'"
+   ],
+   [
+    "node",
+    "pve1",
+    "if command -v sshfs >/dev/null 2>&1; then echo PRESENT; else   DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true;   DEBIAN_FRONTEND=noninteractive apt-get install -y sshfs >/tmp/v2p-sshfs-install.log 2>&1;   if command -v sshfs >/dev/null 2>&1; then echo INSTALLED;   else echo FAILED; tail -5 /tmp/v2p-sshfs-install.log 2>/dev/null; fi; fi"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y sshpass >/dev/null 2>&1 || true"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu",
+    [
+     [
+      "agent",
+      "enabled=1"
+     ],
+     [
+      "bios",
+      "ovmf"
+     ],
+     [
+      "boot",
+      "order=scsi0;net0"
+     ],
+     [
+      "cores",
+      2
+     ],
+     [
+      "cpu",
+      "host"
+     ],
+     [
+      "hotplug",
+      "disk,network"
+     ],
+     [
+      "machine",
+      "q35"
+     ],
+     [
+      "memory",
+      2048
+     ],
+     [
+      "name",
+      "app01"
+     ],
+     [
+      "net0",
+      "vmxnet3,bridge=vmbr0,macaddr=00:50:56:aa:00:01,tag=30"
+     ],
+     [
+      "net1",
+      "e1000e,bridge=vmbr0,macaddr=00:50:56:aa:00:02,tag=30"
+     ],
+     [
+      "ostype",
+      "l26"
+     ],
+     [
+      "scsihw",
+      "pvscsi"
+     ],
+     [
+      "sockets",
+      1
+     ],
+     [
+      "tpmstate0",
+      "local-lvm:1,version=v2.0"
+     ],
+     [
+      "vga",
+      "std"
+     ],
+     [
+      "vmid",
+      120
+     ]
+    ]
+   ],
+   [
+    "node",
+    "pve1",
+    "df --output=avail / 2>/dev/null | tail -1"
+   ],
+   [
+    "node",
+    "pve1",
+    "dir=$(pvesm path local-lvm:1 2>/dev/null | xargs dirname 2>/dev/null) && [ -d \"$dir\" ] && echo $dir || echo /var/tmp"
+   ],
+   [
+    "esxi_ssh",
+    "readlink /vmfs/volumes/ds1 2>/dev/null || realpath /vmfs/volumes/ds1 2>/dev/null || ls -ld /vmfs/volumes/ds1 2>/dev/null | awk '{print $NF}'"
+   ],
+   [
+    "node",
+    "pve1",
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+   ],
+   [
+    "node",
+    "pve1",
+    "ls /tmp/v2p-t1/app01/*.vmdk 2>/dev/null | head -20"
+   ],
+   [
+    "esxi_api",
+    "snapshot",
+    "_pegaprox_clone_snap",
+    "POWERED_ON"
+   ],
+   [
+    "esxi_api",
+    "snapshot",
+    "_pegaprox_clone_snap",
+    "POWERED_ON"
+   ],
+   [
+    "esxi_api",
+    "snapshot",
+    "_pegaprox_migration_snap",
+    "POWERED_ON"
+   ],
+   [
+    "esxi_ssh",
+    "stat -c'%s' /vmfs/volumes/ds1/app01/app01-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "esxcli storage filesystem list 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "vim-cmd hostsvc/datastore/listsummary 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-0 3G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-curl-0 && cat > /run/pegaprox-v2p-t1-curl-0 && [ \"$(wc -c < /run/pegaprox-v2p-t1-curl-0)\" -eq 17 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; : > /run/pegaprox-v2p-t1-cookies-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -K /run/pegaprox-v2p-t1-curl-0 -c /run/pegaprox-v2p-t1-cookies-0 -o /dev/null 'https://esx1.lab/folder?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-0 -K /run/pegaprox-v2p-t1-curl-0 -r 0-1048575 -o /tmp/v2p-t1-test-0 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-0 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-0 -r 0-1048575 -o /tmp/v2p-t1-test-0 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-0 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -vsk -b /run/pegaprox-v2p-t1-cookies-0 -K /run/pegaprox-v2p-t1-curl-0 -r 0-1023 'https://esx1.lab/folder/app01/app01-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>&1 | head -40"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-t1-test-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-ssh-0 && cat > /run/pegaprox-v2p-t1-ssh-0 && [ \"$(wc -c < /run/pegaprox-v2p-t1-ssh-0)\" -eq 2 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "sshpass -f /run/pegaprox-v2p-t1-ssh-0 ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 root@esx1.lab 'dd if=/vmfs/volumes/ds1/app01/app01-flat.vmdk bs=4M' 2>/dev/null | dd of='/dev/local-lvm/vm-120-disk-0' bs=4M status=progress 2>/tmp/v2p-t1-sshdd-0.log; echo PIPE=${PIPESTATUS[0]}/${PIPESTATUS[1]}; rm -f /run/pegaprox-v2p-t1-ssh-0; cat /tmp/v2p-t1-sshdd-0.log; rm -f /tmp/v2p-t1-sshdd-0.log"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-ssh-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-curl-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-cookies-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi0 local-lvm:vm-120-disk-0,discard=on 2>&1"
+   ],
+   [
+    "esxi_ssh",
+    "stat -c'%s' /vmfs/volumes/ds1/app01/app01_1-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "esxcli storage filesystem list 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "vim-cmd hostsvc/datastore/listsummary 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-1 1G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-1 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-1 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-curl-1 && cat > /run/pegaprox-v2p-t1-curl-1 && [ \"$(wc -c < /run/pegaprox-v2p-t1-curl-1)\" -eq 17 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; : > /run/pegaprox-v2p-t1-cookies-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -K /run/pegaprox-v2p-t1-curl-1 -c /run/pegaprox-v2p-t1-cookies-1 -o /dev/null 'https://esx1.lab/folder?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-1 -K /run/pegaprox-v2p-t1-curl-1 -r 0-1048575 -o /tmp/v2p-t1-test-1 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-1 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-1 -r 0-1048575 -o /tmp/v2p-t1-test-1 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-1 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -vsk -b /run/pegaprox-v2p-t1-cookies-1 -K /run/pegaprox-v2p-t1-curl-1 -r 0-1023 'https://esx1.lab/folder/app01/app01_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>&1 | head -40"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-t1-test-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-ssh-1 && cat > /run/pegaprox-v2p-t1-ssh-1 && [ \"$(wc -c < /run/pegaprox-v2p-t1-ssh-1)\" -eq 2 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "sshpass -f /run/pegaprox-v2p-t1-ssh-1 ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 root@esx1.lab 'dd if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk bs=4M' 2>/dev/null | dd of='/dev/local-lvm/vm-120-disk-1' bs=4M status=progress 2>/tmp/v2p-t1-sshdd-1.log; echo PIPE=${PIPESTATUS[0]}/${PIPESTATUS[1]}; rm -f /run/pegaprox-v2p-t1-ssh-1; cat /tmp/v2p-t1-sshdd-1.log; rm -f /tmp/v2p-t1-sshdd-1.log"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-ssh-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-curl-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-cookies-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi1 local-lvm:vm-120-disk-1,discard=on 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "i=0; while [ $i -lt 9 ]; do dd if=/dev/local-lvm/vm-120-disk-0 bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
+   ],
+   [
+    "node",
+    "pve1",
+    "i=0; while [ $i -lt 4 ]; do dd if=/dev/local-lvm/vm-120-disk-1 bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
+   ],
+   [
+    "esxi_api",
+    "power",
+    "stop",
+    "POWERED_ON"
+   ],
+   [
+    "esxi_api",
+    "remove_snapshot",
+    "snapshot-1",
+    "POWERED_OFF"
+   ],
+   [
+    "esxi_ssh",
+    "i=0; while [ $i -lt 9 ]; do dd if=/vmfs/volumes/ds1/app01/app01-flat.vmdk bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
+   ],
+   [
+    "esxi_ssh",
+    "i=0; while [ $i -lt 4 ]; do dd if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --boot order=scsi0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --efidisk0 local-lvm:1,efitype=4m,pre-enrolled-keys=0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu/120/status/start",
+    []
+   ],
+   [
+    "node",
+    "pve1",
+    "fusermount -u /tmp/v2p-t1 2>/dev/null; rmdir /tmp/v2p-t1 2>/dev/null"
+   ]
+  ]
+ },
+ "auto_presync_off": {
+  "status": "completed",
+  "log": [
+   [
+    "esxi_ssh",
+    "hostname"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-img >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-img\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-nbd >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-nbd\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshfs >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshfs\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshpass\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "timeout 5 bash -c '</dev/tcp/\"$1\"/\"$2\"' _ esx1.lab 22 2>&1; echo V2P_TCP_RC=$?"
+   ],
+   [
+    "esxi_ssh",
+    "ls -la /vmfs/volumes/ds1/app01/ | grep '.vmdk'"
+   ],
+   [
+    "esxi_ssh",
+    "ls -1 /vmfs/volumes/ds1/app01/*.vmdk 2>/dev/null | grep -v flat | grep -v delta | grep -v ctk | grep -v '\\-0000'"
+   ],
+   [
+    "node",
+    "pve1",
+    "if command -v sshfs >/dev/null 2>&1; then echo PRESENT; else   DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true;   DEBIAN_FRONTEND=noninteractive apt-get install -y sshfs >/tmp/v2p-sshfs-install.log 2>&1;   if command -v sshfs >/dev/null 2>&1; then echo INSTALLED;   else echo FAILED; tail -5 /tmp/v2p-sshfs-install.log 2>/dev/null; fi; fi"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y sshpass >/dev/null 2>&1 || true"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu",
+    [
+     [
+      "agent",
+      "enabled=1"
+     ],
+     [
+      "bios",
+      "ovmf"
+     ],
+     [
+      "boot",
+      "order=scsi0;net0"
+     ],
+     [
+      "cores",
+      2
+     ],
+     [
+      "cpu",
+      "host"
+     ],
+     [
+      "hotplug",
+      "disk,network"
+     ],
+     [
+      "machine",
+      "q35"
+     ],
+     [
+      "memory",
+      2048
+     ],
+     [
+      "name",
+      "app01"
+     ],
+     [
+      "net0",
+      "vmxnet3,bridge=vmbr0,macaddr=00:50:56:aa:00:01,tag=30"
+     ],
+     [
+      "net1",
+      "e1000e,bridge=vmbr0,macaddr=00:50:56:aa:00:02,tag=30"
+     ],
+     [
+      "ostype",
+      "l26"
+     ],
+     [
+      "scsihw",
+      "pvscsi"
+     ],
+     [
+      "sockets",
+      1
+     ],
+     [
+      "tpmstate0",
+      "local-lvm:1,version=v2.0"
+     ],
+     [
+      "vga",
+      "std"
+     ],
+     [
+      "vmid",
+      120
+     ]
+    ]
+   ],
+   [
+    "node",
+    "pve1",
+    "df --output=avail / 2>/dev/null | tail -1"
+   ],
+   [
+    "node",
+    "pve1",
+    "dir=$(pvesm path local-lvm:1 2>/dev/null | xargs dirname 2>/dev/null) && [ -d \"$dir\" ] && echo $dir || echo /var/tmp"
+   ],
+   [
+    "esxi_ssh",
+    "readlink /vmfs/volumes/ds1 2>/dev/null || realpath /vmfs/volumes/ds1 2>/dev/null || ls -ld /vmfs/volumes/ds1 2>/dev/null | awk '{print $NF}'"
+   ],
+   [
+    "node",
+    "pve1",
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+   ],
+   [
+    "node",
+    "pve1",
+    "ls /tmp/v2p-t1/app01/*.vmdk 2>/dev/null | head -20"
+   ],
+   [
+    "esxi_api",
+    "snapshot",
+    "_pegaprox_clone_snap",
+    "POWERED_OFF"
+   ],
+   [
+    "esxi_api",
+    "snapshot",
+    "_pegaprox_clone_snap",
+    "POWERED_OFF"
+   ],
+   [
+    "esxi_api",
+    "snapshot",
+    "_pegaprox_migration_snap",
+    "POWERED_OFF"
+   ],
+   [
+    "esxi_ssh",
+    "stat -c'%s' /vmfs/volumes/ds1/app01/app01-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "esxcli storage filesystem list 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "vim-cmd hostsvc/datastore/listsummary 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-0 3G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-curl-0 && cat > /run/pegaprox-v2p-t1-curl-0 && [ \"$(wc -c < /run/pegaprox-v2p-t1-curl-0)\" -eq 17 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; : > /run/pegaprox-v2p-t1-cookies-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -K /run/pegaprox-v2p-t1-curl-0 -c /run/pegaprox-v2p-t1-cookies-0 -o /dev/null 'https://esx1.lab/folder?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-0 -K /run/pegaprox-v2p-t1-curl-0 -r 0-1048575 -o /tmp/v2p-t1-test-0 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-0 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-0 -r 0-1048575 -o /tmp/v2p-t1-test-0 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-0 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -vsk -b /run/pegaprox-v2p-t1-cookies-0 -K /run/pegaprox-v2p-t1-curl-0 -r 0-1023 'https://esx1.lab/folder/app01/app01-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>&1 | head -40"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-t1-test-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-ssh-0 && cat > /run/pegaprox-v2p-t1-ssh-0 && [ \"$(wc -c < /run/pegaprox-v2p-t1-ssh-0)\" -eq 2 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "sshpass -f /run/pegaprox-v2p-t1-ssh-0 ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 root@esx1.lab 'dd if=/vmfs/volumes/ds1/app01/app01-flat.vmdk bs=4M' 2>/dev/null | dd of='/dev/local-lvm/vm-120-disk-0' bs=4M status=progress 2>/tmp/v2p-t1-sshdd-0.log; echo PIPE=${PIPESTATUS[0]}/${PIPESTATUS[1]}; rm -f /run/pegaprox-v2p-t1-ssh-0; cat /tmp/v2p-t1-sshdd-0.log; rm -f /tmp/v2p-t1-sshdd-0.log"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-ssh-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-curl-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-cookies-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi0 local-lvm:vm-120-disk-0,discard=on 2>&1"
+   ],
+   [
+    "esxi_ssh",
+    "stat -c'%s' /vmfs/volumes/ds1/app01/app01_1-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "esxcli storage filesystem list 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "vim-cmd hostsvc/datastore/listsummary 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-1 1G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-1 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-1 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-curl-1 && cat > /run/pegaprox-v2p-t1-curl-1 && [ \"$(wc -c < /run/pegaprox-v2p-t1-curl-1)\" -eq 17 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; : > /run/pegaprox-v2p-t1-cookies-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -K /run/pegaprox-v2p-t1-curl-1 -c /run/pegaprox-v2p-t1-cookies-1 -o /dev/null 'https://esx1.lab/folder?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-1 -K /run/pegaprox-v2p-t1-curl-1 -r 0-1048575 -o /tmp/v2p-t1-test-1 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-1 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-1 -r 0-1048575 -o /tmp/v2p-t1-test-1 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-1 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -vsk -b /run/pegaprox-v2p-t1-cookies-1 -K /run/pegaprox-v2p-t1-curl-1 -r 0-1023 'https://esx1.lab/folder/app01/app01_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>&1 | head -40"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-t1-test-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-ssh-1 && cat > /run/pegaprox-v2p-t1-ssh-1 && [ \"$(wc -c < /run/pegaprox-v2p-t1-ssh-1)\" -eq 2 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "sshpass -f /run/pegaprox-v2p-t1-ssh-1 ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 root@esx1.lab 'dd if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk bs=4M' 2>/dev/null | dd of='/dev/local-lvm/vm-120-disk-1' bs=4M status=progress 2>/tmp/v2p-t1-sshdd-1.log; echo PIPE=${PIPESTATUS[0]}/${PIPESTATUS[1]}; rm -f /run/pegaprox-v2p-t1-ssh-1; cat /tmp/v2p-t1-sshdd-1.log; rm -f /tmp/v2p-t1-sshdd-1.log"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-ssh-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-curl-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-cookies-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi1 local-lvm:vm-120-disk-1,discard=on 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --boot order=scsi0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --efidisk0 local-lvm:1,efitype=4m,pre-enrolled-keys=0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu/120/status/start",
+    []
+   ],
+   [
+    "node",
+    "pve1",
+    "fusermount -u /tmp/v2p-t1 2>/dev/null; rmdir /tmp/v2p-t1 2>/dev/null"
+   ]
+  ]
+ },
+ "sshfs_boot_offline_copy": {
+  "status": "completed",
+  "log": [
+   [
+    "esxi_ssh",
+    "hostname"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-img >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-img\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-nbd >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-nbd\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshfs >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshfs\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshpass\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "timeout 5 bash -c '</dev/tcp/\"$1\"/\"$2\"' _ esx1.lab 22 2>&1; echo V2P_TCP_RC=$?"
+   ],
+   [
+    "esxi_ssh",
+    "ls -la /vmfs/volumes/ds1/app01/ | grep '.vmdk'"
+   ],
+   [
+    "esxi_ssh",
+    "ls -1 /vmfs/volumes/ds1/app01/*.vmdk 2>/dev/null | grep -v flat | grep -v delta | grep -v ctk | grep -v '\\-0000'"
+   ],
+   [
+    "node",
+    "pve1",
+    "if command -v sshfs >/dev/null 2>&1; then echo PRESENT; else   DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true;   DEBIAN_FRONTEND=noninteractive apt-get install -y sshfs >/tmp/v2p-sshfs-install.log 2>&1;   if command -v sshfs >/dev/null 2>&1; then echo INSTALLED;   else echo FAILED; tail -5 /tmp/v2p-sshfs-install.log 2>/dev/null; fi; fi"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y sshpass >/dev/null 2>&1 || true"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu",
+    [
+     [
+      "agent",
+      "enabled=1"
+     ],
+     [
+      "bios",
+      "seabios"
+     ],
+     [
+      "boot",
+      "order=scsi0;net0"
+     ],
+     [
+      "cores",
+      2
+     ],
+     [
+      "cpu",
+      "host"
+     ],
+     [
+      "hotplug",
+      "disk,network"
+     ],
+     [
+      "machine",
+      "pc"
+     ],
+     [
+      "memory",
+      2048
+     ],
+     [
+      "name",
+      "app01"
+     ],
+     [
+      "net0",
+      "vmxnet3,bridge=vmbr0,macaddr=00:50:56:aa:00:01,tag=30"
+     ],
+     [
+      "net1",
+      "e1000e,bridge=vmbr0,macaddr=00:50:56:aa:00:02,tag=30"
+     ],
+     [
+      "ostype",
+      "l26"
+     ],
+     [
+      "scsihw",
+      "pvscsi"
+     ],
+     [
+      "sockets",
+      1
+     ],
+     [
+      "vga",
+      "std"
+     ],
+     [
+      "vmid",
+      120
+     ]
+    ]
+   ],
+   [
+    "node",
+    "pve1",
+    "df --output=avail / 2>/dev/null | tail -1"
+   ],
+   [
+    "node",
+    "pve1",
+    "dir=$(pvesm path local-lvm:1 2>/dev/null | xargs dirname 2>/dev/null) && [ -d \"$dir\" ] && echo $dir || echo /var/tmp"
+   ],
+   [
+    "esxi_ssh",
+    "readlink /vmfs/volumes/ds1 2>/dev/null || realpath /vmfs/volumes/ds1 2>/dev/null || ls -ld /vmfs/volumes/ds1 2>/dev/null | awk '{print $NF}'"
+   ],
+   [
+    "node",
+    "pve1",
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+   ],
+   [
+    "node",
+    "pve1",
+    "ls /tmp/v2p-t1/app01/*.vmdk 2>/dev/null | head -20"
+   ],
+   [
+    "esxi_api",
+    "power",
+    "stop",
+    "POWERED_ON"
+   ],
+   [
+    "node",
+    "pve1",
+    "which sshpass 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "ssh-keygen -t rsa -b 2048 -f /tmp/v2p-localkey-t1 -N '' -q -C 'v2p-local' 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-copy && cat > /run/pegaprox-v2p-t1-copy && [ \"$(wc -c < /run/pegaprox-v2p-t1-copy)\" -eq 2 ]"
+   ],
+   [
+    "esxi_ssh",
+    "echo LZ4=$(which lz4 2>/dev/null || echo NO);echo GZIP=$(which gzip 2>/dev/null || echo NO);echo PIGZ=$(which pigz 2>/dev/null || echo NO);echo XXHASH=$(which xxhsum 2>/dev/null || which xxh128sum 2>/dev/null || echo NO)"
+   ],
+   [
+    "node",
+    "pve1",
+    "which lz4 >/dev/null 2>&1 || apt-get install -y lz4 2>&1 | tail -1"
+   ],
+   [
+    "node",
+    "pve1",
+    "which mbuffer >/dev/null 2>&1 || apt-get install -y mbuffer 2>&1 | tail -1"
+   ],
+   [
+    "node",
+    "pve1",
+    "sysctl -w net.core.rmem_max=16777216 net.core.wmem_max=16777216 net.ipv4.tcp_rmem='4096 87380 16777216' net.ipv4.tcp_wmem='4096 87380 16777216' net.ipv4.tcp_window_scaling=1 2>/dev/null || true;sysctl -w fs.pipe-max-size=1048576 2>/dev/null || true"
+   ],
+   [
+    "esxi_ssh",
+    "DISK=$(df /vmfs/volumes/ds1 2>/dev/null | tail -1 | awk '{print $1}');[ -n \"$DISK\" ] && blockdev --setra 16384 $DISK 2>/dev/null || true"
+   ],
+   [
+    "node",
+    "pve1",
+    "if [ -d /sys/fs/cgroup ]; then   mkdir -p /sys/fs/cgroup/v2p-copy-120 2>/dev/null;   echo '10' > /sys/fs/cgroup/v2p-copy-120/io.weight 2>/dev/null;   echo '100' > /sys/fs/cgroup/v2p-copy-120/io.bfq.weight 2>/dev/null;   echo 'OK'; fi"
+   ],
+   [
+    "node",
+    "pve1",
+    "ip route get esx1.lab 2>/dev/null | grep -oP 'dev \\K\\S+'"
+   ],
+   [
+    "node",
+    "pve1",
+    "lsblk -ndo NAME $(pvesm path local-lvm:nonexist 2>/dev/null | sed 's|/dev/||;s|/.*||') 2>/dev/null | head -1 || lsblk -ndo NAME /dev/sda 2>/dev/null | head -1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-0 3G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; f=$(mktemp /tmp/v2p-ssh-t1-d0-XXXXXXXXXX) && cat > \"$f\" << 'V2P_NODE_SCRIPT' && echo \"$f\"\n#!/bin/bash\nset -o pipefail\necho $$ > /sys/fs/cgroup/v2p-copy-120/cgroup.procs 2>/dev/null; \necho 1000 > /proc/self/oom_score_adj 2>/dev/null || true\nulimit -p 1048576 2>/dev/null || true\npids=''\nnice -n 19 ionice -c 3 sshpass -f /run/pegaprox-v2p-t1-copy ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256,ecdh-sha2-nistp256 -o PreferredAuthentications=keyboard-interactive,password  -o Compression=no -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=4M if=/vmfs/volumes/ds1/app01/app01-flat.vmdk skip=0 count=129 2>/dev/null | gzip -1' | gunzip | nice -n 19 ionice -c 3 dd oflag=direct bs=4M conv=notrunc of=/dev/local-lvm/vm-120-disk-0 seek=0 2>/dev/null &\npids=\"$pids $!\"\nnice -n 19 ionice -c 3 sshpass -f /run/pegaprox-v2p-t1-copy ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256,ecdh-sha2-nistp256 -o PreferredAuthentications=keyboard-interactive,password  -o Compression=no -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=4M if=/vmfs/volumes/ds1/app01/app01-flat.vmdk skip=129 count=129 2>/dev/null | gzip -1' | gunzip | nice -n 19 ionice -c 3 dd oflag=direct bs=4M conv=notrunc of=/dev/local-lvm/vm-120-disk-0 seek=129 2>/dev/null &\npids=\"$pids $!\"\nnice -n 19 ionice -c 3 sshpass -f /run/pegaprox-v2p-t1-copy ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256,ecdh-sha2-nistp256 -o PreferredAuthentications=keyboard-interactive,password  -o Compression=no -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=4M if=/vmfs/volumes/ds1/app01/app01-flat.vmdk skip=258 count=129 2>/dev/null | gzip -1' | gunzip | nice -n 19 ionice -c 3 dd oflag=direct bs=4M conv=notrunc of=/dev/local-lvm/vm-120-disk-0 seek=258 2>/dev/null &\npids=\"$pids $!\"\nnice -n 19 ionice -c 3 sshpass -f /run/pegaprox-v2p-t1-copy ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256,ecdh-sha2-nistp256 -o PreferredAuthentications=keyboard-interactive,password  -o Compression=no -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=4M if=/vmfs/volumes/ds1/app01/app01-flat.vmdk skip=387 count=126 2>/dev/null | gzip -1' | gunzip | nice -n 19 ionice -c 3 dd oflag=direct bs=4M conv=notrunc of=/dev/local-lvm/vm-120-disk-0 seek=387 2>/dev/null &\npids=\"$pids $!\"\nrc=0\nfor p in $pids; do wait \"$p\" || rc=1; done\nexit $rc\nV2P_NODE_SCRIPT\n"
+   ],
+   [
+    "node",
+    "pve1",
+    "bash /tmp/v2p-ssh-t1-d0-0000000001 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-ssh-t1-d0-0000000001"
+   ],
+   [
+    "node",
+    "pve1",
+    "which xxhsum >/dev/null 2>&1 || which xxh128sum >/dev/null 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; f=$(mktemp /tmp/v2p-verify-t1-d0-XXXXXXXXXX) && cat > \"$f\" << 'V2P_NODE_SCRIPT' && echo \"$f\"\n#!/bin/bash\n# Hash first 64MB + last 64MB on both sides\nESX_HASH=$(sshpass -f /run/pegaprox-v2p-t1-copy ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256,ecdh-sha2-nistp256 -o PreferredAuthentications=keyboard-interactive,password  root@esx1.lab '{ dd if=/vmfs/volumes/ds1/app01/app01-flat.vmdk bs=1M count=64 2>/dev/null; dd if=/vmfs/volumes/ds1/app01/app01-flat.vmdk bs=1M skip=1987 count=64 2>/dev/null; }' | xxhsum 2>/dev/null | awk '{print $1}')\n\nPVE_HASH=$({\n  dd if=/dev/local-lvm/vm-120-disk-0 bs=1M count=64 2>/dev/null;\n  dd if=/dev/local-lvm/vm-120-disk-0 bs=1M skip=$(((2150629376 / 1048576) - 64)) count=64 2>/dev/null;\n} | xxhsum 2>/dev/null | awk '{print $1}')\n\nif [ \"$ESX_HASH\" = \"$PVE_HASH\" ] && [ -n \"$ESX_HASH\" ]; then\n  echo \"MATCH:$ESX_HASH\"\nelse\n  echo \"MISMATCH:ESX=$ESX_HASH PVE=$PVE_HASH\"\nfi\nV2P_NODE_SCRIPT\n"
+   ],
+   [
+    "node",
+    "pve1",
+    "bash /tmp/v2p-verify-t1-d0-0000000002 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-verify-t1-d0-0000000002"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi0 local-lvm:vm-120-disk-0,discard=on 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-1 1G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-1 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-1 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; f=$(mktemp /tmp/v2p-ssh-t1-d1-XXXXXXXXXX) && cat > \"$f\" << 'V2P_NODE_SCRIPT' && echo \"$f\"\n#!/bin/bash\nset -o pipefail\necho $$ > /sys/fs/cgroup/v2p-copy-120/cgroup.procs 2>/dev/null; \necho 1000 > /proc/self/oom_score_adj 2>/dev/null || true\nulimit -p 1048576 2>/dev/null || true\npids=''\nnice -n 19 ionice -c 3 sshpass -f /run/pegaprox-v2p-t1-copy ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256,ecdh-sha2-nistp256 -o PreferredAuthentications=keyboard-interactive,password  -o Compression=no -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=4M if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk skip=0 count=64 2>/dev/null | gzip -1' | gunzip | nice -n 19 ionice -c 3 dd oflag=direct bs=4M conv=notrunc of=/dev/local-lvm/vm-120-disk-1 seek=0 2>/dev/null &\npids=\"$pids $!\"\nnice -n 19 ionice -c 3 sshpass -f /run/pegaprox-v2p-t1-copy ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256,ecdh-sha2-nistp256 -o PreferredAuthentications=keyboard-interactive,password  -o Compression=no -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=4M if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk skip=64 count=64 2>/dev/null | gzip -1' | gunzip | nice -n 19 ionice -c 3 dd oflag=direct bs=4M conv=notrunc of=/dev/local-lvm/vm-120-disk-1 seek=64 2>/dev/null &\npids=\"$pids $!\"\nnice -n 19 ionice -c 3 sshpass -f /run/pegaprox-v2p-t1-copy ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256,ecdh-sha2-nistp256 -o PreferredAuthentications=keyboard-interactive,password  -o Compression=no -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=4M if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk skip=128 count=64 2>/dev/null | gzip -1' | gunzip | nice -n 19 ionice -c 3 dd oflag=direct bs=4M conv=notrunc of=/dev/local-lvm/vm-120-disk-1 seek=128 2>/dev/null &\npids=\"$pids $!\"\nnice -n 19 ionice -c 3 sshpass -f /run/pegaprox-v2p-t1-copy ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256,ecdh-sha2-nistp256 -o PreferredAuthentications=keyboard-interactive,password  -o Compression=no -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=4M if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk skip=192 count=64 2>/dev/null | gzip -1' | gunzip | nice -n 19 ionice -c 3 dd oflag=direct bs=4M conv=notrunc of=/dev/local-lvm/vm-120-disk-1 seek=192 2>/dev/null &\npids=\"$pids $!\"\nrc=0\nfor p in $pids; do wait \"$p\" || rc=1; done\nexit $rc\nV2P_NODE_SCRIPT\n"
+   ],
+   [
+    "node",
+    "pve1",
+    "bash /tmp/v2p-ssh-t1-d1-0000000003 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-ssh-t1-d1-0000000003"
+   ],
+   [
+    "node",
+    "pve1",
+    "which xxhsum >/dev/null 2>&1 || which xxh128sum >/dev/null 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; f=$(mktemp /tmp/v2p-verify-t1-d1-XXXXXXXXXX) && cat > \"$f\" << 'V2P_NODE_SCRIPT' && echo \"$f\"\n#!/bin/bash\n# Hash first 64MB + last 64MB on both sides\nESX_HASH=$(sshpass -f /run/pegaprox-v2p-t1-copy ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256,ecdh-sha2-nistp256 -o PreferredAuthentications=keyboard-interactive,password  root@esx1.lab '{ dd if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk bs=1M count=64 2>/dev/null; dd if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk bs=1M skip=960 count=64 2>/dev/null; }' | xxhsum 2>/dev/null | awk '{print $1}')\n\nPVE_HASH=$({\n  dd if=/dev/local-lvm/vm-120-disk-1 bs=1M count=64 2>/dev/null;\n  dd if=/dev/local-lvm/vm-120-disk-1 bs=1M skip=$(((1073741824 / 1048576) - 64)) count=64 2>/dev/null;\n} | xxhsum 2>/dev/null | awk '{print $1}')\n\nif [ \"$ESX_HASH\" = \"$PVE_HASH\" ] && [ -n \"$ESX_HASH\" ]; then\n  echo \"MATCH:$ESX_HASH\"\nelse\n  echo \"MISMATCH:ESX=$ESX_HASH PVE=$PVE_HASH\"\nfi\nV2P_NODE_SCRIPT\n"
+   ],
+   [
+    "node",
+    "pve1",
+    "bash /tmp/v2p-verify-t1-d1-0000000004 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-verify-t1-d1-0000000004"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi1 local-lvm:vm-120-disk-1,discard=on 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rmdir /sys/fs/cgroup/v2p-copy-120 2>/dev/null || true"
+   ],
+   [
+    "node",
+    "pve1",
+    "sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-copy"
+   ],
+   [
+    "node",
+    "pve1",
+    "fusermount -u /tmp/v2p-t1 2>/dev/null; rmdir /tmp/v2p-t1 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --boot order=scsi0 2>&1"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu/120/status/start",
+    []
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-localkey-t1 /tmp/v2p-localkey-t1.pub"
+   ]
+  ]
+ },
+ "sshfs_boot_live": {
+  "status": "completed",
+  "log": [
+   [
+    "esxi_ssh",
+    "hostname"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-img >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-img\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-nbd >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-nbd\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshfs >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshfs\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshpass\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "timeout 5 bash -c '</dev/tcp/\"$1\"/\"$2\"' _ esx1.lab 22 2>&1; echo V2P_TCP_RC=$?"
+   ],
+   [
+    "esxi_ssh",
+    "ls -la /vmfs/volumes/ds1/app01/ | grep '.vmdk'"
+   ],
+   [
+    "esxi_ssh",
+    "ls -1 /vmfs/volumes/ds1/app01/*.vmdk 2>/dev/null | grep -v flat | grep -v delta | grep -v ctk | grep -v '\\-0000'"
+   ],
+   [
+    "node",
+    "pve1",
+    "if command -v sshfs >/dev/null 2>&1; then echo PRESENT; else   DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true;   DEBIAN_FRONTEND=noninteractive apt-get install -y sshfs >/tmp/v2p-sshfs-install.log 2>&1;   if command -v sshfs >/dev/null 2>&1; then echo INSTALLED;   else echo FAILED; tail -5 /tmp/v2p-sshfs-install.log 2>/dev/null; fi; fi"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y sshpass >/dev/null 2>&1 || true"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu",
+    [
+     [
+      "agent",
+      "enabled=1"
+     ],
+     [
+      "bios",
+      "ovmf"
+     ],
+     [
+      "boot",
+      "order=scsi0;net0"
+     ],
+     [
+      "cores",
+      2
+     ],
+     [
+      "cpu",
+      "host"
+     ],
+     [
+      "hotplug",
+      "disk,network"
+     ],
+     [
+      "machine",
+      "q35"
+     ],
+     [
+      "memory",
+      2048
+     ],
+     [
+      "name",
+      "app01"
+     ],
+     [
+      "net0",
+      "vmxnet3,bridge=vmbr0,macaddr=00:50:56:aa:00:01,tag=30"
+     ],
+     [
+      "net1",
+      "e1000e,bridge=vmbr0,macaddr=00:50:56:aa:00:02,tag=30"
+     ],
+     [
+      "ostype",
+      "l26"
+     ],
+     [
+      "scsihw",
+      "pvscsi"
+     ],
+     [
+      "sockets",
+      1
+     ],
+     [
+      "tpmstate0",
+      "local-lvm:1,version=v2.0"
+     ],
+     [
+      "vga",
+      "std"
+     ],
+     [
+      "vmid",
+      120
+     ]
+    ]
+   ],
+   [
+    "node",
+    "pve1",
+    "df --output=avail / 2>/dev/null | tail -1"
+   ],
+   [
+    "node",
+    "pve1",
+    "dir=$(pvesm path local-lvm:1 2>/dev/null | xargs dirname 2>/dev/null) && [ -d \"$dir\" ] && echo $dir || echo /var/tmp"
+   ],
+   [
+    "esxi_ssh",
+    "readlink /vmfs/volumes/ds1 2>/dev/null || realpath /vmfs/volumes/ds1 2>/dev/null || ls -ld /vmfs/volumes/ds1 2>/dev/null | awk '{print $NF}'"
+   ],
+   [
+    "node",
+    "pve1",
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+   ],
+   [
+    "node",
+    "pve1",
+    "ls /tmp/v2p-t1/app01/*.vmdk 2>/dev/null | head -20"
+   ],
+   [
+    "esxi_api",
+    "power",
+    "stop",
+    "POWERED_ON"
+   ],
+   [
+    "node",
+    "pve1",
+    "which sshpass 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-0 3G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-1 1G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-1 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-1 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-2 1G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-2 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-2 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "grep '^scsihw:' /etc/pve/qemu-server/120.conf 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^scsi0:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^scsi0:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^virtio0:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^scsi1:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^scsi1:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^virtio1:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^scsi2:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^scsi2:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^virtio2:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^args:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^boot:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "echo 'args: -device pvscsi,id=scsihw0 -drive file.driver=ssh,file.host=esx1.lab,file.port=22,file.path=/vmfs/volumes/ds1/app01/app01-flat.vmdk,file.user=root,file.host-key-check.mode=known_hosts,file.identity-file=/tmp/v2p-key-fixed,format=raw,if=none,id=ssh-disk0,cache=writeback,aio=threads -device scsi-hd,bus=scsihw0.0,scsi-id=0,lun=0,drive=ssh-disk0,bootindex=0 -drive file.driver=ssh,file.host=esx1.lab,file.port=22,file.path=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk,file.user=root,file.host-key-check.mode=known_hosts,file.identity-file=/tmp/v2p-key-fixed,format=raw,if=none,id=ssh-disk1,cache=writeback,aio=threads -device scsi-hd,bus=scsihw0.0,scsi-id=1,lun=0,drive=ssh-disk1,bootindex=1 -drive file.driver=ssh,file.host=esx1.lab,file.port=22,file.path=/vmfs/volumes/ds1/app01/app01_2-flat.vmdk,file.user=root,file.host-key-check.mode=known_hosts,file.identity-file=/tmp/v2p-key-fixed,format=raw,if=none,id=ssh-disk2,cache=writeback,aio=threads -device scsi-hd,bus=scsihw0.0,scsi-id=2,lun=0,drive=ssh-disk2,bootindex=2' >> /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "cat /etc/pve/qemu-server/120.conf 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "timeout 10 qemu-img info 'json:{\"file.driver\": \"ssh\", \"file.host\": \"esx1.lab\", \"file.port\": 22, \"file.path\": \"/vmfs/volumes/ds1/app01/app01-flat.vmdk\", \"file.user\": \"root\", \"file.host-key-check.mode\": \"known_hosts\", \"file.identity-file\": \"/tmp/v2p-key-fixed\"}' 2>&1"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu/120/status/start",
+    []
+   ],
+   [
+    "esxi_ssh",
+    "echo GZIP=$(which gzip 2>/dev/null || echo NO);echo LZ4=$(which lz4 2>/dev/null || echo NO);echo PIGZ=$(which pigz 2>/dev/null || echo NO);echo ZSTD=$(which zstd 2>/dev/null || echo NO)"
+   ],
+   [
+    "node",
+    "pve1",
+    "echo LZ4=$(which lz4 2>/dev/null || echo NO);echo PIGZ=$(which pigz 2>/dev/null || echo NO);echo ZSTD=$(which zstd 2>/dev/null || echo NO);echo GZIP=$(which gzip 2>/dev/null || echo NO)"
+   ],
+   [
+    "node",
+    "pve1",
+    "if [ -d /sys/fs/cgroup ]; then   mkdir -p /sys/fs/cgroup/v2p-copy-120 2>/dev/null;   echo '10' > /sys/fs/cgroup/v2p-copy-120/io.weight 2>/dev/null;   echo '100' > /sys/fs/cgroup/v2p-copy-120/io.bfq.weight 2>/dev/null;   echo 'OK'; fi"
+   ],
+   [
+    "node",
+    "pve1",
+    "ip route get esx1.lab 2>/dev/null | grep -oP 'dev \\K\\S+'"
+   ],
+   [
+    "node",
+    "pve1",
+    "lsblk -ndo NAME $(pvesm path local-lvm:nonexist 2>/dev/null | sed 's|/dev/||;s|/.*||') 2>/dev/null | head -1 || lsblk -ndo NAME /dev/sda 2>/dev/null | head -1"
+   ],
+   [
+    "node",
+    "pve1",
+    "echo 'info block' | qm monitor 120 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rmdir /sys/fs/cgroup/v2p-copy-120 2>/dev/null || true"
+   ],
+   [
+    "node",
+    "pve1",
+    "sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu/120/agent/fsfreeze-freeze",
+    []
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu/120/agent/fsfreeze-thaw",
+    []
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu/120/status/shutdown",
+    [
+     [
+      "timeout",
+      30
+     ]
+    ]
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu/120/status/stop",
+    []
+   ],
+   [
+    "node",
+    "pve1",
+    "sync"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^args:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^boot:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^unused/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^scsi0:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^scsi1:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^scsi2:/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^unused.*local-lvm:vm-120-disk-0/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi0 local-lvm:vm-120-disk-0,discard=on 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^unused.*local-lvm:vm-120-disk-1/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi1 local-lvm:vm-120-disk-1,discard=on 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "sed -i '/^unused.*local-lvm:vm-120-disk-2/d' /etc/pve/qemu-server/120.conf"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi2 local-lvm:vm-120-disk-2,discard=on 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --boot order=scsi0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --bios ovmf --machine q35 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm config 120 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --efidisk0 local-lvm:1,efitype=4m,pre-enrolled-keys=0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0 2>/dev/null"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu/120/status/start",
+    []
+   ],
+   [
+    "node",
+    "pve1",
+    "cat /etc/pve/qemu-server/120.conf 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o PreferredAuthentications=publickey,keyboard-interactive,password  root@esx1.lab 'grep -v \"pegaprox-v2p-fixed\" /etc/ssh/keys-root/authorized_keys > /etc/ssh/keys-root/authorized_keys.tmp 2>/dev/null && mv /etc/ssh/keys-root/authorized_keys.tmp /etc/ssh/keys-root/authorized_keys 2>/dev/null; grep -v \"pegaprox-v2p-fixed\" ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp 2>/dev/null && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys 2>/dev/null; echo CLEANED' 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-key-fixed /tmp/v2p-key-fixed.pub /tmp/v2p-sshcfg-fixed"
+   ],
+   [
+    "node",
+    "pve1",
+    "fusermount -u /tmp/v2p-t1 2>/dev/null; rmdir /tmp/v2p-t1 2>/dev/null"
+   ]
+  ]
+ },
+ "offline_three_disks_dir": {
+  "status": "completed",
+  "log": [
+   [
+    "esxi_ssh",
+    "hostname"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-img >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-img\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v qemu-nbd >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/qemu-nbd\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshfs >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshfs\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 && exit 0; for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do   [ -x \"$d/sshpass\" ] && exit 0; done; echo V2P_TOOL_MISSING; exit 1"
+   ],
+   [
+    "node",
+    "pve1",
+    "timeout 5 bash -c '</dev/tcp/\"$1\"/\"$2\"' _ esx1.lab 22 2>&1; echo V2P_TCP_RC=$?"
+   ],
+   [
+    "esxi_ssh",
+    "ls -la /vmfs/volumes/ds1/app01/ | grep '.vmdk'"
+   ],
+   [
+    "esxi_ssh",
+    "ls -1 /vmfs/volumes/ds1/app01/*.vmdk 2>/dev/null | grep -v flat | grep -v delta | grep -v ctk | grep -v '\\-0000'"
+   ],
+   [
+    "node",
+    "pve1",
+    "if command -v sshfs >/dev/null 2>&1; then echo PRESENT; else   DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true;   DEBIAN_FRONTEND=noninteractive apt-get install -y sshfs >/tmp/v2p-sshfs-install.log 2>&1;   if command -v sshfs >/dev/null 2>&1; then echo INSTALLED;   else echo FAILED; tail -5 /tmp/v2p-sshfs-install.log 2>/dev/null; fi; fi"
+   ],
+   [
+    "node",
+    "pve1",
+    "command -v sshpass >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y sshpass >/dev/null 2>&1 || true"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu",
+    [
+     [
+      "agent",
+      "enabled=1"
+     ],
+     [
+      "bios",
+      "ovmf"
+     ],
+     [
+      "boot",
+      "order=scsi0;net0"
+     ],
+     [
+      "cores",
+      2
+     ],
+     [
+      "cpu",
+      "host"
+     ],
+     [
+      "hotplug",
+      "disk,network"
+     ],
+     [
+      "machine",
+      "q35"
+     ],
+     [
+      "memory",
+      2048
+     ],
+     [
+      "name",
+      "app01"
+     ],
+     [
+      "net0",
+      "vmxnet3,bridge=vmbr0,macaddr=00:50:56:aa:00:01"
+     ],
+     [
+      "net1",
+      "e1000e,bridge=vmbr0,macaddr=00:50:56:aa:00:02"
+     ],
+     [
+      "ostype",
+      "l26"
+     ],
+     [
+      "scsihw",
+      "pvscsi"
+     ],
+     [
+      "sockets",
+      1
+     ],
+     [
+      "tpmstate0",
+      "local-lvm:1,version=v2.0"
+     ],
+     [
+      "vga",
+      "std"
+     ],
+     [
+      "vmid",
+      120
+     ]
+    ]
+   ],
+   [
+    "node",
+    "pve1",
+    "df --output=avail / 2>/dev/null | tail -1"
+   ],
+   [
+    "node",
+    "pve1",
+    "dir=$(pvesm path local-lvm:1 2>/dev/null | xargs dirname 2>/dev/null) && [ -d \"$dir\" ] && echo $dir || echo /var/tmp"
+   ],
+   [
+    "esxi_ssh",
+    "readlink /vmfs/volumes/ds1 2>/dev/null || realpath /vmfs/volumes/ds1 2>/dev/null || ls -ld /vmfs/volumes/ds1 2>/dev/null | awk '{print $NF}'"
+   ],
+   [
+    "node",
+    "pve1",
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+   ],
+   [
+    "node",
+    "pve1",
+    "ls /tmp/v2p-t1/app01/*.vmdk 2>/dev/null | head -20"
+   ],
+   [
+    "esxi_api",
+    "power",
+    "stop",
+    "POWERED_ON"
+   ],
+   [
+    "esxi_ssh",
+    "stat -c'%s' /vmfs/volumes/ds1/app01/app01-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "esxcli storage filesystem list 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "vim-cmd hostsvc/datastore/listsummary 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-0.raw 3G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0.raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-0.raw 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-curl-0 && cat > /run/pegaprox-v2p-t1-curl-0 && [ \"$(wc -c < /run/pegaprox-v2p-t1-curl-0)\" -eq 17 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; : > /run/pegaprox-v2p-t1-cookies-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -K /run/pegaprox-v2p-t1-curl-0 -c /run/pegaprox-v2p-t1-cookies-0 -o /dev/null 'https://esx1.lab/folder?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-0 -K /run/pegaprox-v2p-t1-curl-0 -r 0-1048575 -o /tmp/v2p-t1-test-0 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-0 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-0 -r 0-1048575 -o /tmp/v2p-t1-test-0 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-0 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -vsk -b /run/pegaprox-v2p-t1-cookies-0 -K /run/pegaprox-v2p-t1-curl-0 -r 0-1023 'https://esx1.lab/folder/app01/app01-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>&1 | head -40"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-t1-test-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-ssh-0 && cat > /run/pegaprox-v2p-t1-ssh-0 && [ \"$(wc -c < /run/pegaprox-v2p-t1-ssh-0)\" -eq 2 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "sshpass -f /run/pegaprox-v2p-t1-ssh-0 ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 root@esx1.lab 'dd if=/vmfs/volumes/ds1/app01/app01-flat.vmdk bs=4M' 2>/dev/null | dd of='/mnt/pve/local-lvm/images/120/vm-120-disk-0.raw' bs=4M status=progress 2>/tmp/v2p-t1-sshdd-0.log; echo PIPE=${PIPESTATUS[0]}/${PIPESTATUS[1]}; rm -f /run/pegaprox-v2p-t1-ssh-0; cat /tmp/v2p-t1-sshdd-0.log; rm -f /tmp/v2p-t1-sshdd-0.log"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-ssh-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-curl-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-cookies-0"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi0 local-lvm:vm-120-disk-0.raw,discard=on 2>&1"
+   ],
+   [
+    "esxi_ssh",
+    "stat -c'%s' /vmfs/volumes/ds1/app01/app01_1-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "esxcli storage filesystem list 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "vim-cmd hostsvc/datastore/listsummary 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-1.raw 1G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-1.raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-1.raw 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-curl-1 && cat > /run/pegaprox-v2p-t1-curl-1 && [ \"$(wc -c < /run/pegaprox-v2p-t1-curl-1)\" -eq 17 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; : > /run/pegaprox-v2p-t1-cookies-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -K /run/pegaprox-v2p-t1-curl-1 -c /run/pegaprox-v2p-t1-cookies-1 -o /dev/null 'https://esx1.lab/folder?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-1 -K /run/pegaprox-v2p-t1-curl-1 -r 0-1048575 -o /tmp/v2p-t1-test-1 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-1 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-1 -r 0-1048575 -o /tmp/v2p-t1-test-1 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-1 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -vsk -b /run/pegaprox-v2p-t1-cookies-1 -K /run/pegaprox-v2p-t1-curl-1 -r 0-1023 'https://esx1.lab/folder/app01/app01_1-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>&1 | head -40"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-t1-test-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-ssh-1 && cat > /run/pegaprox-v2p-t1-ssh-1 && [ \"$(wc -c < /run/pegaprox-v2p-t1-ssh-1)\" -eq 2 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "sshpass -f /run/pegaprox-v2p-t1-ssh-1 ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 root@esx1.lab 'dd if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk bs=4M' 2>/dev/null | dd of='/mnt/pve/local-lvm/images/120/vm-120-disk-1.raw' bs=4M status=progress 2>/tmp/v2p-t1-sshdd-1.log; echo PIPE=${PIPESTATUS[0]}/${PIPESTATUS[1]}; rm -f /run/pegaprox-v2p-t1-ssh-1; cat /tmp/v2p-t1-sshdd-1.log; rm -f /tmp/v2p-t1-sshdd-1.log"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-ssh-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-curl-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-cookies-1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi1 local-lvm:vm-120-disk-1.raw,discard=on 2>&1"
+   ],
+   [
+    "esxi_ssh",
+    "stat -c'%s' /vmfs/volumes/ds1/app01/app01_2-flat.vmdk 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "esxcli storage filesystem list 2>/dev/null"
+   ],
+   [
+    "esxi_ssh",
+    "vim-cmd hostsvc/datastore/listsummary 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm status --storage local-lvm 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm list local-lvm --vmid 120 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm alloc local-lvm 120 vm-120-disk-2.raw 1G --format raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-2.raw 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm activate-volume local-lvm:vm-120-disk-2.raw 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-curl-2 && cat > /run/pegaprox-v2p-t1-curl-2 && [ \"$(wc -c < /run/pegaprox-v2p-t1-curl-2)\" -eq 17 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; : > /run/pegaprox-v2p-t1-cookies-2"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -K /run/pegaprox-v2p-t1-curl-2 -c /run/pegaprox-v2p-t1-cookies-2 -o /dev/null 'https://esx1.lab/folder?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-2 -K /run/pegaprox-v2p-t1-curl-2 -r 0-1048575 -o /tmp/v2p-t1-test-2 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01_2-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-2 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -sk -b /run/pegaprox-v2p-t1-cookies-2 -r 0-1048575 -o /tmp/v2p-t1-test-2 -w 'HTTP=%{http_code} DL=%{size_download}' 'https://esx1.lab/folder/app01/app01_2-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>/dev/null && echo ' FSIZE='$(stat -c%s /tmp/v2p-t1-test-2 2>/dev/null || echo 0)"
+   ],
+   [
+    "node",
+    "pve1",
+    "curl -vsk -b /run/pegaprox-v2p-t1-cookies-2 -K /run/pegaprox-v2p-t1-curl-2 -r 0-1023 'https://esx1.lab/folder/app01/app01_2-flat.vmdk?dcPath=ha-datacenter&dsName=ds1' 2>&1 | head -40"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-t1-test-2"
+   ],
+   [
+    "node",
+    "pve1",
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; rm -f /run/pegaprox-v2p-t1-ssh-2 && cat > /run/pegaprox-v2p-t1-ssh-2 && [ \"$(wc -c < /run/pegaprox-v2p-t1-ssh-2)\" -eq 2 ]"
+   ],
+   [
+    "node",
+    "pve1",
+    "sshpass -f /run/pegaprox-v2p-t1-ssh-2 ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 root@esx1.lab 'dd if=/vmfs/volumes/ds1/app01/app01_2-flat.vmdk bs=4M' 2>/dev/null | dd of='/mnt/pve/local-lvm/images/120/vm-120-disk-2.raw' bs=4M status=progress 2>/tmp/v2p-t1-sshdd-2.log; echo PIPE=${PIPESTATUS[0]}/${PIPESTATUS[1]}; rm -f /run/pegaprox-v2p-t1-ssh-2; cat /tmp/v2p-t1-sshdd-2.log; rm -f /tmp/v2p-t1-sshdd-2.log"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-ssh-2"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-curl-2"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /run/pegaprox-v2p-t1-cookies-2"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --scsi2 local-lvm:vm-120-disk-2.raw,discard=on 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --boot order=scsi0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm set 120 --efidisk0 local-lvm:1,efitype=4m,pre-enrolled-keys=0 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0.raw 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "pvesm path local-lvm:vm-120-disk-0.raw 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "fusermount -u /tmp/v2p-t1 2>/dev/null; rmdir /tmp/v2p-t1 2>/dev/null"
+   ],
+   [
+    "node",
+    "pve1",
+    "qm config 120 2>&1"
+   ],
+   [
+    "pve_api",
+    "/nodes/pve1/qemu/120/status/start",
+    []
+   ]
+  ]
+ }
+}

@@ -66,10 +66,13 @@ def _parse_interval_seconds(schedule):
 
     Supported:
       '0 */N * * *'  -> every N hours
-      '*/N * * * *'  -> every N minutes
+      '*/N * * * *'  -> every N minutes, also as plain '*/N'
       '0 H * * *'    -> daily at hour H (treated as 24h interval)
     """
     parts = schedule.strip().split()
+    # JB Nov 2026 - the form sends '*/15' and '*/30' as they are, for snapshot replication too
+    if len(parts) == 1 and parts[0].startswith('*/'):
+        parts = [parts[0], '*', '*', '*', '*']
     if len(parts) != 5:
         return 6 * 3600  # fallback: 6h
 
@@ -122,7 +125,8 @@ def _xcrepl_loop():
                 now = time.time()
                 for job in jobs:
                     job = dict(job)
-                    interval = _parse_interval_seconds(job.get('schedule', '0 */6 * * *'))
+                    # a NULL in the column raised here and ended the tick for every job after it
+                    interval = _parse_interval_seconds(str(job.get('schedule') or '0 */6 * * *'))
                     last_run = job.get('last_run', '')
 
                     # figure out seconds since last run

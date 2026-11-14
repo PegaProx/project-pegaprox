@@ -137,7 +137,7 @@ def test_the_new_label_exists_in_every_language():
     """t() returns the key itself when a string is missing, so a gap shows up as
     the literal 'showOnClusters' next to the cluster buttons."""
     body = open(os.path.join(ROOT, 'web', 'src', 'translations.js'), encoding='utf-8').read()
-    assert len(re.findall(r'^\s*showOnClusters:', body, re.M)) == 9
+    assert len(re.findall(r'^\s*showOnClusters:', body, re.M)) == 10
 
 
 def test_the_picker_is_reachable_from_the_plugin_list():

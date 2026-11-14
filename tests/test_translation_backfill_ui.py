@@ -10,6 +10,7 @@ Source checks read web/src/translations.js; the runtime tests drive the built bu
 headless Chromium against the fake server of tests/test_ha_ui.py and skip where Playwright
 is not installed. LW Oct 2026
 """
+import json
 import os
 import re
 
@@ -18,7 +19,7 @@ import pytest
 from test_ha_ui import CLUSTER, ESXI_READS, SSE_TOKEN, VM, VM_CONFIG, _App, _FakeServer, browser  # noqa: F401
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 KEY_LINE = re.compile(r"^ {16}('?)([A-Za-z0-9_.]+)\1\s*:")
 
 # a sample of the backfilled keys from each of the four views
@@ -104,7 +105,7 @@ def test_placeholders_and_markup_survive():
 def test_no_em_dash_in_the_backfill():
     blocks = _blocks()
     for key in SAMPLE:
-        for lang in ('de', 'zh', 'fr', 'es', 'pt', 'ko', 'it'):
+        for lang in ('de', 'zh', 'fr', 'es', 'pt', 'ko', 'it', 'ru'):
             assert '\u2014' not in blocks[lang][key][0], (lang, key)
 
 
@@ -120,7 +121,7 @@ def test_the_tenant_hint_speaks_of_the_role():
     """The hint sits under the tenant of a new user: a tenant role sets it. Portuguese said
     that new clusters go to this tenant, which is a different setting."""
     role = {'de': 'Rolle', 'en': 'role', 'zh': '角色', 'pl': 'roli', 'fr': 'rôle', 'es': 'rol',
-            'pt': 'função', 'ko': '역할', 'it': 'ruolo'}
+            'pt': 'função', 'ko': '역할', 'it': 'ruolo', 'ru': 'рол'}
     blocks = _blocks()
     for lang in LANGS:
         value = blocks[lang]['tenantAutoHint'][0]
@@ -131,9 +132,12 @@ def test_the_tenant_hint_speaks_of_the_role():
 
 def test_the_bundle_was_rebuilt():
     built = _read('web', 'index.html')
-    for needle in ('ESXi-Server bearbeiten', 'PBS-Verschlüsselungsschlüssel', '작업 및 이벤트',
-                   'Set automatically when you pick a tenant role'):
-        assert needle in built, needle
+    assert 'Set automatically when you pick a tenant role' in built
+    # LW Nov 2026 - the other languages are the files build.sh writes next to the bundle
+    for lang, needles in (('de', ('ESXi-Server bearbeiten', 'PBS-Verschlüsselungsschlüssel')), ('ko', ('작업 및 이벤트',))):
+        texts = json.loads(_read('web', 'i18n', f'{lang}.json')).values()
+        for needle in needles:
+            assert any(needle in v for v in texts), (lang, needle)
 
 
 # --- runtime -------------------------------------------------------------------------------

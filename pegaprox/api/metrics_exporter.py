@@ -846,7 +846,12 @@ def prometheus_metrics():
         try:
             vms = []
             if hasattr(mgr, 'get_vm_resources'):
-                vms = mgr.get_vm_resources() or []
+                vms = mgr.get_vm_resources()
+                if getattr(vms, 'unavailable', False) is True:
+                    # the guest list did not answer: no counts this scrape rather than
+                    # "0 running", which an alert on the series reads as every guest down
+                    continue
+                vms = vms or []
             elif hasattr(mgr, 'get_resources'):
                 vms = [r for r in (mgr.get_resources() or []) if r.get('type') in ('qemu', 'lxc')]
             out.extend(_sample('pegaprox_cluster_vms_total', len(vms), base))

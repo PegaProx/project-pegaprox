@@ -11,6 +11,7 @@ VMs using the existing cross-cluster migration infrastructure.
 """
 
 import time
+import uuid
 import logging
 import threading
 from datetime import datetime
@@ -64,47 +65,6 @@ def _pick_node(manager, highest=True):
         return best
     except Exception:
         return None
-
-
-def _token_cleanup_thread(target_mgr, source_mgr, token_name, task_upid, vmid, vm_type):
-    """Monitor migration task, then delete temp token.
-    MK: Same approach as vms.py cross-cluster migration cleanup.
-    """
-    max_wait, poll_interval = 7200, 15
-    min_wait = 120  # NS: 2 min for automated LB (shorter than manual's 5 min)
-    elapsed = 0
-    logger.info(f"[XCLB-CLEANUP] Monitoring {task_upid} for {vm_type}/{vmid}...")
-
-    while elapsed < max_wait:
-        try:
-            tasks = source_mgr.get_tasks(limit=100)
-            found = False
-            for t in tasks:
-                if t and t.get('upid') == task_upid:
-                    found = True
-                    status = t.get('status', '')
-                    if status and status != 'running':
-                        level = 'info' if status == 'OK' else 'warning'
-                        getattr(logger, level)(f"[XCLB-CLEANUP] {vmid} ended: {status}")
-                        time.sleep(30)
-                        target_mgr.delete_api_token(token_name)
-                        return
-                    break
-            # task scrolled out of list after min_wait -> assume done
-            if not found and elapsed > min_wait:
-                logger.info(f"[XCLB-CLEANUP] Task gone after {elapsed}s, assuming done")
-                target_mgr.delete_api_token(token_name)
-                return
-        except Exception as e:
-            logger.warning(f"[XCLB-CLEANUP] Poll error: {e}")
-        time.sleep(poll_interval)
-        elapsed += poll_interval
-
-    logger.warning(f"[XCLB-CLEANUP] Timeout after {max_wait}s, deleting token anyway")
-    try:
-        target_mgr.delete_api_token(token_name)
-    except Exception:
-        pass
 
 
 def run_cross_cluster_balance_check(group):
@@ -191,13 +151,16 @@ def run_cross_cluster_balance_check(group):
     if not ha.confirm_step(f'cross-cluster balancing of {vmid}'):
         return
 
-    # 7. create temp API token on target cluster
-    token_name = f"xclb-{group_id[:8]}-{vmid}"
-    token = lo_mgr.create_api_token(token_name)
+    # 7. create temp API token on target cluster, one per migration: VMIDs repeat across
+    # clusters and a guest still moving can be picked again, and a token of the same name
+    # is replaced, which revoked the one a running migration authenticates with
+    token_name = f"xclb-{group_id[:8]}-{vmid}-{uuid.uuid4().hex[:6]}"
+    token = lo_mgr.create_api_token(token_name, expire=transfer_net.token_expiry())
     if not token.get('success'):
         logger.error(f"[XCLB] Token creation failed on {lo_cid}: {token.get('error')}")
         return
 
+    started = False
     try:
         # 8. get fingerprint + build endpoint
         # MK Oct 2026 - at the target node's transfer address when lo has a transfer network
@@ -227,25 +190,28 @@ def run_cross_cluster_balance_check(group):
 
         if result.get('success'):
             task_upid = result.get('task')
+            # spawn token cleanup thread (its delete comes later and asks at its exit); the
+            # token is its own from here, the except below leaves it to the running task
+            started = True
+            threading.Thread(
+                target=ha.as_job(transfer_net.drop_token_when_done, f'token cleanup for {vmid}'),
+                args=(lo_mgr, hi_mgr, token_name, task_upid, f'{vm_type}/{vmid}'),
+                daemon=True
+            ).start()
             log_audit('system', 'xclb.migrate',
                       f"Cross-cluster LB: Migrated {vm_type}/{vmid} ({vm_name}) "
                       f"from {hi_cid} to {lo_cid} (group:{group_id})")
-            # spawn token cleanup thread (its delete comes later and asks at its exit)
-            threading.Thread(
-                target=ha.as_job(_token_cleanup_thread, f'token cleanup for {vmid}'),
-                args=(lo_mgr, hi_mgr, token_name, task_upid, vmid, vm_type),
-                daemon=True
-            ).start()
         else:
             logger.error(f"[XCLB] Migration failed: {result.get('error')}")
             lo_mgr.delete_api_token(token_name)
 
     except Exception as e:
         logger.error(f"[XCLB] Error during migration: {e}")
-        try:
-            lo_mgr.delete_api_token(token_name)
-        except Exception:
-            pass
+        if not started:
+            try:
+                lo_mgr.delete_api_token(token_name)
+            except Exception:
+                pass
 
     # 10. update last run timestamp
     try:

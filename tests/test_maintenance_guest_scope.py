@@ -51,9 +51,24 @@ def _task():
 class _Cluster:
     """What the routes read of a Proxmox manager. get_node_status hands out one dict and
     keeps it, as the real one does with its short cache, so a route that writes into the
-    answer writes into what the next caller gets."""
+    answer writes into what the next caller gets.
+
+    Every confined caller below has a guest on n1, the node in maintenance: VM 100 (the
+    VM-ACL) and VM 101 (pool1). A confined caller sees the nodes its own guests run on."""
     cluster_type = 'proxmox'
     is_connected = True
+    guests = [{'vmid': 100, 'node': 'n1', 'type': 'qemu', 'name': 'acl-vm', 'status': 'running'},
+              {'vmid': 101, 'node': 'n1', 'type': 'qemu', 'name': 'pool-vm', 'status': 'running'},
+              {'vmid': 200, 'node': 'n2', 'type': 'qemu', 'name': 'other-vm', 'status': 'running'}]
+
+    def get_vm_resources(self, max_age=0.0):
+        return [dict(g) for g in self.guests]
+
+    def get_pools(self):
+        return [{'poolid': 'pool1'}]
+
+    def get_pool_members(self, pool_id):
+        return {'members': [{'vmid': 101, 'type': 'qemu'}] if pool_id == 'pool1' else []}
 
     def __init__(self):
         self.nodes_in_maintenance = {'n1': _task()}
@@ -201,11 +216,14 @@ def test_a_lowered_admin_in_a_cluster_of_their_own_tenant_sees_it_whole(api, see
 
 
 # --- the live stream -----------------------------------------------------------------------
+# A non-admin stream gets the nodes its own guests run on, as the resources pass found them
+# (#1218): each test sends a resources frame first.
 
 @pytest.fixture
 def stream():
     saved = dict(rt.sse_clients)
     rt.sse_clients.clear()
+    rt._sse_node_scope.clear()
     queues = {}
 
     def add(name, user, is_admin, effective_role, clusters=None):
@@ -217,12 +235,20 @@ def stream():
     finally:
         rt.sse_clients.clear()
         rt.sse_clients.update(saved)
+        rt._sse_node_scope.clear()
 
 
 def _frame(q):
     msg = q.get_nowait()
     assert q.empty()
     return msg
+
+
+def _resources_frame(cluster, queues):
+    rt.broadcast_sse('resources', cluster.get_vm_resources(), CID)
+    for q in queues.values():
+        while not q.empty():
+            q.get_nowait()
 
 
 def test_the_metrics_frame_carries_the_guests_only_to_who_may_see_them(api, seed, cluster, stream):
@@ -239,32 +265,40 @@ def test_the_metrics_frame_carries_the_guests_only_to_who_may_see_them(api, seed
     add('lowered_admin', 'gx', True, 'admin', clusters=['other', CID])
     add('other_tenant', 'milton', False, 'user', clusters=['other'])
     add('gone', 'nobody-here', False, 'user')
+    _resources_frame(cluster, queues)
     rt.broadcast_sse('metrics', cluster.get_node_status(), CID)
     for kind in ('admin', 'operator'):
         msg = _frame(queues[kind])
         assert json.loads(msg)['data']['n1']['maintenance_task']['failed_vms'], kind
-    for kind in ('default_acl_user', 'pool_user', 'lowered_admin', 'gone'):
+    for kind in ('default_acl_user', 'pool_user', 'lowered_admin'):
         data = json.loads(_frame(queues[kind]))['data']
         # the data, not the frame: the frame's timestamp has digits of its own
         assert _no_guests(json.dumps(data)), kind
         task = data['n1']['maintenance_task']
         assert task['status'] == 'evacuating' and task['migrated_vms'] == 2, kind
+    # an account that is not there gets no frame at all
+    assert queues['gone'].empty()
     assert queues['other_tenant'].empty()
     # the manager's answer is the one the next frame is made from
     assert cluster.get_node_status()['n1']['maintenance_task']['off_pin_vms']
 
 
 def test_a_quiet_cluster_costs_the_stream_no_user_read(api, seed, cluster, stream, monkeypatch):
-    """Nothing to cut without a maintenance: every client gets the one shared frame and no
-    account is read for it (the loop sends this once a second per cluster)."""
+    """Nothing to cut without a maintenance: the admin and an operator get the one shared
+    frame, a confined client the nodes of its guests, and no account is read for it once a
+    resources frame has gone out (the loop sends this once a second per cluster)."""
     add, queues = stream
+    _who(api, seed)
     add('default_acl_user', 'dora', False, 'user')
+    add('operator', 'ops', False, 'user', clusters=[CID])
     add('admin', 'root', True, 'admin')
+    cluster.nodes_in_maintenance = {}
+    _resources_frame(cluster, queues)
     reads = []
     monkeypatch.setattr(rt, '_sse_stored_user', lambda *a, **k: reads.append(a))
-    cluster.nodes_in_maintenance = {}
     rt.broadcast_sse('metrics', cluster.get_node_status(), CID)
-    assert _frame(queues['default_acl_user']) == _frame(queues['admin'])
+    assert _frame(queues['operator']) == _frame(queues['admin'])
+    assert sorted(json.loads(_frame(queues['default_acl_user']))['data']) == ['n1']
     assert reads == []
 
 

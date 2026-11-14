@@ -174,8 +174,7 @@ def test_a_directory_login_onto_an_account_it_does_not_own_falls_to_local_auth(h
 
 def test_building_the_row_leaves_the_row_it_was_given_alone(db):
     from pegaprox.utils.ldap import ldap_build_user_row
-    # held in memory as a login sees it; ldap_tenant_permissions has no column to
-    # survive a trip through the database
+    # held in memory as a login sees it
     row = {'role': 'admin', 'tenant_id': 'default', 'auth_source': 'ldap',
            'permissions': ['vm.view'], 'ldap_permissions': ['vm.view'],
            'tenant_permissions': {'acme': {'role': 'admin'}},

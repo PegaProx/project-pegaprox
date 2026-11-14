@@ -208,10 +208,10 @@ def test_the_landing_empty_states_render_the_cta_only_when_given():
 # -- cloud.js ------------------------------------------------------------------
 
 def test_the_cloud_nav_item_is_gated_and_sits_after_hosts(cloud):
-    item = ("...(canAutoInstall ? [{ id: 'autoinstall', label: 'Automated Installs', "
+    item = ("...(canAutoInstall ? [{ id: 'autoinstall', label: t('cloudNavAutoInstall'), "
             "icon: 'Disc' }] : []),")
     assert item in cloud
-    hosts = cloud.index("{ id: 'nodes', label: 'Hosts', icon: 'Cpu' },")
+    hosts = cloud.index("{ id: 'nodes', label: t('hosts'), icon: 'Cpu' },")
     assert cloud.index(item) > hosts
     assert cloud[hosts:cloud.index(item)].count('{ id:') == 1, 'something slipped in between'
     assert 'function CloudSideNav({ active, onSelect, isAdmin, canAutoInstall,' in cloud
@@ -222,7 +222,8 @@ def test_the_cloud_shell_reads_the_flag_off_the_current_user(cloud):
     # that forwards either: the answer URL the page shows would be the standby's own
     assert 'const canAutoInstall = !!(currentUser && currentUser.autoinstall_access) && !haStandby;' in cloud
     shell = cloud[cloud.index('function CloudShell('):]
-    assert shell.index('const { ha, haStandby, haConsolesElsewhere } = useAuth();') < shell.index('const canAutoInstall =')
+    # haReadOnly is read there as well, for the blueprints (#1220)
+    assert shell.index('const { ha, haStandby, haConsolesElsewhere, haReadOnly } = useAuth();') < shell.index('const canAutoInstall =')
     assert 'canAutoInstall={canAutoInstall}' in cloud
 
 
@@ -234,7 +235,9 @@ def test_every_layout_keeps_the_entry_off_every_standby(dash):
         assert gate not in dash, gate
         assert gate not in _read(VM_MODALS), gate
     assert dash.count('{canAutoInstall && !haStandby && (') == 2
-    assert dash.count('show: canAutoInstall && !haStandby,') == 1   # the corporate Tools section
+    # the corporate Tools section and the folded rail of Corporate Redesigned, each behind the gate
+    entries = dash.count("{ id: 'autoinstall',")
+    assert entries == dash.count("{ id: 'autoinstall', show: canAutoInstall && !haStandby,") == 2
     assert ("const { user, sessionId, logout, getAuthHeaders, isAdmin, passwordExpiry, updatePreferences, "
             "ha, haReadOnly, haStandby, haConsolesElsewhere, haServing, refreshHa } = useAuth();") in dash
 

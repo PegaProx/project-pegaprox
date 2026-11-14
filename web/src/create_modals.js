@@ -9,7 +9,7 @@
             { label: 'Ubuntu 24.04 LTS', icon: '🐧', config: { ostype: 'l26', cores: 2, sockets: 1, memory: 2048, disk_size: '32', cpu: 'host', agent: true, bios: 'seabios', machine: 'i440fx', scsihw: 'virtio-scsi-single', net_model: 'virtio', disk_type: 'scsi', disk_discard: true, disk_iothread: true } },
             { label: 'Windows Server 2022', icon: '🖥️', config: { ostype: 'win11', cores: 4, sockets: 1, memory: 4096, disk_size: '64', cpu: 'host', agent: true, bios: 'ovmf', machine: 'q35', scsihw: 'virtio-scsi-single', net_model: 'virtio', disk_type: 'scsi', disk_discard: true } },
             { label: 'Windows 11', icon: '💻', config: { ostype: 'win11', cores: 4, sockets: 1, memory: 8192, disk_size: '64', cpu: 'host', agent: true, bios: 'ovmf', machine: 'q35', scsihw: 'virtio-scsi-single', net_model: 'virtio', disk_type: 'scsi', tpm_version: 'v2.0' } },
-            { label: 'Minimal Linux', icon: '⚡', config: { ostype: 'l26', cores: 1, sockets: 1, memory: 512, disk_size: '8', cpu: 'host', agent: false, bios: 'seabios', net_model: 'virtio', disk_type: 'virtio' } },
+            { label: 'Minimal Linux', icon: '⚡', config: { ostype: 'l26', cores: 1, sockets: 1, memory: 512, disk_size: '8', cpu: 'host', agent: false, bios: 'seabios', net_model: 'virtio', disk_type: 'virtio', disk_ssd: false } },
         ];
 
         function CreateVmModal({ vmType, clusterId, clusterType, nodes: initialNodes, onCreate, onClose }) {
@@ -48,6 +48,23 @@
                 }
             };
             
+            // LW Nov 2026 - the cluster's own CPU models (its PVE version, its custom-* models), the
+            // list the VM config dialog offers too; the built-in list below stays the fallback
+            const [liveCpuTypes, setLiveCpuTypes] = useState(null);
+            useEffect(() => {
+                if (!isQemu || isXcpng) return;
+                let gone = false;
+                (async () => {
+                    const r = await authFetch(`${API_URL}/hardware-options?cluster_id=${encodeURIComponent(clusterId)}`);
+                    if (!r || !r.ok) return;
+                    try {
+                        const d = await r.json();
+                        if (!gone && Array.isArray(d.cpu_types) && d.cpu_types.length) setLiveCpuTypes(d.cpu_types);
+                    } catch (e) { /* keep the built-in list */ }
+                })();
+                return () => { gone = true; };
+            }, [clusterId]);
+
             // Fetch nodes if not provided
             useEffect(() => {
                 const fetchNodes = async () => {
@@ -275,6 +292,9 @@
                 setLoading(false);
             };
 
+            // a container needs a root password or an SSH key, the server refuses it otherwise
+            const ctNeedsCredential = !isQemu && !config.password && !(config.ssh_public_keys || '').trim();
+
             // LW: XCP-ng VMs skip the advanced step (no BIOS/Machine/SCSI/EFI/TPM)
             const steps = isXcpng && isQemu
                 ? [t('general'), t('installMethod') || 'Install', t('hardware'), t('disk'), t('network'), t('options') || 'Options']
@@ -304,21 +324,34 @@
             // MK 2026-05-30 — host first, max second, then alphabetical (case-insensitive).
             // Matches the backend get_cpu_types() ordering; VM Config dropdown already gets
             // a sorted list from /api/hardware-options so the two surfaces look identical now.
-            const cpuTypes = (() => {
+            const cpuTypes = liveCpuTypes || (() => {
+                // qemu-server's own x86_64 list (CPUConfig.pm) with host and the x86-64-v* levels
                 const all = [
                     'host', 'max',
                     'kvm64', 'kvm32', 'qemu64', 'qemu32',
+                    'x86-64-v2', 'x86-64-v2-AES', 'x86-64-v3', 'x86-64-v4',
+                    '486', 'pentium', 'pentium2', 'pentium3', 'coreduo', 'core2duo', 'Conroe', 'Penryn',
+                    'Nehalem', 'Nehalem-IBRS', 'Westmere', 'Westmere-IBRS',
+                    'SandyBridge', 'SandyBridge-IBRS', 'IvyBridge', 'IvyBridge-IBRS',
+                    'Haswell', 'Haswell-IBRS', 'Haswell-noTSX', 'Haswell-noTSX-IBRS',
                     'Broadwell', 'Broadwell-IBRS', 'Broadwell-noTSX', 'Broadwell-noTSX-IBRS',
-                    'Cascadelake-Server', 'Cascadelake-Server-noTSX', 'Conroe', 'EPYC', 'EPYC-IBPB',
-                    'EPYC-Milan', 'EPYC-Rome', 'Haswell', 'Haswell-IBRS', 'Haswell-noTSX',
-                    'Haswell-noTSX-IBRS', 'Icelake-Client', 'Icelake-Client-noTSX', 'Icelake-Server',
-                    'Icelake-Server-noTSX', 'IvyBridge', 'IvyBridge-IBRS', 'KnightsMill', 'Nehalem',
-                    'Nehalem-IBRS', 'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
-                    'Penryn', 'SandyBridge', 'SandyBridge-IBRS', 'Skylake-Client', 'Skylake-Client-IBRS',
-                    'Skylake-Client-noTSX-IBRS', 'Skylake-Server', 'Skylake-Server-IBRS',
-                    'Skylake-Server-noTSX-IBRS', 'Westmere', 'Westmere-IBRS', 'athlon', 'core2duo',
-                    'coreduo', 'n270', 'pentium', 'pentium2', 'pentium3', 'phenom', 'x86-64-v2',
-                    'x86-64-v2-AES', 'x86-64-v3', 'x86-64-v4',
+                    'Skylake-Client', 'Skylake-Client-IBRS', 'Skylake-Client-noTSX-IBRS', 'Skylake-Client-v4',
+                    'Skylake-Server', 'Skylake-Server-IBRS', 'Skylake-Server-noTSX-IBRS', 'Skylake-Server-v4',
+                    'Skylake-Server-v5',
+                    'Cascadelake-Server', 'Cascadelake-Server-v2', 'Cascadelake-Server-noTSX',
+                    'Cascadelake-Server-v4', 'Cascadelake-Server-v5',
+                    'Cooperlake', 'Cooperlake-v2', 'KnightsMill',
+                    'Icelake-Client', 'Icelake-Client-noTSX', 'Icelake-Server', 'Icelake-Server-noTSX',
+                    'Icelake-Server-v3', 'Icelake-Server-v4', 'Icelake-Server-v5', 'Icelake-Server-v6',
+                    'Icelake-Server-v7',
+                    'SapphireRapids', 'SapphireRapids-v2', 'SapphireRapids-v3', 'SapphireRapids-v4',
+                    'GraniteRapids', 'GraniteRapids-v2', 'GraniteRapids-v3',
+                    'SierraForest', 'SierraForest-v2', 'SierraForest-v3', 'ClearwaterForest',
+                    'athlon', 'phenom', 'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
+                    'EPYC', 'EPYC-IBPB', 'EPYC-v3', 'EPYC-v4', 'EPYC-v5',
+                    'EPYC-Rome', 'EPYC-Rome-v2', 'EPYC-Rome-v3', 'EPYC-Rome-v4', 'EPYC-Rome-v5',
+                    'EPYC-Milan', 'EPYC-Milan-v2', 'EPYC-Milan-v3',
+                    'EPYC-Genoa', 'EPYC-Genoa-v2', 'EPYC-Turin',
                 ];
                 const head = [];
                 const rest = [];
@@ -766,7 +799,7 @@
                                         <div className="grid grid-cols-4 gap-3 mb-3">
                                             <div>
                                                 <label className="block text-xs text-gray-400 mb-1">{t('busType')}</label>
-                                                <select value={config.disk_type} onChange={e => setConfig({...config, disk_type: e.target.value})}
+                                                <select value={config.disk_type} onChange={e => setConfig({...config, disk_type: e.target.value, disk_ssd: e.target.value === 'virtio' ? false : config.disk_ssd})}
                                                     className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
                                                     <option value="scsi">SCSI</option>
                                                     <option value="virtio">VirtIO Block</option>
@@ -835,10 +868,13 @@
                                                     {t('ioThread')}
                                                 </label>
                                             )}
-                                            <label className="flex items-center gap-2 text-xs text-gray-300">
-                                                <input type="checkbox" checked={config.disk_ssd} onChange={e => setConfig({...config, disk_ssd: e.target.checked})} className="rounded" />
-                                                {t('ssdEmulation')}
-                                            </label>
+                                            {/* LW Nov 2026 - VirtIO Block has no SSD emulation, PVE refuses the create with it */}
+                                            {config.disk_type !== 'virtio' && (
+                                                <label className="flex items-center gap-2 text-xs text-gray-300">
+                                                    <input type="checkbox" checked={config.disk_ssd} onChange={e => setConfig({...config, disk_ssd: e.target.checked})} className="rounded" />
+                                                    {t('ssdEmulation')}
+                                                </label>
+                                            )}
                                         </div>
                                             </>
                                         )}
@@ -859,7 +895,7 @@
                                                     <label className="block text-xs text-gray-400 mb-1">{t('busType')}</label>
                                                     <select value={disk.type} onChange={e => {
                                                         const newDisks = [...config.additional_disks];
-                                                        newDisks[idx] = {...disk, type: e.target.value};
+                                                        newDisks[idx] = {...disk, type: e.target.value, ssd: e.target.value === 'virtio' ? false : disk.ssd};
                                                         setConfig({...config, additional_disks: newDisks});
                                                     }}
                                                         className="w-full px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
@@ -956,14 +992,16 @@
                                                         {t('ioThread')}
                                                     </label>
                                                 )}
-                                                <label className="flex items-center gap-2 text-xs text-gray-300">
-                                                    <input type="checkbox" checked={disk.ssd || false} onChange={e => {
-                                                        const newDisks = [...config.additional_disks];
-                                                        newDisks[idx] = {...disk, ssd: e.target.checked};
-                                                        setConfig({...config, additional_disks: newDisks});
-                                                    }} className="rounded" />
-                                                    {t('ssdEmulation')}
-                                                </label>
+                                                {disk.type !== 'virtio' && (
+                                                    <label className="flex items-center gap-2 text-xs text-gray-300">
+                                                        <input type="checkbox" checked={disk.ssd || false} onChange={e => {
+                                                            const newDisks = [...config.additional_disks];
+                                                            newDisks[idx] = {...disk, ssd: e.target.checked};
+                                                            setConfig({...config, additional_disks: newDisks});
+                                                        }} className="rounded" />
+                                                        {t('ssdEmulation')}
+                                                    </label>
+                                                )}
                                             </div>
                                         </div>
                                     ))}
@@ -1331,6 +1369,9 @@
                                         />
                                         <p className="text-xs text-gray-500 mt-1">{t('sshKeyHintMultiple') || 'One key per line. Paste or load from file.'}</p>
                                     </div>
+                                    {ctNeedsCredential && (
+                                        <p data-ct-credential-hint className="text-xs text-yellow-400">{t('ctCredentialRequired')}</p>
+                                    )}
                                 </div>
                             );
                         case 2: // Ressourcen
@@ -1824,7 +1865,8 @@
                                     ) : (
                                         <button
                                             onClick={handleCreate}
-                                            disabled={loading || (!isQemu && !config.template)}
+                                            disabled={loading || (!isQemu && !config.template) || ctNeedsCredential}
+                                            title={ctNeedsCredential ? t('ctCredentialRequired') : undefined}
                                             className="corp-vm-btn corp-vm-btn-create"
                                         >
                                             {loading && <Icons.RotateCw className="w-3.5 h-3.5" />}
@@ -1920,7 +1962,8 @@
                                 ) : (
                                     <button
                                         onClick={handleCreate}
-                                        disabled={loading || (!isQemu && !config.template)}
+                                        disabled={loading || (!isQemu && !config.template) || ctNeedsCredential}
+                                        title={ctNeedsCredential ? t('ctCredentialRequired') : undefined}
                                         className="flex items-center gap-2 px-4 py-2 bg-green-600 rounded-lg text-white hover:bg-green-700 disabled:opacity-50"
                                     >
                                         {loading && <Icons.RotateCw />}
@@ -1943,7 +1986,7 @@
             name: '', host: '', api_port: 8006, node_ui_suffix: '', user: 'root@pam', pass: '',
             ssl_verification: false, migration_threshold: 20, migration_tolerance: 10, check_interval: 300,
             auto_migrate: false, balance_containers: false, balance_local_disks: false,
-            dry_run: false, ssh_key: '', ssh_disabled: false, ha_enabled: false, proxlb_tags_enabled: false,
+            dry_run: false, ssh_user: '', ssh_key: '', ssh_key_remove: false, ssh_disabled: false, ha_enabled: false, proxlb_tags_enabled: false,
             proxlb_pins_auto_migrate: false, proxlb_pins_strict: false,
             predictive_balancing: false, predictive_threshold: 75,
             balance_cpu_weight: 1.0, balance_mem_weight: 1.0, balance_io_weight: 0.0,
@@ -2433,7 +2476,9 @@
                         // just this subset. The omitted toggles (HA, ProxLB tags, predictive balancing +
                         // its weights/baseline) started at their defaults, so hitting Re-configure quietly
                         // switched them back off. The list GET already returns all of these.
-                        setConfig(prev => ({ ...prev, name: rc.name || '', host: rc.host || '', api_port: rc.api_port || 8006, node_ui_suffix: rc.node_ui_suffix || '', user: rc.user || '', pass: '', ssl_verification: rc.ssl_verification || false, migration_threshold: rc.migration_threshold || 20, migration_tolerance: rc.migration_tolerance || 10, check_interval: rc.check_interval || 300, auto_migrate: rc.auto_migrate || false, balance_containers: rc.balance_containers || false, balance_local_disks: rc.balance_local_disks || false, dry_run: rc.dry_run || false, ssh_key: '', ssh_disabled: rc.ssh_disabled || false, ha_enabled: rc.ha_enabled || false, proxlb_tags_enabled: rc.proxlb_tags_enabled || false, proxlb_pins_auto_migrate: rc.proxlb_pins_auto_migrate === true, proxlb_pins_strict: rc.proxlb_pins_strict === true, predictive_balancing: rc.predictive_balancing || false, predictive_threshold: rc.predictive_threshold || 75, balance_cpu_weight: rc.balance_cpu_weight || 1.0, balance_mem_weight: rc.balance_mem_weight || 1.0, balance_io_weight: rc.balance_io_weight || 0.0, cpu_baseline: rc.cpu_baseline || null }));
+                        setConfig(prev => ({ ...prev, name: rc.name || '', host: rc.host || '', api_port: rc.api_port || 8006, node_ui_suffix: rc.node_ui_suffix || '', user: rc.user || '', pass: '', ssl_verification: rc.ssl_verification || false, migration_threshold: rc.migration_threshold || 20, migration_tolerance: rc.migration_tolerance || 10, check_interval: rc.check_interval || 300, auto_migrate: rc.auto_migrate || false, balance_containers: rc.balance_containers || false, balance_local_disks: rc.balance_local_disks || false, dry_run: rc.dry_run || false, ssh_user: rc.ssh_user || '', ssh_key: '', ssh_key_remove: false, ssh_disabled: rc.ssh_disabled || false, ha_enabled: rc.ha_enabled || false, proxlb_tags_enabled: rc.proxlb_tags_enabled || false, proxlb_pins_auto_migrate: rc.proxlb_pins_auto_migrate === true, proxlb_pins_strict: rc.proxlb_pins_strict === true, predictive_balancing: rc.predictive_balancing || false, predictive_threshold: rc.predictive_threshold || 75, balance_cpu_weight: rc.balance_cpu_weight || 1.0, balance_mem_weight: rc.balance_mem_weight || 1.0, balance_io_weight: rc.balance_io_weight || 0.0, cpu_baseline: rc.cpu_baseline || null }));
+                        // a login other than root is easy to miss behind a closed section
+                        if (rc.ssh_user) setShowSshSettings(true);
                     }
                 }
             }, [isOpen, initialType, reconfigureConfig]);
@@ -2600,9 +2645,23 @@
                                 {showSshSettings && (
                                     <div className="mt-4 space-y-4 p-4 bg-proxmox-dark/50 rounded-lg">
                                         <p className="text-xs text-gray-400">{t('sshKeyExplanation')}</p>
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('sshUser') || 'SSH User'}</label>
+                                            <input type="text" data-ssh-user value={config.ssh_user || ''} onChange={e => setConfig({...config, ssh_user: e.target.value})}
+                                                placeholder="root" autoComplete="off" spellCheck={false}
+                                                className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors text-sm" />
+                                            <p className="text-xs text-gray-500 mt-1">{t('sshUserHint')}</p>
+                                        </div>
                                         <textarea value={config.ssh_key} onChange={e => setConfig({...config, ssh_key: e.target.value})}
                                             className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors font-mono text-xs"
-                                            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" rows={4} />
+                                            placeholder={reconfigureConfig?.has_ssh_key ? t('sshKeyStoredKeep') : '-----BEGIN OPENSSH PRIVATE KEY-----'} rows={4} />
+                                        {reconfigureConfig?.has_ssh_key && (
+                                            <label className="flex items-center gap-2 text-xs text-gray-400">
+                                                <input type="checkbox" data-ssh-key-remove checked={!!config.ssh_key_remove} disabled={!!(config.ssh_key || '').trim()}
+                                                    onChange={e => setConfig({...config, ssh_key_remove: e.target.checked})} />
+                                                {t('sshKeyRemove')}
+                                            </label>
+                                        )}
                                         <div className="pt-2 border-t border-proxmox-border">
                                             <Toggle checked={config.ssh_disabled} onChange={v => setConfig({...config, ssh_disabled: v})} label={t('sshDisabled') || 'No SSH to this cluster'} />
                                             <p className="text-xs text-gray-400 mt-2">{t('sshDisabledDesc') || 'Blocks every SSH connection to this cluster\'s nodes, including the node shell and the VNC tunnel. Features that need a shell will say so.'}</p>
@@ -2860,9 +2919,11 @@
 
         // User Profile Modal with Password Change and 2FA Setup
         function UserProfileModal({ isOpen, onClose, addToast }) {
-            const { t } = useTranslation();
-            const { getAuthHeaders, user, updatePreferences, updateCurrentUser } = useAuth();
+            const { t, languageLocked } = useTranslation();
+            const { getAuthHeaders, user, updatePreferences, updateCurrentUser, layoutLock } = useAuth();
             const { isCorporate } = useLayout();
+            const layerRef = React.useRef(null);
+            useEscapeToClose(isOpen, onClose, layerRef);
             const [activeTab, setActiveTab] = useState('appearance');
             const [loading, setLoading] = useState(false);
             const [selectedTheme, setSelectedTheme] = useState(user?.theme || 'proxmoxDark');
@@ -3235,7 +3296,7 @@
                 : `flex-1 px-4 py-3 text-sm font-medium transition-colors flex items-center justify-center gap-2 ${active ? 'text-proxmox-orange border-b-2 border-proxmox-orange' : 'text-gray-400 hover:text-white'}`;
 
             return(
-                <div className={overlayCls} onClick={onClose}>
+                <div ref={layerRef} className={overlayCls} onClick={onClose}>
                     <div
                         className={panelCls}
                         onClick={e => e.stopPropagation()}
@@ -3350,8 +3411,9 @@
 
                                     {/* #742: the theme grid is hidden in the Corporate layout — corporate
                                         light/dark is driven by the toggle in the top bar, so the personal
-                                        themes here don't apply there and would look "ignored". */}
-                                    {(user?.ui_layout !== 'corporate') && (<>
+                                        themes here don't apply there and would look "ignored".
+                                        isCorporate is the layout in use, a pinned one included (#1189) */}
+                                    {!isCorporate && (<>
                                     <div>
                                         <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2">
                                             <Icons.Palette />
@@ -3426,10 +3488,18 @@
                                             <Icons.Grid className="w-4 h-4" />
                                             {t('layoutStyle') || 'Layout Style'}
                                         </h3>
+                                        {/* LW Oct 2026 (#1189) - pinned for everyone, so no cards to pick from */}
+                                        {layoutLock ? (
+                                            <p className="text-xs text-gray-400" data-ui-lock="layout">
+                                                {t('uiLayoutLockedHint') || 'Layout set by your administrator'}
+                                            </p>
+                                        ) : (<>
                                         <p className="text-xs text-gray-400 mb-3">
                                             {t('layoutStyleDesc') || 'Choose between modern dashboard or corporate enterprise style.'}
                                         </p>
-                                        <div className="grid grid-cols-3 gap-3">
+                                        {/* LW Nov 2026 - Corporate Redesigned takes the place of classic Corporate,
+                                            whose card only someone already on it still sees */}
+                                        <div className={`grid grid-cols-2 ${user?.ui_layout === 'corporate' ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-3`}>
                                             {/* Modern layout card */}
                                             <button
                                                 onClick={async () => {
@@ -3465,42 +3535,87 @@
                                                 </div>
                                             </button>
                                             {/* Corporate layout card */}
+                                            {user?.ui_layout === 'corporate' && (
+                                                <button
+                                                    onClick={async () => {
+                                                        const corpTheme = localStorage.getItem('corp-theme') === 'light' ? 'corporateLight' : 'corporateDark';
+                                                        const result = await updatePreferences({ ui_layout: 'corporate', theme: corpTheme });
+                                                        if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutCorporate') || 'Corporate'}`, 'success');
+                                                    }}
+                                                    className={`p-3 rounded-xl border-2 transition-all hover:scale-105 text-left ${
+                                                        user?.ui_layout === 'corporate'
+                                                            ? 'border-proxmox-orange ring-2 ring-proxmox-orange/30'
+                                                            : 'border-proxmox-border hover:border-gray-500'
+                                                    }`}
+                                                >
+                                                    <div className="h-16 rounded mb-2 relative overflow-hidden bg-proxmox-dark border border-proxmox-border">
+                                                        {/* Corporate preview: flat sidebar, tree lines, underline tabs */}
+                                                        <div className="absolute left-0 top-0 bottom-0 w-5 bg-proxmox-card border-r border-proxmox-border">
+                                                            <div className="mt-2 ml-1 space-y-1">
+                                                                <div className="w-3 h-0.5 bg-gray-500" />
+                                                                <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                                                <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                                            </div>
+                                                        </div>
+                                                        <div className="absolute right-1.5 top-1.5 left-7 h-2 bg-proxmox-card border-b border-proxmox-border flex items-end gap-1 px-1">
+                                                            <div className="w-3 h-0.5 bg-proxmox-orange" />
+                                                            <div className="w-3 h-0.5 bg-gray-600" />
+                                                            <div className="w-3 h-0.5 bg-gray-600" />
+                                                        </div>
+                                                        <div className="absolute right-1.5 top-5 left-7 bottom-1.5 bg-proxmox-card border border-proxmox-border" />
+                                                        {user?.ui_layout === 'corporate' && (
+                                                            <div className="absolute top-1 right-1 bg-proxmox-orange rounded-full p-0.5">
+                                                                <Icons.Check className="w-3 h-3 text-white" />
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                    <div className="text-center">
+                                                        <span className="text-xs font-medium">{t('layoutCorporate') || 'Corporate'}</span>
+                                                        <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
+                                                    </div>
+                                                </button>
+                                            )}
+                                            {/* LW Oct 2026 - Corporate Redesigned: Corporate with the redesigned skin */}
                                             <button
+                                                data-layout-pick="corporate-redesigned"
                                                 onClick={async () => {
                                                     const corpTheme = localStorage.getItem('corp-theme') === 'light' ? 'corporateLight' : 'corporateDark';
-                                                    const result = await updatePreferences({ ui_layout: 'corporate', theme: corpTheme });
-                                                    if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutCorporate') || 'Corporate'}`, 'success');
+                                                    const result = await updatePreferences({ ui_layout: 'corporate-redesigned', theme: corpTheme });
+                                                    if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutCorporateRedesigned')}`, 'success');
                                                 }}
                                                 className={`p-3 rounded-xl border-2 transition-all hover:scale-105 text-left ${
-                                                    user?.ui_layout === 'corporate'
+                                                    user?.ui_layout === 'corporate-redesigned'
                                                         ? 'border-proxmox-orange ring-2 ring-proxmox-orange/30'
                                                         : 'border-proxmox-border hover:border-gray-500'
                                                 }`}
                                             >
-                                                <div className="h-16 rounded mb-2 relative overflow-hidden bg-proxmox-dark border border-proxmox-border">
-                                                    {/* Corporate preview: flat sidebar, tree lines, underline tabs */}
-                                                    <div className="absolute left-0 top-0 bottom-0 w-5 bg-proxmox-card border-r border-proxmox-border">
-                                                        <div className="mt-2 ml-1 space-y-1">
-                                                            <div className="w-3 h-0.5 bg-gray-500" />
-                                                            <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
-                                                            <div className="w-2.5 h-0.5 bg-gray-600 ml-1" />
+                                                <div className="h-16 rounded mb-2 relative overflow-hidden border" style={{ background: '#17242c', borderColor: '#344954' }}>
+                                                    {/* the picture: slim header, inventory rail, dense rows */}
+                                                    <div className="absolute left-0 right-0 top-0 h-2" style={{ background: '#1c2c35', borderBottom: '1px solid #344954' }}>
+                                                        <div className="absolute top-0.5 left-1 w-3 h-1" style={{ background: '#55b6d0' }} />
+                                                    </div>
+                                                    <div className="absolute left-0 top-2 bottom-0 w-5" style={{ background: '#1c2c35', borderRight: '1px solid #344954' }}>
+                                                        <div className="mt-1 ml-1 space-y-1">
+                                                            <div className="w-3 h-0.5" style={{ background: '#55b6d0' }} />
+                                                            <div className="w-2.5 h-0.5 ml-1" style={{ background: '#718792' }} />
+                                                            <div className="w-2.5 h-0.5 ml-1" style={{ background: '#718792' }} />
                                                         </div>
                                                     </div>
-                                                    <div className="absolute right-1.5 top-1.5 left-7 h-2 bg-proxmox-card border-b border-proxmox-border flex items-end gap-1 px-1">
-                                                        <div className="w-3 h-0.5 bg-proxmox-orange" />
-                                                        <div className="w-3 h-0.5 bg-gray-600" />
-                                                        <div className="w-3 h-0.5 bg-gray-600" />
+                                                    <div className="absolute right-1.5 left-7 bottom-1.5 space-y-1" style={{ top: 14, background: '#20333e', border: '1px solid #293d47' }}>
+                                                        <div className="h-1" style={{ background: '#263c47' }} />
+                                                        <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                                        <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                                        <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
                                                     </div>
-                                                    <div className="absolute right-1.5 top-5 left-7 bottom-1.5 bg-proxmox-card border border-proxmox-border" />
-                                                    {user?.ui_layout === 'corporate' && (
+                                                    {user?.ui_layout === 'corporate-redesigned' && (
                                                         <div className="absolute top-1 right-1 bg-proxmox-orange rounded-full p-0.5">
                                                             <Icons.Check className="w-3 h-3 text-white" />
                                                         </div>
                                                     )}
                                                 </div>
                                                 <div className="text-center">
-                                                    <span className="text-xs font-medium">{t('layoutCorporate') || 'Corporate'}</span>
-                                                    <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
+                                                    <span className="text-xs font-medium">{t('layoutCorporateRedesigned')}</span>
+                                                    <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCorporateRedesignedDesc')}</p>
                                                 </div>
                                             </button>
                                             {/* Cloud layout card (Preview) — NS 2026-06-05 */}
@@ -3537,6 +3652,7 @@
                                                 </div>
                                             </button>
                                         </div>
+                                        </>)}
                                     </div>
 
                                     {/* NS: TaskBar Auto-Expand Setting - Feb 2026 */}
@@ -3601,7 +3717,8 @@
                                     )}
 
                                     {/* NS Jun 2026 — language moved from corporate header into profile prefs */}
-                                    {isCorporate && (
+                                    {/* #1167: a pinned language says so here in every layout, no header has a switcher then */}
+                                    {(isCorporate || languageLocked) && (
                                         <div className="pt-4 border-t border-proxmox-border">
                                             <div className="flex items-center justify-between">
                                                 <div className="flex items-center gap-3">
@@ -3611,7 +3728,9 @@
                                                         <p className="text-xs text-gray-500">{t('languagePreferenceDesc') || 'Interface language for your account'}</p>
                                                     </div>
                                                 </div>
-                                                <LanguageSwitcher />
+                                                {languageLocked
+                                                    ? <span className="text-xs text-gray-400" data-ui-lock="language">{t('uiLanguageLockedHint') || 'Set by your administrator'}</span>
+                                                    : <LanguageSwitcher />}
                                             </div>
                                         </div>
                                     )}

@@ -15,7 +15,7 @@ guests, the storage and the totals.
 | Variable | Default | Meaning |
 |---|---|---|
 | `PEGAPROX_METRICS_RETENTION_DAYS` | `30` | Days of snapshots kept, 7 to 365. Older ones are deleted with every new snapshot. |
-| `PEGAPROX_HEAVY_READ_TTL` | `60` | Seconds a large history read (the report windows) is kept in memory for the next request. |
+| `PEGAPROX_HEAVY_READ_TTL` | `60` | Seconds a large history read (the report windows) is kept in memory for the next request (a value that is no number, such as `60s`, means 60). |
 | `PEGAPROX_HEAVY_READ_MAX_KEYS` | `64` | How many of those reads are kept at most, at least 1 (a value that is no whole number means 64). Past it, the ones that expire first make room; expired ones are dropped on every read and after every snapshot. |
 
 ### Stored per cluster, in parts
@@ -76,3 +76,16 @@ The pruning runs when PegaProx starts and then once a day, in small chunks, and 
 to the log when it removed something. As with the metrics, the freed space is reused and the
 file does not shrink on its own. The first start after the update adds an index for it to the
 drift events before PegaProx serves: about a second for a few hundred thousand events, once.
+
+## The database and a power cut
+
+The database runs in WAL mode with `synchronous=NORMAL`: a commit is written to the
+write-ahead log without waiting for the disk, and the log is synced at each checkpoint. That
+saves an fsync on every commit, several milliseconds each that held up the rest of PegaProx.
+A crashed or killed PegaProx loses no commit, and a power cut leaves the database consistent,
+but it can take the commits made since the log was last synced: metrics, alert and task
+state, a sign-out made just before. What something else relies on is synced right away,
+together with everything committed before it: every audit log entry and checkpoint, a key
+rotation, the failover marks of a recovery plan, and in an HA group the configuration version
+an instance records, the steps of a node recovery and the last-run stamps a change of the
+group's time zone moves.

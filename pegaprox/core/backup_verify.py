@@ -1128,9 +1128,11 @@ def _wait_task(pve_mgr, upid, timeout=600):
             tasks = pve_mgr.get_tasks(limit=50)
             for t in tasks:
                 if t and t.get('upid') == upid:
-                    st = t.get('status', '')
+                    # a finished row carries Proxmox's own text in exitstatus
+                    st = t.get('exitstatus') or t.get('status', '')
                     if st and st != 'running':
-                        return st in ('OK', 'WARNINGS')
+                        # with warnings it ended too, and the text carries a count
+                        return st == 'OK' or str(st).startswith('WARNINGS')
                     break
         except Exception:
             pass

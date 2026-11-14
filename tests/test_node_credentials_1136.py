@@ -512,7 +512,7 @@ def test_a_refused_cluster_password_is_not_sprayed_over_the_fallbacks(db, monkey
 
 def test_the_console_ticket_tries_a_fallback_with_its_own_password_once(stored, monkeypatch):
     import urllib.error
-    import urllib.request as ur
+    import pegaprox.core.manager as manager_mod
     from urllib.parse import parse_qs
     m = _mgr()
     m._ssl_verify = False
@@ -531,7 +531,7 @@ def test_the_console_ticket_tries_a_fallback_with_its_own_password_once(stored, 
         if host == C and pw == PW_C:
             return _Resp()
         raise urllib.error.HTTPError(req.full_url, 401, 'no', {}, None)
-    monkeypatch.setattr(ur, 'urlopen', opener)
+    monkeypatch.setattr(manager_mod, 'pve_opener', lambda context=None: types.SimpleNamespace(open=opener))
     m.config.fallback_hosts = [B, C]
     assert m.mint_console_auth_ticket() == 'PVE:t'
     assert tried == [(A, 'cluster-pw'), (B, PW_B), (C, PW_C)]

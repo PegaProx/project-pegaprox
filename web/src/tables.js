@@ -72,6 +72,14 @@
             return isGuestTemplate(resource) ? `${typeLabel} (${getTemplateLabel(t)})` : typeLabel;
         }
 
+        // LW Nov 2026 - the score cell of a node card. An entry without a score (the HA cache
+        // answer of /metrics had none) reads '-' instead of throwing in the render
+        function nodeScoreCell(score) {
+            const n = score == null || score === '' ? NaN : Number(score);
+            if (!Number.isFinite(n)) return { text: '-', tone: 'text-gray-500' };
+            return { text: n.toFixed(0), tone: n < 100 ? 'text-green-400' : n < 150 ? 'text-yellow-400' : 'text-red-400' };
+        }
+
         // Node Card Component
         function NodeCard({ name, metrics, index, clusterId, nodeUiSuffix, onMaintenanceToggle, onStartUpdate, onOpenNodeConfig, onNodeAction, onRemoveNode, onMoveNode, isFavorite, onToggleFavorite, guestActions, onGuestsAction }) {
             const { t } = useTranslation();
@@ -155,6 +163,9 @@
             const isUpdating = metrics.is_updating;
             const updateTask = metrics.update_task;
             const isOffline = metrics.offline || metrics.status === 'offline';
+            // an HA cache entry sends 0 for the figures nobody could read: '-', not an idle node
+            const unread = !!metrics.from_ha_cache;
+            const scoreCell = nodeScoreCell(unread ? null : metrics.score);
             const proxmoxTarget = { ...metrics, kind: 'node', name, node: name, node_ui_suffix: nodeUiSuffix || '' };  // #689
             const proxmoxUrl = getProxmoxObjectUrl(proxmoxTarget);
             
@@ -613,18 +624,16 @@
                             </button>
                             <div className="text-right">
                                 <div className="text-xs text-gray-500">{t('score')}</div>
-                                <div className={`font-mono font-bold text-lg ${
-                                    metrics.score < 100 ? 'text-green-400' : metrics.score < 150 ? 'text-yellow-400' : 'text-red-400'
-                                }`}>
-                                    {metrics.score.toFixed(0)}
+                                <div className={`font-mono font-bold text-lg ${scoreCell.tone}`}>
+                                    {scoreCell.text}
                                 </div>
                             </div>
                         </div>
                     </div>
 
                     <div className="grid grid-cols-2 gap-4 mb-4">
-                        <Gauge value={metrics.cpu_percent} label="CPU" />
-                        <Gauge value={metrics.mem_percent} label="RAM" />
+                        <Gauge value={unread ? null : metrics.cpu_percent} label="CPU" />
+                        <Gauge value={unread ? null : metrics.mem_percent} label="RAM" />
                     </div>
 
                     <div className="space-y-3 pt-3 border-t border-proxmox-border">
@@ -643,7 +652,7 @@
                         <div className="flex items-center justify-between text-xs">
                             <span className="text-gray-500">{t('ramUsage')}</span>
                             <span className="text-gray-300 font-mono">
-                                {formatBytes(metrics.mem_used)} / {formatBytes(metrics.mem_total)}
+                                {unread ? '-' : <>{formatBytes(metrics.mem_used)} / {formatBytes(metrics.mem_total)}</>}
                             </span>
                         </div>
                         {metrics.ksm && metrics.ksm.shared > 0 && (
@@ -664,8 +673,8 @@
                         
                         {expanded && (
                             <div className="space-y-3 pt-2 border-t border-gray-700/50 animate-fade-in">
-                                {/* Disk Usage - hidden for XCP-ng (no dom0 disk stats) */}
-                                {metrics.disk_percent != null && <><div className="flex items-center justify-between text-xs">
+                                {/* Disk Usage - hidden for XCP-ng (no dom0 disk stats) and for an HA cache entry */}
+                                {metrics.disk_percent != null && !unread && <><div className="flex items-center justify-between text-xs">
                                     <span className="text-gray-500 flex items-center gap-2">
                                         <Icons.HardDrive /> {t('disk')}
                                     </span>
@@ -699,7 +708,7 @@
                                     <div className="flex items-center gap-2">
                                         <Sparkline data={history.netin} width={50} height={16} color="#22c55e" />
                                         <span className="text-green-400 font-mono w-16 text-right">
-                                            {history.netin[history.netin.length-1]?.toFixed(1) || '0.0'} MB/s
+                                            {unread ? '-' : `${history.netin[history.netin.length-1]?.toFixed(1) || '0.0'} MB/s`}
                                         </span>
                                     </div>
                                 </div>
@@ -710,7 +719,7 @@
                                     <div className="flex items-center gap-2">
                                         <Sparkline data={history.netout} width={50} height={16} color="#f97316" />
                                         <span className="text-orange-400 font-mono w-16 text-right">
-                                            {history.netout[history.netout.length-1]?.toFixed(1) || '0.0'} MB/s
+                                            {unread ? '-' : `${history.netout[history.netout.length-1]?.toFixed(1) || '0.0'} MB/s`}
                                         </span>
                                     </div>
                                 </div>
@@ -1005,6 +1014,8 @@
             const isOffline = !metrics || metrics.status === 'offline';
             const cpuPercent = metrics?.cpu_percent?.toFixed(1) || (metrics?.cpu ? (metrics.cpu * 100).toFixed(1) : '0');
             const ramPercent = metrics?.mem_percent?.toFixed(1) || (metrics?.memory ? ((metrics.memory.used / metrics.memory.total) * 100).toFixed(1) : '0');
+            // an HA cache entry sends 0 for what nobody could read: '-' as in NodeCard
+            const unread = !!metrics?.from_ha_cache;
             const isInMaintenance = metrics?.maintenance_mode;
             const maintenanceTask = metrics?.maintenance_task;
             const isUpdating = metrics?.is_updating;
@@ -1051,17 +1062,17 @@
                                 )}
                                 <span className="w-8" style={{color: '#728b9a'}}>CPU</span>
                                 <div className="w-20 h-1.5 flex-shrink-0 overflow-hidden" style={{background: 'var(--corp-bar-track)', borderRadius: '1px'}}>
-                                    <div className="h-full" style={{width: `${Math.min(cpuPercent, 100)}%`, background: '#49afd9', borderRadius: '1px'}}></div>
+                                    <div className="h-full" style={{width: `${unread ? 0 : Math.min(cpuPercent, 100)}%`, background: '#49afd9', borderRadius: '1px'}}></div>
                                 </div>
-                                <span className="w-12 text-right" style={{color: '#adbbc4'}}>{cpuPercent}%</span>
+                                <span className="w-12 text-right" style={{color: '#adbbc4'}}>{unread ? '-' : `${cpuPercent}%`}</span>
                                 {(() => { const d = histRef.current.cpu; const mx = Math.max(...d, 1); const pts = d.map((v,i) => `${(i/19)*40},${12-((v/mx)*12)}`).join(' '); return <svg width="40" height="12" className="corp-sparkline-inline"><polyline fill="none" stroke="#49afd9" strokeWidth="1" points={pts} /><circle cx="40" cy={12-((d[19]/mx)*12)} r="1.5" fill="#49afd9" /></svg>; })()}
                                 <span className="w-8 ml-2" style={{color: '#728b9a'}}>RAM</span>
                                 <div className="w-20 h-1.5 flex-shrink-0 overflow-hidden" style={{background: 'var(--corp-bar-track)', borderRadius: '1px'}}>
-                                    <div className="h-full" style={{width: `${Math.min(ramPercent, 100)}%`, background: '#9b59b6', borderRadius: '1px'}}></div>
+                                    <div className="h-full" style={{width: `${unread ? 0 : Math.min(ramPercent, 100)}%`, background: '#9b59b6', borderRadius: '1px'}}></div>
                                 </div>
-                                <span className="w-12 text-right" style={{color: '#adbbc4'}}>{ramPercent}%</span>
+                                <span className="w-12 text-right" style={{color: '#adbbc4'}}>{unread ? '-' : `${ramPercent}%`}</span>
                                 {(() => { const d = histRef.current.mem; const mx = Math.max(...d, 1); const pts = d.map((v,i) => `${(i/19)*40},${12-((v/mx)*12)}`).join(' '); return <svg width="40" height="12" className="corp-sparkline-inline"><polyline fill="none" stroke="#9b59b6" strokeWidth="1" points={pts} /><circle cx="40" cy={12-((d[19]/mx)*12)} r="1.5" fill="#9b59b6" /></svg>; })()}
-                                {metrics.score != null && <span className="ml-3 w-16" style={{color: '#728b9a'}}>{t('score')}: <span style={{color: '#adbbc4'}}>{Number(metrics.score).toFixed(1)}</span></span>}
+                                {metrics.score != null && !unread && <span className="ml-3 w-16" style={{color: '#728b9a'}}>{t('score')}: <span style={{color: '#adbbc4'}}>{Number(metrics.score).toFixed(1)}</span></span>}
                                 <span className="ml-3" style={{color: '#728b9a'}}>{formatUptime(metrics.uptime)}</span>
                                 <span className="flex-1"></span>
                                 {isInMaintenance && maintenanceTask && maintenanceTask.status === 'running' && (
@@ -1177,7 +1188,7 @@
                             <div className="corp-node-detail-grid">
                                 <div className="corp-node-detail-card">
                                     <div className="corp-node-detail-label">{t('disk')}</div>
-                                    <div className="corp-node-detail-value">{metrics.disk_percent?.toFixed(1) || '-'}%</div>
+                                    <div className="corp-node-detail-value">{unread ? '-' : `${metrics.disk_percent?.toFixed(1) || '-'}%`}</div>
                                     <div className="corp-node-detail-sub">{metrics.disk_total ? `${formatBytes(metrics.disk_used || 0)} / ${formatBytes(metrics.disk_total)}` : '-'}</div>
                                 </div>
                                 <div className="corp-node-detail-card">
@@ -1323,7 +1334,7 @@
         // NS: Added bulk select for mass operations (migration, etc.)
         // This component does a lot... might need to split it up eventually
         // NS: filtering + sorting uses useMemo below (lines 1320+)
-        function ResourceTable({ resources, clusterId, clusters, sourceCluster, onVmAction, onOpenConsole, onOpenSpice, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, datastores, onOpenTags, highlightedVm, addToast, pendingVmAction, onPendingActionConsumed, onVmNavigate, backupStatus, authFetch, onBulkDone, favorites, onToggleFavorite }) {
+        function ResourceTable({ resources, clusterId, clusters, sourceCluster, onVmAction, onOpenConsole, onOpenSpice, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, datastores, onOpenTags, highlightedVm, addToast, pendingVmAction, onPendingActionConsumed, onVmNavigate, backupStatus, authFetch, onBulkDone, favorites, onToggleFavorite, openGuest, onOpenGuestDone }) {
             const { t } = useTranslation();
             const { getAuthHeaders, user, haReadOnly, haConsolesElsewhere } = useAuth();
             // #625 v2 - a standby shows the guests live but acts on none of them: no power,
@@ -1518,6 +1529,9 @@
             // NS: #127 - lazy-load IPs from guest agent for running qemu VMs
             const ipCache = useRef({});
             const [ipTick, setIpTick] = useState(0);
+            // vmid -> when a guest that gave no address may be asked again. Without it every
+            // render of the list asked it again, many times a second for each open tab
+            const ipRetryAt = useRef({});
 
             const filterLabels = {
                 all: t('all'),
@@ -1598,6 +1612,49 @@
                     setCurrentPage(1);  // Reset to first page
                 }
             }, [filteredResources.length]);  // Only when data changes
+
+            // LW Nov 2026 - a guest opened from All Guests or an overview: the detail view with that guest
+            // picked, on the page of the list that holds it and in sight, as a click in that view leaves
+            // it (#1229). Taken from this cluster's list only, which the dashboard empties before it
+            // switches the cluster
+            const pickedRowRef = useRef(null);
+            const detailListRef = useRef(null);
+            const detailPaneRef = useRef(null);
+            const openSwitchedRef = useRef(null);
+            const isOpenGuest = (r) => !!openGuest && String(r.vmid) === String(openGuest.vmid) && (!openGuest.type || r.type === openGuest.type);
+            useEffect(() => {
+                if (!openGuest || openGuest.clusterId !== clusterId) return;
+                // once per request, a view the user picks while it waits stays
+                if (openSwitchedRef.current !== openGuest) { openSwitchedRef.current = openGuest; setViewMode('detail'); }
+                const hit = (resources || []).find(isOpenGuest);
+                if (!hit) return;  // the list of the cluster is still on its way
+                setSelectedDetailVm(hit);
+                const at = filteredResources.indexOf(hit);
+                if (at >= 0) setCurrentPage(Math.floor(at / itemsPerPage) + 1);
+                onOpenGuestDone?.();
+                // once drawn, as little scrolling as it takes; the margin keeps it above the task bar.
+                // With list and panel stacked (narrow window) the panel goes up below the header
+                setTimeout(() => {
+                    if (pickedRowRef.current) pickedRowRef.current.scrollIntoView({ block: 'nearest' });
+                    const list = detailListRef.current, pane = detailPaneRef.current;
+                    if (!list || !pane || pane.getBoundingClientRect().top < list.getBoundingClientRect().bottom - 1) return;
+                    const head = document.querySelector('header');
+                    window.scrollBy(0, pane.getBoundingClientRect().top - (head ? head.getBoundingClientRect().bottom : 0) - 12);
+                }, 100);
+            }, [openGuest, resources, clusterId]);
+            // every read of this cluster's list comes as a frame, unchanged ones too: one without the
+            // guest ends the wait, it was moved or deleted since it was listed where it was clicked
+            useEffect(() => {
+                if (!openGuest || openGuest.clusterId !== clusterId) return;
+                const onFrame = (e) => {
+                    const d = (e && e.detail) || {};
+                    if (d.cluster_id !== clusterId || !Array.isArray(d.rows) || d.rows.some(isOpenGuest)) return;
+                    addToast?.(t('guestNotInClusterList').replace('{id}', openGuest.vmid), 'warning');
+                    onOpenGuestDone?.();
+                };
+                window.addEventListener('pegaprox-resources-frame', onFrame);
+                return () => window.removeEventListener('pegaprox-resources-frame', onFrame);
+            }, [openGuest, clusterId]);
             
             const paginatedResources = useMemo(() => {
                 const startIndex = (effectivePage - 1) * itemsPerPage;
@@ -1607,22 +1664,29 @@
             // fetch IPs for visible running qemu VMs - #127
             useEffect(() => {
                 if (!paginatedResources?.length) return;
+                const now = Date.now();
                 const toFetch = paginatedResources.filter(r =>
                     r.type === 'qemu' && r.status === 'running' && !ipCache.current[r.vmid]
+                    && !(ipRetryAt.current[r.vmid] > now)
                 );
                 if (!toFetch.length) return;
                 toFetch.forEach(vm => {
                     ipCache.current[vm.vmid] = 'loading';
                     const cid = vm._clusterId || clusterId;
+                    // no address yet (agent still starting or not installed): again in a minute.
+                    // A refused or failed call, a 429 among them, waits five
+                    const retryIn = (ms) => { ipCache.current[vm.vmid] = null; ipRetryAt.current[vm.vmid] = Date.now() + ms; };
                     fetch(`/api/clusters/${cid}/vms/${vm.node}/qemu/${vm.vmid}/guest-info`, {
                         credentials: 'include', headers: getAuthHeaders()
                     })
-                    .then(r => r.ok ? r.json() : null)
+                    .then(r => r.ok ? r.json() : Promise.reject(r.status))
                     .then(data => {
-                        ipCache.current[vm.vmid] = data?.ip_addresses?.length ? data.ip_addresses[0] : null;
+                        if (!data?.ip_addresses?.length) return retryIn(60000);
+                        ipCache.current[vm.vmid] = data.ip_addresses[0];
+                        delete ipRetryAt.current[vm.vmid];
                         setIpTick(t => t + 1);
                     })
-                    .catch(() => { ipCache.current[vm.vmid] = null; });
+                    .catch(() => retryIn(300000));
                 });
             }, [paginatedResources]);
 
@@ -1862,7 +1926,6 @@
                     ) : (
                     <div className="flex flex-wrap items-center gap-3">
                         <div className="relative flex-1 min-w-[200px]">
-                            <Icons.Search />
                             <input
                                 type="text"
                                 placeholder={t('searchByNameOrId')}
@@ -2148,7 +2211,7 @@
                                         {/* Card Actions */}
                                         <div className="flex items-center justify-between p-3 border-t border-proxmox-border bg-proxmox-dark/30">
                                             {/* Primary Actions - Always visible */}
-                                            <div className="flex items-center gap-1">
+                                            <div className="flex pp-wrap-narrow items-center gap-1">
                                                 {getProxmoxObjectUrl(getVmProxmoxTarget(resource)) && (
                                                     <button
                                                         onClick={() => openProxmoxObject(getVmProxmoxTarget(resource))}
@@ -2330,7 +2393,8 @@
 
                     {/* LW: Feb 2026 - table view, corporate data-grid */}
                     {viewMode === 'table' && (
-                        <div className={isCorporate ? 'overflow-hidden border border-proxmox-border' : 'overflow-hidden rounded-xl border border-proxmox-border'}>
+                        // JB Nov 2026 (#1225) - scroll, not clip: at common window widths the table is wider than its pane and the actions column was cut off
+                        <div className={isCorporate ? 'overflow-x-auto border border-proxmox-border' : 'overflow-x-auto rounded-xl border border-proxmox-border'}>
                             <table className={`w-full ${isCorporate ? 'corp-datagrid corp-datagrid-striped' : ''}`}>
                                 <thead>
                                     <tr className={isCorporate ? 'text-left' : 'bg-proxmox-dark text-left'} style={isCorporate ? {background: 'var(--corp-header-bg)'} : undefined}>
@@ -2752,7 +2816,7 @@
                             {/* VM List — LW 2026-04-24: viewport-proportional height so it
                                 matches the detail panel on the right and never exceeds the
                                 visible area. Header + list scroll independently. */}
-                            <div className="lg:col-span-1 bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden flex flex-col"
+                            <div ref={detailListRef} className="lg:col-span-1 bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden flex flex-col"
                                  style={{maxHeight: 'calc(100vh - 260px)', minHeight: '400px'}}>
                                 <div className="p-3 border-b border-proxmox-border bg-proxmox-dark/50 flex-shrink-0">
                                     <h3 className="text-sm font-medium text-gray-300">VMs & Container ({filteredResources.length})</h3>
@@ -2761,6 +2825,8 @@
                                     {paginatedResources.map(resource => (
                                         <div
                                             key={resource.vmid}
+                                            ref={selectedDetailVm?.vmid === resource.vmid ? pickedRowRef : null}
+                                            style={selectedDetailVm?.vmid === resource.vmid ? { scrollMarginBottom: '48px' } : undefined}
                                             onClick={() => setSelectedDetailVm(resource)}
                                             className={`flex items-center gap-3 p-3 cursor-pointer transition-all border-b border-gray-700/50 ${
                                                 selectedDetailVm?.vmid === resource.vmid
@@ -2821,11 +2887,12 @@
                             </div>
 
                             {/* Detail Panel */}
-                            <div className="lg:col-span-2">
+                            <div ref={detailPaneRef} className="lg:col-span-2">
                                 {selectedDetailVm ? (
                                     <VmDetailPanel
                                         vm={selectedDetailVm}
                                         clusterId={clusterId}
+                                        clusterType={((clusters || []).find(c => c.id === clusterId) || sourceCluster || {}).cluster_type || 'proxmox'}
                                         onAction={handleAction}
                                         onOpenConsole={onOpenConsole}
                                         onOpenSpice={onOpenSpice}

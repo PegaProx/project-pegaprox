@@ -30,7 +30,7 @@ from flask import Blueprint, jsonify, request
 
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.auth import require_auth
-from pegaprox.api.helpers import check_cluster_access, scope_vm_rows
+from pegaprox.api.helpers import check_cluster_access, scope_vm_rows, caller_guest_nodes
 
 bp = Blueprint('topology', __name__)
 
@@ -70,6 +70,14 @@ def topology(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
+    # MK Nov 2026 - a confined caller gets the nodes their own guests run on, with their
+    # bridges, and the SDN vnets those guests are attached to. Decided before the per-node
+    # network reads, so such a caller fans out to their own nodes only
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[topology] cannot read the caller's guests on {cluster_id}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
 
     # NS Jul 2026 (pentest DoS) — building the topology fires one PVE /config roundtrip
     # per guest (O(N) at 1000+ VMs) and is reachable by any cluster.view holder. The
@@ -101,6 +109,8 @@ def topology(cluster_id):
         pve_nodes = list((mgr.nodes or {}).keys())
     except Exception:
         pve_nodes = []
+    if mine is not None:
+        pve_nodes = [n for n in pve_nodes if n in mine]
 
     # ── per-node bridges/bonds
     bridges_by_node = {}  # node -> list of {iface, type, ports?, vlan_aware?, address?}
@@ -145,6 +155,7 @@ def topology(cluster_id):
         bridges_by_node[node] = bridges
 
     # ── SDN VNets (cluster-wide, may attach to any node's vmbr)
+    held_vnets = {}     # a confined caller's: added once one of their guests is attached
     try:
         url = f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/sdn/vnets"
         r = mgr._api_get(url)
@@ -153,15 +164,25 @@ def topology(cluster_id):
                 vnet = v.get('vnet') or v.get('name')
                 if not vnet: continue
                 vid = f'sdn:{vnet}'
-                nodes_out.append({'id': vid, 'kind': 'sdn_vnet', 'label': vnet,
-                                  'parent_id': f'cluster:{cluster_id}', 'meta': {
-                                      'zone': v.get('zone', ''),
-                                      'tag': v.get('tag'),
-                                      'alias': v.get('alias'),
-                                  }})
+                entry = {'id': vid, 'kind': 'sdn_vnet', 'label': vnet,
+                         'parent_id': f'cluster:{cluster_id}', 'meta': {
+                             'zone': v.get('zone', ''),
+                             'tag': v.get('tag'),
+                             'alias': v.get('alias'),
+                         }}
+                if mine is not None:
+                    held_vnets[vid] = entry
+                    continue
+                nodes_out.append(entry)
                 links_out.append({'source': f'cluster:{cluster_id}', 'target': vid, 'kind': 'sdn'})
     except Exception as e:
         logging.debug(f"[topology] sdn fetch failed: {e}")
+
+    # MK Nov 2026 - the ids a guest link may point at. Looking each one up in nodes_out,
+    # which holds every guest by then, made the links O(guests x graph): 4 s of CPU on the
+    # hub at 10k guests on SDN vnets
+    link_targets = {n['id'] for n in nodes_out if n['kind'] in ('bridge', 'bond', 'sdn_vnet')}
+    link_targets.update(held_vnets)
 
     # ── VMs / CTs grouped under their bridge
     try:
@@ -206,14 +227,17 @@ def topology(cluster_id):
         for br_name in _brs:
             # Try matching to a same-node bridge first; fall back to any node's
             br_target = f'br:{node}:{br_name}'
-            if not any(n['id'] == br_target for n in nodes_out):
+            if br_target not in link_targets:
                 # might be an SDN vnet
                 sdn_target = f'sdn:{br_name}'
-                if any(n['id'] == sdn_target for n in nodes_out):
+                if sdn_target in link_targets:
                     br_target = sdn_target
                 else:
                     # bridge wasn't seen — skip (could be on another node we didn't fully scan)
                     continue
+            if br_target in held_vnets:
+                nodes_out.append(held_vnets.pop(br_target))
+                links_out.append({'source': f'cluster:{cluster_id}', 'target': br_target, 'kind': 'sdn'})
             links_out.append({'source': vm_id, 'target': br_target, 'kind': 'attached'})
 
     payload = {

@@ -13,11 +13,13 @@ import threading
 import uuid
 import socket
 import hashlib
+import ipaddress
 import subprocess
 import re
 import shlex
 from pegaprox.utils.ssh_security import cli_hostkey_opts  # secure host-key opts for subprocess ssh/scp
-from pegaprox.utils.sanitization import validate_snapshot_name, validate_hostname, validate_ssh_user
+from pegaprox.utils.sanitization import validate_snapshot_name, validate_hostname, validate_ssh_user, redact_secrets
+from pegaprox.utils.sanitization import validate_storage_name
 import requests
 import urllib3
 from datetime import datetime, timedelta
@@ -29,6 +31,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # MK: requests verify=False doesn't fully kill hostname checking in newer urllib3,
 # had a user report that IP-only clusters fail while DNS works fine (#88)
 import ssl
+import urllib.error
+import urllib.request
 from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
 
@@ -41,6 +45,52 @@ class _NoHostnameCheckAdapter(HTTPAdapter):
         kwargs['ssl_context'] = ctx
         return super().init_poolmanager(*args, **kwargs)
 
+
+class RedirectRefused(requests.exceptions.RequestException):
+    """A Proxmox VE API answered with a redirect, which PegaProx does not follow."""
+
+
+def _refuse_redirects(session):
+    """Every request of `session` stops at a redirect and raises RedirectRefused.
+
+    pveproxy sends none. One that arrived would carry the call to a host nobody configured
+    or down to plain http, and on a 307 the body with it, the login form and its password
+    too. Session.get() asks for redirects on its own, so the flag is set here whatever
+    the caller passed.
+    """
+    request = getattr(session, 'request', None)
+    if request is None:
+        return session
+
+    def no_redirects(method, url, *args, **kwargs):
+        kwargs['allow_redirects'] = False
+        resp = request(method, url, *args, **kwargs)
+        code = getattr(resp, 'status_code', None)
+        if code in (301, 302, 303, 307, 308):
+            from urllib.parse import urlsplit
+            resp.close()
+            raise RedirectRefused(f'Proxmox VE at {urlsplit(url).hostname} answered with a redirect '
+                                  f'(HTTP {code}), which PegaProx does not follow', response=resp)
+        return resp
+    session.request = no_redirects
+    return session
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, 'Proxmox VE answered with a redirect, '
+                                     'which PegaProx does not follow', headers, fp)
+
+
+def pve_opener(context=None):
+    """A urllib opener for the console logins and tickets that stops at a redirect.
+
+    urlopen() follows one by itself: a 302 to the vncproxy or termproxy POST went on as a
+    GET to the Location, plain http included, with the Cookie and CSRF headers copied.
+    Here it is an HTTPError instead.
+    """
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), _NoRedirectHandler)
+
 from pegaprox.constants import (SSH_MAX_CONCURRENT, LOG_DIR,
                                HA_MIGRATE_SETTLE_SECONDS, HA_MIGRATE_SETTLE_POLL)
 from pegaprox import globals as _g
@@ -49,11 +99,11 @@ from pegaprox.globals import (
     _ssh_connection_lock, task_pegaprox_users_cache, task_pegaprox_users_lock,
 )
 from pegaprox.models.tasks import (MaintenanceTask, PegaProxConfig, balancer_cooldown,
-                                   BALANCER_COOLDOWN_DEFAULT)
+                                   BALANCER_COOLDOWN_DEFAULT, PREDICTIVE_THRESHOLD_DEFAULT)
 from pegaprox.core.config import save_config
 from pegaprox.utils.realtime import broadcast_sse, is_cluster_watched
-from pegaprox.utils.ssh import get_ssh_connection_stats, _ssh_track_connection, ssh_password_for
-from pegaprox.utils.ssh import ssh_login_args, bare_host, is_ipv6_literal
+from pegaprox.utils.ssh import get_ssh_connection_stats, _ssh_track_connection, ssh_password_for, node_login
+from pegaprox.utils.ssh import ssh_login_args, bare_host, is_ipv6_literal, node_ssh_port
 from pegaprox.utils.concurrent import GEVENT_PATCHED
 from pegaprox.core.db import get_db
 from pegaprox.core import ha  # PegaProx's own warm standby (#625), not PVE HA
@@ -62,6 +112,7 @@ from pegaprox.core import rolling_runs
 from pegaprox.core import node_creds
 from pegaprox.core import node_history
 from pegaprox.core.ha_transport import node_cmd
+from pegaprox.core.preflight import cdrom_images
 from pegaprox.utils.ssh import read_capped as _read_capped
 
 # Lazy paramiko import
@@ -117,6 +168,15 @@ except ImportError:
 _TASK_USER_NEGCACHE = {}
 _TASK_USER_NEGCACHE_MAX = 5000
 _TASK_USER_NEGCACHE_TTL = 120.0
+
+# MK Nov 2026 - the source node checks the target cluster (its version, guests and storages)
+# before it forks a remote migration, and the POST is answered only then: over a slow link
+# between the clusters that takes longer than the general api_timeout
+REMOTE_MIGRATE_TIMEOUT = 60
+# a POST that got no answer may have started its task all the same, or start it a little
+# later: the node's task list is read this long before the migration counts as not started
+REMOTE_MIGRATE_LOOK_SECONDS = 30
+REMOTE_MIGRATE_LOOK_EVERY = 5
 
 
 # a guest a recovery moved while its node was online, and did not start (design 5.6)
@@ -269,6 +329,23 @@ def _pve_message(text, max_chars=200):
     return ' '.join(msg.split())[:max_chars] or 'no reason given'
 
 
+def _volume_owner(volid):
+    """The vmid a disk volume belongs to, read from its name as the PVE storage plugins do
+    (parse_volname), or None for a volume that names no guest (iso/, snippets/, a raw LUN)."""
+    parts = str(volid or '').split(',')[0].strip().partition(':')[2].split('/')
+    # vm-100-disk-0 or subvol-100-disk-0 at the root, or a linked clone on ZFS/RBD,
+    # base-99-disk-0/vm-100-disk-1, which belongs to the guest named last
+    if len(parts) == 1 or (len(parts) == 2 and re.match(r'(?:base|basevol)-\d+-', parts[0])):
+        m = re.match(r'(?:vm|base|basevol|subvol)-(\d+)-', parts[-1])
+        return int(m.group(1)) if m else None
+    # directory storages: 100/vm-100-disk-0.qcow2, or 99/base-99-disk-0.qcow2/100/<name> linked
+    if len(parts) == 2 and parts[0].isdigit():
+        return int(parts[0])
+    if len(parts) == 4 and parts[0].isdigit() and parts[2].isdigit():
+        return int(parts[2])
+    return None
+
+
 # MK Oct 2026 (#954) - who holds a Proxmox HA rule off: the rolling update, or the
 # maintenance of one node. A rule held by both, or by two maintenances, goes back on when
 # the last of them lets go; one lock per cluster keeps a hold and a release from crossing.
@@ -317,7 +394,7 @@ def _ssh_stderr_excerpt(stderr, max_chars=240):
     return lines[-1][:max_chars]
 
 
-def _ssh_auth_hint(stderr):
+def _ssh_auth_hint(stderr, tried=None):
     """Translate an opaque SSH failure into an actionable one-liner, or None.
 
     #717: nodes running `PermitRootLogin without-password` refuse root PASSWORD
@@ -326,6 +403,11 @@ def _ssh_auth_hint(stderr):
     the DEBUG logs (and the compliance 502 that follows) read like a mystery.
     A host key that changed after CIS/reprovision surfaces as 'Host key
     verification failed'. Both have a concrete fix the operator can act on.
+
+    `tried` is what the failed attempt offered: 'key' (the cluster's key or the
+    keys ssh finds itself, never a password), 'password' (sshpass), None when the
+    caller cannot tell. The list in the parentheses is what the node would
+    accept, not what was sent (#1156).
     """
     if not stderr:
         return None
@@ -349,7 +431,16 @@ def _ssh_auth_hint(stderr):
             return ("node accepts SSH key auth only (e.g. PermitRootLogin without-password) "
                     "— add an authorized SSH key for this cluster; the password/token only "
                     "covers the PVE API, not SSH")
-        return "SSH password rejected — check the node credentials or add an SSH key"
+        # '(publickey,password)' reads the same whether a password went out or only a
+        # key did, so the wording goes by what was offered. A token cluster without a
+        # key used to be told its password was rejected when none had been sent.
+        if tried == 'password':
+            return "SSH password rejected - check the node credentials or add an SSH key"
+        if tried == 'key':
+            return ("SSH key login refused, no password was sent - add an SSH key for this "
+                    "cluster, or check that the node has its public key in authorized_keys")
+        return ("SSH login refused (key or password) - check the node credentials or add "
+                "an SSH key for this cluster")
     # MK Sep 2026 — sudo, not ssh. For a non-root cluster user every node command goes
     # through `sudo -n bash` (see _wrap_with_sudo), so a node that logs us in perfectly
     # still answers nothing when that user has no passwordless sudo. Without a branch
@@ -644,15 +735,77 @@ def _cooldown_from_tasks(mgr, table):
                      f"from the cluster's task list: {', '.join(str(v) for v in sorted(moved)[:20])}")
 
 
+def ha_cache_node_status(ha_node_status):
+    """The node map of get_node_status() from the HA loop's last look, for when PVE cannot
+    be asked: the fields of a live entry with the figures at 0. The /metrics fallback
+    hands out the same entries. MK Nov 2026"""
+    return {
+        name: {
+            'status': data.get('status', 'offline'),
+            'cpu_percent': 0,
+            'mem_percent': 0,
+            'mem_used': 0,
+            'mem_total': 0,
+            'disk_percent': 0,
+            'disk_used': 0,
+            'disk_total': 0,
+            'netin': 0,
+            'netout': 0,
+            'score': 0,
+            'uptime': 0,
+            'offline': data.get('status') == 'offline',
+            'last_seen': data.get('last_seen').isoformat() if data.get('last_seen') else None
+        }
+        for name, data in ha_node_status.items()
+    }
+
+
+# a journal cursor as sd_journal_get_cursor writes it (s=...;i=...;b=...;m=...;t=...;x=...)
+_JOURNAL_CURSOR = re.compile(r'^s=[0-9a-f]+;i=[0-9a-f]+;')
+
+
 class UnreadList(list):
     """The [] get_vm_resources() answers when cluster/resources did not answer.
 
     It is still an empty list to every caller that only wants one. A caller that acts on
     what is missing asks `unavailable` first: a timeout of that read at 10k guests is not
     a cluster without guests, and drift reported every guest baseline removed. MK Oct 2026
+
+    MK Nov 2026 - it can carry why: `status` the HTTP status PVE sent (0 for none), `text`
+    its body or our own reason, `offline` for a cluster out of reach. The node reads below
+    answer it too, and their routes turn it into an error (api/helpers.unread_failure).
+    `timed_out`: PVE took the request but did not answer in time, which is no cluster
+    out of reach (a 504 there).
     """
-    __slots__ = ()
+    __slots__ = ('text', 'status', 'offline', 'timed_out')
     unavailable = True
+
+    def __init__(self, text='', status=0, offline=False, timed_out=False):
+        super().__init__()
+        self.text, self.status, self.offline, self.timed_out = text, status, offline, timed_out
+
+
+class UnreadDict(dict):
+    """The {} of a read whose answer is an object, when it did not answer. Same fields as
+    UnreadList. MK Nov 2026"""
+    __slots__ = ('text', 'status', 'offline', 'timed_out')
+    unavailable = True
+
+    def __init__(self, text='', status=0, offline=False, timed_out=False):
+        super().__init__()
+        self.text, self.status, self.offline, self.timed_out = text, status, offline, timed_out
+
+
+def unread(kind, response=None, error=None):
+    """kind (UnreadList or UnreadDict) for a PVE read that answered `response` with a status
+    other than 200, or raised `error`; neither means the cluster was not connected."""
+    if response is not None:
+        return kind((getattr(response, 'text', '') or '')[:2000], getattr(response, 'status_code', 0) or 0)
+    if error is None:
+        return kind('the cluster is not connected', offline=True)
+    if isinstance(error, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+        return kind(str(error)[:300], offline=True)
+    return kind(f'the answer could not be read ({type(error).__name__})')
 
 
 def _rrd_value(point, key, scale=1):
@@ -678,6 +831,63 @@ def _rrd_share(point, used_key, total_key, no_total=None):
     if not total:
         return no_total
     return round(used / total * 100, 2)
+
+
+def _hardening_address(v):
+    # ASCII hex, dots and colons first: ip_address alone takes other digits and a %zone
+    if not re.fullmatch(r'[0-9a-fA-F.:]+', v, re.ASCII):
+        return False
+    try:
+        ipaddress.ip_address(v)
+    except ValueError:
+        return False
+    return True
+
+
+# The values a templated hardening control takes into its shell command, by parameter: an
+# IP address for the backup_dns servers, Linux usernames as a comma list for service_user.
+# A parameter without a rule here takes nothing.
+_HARDENING_PARAM_RULES = {
+    'dns1': _hardening_address,
+    'dns2': _hardening_address,
+    'service_user': re.compile(r'[a-zA-Z][a-zA-Z0-9._\-]{0,31}(?:,[a-zA-Z][a-zA-Z0-9._\-]{0,31})*',
+                               re.ASCII).fullmatch,
+}
+
+
+def hardening_param_value(key, value):
+    """The value of parameter `key` as a templated control would use it, '' for none given,
+    None when it may not go into the command. MK Oct 2026 - one rule for apply, which drops
+    such a value and keeps the default, and a saved custom profile, which refuses it."""
+    v = str(value).strip()
+    if not v:
+        return ''
+    rule = _HARDENING_PARAM_RULES.get(key)
+    return v if rule and rule(v) else None
+
+
+def ct_root_credentials(ct_config):
+    """Root password and SSH keys for a new container, as (password, keys, error).
+
+    Empty or missing values come back as None. 'ssh_key' is an alias of 'ssh_public_keys'
+    and the first that holds a key wins, so a blank field cannot hide the other one. A value
+    that is no string is an error (False would go out as the password 'False', a list key
+    would get lost), and so is a NUL in the password: PVE hashes it with crypt(), which
+    ends the password there, so root would get another one than was asked for.
+    """
+    password = ct_config.get('password')
+    if password is not None and not isinstance(password, str):
+        return None, None, 'Password must be a string'
+    if password and '\x00' in password:
+        return None, None, 'Password must not contain a NUL character'
+    keys = None
+    for field in ('ssh_public_keys', 'ssh_key'):
+        val = ct_config.get(field)
+        if val is not None and not isinstance(val, str):
+            return None, None, 'SSH public keys must be a string, one key per line'
+        if keys is None and val and val.strip():
+            keys = val
+    return password or None, keys, None
 
 
 class PegaProxManager:
@@ -995,6 +1205,7 @@ class PegaProxManager:
         # one with a '..' segment would be folded into another endpoint by requests
         from pegaprox.utils.sanitization import refuse_climbing_paths
         refuse_climbing_paths(session)
+        _refuse_redirects(session)
         # an automatic leader that lost its lease sends no change from here (#625)
         ha_transport.guard_session(session)
 
@@ -1504,6 +1715,7 @@ class PegaProxManager:
                         session.verify = False
                     if not self._ssl_verify:
                         session.mount('https://', _NoHostnameCheckAdapter())  # MK: #88
+                    _refuse_redirects(session)
                     # the login passes in every role, the token it may mint needs the lease
                     ha_transport.guard_session(session)
 
@@ -1731,7 +1943,7 @@ class PegaProxManager:
             import random, string
             suffix = ''.join(random.choices(string.digits, k=6))
             token_id = f'pegaprox_{suffix}'
-            url = f"https://{host}:{self.api_port}/api2/json/access/users/{user}/token/{token_id}"
+            url = f"https://{self._bracket_ipv6(host)}:{self.api_port}/api2/json/access/users/{user}/token/{token_id}"
             # NS: need to set ticket cookie on login session, it only has it in the response not as a cookie
             session.cookies.set('PVEAuthCookie', self._ticket)
             headers = {'CSRFPreventionToken': self._csrf_token}
@@ -1903,25 +2115,7 @@ class PegaProxManager:
         if not self.is_connected or not self.session:
             # return cached ha status if disconnected
             if self.ha_node_status:
-                return {
-                    name: {
-                        'status': data.get('status', 'offline'),
-                        'cpu_percent': 0,
-                        'mem_percent': 0,
-                        'mem_used': 0,
-                        'mem_total': 0,
-                        'disk_percent': 0,
-                        'disk_used': 0,
-                        'disk_total': 0,
-                        'netin': 0,
-                        'netout': 0,
-                        'score': 0,
-                        'uptime': 0,
-                        'offline': data.get('status') == 'offline',
-                        'last_seen': data.get('last_seen').isoformat() if data.get('last_seen') else None
-                    }
-                    for name, data in self.ha_node_status.items()
-                }
+                return ha_cache_node_status(self.ha_node_status)
             return {}
 
         # NS 2026-06-05 (#528 scaling): short result cache. get_node_status
@@ -3548,7 +3742,7 @@ class PegaProxManager:
         return selected
     
     def get_best_target_node(self, exclude_nodes: List[str] = None, vmid: int = None,
-                             allowed_nodes=None, pin_mode: str = 'strict') -> Optional[str]:
+                             allowed_nodes=None, pin_mode: str = 'strict', node_status=None) -> Optional[str]:
         """Find the best target node for migration
 
         LW: Now also excludes nodes configured in excluded_nodes (like ProxLB)
@@ -3588,7 +3782,9 @@ class PegaProxManager:
         if config_excluded:
             self.logger.debug(f"Excluding configured nodes from balancing: {config_excluded}")
         
-        node_status = self.get_node_status()
+        # node_status: a read the caller already decided on, used as it is
+        if node_status is None:
+            node_status = self.get_node_status()
         
         # Filter available nodes
         available_nodes = [
@@ -3774,12 +3970,10 @@ class PegaProxManager:
                 row.update(reason='its configuration could not be read', code='config')
                 continue
             here = presence.get(node, {})
-            storages, local_image = set(), None
-            for key, storage, value in self._guest_volumes(config):
-                storages.add(storage)
-                if ('media=cdrom' in value and 'cloudinit' not in value.split(',')[0]
-                        and not here.get(storage) and local_image is None):
-                    local_image = (key, storage)
+            storages = {storage for _key, storage, _value in self._guest_volumes(config)}
+            # same CD drives as the eject before a live move (#1169)
+            local_image = next(((key, storage) for key, storage, _vol in cdrom_images(config)
+                                if not here.get(storage)), None)
             row['storages'] = sorted(storages)
             if local_image:
                 row.update(reason=f"{local_image[0]} holds an image on local storage {local_image[1]} - eject it first",
@@ -3820,9 +4014,12 @@ class PegaProxManager:
         that cannot or does not move stays where it is with the reason in
         task.templates_left; it never fails the evacuation, a template has nothing running
         that the node's reboot could take down."""
-        if not templates:
+        if not templates or self._evacuation_called_off(node_name, task):
             return
         for row in self.template_placement(templates):
+            # each one is a move of its own, none starts once the node has left maintenance
+            if self._evacuation_called_off(node_name, task):
+                return
             vmid, name = row['vmid'], row['name']
             task.current_vm = {'vmid': vmid, 'name': name}
             reason = row['reason']
@@ -4319,7 +4516,7 @@ class PegaProxManager:
             confidence = min(len(metrics) / window, 1.0)
 
             # NS: threshold from config, fallback 75
-            threshold = getattr(self.config, 'predictive_threshold', 75)
+            threshold = getattr(self.config, 'predictive_threshold', PREDICTIVE_THRESHOLD_DEFAULT)
             if score > threshold:
                 trend = 'critical'
             elif score > threshold * 0.7:
@@ -4424,18 +4621,24 @@ class PegaProxManager:
             # target_storage = vm.get('_target_storage')  # old code, not needed
             
             # unmount iso first or migration fails (found this out the hard way)
+            # MK Oct 2026 (#1169) - every CD drive, not only ide2: an ISO on a SCSI or SATA drive
+            # stops the move just the same. Only the medium goes, cloud-init and the host's own
+            # drive stay. PVE reads a 'cdrom' key as ide2, a config never comes back with one.
             if vm_type == 'qemu':
                 config_url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{source_node}/qemu/{vmid}/config"
                 config_response = self._create_session().get(config_url, timeout=15)
                 if config_response.status_code == 200:
                     config = config_response.json().get('data', {})
-                    for key in ['ide2', 'cdrom']:
-                        if key in config and 'iso' in str(config.get(key, '')).lower():
-                            iso_value = config[key]
-                            self.logger.info(f"unmounting iso from {key}")
-                            unmount_response = self._create_session().put(config_url, data={key: 'none,media=cdrom'})
-                            if unmount_response.status_code != 200:
-                                self.logger.warning(f"couldnt unmount iso: {unmount_response.text}")
+                    for key, _storage, volid in cdrom_images(config, paths=True):
+                        self.logger.info(f"unmounting iso from {key} ({volid})")
+                        try:
+                            unmount_response = self._create_session().put(
+                                config_url, data={key: 'none,media=cdrom'}, timeout=15)
+                        except Exception as e:
+                            self.logger.warning(f"couldnt unmount iso from {key}: {e}")
+                            continue
+                        if unmount_response.status_code != 200:
+                            self.logger.warning(f"couldnt unmount iso from {key}: {unmount_response.text}")
             
             if vm_type == 'qemu':
                 url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{source_node}/qemu/{vmid}/migrate"
@@ -4698,9 +4901,11 @@ class PegaProxManager:
                         # Task finished - check if successful
                         exit_status = task_status.get('exitstatus', '')
                         # #184: WARNINGS = task succeeded with non-fatal warnings (NUMA, local disks, etc.)
-                        if exit_status not in ('OK', 'WARNINGS'):
+                        # Proxmox says 'WARNINGS: 2', the bare word never came
+                        ok = exit_status == 'OK' or str(exit_status).startswith('WARNINGS')
+                        if not ok:
                             self.logger.warning(f"Task {task_id} finished with exit status: {exit_status}")
-                        return exit_status in ('OK', 'WARNINGS')
+                        return ok
                     
                 time.sleep(2)  # Poll every 2 seconds
                 
@@ -4787,6 +4992,9 @@ class PegaProxManager:
             task.allow_local_disks = bool(allow_local_disks)
             task.migrate_templates = bool(migrate_templates)   # #763
             task.relax_anti_affinity = bool(relax_anti_affinity) and not skip_evacuation   # #954
+            # its evacuation stops once a cancel or an exit takes it off the node, even one
+            # that lands before the thread has started
+            task._registered = True
             self.nodes_in_maintenance[node_name] = task
 
         self.logger.info(f"[MAINT] Entering maintenance mode for node: {node_name}"
@@ -4953,7 +5161,9 @@ class PegaProxManager:
             health = data.get('health', {}) or {}
             status = health.get('status') or 'unknown'
             checks = health.get('checks', {}) or {}
-            warnings = [k for k in checks.keys()][:5]
+            # JB Nov 2026 - the rolling update gates read all of it: PG_DEGRADED as the sixth check, or
+            # degraded as the fourth PG state, was not seen
+            warnings = list(checks.keys())
             osdmap = data.get('osdmap', {}) or {}
             osd_up = osdmap.get('num_up_osds', osdmap.get('osdmap', {}).get('num_up_osds', 0))
             osd_in = osdmap.get('num_in_osds', osdmap.get('osdmap', {}).get('num_in_osds', 0))
@@ -4961,7 +5171,7 @@ class PegaProxManager:
             pg_summary = ''
             states = pgmap.get('pgs_by_state') or []
             if states:
-                pg_summary = ', '.join(f"{s.get('count', 0)} {s.get('state_name', '')}" for s in states[:3])
+                pg_summary = ', '.join(f"{s.get('count', 0)} {s.get('state_name', '')}" for s in states)
             return {'status': status, 'osd_up': osd_up, 'osd_in': osd_in, 'pgs': pg_summary, 'warnings': warnings}
         except Exception as e:
             self.logger.debug(f"[CEPH] health summary failed: {e}")
@@ -5191,7 +5401,7 @@ class PegaProxManager:
                 self.logger.warning(f"[MAINT] can't resolve {node_name} IP, custom evacuation")
                 return False
 
-            ssh_user = (self.config.user or 'root').split('@')[0]
+            ssh_user = node_login(self.config)
             # non-root PAM users need sudo for ha-manager
             prefix = "sudo " if ssh_user != 'root' else ""
             cmd = f"{prefix}ha-manager crm-command node-maintenance enable {node_name}"
@@ -5219,13 +5429,39 @@ class PegaProxManager:
             self.logger.warning(f"[MAINT] native HA error on {node_name}: {e}")
             return False
 
+    def _evacuation_called_off(self, node_name, task):
+        """True once a cancel or an exit of maintenance took the task off the node, and the
+        task then says cancelled. A task that was never registered for the node is not checked."""
+        if not getattr(task, '_registered', False):
+            return False
+        if (getattr(self, 'nodes_in_maintenance', None) or {}).get(node_name) is task:
+            return False
+        if task.status != 'cancelled':
+            self.logger.info(f"[MAINT] {node_name} left maintenance, stopping its evacuation")
+        task.status = 'cancelled'
+        task.pending_vms = []
+        task.current_vm = None
+        return True
+
     def _evacuate_node(self, node_name: str, task: MaintenanceTask):
         # move all VMs off this node
+        # a caller that registered the task itself, not through enter_maintenance_mode
+        if (getattr(self, 'nodes_in_maintenance', None) or {}).get(node_name) is task:
+            task._registered = True
         try:
+            if self._evacuation_called_off(node_name, task):
+                return
             task.status = 'evacuating'
 
             # Get all VMs on this node
             vms = self.get_vm_resources()
+            # JB Nov 2026 - a read that timed out is an empty list that says so, and 0 guests sent a rolling update
+            # straight on to the reboot with the guests still there
+            if getattr(vms, 'unavailable', False):
+                task.status = 'failed'
+                task.error = f"The guest list of the cluster could not be read, nothing was moved off {node_name}"
+                self.logger.error(f"[MAINT] {task.error}")
+                return
             node_vms = [
                 vm for vm in vms
                 if vm.get('node') == node_name and
@@ -5242,7 +5478,8 @@ class PegaProxManager:
             if task.total_vms == 0:
                 self.logger.info(f"[OK] No running VMs on {node_name}, maintenance mode ready")
                 self._evacuate_templates(node_name, task, templates)
-                task.status = 'completed'
+                if not self._evacuation_called_off(node_name, task):
+                    task.status = 'completed'
                 return
 
             self.logger.info(f"[PKG] Found {task.total_vms} VMs to evacuate from {node_name}")
@@ -5255,7 +5492,16 @@ class PegaProxManager:
             # case up front and skip evacuation: a single node can't live-migrate its
             # guests, so maintenance just flags the node (guests stay running; the admin
             # owns any reboot downtime).
-            if self.get_best_target_node(exclude_nodes=[node_name]) is None:
+            # one read decides both: a node list without this node is a failed or partial read,
+            # not a single node, and a second read could answer differently
+            nodes = self.get_node_status()
+            if node_name not in nodes:
+                task.status = 'failed'
+                task.error = (f"The node list could not be read or does not contain {node_name}, "
+                              f"nothing was moved off {node_name}")
+                self.logger.error(f"[MAINT] {task.error}")
+                return
+            if self.get_best_target_node(exclude_nodes=[node_name], node_status=nodes) is None:
                 self.logger.warning(
                     f"[MAINT] No other online node to evacuate {task.total_vms} guest(s) from "
                     f"{node_name} (single-node cluster or all peers offline) — skipping "
@@ -5265,14 +5511,19 @@ class PegaProxManager:
                 task.note = (f"Single node: {task.total_vms} guest(s) not evacuated — no other "
                              f"node to migrate to. They stay running (a reboot will take them down).")
                 self._evacuate_templates(node_name, task, templates)
-                task.status = 'completed'
+                if not self._evacuation_called_off(node_name, task):
+                    task.status = 'completed'
                 return
 
             # Sort VMs by memory (smallest first for faster evacuation)
             node_vms.sort(key=lambda x: x.get('mem', 0))
             placement = self._evacuation_placement()
 
+            # JB Nov 2026 - a cancel or an exit of maintenance takes the task off the node. This thread went on moving every
+            # guest off a node that was no longer in maintenance
             for vm in node_vms:
+                if self._evacuation_called_off(node_name, task):
+                    return
                 vm_name = vm.get('name', 'unnamed')
                 vmid = vm.get('vmid')
 
@@ -5354,6 +5605,9 @@ class PegaProxManager:
                             "--with-local-disks (this can take a while on big VMs)"
                         )
 
+                # picking the target takes reads: an exit meanwhile starts no further move
+                if self._evacuation_called_off(node_name, task):
+                    return
                 self.logger.info(f"[SYNC] Evacuating {vm_name} (VMID: {vmid}) to {target_node}")
 
                 # MK: #78 — use longer timeout for evacuations. Local storage
@@ -5385,6 +5639,8 @@ class PegaProxManager:
                 while waited < 300:
                     time.sleep(10)
                     waited += 10
+                    if self._evacuation_called_off(node_name, task):
+                        return
                     remaining = self._count_vms_on_node(node_name)
                     if remaining == 0:
                         self.logger.info(f"[OK] All VMs cleared from {node_name} after {waited}s")
@@ -5397,6 +5653,8 @@ class PegaProxManager:
                     self.logger.warning(f"[WARN] {remaining} VMs still on {node_name} after post-evacuation wait")
                 elif remaining < 0:
                     self.logger.warning(f"[WARN] could not verify VM count on {node_name} - API unreachable")
+                # a guest still here is why the rolling update has its pause, and what it would otherwise reboot
+                self._note_guests_left(node_name, task, remaining)
 
             # #647 - the CRM can still finish a move we counted as failed; a guest that
             # has left the node by now is no reason to pause the rolling update
@@ -5415,6 +5673,8 @@ class PegaProxManager:
 
             # after the running guests, before the status the rolling update waits for
             self._evacuate_templates(node_name, task, templates)
+            if self._evacuation_called_off(node_name, task):
+                return
 
             if task.off_pin_vms:
                 _names = ', '.join(f"{o['name']} ({o['vmid']})" for o in task.off_pin_vms)
@@ -5443,10 +5703,33 @@ class PegaProxManager:
             task.status = 'failed'
             task.error = str(e)
     
+    def _note_guests_left(self, node_name, task, remaining):
+        known = {f.get('vmid') for f in task.failed_vms}
+        if remaining == 0:
+            return
+        try:
+            vms = self.get_vm_resources() if remaining > 0 else None
+        except Exception:
+            vms = None
+        # nothing to name the counted guests by: a marker without a vmid, which the recheck of
+        # the failed moves cannot clear when an earlier failure has left the node meanwhile
+        if vms is None or getattr(vms, 'unavailable', False):
+            task.failed_vms.append({'vmid': None, 'name': f'guests on {node_name}',
+                                    'error': 'Could not verify that the node is empty'})
+            return
+        left = [v for v in vms if v.get('node') == node_name and v.get('status') == 'running'
+                and v.get('type') in ('qemu', 'lxc') and v.get('vmid') not in known]
+        for vm in left:
+            task.failed_vms.append({'vmid': vm.get('vmid'), 'name': vm.get('name', 'VM'), 'error': 'Still on the node after the wait'})
+        if not left and not known:
+            task.failed_vms.append({'vmid': None, 'name': f'{remaining} guest(s) on {node_name}', 'error': 'Still on the node after the wait'})
+
     def _count_vms_on_node(self, node_name):
         """Quick check how many running VMs/CTs are still on a node"""
         try:
             vms = self.get_vm_resources()
+            if getattr(vms, 'unavailable', False):
+                return -1
             return len([v for v in vms if v.get('node') == node_name
                         and v.get('type') in ('qemu', 'lxc')
                         and v.get('status') == 'running'])
@@ -5519,7 +5802,7 @@ class PegaProxManager:
     # run it on any other reachable node instead
     def _try_disable_native_ha_maintenance(self, node_name):
         try:
-            ssh_user = (self.config.user or 'root').split('@')[0]
+            ssh_user = node_login(self.config)
             prefix = "sudo " if ssh_user != 'root' else ""
             cmd = f"{prefix}ha-manager crm-command node-maintenance disable {node_name}"
             ssh_key = getattr(self.config, 'ssh_key', '')
@@ -8441,7 +8724,7 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
                 _hkc, _kh = cli_hostkey_opts()
                 result = node_cmd(
                     ['ssh', '-o', 'ConnectTimeout=5', '-o', f'StrictHostKeyChecking={_hkc}',
-                     '-o', f'UserKnownHostsFile={_kh}',
+                     '-o', f'UserKnownHostsFile={_kh}', *self._ssh_port_args(),
                      '--', f'{ssh_user}@{ssh_host}', 'poweroff'],
                     capture_output=True, timeout=15, host=str(ssh_host)
                 )
@@ -8521,8 +8804,7 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
             self.logger.info(f"[HA] 🔍 Checking node {node} on ALL networks: {all_ips}")
             
             # Get SSH credentials from cluster config
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             ssh_key = getattr(self.config, 'ssh_key', '')
             
             # Try SSH on ALL IPs (parallel for speed - reduces worst-case from N*30s to 30s)
@@ -8611,8 +8893,7 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
                 self.logger.error(f"[HA] No IPs available for node {node}")
                 return False
             
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             ssh_key = getattr(self.config, 'ssh_key', '')
             
             self.logger.warning(f"[HA] ═══════════════════════════════════════════════════════")
@@ -9094,7 +9375,7 @@ WantedBy=multi-user.target
         """One command on a node with the credentials the agent installer uses: the
         configured key, then the password, then whatever ssh finds on its own. None
         when none of them got through."""
-        ssh_user = getattr(self.config, 'ssh_user', None) or 'root'
+        ssh_user = node_login(self.config)
         ssh_key = getattr(self.config, 'ssh_key_path', None) or getattr(self.config, 'ssh_key', None)
         ssh_password = self.ssh_password_to_offer(node_ip)
         out = None
@@ -9945,7 +10226,7 @@ fi
                 self._ha_persist_fence_strategy(decision, 'detection-skipped: list-nodes failed')
                 return 'quorum'
 
-            ssh_user = getattr(self.config, 'ssh_user', None) or 'root'
+            ssh_user = node_login(self.config)
             ssh_key = getattr(self.config, 'ssh_key_path', None) or getattr(self.config, 'ssh_key', None)
 
             import re as _re
@@ -10098,7 +10379,7 @@ fi
                 result['error'] = f'list-nodes HTTP {resp.status_code}'
                 return result
 
-            ssh_user = getattr(self.config, 'ssh_user', None) or 'root'
+            ssh_user = node_login(self.config)
             ssh_key = getattr(self.config, 'ssh_key_path', None) or getattr(self.config, 'ssh_key', None)
 
             # Defense-in-depth: refuse to rm -rf anything that doesn't look
@@ -10520,8 +10801,7 @@ echo "AGENT_INSTALLED_OK"
                 self.logger.error(f"[HA] Cannot get IP for node {node}")
                 return False
             
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             ssh_password = self.ssh_password_to_offer(node_ip)
             ssh_key = getattr(self.config, 'ssh_key', '')
             
@@ -10679,11 +10959,12 @@ echo "AGENT_INSTALLED_OK"
         """
         return self.__dict__.get('_ssh_last_stderr', {}).get(host, '')
 
-    def _note_ssh_auth_hint(self, host, stderr):
+    def _note_ssh_auth_hint(self, host, stderr, tried=None):
         """#717: surface an actionable SSH-auth hint ONCE per host, at INFO level so it
         shows without DEBUG. The per-command sites only DEBUG the raw stderr; this lifts
         the conclusion ('add an SSH key' / 'host key changed') into normal logs where a
-        user staring at a compliance 502 will actually see it."""
+        user staring at a compliance 502 will actually see it. `tried` as for
+        _ssh_auth_hint."""
         # Keep the raw text around for _ssh_node_output_ex — the hint is deduplicated
         # per host below, but a caller asking "why did this command come back empty"
         # needs the reason every time, not only the first.
@@ -10691,7 +10972,7 @@ echo "AGENT_INSTALLED_OK"
         store[host] = (stderr or '')[-2000:]
         if len(store) > 512:          # estate-sized clusters: don't let this grow forever
             store.pop(next(iter(store)), None)
-        hint = _ssh_auth_hint(stderr)
+        hint = _ssh_auth_hint(stderr, tried=tried)
         if not hint:
             return
         seen = self.__dict__.setdefault('_ssh_auth_hint_seen', set())
@@ -10711,6 +10992,17 @@ echo "AGENT_INSTALLED_OK"
                 seen.add(str(user))
                 self.logger.warning(f"[SSH] {e} - set a valid SSH user for this cluster")
             return None
+
+    def _ssh_port_args(self):
+        """'-p <port>' for the command-line SSH family and the SSH fence when this
+        cluster's nodes listen somewhere other than 22, nothing for 22 (the argv stays
+        what it always was).
+
+        MK Nov 2026 - none of them passed a port, so with ssh_port set the HA checks, the
+        in-band BMC read and the fence all knocked on 22. With -p, OpenSSH pins the host
+        as [host]:port, the name paramiko gives it too."""
+        port = node_ssh_port(self.config)
+        return [] if port == 22 else ['-p', str(port)]
 
     def _ssh_run_command_output(self, host: str, user: str, command: str, timeout: int = 30) -> str:
         """Run SSH command and return output - HA PRIORITY (no rate limiting)
@@ -10743,13 +11035,14 @@ echo "AGENT_INSTALLED_OK"
             result = node_cmd(
                 ['ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                  '-o', f'UserKnownHostsFile={_kh}',
-                 '-o', 'BatchMode=yes', *login, command],
+                 '-o', 'BatchMode=yes', *self._ssh_port_args(), *login, command],
                 capture_output=True, text=True, timeout=timeout, host=host
             )
             if result.returncode == 0:
                 return result.stdout
             self.logger.debug(f"[SSH] Command failed on {host}: {_ssh_stderr_excerpt(result.stderr)}")
-            self._note_ssh_auth_hint(host, result.stderr)
+            # BatchMode: the keys ssh finds itself, never a password
+            self._note_ssh_auth_hint(host, result.stderr, tried='key')
             return None
         except subprocess.TimeoutExpired:
             self.logger.debug(f"[SSH] Command timed out on {host}")
@@ -10807,13 +11100,13 @@ echo "AGENT_INSTALLED_OK"
                 result = node_cmd(
                     ['ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                      '-o', f'UserKnownHostsFile={_kh}',
-                     '-i', key_file, *login, command],
+                     '-i', key_file, *self._ssh_port_args(), *login, command],
                     capture_output=True, text=True, timeout=timeout, host=host
                 )
                 if result.returncode == 0:
                     return result.stdout
                 self.logger.debug(f"[SSH] Key auth failed on {host}: {_ssh_stderr_excerpt(result.stderr)}")
-                self._note_ssh_auth_hint(host, result.stderr)
+                self._note_ssh_auth_hint(host, result.stderr, tried='key')
                 return None
             finally:
                 os.unlink(key_file)
@@ -10867,13 +11160,13 @@ echo "AGENT_INSTALLED_OK"
             result = node_cmd(
                 ['sshpass', '-e', 'ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                  '-o', f'UserKnownHostsFile={_kh}',
-                 *login, command],
+                 *self._ssh_port_args(), *login, command],
                 capture_output=True, text=True, timeout=timeout, env=env, host=host
             )
             if result.returncode == 0:
                 return result.stdout
             self.logger.debug(f"[SSH] Password auth failed on {host}: {_ssh_stderr_excerpt(result.stderr)}")
-            self._note_ssh_auth_hint(host, result.stderr)
+            self._note_ssh_auth_hint(host, result.stderr, tried='password')
             return None
         except FileNotFoundError:
             self.logger.debug(f"[SSH] sshpass not installed - cannot use password auth")
@@ -10887,6 +11180,30 @@ echo "AGENT_INSTALLED_OK"
         finally:
             _ssh_track_connection('ha', -1)
     
+    def _ssh_read_output(self, host: str, user: str, command: str, timeout: int = 30) -> str:
+        """stdout of a read on a node with the cluster's own credentials, None when none of
+        them got through: the configured key, then the keys ssh finds itself, then the
+        password - the order of _ssh_node_output_ex.
+
+        MK Oct 2026 (#601) - the sensors, the cluster health and the NIC counters called
+        _ssh_run_command_output alone, which offers only the keys of the PegaProx process.
+        The key from the cluster settings never went along, so where the process has none
+        (the Docker image) each of these reads failed, next to an sshd log full of logins
+        with that key from everything else.
+        """
+        ssh_key = getattr(self.config, 'ssh_key', '')
+        if ssh_key:
+            out = self._ssh_run_command_with_key_output(host, user, command, ssh_key, timeout=timeout)
+            if out is not None:
+                return out
+        out = self._ssh_run_command_output(host, user, command, timeout=timeout)
+        if out is not None:
+            return out
+        password = self.ssh_password_to_offer(host)
+        if password:
+            return self._ssh_run_command_with_password_output(host, user, command, password, timeout=timeout)
+        return None
+
     # Legacy storage-based functions kept for advanced users who want extra safety
     def _ha_storage_heartbeat_init(self):
         """Initialize storage-based heartbeat system"""
@@ -11383,9 +11700,7 @@ echo "AGENT_INSTALLED_OK"
             self.logger.info(f"[HA] Target node IP: {node_ip}")
             
             # Use cluster credentials - same as Proxmox API login
-            # User format is usually "root@pam" - extract just the username
-            api_user = self.config.user  # e.g. "root@pam"
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             ssh_password = self.ssh_password_to_offer(node_ip)
             ssh_key = getattr(self.config, 'ssh_key', '')  # SSH private key from cluster config
             
@@ -11470,8 +11785,7 @@ echo "AGENT_INSTALLED_OK"
                 return
             
             # Use cluster credentials
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             ssh_password = self.ssh_password_to_offer(node_ip)
             ssh_key = getattr(self.config, 'ssh_key', '')  # SSH key from cluster config
             
@@ -11761,8 +12075,7 @@ echo "AGENT_INSTALLED_OK"
                 return False
             
             # Get SSH credentials
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             
             surviving_ip = self._ha_get_node_ip(surviving_node)
             if not surviving_ip:
@@ -11885,6 +12198,7 @@ echo "AGENT_INSTALLED_OK"
             ssh_cmd = ['ssh', '-o', f'StrictHostKeyChecking={_hkc}', '-o', f'UserKnownHostsFile={_kh}', '-o', f'ConnectTimeout={ct}', '-o', 'BatchMode=yes']
             if key_file:
                 ssh_cmd.extend(['-i', key_file])
+            ssh_cmd.extend(self._ssh_port_args())
             ssh_cmd.extend(login)
             ssh_cmd.append(command)
             
@@ -12020,6 +12334,7 @@ echo "AGENT_INSTALLED_OK"
             ssh_cmd = [
                 'sshpass', '-e',
                 'ssh', '-o', f'StrictHostKeyChecking={_hkc}', '-o', f'UserKnownHostsFile={_kh}', '-o', f'ConnectTimeout={ct}',
+                *self._ssh_port_args(),
                 *login,
                 command
             ]
@@ -12107,8 +12422,7 @@ echo "AGENT_INSTALLED_OK"
                 target_ip = self.raw_host
             
             # Use cluster credentials for SSH
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             ssh_password = self.ssh_password_to_offer(target_ip)
             
             # Build the move command - use mv to atomically move the config
@@ -12288,10 +12602,11 @@ echo "AGENT_INSTALLED_OK"
                 'fence_agent': self._ha_fence_agent_status(),
                 'cluster_claim': self._ha_claim_status(),
             }
-            if ha.lease_in_force():
-                # automatic failover: recoveries a former leader left half done (5.6)
-                status['interrupted_recoveries'] = self.ha_interrupted_recoveries()
-            return status
+        if ha.lease_in_force():
+            # automatic failover: recoveries a former leader left half done (5.6). Read
+            # after the lock: the listing asks the cluster and takes ha_lock itself
+            status['interrupted_recoveries'] = self.ha_interrupted_recoveries()
+        return status
 
     def get_tasks(self, limit: int = 50, force: bool = False) -> List[Dict]:
         """get recent cluster tasks, newest first - MK
@@ -12422,13 +12737,16 @@ echo "AGENT_INSTALLED_OK"
                             task_info['vmid'] = task_info['id']
                     
                     # Get exit status for completed tasks
-                    if getattr(task, 'status', None) and task['status'] != 'running':
-                        task_info['exitstatus'] = task.get('exitstatus', '')
-                        # Mark as failed if exit status indicates error
-                        if task_info['exitstatus'] and 'error' in task_info['exitstatus'].lower():
-                            task_info['status'] = 'failed'
-                            task_info['error'] = task_info['exitstatus']
-                        elif task_info['exitstatus'] and task_info['exitstatus'] != 'OK':
+                    # NS: task is a dict, the old getattr() never saw its status, so no
+                    # task was ever marked failed. /cluster/tasks has no exitstatus either: a
+                    # finished task carries 'OK', 'WARNINGS: n' or the error itself in status.
+                    # 'stopped' alone only says it ended, the result would be in exitstatus.
+                    _st = task_info['status']
+                    _said = task.get('exitstatus') or ('' if _st == 'stopped' else _st)
+                    if _st and _st != 'running' and _said:
+                        task_info['exitstatus'] = str(_said)
+                        # warnings: done, worth a look in the log, not a failure
+                        if task_info['exitstatus'] != 'OK' and not task_info['exitstatus'].startswith('WARNINGS'):
                             task_info['status'] = 'failed'
                             task_info['error'] = task_info['exitstatus']
                     
@@ -12550,23 +12868,29 @@ echo "AGENT_INSTALLED_OK"
     # PROXMOX NATIVE HA INTEGRATION
     # =====================================================
     
-    def get_proxmox_ha_resources(self) -> List[Dict]:
-        
+    def get_proxmox_ha_resources(self, strict: bool = False) -> Optional[List[Dict]]:
+        """The cluster's HA resources. A failed read is [] for the balancer, which only
+        wants a list to skip; strict=True answers None for it, so the HA list route can
+        tell "no guest in HA" from "could not ask" (no connection, non-200, an error)."""
+        unread = None if strict else []
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
-        
+                return unread
+
         try:
             host = self.host
             url = f"https://{host}:{self.api_port}/api2/json/cluster/ha/resources"
             response = self._api_get(url)
-            
+
             if response.status_code == 200:
-                return response.json().get('data', [])
-            return []
+                data = response.json().get('data', [])
+                if strict and not isinstance(data, list):
+                    return None
+                return data
+            return unread
         except Exception as e:
             self.logger.error(f"Error getting Proxmox HA resources: {e}")
-            return []
+            return unread
     
     def get_proxmox_ha_groups(self) -> List[Dict]:
         """Return HA groups in the legacy group shape so the existing UI keeps working.
@@ -13285,7 +13609,7 @@ echo "AGENT_INSTALLED_OK"
         user = getattr(self.config, 'user', '') or ''
         if '!' in user or not user.endswith('@pam'):
             return cluster_pw
-        login = getattr(self.config, 'ssh_user', '') or user.split('@')[0]
+        login = node_login(self.config)
         if login != user.split('@')[0]:
             return cluster_pw
         return self._own_password_at(host) or cluster_pw
@@ -13300,7 +13624,9 @@ echo "AGENT_INSTALLED_OK"
         return bool(password) and password == stored and not ssh_password_for(self.config)
 
     def _ssh_connect(self, host: str, retries: int = 3, retry_delay: float = 2.0,
-                     connect_timeout: int = 30, failure: dict = None, pinned_as: str = None):
+                     connect_timeout: int = 30, failure: dict = None, pinned_as: str = None,
+                     login: str = None, quiet: bool = False, queue_wait: float = 120,
+                     guard_asked: bool = False):
         """SSH connect with retry logic and connection rate limiting
 
         NS: Jan 2026 - Limits concurrent CONNECTION ATTEMPTS (not active sessions).
@@ -13311,12 +13637,20 @@ echo "AGENT_INSTALLED_OK"
         HA operations use separate methods without any rate limiting.
 
         MK Oct 2026 - `failure`, when given, gets {'kind', 'detail'} on a None return
-        (auth, host_key, unreachable, key, blocked, error); the connection check names
-        the reason per node instead of a bare "SSH failed".
+        (auth, host_key, unreachable, key, blocked, error, and busy or local when nothing
+        left this host); the connection check names the reason per node instead of a
+        bare "SSH failed". An auth failure also says `refused`: False when the connection
+        ended or stalled during the login, rather than the server saying no.
 
         `pinned_as`: another address of the same node (its management address). `host`
         is then accepted only with the host key pinned for that one, nothing is learned
         or saved, and without such a pin there is no connection (transfer network).
+
+        MK Nov 2026 (#1224) - for _pve_node_exec's key leg: `login` the user to log in as
+        (default node_login: ssh_user, else root - #1322),
+        `quiet` its connect lines at debug (a polled path), `queue_wait` how long it waits
+        for a connection slot, `guard_asked` it asked guard_ssh for its one command before
+        connecting.
         """
         # #941 — decide before we open a socket. Every SSH path to a PVE node comes
         # through here, so refusing here is what stops the traffic AND stops the token
@@ -13343,21 +13677,27 @@ echo "AGENT_INSTALLED_OK"
         paramiko = get_paramiko()
         if not paramiko:
             self.logger.error("paramiko not installed, cannot use SSH features")
+            if failure is not None:
+                failure.update(kind='local', detail='paramiko is not installed on this PegaProx')
             return None
         
         # Get connection parameters
-        username = self.config.ssh_user if self.config.ssh_user else self.config.user.split('@')[0]
+        username = login or node_login(self.config)
         ssh_port = getattr(self.config, 'ssh_port', 22) or 22
         ssh_key = getattr(self.config, 'ssh_key', '')
+        _said = self.logger.debug if quiet else self.logger.info
         
         for attempt in range(1, retries + 1):
             # Rate limit connection ATTEMPTS (not active connections)
             stats = get_ssh_connection_stats()
             self.logger.debug(f"SSH queue: {stats['active_normal']} connecting, {stats['active_ha']} HA active")
             
-            acquired = _g._ssh_semaphore.acquire(timeout=120)
+            acquired = _g._ssh_semaphore.acquire(timeout=queue_wait)
             if not acquired:
-                self.logger.error(f"SSH to {host} queued too long (120s) - increase PEGAPROX_SSH_MAX_CONCURRENT")
+                self.logger.error(f"SSH to {host} queued too long ({int(queue_wait)}s) - increase PEGAPROX_SSH_MAX_CONCURRENT")
+                if failure is not None:
+                    failure.update(kind='busy', detail=f'every SSH connection slot of this PegaProx '
+                                                       f'was taken for {int(queue_wait)}s')
                 return None
             
             _ssh_track_connection('normal', +1)
@@ -13366,7 +13706,7 @@ echo "AGENT_INSTALLED_OK"
                 if attempt > 1:
                     self.logger.info(f"SSH retry {attempt}/{retries} to {host}...")
                 else:
-                    self.logger.info(f"Connecting to {host}:{ssh_port} as {username}...")
+                    _said(f"Connecting to {host}:{ssh_port} as {username}...")
                 
                 from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys, pin_as
                 ssh = paramiko.SSHClient()
@@ -13420,16 +13760,22 @@ echo "AGENT_INSTALLED_OK"
                 ssh.connect(**connect_kwargs)
                 if not pinned_as:
                     persist_host_keys(ssh)
-                self.logger.info(f"SSH connected to {host}" + (f" (attempt {attempt})" if attempt > 1 else ""))
+                _said(f"SSH connected to {host}" + (f" (attempt {attempt})" if attempt > 1 else ""))
+                if ssh_key:
+                    # MK Nov 2026 (#1224) - node commands stop skipping the key there
+                    from pegaprox.utils.ssh import key_accepted
+                    key_accepted(getattr(self, 'id', None), host, username, ssh_key)
 
                 # SUCCESS - release semaphore immediately, connection is established
                 # This allows new connections while this session runs
-                return ha_transport.guard_client(ssh, host)
+                return ha_transport.guard_client(ssh, host, again=guard_asked)
                 
             except paramiko.ssh_exception.AuthenticationException as e:
                 self.logger.error(f"SSH auth failed for {username}@{host}: {e}")
                 if failure is not None:
-                    failure.update(kind='auth', detail=str(e)[:300])
+                    # paramiko's words for a connection that ended or stalled in the login
+                    _gone = 'saw EOF' in str(e) or str(e).startswith('Authentication timeout')
+                    failure.update(kind='auth', detail=str(e)[:300], refused=not _gone)
                 return None
                 
             except (paramiko.ssh_exception.NoValidConnectionsError, socket.timeout, TimeoutError) as e:
@@ -13495,33 +13841,38 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"SSH execute error: {e}")
             return -1, '', str(e)
     
-    def _wait_for_node_online(self, node_name: str, timeout: int = 600) -> bool:
+    def _wait_for_node_online(self, node_name: str, timeout: int = 600, since: float = None) -> bool:
         
         self.logger.info(f"Waiting for {node_name} to come back online (timeout: {timeout}s)...")
-        start_time = time.time()
+        # monotonic: the uptime is a duration, and the wall clock can step while we wait
+        start_time = time.monotonic()
         
-        # First wait a bit for the node to actually go down
-        # 30s seems to work, less and you get false positives
-        time.sleep(30)
+        # JB Nov 2026 - a node still shutting down answers online, and a rolling update then pulled the
+        # next node. Online only counts once this one was seen down or has booted since the reboot was sent
+        seen_down = False
+        booted_after = since or start_time
         
-        while time.time() - start_time < timeout:
+        while time.monotonic() - start_time < timeout:
             try:
                 # Try to get node status from Proxmox API
                 # Force reconnect in case session expired
                 self.session = None  # force new session
                 if self.connect_to_proxmox():
-                    node_status = self.get_node_status()
-                    if node_name in node_status:
-                        if node_status[node_name]['status'] == 'online':
-                            self.logger.info(f"[OK] {node_name} is back online!")
-                            return True
+                    # no row says nothing: a failed read, or its details ran out of time. Only
+                    # offline counts as down, and the uptime shows a node that left the list
+                    node = self.get_node_status().get(node_name) or {}
+                    if node.get('status') == 'offline':
+                        seen_down = True
+                    elif node.get('status') == 'online' and (seen_down or 0 < (node.get('uptime') or 0) < time.monotonic() - booted_after):
+                        self.logger.info(f"[OK] {node_name} is back online!")
+                        return True
                 
             except Exception as e:
                 self.logger.debug(f"Waiting for {node_name}: {e}")
             
             time.sleep(10)
         
-        self.logger.error(f"Timeout waiting for {node_name} to come online")
+        self.logger.error(f"Timeout waiting for {node_name}: it did not restart and come back online")
         return False
     
     def start_node_update(self, node_name: str, reboot: bool = True, force: bool = False) -> Optional[UpdateTask]:
@@ -13599,10 +13950,7 @@ echo "AGENT_INSTALLED_OK"
             ssh = self._ssh_connect(node_ip, failure=failure)
             if not ssh:
                 # Check why SSH failed - get username for hint
-                if self.config.ssh_user:
-                    username = self.config.ssh_user
-                else:
-                    username = self.config.user.split('@')[0]
+                username = node_login(self.config)
                 ssh_port = getattr(self.config, 'ssh_port', 22) or 22
                 
                 if failure.get('kind') == 'auth' and not self.config.ssh_key:
@@ -13681,7 +14029,19 @@ echo "AGENT_INSTALLED_OK"
                 task.add_output("[SYNC] Initiating reboot / Starte Neustart...")
                 
                 # Reconnect for reboot command
-                ssh = self._ssh_connect(node_ip)
+                reboot_asked_at = time.monotonic()
+                failure = {}
+                ssh = self._ssh_connect(node_ip, failure=failure)
+                # JB Nov 2026 - no connection means no reboot, and the wait below sees the node online and calls it done:
+                # a kernel update ended as success without its reboot
+                if not ssh:
+                    task.add_output(f"[ERROR] Could not connect to send the reboot / Keine Verbindung fuer den Neustart: {node_name}")
+                    why = failure.get('detail') or failure.get('kind')
+                    task.error = "The reboot could not be sent: no SSH connection to the node" + (f" ({why})" if why else '')
+                    task.status = 'failed'
+                    task.phase = 'reboot_failed'
+                    task.completed_at = datetime.now()
+                    return
                 if ssh:
                     try:
                         # Check if root
@@ -13786,22 +14146,34 @@ echo "AGENT_INSTALLED_OK"
                         ssh = None
 
                 
-                task.add_output("Waiting for node to reboot / Warte auf Neustart...")
-                
-                # Wait for node to come back online
-                task.phase = 'wait_online'
-                task.status = 'waiting_online'
-                
-                if self._wait_for_node_online(node_name):
-                    task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
-                    task.back_online = True
+                # JB Nov 2026 - a node that got no reboot never goes down, and the wait now asks for that
+                rolling = getattr(self, '_rolling_update', None) or {}
+                in_run = rolling.get('status') == 'running' and rolling.get('current_node') == node_name
+                if not task.reboot_issued:
+                    task.add_output(f"No reboot sent to {node_name}, nothing to wait for / Kein Neustart, kein Warten")
+                elif in_run and rolling.get('wait_for_reboot') is False:
+                    # the run takes it out of maintenance itself, with its own retry
+                    task.add_output(f"Not waiting for {node_name} / Warte nicht auf {node_name}")
                 else:
-                    task.add_output(f"[ERROR] Timeout waiting for / beim Warten auf {node_name}")
-                    task.error = "Node did not come back online in time"
-                    task.status = 'failed'
-                    task.phase = 'wait_timeout'
-                    task.completed_at = datetime.now()
-                    return
+                    task.add_output("Waiting for node to reboot / Warte auf Neustart...")
+                    
+                    # Wait for node to come back online
+                    task.phase = 'wait_online'
+                    task.status = 'waiting_online'
+                    
+                    # JB Nov 2026 - the reboot timeout of the rolling update this node is in counts here, this
+                    # was always 600 s. A node updated by hand meanwhile has nothing to do with that run
+                    reboot_timeout = rolling.get('reboot_timeout') if in_run else None
+                    if self._wait_for_node_online(node_name, timeout=int(reboot_timeout or 600), since=reboot_asked_at):
+                        task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
+                        task.back_online = True
+                    else:
+                        task.add_output(f"[ERROR] Timeout waiting for / beim Warten auf {node_name}")
+                        task.error = "Node did not come back online in time"
+                        task.status = 'failed'
+                        task.phase = 'wait_timeout'
+                        task.completed_at = datetime.now()
+                        return
 
             # Done!
             task.status = 'completed'
@@ -13810,7 +14182,7 @@ echo "AGENT_INSTALLED_OK"
             task.add_output(f"[OK] Update completed / abgeschlossen!")
             
             # Auto-exit maintenance mode after successful update
-            if node_name in self.nodes_in_maintenance:
+            if node_name in self.nodes_in_maintenance and (task.back_online or not task.reboot_issued):
                 task.add_output(f"Exiting maintenance mode / Beende Wartungsmodus...")
                 try:
                     self.exit_maintenance_mode(node_name)
@@ -14170,12 +14542,23 @@ echo "AGENT_INSTALLED_OK"
             # this fix reached one line; both now go through the shared rule.
             from pegaprox.utils.sanitization import redact_secrets
             self.logger.debug(f"Migration data: {redact_secrets(data)}")
-            response = self._api_post(url, data=data)
+            sent = time.monotonic()
+            try:
+                response = self._api_post(url, data=data, timeout=(self.api_timeout, REMOTE_MIGRATE_TIMEOUT))
+            except requests.exceptions.ReadTimeout:
+                return self._unanswered_remote_migrate(node, vmid, vm_type, target_endpoint, sent,
+                                                       REMOTE_MIGRATE_TIMEOUT)
             
             if response.status_code == 200:
                 task_data = response.json()
                 self.logger.info(f"[OK] Remote migration started for {vmid}, task: {task_data.get('data')}")
                 return {'success': True, 'task': task_data.get('data')}
+            elif (response.status_code == 596
+                  and 'timed out' in f"{getattr(response, 'reason', '')} {response.text}".lower()):
+                # pveproxy hands the call on to pvedaemon (or to the node) and answers 596 once it
+                # waited too long for it, while the node goes on with its checks
+                return self._unanswered_remote_migrate(node, vmid, vm_type, target_endpoint, sent,
+                                                       int(time.monotonic() - sent))
             else:
                 error_msg = response.text
                 self.logger.error(f"[ERROR] Remote migration failed: {error_msg}")
@@ -14184,6 +14567,74 @@ echo "AGENT_INSTALLED_OK"
         except Exception as e:
             self.logger.error(f"[ERROR] Remote migration error: {e}")
             return {'success': False, 'error': str(e)}
+    
+    def migration_tasks(self, node, vmid, vm_type):
+        """The migration tasks of vmid on node as the node lists them, running and ended
+        (upid, starttime, endtime, status; a running one has no endtime). A remote migration
+        is one of them: qmigrate for a VM, vzmigrate for a container. None when the list
+        cannot be read."""
+        kind = 'qmigrate' if vm_type == 'qemu' else 'vzmigrate'
+        try:
+            r = self._api_get(f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/tasks",
+                              params={'vmid': vmid, 'typefilter': kind, 'source': 'all', 'limit': 50})
+            if r.status_code != 200:
+                return None
+            data = r.json().get('data')
+        except Exception as e:
+            self.logger.debug(f"migration tasks of {vmid} on {node} unreadable: {e}")
+            return None
+        if not isinstance(data, list):
+            return None
+        return [t for t in data if isinstance(t, dict) and t.get('type') == kind
+                and str(t.get('id')) == str(vmid) and str(t.get('upid') or '').startswith(f'UPID:{node}:')]
+
+    def _node_clock(self, node):
+        """The node's own time (epoch seconds), None when it cannot be read."""
+        try:
+            r = self._api_get(f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/time")
+            if r.status_code == 200:
+                return int((r.json().get('data') or {}).get('time'))
+        except Exception as e:
+            self.logger.debug(f"time of {node} unreadable: {e}")
+        return None
+
+    def _unanswered_remote_migrate(self, node, vmid, vm_type, target_endpoint, sent, waited):
+        """A remote_migrate POST sent at `sent` (monotonic) got no answer in `waited` seconds.
+
+        The node may have forked the task all the same, or still does once its checks are
+        through. A migration task of the guest that the node started after the POST, by its
+        own clock, is the answer then; the node's task list is read for
+        REMOTE_MIGRATE_LOOK_SECONDS. Without one the error says what did not answer, so the
+        caller drops its token as for a refused start."""
+        deadline = time.monotonic() + REMOTE_MIGRATE_LOOK_SECONDS
+        offset, read = None, False
+        while True:
+            if offset is None:
+                clock = self._node_clock(node)
+                if clock is not None:
+                    offset = clock - time.time()
+            tasks = self.migration_tasks(node, vmid, vm_type) if offset is not None else None
+            if tasks is not None:
+                read = True
+                # the node's time when the POST went out, a few seconds to spare
+                since = time.time() + offset - (time.monotonic() - sent) - 5
+                ours = [t for t in tasks if (t.get('starttime') or 0) >= since]
+                if ours:
+                    upid = max(ours, key=lambda t: t.get('starttime') or 0)['upid']
+                    self.logger.warning(f"[WARN] Remote migration of {vmid} got no answer within {waited}s, "
+                                        f"but {node} started it: {upid}")
+                    return {'success': True, 'task': upid}
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(REMOTE_MIGRATE_LOOK_EVERY)
+        host = re.search(r'(?:^|,)host=([^,]+)', target_endpoint or '')
+        error_msg = (f"the source node {node} did not answer the remote migration request within {waited} s; "
+                     f"check that the source nodes reach the target cluster's API"
+                     + (f" at {host.group(1)}" if host else ''))
+        if not read:
+            error_msg += f" (whether {node} started the task could not be read)"
+        self.logger.error(f"[ERROR] Remote migration failed: {error_msg}")
+        return {'success': False, 'error': error_msg}
     
     @staticmethod
     def tls_fingerprint(host, port, timeout=None):
@@ -14234,10 +14685,10 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"Error getting fingerprint: {e}")
             return {'success': False, 'error': str(e)}
 
-    def create_api_token(self, token_name: str = 'pegaprox-migrate') -> Dict[str, Any]:
+    def create_api_token(self, token_name: str = 'pegaprox-migrate', expire: int = 0) -> Dict[str, Any]:
         # MK May 2026 (#413 layer 6, blackshocks bundle 20260530_220647):
-        # if a prior Planned/Emergency failover crashed or its _delayed_cleanup
-        # hadn't fired yet, the same token_name is still on target → PVE returns
+        # if a prior Planned/Emergency failover crashed or its token cleanup
+        # hadn't run yet, the same token_name is still on target → PVE returns
         # 400 "Token already exists" and the next failover bails before it ever
         # touches qmigrate. Pre-delete is the cleanest path — we'd issue the
         # delete on cleanup anyway, doing it up-front makes the create idempotent.
@@ -14252,7 +14703,9 @@ echo "AGENT_INSTALLED_OK"
         def _do_create():
             data = {
                 'privsep': 0,  # No privilege separation - token has same permissions as user
-                'expire': 0,   # No expiration (we'll delete it manually)
+                # we delete it ourselves; should that never happen, PVE refuses it after
+                # expire (seconds since the epoch, 0 never)
+                'expire': int(expire or 0),
                 'comment': 'PegaProx temporary migration token'
             }
             return self._api_post(url, data=data)
@@ -14579,7 +15032,8 @@ echo "AGENT_INSTALLED_OK"
                 disk_options.append("discard=on")
             if vm_config.get('disk_iothread') and disk_type == 'scsi':
                 disk_options.append("iothread=1")
-            if vm_config.get('disk_ssd'):
+            # JB Nov 2026 - VirtIO Block has no ssd option, PVE refuses the whole create with it
+            if vm_config.get('disk_ssd') and disk_type in ('scsi', 'sata', 'ide'):
                 disk_options.append("ssd=1")
             
             if disk_options:
@@ -14626,8 +15080,8 @@ echo "AGENT_INSTALLED_OK"
                 if add_disk.get('iothread', True) and add_type == 'scsi':
                     add_opts.append("iothread=1")
                 
-                # SSD emulation: per-disk
-                if add_disk.get('ssd', False):
+                # SSD emulation: per-disk, on the buses that have it
+                if add_disk.get('ssd', False) and add_type in ('scsi', 'sata', 'ide'):
                     add_opts.append("ssd=1")
                 
                 if add_opts:
@@ -14730,8 +15184,9 @@ echo "AGENT_INSTALLED_OK"
             if vm_config.get('onboot'):
                 data['onboot'] = '1'
             
-            # Start after creation
-            start_after = vm_config.get('start', False)
+            # JB Nov 2026 - the checkbox was read and then dropped; PVE starts it at the end of the create task
+            if vm_config.get('start'):
+                data['start'] = '1'
             
             # MK: HA config (will be applied after VM creation)
             ha_enabled = vm_config.get('ha_enabled', False)
@@ -14793,7 +15248,12 @@ echo "AGENT_INSTALLED_OK"
             template = ct_config.get('template')
             if not template:
                 return {'success': False, 'error': 'Template is required for container creation'}
-            
+
+            # sent as given or not at all, see ct_root_credentials
+            password, ssh_keys, cred_err = ct_root_credentials(ct_config)
+            if cred_err:
+                return {'success': False, 'error': cred_err}
+
             # Build data payload
             # MK: defaults are conservative, users can change later
             data = {
@@ -14803,9 +15263,11 @@ echo "AGENT_INSTALLED_OK"
                 'memory': ct_config.get('memory', 512),  # MB
                 'swap': ct_config.get('swap', 512),
                 'cores': ct_config.get('cores', 1),
-                'password': ct_config.get('password', 'changeme'),  # should probably require this
             }
-            
+            # only a password the caller chose, a key-only container gets none from us
+            if password:
+                data['password'] = password
+
             # Root disk
             storage = ct_config.get('storage', 'local-lvm')
             disk_size = ct_config.get('disk_size', '8')  # GB
@@ -14904,7 +15366,6 @@ echo "AGENT_INSTALLED_OK"
                 data['onboot'] = '1'
             
             # SSH public keys
-            ssh_keys = ct_config.get('ssh_public_keys') or ct_config.get('ssh_key')
             if ssh_keys:
                 data['ssh-public-keys'] = ssh_keys
             
@@ -14921,6 +15382,9 @@ echo "AGENT_INSTALLED_OK"
                 features.append(f"mount={mount}")
             if features:
                 data['features'] = ','.join(features)
+            
+            if ct_config.get('start'):
+                data['start'] = '1'
             
             # MK: HA config (will be applied after CT creation)
             ha_enabled = ct_config.get('ha_enabled', False)
@@ -16029,6 +16493,7 @@ echo "AGENT_INSTALLED_OK"
         if not getattr(self, '_ssl_verify', False):
             ctx.check_hostname = False
             ctx.verify_mode = _ssl.CERT_NONE
+        opener = pve_opener(ctx)
 
         last = None
         # MK Oct 2026 (#1136) - a fallback whose node has a root password of its own logs
@@ -16047,7 +16512,7 @@ echo "AGENT_INSTALLED_OK"
                 )
                 # short per-host budget: a dead node should cost seconds, not the whole
                 # request. Four candidates at 10s each is how a tile poll reached 50s.
-                with _ur.urlopen(req, context=ctx, timeout=6) as resp:
+                with opener.open(req, timeout=6) as resp:
                     res = _json.loads(resp.read().decode('utf-8'))
                 ticket = res['data']['ticket']
                 if idx:
@@ -16061,6 +16526,10 @@ echo "AGENT_INSTALLED_OK"
                     return ticket, res['data'].get('CSRFPreventionToken')
                 return ticket
             except _uerr.HTTPError as he:
+                if he.code in (301, 302, 303, 307, 308):
+                    # not followed, and no word on the password: the next host may still do
+                    last = he
+                    continue
                 # the node answered and said no — credentials, not reachability
                 self.logger.warning(f"[CONSOLE] auth-ticket rejected by {host}: HTTP {he.code}")
                 refused.append(host_pwd)
@@ -16127,6 +16596,10 @@ echo "AGENT_INSTALLED_OK"
             else:
                 s.verify = False
                 s.mount('https://', _NoHostnameCheckAdapter(**_pool_kw))
+            # MK Nov 2026 - the same path check as the cached session, this one is root@pam
+            from pegaprox.utils.sanitization import refuse_climbing_paths
+            refuse_climbing_paths(s)
+            _refuse_redirects(s)
             ha_transport.guard_session(s)
             # self.host is already IPv6-bracketed by the property — use it directly.
             login_url = f"https://{self.host}:{self.api_port}/api2/json/access/ticket"
@@ -16303,7 +16776,8 @@ echo "AGENT_INSTALLED_OK"
                     'user': user,
                     'host': self.config.host,
                     'node': node,
-                    'pve_auth_cookie': self._ticket
+                    # MK Nov 2026 - no PVEAuthCookie in here either, like the VNC and
+                    # term tickets: the session of the cluster account stays server-side
                 }
             else:
                 error_msg = response.text
@@ -16616,10 +17090,18 @@ echo "AGENT_INSTALLED_OK"
             # comments that picking VirtIO in PegaProx left PVE on LSI; turns
             # out the dropdown was already showing VirtIO without anything to
             # save against, so the user's "no-op" save kept PVE's lsi default.
+            # MK Nov 2026 - an unset cpu is PVE's default type (CPUConfig.pm get_default_cpu_type):
+            # kvm64, qemu64 without KVM, host on aarch64 (max without KVM). 'host' here made the
+            # dropdown claim host and a CPU flag click write cpu=host,flags=..., a silent type change
+            _kvm = str(config.get('kvm', 1)) != '0'
+            if config.get('arch') == 'aarch64':
+                _cpu_default = 'host' if _kvm else 'max'
+            else:
+                _cpu_default = 'kvm64' if _kvm else 'qemu64'
             parsed['hardware'] = {
                 'cores': config.get('cores', 1),
                 'sockets': config.get('sockets', 1),
-                'cpu': config.get('cpu', 'host'),
+                'cpu': config.get('cpu', _cpu_default),
                 'memory': config.get('memory', 512),
                 'balloon': config.get('balloon', 0),
                 'numa': config.get('numa', 0),
@@ -16921,7 +17403,8 @@ echo "AGENT_INSTALLED_OK"
                                 del config_updates['boot']
                                 self.logger.warning(f"No valid boot devices found, skipping boot order update")
             
-            self.logger.info(f"Updating {vm_type}/{vmid} config: {config_updates}")
+            # PVE gets a cloud-init or root password as sent, the log line its key only
+            self.logger.info(f"Updating {vm_type}/{vmid} config: {redact_secrets(config_updates)}")
             
             response = self._api_put(url, data=config_updates)
             
@@ -16953,7 +17436,9 @@ echo "AGENT_INSTALLED_OK"
             if not config_result.get('success'):
                 return {'success': False, 'error': 'Could not get VM config'}
             
-            config = config_result.get('config', {})
+            # get_vm_config hands back the config parsed for the UI, the boot line and the
+            # device keys are only in the PVE config it keeps under raw (#1356)
+            config = config_result.get('config', {}).get('raw') or {}
             boot_val = config.get('boot', '')
             
             if not boot_val or 'order=' not in boot_val:
@@ -16969,8 +17454,9 @@ echo "AGENT_INSTALLED_OK"
             removed_devices = []
             
             for dev in devices:
-                # Check if device exists in config (net0 is always valid for QEMU)
-                if dev in config or (dev == 'net0' and vm_type == 'qemu'):
+                # Check if device exists in config. PVE refuses an order naming a device the
+                # config does not have (Qemu.pm, 'invalid bootorder'), a missing net0 as well
+                if dev in config:
                     valid_devices.append(dev)
                 else:
                     removed_devices.append(dev)
@@ -16982,9 +17468,12 @@ echo "AGENT_INSTALLED_OK"
             # Update boot order
             if valid_devices:
                 new_boot = 'order=' + ';'.join(valid_devices)
+            elif vm_type == 'qemu' and 'net0' in config:
+                # No valid devices - network boot, the VM has a NIC
+                new_boot = 'order=net0'
             else:
-                # No valid devices - default to net0 for QEMU
-                new_boot = 'order=net0' if vm_type == 'qemu' else ''
+                # nothing left PVE would take: drop the order, PVE's default applies
+                new_boot = ''
             
             # Apply update
             if vm_type == 'qemu':
@@ -16992,7 +17481,7 @@ echo "AGENT_INSTALLED_OK"
             else:
                 url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/lxc/{vmid}/config"
             
-            response = self._api_put(url, data={'boot': new_boot})
+            response = self._api_put(url, data={'boot': new_boot} if new_boot else {'delete': 'boot'})
             
             if response.status_code == 200:
                 self.logger.info(f"[OK] Sanitized boot order for {vm_type}/{vmid}: removed {removed_devices}")
@@ -17377,6 +17866,10 @@ echo "AGENT_INSTALLED_OK"
             if not self.connect_to_proxmox():
                 return []
         
+        # MK Nov 2026 - a storage the caller names goes into the path: a name, or no request
+        if storage and not validate_storage_name(storage):
+            self.logger.warning(f"[ISO] refused to list ISOs of storage {storage!r}: no storage name")
+            return []
         try:
             host = self.host
             isos = []
@@ -17424,57 +17917,99 @@ echo "AGENT_INSTALLED_OK"
             return storage, None
         return None, f"Storage {storage_name} not found on {node}"
 
-    def get_content_sync_status(self, content_type='iso'):
-        """Build matrix of which ISOs/templates exist on which nodes"""
-        if not self.is_connected:
-            return {'nodes': [], 'files': [], 'matrix': {}}
+    # MK Nov 2026 - the content reads of the sync status: at most this many nodes at a time,
+    # and the whole status within this many seconds (each request 10 s, never past that)
+    SYNC_STATUS_WORKERS = 8
+    SYNC_STATUS_DEADLINE = 25
+
+    def _node_sync_files(self, node, content_type, end=None):
+        """(files, None) of the local active storages of `node` that take content_type, or
+        (None, why) when its storage list or one of their content reads did not answer.
+        `end` (monotonic): no request starts after it and none waits past it."""
+        base = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}"
+        late = (None, 'the read did not finish in time')
+
+        def _left(cap):
+            return cap if end is None else min(cap, end - time.monotonic())
         try:
+            if _left(1) <= 0:
+                return late
+            r = self._api_get(f"{base}/storage", timeout=_left(10))
+            if r.status_code != 200:
+                return None, f'its storage list answered HTTP {r.status_code}'
+            storages = [s for s in (r.json().get('data') or [])
+                        if isinstance(s, dict) and content_type in (s.get('content') or '')
+                        and s.get('active') and not self._storage_is_shared(s)]
+            files = []
+            for stor in storages:
+                if _left(1) <= 0:
+                    return late
+                r = self._create_session().get(f"{base}/storage/{stor['storage']}/content",
+                                               params={'content': content_type}, timeout=_left(10))
+                if r.status_code != 200:
+                    return None, f"the content of {stor['storage']} answered HTTP {r.status_code}"
+                for item in r.json().get('data') or []:
+                    volid = item.get('volid', '')
+                    files.append({'volid': volid, 'name': volid.split('/')[-1] if '/' in volid else volid,
+                                  'size': item.get('size', 0), 'storage': stor['storage']})
+            return files, None
+        except Exception as e:
+            return None, f'it did not answer ({type(e).__name__})'
+
+    def get_content_sync_status(self, content_type='iso'):
+        """Build matrix of which ISOs/templates exist on which nodes
+
+        MK Nov 2026 - the nodes are read in parallel, SYNC_STATUS_WORKERS at a time (one
+        after the other took minutes at 200 nodes). A node whose read failed or did not end
+        within SYNC_STATUS_DEADLINE is left out of nodes and matrix and named in `unread`:
+        with all its files false it read as missing them, and a sync of all copied there.
+        `error` says why there is no status at all (the route answers it as an error)."""
+        if not self.is_connected:
+            return {'nodes': [], 'files': [], 'matrix': {}, 'unread': {},
+                    'error': 'the cluster is not connected', 'offline': True}
+        try:
+            from pegaprox.utils.concurrent import run_per_node, yield_to_hub
             ns = self.get_node_status()
             online_nodes = [n for n, d in ns.items() if d.get('status') == 'online']
-            host = self.host
-            # collect per-node content
-            node_files = {}
+            # one turn of the hub first: its clock stands still while this greenlet runs, and
+            # the deadline below would start that much in the past
+            yield_to_hub()
+            # the deadline holds for the whole read: no node starts after it, no request waits past it
+            end = time.monotonic() + self.SYNC_STATUS_DEADLINE
+            got = run_per_node({n: (lambda node: self._node_sync_files(node, content_type, end)) for n in online_nodes},
+                               max_concurrent=self.SYNC_STATUS_WORKERS, timeout=self.SYNC_STATUS_DEADLINE, whole=True)
+            node_files, unread = {}, {}
             for node in online_nodes:
-                storages = [s for s in self.get_storage_list(node)
-                            if content_type in s.get('content', '')
-                            and s.get('active')
-                            and not self._storage_is_shared(s)]
-                files = []
-                for stor in storages:
-                    url = f"https://{host}:{self.api_port}/api2/json/nodes/{node}/storage/{stor['storage']}/content"
-                    r = self._create_session().get(url, params={'content': content_type}, timeout=10)
-                    if r.status_code == 200:
-                        for item in r.json().get('data', []):
-                            files.append({
-                                'volid': item.get('volid', ''),
-                                'name': item.get('volid', '').split('/')[-1] if '/' in item.get('volid', '') else item.get('volid', ''),
-                                'size': item.get('size', 0),
-                                'storage': stor['storage'],
-                            })
-                node_files[node] = files
+                files, why = got.get(node) or (None, 'the read did not finish in time')
+                if files is None:
+                    unread[node] = why
+                else:
+                    node_files[node] = files
+            read_nodes = [n for n in online_nodes if n in node_files]
 
-            # build deduplicated file list + matrix
-            all_names = {}
-            for node, files in node_files.items():
-                for f in files:
+            # build deduplicated file list + matrix, one set of keys per node
+            all_names, held = {}, {}
+            for node in read_nodes:
+                keys = held[node] = set()
+                for f in node_files[node]:
                     key = f"{f['storage']}:{f['name']}"
+                    keys.add(key)
                     if key not in all_names:
                         all_names[key] = {'name': f['name'], 'storage': f['storage'], 'size': f['size']}
-            matrix = {}
-            for key in all_names:
-                matrix[key] = {}
-                for node in online_nodes:
-                    matrix[key][node] = any(
-                        f"{fi['storage']}:{fi['name']}" == key for fi in node_files.get(node, [])
-                    )
+            matrix = {key: {node: key in held[node] for node in read_nodes} for key in all_names}
+            if unread:
+                self.logger.warning(f"[SYNC] {len(unread)} node(s) not read for the sync status: "
+                                    f"{', '.join(sorted(unread)[:10])}")
             return {
-                'nodes': online_nodes,
+                'nodes': read_nodes,
                 'files': list(all_names.values()),
                 'matrix': matrix,
+                'unread': unread,
             }
         except Exception as e:
             self.logger.error(f"[SYNC] Error building sync status: {e}")
-            return {'nodes': [], 'files': [], 'matrix': {}}
+            return {'nodes': [], 'files': [], 'matrix': {}, 'unread': {},
+                    'error': f'the sync status could not be built ({type(e).__name__})'}
 
     def sync_content_to_nodes(self, source_node, storage, filename, content_type='iso', target_nodes=None):
         """Copy ISO/template from source node to other nodes via SSH
@@ -17510,7 +18045,7 @@ echo "AGENT_INSTALLED_OK"
         src_file = f"{src_path}/{filename}"
         self.logger.info(f"[SYNC] Source: {src_ip}:{src_file}")
 
-        ssh_user = getattr(self.config, 'ssh_user', '') or 'root'
+        ssh_user = node_login(self.config)
 
         for tgt_node in online_nodes:
             # already an intersection with the live online-node list, but resolve it the same
@@ -17858,11 +18393,20 @@ echo "AGENT_INSTALLED_OK"
             bus_type = ''.join(c for c in disk_id if c.isalpha())
             # LW: iothread only works with virtio-scsi controller
             supports_iothread = bus_type in ['scsi', 'virtio']
-            # MK: ssd emulation supported for scsi, virtio, sata (NOT ide - tried it, breaks)
-            supports_ssd = bus_type in ['scsi', 'virtio', 'sata']
+            # MK: ssd emulation supported for scsi, sata (NOT ide - tried it, breaks)
+            # MK Nov 2026 - and not virtio either, VirtIO Block has no ssd and PVE refuses the drive
+            supports_ssd = bus_type in ['scsi', 'sata']
             
             if vm_type == 'qemu':
                 url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/qemu/{vmid}/config"
+
+                # JB Nov 2026 - the ID is free text in the dialog. PVE takes a PUT on a used slot as a
+                # swap: the old disk is unplugged (live on a running guest) and parked as unusedN
+                current = self._api_get(url)
+                if current.status_code != 200:
+                    return {'success': False, 'error': f'Could not read the config of VM {vmid}'}
+                if disk_id in (current.json().get('data') or {}):
+                    return {'success': False, 'error': f'{disk_id} is already in use, pick a free slot'}
 
                 # Build disk string - format is storage:size (size in GB without unit)
                 disk_str = f"{storage}:{size}"
@@ -17882,7 +18426,7 @@ echo "AGENT_INSTALLED_OK"
                 # MK: Only add iothread for scsi/virtio
                 if disk_config.get('iothread') and supports_iothread:
                     disk_str += ",iothread=1"
-                # MK: Only add ssd for scsi/virtio/sata (not ide)
+                # MK: Only add ssd for scsi/sata (not ide)
                 if disk_config.get('ssd') and supports_ssd:
                     disk_str += ",ssd=1"
                 if disk_config.get('discard'):
@@ -17968,8 +18512,11 @@ echo "AGENT_INSTALLED_OK"
                         if new_parts != parts:  # Boot order changed
                             if new_parts:
                                 new_boot = 'order=' + ';'.join(new_parts)
+                            elif vm_type == 'qemu' and 'net0' in raw_config:
+                                new_boot = 'order=net0'
                             else:
-                                new_boot = 'order=net0' if vm_type == 'qemu' else ''
+                                # PVE refuses an order naming a device the VM lacks: no order then
+                                new_boot = ''
                             
                             # Update boot order BEFORE removing disk
                             if vm_type == 'qemu':
@@ -17977,9 +18524,9 @@ echo "AGENT_INSTALLED_OK"
                             else:
                                 boot_url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/lxc/{vmid}/config"
                             
-                            boot_response = self._api_put(boot_url, data={'boot': new_boot})
+                            boot_response = self._api_put(boot_url, data={'boot': new_boot} if new_boot else {'delete': 'boot'})
                             if boot_response.status_code == 200:
-                                self.logger.info(f"[DISK] Updated boot order before removing {disk_id}: {new_boot}")
+                                self.logger.info(f"[DISK] Updated boot order before removing {disk_id}: {new_boot or 'default'}")
                             else:
                                 self.logger.warning(f"[DISK] Failed to update boot order: {boot_response.text}")
                     except Exception as e:
@@ -18018,15 +18565,19 @@ echo "AGENT_INSTALLED_OK"
                             parsed_config = new_config.get('config', {})
                             raw_config = parsed_config.get('raw', {})
                             
-                            # Find the unused slot containing our volume
-                            unused_slot = None
-                            for key, value in raw_config.items():
-                                if key.startswith('unused') and volume_path in str(value):
-                                    unused_slot = key
-                                    self.logger.info(f"[DEBUG] Found {volume_path} in {key}={value}")
-                                    break
+                            # Find the unused slots holding exactly our volume id (the part before the first comma).
+                            # A substring test would match disk-1 inside disk-10 and delete the wrong volume.
+                            unused_slots = [key for key, value in raw_config.items()
+                                            if key.startswith('unused') and str(value).split(',')[0].strip() == volume_path]
+                            if len(unused_slots) > 1:
+                                held_by = ', '.join(unused_slots)
+                                self.logger.warning(f"[WARN] {volume_path} is held by {held_by} on {vm_type}/{vmid}: nothing deleted")
+                                # the detach is done: report it as the other partial outcomes below do
+                                return {'success': True, 'message': f'Disk {disk_id} detached (volume kept: {volume_path} is held by {held_by})'}
+                            unused_slot = unused_slots[0] if unused_slots else None
                             
                             if unused_slot:
+                                self.logger.info(f"[DEBUG] Found {volume_path} in {unused_slot}={raw_config[unused_slot]}")
                                 # Delete the unused slot - this removes the volume
                                 delete_data_req = {'delete': unused_slot}
                                 delete_response = self._api_put(url, data=delete_data_req)
@@ -18037,6 +18588,25 @@ echo "AGENT_INSTALLED_OK"
                                     self.logger.warning(f"[WARN] Failed to delete {unused_slot}: {delete_response.text}")
                             else:
                                 self.logger.warning(f"[WARN] Could not find {volume_path} in unused slots. Raw config keys: {list(raw_config.keys())}")
+                                # PVE parks only a volume of this guest in unusedN. The storage API
+                                # frees whatever it is named and looks at no guest config, so another
+                                # guest's disk or an ISO never goes there
+                                if _volume_owner(volume_path) != int(vmid):
+                                    self.logger.warning(f"[WARN] {volume_path} does not belong to {vm_type}/{vmid}: nothing deleted")
+                                    return {'success': True, 'message': f'Disk {disk_id} detached (volume kept: {volume_path} does not belong to guest {vmid})'}
+                                # On a running guest PVE only marks a drive it cannot unplug live for
+                                # removal (sata, ide, no disk hotplug, a container mount point). It stays
+                                # in use until the next start, and freeing it now pulls it from the guest.
+                                # A status that could not be read counts as running
+                                if (parsed_config.get('status') or {}).get('status') != 'stopped':
+                                    pending_response = self._api_get(url.rsplit('/', 1)[0] + '/pending')
+                                    if pending_response.status_code != 200:
+                                        self.logger.warning(f"[WARN] Could not read the pending changes of {vm_type}/{vmid}: {volume_path} kept")
+                                        return {'success': True, 'message': f'Disk {disk_id} detach sent (volume kept: the pending changes of guest {vmid} could not be read)'}
+                                    if any(isinstance(p, dict) and p.get('key') == disk_id and p.get('delete')
+                                           for p in (pending_response.json().get('data') or [])):
+                                        self.logger.info(f"[DISK] {disk_id} of running {vm_type}/{vmid} goes at its next start: {volume_path} kept")
+                                        return {'success': True, 'message': f'Disk {disk_id} is detached at the next start of guest {vmid} (volume kept)'}
                                 # Volume not found in unused - try direct storage API delete
                                 storage_name = volume_path.split(':')[0] if ':' in volume_path else None
                                 if storage_name:
@@ -18089,14 +18659,15 @@ echo "AGENT_INSTALLED_OK"
             else:
                 url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/lxc/{vmid}/move_volume"
             
+            # move_volume names the volume 'volume' and refuses 'disk' as an unknown parameter
             data = {
-                'disk': disk_id,
+                'disk' if vm_type == 'qemu' else 'volume': disk_id,
                 'storage': target_storage,
                 'delete': 1 if delete_original else 0
             }
-            
+
             response = self._api_post(url, data=data)
-            
+
             if response.status_code == 200:
                 task_id = response.json().get('data')
                 self.logger.info(f"[OK] Moving disk {disk_id} to {target_storage} (Task: {task_id})")
@@ -18199,7 +18770,9 @@ echo "AGENT_INSTALLED_OK"
                 net_str = ','.join(parts)
             
             data = {net_id: net_str}
-            response = self._api_post(url, data=data)
+            # JB Nov 2026 - a container's config has no POST, the disk route below already went through this
+            # keyed like the URL above, anything but qemu is the container's config
+            response = self._api_post(url, data=data) if vm_type == 'qemu' else self._api_put(url, data=data)
             
             if response.status_code == 200:
                 self.logger.info(f"[OK] Added network {net_id} to {vm_type}/{vmid}")
@@ -18210,6 +18783,29 @@ echo "AGENT_INSTALLED_OK"
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
+    # MK Nov 2026 - the parts of a network device the edit dialog owns. Everything else in the
+    # stored string (trunks, an LXC link_down or type, a part a newer PVE adds) is kept: the
+    # rebuild from the dialog fields used to drop it, so editing the rate of a trunk port
+    # turned off its VLAN trunks.
+    _NET_DIALOG_PARTS = {
+        'qemu': {'model', 'macaddr', 'bridge', 'tag', 'firewall', 'rate', 'queues', 'mtu', 'link_down'},
+        'lxc': {'name', 'bridge', 'hwaddr', 'ip', 'gw', 'ip6', 'gw6', 'tag', 'firewall', 'rate', 'mtu'},
+    }
+
+    @classmethod
+    def _net_kept_parts(cls, vm_type: str, stored: str) -> List[str]:
+        """The parts of a stored netN string the dialog does not own, in their order."""
+        owned = cls._NET_DIALOG_PARTS['qemu' if vm_type == 'qemu' else 'lxc']
+        kept = []
+        for i, part in enumerate(p for p in str(stored or '').split(',') if p):
+            key = part.split('=', 1)[0]
+            # QEMU writes the model as "<model>=<mac>" in front
+            if vm_type == 'qemu' and i == 0 and '=' in part and key not in owned:
+                continue
+            if key not in owned:
+                kept.append(part)
+        return kept
+
     def update_network(self, node: str, vmid: int, vm_type: str, net_id: str, net_config: Dict) -> Dict[str, Any]:
         """Update network configuration
         
@@ -18224,6 +18820,12 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
+            cfg_url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/{'qemu' if vm_type == 'qemu' else 'lxc'}/{vmid}/config"
+            cur = self._api_get(cfg_url)
+            if cur.status_code != 200:
+                return {'success': False, 'error': f'Could not read the current {net_id}, nothing was changed'}
+            kept = self._net_kept_parts(vm_type, ((cur.json() or {}).get('data') or {}).get(net_id, ''))
+
             if vm_type == 'qemu':
                 url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/qemu/{vmid}/config"
                 
@@ -18280,6 +18882,7 @@ echo "AGENT_INSTALLED_OK"
                 
                 net_str = ','.join(parts)
             
+            net_str = ','.join([net_str] + kept) if kept else net_str
             data = {net_id: net_str}
             response = self._api_put(url, data=data)
             
@@ -18385,23 +18988,35 @@ echo "AGENT_INSTALLED_OK"
     # CPU profiles (see manager.cluster.cpu-models in pve-manager 9.2). We try
     # to fetch + append on connect; on older clusters the endpoint 404s and
     # the static list is returned unchanged.
+    # MK Nov 2026 - the fallback is the x86_64 list qemu-server keeps in CPUConfig.pm
+    # (initialize_cpu_models) plus host and the x86-64-v* levels. It lacked 34 newer models
+    # (EPYC-Genoa/-Turin, GraniteRapids, SierraForest, the -vN revisions) and offered n270,
+    # which PVE refuses.
     _STATIC_CPU_TYPES = [
         'host', 'kvm64', 'kvm32', 'qemu64', 'qemu32',
         'max', 'x86-64-v2', 'x86-64-v2-AES', 'x86-64-v3', 'x86-64-v4',
-        'Broadwell', 'Broadwell-IBRS', 'Broadwell-noTSX', 'Broadwell-noTSX-IBRS',
-        'Cascadelake-Server', 'Cascadelake-Server-noTSX', 'Cascadelake-Server-v2',
-        'Conroe', 'Cooperlake', 'Cooperlake-v2',
-        'EPYC', 'EPYC-IBPB', 'EPYC-Milan', 'EPYC-Rome', 'EPYC-v3',
+        '486', 'pentium', 'pentium2', 'pentium3', 'coreduo', 'core2duo', 'Conroe', 'Penryn',
+        'Nehalem', 'Nehalem-IBRS', 'Westmere', 'Westmere-IBRS',
+        'SandyBridge', 'SandyBridge-IBRS', 'IvyBridge', 'IvyBridge-IBRS',
         'Haswell', 'Haswell-IBRS', 'Haswell-noTSX', 'Haswell-noTSX-IBRS',
+        'Broadwell', 'Broadwell-IBRS', 'Broadwell-noTSX', 'Broadwell-noTSX-IBRS',
+        'Skylake-Client', 'Skylake-Client-IBRS', 'Skylake-Client-noTSX-IBRS', 'Skylake-Client-v4',
+        'Skylake-Server', 'Skylake-Server-IBRS', 'Skylake-Server-noTSX-IBRS', 'Skylake-Server-v4',
+        'Skylake-Server-v5',
+        'Cascadelake-Server', 'Cascadelake-Server-v2', 'Cascadelake-Server-noTSX',
+        'Cascadelake-Server-v4', 'Cascadelake-Server-v5',
+        'Cooperlake', 'Cooperlake-v2', 'KnightsMill',
         'Icelake-Client', 'Icelake-Client-noTSX', 'Icelake-Server', 'Icelake-Server-noTSX',
-        'IvyBridge', 'IvyBridge-IBRS',
-        'Nehalem', 'Nehalem-IBRS',
-        'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
-        'Penryn', 'SandyBridge', 'SandyBridge-IBRS',
-        'SapphireRapids', 'Skylake-Client', 'Skylake-Client-IBRS',
-        'Skylake-Server', 'Skylake-Server-IBRS', 'Skylake-Server-noTSX-IBRS',
-        'Westmere', 'Westmere-IBRS', 'athlon', 'core2duo', 'coreduo',
-        'n270', 'pentium', 'pentium2', 'pentium3', 'phenom'
+        'Icelake-Server-v3', 'Icelake-Server-v4', 'Icelake-Server-v5', 'Icelake-Server-v6',
+        'Icelake-Server-v7',
+        'SapphireRapids', 'SapphireRapids-v2', 'SapphireRapids-v3', 'SapphireRapids-v4',
+        'GraniteRapids', 'GraniteRapids-v2', 'GraniteRapids-v3',
+        'SierraForest', 'SierraForest-v2', 'SierraForest-v3', 'ClearwaterForest',
+        'athlon', 'phenom', 'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
+        'EPYC', 'EPYC-IBPB', 'EPYC-v3', 'EPYC-v4', 'EPYC-v5',
+        'EPYC-Rome', 'EPYC-Rome-v2', 'EPYC-Rome-v3', 'EPYC-Rome-v4', 'EPYC-Rome-v5',
+        'EPYC-Milan', 'EPYC-Milan-v2', 'EPYC-Milan-v3',
+        'EPYC-Genoa', 'EPYC-Genoa-v2', 'EPYC-Turin',
     ]
 
     def get_cpu_types(self) -> List[str]:
@@ -18413,7 +19028,7 @@ echo "AGENT_INSTALLED_OK"
              shows up — e.g. EPYC entries only on AMD nodes). Returns rows
              with {name, vendor, custom} — we keep names verbatim, including
              custom-* models the admin defined.
-          2) Fall back to the static 61-entry list on any error or when no
+          2) Fall back to the static list (qemu-server's own) on any error or when no
              node is reachable. Same shape that PegaProx has been returning
              since forever, so callers don't see breakage.
 
@@ -18780,10 +19395,10 @@ echo "AGENT_INSTALLED_OK"
             return {'error': str(e)}
     
     def get_node_network_config(self, node: str) -> List[Dict]:
-        
+        # MK Nov 2026 - a read that failed is an UnreadList, never a node without interfaces
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/network"
@@ -18791,10 +19406,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', [])
-            return []
+            return unread(UnreadList, response)
         except Exception as e:
             self.logger.error(f"Error getting network config: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def update_node_network(self, node: str, iface: str, config: Dict) -> Dict[str, Any]:
         
@@ -18885,21 +19500,33 @@ echo "AGENT_INSTALLED_OK"
             return {'success': False, 'error': str(e)}
     
     def get_node_dns(self, node: str) -> Dict[str, Any]:
-        
+        # MK Oct 2026 (#1163) - a failed read came back as {}, the same as a node without any
+        # DNS, and the UI showed blank servers (and offered to save them). A failure is
+        # {'error', 'upstream_status'} now, the status None when Proxmox VE gave no answer.
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return {}
+                return {'error': 'The cluster is not connected', 'upstream_status': None}
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/dns"
             response = self._api_get(url)
-            
-            if response.status_code == 200:
-                return response.json().get('data', {})
-            return {}
         except Exception as e:
             self.logger.error(f"Error getting DNS config: {e}")
-            return {}
+            return {'error': 'Proxmox VE did not answer', 'upstream_status': None}
+        
+        status = response.status_code
+        if status != 200:
+            self.logger.warning(f"DNS config of {node!r} not read: HTTP {status} {response.text[:200]!r}")
+            # 595 is pveproxy not reaching the node it forwards the read to
+            said = f'The node is unreachable (HTTP {status})' if status == 595 else f'Proxmox VE answered HTTP {status}'
+            return {'error': said, 'upstream_status': status}
+        try:
+            data = response.json().get('data')
+        except (ValueError, AttributeError):
+            data = None
+        if not isinstance(data, dict):
+            return {'error': 'Proxmox VE sent no DNS settings', 'upstream_status': None}
+        return data
     
     def update_node_dns(self, node: str, dns_config: Dict) -> Dict[str, Any]:
         
@@ -18956,7 +19583,7 @@ echo "AGENT_INSTALLED_OK"
         
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return {}
+                return unread(UnreadDict)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/time"
@@ -18964,10 +19591,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', {})
-            return {}
+            return unread(UnreadDict, response)
         except Exception as e:
             self.logger.error(f"Error getting time: {e}")
-            return {}
+            return unread(UnreadDict, error=e)
     
     def update_node_time(self, node: str, timezone: str) -> Dict[str, Any]:
         """Update node timezone"""
@@ -18989,30 +19616,43 @@ echo "AGENT_INSTALLED_OK"
         """Get node system log - returns newest entries first"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
-            url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/syslog"
-            params = {'limit': limit}
-            if since:
-                params['since'] = since
+            # MK Nov 2026 - /syslog runs journalctl over the whole journal and answers the first
+            # `limit` lines of it: the oldest ones, after 13 s or a read timeout on a node with
+            # months of log. /journal seeks to the end (lastentries), as the PVE web UI does.
+            # Its first and last entries are the cursors of the range it read.
+            url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/journal"
+            # since (a UNIX time there) and lastentries exclude each other
+            params = {'since': since} if since else {'lastentries': limit}
             response = self._create_session().get(url, params=params)
             
             if response.status_code == 200:
-                data = response.json().get('data', [])
-                # Reverse to get newest first, then return
-                lines = [line.get('t', '') for line in data]
-                return list(reversed(lines))
-            return []
+                body = response.json() or {}
+                if body.get('error'):
+                    # the reader stopped part way and said why
+                    return UnreadList(str(body['error'])[:300])
+                lines = [line for line in body.get('data') or [] if isinstance(line, str)]
+                if lines and _JOURNAL_CURSOR.match(lines[0]):
+                    lines = lines[1:]
+                if lines and _JOURNAL_CURSOR.match(lines[-1]):
+                    lines = lines[:-1]
+                # newest first
+                return list(reversed(lines))[:limit]
+            return unread(UnreadList, response)
+        except requests.exceptions.ReadTimeout as e:
+            self.logger.warning(f"System log of node {node} took too long: {e}")
+            return UnreadList(str(e)[:300], timed_out=True)
         except Exception as e:
             self.logger.error(f"Error getting syslog: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def get_node_certificates(self, node: str) -> List[Dict]:
         """Get node certificates"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/certificates/info"
@@ -19020,10 +19660,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', [])
-            return []
+            return unread(UnreadList, response)
         except Exception as e:
             self.logger.error(f"Error getting certificates: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def renew_node_certificate(self, node: str, force: bool = False) -> Dict[str, Any]:
         """Renew node certificate using ACME"""
@@ -19119,7 +19759,7 @@ echo "AGENT_INSTALLED_OK"
         """Get LVM volume groups"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/disks/lvm"
@@ -19127,10 +19767,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', [])
-            return []
+            return unread(UnreadList, response)
         except Exception as e:
             self.logger.error(f"Error getting LVM: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def create_node_lvm(self, node: str, device: str, name: str, add_storage: bool = True) -> Dict[str, Any]:
         """Create LVM volume group"""
@@ -19191,10 +19831,10 @@ echo "AGENT_INSTALLED_OK"
         ip = self._get_node_ip(node)
         if not ip:
             return {'error': f'no SSH-reachable IP for node {node}'}
-        user = getattr(self.config, 'ssh_user', None) or 'root'
+        user = node_login(self.config)
 
         with ha.reading():
-            raw = self._ssh_run_command_output(ip, user, self._SENSORS_PROBE, timeout=8)
+            raw = self._ssh_read_output(ip, user, self._SENSORS_PROBE, timeout=8)
         if raw is None:
             return {'error': f'no answer from node {node} over SSH'}
         raw, _, hw_dump = raw.partition('__PP_HWMON__')
@@ -19256,7 +19896,7 @@ echo "AGENT_INSTALLED_OK"
             # is perfectly fine. Parse the human-readable output instead - it works wherever
             # `sensors` itself does. Not tried when the probe found no lm-sensors at all.
             with ha.reading():
-                text = self._ssh_run_command_output(ip, user, 'sensors 2>/dev/null', timeout=8)
+                text = self._ssh_read_output(ip, user, 'sensors 2>/dev/null', timeout=8)
             out = self._parse_sensors_text(text) if text and text.strip() else []
             if out:
                 return {'sensors': out, 'count': len(out), 'source': 'text'}
@@ -19463,7 +20103,7 @@ echo "AGENT_INSTALLED_OK"
         ip = self._get_node_ip(node)
         if not ip:
             return {'error': f'no SSH-reachable IP for node {node}'}
-        user = getattr(self.config, 'ssh_user', None) or 'root'
+        user = node_login(self.config)
 
         from pegaprox.utils.concurrent import run_concurrent_dict
         import shlex
@@ -19475,13 +20115,13 @@ echo "AGENT_INSTALLED_OK"
         # path future-proof regardless.
         SERVICES = ['pveproxy', 'pvedaemon', 'pve-cluster', 'corosync', 'pvestatd']
         tasks = {
-            'cfg':   (lambda: self._ssh_run_command_output(ip, user, 'corosync-cfgtool -s 2>&1', timeout=8)),
-            'pvecm': (lambda: self._ssh_run_command_output(ip, user, 'pvecm status 2>&1', timeout=8)),
+            'cfg':   (lambda: self._ssh_read_output(ip, user, 'corosync-cfgtool -s 2>&1', timeout=8)),
+            'pvecm': (lambda: self._ssh_read_output(ip, user, 'pvecm status 2>&1', timeout=8)),
         }
         for svc in SERVICES:
             # closure-bind svc explicitly — late-binding bites here otherwise
             quoted = shlex.quote(svc)
-            tasks[f'svc:{svc}'] = (lambda q=quoted: self._ssh_run_command_output(
+            tasks[f'svc:{svc}'] = (lambda q=quoted: self._ssh_read_output(
                 ip, user,
                 f'systemctl show -p ActiveState,SubState,ActiveEnterTimestamp,Result {q} 2>&1',
                 timeout=8))
@@ -19583,8 +20223,8 @@ echo "AGENT_INSTALLED_OK"
         if not ip:
             return {'error': f'no SSH-reachable IP for node {node}'}
 
-        user = getattr(self.config, 'ssh_user', None) or 'root'
-        output = self._ssh_run_command_output(ip, user, 'cat /proc/net/dev', timeout=10)
+        user = node_login(self.config)
+        output = self._ssh_read_output(ip, user, 'cat /proc/net/dev', timeout=10)
         if not output:
             return {'error': 'SSH read failed (auth, timeout, or empty)'}
 
@@ -19617,7 +20257,7 @@ echo "AGENT_INSTALLED_OK"
         """Get LVM-Thin pools"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/disks/lvmthin"
@@ -19625,10 +20265,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', [])
-            return []
+            return unread(UnreadList, response)
         except Exception as e:
             self.logger.error(f"Error getting LVM-Thin: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def create_node_lvmthin(self, node: str, device: str, name: str, add_storage: bool = True) -> Dict[str, Any]:
         """Create LVM-Thin pool"""
@@ -19655,7 +20295,7 @@ echo "AGENT_INSTALLED_OK"
         """Get ZFS pools"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/disks/zfs"
@@ -19663,10 +20303,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', [])
-            return []
+            return unread(UnreadList, response)
         except Exception as e:
             self.logger.error(f"Error getting ZFS: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def get_node_zfs_detail(self, node: str, name: str):
         """(status, data) of one ZFS pool: `zpool status` as Proxmox parses it, the vdev
@@ -19783,15 +20423,29 @@ echo "AGENT_INSTALLED_OK"
             if not self.connect_to_proxmox():
                 return {'success': False, 'error': 'Could not connect'}
         
+        priv = None
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/disks/wipedisk"
-            response = self._api_post(url, data={'disk': disk})
+            # PVE has wipedisk as PUT only, a POST gets 501. It names no permission either, so
+            # only root@pam itself may run it and the API token we connect with gets a 403:
+            # the wipe goes through a fresh root@pam ticket then, as Ceph OSD create does
+            if getattr(self, '_api_token', None):
+                priv, priv_err = self.create_privileged_session('a disk wipe')
+                if priv_err:
+                    return {'success': False, 'error': priv_err}
+                response = priv.put(url, data={'disk': disk}, timeout=self.api_timeout)
+            else:
+                response = self._api_put(url, data={'disk': disk})
             
             if response.status_code == 200:
                 return {'success': True, 'task': response.json().get('data')}
             return {'success': False, 'error': response.text}
         except Exception as e:
             return {'success': False, 'error': str(e)}
+        finally:
+            if priv is not None:
+                try: priv.close()
+                except Exception: pass
     
     def get_node_replication(self, node: str) -> List[Dict]:
         """Get replication jobs for node"""
@@ -19814,7 +20468,7 @@ echo "AGENT_INSTALLED_OK"
         """Get task history for node"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/tasks"
@@ -19825,10 +20479,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', [])
-            return []
+            return unread(UnreadList, response)
         except Exception as e:
             self.logger.error(f"Error getting tasks: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def get_node_task_log(self, node: str, upid: str, start: int = 0, limit: int = 500) -> List[str]:
         """Get log for a specific task"""
@@ -19854,7 +20508,7 @@ echo "AGENT_INSTALLED_OK"
         """Get node subscription status"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return {}
+                return unread(UnreadDict)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/subscription"
@@ -19862,10 +20516,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', {})
-            return {}
+            return unread(UnreadDict, response)
         except Exception as e:
             self.logger.error(f"Error getting subscription: {e}")
-            return {}
+            return unread(UnreadDict, error=e)
     
     def update_node_subscription(self, node: str, key: str) -> Dict[str, Any]:
         """Update subscription key"""
@@ -20125,7 +20779,7 @@ echo "AGENT_INSTALLED_OK"
             predictive_on = getattr(self.config, 'predictive_balancing', False)
             if predictive_on and migrations_done == 0 and self.config.auto_migrate and not self.config.dry_run:
                 try:
-                    pred_threshold = getattr(self.config, 'predictive_threshold', 75)
+                    pred_threshold = getattr(self.config, 'predictive_threshold', PREDICTIVE_THRESHOLD_DEFAULT)
                     for nname, ndata in (node_status or {}).items():
                         if ndata.get('status') != 'online' or ndata.get('maintenance_mode'):
                             continue
@@ -20227,7 +20881,11 @@ echo "AGENT_INSTALLED_OK"
                     self.logger.error(f"[MAINT] switching negative affinity rules back on failed: {e}")
 
             # Wait for next interval or stop signal
-            self.stop_event.wait(self.config.check_interval)
+            # one stored before the route checked it must not end this loop. Only the route's range:
+            # inf or a value past threading.TIMEOUT_MAX raised in the wait, under gevent it never returned
+            _wait = self.config.check_interval
+            _ok = isinstance(_wait, (int, float)) and not isinstance(_wait, bool) and 1 <= _wait <= 86400
+            self.stop_event.wait(_wait if _ok else 300)
         
         self.logger.info(f"PegaProx daemon stopped for cluster: {self.config.name}")
     
@@ -20311,7 +20969,7 @@ echo "AGENT_INSTALLED_OK"
         if not node_ip:
             return None, f"no reachable IP resolved for node '{node_name}'"
 
-        ssh_user = (self.config.user or 'root').split('@')[0]
+        ssh_user = node_login(self.config)
         # Sudo wrap is handled inside the _ssh_run_command_* helpers so we don't
         # double-wrap when the call chain goes through multiple layers.
 
@@ -20331,17 +20989,26 @@ echo "AGENT_INSTALLED_OK"
         if out is not None:
             return out, None
         last_err = self._last_ssh_stderr(node_ip) or last_err
+        tried = 'key'
 
         # MK Oct 2026 - a stored key gets past ssh_blocked_reason, so a refused key used to
         # land here with config.pass_ - the token secret on a token cluster.
         ssh_password = self.ssh_password_to_offer(node_ip)
         if ssh_password:
+            # what the key steps left must not be read as the password's answer when
+            # this step leaves none (a timeout, no sshpass) - #1156
+            self.__dict__.setdefault('_ssh_last_stderr', {}).pop(node_ip, None)
             out = self._ssh_run_command_with_password_output(node_ip, ssh_user, cmd, ssh_password, timeout=timeout)
             if out is not None:
                 return out, None
-            last_err = self._last_ssh_stderr(node_ip) or last_err
+            if self._last_ssh_stderr(node_ip):
+                last_err, tried = self._last_ssh_stderr(node_ip), 'password'
+            else:
+                # a password may have gone out without an answer (a timeout), so neither
+                # 'rejected' nor 'no password was sent' is known to be true
+                tried = None
 
-        hint = _ssh_auth_hint(last_err)
+        hint = _ssh_auth_hint(last_err, tried=tried)
         if hint:
             # _ssh_auth_hint has no idea who we connected as; name them here.
             hint = hint.replace('the cluster SSH user', f"'{ssh_user}'")
@@ -20605,6 +21272,9 @@ echo DONE""",
             'check': "[ -f /etc/modprobe.d/cis-disable-modules.conf ] && echo OK || echo FAIL",
             'apply': """# included in fs_modules control
 echo DONE""",
+            # the apply changes nothing, so it is never reported as applied
+            'noop': 'covered by fs_modules, which writes the module blocklist for these '
+                    'protocols: apply that control instead',
         },
         'journald': {
             'check': """{ systemd-analyze cat-config systemd/journald.conf 2>/dev/null || cat /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null; } | grep -qE '^[[:space:]]*SystemMaxUse[[:space:]]*=[[:space:]]*[^[:space:]]' && echo OK || echo FAIL""",
@@ -20802,10 +21472,12 @@ echo DONE""",
             'check': """ns_count=$(grep -c '^nameserver' /etc/resolv.conf 2>/dev/null); [ "$ns_count" -ge 2 ] && echo OK || echo FAIL""",
             # NS: configurable - dns1/dns2 get replaced by apply_node_hardening
             'apply_template': True,
-            'apply': """if ! grep -q '{dns1}' /etc/resolv.conf && [ "$(grep -c '^nameserver' /etc/resolv.conf)" -lt 2 ]; then
+            # MK Oct 2026 - the address is looked for as itself (-F) and whole (-w), not as a
+            # regex that 10.0.0.53 would find in 110.0.0.53
+            'apply': """if ! grep -qwF '{dns1}' /etc/resolv.conf && [ "$(grep -c '^nameserver' /etc/resolv.conf)" -lt 2 ]; then
 echo 'nameserver {dns1}' >> /etc/resolv.conf
 fi
-if ! grep -q '{dns2}' /etc/resolv.conf && [ "$(grep -c '^nameserver' /etc/resolv.conf)" -lt 3 ]; then
+if ! grep -qwF '{dns2}' /etc/resolv.conf && [ "$(grep -c '^nameserver' /etc/resolv.conf)" -lt 3 ]; then
 echo 'nameserver {dns2}' >> /etc/resolv.conf
 fi
 echo DONE""",
@@ -21584,36 +22256,45 @@ echo DONE""",
     # no-op that prints DONE so the existing apply API doesn't blow up. Operator must
     # configure these manually after reading the evidence (BSI Grundschutz expects
     # documented operator decision per environment).
+    # an apply of these answers noop with this reason instead of a success
+    _VSNFD_AUDIT_ONLY = ('audit only: PegaProx does not change this setting, it is made by hand '
+                         '(the check says what the node has now)')
     _VSNFD_EXTRA_CHECKS = {
         'vsnfd_disk_encryption': {
             'check': """if lsblk -o NAME,FSTYPE,TYPE 2>/dev/null | grep -qE 'crypto_LUKS|zfs.*encrypt'; then echo OK; else echo FAIL; fi""",
             'verbose_check': """echo '--- block devices ---'; lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT 2>/dev/null | head -20; echo '--- LUKS ---'; lsblk -o NAME,FSTYPE 2>/dev/null | grep -i luks || echo '  (no LUKS volumes found)'; echo '--- ZFS encryption ---'; zfs get encryption 2>/dev/null | grep -v 'off' | head -5 || echo '  (no encrypted ZFS datasets)'; """,
             'apply': "echo 'INFORMATIONAL: configure disk encryption manually per BSI guidance'; echo DONE",
+            'noop': _VSNFD_AUDIT_ONLY,
         },
         'vsnfd_audit_retention': {
             'check': """RETENTION=$(grep -h '^MaxRetentionSec' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null | tail -1 | awk -F= '{print $2}' | tr -d ' '); if [ -n "$RETENTION" ]; then case "$RETENTION" in *month|*M) NUM=${RETENTION%[mM]*}; [ "$NUM" -ge 6 ] && echo OK || echo FAIL ;; *year|*Y) echo OK ;; *week|*w) NUM=${RETENTION%[wW]*}; [ "$NUM" -ge 26 ] && echo OK || echo FAIL ;; *day|*d) NUM=${RETENTION%[dD]*}; [ "$NUM" -ge 180 ] && echo OK || echo FAIL ;; *[!0-9]*) echo FAIL ;; *) [ "$RETENTION" -ge 15552000 ] && echo OK || echo FAIL ;; esac; else echo FAIL; fi""",
             'verbose_check': """echo '--- journald retention configuration ---'; grep -h 'MaxRetentionSec\\|SystemMaxUse\\|Storage' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null || echo '  (no MaxRetentionSec configured)'; echo '--- current journal size ---'; journalctl --disk-usage 2>/dev/null""",
             'apply': "echo 'INFORMATIONAL: set MaxRetentionSec=6month (or higher) in /etc/systemd/journald.conf manually'; echo DONE",
+            'noop': _VSNFD_AUDIT_ONLY,
         },
         'vsnfd_journald_size': {
             'check': """SIZE=$(grep -h '^SystemMaxUse' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null | tail -1 | awk -F= '{print $2}' | tr -d ' '); if [ -n "$SIZE" ]; then case "$SIZE" in *G|*g) NUM=${SIZE%[gG]*}; [ "$NUM" -ge 1 ] && echo OK || echo FAIL ;; *) echo FAIL ;; esac; else echo FAIL; fi""",
             'verbose_check': """grep -h 'SystemMaxUse\\|RuntimeMaxUse' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null || echo '  (no SystemMaxUse configured, journald uses 10% of /var/log/journal partition default)'""",
             'apply': "echo 'INFORMATIONAL: set SystemMaxUse=1G or larger in /etc/systemd/journald.conf manually'; echo DONE",
+            'noop': _VSNFD_AUDIT_ONLY,
         },
         'vsnfd_secure_boot': {
             'check': """if [ -d /sys/firmware/efi ]; then if mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then echo OK; else echo FAIL; fi; else echo FAIL; fi""",
             'verbose_check': """echo '--- EFI status ---'; [ -d /sys/firmware/efi ] && echo 'EFI: yes' || echo 'EFI: no (legacy BIOS)'; echo '--- Secure Boot ---'; mokutil --sb-state 2>/dev/null || echo '  (mokutil not available)'; echo '--- TPM ---'; ls /dev/tpm* 2>/dev/null || echo '  (no TPM device)' """,
             'apply': "echo 'INFORMATIONAL: enable Secure Boot in firmware (UEFI) — host re-installation may be required'; echo DONE",
+            'noop': _VSNFD_AUDIT_ONLY,
         },
         'vsnfd_kernel_lockdown': {
             'check': """LD=$(cat /sys/kernel/security/lockdown 2>/dev/null | tr -d ' '); echo "$LD" | grep -qE '\\[integrity\\]|\\[confidentiality\\]' && echo OK || echo FAIL""",
             'verbose_check': """echo '--- kernel lockdown ---'; cat /sys/kernel/security/lockdown 2>/dev/null || echo '  (lockdown not available — kernel built without CONFIG_SECURITY_LOCKDOWN_LSM)'""",
             'apply': "echo 'INFORMATIONAL: kernel lockdown is set at boot via cmdline (lockdown=integrity) or by Secure Boot. Cannot toggle live.'; echo DONE",
+            'noop': _VSNFD_AUDIT_ONLY,
         },
         'vsnfd_password_min_12': {
             'check': """grep -h 'minlen\\s*=' /etc/security/pwquality.conf /etc/security/pwquality.conf.d/*.conf 2>/dev/null | grep -oE 'minlen\\s*=\\s*[0-9]+' | tail -1 | awk -F= '{print $2}' | awk '{if ($1+0 >= 12) print "OK"; else print "FAIL"}' """,
             'verbose_check': """echo '--- pwquality configuration ---'; grep -h 'minlen\\|minclass\\|dcredit\\|ucredit\\|lcredit\\|ocredit' /etc/security/pwquality.conf /etc/security/pwquality.conf.d/*.conf 2>/dev/null || echo '  (no pwquality settings found — install libpam-pwquality)'""",
             'apply': "echo 'INFORMATIONAL: BSI requires minlen=12+. Use pw_quality CIS control with custom params or edit /etc/security/pwquality.conf manually.'; echo DONE",
+            'noop': _VSNFD_AUDIT_ONLY,
         },
     }
 
@@ -21639,13 +22320,14 @@ echo DONE""",
         """
         return 'cis-l1' if (profile or 'cis-l1') == 'cis-l2' else (profile or 'cis-l1')
 
-    def _all_hardening_controls(self):
+    @classmethod
+    def _all_hardening_controls(cls):
         """Merged dict of CIS_CHECKS + VS-NfD extras (id → control)."""
-        merged = dict(self.CIS_CHECKS)
-        merged.update(self._VSNFD_EXTRA_CHECKS)
+        merged = dict(cls.CIS_CHECKS)
+        merged.update(cls._VSNFD_EXTRA_CHECKS)
         return merged
 
-    def check_node_hardening(self, node_name, verbose=False, profile=None):
+    def check_node_hardening(self, node_name, verbose=False, profile=None, controls=None):
         """Check CIS hardening status for a node via SSH.
 
         verbose=False (default): returns {control_id: bool}
@@ -21654,13 +22336,17 @@ echo DONE""",
                       command if defined, otherwise falls back to the raw check output.
         profile=None / 'cis-l1' / 'cis-l2': all CIS controls (default).
         profile='vs-nfd': Proxmox-safe subset + BSI VS-NfD extras (NS Apr 2026).
+        controls=[ids]: exactly these, whatever profile says (a custom profile, MK Oct 2026).
+        Ids that are no control are left out.
         """
         all_checks = self._all_hardening_controls()
-        members = self._profile_control_set(profile)
+        members = set(controls) if controls is not None else self._profile_control_set(profile)
         if members is not None:
             checks = {cid: ctrl for cid, ctrl in all_checks.items() if cid in members}
         else:
             checks = self.CIS_CHECKS  # original behaviour
+        if not checks:
+            return {}   # nothing to run; an empty batch would be a shell syntax error
         parts = []
         for cid, ctrl in checks.items():
             if verbose and ctrl.get('verbose_check'):
@@ -21759,11 +22445,12 @@ echo DONE""",
         return results
 
     def apply_node_hardening(self, node_name, controls, params=None):
-        """Apply selected CIS controls to a node. Returns per-control results.
+        """Apply selected CIS controls to a node. Returns per-control results:
+        {success, verified, exit_code[, error]}, see _hardening_apply_result.
 
-        NS Apr 2026 — also accepts VS-NfD informational checks (apply is no-op).
+        A control that changes nothing (net_protocols, the VS-NfD checks) is
+        answered {success: False, noop: True, error: why} without going to the node.
         """
-        import re as _re
         all_checks = self._all_hardening_controls()
         out = {}
         for ctrl_id in controls:
@@ -21771,6 +22458,9 @@ echo DONE""",
                 out[ctrl_id] = {'success': False, 'error': 'unknown control'}
                 continue
             check = all_checks[ctrl_id]
+            if check.get('noop'):
+                out[ctrl_id] = {'success': False, 'noop': True, 'error': check['noop']}
+                continue
             cmd = check['apply']
             # MK: templated controls get user-supplied values merged with defaults
             # NS Apr 2026 — extended validator to accept Linux usernames (comma-list)
@@ -21781,17 +22471,29 @@ echo DONE""",
                 vals = dict(check.get('defaults', {}))
                 if params and ctrl_id in params:
                     for k, v in params[ctrl_id].items():
-                        v = str(v).strip()
-                        if not v:
-                            continue
-                        # IP/IPv6/MAC-style for backup_dns
-                        if _re.match(r'^[\d\.:a-fA-F]+$', v):
+                        v = hardening_param_value(k, v)
+                        # empty or not allowed: silently dropped (defaults remain)
+                        if v:
                             vals[k] = v
-                        # Linux username — single or comma-separated list, no shell metas
-                        elif _re.match(r'^[a-zA-Z][a-zA-Z0-9._\-]{0,31}(?:,[a-zA-Z][a-zA-Z0-9._\-]{0,31})*$', v):
-                            vals[k] = v
-                        # else: silently dropped (defaults remain)
-                cmd = cmd.format(**vals)
+                try:
+                    cmd = cmd.format(**vals)
+                except (KeyError, IndexError, ValueError) as e:
+                    # a shell brace in the text that format takes for a field; the request
+                    # used to end in a 500 here, and nothing has reached the node yet
+                    out[ctrl_id] = {'success': False, 'verified': None, 'exit_code': None,
+                                    'error': f'the command of this control could not be built '
+                                             f'({e!r}), nothing was sent to the node'}
+                    continue
+            # NS Nov 2026 - every apply ends in `echo DONE`, so DONE alone said nothing about
+            # an install that failed into /dev/null or a script that stopped half way. The
+            # apply runs in a subshell (its exit and set -e stay in there), then the control's
+            # own check runs in the same SSH call. The script's last command is not asked:
+            # usb_storage, restrict_compilers and others end in a step that fails on purpose.
+            # The whole thing exits 0, so a failed apply is not run again with the next
+            # credential the SSH helpers would try. The exit marker starts a line of its own
+            # even when the apply's last output had no newline.
+            cmd = ('(\n%s\n)\nrc=$?; printf \'\\n---PEGAPROX-APPLY-EXIT:%%s---\\n\' "$rc"\n{ %s; }\n'
+                   'echo ---PEGAPROX-END---' % (cmd, check['check']))
             # NS #386: snapshot the files this control edits BEFORE applying, so the
             # change can be rolled back. Only the first apply backs up (preserves
             # the true pre-hardening state); a re-apply won't clobber the original.
@@ -21804,16 +22506,60 @@ echo DONE""",
                     for f in bf
                 )
                 cmd = pre + '; ' + cmd
-            result = self._ssh_node_output(node_name, cmd, timeout=60)
-            if result is not None and 'DONE' in result:
-                out[ctrl_id] = {'success': True}
-            else:
-                out[ctrl_id] = {'success': False, 'error': result or 'SSH command failed'}
+            out[ctrl_id] = self._hardening_apply_result(self._ssh_node_output(node_name, cmd, timeout=60))
         return out
+
+    @staticmethod
+    def _hardening_apply_result(raw):
+        """What one apply of apply_node_hardening sent back, as {success, verified, exit_code}.
+
+        success: the script reached its own DONE with exit status 0 and the control's check
+        printed OK right after. verified is that check (None: no verdict came back),
+        exit_code the subshell's status (None: no answer). Anything short of success
+        carries an error with the reason and the end of what the script printed.
+        """
+        if raw is None:
+            return {'success': False, 'verified': None, 'exit_code': None,
+                    'error': 'SSH command failed or timed out, the state of the node is unknown '
+                             'until the next check'}
+        # the marker has a line of its own (printf puts a newline in front of it); the last
+        # one is ours, the apply's own output comes before it
+        m = None
+        for m in re.finditer(r'^---PEGAPROX-APPLY-EXIT:(\d+)---$', raw, re.M):
+            pass
+        said = (raw[:m.start()] if m else raw).strip()
+        exit_code = int(m.group(1)) if m else None
+        verified = None
+        for line in (raw[m.end():] if m else '').splitlines():
+            line = line.strip()
+            if line == '---PEGAPROX-END---':
+                break
+            if line in ('OK', 'FAIL'):
+                verified = line == 'OK'
+                break
+        done = 'DONE' in (l.strip() for l in said.splitlines())
+        res = {'success': done and exit_code == 0 and verified is True,
+               'verified': verified, 'exit_code': exit_code}
+        if res['success']:
+            return res
+        if exit_code is None:
+            why = 'the apply did not finish, its output was cut short'
+        elif exit_code != 0 or not done:
+            why = f'the apply script stopped before its end with exit status {exit_code}'
+        elif verified is False:
+            why = "the apply ran, but the control's check still fails"
+        else:
+            why = 'the apply ran, but the check afterwards gave no verdict'
+        tail = said[-300:]
+        res['error'] = f'{why}: {tail}' if tail else why
+        return res
 
     def rollback_node_hardening(self, node_name, controls):
         """Restore the config files a CIS control changed, from the snapshot taken
         at apply time (#386). Only controls that declare backup_files can roll back."""
+        # files says per file 'restored', 'no_snapshot', 'failed' (the copy back
+        # failed) or 'unknown' (no answer). success needs every file restored; some of them is
+        # partial, never a full rollback
         all_checks = self._all_hardening_controls()
         out = {}
         for ctrl_id in controls:
@@ -21829,19 +22575,38 @@ echo DONE""",
             for f in bf:
                 bak = f + '.pegaprox-bak.' + ctrl_id
                 qf, qb = shlex.quote(f), shlex.quote(bak)
-                steps.append('if [ -f %s ]; then cp -p %s %s && rm -f %s && echo RESTORED:%s; else echo NOBACKUP:%s; fi'
-                             % (qb, qb, qf, qb, ctrl_id, ctrl_id))
+                # the file is restored once the copy back worked; a snapshot that cannot be
+                # removed afterwards does not make that a failure
+                steps.append('if [ -f %s ]; then if cp -p %s %s; then rm -f %s; echo %s; else echo %s; fi; '
+                             'else echo %s; fi'
+                             % (qb, qb, qf, qb, shlex.quote('RESTORED:' + f), shlex.quote('FAILED:' + f),
+                                shlex.quote('NOBACKUP:' + f)))
             post = ctrl.get('rollback_post')
             if post:
                 steps.append('{ %s ; } || true' % post)
             steps.append('echo DONE')
             result = self._ssh_node_output(node_name, ' ; '.join(steps), timeout=60)
-            if result and 'DONE' in result and 'RESTORED:' in result:
-                out[ctrl_id] = {'success': True}
-            elif result and 'NOBACKUP:' in result and 'RESTORED:' not in result:
-                out[ctrl_id] = {'success': False, 'error': 'no snapshot found — control was never applied (or already rolled back)'}
+            files = dict.fromkeys(bf, 'unknown')
+            for line in (result or '').splitlines():
+                tag, _, path = line.strip().partition(':')
+                if path in files and tag in ('RESTORED', 'NOBACKUP', 'FAILED'):
+                    files[path] = {'RESTORED': 'restored', 'NOBACKUP': 'no_snapshot', 'FAILED': 'failed'}[tag]
+            restored = [f for f in bf if files[f] == 'restored']
+            missing = [f for f in bf if files[f] == 'no_snapshot']
+            if len(restored) == len(bf):
+                out[ctrl_id] = {'success': True, 'files': files}
+            elif restored:
+                why = [f'only {len(restored)} of {len(bf)} files were restored']
+                if missing:
+                    why.append('no snapshot of ' + ', '.join(missing))
+                if len(restored) + len(missing) < len(bf):
+                    why.append('not restored: ' + ', '.join(f for f in bf if files[f] in ('failed', 'unknown')))
+                out[ctrl_id] = {'success': False, 'partial': True, 'files': files, 'error': '; '.join(why)}
+            elif result is not None and len(missing) == len(bf):
+                out[ctrl_id] = {'success': False, 'files': files,
+                                'error': 'no snapshot found - control was never applied (or already rolled back)'}
             else:
-                out[ctrl_id] = {'success': False, 'error': (result or 'SSH command failed')[:300]}
+                out[ctrl_id] = {'success': False, 'files': files, 'error': (result or 'SSH command failed')[:300]}
         return out
 
     def _fetch_qemu_ips(self, node: str, vmid: int) -> list:

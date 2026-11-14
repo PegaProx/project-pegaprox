@@ -232,11 +232,11 @@ def test_the_ceph_osd_session_refuses_exactly_where_the_matrix_says_no(db, monke
 
 @pytest.mark.parametrize('user,stored', [('root@pam', 'pw1'), ('ops@pve!tok', 'tv1'), ('root@pam', '')])
 def test_the_guest_terminal_route_refuses_where_the_matrix_says_no(api, seed, monkeypatch, user, stored):
-    import urllib.request
+    import types
 
     def no_network(*a, **k):
         raise OSError('no PVE here')
-    monkeypatch.setattr(urllib.request, 'urlopen', no_network)
+    monkeypatch.setattr('pegaprox.core.manager.pve_opener', lambda context=None: types.SimpleNamespace(open=no_network))
     m = Mgr()
     m.auth_host = m.host
     m.config.user, m.config.pass_ = user, stored

@@ -3,26 +3,26 @@
         // That's ~150 entries with no structure. Now: group by the dot-prefix, human-readable
         // group headers, per-group "select all", description tooltips, and a search box.
         const PERMISSION_CATEGORY_META = {
-            vm:            { order: 10, title: 'Virtual Machines',      icon: '🖥️' },
-            cluster:       { order: 20, title: 'Cluster',               icon: '🔗' },
-            node:          { order: 30, title: 'Nodes',                 icon: '🏠' },
-            storage:       { order: 40, title: 'Storage',               icon: '💾' },
-            backup:        { order: 50, title: 'Backup Jobs',           icon: '📦' },
-            ha:            { order: 60, title: 'High Availability',     icon: '⚡' },
-            firewall:      { order: 70, title: 'Firewall',              icon: '🛡️' },
-            pool:          { order: 80, title: 'Resource Pools',        icon: '🗂️' },
-            replication:   { order: 90, title: 'Replication',           icon: '🔁' },
+            vm:            { order: 10, title: 'Virtual Machines', titleKey: 'virtualMachines',      icon: '🖥️' },
+            cluster:       { order: 20, title: 'Cluster', titleKey: 'cluster',               icon: '🔗' },
+            node:          { order: 30, title: 'Nodes', titleKey: 'nodes',                 icon: '🏠' },
+            storage:       { order: 40, title: 'Storage', titleKey: 'storage',               icon: '💾' },
+            backup:        { order: 50, title: 'Backup Jobs', titleKey: 'backupJobs',           icon: '📦' },
+            ha:            { order: 60, title: 'High Availability', titleKey: 'permCatHa',     icon: '⚡' },
+            firewall:      { order: 70, title: 'Firewall', titleKey: 'firewall',              icon: '🛡️' },
+            pool:          { order: 80, title: 'Resource Pools', titleKey: 'permCatPools',        icon: '🗂️' },
+            replication:   { order: 90, title: 'Replication', titleKey: 'replication',           icon: '🔁' },
             ceph:          { order: 100, title: 'Ceph',                 icon: '🐙' },
-            sdn:           { order: 110, title: 'Software-Defined Net', icon: '🌐' },
-            alert:         { order: 120, title: 'Alerts',               icon: '🔔' },
-            site_recovery: { order: 130, title: 'Site Recovery',        icon: '🚨' },
+            sdn:           { order: 110, title: 'Software-Defined Net', titleKey: 'permCatSdn', icon: '🌐' },
+            alert:         { order: 120, title: 'Alerts', titleKey: 'alerts',               icon: '🔔' },
+            site_recovery: { order: 130, title: 'Site Recovery', titleKey: 'siteRecovery',        icon: '🚨' },
             pbs:           { order: 140, title: 'Proxmox Backup Server',icon: '🗄️' },
             vmware:        { order: 150, title: 'ESXi',       icon: '📡' },
             xapi:          { order: 160, title: 'XCP-ng',               icon: '🔶' },
-            plugins:       { order: 170, title: 'Plugins',              icon: '🧩' },
-            autoinstall:   { order: 175, title: 'Automated Installs',   icon: '💿' },
-            metrics:       { order: 180, title: 'Telemetry',            icon: '📈' },
-            admin:         { order: 999, title: 'Administration',       icon: '⚙️' },
+            plugins:       { order: 170, title: 'Plugins', titleKey: 'plugins',              icon: '🧩' },
+            autoinstall:   { order: 175, title: 'Automated Installs', titleKey: 'permCatAutoInstall',   icon: '💿' },
+            metrics:       { order: 180, title: 'Telemetry', titleKey: 'permCatTelemetry',            icon: '📈' },
+            admin:         { order: 999, title: 'Administration', titleKey: 'permCatAdmin',       icon: '⚙️' },
         };
 
         function PermissionsGrid({ allPermissions, selected, onChange, t }) {
@@ -88,7 +88,7 @@
                                         onClick={() => setCollapsed(c => ({...c, [cat]: !c[cat]}))}>
                                         <Icons.ChevronDown className={`w-3.5 h-3.5 text-gray-400 transition-transform ${isCollapsed ? '-rotate-90' : ''}`} />
                                         <span className="text-base">{meta.icon}</span>
-                                        <span className="text-sm font-medium text-white flex-1">{meta.title}</span>
+                                        <span className="text-sm font-medium text-white flex-1">{meta.titleKey ? t(meta.titleKey) : meta.title}</span>
                                         <span className={`text-xs ${allChecked ? 'text-green-400' : someChecked ? 'text-yellow-400' : 'text-gray-500'}`}>
                                             {checkedCount}/{perms.length}
                                         </span>
@@ -2695,10 +2695,12 @@
         // ═══════════════════════════════════════════════
         // PegaProx Settings Modal with User Management and Audit Log
         function PegaProxSettingsModal({ isOpen, onClose, addToast, onGroupsChanged }) {
-            const { t } = useTranslation();
+            const { t, loadUiLock } = useTranslation();
             // haStandby: the saves below that no standby carries out, forwarding or not (#625)
             const { getAuthHeaders, user: currentUser, isAdmin, haStandby } = useAuth();
             const { isCorporate } = useLayout(); // LW: Feb 2026 - Corporate styling
+            const layerRef = useRef(null);
+            useEscapeToClose(isOpen, onClose, layerRef);
             const [activeTab, setActiveTab] = useState('users');
             const [users, setUsers] = useState([]);
             const [auditLogs, setAuditLogs] = useState([]);
@@ -2706,6 +2708,8 @@
             const [showAddUser, setShowAddUser] = useState(false);
             const [editingUser, setEditingUser] = useState(null);
             const [userFilter, setUserFilter] = useState('');
+            // JB Nov 2026 - the Users folder filter and this one shared a state, each emptied the other's list
+            const [auditUserFilter, setAuditUserFilter] = useState('');
             const [userFolders, setUserFolders] = useState([]);
             const [showAddFolder, setShowAddFolder] = useState(false);
             const [newFolderName, setNewFolderName] = useState('');
@@ -2737,7 +2741,7 @@
             const [ldapConfig, setLdapConfig] = useState({
                 ldap_enabled: false,
                 ldap_server: '', ldap_port: 389,
-                ldap_use_ssl: false, ldap_use_starttls: false,
+                ldap_use_ssl: false, ldap_use_starttls: true,
                 ldap_bind_dn: '', ldap_bind_password: '',
                 ldap_base_dn: '',
                 ldap_user_filter: '(&(objectClass=person)(sAMAccountName={username}))',
@@ -2749,9 +2753,13 @@
                 ldap_admin_group: '', ldap_user_group: '', ldap_viewer_group: '',
                 ldap_default_role: 'viewer',
                 ldap_auto_create_users: true,
-                ldap_verify_tls: false,
+                ldap_verify_tls: true,
+                ldap_ca_cert: '',
                 ldap_group_mappings: [],  // LW: [{group_dn, role, tenant, tenant_role, permissions}]
             });
+            // LW Nov 2026 - the transport of the SAVED settings, which the note at the top of
+            // the connection block is about. The form can differ until it is saved
+            const [ldapSaved, setLdapSaved] = useState(null);
             const [ldapTesting, setLdapTesting] = useState(false);
             const [ldapTestResult, setLdapTestResult] = useState(null);
             const [ldapTestUser, setLdapTestUser] = useState('');
@@ -2859,6 +2867,10 @@
                 logo_url: '',
                 app_name: 'PegaProx',
                 default_theme: 'proxmoxDark',  // NS: Default theme for new users - Jan 2026
+                // LW Oct 2026 (#1189, #1167) - '' = users choose
+                ui_layout_lock: '',
+                ui_language_lock: '',
+                ui_lock_admins: false,
                 login_background: '',
                 // NS: SMTP Settings - Dec 2025
                 smtp_enabled: false,
@@ -3696,12 +3708,16 @@
                             acme_dns_cloudflare_account_id: acmeDnsConfig.account_id || data.acme_dns_cloudflare_account_id || '',
                             cert_info: data.cert_info || null,
                             http_redirect_port: data.http_redirect_port || 0,
+                            http_redirect_state: data.http_redirect_state || null,
                             reverse_proxy_enabled: data.reverse_proxy_enabled || false,
                             audit_retention_days: data.audit_retention_days || 90,
                             air_gap_mode: data.air_gap_mode || false,
                             trusted_proxies: data.trusted_proxies || '',
                             proxy_bind_address: data.proxy_bind_address || '',
                             default_theme: data.default_theme || 'proxmoxDark',
+                            ui_layout_lock: data.ui_layout_lock || '',
+                            ui_language_lock: data.ui_language_lock || '',
+                            ui_lock_admins: data.ui_lock_admins === true,
                             login_background: data.login_background || '',
                             // SMTP settings
                             smtp_enabled: data.smtp_enabled || false,
@@ -3764,8 +3780,17 @@
                             ldap_default_role: data.ldap_default_role || 'viewer',
                             ldap_auto_create_users: data.ldap_auto_create_users !== false,
                             ldap_verify_tls: data.ldap_verify_tls || false,
+                            ldap_ca_cert: data.ldap_ca_cert || '',
                             ldap_group_mappings: data.ldap_group_mappings || [],
                         }));
+                        // the server says what runs (a scheme in a server stored before wins over
+                        // the toggles); the toggles only for an answer without it
+                        const lt = data.ldap_transport;
+                        setLdapSaved({
+                            on: !!data.ldap_enabled || !!String(data.ldap_server || '').trim(),
+                            tls: lt ? lt.kind !== 'plain' : !!(data.ldap_use_ssl || data.ldap_use_starttls),
+                            verified: lt ? !!lt.checked : !!data.ldap_verify_tls,
+                        });
                         
                         // NS: Load OIDC / Entra ID settings
                         setOidcConfig(prev => ({
@@ -3942,6 +3967,9 @@
                     formData.append('trusted_proxies', serverSettings.trusted_proxies || '');
                     formData.append('proxy_bind_address', serverSettings.proxy_bind_address || '');
                     formData.append('default_theme', serverSettings.default_theme || 'proxmoxDark');
+                    formData.append('ui_layout_lock', serverSettings.ui_layout_lock || '');
+                    formData.append('ui_language_lock', serverSettings.ui_language_lock || '');
+                    formData.append('ui_lock_admins', serverSettings.ui_lock_admins ? 'true' : 'false');
                     // NS: alert recipients live in the same tab - must send them too (#131)
                     formData.append('alert_email_recipients', JSON.stringify(serverSettings.alert_email_recipients || []));
                     if (serverSettings.alert_cooldown) {
@@ -3976,6 +4004,8 @@
                         }
                         setLoginBgFile(null);
                         fetchServerSettings();
+                        // this page follows a lock that now holds admins too, and the login page shows it
+                        loadUiLock(true);
                     } else {
                         const err = await response.json();
                         addToast(err.error || t('errorSavingSettings'), 'error');
@@ -4378,7 +4408,30 @@
                     addToast('Error disabling 2FA', 'error');
                 }
             };
-            
+
+            // LW Nov 2026 - an OIDC / Entra account signs in only for the IdP subject it is bound
+            // to. Clearing it lets the next sign-in through the IdP under this name bind it again
+            const handleResetOidcBinding = async (username) => {
+                if (!confirm(t('resetOidcBindingConfirm').replace('{user}', username))) return;
+                try {
+                    const response = await fetch(`${API_URL}/users/${encodeURIComponent(username)}/oidc-binding`, {
+                        method: 'DELETE',
+                        credentials: 'include',
+                        headers: getAuthHeaders()
+                    });
+                    if (response && response.ok) {
+                        addToast(t('resetOidcBindingDone'), 'success');
+                        fetchUsers();
+                        fetchAuditLogs();
+                    } else {
+                        const data = await response.json().catch(() => ({}));
+                        addToast(data.error || t('resetOidcBindingFailed'), 'error');
+                    }
+                } catch (err) {
+                    addToast(t('resetOidcBindingFailed'), 'error');
+                }
+            };
+
             const handleCreateUser = async (e) => {
                 e.preventDefault();
                 setLoading(true);
@@ -4538,7 +4591,7 @@
             const uniqueActions = [...new Set(auditLogs.map(log => log.action))];
             
             const filteredLogs = auditLogs.filter(log => {
-                if (userFilter && log.user !== userFilter) return false;
+                if (auditUserFilter && log.user !== auditUserFilter) return false;
                 if (actionFilter && log.action !== actionFilter) return false;
                 return true;
             });
@@ -4548,6 +4601,7 @@
             return (
                 <>
                 <div
+                    ref={layerRef}
                     className={isCorporate ? "corp-vm-modal-overlay" : "fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80"}
                     onClick={onClose}
                 >
@@ -5095,6 +5149,18 @@
                                                                             {userFolders.find(f => f.id === user.user_folder)?.name}
                                                                         </span>
                                                                     ) : null}
+                                                                    {/* not for an account keyed on its IdP subject: the server refuses that one */}
+                                                                    {editingUser === user.username && user.oidc_resettable && (
+                                                                        <button
+                                                                            type="button"
+                                                                            data-oidc-binding-reset={user.username}
+                                                                            onClick={() => handleResetOidcBinding(user.username)}
+                                                                            className="block mt-1 text-xs text-left text-gray-400 hover:text-yellow-400 hover:underline"
+                                                                            title={t('resetOidcBindingHint')}
+                                                                        >
+                                                                            {t('resetOidcBinding')}
+                                                                        </button>
+                                                                    )}
                                                                 </div>
                                                             </div>
                                                         </td>
@@ -7326,10 +7392,23 @@
                                     {/* Connection Settings */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-4">
                                         <h4 className="text-white font-medium">Connection</h4>
+                                        {ldapSaved && ldapSaved.on && !(ldapSaved.tls && ldapSaved.verified) && (
+                                            <div className="rounded-lg p-3 text-sm border bg-yellow-500/10 border-yellow-500/40 text-yellow-200 flex items-start gap-2" data-ldap-transport-note={ldapSaved.tls ? 'unverified' : 'plain'}>
+                                                <span className="mt-0.5 flex-shrink-0"><Icons.AlertTriangle /></span>
+                                                <span>{ldapSaved.tls
+                                                    ? 'LDAP uses TLS without checking the certificate: a machine on the network path can pose as the directory, read the passwords and let anyone sign in as an admin. Turn on Verify TLS Certificate and paste the CA certificate of your directory below.'
+                                                    : 'LDAP runs in plain text: the service account password and every user password cross the network readable, and a machine on the path can pose as the directory and let anyone sign in as an admin. Turn on STARTTLS or LDAPS with Verify TLS Certificate and paste the CA certificate of your directory below.'}</span>
+                                            </div>
+                                        )}
                                         <div className="grid grid-cols-3 gap-3">
                                             <div className="col-span-2">
                                                 <label className="block text-sm text-gray-400 mb-1">Server (hostname or IP)</label>
                                                 <input type="text" value={ldapConfig.ldap_server} onChange={e => setLdapConfig(prev => ({...prev, ldap_server: e.target.value}))} placeholder="ldap.example.com" className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm" />
+                                                {/* LW Nov 2026 - ldap3 matches DNS names only on newer Pythons, so an address fails the check there */}
+                                                {(ldapConfig.ldap_use_ssl || ldapConfig.ldap_use_starttls) && ldapConfig.ldap_verify_tls
+                                                    && /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$|^\[?[0-9a-f]*:[0-9a-f]*:[0-9a-f:.]*\]?(:\d+)?$/i.test(String(ldapConfig.ldap_server || '').trim().replace(/^ldaps?:\/\//i, '').replace(/\/+$/, '')) && (
+                                                    <p className="text-xs text-yellow-400 mt-1" data-ldap-ip-hint>The certificate check compares the server name with the certificate, and an IP address does not pass it on every system. Enter the DNS name the directory certificate carries.</p>
+                                                )}
                                             </div>
                                             <div>
                                                 <label className="block text-sm text-gray-400 mb-1">Port</label>
@@ -7338,11 +7417,13 @@
                                         </div>
                                         <div className="flex gap-4">
                                             <label className="flex items-center gap-2 cursor-pointer">
-                                                <input type="checkbox" checked={ldapConfig.ldap_use_ssl} onChange={e => setLdapConfig(prev => ({...prev, ldap_use_ssl: e.target.checked, ldap_port: e.target.checked ? 636 : 389}))} className="w-4 h-4 accent-proxmox-orange" />
+                                                <input type="checkbox" checked={ldapConfig.ldap_use_ssl} onChange={e => setLdapConfig(prev => ({...prev, ldap_use_ssl: e.target.checked, ldap_port: e.target.checked ? 636 : 389, ldap_use_starttls: e.target.checked ? false : prev.ldap_use_starttls}))} className="w-4 h-4 accent-proxmox-orange" />
                                                 <span className="text-sm text-gray-300">SSL (LDAPS, port 636)</span>
                                             </label>
                                             <label className="flex items-center gap-2 cursor-pointer">
-                                                <input type="checkbox" checked={ldapConfig.ldap_use_starttls} onChange={e => setLdapConfig(prev => ({...prev, ldap_use_starttls: e.target.checked}))} className="w-4 h-4 accent-proxmox-orange" />
+                                                <input type="checkbox" checked={ldapConfig.ldap_use_starttls} onChange={e => setLdapConfig(prev => (e.target.checked && prev.ldap_use_ssl
+                                                    ? {...prev, ldap_use_starttls: true, ldap_use_ssl: false, ldap_port: prev.ldap_port === 636 ? 389 : prev.ldap_port}
+                                                    : {...prev, ldap_use_starttls: e.target.checked}))} className="w-4 h-4 accent-proxmox-orange" />
                                                 <span className="text-sm text-gray-300">STARTTLS</span>
                                             </label>
                                             {(ldapConfig.ldap_use_ssl || ldapConfig.ldap_use_starttls) && (
@@ -7352,6 +7433,16 @@
                                                 </label>
                                             )}
                                         </div>
+                                        {(ldapConfig.ldap_use_ssl || ldapConfig.ldap_use_starttls) && (
+                                            <div>
+                                                <label htmlFor="ldap-ca-cert" className="block text-sm text-gray-400 mb-1">CA Certificate (PEM)</label>
+                                                <textarea id="ldap-ca-cert" rows={4} spellCheck={false} value={ldapConfig.ldap_ca_cert}
+                                                    onChange={e => setLdapConfig(prev => ({...prev, ldap_ca_cert: e.target.value}))}
+                                                    placeholder="-----BEGIN CERTIFICATE-----"
+                                                    className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-xs font-mono" />
+                                                <p className="text-xs text-gray-500 mt-1">The CA that issued the directory certificate, for an internal CA that is not in the system trust store. Used while Verify TLS Certificate is on; with a CA here only this CA is trusted, empty uses the system trust store.</p>
+                                            </div>
+                                        )}
                                     </div>
                                     
                                     {/* Bind Credentials */}
@@ -7482,6 +7573,7 @@
                                                 <p className={`font-medium text-sm ${ldapTestResult.success ? 'text-green-400' : 'text-red-400'}`}>
                                                     {ldapTestResult.success ? '✓ Connection Successful' : `✗ ${ldapTestResult.error}`}
                                                 </p>
+                                                {ldapTestResult.hint && <p className="text-xs text-gray-300 mt-1">{ldapTestResult.hint}</p>}
                                                 {ldapTestResult.steps && (
                                                     <div className="mt-2 space-y-1">
                                                         {ldapTestResult.steps.map((step, i) => (
@@ -7600,15 +7692,15 @@
                                         </div>
                                         {/* NS Oct 2026 (#1149) - which claim names the account; AD FS sends its claims in the tokens only */}
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">Username claim</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('oidcUsernameClaim')}</label>
                                             <select data-oidc="username-claim" value={oidcConfig.oidc_username_claim || ''} onChange={e => setOidcConfig(prev => ({...prev, oidc_username_claim: e.target.value}))}
                                                 className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm">
-                                                <option value="">Automatic (preferred_username, then email)</option>
+                                                <option value="">{t('oidcUsernameClaimAuto')}</option>
                                                 <option value="preferred_username">preferred_username</option>
                                                 <option value="email">email</option>
                                                 <option value="upn">upn (AD FS)</option>
                                             </select>
-                                            <p className="text-xs text-gray-600 mt-1">Pick a claim users cannot change themselves. With a claim picked here an account stays with the sign-in it was made for, and a sign-in without that claim is refused. For AD FS also add allatclaims to the scopes. For Entra pick preferred_username (the UPN): email there is the mail attribute, which Entra does not verify.</p>
+                                            <p className="text-xs text-gray-600 mt-1">{t('oidcUsernameClaimHint')}</p>
                                         </div>
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">Login Button Text</label>
@@ -7989,6 +8081,65 @@
                                         </p>
                                     </div>
 
+                                    {/* LW Oct 2026 (#1189, #1167) - pin layout and language for everyone.
+                                        Saved with the button at the bottom like the rest of this tab. */}
+                                    <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-4" data-ui-lock-card>
+                                        <h4 className="font-medium text-white flex items-center gap-2">
+                                            <Icons.Lock />
+                                            {t('uiLockTitle') || 'Interface defaults'}
+                                        </h4>
+                                        <p className="text-sm text-gray-400">
+                                            {t('uiLockDesc') || 'Pin the layout or the language for every user. Their own choice stays saved and comes back once this is set to Users choose again.'}
+                                        </p>
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            <div>
+                                                <label htmlFor="ui-layout-lock" className="block text-sm text-gray-400 mb-1">{t('uiLockLayout') || 'Layout for everyone'}</label>
+                                                <select
+                                                    id="ui-layout-lock"
+                                                    value={serverSettings.ui_layout_lock || ''}
+                                                    onChange={e => setServerSettings({...serverSettings, ui_layout_lock: e.target.value})}
+                                                    className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
+                                                >
+                                                    <option value="">{t('uiLockUsersChoose') || 'Users choose'}</option>
+                                                    <option value="modern">{t('layoutModern') || 'Modern'}</option>
+                                                    {/* LW Nov 2026 - classic Corporate only while it is the pin, the redesign takes its place */}
+                                                    {serverSettings.ui_layout_lock === 'corporate' && (
+                                                        <option value="corporate">{t('layoutCorporate') || 'Corporate'}</option>
+                                                    )}
+                                                    {/* LW Nov 2026 - the redesign can be pinned too (ui_layout_lock takes it) */}
+                                                    <option value="corporate-redesigned">{t('layoutCorporateRedesigned')}</option>
+                                                    <option value="cloud">Cloud ({t('preview') || 'Preview'})</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label htmlFor="ui-language-lock" className="block text-sm text-gray-400 mb-1">{t('uiLockLanguage') || 'Language for everyone'}</label>
+                                                <select
+                                                    id="ui-language-lock"
+                                                    value={serverSettings.ui_language_lock || ''}
+                                                    onChange={e => setServerSettings({...serverSettings, ui_language_lock: e.target.value})}
+                                                    className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
+                                                >
+                                                    <option value="">{t('uiLockUsersChoose') || 'Users choose'}</option>
+                                                    {languageChoices(t).map(l => (
+                                                        <option key={l.code} value={l.code}>{l.title}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <label className="flex items-start gap-2 cursor-pointer">
+                                            <input
+                                                type="checkbox"
+                                                checked={!!serverSettings.ui_lock_admins}
+                                                onChange={e => setServerSettings({...serverSettings, ui_lock_admins: e.target.checked})}
+                                                className="mt-0.5 rounded border-proxmox-border bg-proxmox-darker"
+                                            />
+                                            <span>
+                                                <span className="block text-sm text-gray-300">{t('uiLockAdmins') || 'Also apply to administrators'}</span>
+                                                <span className="block text-xs text-gray-500">{t('uiLockAdminsHint') || 'Administrators are exempt unless this is on.'}</span>
+                                            </span>
+                                        </label>
+                                    </div>
+
                                     {/* Login Background - NS Mar 2026 */}
                                     <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-3">
                                         <h4 className="font-medium text-white flex items-center gap-2">
@@ -8082,7 +8233,29 @@
                                                     max="65535"
                                                     className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
                                                 />
-                                                <p className="text-xs text-gray-500 mt-1">{t('httpRedirectPortHint') || '0 = auto (80 if root), -1 = disabled'}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{t('httpRedirectPortHint') || '-1 = no extra port, 0 = auto (80 if the service may open it)'}</p>
+                                                {serverSettings.http_redirect_state && (() => {
+                                                    // LW Nov 2026 - what the running server does; the field above takes effect after a restart
+                                                    const st = serverSettings.http_redirect_state;
+                                                    if (!st.same_port) {
+                                                        // the Flask fallback runs none either, so reverse proxy mode is named only when it is on
+                                                        return <p className="text-xs text-gray-500 mt-1">{t(serverSettings.reverse_proxy_enabled ? 'httpRedirectStateOff' : 'httpRedirectStateNone')}</p>;
+                                                    }
+                                                    // the two reasons the server names itself; an OS error as it came
+                                                    const reason = st.extra_error === 'needs root or CAP_NET_BIND_SERVICE' ? t('httpRedirectReasonPrivilege')
+                                                        : st.extra_error === 'already in use' ? t('httpRedirectReasonInUse') : st.extra_error;
+                                                    return (
+                                                        <div className="mt-1 space-y-0.5">
+                                                            <p className="text-xs text-green-400">{t('httpRedirectStateSamePort').replace('{port}', () => String(st.same_port))}</p>
+                                                            {st.extra_port && !st.extra_error && (
+                                                                <p className="text-xs text-green-400">{t('httpRedirectStateExtra').replace('{port}', () => String(st.extra_port))}</p>
+                                                            )}
+                                                            {st.extra_port && st.extra_error && (
+                                                                <p className="text-xs text-yellow-400">{t('httpRedirectStateExtraFailed').replace('{port}', () => String(st.extra_port)).replace('{reason}', () => reason)}</p>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })()}
                                             </div>
                                         </div>
                                     </div>
@@ -9172,8 +9345,8 @@
                                     <div className="flex items-center justify-between gap-4">
                                         <div className="flex items-center gap-3">
                                             <select
-                                                value={userFilter}
-                                                onChange={e => setUserFilter(e.target.value)}
+                                                value={auditUserFilter}
+                                                onChange={e => setAuditUserFilter(e.target.value)}
                                                 className="px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-sm text-white focus:outline-none focus:border-proxmox-orange"
                                             >
                                                 <option value="">{t('allUsers')}</option>
@@ -9194,7 +9367,7 @@
                                         </div>
                                         <div className="flex items-center gap-2">
                                             <button
-                                                onClick={fetchAuditLogs}
+                                                onClick={() => fetchAuditLogs()}
                                                 className="flex items-center gap-2 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-sm text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
                                             >
                                                 <Icons.RefreshCw />
@@ -9315,6 +9488,10 @@
                             {/* LW Sep 2026 (#625) - warm standby for PegaProx itself */}
                             {activeTab === 'ha' && isAdmin && (
                                 <HaPanel t={t} addToast={addToast} getAuthHeaders={getAuthHeaders} />
+                            )}
+                            {/* LW Oct 2026 - the QNetd hosts the QDevices of the clusters vote through */}
+                            {activeTab === 'ha' && isAdmin && (
+                                <QnetdHostsPanel t={t} addToast={addToast} getAuthHeaders={getAuthHeaders} />
                             )}
 
                             {/* MK May 2026 — SIEM Forwarder Tab */}
@@ -9537,7 +9714,8 @@
                                                     ✓ Backup created: <code className="text-green-400">{updateInfo.backup_path}</code>
                                                 </p>
                                             )}
-                                            {updateInfo.download_url && (
+                                            {/* LW Nov 2026 - the url is from the version manifest, only an https page becomes the link */}
+                                            {typeof updateInfo.download_url === 'string' && /^https:\/\//i.test(updateInfo.download_url) && (
                                                 <a
                                                     href={updateInfo.download_url}
                                                     target="_blank"

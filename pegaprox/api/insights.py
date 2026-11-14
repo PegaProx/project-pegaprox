@@ -21,7 +21,8 @@ from flask import Blueprint, jsonify, request
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.auth import require_auth
 from pegaprox.api.helpers import (check_cluster_access, safe_error, load_metrics_window, scope_vm_rows,
-                                  history_report, history_version, run_off_hub)
+                                  history_report, history_version, run_off_hub, caller_is_scoped,
+                                  _request_caller)
 from pegaprox.background.metrics_store import need, guest_columns, FT, HERE, RUN, CPU_SET, MEM_SET
 from pegaprox.core.db import get_db
 
@@ -319,6 +320,9 @@ def capacity_forecast(cluster_id):
         threshold = max(50, min(99.9, threshold))
     except (TypeError, ValueError):
         threshold = 90.0
+    # the storages come by name for the whole cluster, not per node: a caller confined to some
+    # guests gets the cluster series, as the storage reads refuse them the others
+    confined = caller_is_scoped(_request_caller(), cluster_id)
 
     history = _load_history(cluster_id, days=days)
     if len(history) < 6:  # need at least 30min of data
@@ -330,7 +334,8 @@ def capacity_forecast(cluster_id):
             'message': 'not enough history yet — collector needs ~30 min',
             'forecasts': [],
         })
-    need(history, 'storage')
+    if not confined:
+        need(history, 'storage')
 
     now_ts = int(datetime.now().timestamp())
 
@@ -349,7 +354,7 @@ def capacity_forecast(cluster_id):
         mem_used = totals.get('mem_used') or 0
         if mem_total > 0:
             series['memory'].append((ts, mem_used / mem_total * 100))
-        for sid, sd in (cd.get('storage') or {}).items():
+        for sid, sd in ({} if confined else cd.get('storage') or {}).items():
             storage_series.setdefault(sid, []).append((ts, sd.get('pct') or 0))
 
     forecasts = []
@@ -603,7 +608,7 @@ def top_talkers(cluster_id):
 
 
 @bp.route('/api/clusters/<cluster_id>/insights/history', methods=['GET'])
-@require_auth(perms=['insights.view'])
+@require_auth(perms=['cluster.view'])
 def long_term_history(cluster_id):
     """Return cluster-aggregate + per-node time-series from the
     metrics_history snapshots. Powers the long-term-history chart
@@ -652,13 +657,23 @@ def long_term_history(cluster_id):
     # held the hub: they run in the thread pool now (the node parts are read there too)
     samples = run_off_hub(_history_samples, raw, step)
 
-    return jsonify({
+    out = {
         'cluster_id': cluster_id,
         'days_requested': days,
         'step_seconds': step,
         'sample_count': len(samples),
         'samples': samples,
-    })
+    }
+    # cluster.view like right-sizing, forecast and rollups (it asked for an insights.view
+    # that no role holds). The guest counts are the whole cluster's: a caller confined
+    # to some guests gets none, as the report summaries give it none. CPU, memory and nodes stay.
+    from pegaprox.utils.auth import build_authz_user
+    if caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id):
+        for s in samples:
+            s.pop('vms_running', None)
+            s.pop('cts_running', None)
+        out['scoped'] = True
+    return jsonify(out)
 
 
 def _history_samples(raw, step):
@@ -685,8 +700,9 @@ def _history_samples(raw, step):
             'ts': ts_unix,
             'cpu_pct': cpu_pct,
             'mem_pct': mem_pct,
-            'vms_running': totals.get('vms_running', 0),
-            'cts_running': totals.get('cts_running', 0),
+            # None: the snapshot's guest list was not read (the collector stores no counts)
+            'vms_running': totals.get('vms_running'),
+            'cts_running': totals.get('cts_running'),
             'nodes': nodes,
         })
 
@@ -716,8 +732,8 @@ def _avg_samples(samples, bucket_ts):
     n = max(len(samples), 1)
     cpu = sum(s['cpu_pct'] for s in samples) / n
     mem = sum(s['mem_pct'] for s in samples) / n
-    vms = max(s['vms_running'] for s in samples)
-    cts = max(s['cts_running'] for s in samples)
+    vms = max((s['vms_running'] for s in samples if s.get('vms_running') is not None), default=None)
+    cts = max((s['cts_running'] for s in samples if s.get('cts_running') is not None), default=None)
     # node-level averaging — union of node names, mean of values
     node_avgs = {}
     for s in samples:

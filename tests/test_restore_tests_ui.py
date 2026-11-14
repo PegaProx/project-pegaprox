@@ -17,7 +17,7 @@ from test_ha_ui import CLUSTER, NODE_METRICS, SSE_TOKEN, VM, _App, _FakeServer, 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHOTS = os.environ.get('PEGAPROX_SHOTS', '')
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 DASHES = (chr(0x2014), chr(0x2013))
 
 
@@ -80,7 +80,7 @@ def test_placeholders_survive_translation():
     tr = _read('web', 'src', 'translations.js')
     for key in _keys():
         values = re.findall(rf'^\s*{key}: "(.*)",$', tr, re.M)
-        assert len(values) == 9, key
+        assert len(values) == 10, key
         wanted = set(re.findall(r'\{(\w+)\}', values[LANGS.index('en')]))
         for v in values:
             assert set(re.findall(r'\{(\w+)\}', v)) == wanted, (key, v)
@@ -296,10 +296,12 @@ def test_runtime_the_report_the_schedule_and_a_guest(open_app, layout):
     # the export is the report as CSV, of the period shown
     assert page.locator('[data-rtest-csv]').get_attribute('href').endswith('/api/clusters/c1/recovery-report?days=30&format=csv')
     page.locator('[data-rtest-days]').select_option('60')
-    deadline = time.time() + 4
-    while time.time() < deadline and not any('days=60' in u for u in app.server.urls):
+    # the open guest reads its own report with the new period too, so wait for the one this is about
+    deadline = time.time() + 20
+    asked = lambda: any(re.search(r'recovery-report\?days=60(&|$)', u) for u in app.server.urls)
+    while time.time() < deadline and not asked():
         page.wait_for_timeout(100)
-    assert any('recovery-report?days=60' in u for u in app.server.urls)
+    assert asked()
     _shot(page, f'rtest_{layout}.png')
     assert not app.errors, app.errors
 

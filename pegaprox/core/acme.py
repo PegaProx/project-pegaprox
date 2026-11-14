@@ -12,10 +12,12 @@ import re
 import requests
 import secrets
 import ssl
+from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding, utils
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
@@ -121,7 +123,29 @@ def _jws_header(account_key, url, nonce, kid=None):
 
 
 def _signed_request(url, payload, account_key, nonce, kid=None):
-    """Send a JWS-signed POST to an ACME endpoint"""
+    """Send a JWS-signed POST to an ACME endpoint.
+
+    RFC 8555 6.5: a CA refuses a nonce with badNonce and a fresh one in Replay-Nonce,
+    and the client should send the request again with that. Some CAs refuse a share of
+    nonces on purpose, so without this a renewal failed now and then and waited a day."""
+    resp = _post_jws(url, payload, account_key, nonce, kid)
+    fresh = resp.headers.get('Replay-Nonce')
+    if resp.status_code == 400 and fresh and _problem_type(resp) == 'urn:ietf:params:acme:error:badNonce':
+        logging.info(f"[ACME] The CA refused the nonce for {url}, sending again with its fresh one")
+        resp = _post_jws(url, payload, account_key, fresh, kid)
+    return resp
+
+
+def _problem_type(resp):
+    try:
+        problem = resp.json()
+    except ValueError:
+        return None
+    return problem.get('type') if isinstance(problem, dict) else None
+
+
+def _post_jws(url, payload, account_key, nonce, kid=None):
+    """One JWS-signed POST to an ACME endpoint"""
     header = _jws_header(account_key, url, nonce, kid)
     protected = _b64url(json.dumps(header))
 
@@ -535,6 +559,139 @@ def _validate_challenge(authz_url, challenge_url, account_key, nonce, kid, token
     return {'success': False, 'message': 'Challenge validation timed out (60s)'}
 
 
+def _acme_problem(resp):
+    """The CA's reason from the problem document of a refused request, else the HTTP status."""
+    try:
+        err = resp.json()
+    except ValueError:
+        err = None
+    if isinstance(err, dict) and err.get('detail'):
+        return f"{err['detail']} (HTTP {resp.status_code})"
+    return f"HTTP {resp.status_code}"
+
+
+def _no_answer(url, err):
+    """A request to the CA that got no HTTP answer, said with the CA it went to. The raw
+    text was "('Connection aborted.', RemoteDisconnected(...))", with no step and no CA."""
+    host = urlparse(url).netloc or url
+    if isinstance(err, requests.Timeout):
+        return f"no answer from the CA at {host} in time"
+    if isinstance(err, requests.ConnectionError):
+        return f"no answer from the CA at {host}, the connection was closed or refused"
+    return f"no answer from the CA at {host} ({type(err).__name__})"
+
+
+# one whole PEM certificate: base64 and line breaks between its two lines, nothing else
+_PEM_CERT_RE = re.compile(r'-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----')
+
+
+def _issued_by(cert, issuer):
+    """True if issuer is named as the issuer of cert and its key signed cert."""
+    try:
+        cert.verify_directly_issued_by(issuer)
+        return True
+    except (ValueError, TypeError, InvalidSignature):
+        return False
+
+
+def _cert_names(cert):
+    """The DNS names a certificate is for: its SAN, else its CN."""
+    try:
+        names = cert.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
+    except x509.ExtensionNotFound:
+        names = [a.value for a in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)]
+    return {str(n).lower().rstrip('.') for n in names}
+
+
+def _cert_label(cert):
+    """A certificate's subject, or its names when the subject is empty."""
+    return cert.subject.rfc4514_string() or ', '.join(sorted(_cert_names(cert)))
+
+
+def _checked_chain(chain_pem, domain_key, domain):
+    """The certificates of a downloaded chain, the end-entity one first, or ValueError.
+
+    RFC 8555 9.1: the body holds PEM certificates and nothing else, the end-entity one
+    first, each one certified by the one after it, and the first has to carry the key and
+    the name we put in the CSR. Anything else (an error page from a proxy, a key block, a
+    body cut off on the way) is not written over the pair the listener serves."""
+    labels = re.findall(r'-----BEGIN ([^-\r\n]*)-----', chain_pem)
+    if not chain_pem.lstrip().startswith('-----BEGIN CERTIFICATE-----') or set(labels) != {'CERTIFICATE'}:
+        raise ValueError('the CA did not answer with a PEM certificate chain')
+    blocks = _PEM_CERT_RE.findall(chain_pem)
+    # a body cut inside a header line ('-----BEGIN CERT') has no label to find, so every
+    # BEGIN and END there is has to belong to a whole block
+    if not len(blocks) == chain_pem.count('-----BEGIN') == chain_pem.count('-----END'):
+        raise ValueError('the certificate chain is cut off')
+    if _PEM_CERT_RE.sub('', chain_pem).strip():
+        raise ValueError('the certificate chain carries text outside its certificates')
+    try:
+        chain = [x509.load_pem_x509_certificate(b.encode()) for b in blocks]
+    except ValueError:
+        raise ValueError('a certificate of the chain does not parse')
+    for cert, issuer in zip(chain, chain[1:]):
+        if not _issued_by(cert, issuer):
+            raise ValueError(f"the certificate chain does not link up: {_cert_label(issuer)} "
+                             f"did not issue {_cert_label(cert)}")
+    spki = (serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    if chain[0].public_key().public_bytes(*spki) != domain_key.public_key().public_bytes(*spki):
+        raise ValueError('the certificate is not for the key of this request')
+    if domain.lower().rstrip('.') not in _cert_names(chain[0]):
+        raise ValueError(f'the certificate is not for {domain}')
+    return chain
+
+
+def _served_chain(cert_path):
+    """The certificates of the pair served now, [] if there is none to read."""
+    try:
+        with open(cert_path, 'rb') as f:
+            return x509.load_pem_x509_certificates(f.read())
+    except (OSError, ValueError):
+        return []
+
+
+def _trusted_issuer(cert):
+    """True if a root this host trusts (system store and Requests' bundle) issued cert."""
+    try:
+        context = _acme_ssl_context()
+        anchors = zip(context.get_ca_certs(), context.get_ca_certs(binary_form=True))
+    except (ssl.SSLError, OSError):
+        return False
+    wanted = sorted(str(a.value) for a in cert.issuer)
+    for info, der in anchors:
+        # only the roots with the issuer's name get parsed, a store has odd ones
+        if sorted(v for rdn in info.get('subject', ()) for _, v in rdn) != wanted:
+            continue
+        try:
+            ca = x509.load_der_x509_certificate(der)
+        except ValueError:
+            continue
+        if ca.subject == cert.issuer and _issued_by(cert, ca):
+            return True
+    return False
+
+
+def _dropped_intermediate(chain, served):
+    """The name of an intermediate the served chain carries and the new one leaves out, or None.
+
+    A renewal from the same issuer that comes back shorter is taken only if it still ends
+    at its anchor: a self-signed certificate, an issuer the served chain never sent as an
+    intermediate either (a private CA that signs from its root), or a root this host
+    trusts (a CA that stops sending a cross-signed root). Without an intermediate we used
+    to send, clients that hold only the root fail on the new chain."""
+    if not served or served[0].issuer != chain[0].issuer or len(chain) >= len(served):
+        return None
+    top = chain[-1]
+    if top.issuer == top.subject:
+        return None
+    if not any(c.subject == top.issuer and c.issuer != c.subject for c in served):
+        return None
+    if _trusted_issuer(top):
+        return None
+    return top.issuer.rfc4514_string()
+
+
 def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid):
     """Generate the domain key/CSR, finalize the ACME order, and save cert files."""
     domain_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -567,27 +724,51 @@ def _finalize_order(domain, ssl_dir, order, order_url, account_key, nonce, kid):
         return {'success': False, 'message': 'Timed out waiting for certificate'}
 
     cert_url = order_data['certificate']
-    cert_resp = _signed_request(cert_url, None, account_key, nonce, kid)
-    cert_pem = cert_resp.text
+    try:
+        cert_resp = _signed_request(cert_url, None, account_key, nonce, kid)
+    except requests.RequestException as e:
+        return {'success': False, 'message': f"Certificate download failed: {_no_answer(cert_url, e)}"}
+    cert_pem = cert_resp.text or ''
 
-    os.makedirs(ssl_dir, exist_ok=True)
+    # A renewal writes into the dir the listener loads from. A rate limit or a proxy page
+    # here used to land in cert.pem with a fresh key next to it, and the next start had no
+    # pair to load. Nothing is replaced until the chain parses and fits our key.
+    if cert_resp.status_code != 200:
+        return {'success': False, 'message': f"Certificate download failed: {_acme_problem(cert_resp)}"}
     cert_path = os.path.join(ssl_dir, 'cert.pem')
     key_path = os.path.join(ssl_dir, 'key.pem')
-
-    with open(cert_path, 'w') as f:
-        f.write(cert_pem)
-    os.chmod(cert_path, 0o644)
-
-    with open(key_path, 'wb') as f:
-        f.write(domain_key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption()
-        ))
-    os.chmod(key_path, 0o600)
-
-    cert_obj = x509.load_pem_x509_certificate(cert_pem.encode())
+    try:
+        chain = _checked_chain(cert_pem, domain_key, domain)
+    except ValueError as e:
+        return {'success': False, 'message': f"Certificate download failed: {e}"}
+    missing = _dropped_intermediate(chain, _served_chain(cert_path))
+    if missing:
+        return {'success': False, 'message': f"Certificate download failed: the chain leaves out "
+                f"the intermediate {missing} that the served chain carries"}
+    cert_obj = chain[0]
     expires = cert_obj.not_valid_after_utc.isoformat()
+
+    os.makedirs(ssl_dir, exist_ok=True)
+
+    from pegaprox.app import _write_atomic
+    try:
+        with open(key_path, 'rb') as f:
+            old_key = f.read()
+    except OSError:
+        old_key = None
+    # each file in one rename, the key first
+    _write_atomic(key_path, domain_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()
+    ), 0o600)
+    try:
+        _write_atomic(cert_path, cert_pem.encode(), 0o644)
+    except OSError:
+        # the disk filled up in between: the old certificate gets its key back
+        if old_key is not None:
+            _write_atomic(key_path, old_key, 0o600)
+        raise
 
     logging.info(f"[ACME] Certificate saved! Expires: {expires}")
     return {
@@ -627,7 +808,11 @@ def _create_order(domain, email, ssl_dir, staging=False, directory_url=None):
 
     reg_resp = _signed_request(directory['newAccount'], reg_payload, account_key, nonce)
     nonce = reg_resp.headers.get('Replay-Nonce', nonce)
-    kid = reg_resp.headers['Location']
+    kid = reg_resp.headers.get('Location')
+    # 201 for a new account, 200 for the one this key has already (RFC 8555 7.3). A refusal
+    # (a contact the CA does not take, a rate limit) carries no Location and says why
+    if reg_resp.status_code not in (200, 201) or not kid:
+        return {'success': False, 'message': f"Account registration failed: {_acme_problem(reg_resp)}"}
     logging.info(f"[ACME] Account registered/found: {kid}")
 
     order_payload = {'identifiers': [{'type': 'dns', 'value': domain}]}
@@ -642,6 +827,16 @@ def _create_order(domain, email, ssl_dir, staging=False, directory_url=None):
     authz_url = order['authorizations'][0]
     authz_resp = _signed_request(authz_url, None, account_key, nonce, kid)
     nonce = authz_resp.headers.get('Replay-Nonce', nonce)
+    # a refusal here is a problem document without challenges, and looking for one in
+    # it said "No HTTP-01 challenge offered", which is not what went wrong
+    if authz_resp.status_code != 200:
+        return {'success': False, 'message': f"Authorization fetch failed: {_acme_problem(authz_resp)}"}
+    try:
+        authz = authz_resp.json()
+    except ValueError:
+        authz = None
+    if not isinstance(authz, dict):
+        return {'success': False, 'message': 'Authorization fetch failed: the CA did not answer with an authorization'}
 
     return {
         'success': True,
@@ -651,7 +846,7 @@ def _create_order(domain, email, ssl_dir, staging=False, directory_url=None):
         'order': order,
         'order_url': order_resp.headers.get('Location', ''),
         'authz_url': authz_url,
-        'authz': authz_resp.json(),
+        'authz': authz,
     }
 
 

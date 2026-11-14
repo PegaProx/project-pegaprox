@@ -3,7 +3,10 @@
 // Live data is NEVER cached — only static shell + images.
 // On push event we fetch /api/push/inbox to show the freshest notification.
 
-const CACHE_NAME = 'pegaprox-shell-v3';
+// LW Nov 2026 - v4: every language but English left the page for /i18n/<lang>.json?v=<hash>.
+// The cache of a page that still carried them all goes, and a page never meets the language
+// files of another build: they are cached by their full URL, the newest one of each language.
+const CACHE_NAME = 'pegaprox-shell-v4';
 const SHELL_ASSETS = [
   '/',
   '/manifest.webmanifest',
@@ -39,18 +42,33 @@ self.addEventListener('fetch', (e) => {
   if (url.pathname.startsWith('/ws')) return;                   // pass through ws
   if (url.pathname.startsWith('/.well-known/')) return;         // pass through ACME
 
+  const languageFile = url.pathname.startsWith('/i18n/');
+
   // For shell + static: try network, then cache, then show whatever we have.
   e.respondWith(
     fetch(e.request).then(resp => {
       // only cache successful basic GETs
       if (resp.ok && resp.type === 'basic') {
         const clone = resp.clone();
-        caches.open(CACHE_NAME).then(c => c.put(e.request, clone)).catch(() => {});
+        caches.open(CACHE_NAME)
+          .then(c => c.put(e.request, clone).then(() => languageFile && dropOtherVersions(c, url)))
+          .catch(() => {});
       }
       return resp;
-    }).catch(() => caches.match(e.request).then(r => r || caches.match('/')))
+    // a language file offline is that very file or nothing (the page reads English then), never the page
+    }).catch(() => caches.match(e.request).then(r => r || (languageFile ? Response.error() : caches.match('/'))))
   );
 });
+
+// the other builds of a language file, its ?v= is the hash of the build
+function dropOtherVersions(cache, url) {
+  return cache.keys().then(keys => Promise.all(keys
+    .filter(k => {
+      const u = new URL(k.url);
+      return u.pathname === url.pathname && u.search !== url.search;
+    })
+    .map(k => cache.delete(k))));
+}
 
 // Wake-up push: fetch the latest inbox entry and showNotification.
 self.addEventListener('push', (e) => {

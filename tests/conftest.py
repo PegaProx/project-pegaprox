@@ -15,6 +15,7 @@ import gevent.monkey
 gevent.monkey.patch_all()
 
 import os
+import sys
 import threading
 import types
 import tempfile
@@ -127,6 +128,7 @@ def db():
 
     database = dbmod.get_db()
     _reset_rbac_caches()  # start each test with empty process-global caches
+    _reset_storage_groups()
     try:
         yield database
     finally:
@@ -147,6 +149,7 @@ def db():
         constants.DATABASE_FILE = _orig_const
         dbcrypto._HEAVY_CACHE.clear()
         _metrics_store.forget()
+        _reset_storage_groups()
         shutil.rmtree(tmp, ignore_errors=True)
         _reset_rbac_caches()
     # a snapshot whose parts did not read back as written was kept as JSON and logged; in a
@@ -257,6 +260,17 @@ def _node_history_forgotten():
 
 
 @pytest.fixture(autouse=True)
+def _node_scopes_forgotten():
+    """The node sets a confined caller's reads and streams are cut to are kept per account
+    for seconds (helpers.caller_guest_nodes), and the next test's accounts have their guests
+    on other nodes."""
+    from pegaprox.api import helpers
+    helpers.forget_node_scopes()
+    yield
+    helpers.forget_node_scopes()
+
+
+@pytest.fixture(autouse=True)
 def _history_reports_forgotten():
     """The power, cost and right-sizing reports are kept per cluster id for minutes
     (helpers.history_report), and the next test's cluster_1 has another history."""
@@ -304,6 +318,16 @@ def _reset_rbac_caches():
         rbac._disk_alloc_cache.clear()
     except Exception:
         pass
+
+
+def _reset_storage_groups():
+    """The storage balancing groups live in a module global that the routes write and the
+    table follows. A fresh DB holds none, so neither may memory, or one test's group answers
+    the next one's create with a 409. Not imported here: importing storage starts its worker."""
+    mod = sys.modules.get('pegaprox.api.storage')
+    if mod is not None:
+        mod.storage_clusters_config = {}
+        mod._storage_clusters_loaded = True
 
 
 def _seed_user(db, username, role='user', tenant_id=DEFAULT_TENANT, enabled=True,

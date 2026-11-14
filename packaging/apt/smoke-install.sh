@@ -7,7 +7,9 @@
 # 127.0.0.1:8079, key in /smoke/key.asc) next to Debian's own trixie sources, installs
 # pegaprox with the lines the README gives users, and checks what it got. Nothing else
 # is configured: every dependency has to come from trixie or from that repository.
-# The workflow boots the resulting tree with systemd-nspawn afterwards.
+# The workflow boots the resulting tree with systemd-nspawn afterwards. No systemd runs
+# in here, so the postinst leaves the master key to the unit's first start (#1226): the
+# boot checks that one.
 #
 # NS Oct 2026
 set -euo pipefail
@@ -27,10 +29,10 @@ echo "deb [signed-by=/etc/apt/keyrings/pegaprox.asc] http://127.0.0.1:8079 trixi
 apt-get update -q
 apt-get install -y -q pegaprox </dev/null
 
-apt-cache policy pegaprox python3-flask-sock python3-xenapi
+apt-cache policy pegaprox python3-flask-sock python3-xenapi python3-sqlcipher3
 got=$(dpkg-query -W -f '${Version}' pegaprox)
 [ "$got" = "$want" ] || { echo "smoke: pegaprox $got is installed, the build made $want" >&2; exit 1; }
-for pkg in python3-flask-sock python3-xenapi; do
+for pkg in python3-flask-sock python3-xenapi python3-sqlcipher3; do
   dpkg-query -W -f '${Package} ${Version} ${db:Status-Status}\n' "$pkg"
 done
 

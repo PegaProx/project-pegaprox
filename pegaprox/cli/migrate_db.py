@@ -80,9 +80,12 @@ def main(argv: List[str]) -> int:
     from pegaprox.core import dbcrypto
     if dbcrypto.BACKEND != 'sqlcipher':
         print(f"\n[BLOCKED] sqlcipher3 not importable on this platform.")
+        if dbcrypto.SQLCIPHER_ERROR:
+            print(f"          {dbcrypto.sqlcipher_problem()}")
         print(f"          DB encryption cannot be enabled.  Install:")
         print(f"            pip install 'sqlcipher3-binary>=0.6.0'   (Linux x86_64)")
-        print(f"          or build pysqlcipher3 from source (other platforms).")
+        print(f"            pip install 'sqlcipher3>=0.6.4'          (aarch64, macOS, Windows)")
+        print(f"          never both: they install the same module.")
         return 2
 
     state = dbcrypto.detect_db_state(db_path)
@@ -112,8 +115,9 @@ def main(argv: List[str]) -> int:
     print(f"master key source: {mk.source}{' (' + mk.source_path + ')' if mk.source_path else ''}")
     if mk.is_legacy:
         print("\n[WARN]  Master key is in the legacy CONFIG_DIR location.")
-        print("        Consider running `pegaprox secure-key migrate` first to move it")
-        print("        outside the DB directory before encrypting the DB itself.")
+        print("        Consider moving it to /etc/pegaprox/secret.key first (mode 0640,")
+        print("        owner root, group of the service user), outside the DB directory;")
+        print("        --keystore-status names the steps.")
         print()
 
     # Plan summary
@@ -189,6 +193,11 @@ def _encrypt_via_sqlcipher_export(plain_path: str, encrypted_path: str, key_raw:
     count copied across all tables (for the log line)."""
     if os.path.exists(encrypted_path):
         os.remove(encrypted_path)
+    # MK Nov 2026 - created 0600 before SQLCipher opens it. A file SQLite creates gets
+    # the umask (0644 as a rule), and the chmod meant for it sat after the return. The
+    # journal SQLite writes next to it takes the same mode.
+    os.close(os.open(encrypted_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    os.chmod(encrypted_path, 0o600)
 
     import sqlcipher3
     hex_key = key_raw.hex()
@@ -220,11 +229,6 @@ def _encrypt_via_sqlcipher_export(plain_path: str, encrypted_path: str, key_raw:
         return total
     finally:
         enc.close()
-    # tighten perms on the new file
-    try:
-        os.chmod(encrypted_path, 0o600)
-    except Exception:
-        pass
 
 
 def _verify_row_counts(plain_path: str, encrypted_path: str) -> None:

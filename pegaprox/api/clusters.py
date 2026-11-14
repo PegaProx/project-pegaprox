@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """cluster CRUD, HA & maintenance routes - split from monolith dec 2025, NS"""
 
+import copy
 import json
 import logging
 import re
@@ -12,7 +13,7 @@ from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.models.tasks import (PegaProxConfig, balancer_cooldown, BALANCER_COOLDOWN_MIN,
-                                   BALANCER_COOLDOWN_MAX)
+                                   BALANCER_COOLDOWN_MAX, PREDICTIVE_THRESHOLD_DEFAULT)
 from pegaprox.core.db import get_db
 from pegaprox.core import ha
 from pegaprox.core.cache import StorageDataCache
@@ -27,13 +28,15 @@ from pegaprox.utils.rbac import (
 )
 from pegaprox.utils.realtime import broadcast_sse, broadcast_update, push_immediate_update
 from pegaprox.core.config import load_config, save_config
-from pegaprox.core.manager import PegaProxManager
+from pegaprox.core.manager import PegaProxManager, ha_cache_node_status
 from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
-from pegaprox.utils.sanitization import bounded_list, validate_ssh_user, validate_host_address
+from pegaprox.utils.sanitization import bounded_list, validate_ssh_user, validate_host_address, dns_suffix
 from pegaprox.utils.sanitization import task_ref_ok
 from pegaprox.api.helpers import (load_server_settings, get_connected_manager, check_cluster_access,
                                   safe_error, scope_vm_rows, require_unconfined, parse_pve_error,
-                                  bounded_limit, node_maintenance_for_caller, upstream_failure)
+                                  bounded_limit, node_map_for_caller, upstream_failure)
+from pegaprox.api.helpers import caller_guest_nodes
+from pegaprox.api.helpers import pve_read_failed, pve_unreachable
 
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
 bp = Blueprint('clusters', __name__)
@@ -143,7 +146,7 @@ def get_clusters():
                 'proxlb_pins_strict': bool(getattr(mgr.config, 'proxlb_pins_strict', False)),
                 'dry_run': mgr.config.dry_run,
                 'predictive_balancing': getattr(mgr.config, 'predictive_balancing', False),
-                'predictive_threshold': getattr(mgr.config, 'predictive_threshold', 75),
+                'predictive_threshold': getattr(mgr.config, 'predictive_threshold', PREDICTIVE_THRESHOLD_DEFAULT),
                 'balance_cpu_weight': getattr(mgr.config, 'balance_cpu_weight', 1.0),
                 'balance_mem_weight': getattr(mgr.config, 'balance_mem_weight', 1.0),
                 'balance_io_weight': getattr(mgr.config, 'balance_io_weight', 0.0),
@@ -196,12 +199,15 @@ def add_cluster():
     _uerr = _ssh_user_error(data)
     if _uerr:
         return _uerr
-    _cd_err = _cooldown_error(data)
+    _cd_err = _cooldown_error(data) or _check_interval_error(data)
     if _cd_err:
         return _cd_err
     _xn_err = _transfer_network_error(data)
     if _xn_err:
         return _xn_err
+    _sfx_err = _node_ui_suffix_error(data)
+    if _sfx_err:
+        return _sfx_err
 
     # Generate unique ID
     cluster_id = str(uuid.uuid4())[:8]
@@ -265,6 +271,10 @@ def export_cluster_config(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    # read for a re-configure, which a confined caller may not do
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -287,6 +297,20 @@ def export_cluster_config(cluster_id):
         'vnc_tunnel': bool(getattr(c, 'vnc_tunnel', False)),  # MK Apr 2026
         'ssh_disabled': bool(getattr(c, 'ssh_disabled', False)),  # MK Sep 2026 (#941)
         'transfer_network': getattr(c, 'transfer_network', '') or '',
+        # MK Nov 2026 (#1322) - the dialog fills these from here and sends them back; they
+        # were missing, so a re-save switched the HA off, dropped the API port, the node
+        # link suffix and the predictive settings
+        'api_port': getattr(c, 'api_port', 8006) or 8006,
+        'node_ui_suffix': getattr(c, 'node_ui_suffix', '') or '',
+        'ha_enabled': bool(getattr(c, 'ha_enabled', False)),
+        'predictive_balancing': bool(getattr(c, 'predictive_balancing', False)),
+        'predictive_threshold': getattr(c, 'predictive_threshold', PREDICTIVE_THRESHOLD_DEFAULT),
+        'balance_cpu_weight': getattr(c, 'balance_cpu_weight', 1.0),
+        'balance_mem_weight': getattr(c, 'balance_mem_weight', 1.0),
+        'balance_io_weight': getattr(c, 'balance_io_weight', 1.0),
+        'cpu_baseline': getattr(c, 'cpu_baseline', '') or '',
+        'ssh_user': getattr(c, 'ssh_user', '') or '',
+        'has_ssh_key': bool(getattr(c, 'ssh_key', '')),
         # secrets intentionally omitted: pass, ssh_key, api_token_secret
     })
 
@@ -403,7 +427,7 @@ def reconfigure_cluster(cluster_id):
         # LDAP user: verify against LDAP server
         from pegaprox.utils.ldap import ldap_authenticate
         ldap_result = ldap_authenticate(username, current_password) if current_password else {}
-        if not current_password or 'error' in ldap_result:
+        if not current_password or not ldap_result.get('success'):
             return jsonify({'error': 'Invalid LDAP password'}), 401
     else:
         return jsonify({'error': 'Re-authentication not supported for this account type. Use a local admin account.'}), 400
@@ -412,6 +436,13 @@ def reconfigure_cluster(cluster_id):
     for field in ['name', 'host', 'user']:
         if field not in data:
             return jsonify({'error': f'Missing required field: {field}'}), 400
+    # NS Nov 2026 (#1251) - a key field with nothing but whitespace in it is no key: it must not
+    # replace the stored one, which the dialog cannot read back, nor pass the check below
+    if isinstance(data.get('ssh_key'), str) and not data['ssh_key'].strip():
+        data['ssh_key'] = ''
+    # JB Nov 2026 (#1251) - the dialog cannot read a stored key back, so an empty field keeps it
+    # and the stored key goes only on an explicit remove, a real true like the other flags
+    _remove_key = data.pop('ssh_key_remove', False) is True
     if not data.get('pass') and not data.get('ssh_key'):
         return jsonify({'error': 'Password or SSH key is required'}), 400
     if 'pass' not in data:
@@ -432,7 +463,7 @@ def reconfigure_cluster(cluster_id):
         kept = getattr(old_mgr.config, 'ha_settings', None)
         data['ha_settings'] = dict(kept) if isinstance(kept, dict) else {}
     # the balancer cooldown is no connection setting either: one the dialog leaves out stays
-    _cd_err = _cooldown_error(data)
+    _cd_err = _cooldown_error(data) or _check_interval_error(data)
     if _cd_err:
         return _cd_err
     data.setdefault('migration_cooldown', balancer_cooldown(getattr(old_mgr.config, 'migration_cooldown', None)))
@@ -441,6 +472,21 @@ def reconfigure_cluster(cluster_id):
     if _xn_err:
         return _xn_err
     data.setdefault('transfer_network', getattr(old_mgr.config, 'transfer_network', '') or '')
+    _sfx_err = _node_ui_suffix_error(data)
+    if _sfx_err:
+        return _sfx_err
+    # MK Nov 2026 (#1322) - and everything else the body leaves out: the stored SSH key
+    # and user, a custom SSH port, the excluded nodes... went with the old manager on
+    # every re-save. An empty key keeps the stored one. The fallback hosts only while the
+    # cluster stays where it was, the new manager finds its own.
+    old_cfg = old_mgr.config
+    for key in _KEPT_BY_RECONFIGURE:
+        if key not in data and hasattr(old_cfg, key):
+            data[key] = copy.deepcopy(getattr(old_cfg, key))
+    if not data.get('ssh_key'):
+        data['ssh_key'] = '' if _remove_key else getattr(old_cfg, 'ssh_key', '') or ''
+    if 'fallback_hosts' not in data and _host_key(data.get('host')) == _host_key(old_cfg.host):
+        data['fallback_hosts'] = list(getattr(old_cfg, 'fallback_hosts', None) or [])
 
     # Create new config + manager, test connection
     new_config = PegaProxConfig(data)
@@ -485,11 +531,25 @@ def reconfigure_cluster(cluster_id):
     return jsonify(result)
 
 
+# the settings a re-configure body may leave out and the cluster keeps (#1322). Not the
+# credential (user, pass), nor what re-configure handles on its own: ssh_key, the fallback
+# hosts, ha_settings, migration_cooldown, transfer_network, the minted API token.
+_KEPT_BY_RECONFIGURE = (
+    'ssl_verification', 'migration_threshold', 'migration_tolerance', 'check_interval',
+    'auto_migrate', 'balance_containers', 'balance_local_disks', 'proxlb_tags_enabled',
+    'proxlb_pins_auto_migrate', 'proxlb_pins_strict', 'dry_run', 'enabled', 'ha_enabled',
+    'ssh_user', 'ssh_port', 'ssh_disabled', 'api_port', 'excluded_nodes', 'smbios_autoconfig',
+    'vnc_tunnel', 'latitude', 'longitude', 'location_label', 'node_ui_suffix',
+    'predictive_balancing', 'predictive_threshold', 'balance_cpu_weight', 'balance_mem_weight',
+    'balance_io_weight', 'cpu_baseline', 'backup_sla_max_age_hours',
+)
+
+
 def _moved_by_reconfigure(old, new, data):
     """What of host, fallback_hosts, ssh_port and ssl_verification a re-configure moves,
     by the rule of _config_edit_checks: an address not among the old ones, another SSH
-    port, verification switched off. The dialog sends no SSH port; one the body leaves
-    out is the default port 22 of the node itself, no move."""
+    port, verification switched off. The dialog sends no SSH port; the cluster keeps its
+    own then (#1322), no move."""
     known = {_host_key(old.host)} | {_host_key(h) for h in (getattr(old, 'fallback_hosts', None) or [])}
     moved = []
     if _host_key(new.host) not in known:
@@ -525,11 +585,25 @@ def get_cluster_nodes(cluster_id):
     
     manager = cluster_managers[cluster_id]
 
+    # MK Nov 2026 - a confined caller gets the nodes their own guests run on, on every
+    # answer below (the cache keeps the whole list)
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[NODES] cannot read the caller's guests on {cluster_id}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs',
+                        'nodes': []}), 503
+
+    def _theirs(rows):
+        if mine is None:
+            return rows
+        return [n for n in rows or [] if isinstance(n, dict) and n.get('node') in mine]
+
     # MK: XCP-ng clusters use their own get_nodes()
     if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
         try:
             nodes = manager.get_nodes()
-            return jsonify(nodes)
+            return jsonify(_theirs(nodes))
         except Exception as e:
             logging.debug(f"XCP-ng get_nodes failed for {cluster_id}: {e}")
             return jsonify({'error': 'Connection temporarily unavailable', 'nodes': [], 'offline': True}), 503
@@ -560,7 +634,7 @@ def get_cluster_nodes(cluster_id):
                     n['mem_percent'] = round((mem / maxmem) * 100, 2)
             # Cache the nodes data
             manager._cached_nodes = nodes
-            return jsonify(nodes)
+            return jsonify(_theirs(nodes))
     except Exception as e:
         logging.debug(f"Failed to get nodes for {cluster_id}: {e}")
 
@@ -571,7 +645,7 @@ def get_cluster_nodes(cluster_id):
         for node in cached:
             if 'connection_status' not in node:
                 node['connection_status'] = 'stale'
-        return jsonify(cached)
+        return jsonify(_theirs(cached))
 
     # If HA is tracking nodes, return those
     if manager.ha_node_status:
@@ -582,7 +656,7 @@ def get_cluster_nodes(cluster_id):
                 'status': data.get('status', 'unknown'),
                 'connection_status': 'from_ha_cache'
             })
-        return jsonify(nodes)
+        return jsonify(_theirs(nodes))
     
     # Last resort - return empty but with error info
     return jsonify({
@@ -918,7 +992,7 @@ def get_node_credentials(cluster_id):
     if err:
         return err
     from pegaprox.core import node_creds
-    from pegaprox.utils.ssh import ssh_password_for
+    from pegaprox.utils.ssh import ssh_password_for, node_login
     rows = {r['node']: r for r in node_creds.state(cluster_id)}
     members = _cluster_members(mgr)
     nodes = []
@@ -941,7 +1015,7 @@ def get_node_credentials(cluster_id):
     return jsonify({
         'cluster_id': cluster_id,
         'nodes': nodes,
-        'ssh_user': getattr(cfg, 'ssh_user', '') or (user or 'root').split('@')[0],
+        'ssh_user': node_login(cfg),
         'ssh_key': bool(getattr(cfg, 'ssh_key', '')),
         'ssh_disabled': bool(getattr(cfg, 'ssh_disabled', False)),
         'token_auth': '!' in user,
@@ -1260,11 +1334,16 @@ def reorder_clusters():
     if not order:
         return jsonify({'error': 'No order provided'}), 400
 
-    _own = get_user_clusters(build_authz_user(request.session.get('user', ''), request.session))
+    # MK Nov 2026 - the clusters PUT .../sort-order lets the caller move. A pool grant on
+    # another tenant's cluster put that cluster in the list as well
+    from pegaprox.api.helpers import caller_is_scoped
+    _caller = build_authz_user(request.session.get('user', ''), request.session)
+    _own = get_user_clusters(_caller, include_pools=False)
     if _own is not None:
         order = [c for c in order if c in _own]
-        if not order:
-            return jsonify({'error': 'No order provided'}), 400
+    order = [c for c in order if not caller_is_scoped(_caller, c)]
+    if not order:
+        return jsonify({'error': 'No order provided'}), 400
 
     db = get_db()
     cursor = db.conn.cursor()
@@ -1292,6 +1371,15 @@ def update_cluster_sort_order(cluster_id):
 
     Request body: { "sort_order": 5 }
     """
+    # MK Nov 2026 - cluster.config alone let a caller move any cluster it could name, another
+    # tenant's too. The same gate as the location route beside it, and before the lookup,
+    # so an id of somebody else's cluster is answered like one that does not exist
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
@@ -1444,27 +1532,23 @@ def get_cluster_metrics(cluster_id):
             if metrics:
                 # Cache the metrics
                 mgr._cached_metrics = metrics
-                # MK Oct 2026 - a node in maintenance names its guests: not to a confined caller
-                return jsonify(node_maintenance_for_caller(cluster_id, metrics))
+                # MK Nov 2026 - a confined caller gets the nodes their guests run on, and a
+                # maintenance there without the guests in it
+                return jsonify(node_map_for_caller(cluster_id, metrics))
         except Exception as e:
             logging.debug(f"Error getting metrics for {cluster_id}: {e}")
     
     # If live data failed, try cached data
     if hasattr(mgr, '_cached_metrics') and mgr._cached_metrics:
-        return jsonify(node_maintenance_for_caller(cluster_id, mgr._cached_metrics))
+        return jsonify(node_map_for_caller(cluster_id, mgr._cached_metrics))
     
     # If HA is tracking nodes, build metrics from HA data
+    # MK Nov 2026 - the entries of a disconnected get_node_status(): the node card formats
+    # the score and the percentages of every node that is not offline
     if mgr.ha_node_status:
-        ha_metrics = {}
-        for name, data in mgr.ha_node_status.items():
-            ha_metrics[name] = {
-                'status': data.get('status', 'unknown'),
-                'cpu': 0,
-                'memory': {'used': 0, 'total': 0},
-                'disk': {'used': 0, 'total': 0},
-                'from_ha_cache': True
-            }
-        return jsonify(ha_metrics)
+        ha_metrics = {name: dict(entry, from_ha_cache=True)
+                      for name, entry in ha_cache_node_status(mgr.ha_node_status).items()}
+        return jsonify(node_map_for_caller(cluster_id, ha_metrics))
     
     # Return error with empty metrics - frontend will keep old data
     return jsonify({'error': 'Connection temporarily unavailable', 'offline': True}), 503
@@ -1527,9 +1611,117 @@ def _health_storage_rows(cluster_id, mgr, ns):
     return rows
 
 
+# NS Oct 2026 - Ceph in the health score (#948). The status is the read the ceph_health alert
+# and the Ceph overview share (alert_events.ceph_status, one per cluster per CEPH_FRESH), and a
+# poll never waits for it: once it is older than that, a new read starts in the background and
+# the poll scores the last one while it is younger than _HEALTH_CEPH_SERVE_MAX. Only a cluster
+# with a Ceph storage, or whose Ceph answered before, is asked at all, so one without Ceph
+# scores and is read exactly as it was.
+_HEALTH_CEPH_SERVE_MAX = 300
+# status -> (points off, the most the score can be then). WARN keeps a cluster out of
+# 'excellent', ERR puts it in 'critical' however good the rest looks
+_HEALTH_CEPH_PENALTY = {'HEALTH_WARN': (15, 75), 'HEALTH_ERR': (50, 25)}
+_HEALTH_CEPH_SEVERITY = {'HEALTH_OK': 'ok', 'HEALTH_WARN': 'warning', 'HEALTH_ERR': 'critical'}
+_HEALTH_CEPH_STORAGE = ('rbd', 'cephfs')
+# a Ceph that answered before and whose reads have failed since for longer than the serve
+# window: monitors that lost quorum fail the status call itself, so silence counts as a
+# warning, not as nothing to report
+_HEALTH_CEPH_SILENT = 'silent'
+_health_ceph_reads = set()
+_health_ceph_lock = threading.Lock()
+
+
+def _health_ceph_spawn(fn):
+    threading.Thread(target=fn, daemon=True, name='health-ceph-read').start()
+
+
+def _health_ceph_refresh(cluster_id, mgr):
+    """Start a Ceph status read in the background unless one for this cluster runs already."""
+    from pegaprox.background import alert_events
+    with _health_ceph_lock:
+        if cluster_id in _health_ceph_reads:
+            return
+        _health_ceph_reads.add(cluster_id)
+
+    def run():
+        try:
+            alert_events.ceph_status(cluster_id, mgr, max_age=alert_events.CEPH_FRESH)
+        except Exception as e:
+            logging.debug(f"[health] ceph read of {_sl(cluster_id)} failed: {e}")
+        finally:
+            with _health_ceph_lock:
+                _health_ceph_reads.discard(cluster_id)
+    try:
+        _health_ceph_spawn(run)
+    except Exception as e:
+        logging.debug(f"[health] ceph read of {_sl(cluster_id)} not started: {e}")
+        with _health_ceph_lock:
+            _health_ceph_reads.discard(cluster_id)
+
+
+def _health_ceph_status(cluster_id, mgr):
+    """(Ceph status dict or None, whether the cluster has Ceph) for the health score. The
+    status is None while there is no recent read; a cluster whose Ceph never answered and
+    that has no Ceph storage counts as one without Ceph."""
+    import time as _t
+    from pegaprox.background import alert_events
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return None, False
+    if not alert_events.ceph_seen(cluster_id):
+        # the storage factor just read these (or took them from the cache); not read again here
+        rows, hit = _health_storage_cache.get(cluster_id, 'resources')
+        if not hit or not any(r.get('plugintype') in _HEALTH_CEPH_STORAGE for r in (rows or [])):
+            return None, False
+    now = _t.time()
+    last = alert_events.ceph_reading(cluster_id)
+    if (last is None or not 0 <= now - last[0] < alert_events.CEPH_FRESH) \
+            and not alert_events.ceph_absent(cluster_id, now):
+        _health_ceph_refresh(cluster_id, mgr)
+        last = alert_events.ceph_reading(cluster_id)
+    if last is not None and now - last[0] < _HEALTH_CEPH_SERVE_MAX:
+        return last[1], True
+    if alert_events.ceph_silent_since(cluster_id):
+        return _HEALTH_CEPH_SILENT, True
+    return None, alert_events.ceph_seen(cluster_id)
+
+
+def _health_ceph_factor(status, score):
+    """The Ceph factor for a score so far, and the issue line for it (None when there is none).
+    Without a status the factor shows as unknown and takes nothing off; a Ceph gone silent
+    counts as HEALTH_WARN does."""
+    from pegaprox.api.ceph import ceph_rollup
+    if status == _HEALTH_CEPH_SILENT:
+        off, cap = _HEALTH_CEPH_PENALTY['HEALTH_WARN']
+        return {'key': 'ceph', 'label': 'Ceph', 'value': 'not answering', 'delta': min(score - off, cap) - score,
+                'severity': 'warning', 'status': None, 'silent': True, 'checks': [], 'cap': cap}, \
+            'Ceph status unreadable for more than 5 minutes'
+    roll = ceph_rollup(status) if isinstance(status, dict) else None
+    state = roll['health'] if roll else None
+    if state not in _HEALTH_CEPH_SEVERITY:
+        return {'key': 'ceph', 'label': 'Ceph', 'value': 'unknown', 'delta': 0,
+                'severity': 'unknown', 'status': None, 'checks': [], 'cap': 100}, None
+    names = [c['name'] for c in roll['checks']]
+    count = len(names) + roll['checks_more']
+    off, cap = _HEALTH_CEPH_PENALTY.get(state, (0, 100))
+    delta = min(score - off, cap) - score
+    value = f"{state}: {count} check{'' if count == 1 else 's'}" if count else state
+    osds = roll['osds']
+    if osds['total'] and osds['up'] < osds['total']:
+        value += f", {osds['up']}/{osds['total']} OSDs up"
+    issue = None
+    if state != 'HEALTH_OK':
+        issue = f'Ceph reports {state}'
+        if names:
+            issue += ': ' + ', '.join(names[:5]) + (f' and {count - 5} more' if count > 5 else '')
+    return {'key': 'ceph', 'label': 'Ceph', 'value': value, 'delta': delta,
+            'severity': _HEALTH_CEPH_SEVERITY[state], 'status': state, 'checks': names,
+            'cap': cap}, issue
+
+
 # NS May 2026 — single-number cluster health score (0-100). Inputs are cheap-to-compute
 # stuff we already pull elsewhere: node status, per-node storages, replication, backup-SLA.
 # The drill-down list lets the user see what dragged the score down.
+# Where the cluster has Ceph, its health status counts as well (#948).
 @bp.route('/api/clusters/<cluster_id>/health', methods=['GET'])
 @require_auth(perms=['cluster.view'])
 def get_cluster_health(cluster_id):
@@ -1554,11 +1746,22 @@ def get_cluster_health(cluster_id):
             'computed_at': None,
         })
 
+    # MK Nov 2026 (#1218) - a caller confined to some guests is told about the nodes those
+    # run on: which are offline, the fullest storage, their replication jobs and backups.
+    # Nothing of it while their guests cannot be read, and no Ceph (below)
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.warning(f"[health] guests on {cluster_id} unread, node factors left out for this caller: {e}")
+        mine = set()
+
     # 1) Nodes online
     try:
         ns = mgr.get_node_status() or {}
     except Exception:
         ns = {}
+    if mine is not None:
+        ns = {name: d for name, d in ns.items() if name in mine}
     total_nodes = len(ns)
     online_nodes = sum(1 for n in ns.values() if (n.get('status') in ('online', 'running') or not n.get('offline')))
     if total_nodes:
@@ -1585,7 +1788,7 @@ def get_cluster_health(cluster_id):
             if rows is not None:
                 _health_storage_cache.set(cluster_id, 'storage', rows, ttl_seconds=_HEALTH_STORAGE_TTL)
         for node_name, stor_name, used, total in (rows or []):
-            if total <= 0:
+            if total <= 0 or (mine is not None and node_name not in mine):
                 continue
             pct = (used / total) * 100.0
             if pct > worst_pct:
@@ -1616,6 +1819,9 @@ def get_cluster_health(cluster_id):
         repl = mgr.get_replication_status() or []
     except Exception:
         repl = []
+    if mine is not None:
+        # a job's 'type' is the replication type (local), not the guest's: asked as either
+        repl = scope_vm_rows(cluster_id, repl, vmid_key='guest', type_key='guest_type') if mine else []
     if repl:
         # PVE flags failures via 'fail_count' or non-zero error
         failed = sum(1 for r in repl if (r.get('fail_count') or 0) > 0 or r.get('error'))
@@ -1648,7 +1854,10 @@ def get_cluster_health(cluster_id):
             r = mgr._api_get(url)
             stale = 0
             if r is not None and r.status_code == 200:
-                stale = len(r.json().get('data') or [])
+                _rows = r.json().get('data') or []
+                if mine is not None:
+                    _rows = scope_vm_rows(cluster_id, _rows) if mine else []
+                stale = len(_rows)
             d = -10 if stale else 0
             score += d
             factors.append({
@@ -1661,6 +1870,20 @@ def get_cluster_health(cluster_id):
                 issues.append(f'{stale} VMs past backup RPO of {max_age}h')
         except Exception as e:
             logging.debug(f"[health] backup-sla check failed: {e}")
+
+    # 5) Ceph - last, its cap holds whatever the factors above left. Not for a caller confined
+    # to a pool or to guests: Ceph is the cluster's storage, and the Ceph overview answers
+    # 'confined' to them as well
+    try:
+        ceph, has_ceph = (None, False) if mine is not None else _health_ceph_status(cluster_id, mgr)
+        if has_ceph:
+            f, issue = _health_ceph_factor(ceph, score)
+            score += f['delta']
+            factors.append(f)
+            if issue:
+                issues.append(issue)
+    except Exception as e:
+        logging.debug(f"[health] ceph check failed: {e}")
 
     # Clamp & band
     score = max(0, min(100, score))
@@ -1891,6 +2114,17 @@ ALLOWED_CONFIG_FIELDS = {
 BOOLEAN_CONFIG_FIELDS = {'proxlb_pins_auto_migrate', 'proxlb_pins_strict'}
 
 
+def _check_interval_error(data):
+    # JB Nov 2026 - it goes straight into the wait of the cluster's daemon loop: a string ended the loop for good,
+    # and 0 made it spin
+    if 'check_interval' not in data:
+        return None
+    value = data['check_interval']
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 1 <= value <= 86400:
+        return jsonify({'error': "'check_interval' must be seconds from 1 to 86400"}), 400
+    return None
+
+
 def _cooldown_error(data):
     """A 400 when the body sets migration_cooldown to anything but whole seconds in
     range. Checked before any field is applied, like the booleans above."""
@@ -1918,6 +2152,22 @@ def _transfer_network_error(data, mgr=None):
     if cidr and (kind or 'proxmox') != 'proxmox':
         return jsonify({'error': 'transfer_network applies to Proxmox VE clusters only'}), 400
     data['transfer_network'] = cidr
+    return None
+
+
+def _node_ui_suffix_error(data):
+    """A 400 when the body sets node_ui_suffix to anything but a DNS suffix or empty.
+    The UI puts it behind the node name in the "Open in Proxmox" link, so a '/', '@' or
+    ':' there would move the link to another host, and a number or an object broke the
+    link builder and the save of the cluster row. Normalises it in place (no leading or
+    trailing dot, no surrounding space). A config restore checks it the same way."""
+    if 'node_ui_suffix' not in data:
+        return None
+    value = dns_suffix(data['node_ui_suffix'])
+    if value is None:
+        return jsonify({'error': "'node_ui_suffix' must be a domain name such as example.local: "
+                                 "letters, digits and hyphens, separated by dots"}), 400
+    data['node_ui_suffix'] = value
     return None
 
 
@@ -2083,10 +2333,10 @@ def update_cluster_config(cluster_id):
     for _bk in BOOLEAN_CONFIG_FIELDS:
         if _bk in data and type(data[_bk]) is not bool:
             return jsonify({'error': f"'{_bk}' must be a boolean"}), 400
-    _cd_err = _cooldown_error(data)
+    _cd_err = _cooldown_error(data) or _check_interval_error(data)
     if _cd_err:
         return _cd_err
-    _xn_err = _transfer_network_error(data, mgr)
+    _xn_err = _transfer_network_error(data, mgr) or _node_ui_suffix_error(data)
     if _xn_err:
         return _xn_err
     _err, rebind = _config_edit_checks(mgr, data)
@@ -2138,10 +2388,10 @@ def update_cluster_config_live(cluster_id):
     for _bk in BOOLEAN_CONFIG_FIELDS:
         if _bk in data and type(data[_bk]) is not bool:
             return jsonify({'error': f"'{_bk}' must be a boolean"}), 400
-    _cd_err = _cooldown_error(data)
+    _cd_err = _cooldown_error(data) or _check_interval_error(data)
     if _cd_err:
         return _cd_err
-    _xn_err = _transfer_network_error(data, mgr)
+    _xn_err = _transfer_network_error(data, mgr) or _node_ui_suffix_error(data)
     if _xn_err:
         return _xn_err
     _err, rebind = _config_edit_checks(mgr, data)
@@ -2177,6 +2427,11 @@ def get_cpu_compatibility(cluster_id):
     """CPU compatibility matrix for EVC-like migration safety"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # every running guest of the cluster and the CPU of every node, one config read per
+    # guest: not for a caller confined to some guests, and refused before that walk
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -2193,6 +2448,10 @@ def get_predictive_analysis(cluster_id):
     """Get predictive load analysis for all nodes"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the load forecast of every node; balancing is cluster configuration
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -2200,7 +2459,7 @@ def get_predictive_analysis(cluster_id):
     return jsonify({
         'nodes': result,
         'enabled': getattr(mgr.config, 'predictive_balancing', False),
-        'threshold': getattr(mgr.config, 'predictive_threshold', 75),
+        'threshold': getattr(mgr.config, 'predictive_threshold', PREDICTIVE_THRESHOLD_DEFAULT),
     })
 
 
@@ -2214,6 +2473,9 @@ def get_excluded_nodes(cluster_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2515,6 +2777,10 @@ def remove_excluded_vm(cluster_id, vmid):
 def get_excluded_pools(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the pools of every tenant on the cluster, as the excluded nodes above
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     mgr = cluster_managers.get(cluster_id)
     if not mgr: return jsonify({'error': 'Cluster not found'}), 404
     pools = mgr.get_balancing_excluded_pools()
@@ -2566,6 +2832,10 @@ def get_fallback_hosts(cluster_id):
     """Get list of fallback hosts for HA"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the addresses of the nodes
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2739,66 +3009,52 @@ def get_backup_sla(cluster_id):
         # every guest (vmid, name, node, status, backup age) to any backup.view holder admitted by
         # the pool/ACL fallback — the most complete inventory of the report family, and it flags the
         # unbacked guests. Scope it per-VM like its costs/power/top-vms siblings.
-        vms = scope_vm_rows(cluster_id, mgr.get_vm_resources() or [])
+        raw = mgr.get_vm_resources()
+        # MK Nov 2026 - a guest list that did not answer is no cluster without guests
+        if getattr(raw, 'unavailable', False):
+            return jsonify({'error': 'Could not read the guests of this cluster', 'code': 'PVE_READ_FAILED'}), 502
+        vms = scope_vm_rows(cluster_id, raw or [])
     except Exception as e:
         return jsonify({'error': f'failed to enumerate VMs: {e}'}), 502
 
     # 2) most-recent backup ts per (vmtype, vmid) across local backup storages
     last_backup = {}  # (type, vmid) -> {'ts': int, 'source': 'local|pbs', 'volid': str}
+    base = f"https://{mgr.host}:{mgr.api_port}/api2/json"
     try:
-        host, port = mgr.host, mgr.api_port
-        sess = mgr._create_session()
-        # discover unique nodes
-        nodes_resp = sess.get(f"https://{host}:{port}/api2/json/nodes", timeout=10)
-        nodes = [n['node'] for n in (nodes_resp.json().get('data') or []) if n.get('status') == 'online'] if nodes_resp.status_code == 200 else []
-        seen_storages = set()
-        for node in nodes:
-            try:
-                stor_resp = sess.get(f"https://{host}:{port}/api2/json/nodes/{node}/storage", timeout=10)
-                if stor_resp.status_code != 200:
-                    continue
-                for st in stor_resp.json().get('data') or []:
-                    if 'backup' not in (st.get('content') or ''):
-                        continue
-                    sname = st.get('storage')
-                    if not sname or (node, sname) in seen_storages:
-                        continue
-                    seen_storages.add((node, sname))
-                    try:
-                        c_resp = sess.get(
-                            f"https://{host}:{port}/api2/json/nodes/{node}/storage/{sname}/content",
-                            params={'content': 'backup'}, timeout=(5, 30))
-                    except Exception:
-                        continue
-                    if c_resp.status_code != 200:
-                        continue
-                    for item in c_resp.json().get('data') or []:
-                        ts = int(item.get('ctime') or 0)
-                        if not ts:
-                            continue
-                        vmid = str(item.get('vmid') or '')
-                        if not vmid:
-                            continue
-                        # vmtype from volid prefix: "vzdump-qemu-100..." or "vzdump-lxc-..."
-                        volid = item.get('volid') or ''
-                        if 'qemu' in volid:
-                            vt = 'qemu'
-                        elif 'lxc' in volid or 'openvz' in volid:
-                            vt = 'lxc'
-                        else:
-                            # PBS volids: "<store>:backup/<type>/<id>/<time>"
-                            after = volid.split('backup/', 1)[1] if 'backup/' in volid else ''
-                            vt = 'qemu' if after.startswith('vm/') else 'lxc' if after.startswith('ct/') else ''
-                        if not vt:
-                            continue
-                        key = (vt, vmid)
-                        prev = last_backup.get(key)
-                        if not prev or ts > prev['ts']:
-                            last_backup[key] = {'ts': ts, 'source': 'pbs' if 'pbs' in (st.get('type') or '').lower() else 'local', 'volid': volid}
-            except Exception:
-                continue
+        nodes_resp = mgr._create_session().get(f"{base}/nodes", timeout=10)
     except Exception as e:
-        logging.warning(f"[BACKUP_SLA] storage scan failed for {cluster_id}: {e}")
+        logging.warning(f"[BACKUP_SLA] node list of {cluster_id} not read: {e}")
+        return pve_unreachable('the nodes of this cluster')
+    # MK Nov 2026 - without the node list every guest read as never backed up
+    if nodes_resp.status_code != 200:
+        return pve_read_failed(nodes_resp.status_code, nodes_resp.text, 'the nodes of this cluster')
+    nodes = [n['node'] for n in (nodes_resp.json().get('data') or []) if n.get('status') == 'online']
+    found, unread = _sla_scan(mgr, base, nodes)
+    for st_type, items in found:
+        for item in items:
+            ts = int(item.get('ctime') or 0)
+            if not ts:
+                continue
+            vmid = str(item.get('vmid') or '')
+            if not vmid:
+                continue
+            # vmtype from volid prefix: "vzdump-qemu-100..." or "vzdump-lxc-..."
+            # JB Nov 2026 - after the colon: a storage named lxc-backups made every VM on it a container
+            volid = (item.get('volid') or '').split(':', 1)[-1]
+            if 'qemu' in volid:
+                vt = 'qemu'
+            elif 'lxc' in volid or 'openvz' in volid:
+                vt = 'lxc'
+            else:
+                # PBS volids: "<store>:backup/<type>/<id>/<time>"
+                after = volid.split('backup/', 1)[1] if 'backup/' in volid else ''
+                vt = 'qemu' if after.startswith('vm/') else 'lxc' if after.startswith('ct/') else ''
+            if not vt:
+                continue
+            key = (vt, vmid)
+            prev = last_backup.get(key)
+            if not prev or ts > prev['ts']:
+                last_backup[key] = {'ts': ts, 'source': 'pbs' if 'pbs' in (st_type or '').lower() else 'local', 'volid': volid}
 
     # 3) evaluate per VM
     out_vms = []
@@ -2845,6 +3101,13 @@ def get_backup_sla(cluster_id):
     measurable = total - counts.get('disabled', 0)
     pct = round(100 * counts.get('ok', 0) / measurable, 1) if measurable else None
 
+    # MK Nov 2026 - a pool or ACL confined caller learns how many stores were not read, not
+    # their names or the nodes they sit on (it may see neither)
+    if unread:
+        from pegaprox.api.helpers import caller_is_scoped
+        if caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id):
+            unread = [{'storage': None, 'node': None, 'error': u.get('error')} for u in unread]
+
     return jsonify({
         'enabled': max_age > 0,
         'max_age_hours': max_age,
@@ -2860,7 +3123,107 @@ def get_backup_sla(cluster_id):
             'compliance_pct': pct,
         },
         'vms': out_vms,
+        # the storages whose backups are not in the ages above: a guest backed up only there
+        # reads as without a backup or older than it is
+        'unread': unread,
     })
+
+
+# MK Nov 2026 - the backup scan of the SLA read every backup storage on every node one after
+# the other: a shared PBS store 200 times at 200 nodes, minutes for one answer. Now the node
+# lists and then the stores are read this many at a time, a shared store once (from the next
+# node that lists it when a read fails), and the whole scan ends within the deadline
+_SLA_WORKERS = 8
+_SLA_LIST_DEADLINE = 15
+_SLA_DEADLINE = 60
+_SLA_SHARED_TRIES = 3
+
+
+def _sla_left(end, cap):
+    """Seconds a request may still wait: at most `cap`, never past the monotonic `end`."""
+    import time
+    return cap if end is None else min(cap, end - time.monotonic())
+
+
+def _sla_storages(mgr, base, node, end=None):
+    """The backup storages `node` lists, or a str with why they could not be read."""
+    if _sla_left(end, 1) <= 0:
+        return 'the storage list did not answer in time'
+    try:
+        r = mgr._create_session().get(f"{base}/nodes/{node}/storage", timeout=_sla_left(end, 10))
+        if r.status_code != 200:
+            return f'the storage list answered HTTP {r.status_code}'
+        return [st for st in (r.json().get('data') or []) if isinstance(st, dict) and st.get('storage')
+                and 'backup' in (st.get('content') or '') and st.get('enabled', 1)]
+    except Exception as e:
+        return f'the storage list did not answer ({type(e).__name__})'
+
+
+def _sla_content(mgr, base, nodes, storage, end=None):
+    """(items, node, None) of the first of `nodes` that lists the backups of `storage`, or
+    (None, last node tried, why)."""
+    why, node = 'not read', None
+    for node in nodes:
+        if _sla_left(end, 1) <= 0:
+            return None, node, 'did not answer in time'
+        try:
+            r = mgr._create_session().get(f"{base}/nodes/{node}/storage/{storage}/content",
+                                          params={'content': 'backup'},
+                                          timeout=(_sla_left(end, 5), _sla_left(end, 30)))
+            if r.status_code == 200:
+                return (r.json().get('data') or []), node, None
+            why = f'HTTP {r.status_code}'
+        except Exception as e:
+            why = f'no answer ({type(e).__name__})'
+    return None, node, why
+
+
+def _sla_scan(mgr, base, nodes):
+    """([(storage type, backup items)], unread) for the online `nodes`. unread: one
+    {storage, node, error} per storage list or store that was not read."""
+    import time
+    from pegaprox.utils.concurrent import run_per_node, yield_to_hub
+    yield_to_hub()   # the hub's clock, which the deadlines go by, is the one of its last turn
+    started = time.monotonic()
+    unread = []
+    # each deadline holds for its whole step: no read starts after it, none waits past it
+    lists_end = started + _SLA_LIST_DEADLINE
+    lists = run_per_node({n: (lambda node: _sla_storages(mgr, base, node, lists_end)) for n in nodes},
+                         max_concurrent=_SLA_WORKERS, timeout=_SLA_LIST_DEADLINE, whole=True)
+    shared, local = {}, {}
+    for node in nodes:
+        got = lists.get(node)
+        if not isinstance(got, list):
+            unread.append({'storage': None, 'node': node, 'error': got or 'the storage list did not answer in time'})
+            continue
+        for st in got:
+            if PegaProxManager._storage_is_shared(st):
+                # the nodes that have it active first
+                entry = shared.setdefault(st['storage'], {'type': st.get('type'), 'on': [], 'off': []})
+                entry['on' if st.get('active', 1) else 'off'].append(node)
+            else:
+                local[(node, st['storage'])] = st.get('type')
+    end = started + _SLA_DEADLINE
+    jobs, types = {}, {}
+    for name, entry in shared.items():
+        tries = (entry['on'] + entry['off'])[:_SLA_SHARED_TRIES]
+        jobs[('shared', name)] = (lambda key, tries=tries: _sla_content(mgr, base, tries, key[1], end))
+        types[('shared', name)] = entry['type']
+    for (node, name), st_type in local.items():
+        jobs[('local', node, name)] = (lambda key: _sla_content(mgr, base, [key[1]], key[2], end))
+        types[('local', node, name)] = st_type
+    left = max(end - time.monotonic(), 0)
+    done = run_per_node(jobs, max_concurrent=_SLA_WORKERS, timeout=left, whole=True) if left > 0 else {}
+    found = []
+    for key in jobs:
+        items, node, why = done.get(key) or (None, key[1] if key[0] == 'local' else None, 'did not answer in time')
+        if items is None:
+            unread.append({'storage': key[-1], 'node': node, 'error': why})
+        else:
+            found.append((types[key], items))
+    if unread:
+        logging.warning(f"[BACKUP_SLA] {len(unread)} backup storage read(s) failed for {getattr(mgr, 'id', '?')}")
+    return found, unread
 
 
 @bp.route('/api/clusters/<cluster_id>/backup-sla/config', methods=['PUT'])
@@ -3501,7 +3864,7 @@ def get_ha_status(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
-    return jsonify(cluster_managers[cluster_id].get_ha_status())
+    return ha_status_answer(cluster_id, cluster_managers[cluster_id])
 
 
 @bp.route('/api/clusters/<cluster_id>/ha/status', methods=['GET'])
@@ -3513,7 +3876,37 @@ def get_ha_status_detailed(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
-    return jsonify(cluster_managers[cluster_id].get_ha_status())
+    return ha_status_answer(cluster_id, cluster_managers[cluster_id])
+
+
+# what of PegaProx's HA status a caller confined to some guests gets besides the nodes
+HA_STATUS_FOR_CONFINED = ('enabled', 'check_interval', 'failure_threshold', 'error')
+
+
+def ha_status_answer(cluster_id, mgr):
+    """PegaProx's HA status as the caller of this request may see it. Whole for the admin and
+    an operator of the cluster. A caller confined to some guests gets whether HA is on, the
+    nodes their guests run on (the dashboard raises its node alerts from these on every
+    cluster switch) and, on XCP-ng, their own guests in HA. Fallback and quorum hosts, the
+    fences, storages, agents and the recoveries of other nodes are the setup of the whole
+    cluster. Asked before the manager, whose XCP-ng answer walks every guest."""
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[HA] cannot read the caller's guests on {_sl(cluster_id)}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
+    status = mgr.get_ha_status()
+    if mine is None or not isinstance(status, dict):
+        return jsonify(status)
+    out = {k: status[k] for k in HA_STATUS_FOR_CONFINED if k in status}
+    if isinstance(status.get('nodes'), dict):
+        out['nodes'] = {n: v for n, v in status['nodes'].items() if n in mine}
+    if isinstance(status.get('recovery_in_progress'), list):
+        # keyed by the node that failed
+        out['recovery_in_progress'] = [n for n in status['recovery_in_progress'] if n in mine]
+    if isinstance(status.get('protected_vms'), list):
+        out['protected_vms'] = scope_vm_rows(cluster_id, status['protected_vms'])
+    return jsonify(out)
 
 
 @bp.route('/api/clusters/<cluster_id>/ha/enable', methods=['POST'])
@@ -4316,18 +4709,20 @@ def set_ha_status(cluster_id):
         })
 
 
-def _ha_sid_authorized(cluster_id, sid, perm='vm.config'):
+def _ha_sid_authorized(cluster_id, sid, perm='vm.config', user=None):
     """sec (audit): the HA routes take a caller-supplied guest and had cluster-level gating only.
     ha.view and ha.config are BOTH granted by the shipped tenant_admin template, so a caller
     admitted by the #248/#555 fallbacks could enumerate every guest's HA state and add/remove
     foreign guests from HA (an availability lever). The plugin twin already filters its listing;
-    this is the same question for the core routes."""
+    this is the same question for the core routes.
+
+    user: the identity of a filter over many sids, built once by the caller."""
     from pegaprox.utils.auth import build_authz_user
     from pegaprox.utils.rbac import user_can_access_vm
     _kind, _, _num = str(sid or '').partition(':')
     if _kind not in ('vm', 'ct') or not _num.isdigit():
         return False
-    _u = build_authz_user(request.session.get('user', ''), request.session)
+    _u = user if user is not None else build_authz_user(request.session.get('user', ''), request.session)
     return user_can_access_vm(_u, cluster_id, int(_num), perm,
                               'lxc' if _kind == 'ct' else 'qemu')
 
@@ -4342,7 +4737,10 @@ def get_proxmox_ha_resources(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
-    _res = cluster_managers[cluster_id].get_proxmox_ha_resources()
+    _res = cluster_managers[cluster_id].get_proxmox_ha_resources(strict=True)
+    # an empty list would read as "no guest in HA" and the views would offer to add one
+    if _res is None:
+        return jsonify({'error': 'Could not read the Proxmox HA resources'}), 502
     if isinstance(_res, list):
         _res = [r for r in _res if _ha_sid_authorized(cluster_id, r.get('sid'), 'vm.view')]
     return jsonify(_res)
@@ -4353,6 +4751,11 @@ def get_proxmox_ha_resources(cluster_id):
 def get_proxmox_ha_groups(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the groups (PVE 9: the node affinity rules with the guests in them) of the whole
+    # cluster; a guest's own HA state is per guest in /proxmox-ha/resources
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404

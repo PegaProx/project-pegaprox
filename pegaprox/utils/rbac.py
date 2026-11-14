@@ -478,6 +478,18 @@ def acts_as_admin(user: dict) -> bool:
     return not _admin_is_capped_in_own_tenant(user)
 
 
+def portal_only_holds(user: dict) -> bool:
+    """Whether portal_only keeps this account to the Client Portal.
+
+    MK Oct 2026 - never an administrator's account. users.py refuses the flag on an admin
+    and clears it on promotion, but a directory group mapping makes an account admin at
+    sign-in without passing there, and the portal turns admins away: held to it, that
+    account could use nothing at all. Goes by the stored role, so an API token of such
+    an account follows its owner and not its own (lower) role.
+    """
+    return bool(user and user.get('portal_only')) and user.get('role') != ROLE_ADMIN
+
+
 def has_permission(user: dict, permission: str, tenant_id: str = None) -> bool:
     """check if user has a specific permission
     
@@ -501,6 +513,33 @@ def get_user_effective_role(user: dict, tenant_id: str = None) -> str:
     if tenant_id in tenant_perms:
         return tenant_perms[tenant_id].get('role', user.get('role', ROLE_VIEWER))
     return user.get('role', ROLE_VIEWER)
+
+
+def get_acting_role(user: dict, tenant_id: str = None) -> str:
+    """The role a caller is told it holds in `tenant_id` (/api/me/permissions, /api/me/tenants).
+
+    A session user: get_user_effective_role. An API token acts with its own role, of
+    what its owner holds there (_token_permissions), so the answer is the owner's role
+    in that tenant where that role grants nothing the token's role does not, and the
+    token's role otherwise. Roles are compared by what they grant, so this covers a
+    custom role on either side; the builtins nest, so for them it is the lower one.
+    get_user_effective_role cannot answer for a token: it reads the owner's tenant
+    override before any role, and the record of an API token still carries the owner's
+    tenant_permissions.
+    """
+    if not user.get('_token_owner_capped'):
+        return get_user_effective_role(user, tenant_id)
+    if not tenant_id:
+        tenant_id = user.get('tenant_id', DEFAULT_TENANT_ID)
+    token_role = user.get('effective_role') or ROLE_VIEWER
+    owner = {k: v for k, v in user.items() if k not in ('effective_role', '_token_owner_capped')}
+    held = get_user_effective_role(owner, tenant_id)
+    if held == token_role:
+        return token_role
+
+    def _grants(role):
+        return set(get_role_permissions_for_user({'role': role}, _tenant_defining_role(role, tenant_id)))
+    return held if _grants(held) <= _grants(token_role) else token_role
 
 def invalidate_tenants_cache():
     """sec (audit): tenants_db is the cache get_user_clusters reads, and it was only ever
@@ -1762,6 +1801,13 @@ def _user_can_access_vm_uncapped(user: dict, cluster_id: str, vmid: int, permiss
     # set) must NOT inherit role-wide control of every VM here — only the specific ACL/
     # pool VMs handled above. Without this, #555's pool cluster-reach (and the older
     # #248 VM-ACL reach) let a pool-/ACL-scoped user drive every VM on the cluster.
+    # MK Oct 2026 - a portal_only account has the guests an ACL row or a pool grant names,
+    # the ones the portal lists, and never the role-wide grant below. On a cluster without
+    # an ACL row for it that grant made every guest its own to stop, through the portal's
+    # power route and the console as well.
+    if portal_only_holds(user):
+        logging.debug(f"[VM-ACL] {username} is portal_only, no ACL or pool grant for VM {vmid} → deny {permission}")
+        return False
     tenant_clusters = get_user_clusters(user, include_pools=False)
     if tenant_clusters is not None and cluster_id not in tenant_clusters:
         logging.debug(f"[VM-ACL] {username} reached {cluster_id} only via ACL/pool; no grant for VM {vmid} → deny {permission}")

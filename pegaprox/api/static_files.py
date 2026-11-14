@@ -20,7 +20,7 @@ from pegaprox.utils.rbac import (
     get_user_permissions, get_vm_acls, acl_grants_user,
     get_pool_membership_cache, invalidate_pool_cache,
     get_user_effective_role, get_role_permissions_for_user,
-    DEFAULT_TENANT_ID, acts_as_admin,
+    DEFAULT_TENANT_ID, acts_as_admin, get_acting_role,
 )
 from pegaprox.api.helpers import check_cluster_access, safe_error, parse_pve_error, caller_acts_as_admin, find_user_key
 
@@ -680,15 +680,17 @@ def get_my_permissions():
     # the owner's role and the UI offered actions the backend then refused.
     user = build_authz_user(request.session.get('user', ''), request.session)
     tenant_id = request.args.get('tenant_id', user.get('tenant_id', DEFAULT_TENANT_ID))
-    # For an API-token session, report the TOKEN's role everywhere: get_user_effective_role reads
-    # user['role'], which is still the owner's, so hand it a record already floored to the token.
-    scoped = dict(user, role=user.get('effective_role', user.get('role')))
+    # For an API-token session, report the TOKEN's role everywhere. Swapping user['role'] for
+    # the token's was not enough: get_user_effective_role reads the owner's tenant override
+    # first, so a viewer token of an owner with an admin override was told 'admin' here.
+    is_token = bool(user.get('_token_owner_capped'))
 
     return jsonify({
-        'role': scoped.get('role'),
-        'effective_role': get_user_effective_role(scoped, tenant_id),
+        'role': user.get('effective_role', user.get('role')),
+        'effective_role': get_acting_role(user, tenant_id),
         'tenant_id': tenant_id,
-        'tenant_permissions': user.get('tenant_permissions', {}),
+        # the owner's overrides are the owner's, a token does not act with them
+        'tenant_permissions': {} if is_token else user.get('tenant_permissions', {}),
         'permissions': get_user_permissions(user, tenant_id)
     })
 

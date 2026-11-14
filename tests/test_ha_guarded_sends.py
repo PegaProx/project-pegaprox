@@ -354,6 +354,8 @@ def test_the_progress_probes_of_an_import_go_out_in_an_automatic_group(auto, see
     m._is_node_blocked = lambda node: (False, 0)
     m._get_node_ip = lambda node: '10.0.0.11'
     m._register_node_failure = lambda node: None
+    # its node list, fresh: _pve_node_exec runs commands on a listed node only (#1224)
+    m._cached_node_dict, m._nodes_cache_time = {'pve1': {'node': 'pve1'}}, time.time()
     task = types.SimpleNamespace(id='t1', log=lambda s: None, update_progress=lambda *a: None)
     stop = threading.Event()
     seen = []

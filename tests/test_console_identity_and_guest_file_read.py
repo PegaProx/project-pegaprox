@@ -79,7 +79,8 @@ def dialled(monkeypatch):
         raise AssertionError(f'unexpected PVE call {getattr(req, "full_url", req)}')
 
     monkeypatch.setattr(websocket, 'create_connection', _create)
-    monkeypatch.setattr('urllib.request.urlopen', _no_login)
+    monkeypatch.setattr('pegaprox.core.manager.pve_opener',
+                        lambda context=None: types.SimpleNamespace(open=_no_login))
     return calls
 
 

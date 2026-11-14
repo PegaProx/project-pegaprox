@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
-"""Turn the pinned pure-Python wheels of packaging/apt/python-debs/ into .debs.
+"""Turn the pinned wheels of packaging/apt/python-debs/ into .debs.
 
-    python3 -I packaging/apt/build-python-debs.py <wheel-dir> <out-dir>
+    python3 -I packaging/apt/build-python-debs.py [--arch amd64|arm64] <wheel-dir> <out-dir>
 
-Two of the libraries pegaprox depends on are not in trixie (flask-sock, XenAPI). They
-are pure Python, so the package is the wheel's files under /usr/lib/python3/dist-packages,
-a control file naming the Debian packages of the wheel's own requirements, copyright and
+Three of the libraries pegaprox depends on are not in trixie (flask-sock, XenAPI,
+sqlcipher3). The package is the wheel's files under /usr/lib/python3/dist-packages, a
+control file naming the Debian packages of the wheel's own requirements, copyright and
 changelog under /usr/share/doc, and the py3compile/py3clean calls dh_python3 would have
 written. No .pyc ships; py3compile writes them on the target and py3clean takes them away.
+
+flask-sock and XenAPI are pure Python and go in as Architecture: all. sqlcipher3 is a C
+extension with SQLCipher built in; upstream's manylinux wheel for trixie's Python becomes
+one package per architecture, tied to that Python and to the glibc the wheel names. NS
+Nov 2026 (#1226)
 
 The wheel-dir holds exactly what `pip download --require-hashes` fetched from
 python-debs/requirements.txt. Every file is checked against the wheel's RECORD, every
 requirement of the wheel must map to a Depends entry here, and the same wheel gives the
 same .deb (dates from the wheel, root ownership, no build-time paths).
+
+With --arch the wheel-dir holds what pip fetched for that one machine, and the debs are what
+that architecture installs: the Architecture: all ones and the binary ones of <arch>. The
+appliance images build their python3-sqlcipher3 that way (build-sqlcipher3-deb.sh). NS Nov
+2026 (#1226)
 
 NS Oct 2026
 """
@@ -51,12 +61,23 @@ PACKAGES = {
         'requires': {},
         'description': 'XenAPI SDK for XenServer and XCP-ng (Python 3)',
     },
+    # one wheel per entry of ARCHES, e.g. cp313-cp313-manylinux_2_28_x86_64
+    'sqlcipher3': {
+        'deb': 'python3-sqlcipher3',
+        'requires': {},
+        'description': 'DB-API 2.0 interface for SQLCipher 4 (Python 3)',
+        'binary': True,
+    },
 }
+# the wheel's machine -> the Debian architecture of its package
+ARCHES = {'x86_64': 'amd64', 'aarch64': 'arm64'}
 
 DIST_PACKAGES = 'usr/lib/python3/dist-packages'
 # pip's own bookkeeping, no place for it in a tree dpkg owns
 DROP_FROM_DIST_INFO = {'RECORD', 'INSTALLER', 'REQUESTED', 'direct_url.json'}
 WHEEL_NAME = re.compile(r'^(?P<name>[A-Za-z0-9_.]+)-(?P<version>[A-Za-z0-9_.!+]+)-py3-none-any\.whl$')
+BINARY_WHEEL = re.compile(r'^(?P<name>[A-Za-z0-9_.]+)-(?P<version>[A-Za-z0-9_.!+]+)-cp3(?P<minor>[0-9]+)'
+                          r'-cp3[0-9]+-manylinux_(?P<glibc>[0-9]+_[0-9]+)_(?P<machine>[a-z0-9_]+)\.whl$')
 
 POSTINST = 'if command -v py3compile >/dev/null 2>&1; then\n\tpy3compile -p {deb}\nfi\n'
 PRERM = 'if command -v py3clean >/dev/null 2>&1; then\n\tpy3clean -p {deb}\nfi\n'
@@ -86,9 +107,29 @@ def _matches_record(data, digest):
     return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode() == want
 
 
-def _depends(meta, spec):
-    """python3:any plus the Debian package of every unconditional Requires-Dist."""
-    deps = ['python3:any']
+def _wheel(fname):
+    """(spec, name, upstream version, Debian architecture, base Depends) of a wheel."""
+    m = WHEEL_NAME.match(fname)
+    if m and not PACKAGES.get(_norm(m.group('name')), {}).get('binary'):
+        spec = PACKAGES.get(_norm(m.group('name')))
+        if spec:
+            return spec, m.group('name'), m.group('version'), 'all', ['python3:any']
+    m = BINARY_WHEEL.match(fname)
+    if m and PACKAGES.get(_norm(m.group('name')), {}).get('binary'):
+        arch = ARCHES.get(m.group('machine'))
+        if not arch:
+            _fail(f'{fname}: no Debian architecture for {m.group("machine")} in ARCHES')
+        minor = int(m.group('minor'))
+        # the extension module loads into exactly this Python, on a glibc at least this new
+        return (PACKAGES[_norm(m.group('name'))], m.group('name'), m.group('version'), arch,
+                [f'python3 (>= 3.{minor}~)', f'python3 (<< 3.{minor + 1})',
+                 f'libc6 (>= {m.group("glibc").replace("_", ".")})'])
+    _fail(f'{fname}: not a wheel PACKAGES builds (py3-none-any, or cp3X manylinux for a binary one)')
+
+
+def _depends(meta, spec, base):
+    """`base` plus the Debian package of every unconditional Requires-Dist."""
+    deps = list(base)
     for line in meta.get_all('Requires-Dist') or []:
         req, _, marker = line.partition(';')
         if 'extra' in marker:
@@ -166,7 +207,7 @@ def _installed_size(root):
     return kib
 
 
-def _write_control(root, spec, deb_version, meta):
+def _write_control(root, spec, deb_version, meta, arch, base):
     md5 = []
     for dirpath, _dirs, files in os.walk(root):
         for f in files:
@@ -181,10 +222,10 @@ def _write_control(root, spec, deb_version, meta):
     fields = [
         ('Package', spec['deb']),
         ('Version', deb_version),
-        ('Architecture', 'all'),
+        ('Architecture', arch),
         ('Maintainer', MAINTAINER),
         ('Installed-Size', str(size)),
-        ('Depends', ', '.join(_depends(meta, spec))),
+        ('Depends', ', '.join(_depends(meta, spec, base))),
         ('Section', 'python'),
         ('Priority', 'optional'),
     ]
@@ -205,13 +246,7 @@ def _write_control(root, spec, deb_version, meta):
 
 def build(wheel_path, out_dir):
     fname = os.path.basename(wheel_path)
-    m = WHEEL_NAME.match(fname)
-    if not m:
-        _fail(f'{fname} is not a pure-Python py3-none-any wheel')
-    spec = PACKAGES.get(_norm(m.group('name')))
-    if not spec:
-        _fail(f'{fname}: nothing in PACKAGES for {_norm(m.group("name"))}')
-    upstream = m.group('version')
+    spec, name, upstream, arch, base = _wheel(fname)
     deb_version = f'{upstream}-{REVISION}'
 
     work = tempfile.mkdtemp(prefix=f'{spec["deb"]}-')
@@ -223,17 +258,19 @@ def build(wheel_path, out_dir):
                 _fail(f'{fname}: expected one .dist-info, found {metas}')
             dist_info = metas[0].split('/')[0]
             meta = email.parser.Parser().parsestr(zf.read(metas[0]).decode('utf-8'))
-            if _norm(meta['Name']) != _norm(m.group('name')) or meta['Version'] != upstream:
+            if _norm(meta['Name']) != _norm(name) or meta['Version'] != upstream:
                 _fail(f'{fname}: its METADATA says {meta["Name"]} {meta["Version"]}')
             wheel = email.parser.Parser().parsestr(zf.read(f'{dist_info}/WHEEL').decode('utf-8'))
-            if (wheel['Root-Is-Purelib'] or '').strip().lower() != 'true':
-                _fail(f'{fname} is not purelib')
+            purelib = (wheel['Root-Is-Purelib'] or '').strip().lower() == 'true'
+            if purelib == bool(spec.get('binary')):
+                _fail(f'{fname}: Root-Is-Purelib is {purelib}, PACKAGES says '
+                      f'{"binary" if spec.get("binary") else "pure Python"}')
             # every date in the package comes from the wheel
             epoch = max(calendar.timegm(i.date_time + (0, 0, 0)) for i in zf.infolist())
             _unpack(zf, fname, dist_info, os.path.join(root, DIST_PACKAGES))
 
         _write_docs(root, spec, deb_version, meta, epoch)
-        control_dir = _write_control(root, spec, deb_version, meta)
+        control_dir = _write_control(root, spec, deb_version, meta, arch, base)
 
         for dirpath, _dirs, files in os.walk(root):
             os.chmod(dirpath, 0o755)
@@ -246,7 +283,7 @@ def build(wheel_path, out_dir):
             os.utime(dirpath, (epoch, epoch))
 
         os.makedirs(out_dir, exist_ok=True)
-        target = os.path.join(out_dir, f'{spec["deb"]}_{deb_version}_all.deb')
+        target = os.path.join(out_dir, f'{spec["deb"]}_{deb_version}_{arch}.deb')
         subprocess.run(['dpkg-deb', '--root-owner-group', '-Zxz', '--build', root, target],
                        check=True, stdout=subprocess.DEVNULL,
                        env=dict(os.environ, SOURCE_DATE_EPOCH=str(epoch)))
@@ -257,13 +294,19 @@ def build(wheel_path, out_dir):
 
 
 def main(argv):
-    if len(argv) != 3:
-        sys.exit('usage: build-python-debs.py <wheel-dir> <out-dir>')
-    wheel_dir, out_dir = argv[1], argv[2]
+    args = argv[1:]
+    arches = sorted(ARCHES.values())
+    if args[:1] == ['--arch'] and len(args) == 4 and args[1] in arches:
+        arches, args = [args[1]], args[2:]
+    if len(args) != 2 or args[0].startswith('-'):
+        sys.exit(f'usage: build-python-debs.py [--arch {"|".join(sorted(ARCHES.values()))}] <wheel-dir> <out-dir>')
+    wheel_dir, out_dir = args
     wheels = sorted(f for f in os.listdir(wheel_dir) if f.endswith('.whl'))
-    names = {_norm(WHEEL_NAME.match(w).group('name')) for w in wheels if WHEEL_NAME.match(w)}
-    if len(wheels) != len(PACKAGES) or names != set(PACKAGES):
-        _fail(f'expected one wheel each for {sorted(PACKAGES)}, found {wheels}')
+    want = sorted((name, arch) for name, spec in PACKAGES.items()
+                  for arch in (arches if spec.get('binary') else ['all']))
+    got = sorted((_norm(w[1]), w[3]) for w in map(_wheel, wheels))
+    if got != want:
+        _fail(f'expected one wheel each for {want}, found {wheels}')
     for w in wheels:
         build(os.path.join(wheel_dir, w), out_dir)
 

@@ -67,8 +67,9 @@ def _fake_urlopen(reachable, ticket='PVE:tkt', csrf='CSRF1', record=None):
 @pytest.fixture
 def patched(monkeypatch):
     def _apply(opener):
-        import urllib.request as ur
-        monkeypatch.setattr(ur, 'urlopen', opener)
+        import types
+        import pegaprox.core.manager as mgrmod
+        monkeypatch.setattr(mgrmod, 'pve_opener', lambda context=None: types.SimpleNamespace(open=opener))
     return _apply
 
 

@@ -22,7 +22,7 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'web', 'src')
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 
 
 def _read(*parts):
@@ -591,6 +591,14 @@ class _FakeServer:
                 with open(fp, 'rb') as fh:
                     return route.fulfill(status=200, body=fh.read(), headers={'Content-Type': ctype})
             return route.fulfill(status=404, body='')
+        # LW Nov 2026 - the languages besides English are files next to the bundle (web/Dev/build.sh)
+        lang_file = re.fullmatch(r'/i18n/([a-z]{2})\.json', path)
+        if lang_file:
+            fp = os.path.join(ROOT, 'web', 'i18n', f'{lang_file.group(1)}.json')
+            if os.path.isfile(fp):
+                with open(fp, 'rb') as fh:
+                    return route.fulfill(status=200, body=fh.read(), headers={'Content-Type': 'application/json'})
+            return route.fulfill(status=404, body='')
         if not path.startswith('/api/'):
             return route.fulfill(status=404, body='')
         self.calls.append((req.method, path))
@@ -599,7 +607,10 @@ class _FakeServer:
             body = json.loads(req.post_data) if req.post_data else {}
         except Exception:
             body = {}
-        self.bodies.setdefault(path, []).append(body)
+        # JB Nov 2026 - what was sent, not what was read: a list read again after a write has
+        # the same path, and its {} became bodies[path][-1] whenever it came before the test looked
+        if req.method != 'GET':
+            self.bodies.setdefault(path, []).append(body)
 
         def answer(data, status=200):
             return route.fulfill(status=status, body=json.dumps(data),
@@ -1368,7 +1379,7 @@ def test_the_node_modal_has_no_shell_and_locks_what_changes_on_a_standby():
 
     # what reads stays usable
     reads = [m.start() for m in re.finditer(re.escape("onClick={() => loadTabData('system')}"), tabs['system'])]
-    assert len(reads) == 4                      # Hosts retry, sensors, cluster health, syslog
+    assert len(reads) == 5                      # DNS retry (#1163), Hosts retry, sensors, cluster health, syslog
     for at in reads:
         assert not locked('system', tabs['system'][at:at + 60])
     assert not locked('disks', "onClick={() => loadTabData('disks')}")
@@ -1788,7 +1799,8 @@ def test_the_corporate_node_view_shows_but_does_not_change_on_a_standby():
     # the sub navigation reads and stays outside the disabled part
     assert configure.index('corp-subnav-item') < configure.index('<fieldset disabled={haReadOnly} className="contents">')
     hw = body[body.index("{activeDetailTab === 'hardware' && ("):]
-    assert hw.index('<fieldset disabled={haReadOnly} className="contents">') < hw.index('<HardwareMonitoringPanel')
+    # Corporate Redesigned gives the same fieldset a class of its own
+    assert hw.index('<fieldset disabled={haReadOnly} className=') < hw.index('<HardwareMonitoringPanel')
 
 
 def test_no_efficient_snapshot_refresh_from_a_standby():
@@ -2044,9 +2056,10 @@ def test_compliance_stays_a_reading_tab_on_a_standby(dash):
     assert ("if (tab.id === 'compliance') return holds('admin.audit') || holds('node.maintenance') "
             "|| holds('changes.view');") in dash
     # holds() decides this tab (and the sub tabs of it, with the change plans' request button),
-    # whether a standby offers a console on the active, and the console entries of a member
-    # that opens them itself
-    assert len(re.findall(r'\bholds\(', dash)) == 9
+    # whether a standby offers a console on the active, the console entries of a member
+    # that opens them itself, whether the Corporate Redesigned dashboard reads the audit trail,
+    # and whether its template sub tab reads the blueprints, the one of Modern too (#1220; writing them asks can())
+    assert len(re.findall(r'\bholds\(', dash)) == 12
     assert 'const onActiveItems = (permission, search, disabled = false) => !holds(permission) ? [] : [{' in dash
     assert 'const menuAllows = (i) => !i.perm || (i.console ? holds(i.perm) : can(i.perm));' in dash
     drift = _function(dash, 'DriftTab')
@@ -2351,7 +2364,7 @@ def test_runtime_a_refused_snapshot_delete_says_so(open_app, bulk):
     page = app.page
     if bulk:
         page.locator('tbody input[type="checkbox"]').first.check()
-        page.locator('button', has_text='deleteSelected').first.click()   # the key has no text yet (pre-existing)
+        page.locator('button', has_text='Delete selected').first.click()
     else:
         page.locator('button[title="Delete snapshot"]').first.click(force=True)
     page.get_by_text(reason).first.wait_for(timeout=5000)
@@ -3630,6 +3643,9 @@ def test_runtime_a_console_window_on_a_standby_offers_the_active(open_app, role)
     here, the window offers the same console on the active."""
     app = open_app(role=role, layout='modern', clusters=[CLUSTER], resources=[VM], forward_writes=True)
     page = app.page
+    # the dashboard asks for an update two seconds after it opened; with a bundle that takes longer
+    # to load than that, the old page asked while the window loaded. Count only the window's calls
+    page.goto('about:blank')
     before = len(app.server.calls)
     page.goto(BASE + '/?console=c1:qemu:100:pve1', wait_until='load')
     if role == 'standby':
@@ -4053,7 +4069,8 @@ def test_the_panel_speaks_the_serving_contract(panel):
 
 OLD_CONSOLE_CLAUSE = {'de': 'Konsolen öffnen sich immer', 'en': 'consoles always open', 'zh': '控制台始终',
                       'pl': 'konsole zawsze', 'fr': r"consoles s\'ouvrent toujours", 'es': 'consolas siempre',
-                      'pt': 'consoles sempre', 'ko': '콘솔은 항상', 'it': 'console si aprono sempre'}
+                      'pt': 'consoles sempre', 'ko': '콘솔은 항상', 'it': 'console si aprono sempre',
+                      'ru': 'консоли всегда открываются'}
 
 
 def test_the_serving_strings_say_no_em_dash():
@@ -4213,6 +4230,9 @@ def test_runtime_a_console_window_on_a_serving_member(open_app, serve):
     app = open_app(role='standby', layout='modern', clusters=[CLUSTER], resources=[VM], forward_writes=True,
                    serve_assigned=serve)
     page = app.page
+    # the dashboard asks for an update two seconds after it opened; with a bundle that takes longer
+    # to load than that, the old page asked while the window loaded. Count only the window's calls
+    page.goto('about:blank')
     before = len(app.server.calls)
     page.goto(BASE + '/?console=c1:qemu:100:pve1', wait_until='load')
     if serve:
@@ -4426,7 +4446,7 @@ def test_the_leader_only_lists_say_when_the_leader_is_away(ctx, dash):
     assert 'const away = await haLeaderAway(r);' in bell
     assert 'if (away) { setItems([]); setUnread(0); return; }' in bell
     assert '{items.length === 0 && !leaderAway && (' in bell
-    alerts = _block(dash, 'const loadActiveAlerts = async (clusterId) => {', 'const ackAlert = ')
+    alerts = _block(dash, 'const loadActiveAlerts = async (clusterId, force) => {', 'const ackAlert = ')
     assert 'setActiveAlertsAway(await haLeaderAway(r));' in alerts
     for where in ('drift', 'inbox', 'alerts'):
         at = dash.index(f'data-ha-leader-away="{where}"')
@@ -4827,7 +4847,8 @@ INTRO = ('Run up to four PegaProx instances as one group. One is the leader: it 
 # what the old texts said about every standby, in each language
 READ_ONLY = {'de': ('schreibgeschützt', 'nur lesend'), 'en': ('read-only', 'read only'), 'zh': ('只读',),
              'pl': ('tylko do odczytu', 'tylko odczyt'), 'fr': ('lecture seule',), 'es': ('solo lectura',),
-             'pt': ('somente leitura', 'somente para leitura'), 'ko': ('읽기 전용',), 'it': ('sola lettura',)}
+             'pt': ('somente leitura', 'somente para leitura'), 'ko': ('읽기 전용',), 'it': ('sola lettura',),
+             'ru': ('только для чтения', 'только чтение')}
 KIND_KEYS = ('pgHaRoleDescLeader', 'pgHaRoleDescActive', 'pgHaRoleDescStandby', 'pgHaForwardPausedServing',
              'pgHaManagersServing', 'pgHaPromoteLeader', 'pgHaPromoteLeaderDesc', 'pgHaPromoteLeaderSyncFailed')
 KIND_REWORDED = ('pgHaIntro', 'pgHaLiveView', 'pgHaLiveViewHint', 'pgHaLiveViewSaved', 'pgHaForwardWrites',

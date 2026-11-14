@@ -65,6 +65,12 @@ exec /usr/bin/python3 /usr/libexec/pegaprox/pegaprox_multi_cluster.py "$@"
 EOF
 chmod 0755 %{buildroot}%{_bindir}/pegaprox
 
+# The QNetd helper and its installer, root-owned in /usr/lib/pegaprox/qnetd as on Debian.
+# No sudo rule: PegaProx runs as root under this unit (docs/qdevice.md)
+install -d %{buildroot}%{_prefix}/lib/pegaprox/qnetd
+install -m 0755 packaging/qnetd/pegaprox-qnetd-helper %{buildroot}%{_prefix}/lib/pegaprox/qnetd/pegaprox-qnetd-helper
+install -m 0755 packaging/qnetd/install.sh %{buildroot}%{_prefix}/lib/pegaprox/qnetd/install.sh
+
 # Systemd service
 install -d %{buildroot}%{_unitdir}
 cat > %{buildroot}%{_unitdir}/pegaprox.service << 'EOF'
@@ -88,6 +94,10 @@ EOF
 %{_libexecdir}/pegaprox
 %{_bindir}/pegaprox
 %{_unitdir}/pegaprox.service
+%dir %attr(0755,root,root) %{_prefix}/lib/pegaprox
+%dir %attr(0755,root,root) %{_prefix}/lib/pegaprox/qnetd
+%attr(0755,root,root) %{_prefix}/lib/pegaprox/qnetd/pegaprox-qnetd-helper
+%attr(0755,root,root) %{_prefix}/lib/pegaprox/qnetd/install.sh
 
 %post
 %systemd_post pegaprox.service

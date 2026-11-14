@@ -256,7 +256,7 @@ class _OnceSlowPve(_SlowPve):
 def cluster(api, seed, monkeypatch):
     """A password cluster whose login PVE accepts, so every leg gets as far as its relay."""
     seed.user('root', role='admin')
-    monkeypatch.setattr('urllib.request.urlopen', _Pve(password_ok=True).urlopen)
+    monkeypatch.setattr('pegaprox.core.manager.pve_opener', _Pve(password_ok=True).opener)
     return api.set_manager('c1', _PasswordManager())
 
 

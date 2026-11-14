@@ -5,6 +5,7 @@ Background alert checking and notification.
 """
 
 import os
+import math
 import time
 import json
 import logging
@@ -14,7 +15,7 @@ import html as html_lib  # MK May 2026 - aliased so we don't shadow local `html`
 from datetime import datetime
 
 from pegaprox.constants import (
-    ALERTS_CONFIG_FILE, GITHUB_VERSION_URL, MIRROR_VERSION_URL,
+    ALERTS_CONFIG_FILE, GITHUB_REPO_URL, GITHUB_VERSION_URL, MIRROR_VERSION_URL,
     PEGAPROX_VERSION,
 )
 from pegaprox.globals import (
@@ -228,6 +229,19 @@ def check_and_send_alerts():
         cluster_id = alert.get('cluster_id', '')
         metric = alert.get('metric', '')  # cpu, memory, disk
         threshold = alert.get('threshold', 80)
+        # JB Nov 2026 - a rule stored with text here raised at the comparison below and took every later rule of
+        # every cluster with it, each round
+        # a flag, nan or inf would compare as nonsense: never or always firing
+        try:
+            if isinstance(threshold, bool):
+                raise TypeError
+            if not isinstance(threshold, int):
+                threshold = float(threshold)
+                if not math.isfinite(threshold):
+                    raise ValueError
+        except (TypeError, ValueError):
+            _record_eval(alert_id, reason=f"threshold is not a number: {alert.get('threshold')!r}")
+            continue
         operator = alert.get('operator', '>')  # >, <, =
         target_type = alert.get('target_type', 'cluster')  # cluster, node, vm
         target_id = alert.get('target_id', '')  # node name or vmid
@@ -367,7 +381,7 @@ def check_and_send_alerts():
                                                         ts = int(it.get('ctime') or 0)
                                                         vmid = str(it.get('vmid') or '')
                                                         if not ts or not vmid: continue
-                                                        volid = it.get('volid') or ''
+                                                        volid = (it.get('volid') or '').split(':', 1)[-1]
                                                         vt = 'qemu' if 'qemu' in volid or '/vm/' in volid else \
                                                              'lxc' if 'lxc' in volid or '/ct/' in volid else ''
                                                         if not vt: continue
@@ -556,6 +570,8 @@ This is an automated alert from PegaProx.
                 'current_value': round(current_value, 1),
                 'target_type': target_type,
                 'target_name': target_name,
+                # the vmid or the node: who may read the alert goes by it (push inbox)
+                'target_id': '' if target_id is None else str(target_id),
                 'cluster_id': cluster_id,
                 'severity': severity,
                 'timestamp': datetime.now().isoformat(),
@@ -674,13 +690,14 @@ def check_update_available_alert():
         '',
         'Changelog:',
     ]
+    # MK Nov 2026 - the link of the mail is an https page or the repo, never another scheme
+    download_url = ha.valid_https_url(remote.get('download_url')) or GITHUB_REPO_URL
     body_lines += [f"  - {line}" for line in changelog[:10]]
-    body_lines += ['', f"Download: {remote.get('download_url', '')}"]
+    body_lines += ['', f"Download: {download_url}"]
     body = '\n'.join([ln for ln in body_lines if ln is not None])
     # MK May 2026 - changelog + version come from remote update server (version.json).
     # If GitHub-mirror is ever compromised an attacker could ship `<script>` inside
     # the release notes; escape them all before they hit the email's HTML body.
-    download_url = remote.get('download_url', '')
     html_items = ''.join(f"<li>{html_lib.escape(str(c))}</li>" for c in changelog[:10])
     html_body = (
         f"<h2>PegaProx update available</h2>"
@@ -844,6 +861,7 @@ def emit_rolling_update_reboot_event(cluster_id, node):
             'metric': 'rolling_update_reboot',
             'target_type': 'node',
             'target_name': node,
+            'target_id': node,
             'cluster_id': cluster_id,
             'severity': rule.get('severity') if rule.get('severity') not in (None, 'auto') else 'info',
             'current_value': 'rebooting',
@@ -1091,6 +1109,7 @@ def _send_metric_resolved(items):
         alert_data = {
             'alert_name': name, 'metric': metric, 'operator': operator, 'threshold': threshold,
             'current_value': 'resolved', 'target_type': target_type, 'target_name': target_name,
+            'target_id': '' if target_id is None else str(target_id),
             'cluster_id': cluster_id, 'severity': 'info', 'timestamp': datetime.now().isoformat(),
             'message': message, 'event': 'resolved',
         }

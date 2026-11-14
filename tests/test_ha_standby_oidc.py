@@ -345,7 +345,8 @@ def test_a_disabled_account_is_refused_as_on_the_active(ha_env, db, monkeypatch)
 def test_without_auto_create_a_missing_account_is_refused_as_on_the_active(ha_env, db, monkeypatch):
     before = _oidc_row(db, 'olga')
     _idp(monkeypatch, {'auto_create_users': False}, erin=_claims('erin'), olga=_claims('olga'))
-    missing = 'User account does not exist. Contact an administrator.'
+    # MK Nov 2026 - in the words a held name gets (test_oidc_subject_binding.py)
+    missing = 'This sign-in could not be matched to a PegaProx account. Contact an administrator.'
     for role, peer in (('standby', None), ('active', _peer_record())):
         if role == 'standby':
             _standby_of_active(ha_env)
@@ -453,6 +454,8 @@ HELD = {'auth_source': 'oidc', 'oidc_sub': 's-olga', 'role': 'admin', 'tenant_id
 OLGA = {'sub': 's-olga-2', 'preferred_username': 'olga', 'email': 'olga@corp.example',
         'given_name': 'Olga'}
 UNTOUCHED = "a {} account of that name exists and cannot be taken over by OIDC"
+# the subject the held row is bound to, signing in again
+SETTLED_OLGA = dict(OLGA, sub='s-olga')
 
 # (rows held, claims, mapping, label) -> (stored under, what the row says then, last log line).
 # A sign-in that is refused stores under None and the row stays what was held.
@@ -477,28 +480,34 @@ PROVISIONING = {
          'email': '', 'enabled': True, 'last_oidc_sync': NOW},
         "[OIDC] Provisioned new user 'oidc_f445801e0cb89926' (role=viewer, source=entra)"),
     'a-settled-account-the-whole-group-set': (
-        {'olga': HELD}, OLGA, FULL, 'entra',
+        {'olga': HELD}, SETTLED_OLGA, FULL, 'entra',
         'olga',
         {'role': 'viewer', 'tenant_id': 'acme', 'permissions': ['vm.view'], 'tenant_permissions': {},
-         'auth_source': 'entra', 'oidc_sub': 's-olga-2', 'display_name': 'Olga',
+         'auth_source': 'entra', 'oidc_sub': 's-olga', 'display_name': 'Olga',
          'email': 'olga@corp.example', 'enabled': True, 'last_oidc_sync': NOW},
         "[OIDC] Updated user 'olga' (role=viewer, source=entra)"),
     'a-settled-account-part-of-the-group-set': (
-        {'olga': HELD}, OLGA, PARTIAL, 'oidc',
+        {'olga': HELD}, SETTLED_OLGA, PARTIAL, 'oidc',
         'olga',
         {'role': 'admin', 'tenant_id': 'globex',
          'permissions': ['node.maintenance', 'vm.delete', 'vm.view'],
          'tenant_permissions': dict(ACME_ADMIN, globex={'role': 'user', 'extra': ['vm.view']}),
-         'auth_source': 'oidc', 'oidc_sub': 's-olga-2', 'display_name': 'Olga',
+         'auth_source': 'oidc', 'oidc_sub': 's-olga', 'display_name': 'Olga',
          'email': 'olga@corp.example', 'enabled': True, 'last_oidc_sync': NOW},
         "[OIDC] Updated user 'olga' (role=admin, source=oidc)"),
     'a-settled-account-no-group-set-at-all': (
-        {'olga': HELD}, OLGA, NOTHING_KNOWN, 'oidc',
+        {'olga': HELD}, SETTLED_OLGA, NOTHING_KNOWN, 'oidc',
         'olga',
         {'role': 'admin', 'tenant_id': 'acme', 'permissions': ['node.maintenance', 'vm.delete'],
-         'tenant_permissions': ACME_ADMIN, 'auth_source': 'oidc', 'oidc_sub': 's-olga-2',
+         'tenant_permissions': ACME_ADMIN, 'auth_source': 'oidc', 'oidc_sub': 's-olga',
          'display_name': 'Olga', 'email': 'olga@corp.example', 'enabled': True, 'last_oidc_sync': NOW},
         "[OIDC] Updated user 'olga' (role=admin, source=oidc)"),
+    # MK Nov 2026 - another subject under that name updated the row, sub and role included
+    'another-subject-of-that-name': (
+        {'olga': HELD}, OLGA, FULL, 'oidc',
+        None, None, "[OIDC] Rejected login for 'olga' - the account belongs to another subject of "
+                    "the identity provider; an admin can reset its sign-in binding if it is the "
+                    "same person (after a move to another identity provider, for example)"),
     'a-local-account-of-that-name': (
         {'olga': dict(HELD, auth_source='local', oidc_sub='')}, OLGA, FULL, 'oidc',
         None, None, "[OIDC] Rejected login for 'olga' - " + UNTOUCHED.format('local')),

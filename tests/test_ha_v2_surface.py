@@ -73,6 +73,8 @@ def _fake_manager(api):
     m.config.name = CID
     m.host, m.api_port = '192.0.2.10', 8006
     m.is_connected = True
+    # the screenshot asks its node against the node list a real manager has (#1224)
+    m.nodes = {'n1': {'node': 'n1', 'status': 'online'}}
     return m
 
 
@@ -331,11 +333,13 @@ def test_the_cluster_creds_route_of_the_legacy_shell(ha_env, seed, monkeypatch):
     admin = _admin(api, seed)
     reg = _registry(monkeypatch)
     client = api.app.test_client()
-    # the SSH server sends the browser's session as the cookie `session`
+    # the SSH server sends the browser's session as the cookie `session`, and its proof
     client.set_cookie('session', admin.session_id, domain='localhost')
 
     def creds():
-        return client.get(f'/api/internal/cluster-creds/{CID}', base_url='http://localhost')
+        from pegaprox.api.realtime import CONSOLE_SERVER_HEADER, console_server_secret
+        return client.get(f'/api/internal/cluster-creds/{CID}', base_url='http://localhost',
+                          headers={CONSOLE_SERVER_HEADER: console_server_secret()})
 
     _standby_of_active(ha_env)
     r = creds()

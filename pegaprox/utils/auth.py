@@ -859,6 +859,107 @@ def _mfa_enrolment_lets_through(session: dict) -> bool:
     return False
 
 
+# MK Oct 2026 - portal_only held on the server too. The flag only told the UI where to send
+# the account; the API itself answered it like any other account of its role. What it may
+# reach now, by the endpoint that serves the request (like MFA_ENROLMENT_ENDPOINTS), and
+# nothing else. The one list for require_auth and hold_portal_only_accounts (app.py).
+PORTAL_ONLY_ENDPOINTS = frozenset({
+    # signing in and out, and the session check the portal and / start with
+    'auth.auth_login', 'auth.auth_logout', 'auth.auth_check',
+    # SSO started from the portal (redirect_after=/portal) and the way back from the IdP
+    'auth.oidc_get_public_config', 'auth.oidc_authorize', 'auth.oidc_login',
+    'auth.oidc_callback', 'auth.oidc_callback_redirect',
+    # a security key as second factor on the login page of /, before there is a session
+    'webauthn.auth_begin', 'webauthn.auth_finish',
+    # TOTP enrolment from the portal, forced 2FA included
+    'auth.setup_2fa', 'auth.verify_2fa_setup',
+    # the portal console on the main port (reverse proxy), with the ws token its vm/console
+    # route mints; _console_authz keeps it to the account's own guests
+    'vms.vnc_websocket_route', '__flask_sock.vnc_websocket_proxy',
+})
+# and the plugin API of this one plugin (plugins.plugin_proxy), not of any other
+PORTAL_ONLY_PLUGIN = 'client_portal'
+PORTAL_ONLY_ERROR = {'error': 'This account can only use the Client Portal', 'code': 'PORTAL_ONLY'}
+# routes the hook leaves alone: they read no credential and answer everyone the same, and
+# a probe hammers /api/health, which must not turn to a DB lookup or a 503 on a header.
+# The interface lock (#1189) is read by every page load of /, a portal account's included
+PORTAL_ONLY_UNREAD = frozenset({'auth.health_check', 'settings.get_interface_lock'})
+
+
+def portal_only_may_serve() -> bool:
+    """Is this request one a portal_only account may make?"""
+    endpoint = request.endpoint
+    if endpoint in PORTAL_ONLY_ENDPOINTS:
+        return True
+    return (endpoint == 'plugins.plugin_proxy'
+            and (request.view_args or {}).get('plugin_id') == PORTAL_ONLY_PLUGIN)
+
+
+def portal_only_refusal(user: dict):
+    """The 403 for a portal_only account outside the portal, None otherwise."""
+    from pegaprox.utils.rbac import portal_only_holds
+    if not portal_only_holds(user) or portal_only_may_serve():
+        return None
+    return jsonify(PORTAL_ONLY_ERROR), 403
+
+
+def _api_token_owner(token: str):
+    """The account an API token belongs to, None for one we do not know."""
+    row = get_db().conn.execute('SELECT username FROM api_tokens WHERE token_hash = ?',
+                                (hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
+    return row['username'] if row else None
+
+
+def _request_accounts(look_up_tokens=True) -> set:
+    """Who the credentials on this request name, whichever a route goes by: the session id
+    in the header, either cookie (the SSH server sends `session`) or ?session=, an API
+    token, a ws or SSE token in ?token=. Looked up, never used: a ws token is single-use
+    and stays for the route, and no session is touched. look_up_tokens=False leaves an API
+    token in the header alone (it costs a DB read)."""
+    names = set()
+    sids = (request.headers.get('X-Session-ID'), request.cookies.get('session_id'),
+            request.cookies.get('session'), request.args.get('session'))
+    with sessions_lock:
+        for sid in sids:
+            if sid:
+                names.add((active_sessions.get(sid) or {}).get('user'))
+    token = request.args.get('token')
+    if token:
+        from pegaprox.globals import ws_tokens, ws_tokens_lock, sse_tokens, sse_tokens_lock
+        with ws_tokens_lock:
+            names.add((ws_tokens.get(token) or {}).get('user'))
+        with sse_tokens_lock:
+            names.add((sse_tokens.get(token) or {}).get('user'))
+    bearer = request.headers.get('Authorization', '')
+    if look_up_tokens and bearer.startswith('Bearer pgx_'):
+        names.add(_api_token_owner(bearer[7:]))
+    names.discard(None)
+    names.discard('')
+    return names
+
+
+def portal_only_request_refusal(look_up_tokens=True):
+    """portal_only for a route without require_auth: one that finds its caller itself (the
+    consoles, the live streams, the validate calls of the SSH server) or none at all.
+    look_up_tokens=False for a request the API rate limit does not count: a made-up token
+    must not buy an unlimited stream of DB reads, and no route there takes an API token."""
+    if portal_only_may_serve() or request.endpoint in PORTAL_ONLY_UNREAD:
+        return None
+    try:
+        users = [get_db().get_user(name) for name in _request_accounts(look_up_tokens)]
+    except Exception as e:
+        # an account we cannot read is not one we know to be free to go on
+        logging.warning(f"[AUTH] cannot tell whether the caller is portal_only: {e}")
+        return jsonify({'error': 'The account could not be read, try again',
+                        'code': 'ACCOUNT_UNREADABLE'}), 503
+    for user in users:
+        # no record: the route refuses an account that is gone, as it always did
+        refused = portal_only_refusal(user)
+        if refused:
+            return refused
+    return None
+
+
 def validate_session(session_id: str) -> dict:
     """Validate a session and return user info if valid"""
     if not session_id:
@@ -1420,7 +1521,13 @@ def require_auth(roles: list = None, perms: list = None):
                 pass
             if not user.get('enabled', True):
                 return jsonify({'error': 'Account is disabled', 'code': 'ACCOUNT_DISABLED'}), 401
-            
+            # MK Oct 2026 - a portal_only account reaches the Client Portal and nothing else,
+            # by session or by one of its API tokens (PORTAL_ONLY_ENDPOINTS)
+            if user.get('portal_only'):
+                refused = portal_only_refusal(user)
+                if refused:
+                    return refused
+
             # MK May 2026 (CodeAnt CWE-269) — DO NOT refresh role from the user record
             # when this is an API-token session. The token has its own role bound at
             # creation (e.g. an admin creating a 'viewer' token for CI/CD); refreshing

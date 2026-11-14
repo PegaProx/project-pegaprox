@@ -123,6 +123,11 @@ class TunnelEndpoint:
 class _Pumper(threading.Thread):
     """Bidirectional byte-pipe between a local TCP socket and an SSH channel."""
 
+    # how long one chunk written to the local leg may wait for the console relay to take
+    # it. That reader goes at the browser's pace; a slow link only makes it slow, it does
+    # not stop it. A chunk it does not take within this time ends the leg.
+    LOCAL_SEND_TIMEOUT = 60.0
+
     def __init__(self, sock: socket.socket, channel, port_for_log: int):
         super().__init__(name=f"VncTun-Pump-{port_for_log}", daemon=True)
         self._sock = sock
@@ -160,12 +165,23 @@ class _Pumper(threading.Thread):
                         data = self._channel.recv(BUF)
                         if not data:
                             break
-                        self._sock.sendall(data)
+                        # on the non-blocking socket sendall raised as soon as the local
+                        # buffer was full, so a big update to a slow browser ended the console.
+                        # Wait for the reader instead; until then SSH flow control holds PVE back.
+                        self._sock.settimeout(self.LOCAL_SEND_TIMEOUT)
+                        try:
+                            self._sock.sendall(data)
+                        finally:
+                            self._sock.setblocking(False)
                 # Stale-close detection: if channel reports closed
                 if self._channel.exit_status_ready() and not self._channel.recv_ready():
                     break
         except Exception as e:
-            logging.debug(f"[VncTunnel] pump exception: {e}")
+            # after stop() this is just the closed socket; before it, a console just ended
+            if self._stopped:
+                logging.debug(f"[VncTunnel] pump exception: {e}")
+            else:
+                logging.info(f"[VncTunnel] pump ended: {e!r}")
         finally:
             try: self._sock.close()
             except Exception: pass

@@ -11,6 +11,7 @@ import hashlib
 import base64
 import secrets
 import re
+import unicodedata
 import requests
 from datetime import datetime
 from urllib.parse import urlencode, urlparse, urlunparse
@@ -81,6 +82,8 @@ ENTRA_CLOUD_ENDPOINTS = {
         'graph_base': 'dod-graph.microsoft.us',
     },
 }
+# a directory (tenant) id as Entra writes it, the form its tokens carry in tid and iss
+_ENTRA_TENANT_ID = re.compile(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}')
 
 # NS Oct 2026 (#1149) - the claims an admin may pick to name the account. unique_name is not
 # among them: AD FS fills it with DOMAIN\user, and the name filter would drop the backslash
@@ -128,6 +131,8 @@ def get_oidc_settings() -> dict:
         'button_text': settings.get('oidc_button_text', 'Sign in with Microsoft'),
         # NS: allow disabling JWT sig verification for broken JWKS environments
         'oidc_skip_jwt_verification': settings.get('oidc_skip_jwt_verification', False),
+        # MK Nov 2026 - the extra audiences oidc_decode_id_token accepts besides the client_id
+        'oidc_audiences': settings.get('oidc_audiences', '') or '',
         # NS Apr 2026 (#188) — let admins disable TLS verification for self-hosted
         # Authentik / Keycloak with self-signed certs. Default OFF (secure).
         'oidc_skip_ssl_verify': settings.get('oidc_skip_ssl_verify', False),
@@ -162,6 +167,10 @@ def get_oidc_endpoints(config: dict) -> dict:
         graph_base = endpoints['graph_base']
         
         base = f"https://{login_base}/{tenant_id}/oauth2/v2.0"
+        # MK Nov 2026 - the iss of a v2.0 ID token names the tenant by its id. A tenant set
+        # by id is bound to it; 'common', 'organizations' or a domain name cannot be, so the
+        # token's own tid fills the slot, the way Entra's discovery document spells it.
+        issuer_tenant = tenant_id.lower() if _ENTRA_TENANT_ID.fullmatch(tenant_id) else '{tenantid}'
         return {
             'authorization': f"{base}/authorize",
             'token': f"{base}/token",
@@ -169,6 +178,7 @@ def get_oidc_endpoints(config: dict) -> dict:
             'userinfo': f"https://{graph_base}/oidc/userinfo",
             'graph_me': f"https://{graph_base}/v1.0/me",
             'graph_groups': f"https://{graph_base}/v1.0/me/memberOf",
+            'issuer': f"https://{login_base}/{issuer_tenant}/v2.0",
         }
     else:
         # Generic OIDC provider - try .well-known discovery first, fall back to authority URL
@@ -200,6 +210,7 @@ def get_oidc_endpoints(config: dict) -> dict:
                 'userinfo': disco.get('userinfo_endpoint', f"{authority}/userinfo"),
                 'graph_me': '',
                 'graph_groups': '',
+                'issuer': disco.get('issuer') or authority,
                 '_discovery_used': True,
             }
 
@@ -282,6 +293,9 @@ def get_oidc_endpoints(config: dict) -> dict:
                         'userinfo': disco.get('userinfo_endpoint', f"{authority}/userinfo"),
                         'graph_me': '',
                         'graph_groups': '',
+                        # the name the IdP gives itself, which its tokens carry as iss (OIDC
+                        # Discovery 4.3); the configured authority can differ in host or slash
+                        'issuer': disco.get('issuer') or authority,
                         '_discovery_used': True,
                     }
             else:
@@ -311,8 +325,41 @@ def get_oidc_endpoints(config: dict) -> dict:
             'userinfo': f"{authority}/userinfo",
             'graph_me': '',
             'graph_groups': '',
+            'issuer': authority,
             '_discovery_used': False,
         }
+
+
+def oidc_idp_request_target(config: dict, url: str, allow_private: bool) -> tuple:
+    """(url, extra requests kwargs) for a request to an endpoint the IdP's discovery named.
+
+    MK Nov 2026 - oidc_skip_ssl_verify only ever reached the discovery GET, so a self-signed
+    IdP got through discovery and then failed the token request on its certificate. With the
+    switch on, the token, userinfo and JWKS requests go the way discovery does: unverified,
+    and pinned to the address the guard vetted, since no certificate check is left to catch
+    a rebind and the token request carries the client secret. With it off the URL comes back
+    as it is and the request is made exactly as before. Entra's endpoints are Microsoft's and
+    discovery never read the switch for them, so neither does this. Raises SsrfError like
+    resolve_and_pin_url.
+    """
+    if not config.get('oidc_skip_ssl_verify') or config.get('provider', 'entra') == 'entra':
+        return url, {}
+    return resolve_and_pin_url(url, allow_private=allow_private, tls_verified=False), {'verify': False}
+
+
+def _redirect_refused(what: str, resp) -> str:
+    """Log where an IdP endpoint redirected to, and return the error that names it.
+
+    MK Nov 2026 - the sign-in requests do not follow a redirect, as discovery and the JWKS
+    step of the settings test already did not: its target is a URL the guard never saw,
+    and a 307 from the token endpoint posts the client secret there again. The Location is
+    whatever answered, so it is sanitised before it reaches the log (CWE-117).
+    """
+    from pegaprox.utils.sanitization import sanitize_log_message as _sl
+    loc = _sl(str((getattr(resp, 'headers', None) or {}).get('Location', '(no Location header)')))[:200]
+    logging.warning(f"[OIDC] the {what} answered HTTP {resp.status_code} redirecting to {loc!r} - "
+                    f"not following it. The identity provider has to name the final URL.")
+    return f"The {what} redirected (HTTP {resp.status_code}), which is not followed"
 
 
 def oidc_build_auth_url(config: dict, state: str) -> tuple:
@@ -382,6 +429,7 @@ def oidc_exchange_code(config: dict, code: str, code_verifier: str = None) -> di
             # allow_private flag into token sanitize too — discovery was fixed
             # last release but token + userinfo still tripped the strict guard
             sanitize_outbound_url(endpoints['token'], allow_private=allow_private_ip)
+            token_url, tls_kw = oidc_idp_request_target(config, endpoints['token'], allow_private_ip)
         except SsrfError as guard_err:
             logging.warning(f"[OIDC] token endpoint rejected by SSRF guard: {guard_err}")
             if not allow_private_ip and "private" in str(guard_err).lower():
@@ -391,7 +439,9 @@ def oidc_exchange_code(config: dict, code: str, code_verifier: str = None) -> di
                     "settings (covers discovery + token + userinfo)."
                 )
             return {'error': 'Token endpoint failed pre-flight URL validation'}
-        resp = requests.post(endpoints['token'], data=data, timeout=15)
+        resp = requests.post(token_url, data=data, timeout=15, allow_redirects=False, **tls_kw)
+        if 300 <= resp.status_code < 400:
+            return {'error': _redirect_refused('token endpoint', resp)}
         if resp.status_code != 200:
             logging.error(f"[OIDC] Token exchange failed: {resp.status_code} {resp.text[:300]}")
             return {'error': f'Token exchange failed: {resp.status_code}'}
@@ -421,119 +471,273 @@ def oidc_id_token_verified(claims) -> bool:
     return isinstance(claims, _VerifiedClaims)
 
 
-def oidc_decode_id_token(id_token: str, expected_nonce: str = None,
-                         config: dict = None) -> dict:
-    """Decode and verify JWT ID token signature using JWKS
+# what the callback answers after "Authentication failed - "; the reason goes to the log
+_ID_TOKEN_INVALID = 'Failed to validate identity token'
+_ID_TOKEN_EXPIRED = 'ID token has expired'
+_ID_TOKEN_NONCE = 'OIDC nonce mismatch - possible replay attack'
 
-    MK Mar 2026: Now verifies signature via JWKS endpoint (PyJWT).
-    Falls back to unsigned decode if PyJWT unavailable or JWKS fetch fails,
-    so existing deployments don't break during upgrade.
+# every asymmetric algorithm PyJWT verifies. Keycloak, Authelia and Gitea let the admin
+# pick RS512 or ES384, Authentik signs with what its key gives. HS* (a shared secret) and
+# none stay out, and the key always comes from the IdP's JWKS.
+_ID_TOKEN_ALGORITHMS = ('RS256', 'RS384', 'RS512', 'PS256', 'PS384', 'PS512',
+                        'ES256', 'ES384', 'ES512', 'EdDSA')
+# the JWK key type ("kty") each family of them takes
+_ID_TOKEN_KEY_TYPES = {'RS': 'RSA', 'PS': 'RSA', 'ES': 'EC', 'Ed': 'OKP'}
+
+
+def _oidc_accepted_audiences(config: dict) -> list:
+    """The client_id plus the extra audiences the admin saved in oidc_audiences.
+
+    NS May 2026 - PVE 9.2's OIDC realm gained the same `audiences` field. Mirroring it lets
+    us accept tokens issued for a logical audience (e.g. "pegaprox-prod") that maps to
+    multiple deployments.
     """
-    # NS Mar 2026 - try proper signature verification first
-    # can be disabled via settings for envs where JWKS is broken/unreachable
-    skip_verify = config.get('oidc_skip_jwt_verification', False) if config else False
-    if skip_verify:
-        logging.warning("[OIDC] JWT signature verification DISABLED by admin setting")
-    if PYJWT_AVAILABLE and config and not skip_verify:
-        try:
-            endpoints = get_oidc_endpoints(config)
-            jwks_uri = endpoints.get('jwks', '')
+    client_id = config.get('client_id')
+    extra = config.get('oidc_audiences', '') or ''
+    if isinstance(extra, str):
+        extra = [a.strip() for a in extra.split(',') if a.strip()]
+    return ([client_id] if client_id else []) + list(extra)
 
-            if jwks_uri:
-                # NS Jul 2026 (CodeAnt SSRF) — gate the JWKS URI before fetching keys from it.
-                # Return (fail closed) rather than raise: the outer except falls back to an
-                # UNVERIFIED decode, so a raise here would DOWNGRADE signature verification.
-                # allow_private=True keeps internal IdPs (RFC1918) working while cloud-metadata
-                # endpoints stay blocked (always) + control chars/bad schemes rejected.
-                from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError, resolve_and_pin_url
-                try:
-                    sanitize_outbound_url(jwks_uri, allow_private=True)
-                except SsrfError as _se:
-                    logging.warning(f"[OIDC] jwks_uri rejected by SSRF guard: {_se}")
-                    return {'error': 'OIDC JWKS endpoint rejected by SSRF guard'}
-                if jwks_uri not in _jwks_clients:
-                    _jwks_clients[jwks_uri] = PyJWKClient(jwks_uri, cache_keys=True, lifespan=3600)
 
-                signing_key = _jwks_clients[jwks_uri].get_signing_key_from_jwt(id_token)
+def _oidc_idp_tls_verified(config: dict) -> bool:
+    """True when the token request of this sign-in went over a checked TLS connection.
 
-                # NS May 2026 — audience list: client_id is always accepted,
-                # plus any additional audiences the admin configured. PVE 9.2's
-                # OIDC realm gained the same `audiences` field — mirroring it
-                # here lets us accept tokens issued for a logical audience
-                # (e.g. "pegaprox-prod") that maps to multiple deployments.
-                client_id = config.get('client_id')
-                extra_auds = config.get('oidc_audiences', '') or ''
-                if isinstance(extra_auds, str):
-                    extra_auds = [a.strip() for a in extra_auds.split(',') if a.strip()]
-                accepted = [client_id] + extra_auds if client_id else extra_auds or None
+    The rule oidc_idp_request_target applies: the switch only reaches the generic providers,
+    Entra's endpoints are always verified. The token endpoint is https only (the URL guard's
+    default scheme list), so there is no plain http case.
+    """
+    return not config.get('oidc_skip_ssl_verify') or config.get('provider', 'entra') == 'entra'
 
-                # #188: support more algorithms (Authentik uses RS256, but others exist)
-                # MK 2026-05-31 — `verify_iss=False` is INTENTIONAL, not a gap.
-                # Real-world IdPs (Authentik, Keycloak, Entra ID) return `iss`
-                # values that vary from the configured authority URL: trailing
-                # slash, host-vs-FQDN, http-vs-https on internal IdPs. The
-                # channel-binding is enforced at the JWKS layer instead —
-                # `signing_key.key` came from the JWKS endpoint at the
-                # operator-configured authority, so a token signed by someone
-                # else fails signature verification before any claim is read.
-                # `verify_aud=True` + `audience=accepted` still gates audience.
-                # Nonce check below covers replay. Flipping verify_iss to True
-                # breaks legitimate logins on the next IdP config tweak.
-                claims = pyjwt.decode(
-                    id_token,
-                    signing_key.key,
-                    algorithms=["RS256", "ES256", "PS256", "EdDSA"],
-                    audience=accepted,
-                    options={
-                        "verify_exp": True,
-                        "verify_aud": True,
-                        "verify_iss": False,  # see comment above — intentional
-                        "require": ["exp", "iat", "sub"],
-                    },
-                    leeway=300,  # 5 min clock skew
-                )
 
-                # #188: only validate nonce if token actually has one
-                # some providers (Authentik in certain configs) don't include nonce
-                if expected_nonce and claims.get('nonce') and claims['nonce'] != expected_nonce:
-                    logging.warning(f"[OIDC] Nonce mismatch after sig verification")
-                    return {'error': 'OIDC nonce mismatch - possible replay attack'}
+def _oidc_issuer_key(value: str) -> str:
+    # a trailing slash is the one difference let through. Google writes iss without the
+    # scheme ("accounts.google.com"), its discovery document with it.
+    value = value.strip().rstrip('/')
+    return value if '://' in value else 'https://' + value
 
-                return _VerifiedClaims(claims)
 
-        except Exception as e:
-            # MK: don't break login if JWKS is temporarily unreachable
-            logging.warning(f"[OIDC] JWKS verification failed ({type(e).__name__}: {e}), falling back to unverified decode")
+def _oidc_claims_refusal(claims, config: dict, expected_nonce, issuer, check_iss=True):
+    """(error, reason) when the claims of an ID token may not sign anyone in, else None.
 
-    # Fallback: decode without signature check (pre-PyJWT behavior)
+    MK Nov 2026 - what every path checks, with or without the signature: the audience is
+    the client_id or one of oidc_audiences, an azp names the client_id, the token is
+    within its nbf and exp, it carries this sign-in's nonce and, with check_iss, the
+    IdP's own issuer. `issuer` may hold Entra's {tenantid} slot, filled from the token's tid.
+    """
+    from pegaprox.utils.sanitization import sanitize_log_message as _sl
+
+    def _number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    if not isinstance(claims, dict):
+        return _ID_TOKEN_INVALID, 'its body is not a JSON object'
+    aud = claims.get('aud')
+    auds = {a for a in (aud if isinstance(aud, list) else [aud]) if isinstance(a, str)}
+    if not auds & set(_oidc_accepted_audiences(config)):
+        return _ID_TOKEN_INVALID, (f"its audience {_sl(str(aud))[:120]!r} is neither the "
+                                   f"client_id nor one of oidc_audiences")
+    # the party the token was issued to (OIDC Core 3.1.3.7): in the code flow that is us,
+    # whatever extra audience it also names
+    azp, client_id = claims.get('azp'), config.get('client_id')
+    if azp is not None and client_id and azp != client_id:
+        return _ID_TOKEN_INVALID, f"it was issued to another client (azp {_sl(str(azp))[:120]!r})"
+    exp, nbf, now = claims.get('exp'), claims.get('nbf'), time.time()
+    if not _number(exp):
+        return _ID_TOKEN_INVALID, 'it carries no expiry'
+    # LW Feb 2026 - 5 min clock skew, the leeway of the signed path too
+    if now > exp + 300:
+        return _ID_TOKEN_EXPIRED, f"it expired (exp={exp}, now={now:.0f})"
+    if nbf is not None and not (_number(nbf) and nbf <= now + 300):
+        return _ID_TOKEN_INVALID, f"it is not valid yet (nbf={_sl(str(nbf))[:40]}, now={now:.0f})"
+    if check_iss:
+        iss = claims.get('iss')
+        expected = issuer or ''
+        if '{tenantid}' in expected:
+            tid = claims.get('tid')
+            expected = expected.replace('{tenantid}', tid) if isinstance(tid, str) and tid else ''
+        if not expected:
+            return _ID_TOKEN_INVALID, 'there is no issuer to check its iss against'
+        if not isinstance(iss, str) or _oidc_issuer_key(iss) != _oidc_issuer_key(expected):
+            return _ID_TOKEN_INVALID, (f"its issuer {_sl(str(iss))[:200]!r} is not the "
+                                       f"identity provider's {_sl(expected)[:200]!r}")
+    # only a nonce the token carries is compared, some Authentik setups send none
+    if expected_nonce and claims.get('nonce') and claims['nonce'] != expected_nonce:
+        return _ID_TOKEN_NONCE, 'its nonce is not the one this sign-in sent'
+    return None
+
+
+def _oidc_refused(reason: str, error: str = _ID_TOKEN_INVALID) -> dict:
+    logging.warning(f"[OIDC] ID token refused: {reason}")
+    return {'error': error}
+
+
+def _oidc_unverified_claims(id_token: str, expected_nonce, config: dict, issuer, check_iss=True) -> dict:
+    """The claims of an ID token read without its signature, after the claim checks."""
     try:
         parts = id_token.split('.')
         if len(parts) != 3:
             return {'error': 'Invalid JWT format'}
-
-        payload = parts[1]
-        padding = 4 - len(payload) % 4
-        if padding != 4:
-            payload += '=' * padding
-
-        decoded = base64.urlsafe_b64decode(payload)
-        claims = json.loads(decoded)
-
-        # LW Feb 2026 - validate expiry (5 min clock skew tolerance)
-        exp = claims.get('exp')
-        if exp and time.time() > exp + 300:
-            logging.warning(f"[OIDC] ID token expired: exp={exp}, now={time.time():.0f}")
-            return {'error': 'ID token has expired'}
-
-        # #188: only fail on nonce mismatch if token has a nonce claim
-        if expected_nonce and claims.get('nonce') and claims['nonce'] != expected_nonce:
-            logging.warning(f"[OIDC] Nonce mismatch: expected={expected_nonce[:8]}..., got={str(claims.get('nonce', ''))[:8]}...")
-            return {'error': 'OIDC nonce mismatch - possible replay attack'}
-
-        return claims
+        payload = parts[1] + '=' * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
     except Exception as e:
         logging.error(f"[OIDC] JWT decode error: {e}")
-        return {'error': 'Failed to validate identity token'}
+        return {'error': _ID_TOKEN_INVALID}
+    refusal = _oidc_claims_refusal(claims, config, expected_nonce, issuer, check_iss)
+    if refusal:
+        return _oidc_refused(refusal[1], refusal[0])
+    return claims
+
+
+def _oidc_jwks_client(config: dict, jwks_uri: str):
+    """The PyJWKClient for the IdP's key set. Raises SsrfError when the guard refuses the URI."""
+    # NS Jul 2026 (CodeAnt SSRF) - gate the JWKS URI before fetching keys from it.
+    # allow_private=True keeps internal IdPs (RFC1918) working while cloud-metadata
+    # endpoints stay blocked (always) + control chars/bad schemes rejected.
+    from pegaprox.utils.url_security import sanitize_outbound_url
+    sanitize_outbound_url(jwks_uri, allow_private=True)
+    jwks_fetch, jwks_tls = oidc_idp_request_target(config, jwks_uri, True)
+    # MK Nov 2026 - an unverified client is kept apart, so a verified fetch never
+    # reuses one after the TLS switch is turned off again
+    jwks_key = ('unverified', jwks_fetch) if jwks_tls else jwks_uri
+    if jwks_key not in _jwks_clients:
+        if jwks_tls:
+            import ssl
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            _jwks_clients[jwks_key] = PyJWKClient(jwks_fetch, cache_keys=True, lifespan=3600,
+                                                  ssl_context=ctx)
+        else:
+            _jwks_clients[jwks_key] = PyJWKClient(jwks_uri, cache_keys=True, lifespan=3600)
+    return _jwks_clients[jwks_key]
+
+
+def _oidc_token_keys(client, jwk_set, header: dict) -> list:
+    """The keys of the IdP's set the token may be signed with, of the type its alg takes.
+
+    The one its kid names, fetching the set once more for a key rotated in since it was
+    cached. PyJWKClient matches by kid alone, so a token without one, or a set whose keys
+    carry none, never found its key: then each signing key of the set is a candidate.
+    """
+    kind = _ID_TOKEN_KEY_TYPES[header['alg'][:2]]
+    signing = [k for k in jwk_set.keys if k.public_key_use in ('sig', None)]
+    kid = header.get('kid')
+    if kid and any(k.key_id for k in signing):
+        named = [k for k in signing if k.key_id == kid] or [client.get_signing_key(kid)]
+    else:
+        named = signing
+    keys = [k for k in named if k.key_type == kind]
+    if not keys:
+        raise pyjwt.PyJWKClientError(f'the key set holds no {kind} signing key'
+                                     + (f' under the kid {kid!r}' if kid else ''))
+    return keys
+
+
+def oidc_decode_id_token(id_token: str, expected_nonce: str = None,
+                         config: dict = None) -> dict:
+    """Decode the ID token of a sign-in and check it. Returns the claims or {'error': ...}.
+
+    MK Mar 2026: the signature is verified against the IdP's JWKS (PyJWT).
+    MK Nov 2026: and the check fails closed. Every error in it used to fall back to reading
+    the token unchecked, so a bad signature, an unknown key or another audience still
+    signed the user in, with the groups of that token deciding the role. A token whose
+    signature, audience (client_id or oidc_audiences), azp, issuer, nbf, expiry or nonce
+    does not check out is refused now. Its signature goes unchecked in two cases only:
+
+      * oidc_skip_jwt_verification, the admin's own switch for a broken JWKS. Audience,
+        azp, nbf, expiry and nonce are still checked.
+      * the key set itself cannot be loaded (network, it does not parse, no key) while TLS is
+        verified. The token then came straight from the token endpoint over a checked
+        connection, which OIDC Core 3.1.3.7 accepts in place of the signature, and
+        audience, issuer, expiry and nonce are checked on its claims. With
+        oidc_skip_ssl_verify on nothing vouches for it, so it is refused.
+
+    A key set that loads but has no key for the token is a refusal, not an outage. The
+    token may be signed with any asymmetric algorithm (_ID_TOKEN_ALGORITHMS).
+    """
+    from pegaprox.utils.sanitization import sanitize_log_message as _sl
+
+    if not config:
+        return _oidc_refused('there are no OIDC settings to check it against')
+    if config.get('oidc_skip_jwt_verification', False):
+        logging.warning("[OIDC] JWT signature verification DISABLED by admin setting")
+        return _oidc_unverified_claims(id_token, expected_nonce, config, None, check_iss=False)
+    if not PYJWT_AVAILABLE:
+        return _oidc_refused('PyJWT is not installed, so its signature cannot be checked')
+
+    endpoints = get_oidc_endpoints(config) or {}
+    # the issuer discovery names (Entra: from the tenant), else the configured authority
+    issuer = endpoints.get('issuer') or config.get('authority') or ''
+    jwks_uri = endpoints.get('jwks', '')
+
+    client = None
+    if jwks_uri:
+        try:
+            client = _oidc_jwks_client(config, jwks_uri)
+        except SsrfError as _se:
+            logging.warning(f"[OIDC] jwks_uri rejected by SSRF guard: {_se}")
+            return {'error': 'OIDC JWKS endpoint rejected by SSRF guard'}
+        except Exception as e:
+            return _oidc_refused(f"no client for its JWKS ({type(e).__name__}: {_sl(str(e))[:300]})")
+
+    # the key set first, on its own: only when it cannot be had at all (network, no JSON,
+    # no key in it) does the TLS connection the token came over stand in for the signature
+    try:
+        if client is None:
+            raise pyjwt.PyJWKClientError('the identity provider names no JWKS endpoint')
+        jwk_set = client.get_jwk_set()
+    except (pyjwt.PyJWTError, ValueError, OSError) as e:
+        why = f"{type(e).__name__}: {_sl(str(e))[:300]}"
+        if not _oidc_idp_tls_verified(config):
+            return _oidc_refused(f"its JWKS could not be loaded ({why}) and oidc_skip_ssl_verify "
+                                 f"is on, so nothing vouches for the token without its signature")
+        # MK: don't break login if JWKS is temporarily unreachable
+        logging.warning(f"[OIDC] JWKS could not be loaded ({why}), falling back to unverified decode: "
+                        f"the token came from the token endpoint over verified TLS, its audience, "
+                        f"issuer, expiry and nonce are still checked")
+        return _oidc_unverified_claims(id_token, expected_nonce, config, issuer)
+    except Exception as e:
+        return _oidc_refused(f"its JWKS could not be read ({type(e).__name__}: {_sl(str(e))[:300]})")
+
+    try:
+        header = pyjwt.get_unverified_header(id_token)
+        if header.get('alg') not in _ID_TOKEN_ALGORITHMS:
+            raise pyjwt.InvalidAlgorithmError(f"the alg {_sl(str(header.get('alg')))[:20]!r} is not allowed")
+        claims = None
+        for key in _oidc_token_keys(client, jwk_set, header):
+            # verify_iss stays off here on purpose: iss is compared below with the issuer
+            # discovery names, not the configured authority, which real IdPs (Authentik,
+            # Keycloak) often spell with another host or slash. Same check on every path.
+            try:
+                claims = pyjwt.decode(
+                    id_token,
+                    key.key,
+                    algorithms=list(_ID_TOKEN_ALGORITHMS),
+                    audience=_oidc_accepted_audiences(config) or None,
+                    options={
+                        "verify_exp": True,
+                        "verify_aud": True,
+                        "verify_iss": False,
+                        "require": ["exp", "iat", "sub"],
+                    },
+                    leeway=300,  # 5 min clock skew
+                )
+                break
+            except (pyjwt.InvalidSignatureError, pyjwt.InvalidKeyError) as e:
+                # without a kid to pick it, the next key of the set may be the one
+                last = e
+        if claims is None:
+            raise last
+    except Exception as e:
+        expired = isinstance(e, pyjwt.ExpiredSignatureError)
+        return _oidc_refused(f"it did not pass the signature and claim check "
+                             f"({type(e).__name__}: {_sl(str(e))[:300]})",
+                             _ID_TOKEN_EXPIRED if expired else _ID_TOKEN_INVALID)
+
+    refusal = _oidc_claims_refusal(claims, config, expected_nonce, issuer)
+    if refusal:
+        return _oidc_refused(refusal[1], refusal[0])
+    return _VerifiedClaims(claims)
 
 
 def oidc_get_user_info(config: dict, access_token: str) -> dict:
@@ -549,7 +753,7 @@ def oidc_get_user_info(config: dict, access_token: str) -> dict:
     try:
         if config.get('provider') == 'entra' and endpoints.get('graph_me'):
             # LW: Microsoft Graph gives us more data than OIDC userinfo
-            resp = requests.get(endpoints['graph_me'], headers=headers, timeout=10)
+            resp = requests.get(endpoints['graph_me'], headers=headers, timeout=10, allow_redirects=False)
             if resp.status_code == 200:
                 graph_data = resp.json()
                 user_info = {
@@ -570,10 +774,14 @@ def oidc_get_user_info(config: dict, access_token: str) -> dict:
             allow_private_ip = bool(config.get('oidc_allow_private_ip', False))
             try:
                 sanitize_outbound_url(endpoints['userinfo'], allow_private=allow_private_ip)
+                userinfo_url, tls_kw = oidc_idp_request_target(config, endpoints['userinfo'],
+                                                               allow_private_ip)
             except SsrfError as guard_err:
                 logging.warning(f"[OIDC] userinfo endpoint rejected by SSRF guard: {guard_err}")
                 return {'error': 'Userinfo endpoint failed pre-flight URL validation'}
-            resp = requests.get(endpoints['userinfo'], headers=headers, timeout=10)
+            resp = requests.get(userinfo_url, headers=headers, timeout=10, allow_redirects=False, **tls_kw)
+            if 300 <= resp.status_code < 400:
+                return {'error': _redirect_refused('userinfo endpoint', resp)}
             if resp.status_code == 200:
                 user_info = resp.json()
     except Exception as e:
@@ -592,7 +800,7 @@ def oidc_name_from_id_token(user_info: dict, id_claims: dict) -> dict:
     unverified decode, and only for the same subject (OIDC Core 5.3.2).
     """
     if user_info.get('preferred_username') or user_info.get('email'):
-        return user_info
+        return _with_token_email_flag(user_info, id_claims)
     if not oidc_id_token_verified(id_claims):
         return user_info
     sub = user_info.get('sub')
@@ -603,6 +811,9 @@ def oidc_name_from_id_token(user_info: dict, id_claims: dict) -> dict:
         value = id_claims.get(claim)
         if isinstance(value, str) and value:
             named[claim] = value
+    # the flag travels with the address it is about, oidc_derive_username reads it
+    if named.get('email') and 'email_verified' in id_claims:
+        named['email_verified'] = id_claims['email_verified']
     return named
 
 
@@ -611,9 +822,36 @@ def _claim_text(value):
     return value if isinstance(value, str) and value.strip() else None
 
 
+# MK Nov 2026 - how the IdPs write "no": a JSON false, a 0, or one of these words in any case
+_EMAIL_FLAG_NO = frozenset(('false', '0', 'no', 'n', 'off'))
+
+
 def _email_unverified(source):
     flag = source.get('email_verified')
-    return flag is False or (isinstance(flag, str) and flag.strip().lower() == 'false')
+    if isinstance(flag, bool):
+        return flag is False
+    if isinstance(flag, (int, float)):
+        return flag == 0
+    return isinstance(flag, str) and flag.strip().lower() in _EMAIL_FLAG_NO
+
+
+def _with_token_email_flag(userinfo: dict, id_claims) -> dict:
+    """userinfo, with the email_verified of the verified ID token when it carries the same
+    address without a flag of its own.
+
+    MK Nov 2026 - a userinfo answer that leaves the flag out says nothing about the address,
+    the token of the same subject may. Only ever turns a name off, so a userinfo answer
+    without a sub counts as the token's subject here.
+    """
+    if 'email_verified' in userinfo or not oidc_id_token_verified(id_claims) \
+            or 'email_verified' not in id_claims:
+        return userinfo
+    email, token_email, sub = userinfo.get('email'), id_claims.get('email'), userinfo.get('sub')
+    if (not isinstance(email, str) or not isinstance(token_email, str)
+            or email.strip().lower() != token_email.strip().lower()
+            or (sub and sub != id_claims.get('sub'))):
+        return userinfo
+    return dict(userinfo, email_verified=id_claims['email_verified'])
 
 
 def oidc_username_claim_value(userinfo: dict, id_claims: dict, claim: str):
@@ -630,7 +868,8 @@ def oidc_username_claim_value(userinfo: dict, id_claims: dict, claim: str):
     userinfo = userinfo if isinstance(userinfo, dict) else {}
     value = _claim_text(userinfo.get(claim))
     if value:
-        return None if claim == 'email' and _email_unverified(userinfo) else value
+        unverified = claim == 'email' and _email_unverified(_with_token_email_flag(userinfo, id_claims))
+        return None if unverified else value
     if not isinstance(id_claims, dict) or not oidc_id_token_verified(id_claims):
         return None
     if userinfo:
@@ -714,7 +953,8 @@ def oidc_get_user_groups_ex(config: dict, access_token: str):
     try:
         # NS: Entra Graph API for group memberships
         while url:
-            resp = requests.get(url, headers=headers, timeout=10)
+            # a redirect is not followed (see _redirect_refused): any status but 200 is a failed fetch
+            resp = requests.get(url, headers=headers, timeout=10, allow_redirects=False)
             if resp.status_code != 200:
                 logging.warning(f"[OIDC] Group fetch failed: {resp.status_code}")
                 complete = False
@@ -970,6 +1210,16 @@ def _oidc_is_fallback_row(username: str, row: dict) -> bool:
     return username in (_oidc_fallback_key(sub), f"oidc_{sub[:12]}")
 
 
+def oidc_key_names_a_subject(username: str, row: dict) -> bool:
+    """Whether the account's key was made from a subject id, not from a name: the account
+    of a sign-in without a name claim (_oidc_is_fallback_row), or a key of the hash's shape.
+
+    MK Nov 2026 - such an account is found by its sub alone. Without one stored, its owner
+    lands elsewhere and a sign-in whose name spells the key would get it.
+    """
+    return _oidc_is_fallback_row(username, row) or bool(re.fullmatch(r'oidc_[0-9a-f]{16}', username or ''))
+
+
 def oidc_derive_username(user_info: dict, users: dict = None, name: str = None) -> str:
     """Derive the local username key from OIDC claims.
 
@@ -1001,6 +1251,14 @@ def oidc_derive_username(user_info: dict, users: dict = None, name: str = None) 
     else:
         raw_username = (user_info.get('preferred_username')
                         or user_info.get('email', ''))
+        # MK Nov 2026 - an address the IdP marks as not verified is one anybody could
+        # have typed in at a self-service sign-up. It names nobody: the sign-in goes on
+        # as one without a name, which finds the account already bound to its sub.
+        # Only an explicit false - Entra and AD FS send no flag at all.
+        if raw_username and not user_info.get('preferred_username') and _email_unverified(user_info):
+            logging.warning("[OIDC] the email claim is marked as not verified, so it does not "
+                            "name the account - going on as a sign-in without a name")
+            raw_username = ''
 
     # Char set matches sanitize_username()'s allowlist. '+' belongs here for the
     # same reason '@' does: dropping it silently merges identities, so
@@ -1036,6 +1294,83 @@ def oidc_derive_username(user_info: dict, users: dict = None, name: str = None) 
     return username
 
 
+def _oidc_name_is_exact(raw, username: str) -> bool:
+    """Whether the claim `raw` became the key `username` by lower-casing alone.
+
+    The automatic order drops what the username filter does not know and lower() folds the
+    Kelvin sign into a k, so 'Bob\u200b@corp.example', ' bob@corp.example', "bo'b@..." or a
+    decomposed umlaut all come out as some other account's key.
+    """
+    return (isinstance(raw, str) and raw == raw.strip()
+            and unicodedata.normalize('NFKC', raw) == raw and raw.lower() == username)
+
+
+def oidc_new_account_refusal(username: str, user_info: dict, name: str = None):
+    """Why this sign-in may not make the new account `username`, or None when it may.
+
+    MK Nov 2026 - the same folds made a new account for a stranger: 'Bob\u200b@corp.example',
+    'bob@corp.example ' or the Kelvin sign made bob@corp.example or kelvin@corp.example,
+    bound to that sub, and the person of the name was refused from then on. Punctuation
+    may still go (the apostrophe of an O'Brien address) and case folds as before; padding,
+    what NFKC folds and what cannot be seen or combines with a letter may not.
+    """
+    raw = name if name is not None else (user_info.get('preferred_username') or user_info.get('email'))
+    if not isinstance(raw, str) or not raw:
+        return None
+    lowered = raw.lower()
+    dropped = [c for c in lowered if not (c.isalnum() or c in '._-@+')]
+    if ''.join(c for c in lowered if c not in dropped) != username:
+        return None  # the key is not this name's: a sign-in without one, keyed on its sub
+    if raw != raw.strip():
+        return 'padding around the name'
+    if unicodedata.normalize('NFKC', raw) != raw:
+        return 'characters NFKC folds into others'
+    hidden = [c for c in dropped if c != ' ' and unicodedata.category(c)[0] in 'CMZ']
+    if hidden:
+        return ('characters that cannot be seen or combine with a letter ('
+                + ', '.join(f'U+{ord(c):04X}' for c in hidden[:4]) + ')')
+    return None
+
+
+def oidc_subject_refusal(username: str, row: dict, user_info: dict, subjects=None, name: str = None):
+    """Why this sign-in may not use the OIDC / Entra account `row`, or None when it may.
+
+    `subjects` are the ids this one sign-in goes by besides user_info's sub: with Entra
+    the Graph id when /me answered and the verified token's sub and oid, so a Graph
+    hiccup does not lock anyone out. `name` is the picked username claim, as for
+    oidc_derive_username.
+    """
+    sub = user_info.get('sub')
+    # MK Oct 2026 (#1141) - a fallback key is lower case now, so a name claim can spell
+    # one ("oidc_" + 16 hex). That row is its sub's, not whoever picks it as a username.
+    if _oidc_is_fallback_row(username, row) and row.get('oidc_sub') != sub:
+        return "that account was made for another subject's sign-in without a name"
+    # NS Oct 2026 (#1149) - the account stays with the subject it was made for. Claims like
+    # email can be changed or handed on at some identity providers, and the update would
+    # give the row and its role to whoever carries the value now.
+    # MK Nov 2026 - whatever names the account, the picked claim or the automatic order:
+    # two subjects with one preferred_username (a renamed or recycled IdP account, a second
+    # IdP) took turns on the row. A row with no subject stored (made by hand, or reset by
+    # an admin) is bound by the next sign-in that carries a subject id and names it exactly.
+    bound = row.get('oidc_sub')
+    own = {s for s in [*(subjects or ()), sub] if isinstance(s, str) and s}
+    if bound:
+        if bound not in own:
+            return ("the account belongs to another subject of the identity provider; an admin "
+                    "can reset its sign-in binding if it is the same person (after a move to "
+                    "another identity provider, for example)")
+        return None
+    if not own:
+        return "the account is not bound yet and the sign-in carries no subject id to bind it to"
+    raw = name if name is not None else (user_info.get('preferred_username') or user_info.get('email'))
+    if not _oidc_name_is_exact(raw, username):
+        return ("the account is not bound yet and is taken only by its exact name, while this "
+                "sign-in's name reaches it only once characters are dropped or folded (padding, "
+                "invisible or combining characters, punctuation, a look-alike letter). If it is "
+                "the owner, an admin can delete the account and the next sign-in creates it again")
+    return None
+
+
 def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, users: dict,
                         name: str = None, subjects=None):
     """The row an OIDC sign-in would store for this user, without storing it.
@@ -1052,7 +1387,10 @@ def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, u
     username = oidc_derive_username(user_info, users, name=name)
     if username is None:
         return None  # no name, and the fallback key is not this identity's (#1141)
-    if name is not None and not user_info.get('sub'):
+    # MK Nov 2026 - in the automatic order too: a row made or updated without a sub is
+    # bound to nobody, and an update wrote the empty sub over the stored one
+    sub = user_info.get('sub')
+    if not isinstance(sub, str) or not sub:
         logging.warning(f"[OIDC] Rejected login for '{username}' - the sign-in has no sub, "
                         f"so the account cannot be tied to it")
         return None
@@ -1074,30 +1412,10 @@ def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, u
             logging.warning(f"[OIDC] Rejected login for '{username}' - a {existing_source} "
                             f"account of that name exists and cannot be taken over by OIDC")
             return None  # Caller should handle None return
-        # MK Oct 2026 (#1141) - a fallback key is lower case now, so a name claim can spell
-        # one ("oidc_" + 16 hex). That row is its sub's, not whoever picks it as a username.
-        if (_oidc_is_fallback_row(username, users[username])
-                and users[username].get('oidc_sub') != user_info.get('sub')):
-            logging.warning(f"[OIDC] Rejected login for '{username}' - that account was made "
-                            f"for another subject's sign-in without a name")
+        refusal = oidc_subject_refusal(username, users[username], user_info, subjects, name=name)
+        if refusal:
+            logging.warning(f"[OIDC] Rejected login for '{username}' - {refusal}")
             return None
-        # NS Oct 2026 (#1149) - with a claim the admin picked, the account stays with the
-        # subject it was made for. Claims like email can be changed or handed on at some
-        # identity providers, and the update below would give the row and its role to
-        # whoever carries the value now.
-        # `subjects` are the ids this one sign-in goes by: with Entra the Graph id when /me
-        # answered and the token's sub and oid, so a Graph hiccup does not lock anyone out.
-        # A row with no subject stored is not taken either: an admin binds or deletes it.
-        bound = users[username].get('oidc_sub')
-        if name is not None:
-            own = {s for s in (set(subjects or ()) | {user_info.get('sub')}) if s}
-            if not bound or bound not in own:
-                logging.warning(f"[OIDC] Rejected login for '{username}' - the account "
-                                + ("has no identity provider subject stored; an admin can "
-                                   "delete it to let the sign-in create it again" if not bound else
-                                   "belongs to another subject of the identity provider; an "
-                                   "admin can delete it if that person is gone"))
-                return None
 
         # Update existing OIDC user - on a copy, so the table the caller handed in
         # stays what it was
@@ -1161,6 +1479,12 @@ def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, u
             user['groups'] = _held + [g for g in (role_mapping.get('groups') or [])
                                       if isinstance(g, str) and g.lower() not in _have]
     else:
+        refusal = oidc_new_account_refusal(username, user_info, name=name)
+        if refusal:
+            logging.warning(f"[OIDC] Rejected login for '{username}' - the sign-in's name reaches this "
+                            f"key only through {refusal}; a new account takes a name only as the "
+                            f"identity provider spells it")
+            return None
         # Create new user
         user = {
             'role': role_mapping.get('role', ROLE_VIEWER),

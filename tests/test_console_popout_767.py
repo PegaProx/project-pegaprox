@@ -21,7 +21,7 @@ import pytest
 
 
 SRC = 'web/src/'
-LANGS = ('de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it')
+LANGS = ('de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru')
 
 
 @pytest.fixture(scope='module')

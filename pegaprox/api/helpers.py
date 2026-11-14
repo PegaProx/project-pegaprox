@@ -3,6 +3,7 @@
 
 import os
 import json
+import threading
 import time
 import logging
 from datetime import datetime
@@ -17,6 +18,7 @@ from pegaprox.globals import (
     task_pegaprox_users_cache, task_pegaprox_users_lock,
 )
 from pegaprox.core.db import get_db
+from pegaprox.models.permissions import ROLE_ADMIN
 from pegaprox.utils.rbac import acts_as_admin
 
 def effective_reverse_proxy(settings=None):
@@ -68,8 +70,9 @@ def load_server_settings():
         # HTTP redirect port - NS Jan 2026
         # Now that we have protocol detection on the main port, this is only needed
         # if you want HTTP:80 → HTTPS:5000 redirect
-        # 0 = auto (80 if root, disabled otherwise), -1 = disabled, or specific port
-        'http_redirect_port': -1,  # Disabled by default - protocol detection handles same-port redirect
+        # 0 = auto (80 if the service may open it, see app._may_bind_port80), -1 = no
+        # extra port, or a specific port
+        'http_redirect_port': -1,  # no extra port by default - protocol detection handles same-port redirect
         # Brute force protection settings
         'login_max_attempts': 5,
         'login_lockout_time': 300,  # 5 min
@@ -138,7 +141,7 @@ def load_server_settings():
         'ldap_server': '',
         'ldap_port': 389,
         'ldap_use_ssl': False,
-        'ldap_use_starttls': False,
+        'ldap_use_starttls': True,  # MK Nov 2026 - a new setup starts encrypted and checked (see below for older ones)
         'ldap_bind_dn': '',
         'ldap_bind_password': '',
         'ldap_base_dn': '',
@@ -154,6 +157,8 @@ def load_server_settings():
         'ldap_default_role': 'viewer',
         'ldap_auto_create_users': True,
         'ldap_group_mappings': [],
+        'ldap_verify_tls': True,
+        'ldap_ca_cert': '',  # PEM, one or more CA certificates the directory's certificate is checked against
         # NS: Mar 2026 - reverse proxy support (nginx/haproxy)
         'reverse_proxy_enabled': False,
         'trusted_proxies': '',  # comma-separated IPs/CIDRs, empty = loopback only
@@ -189,6 +194,11 @@ def load_server_settings():
         # NS May 2026 (PVE 9.2 parity) — extra audiences (comma-separated)
         # accepted on the JWT verify alongside the client_id.
         'oidc_audiences': '',
+        # MK Oct 2026 (#1189, #1167) - layout and language pinned for everyone, '' = users choose.
+        # Admins are exempt unless ui_lock_admins is on (see ui_lock below)
+        'ui_layout_lock': '',
+        'ui_language_lock': '',
+        'ui_lock_admins': False,
     }
     
     try:
@@ -201,6 +211,18 @@ def load_server_settings():
             # it until an admin turns it on; a new setup gets the check
             if 'smtp_verify_tls' not in saved:
                 merged['smtp_verify_tls'] = not str(saved.get('smtp_host') or '').strip()
+            # MK Nov 2026 - the same for LDAP. A directory that has a server keeps running the
+            # way it did, a TLS key it never stored is the old default (off). Without a server
+            # nothing was set up, and the new defaults win over a stored off as well: every save
+            # writes back all keys it read, so an install that saved anything holds the old
+            # defaults without anyone having chosen them
+            if str(saved.get('ldap_server') or '').strip():
+                for _k in ('ldap_use_starttls', 'ldap_verify_tls'):
+                    if _k not in saved:
+                        merged[_k] = False
+            else:
+                merged['ldap_use_starttls'] = not merged.get('ldap_use_ssl')
+                merged['ldap_verify_tls'] = True
             return merged
     except Exception as e:
         logging.error(f"Error loading server settings from database: {e}")
@@ -272,6 +294,91 @@ def save_server_settings(settings):
     except Exception as e:
         logging.error(f"Error saving server settings: {e}")
         return False
+
+
+# The layouts and languages an admin can pin for everyone (#1189, #1167). The languages are
+# the ones the UI ships, SUPPORTED_LANGS in web/src/contexts.js.
+# MK Nov 2026 - corporate-redesigned can be pinned as well. A corporate lock still means the
+# classic Corporate, which is frozen, so without it nobody could be given the redesign
+UI_LAYOUT_LOCKS = ('modern', 'corporate', 'corporate-redesigned', 'cloud')
+UI_LANGUAGE_LOCKS = ('de', 'en', 'it', 'fr', 'es', 'pt', 'ko', 'zh', 'pl', 'ru')
+UI_LOCKED = 'UI_LOCKED'
+
+
+def _checkbox(value):
+    """True or False for a checkbox sent as JSON or as a form field, None for anything else.
+    bool('false') is True, so a string is read and never cast."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in ('true', '1', 'yes', 'on'):
+            return True
+        if word in ('false', '0', 'no', 'off', ''):
+            return False
+    return None
+
+
+def apply_ui_lock(source, settings):
+    """Check the lock keys a server settings save carries (the JSON body or request.form)
+    and write them into settings. Returns (audit line or '', error or None); on an error
+    settings is left as it was. A key the save does not carry stays as stored."""
+    # MK Oct 2026 - a value outside the lists is refused, not stored as ''. A typo would
+    # lift the lock the admin meant to set, and nobody would see it
+    changes = {}
+    for key, allowed in (('ui_layout_lock', UI_LAYOUT_LOCKS), ('ui_language_lock', UI_LANGUAGE_LOCKS)):
+        if key not in source:
+            continue
+        value = source.get(key)
+        if not isinstance(value, str) or value.strip() not in ('',) + allowed:
+            return '', f"{key} is empty or one of {', '.join(allowed)}"
+        changes[key] = value.strip()
+    if 'ui_lock_admins' in source:
+        flag = _checkbox(source.get('ui_lock_admins'))
+        if flag is None:
+            return '', 'ui_lock_admins is true or false'
+        changes['ui_lock_admins'] = flag
+
+    # the audit line goes by what was in effect, so a stored value ui_lock() reads as no
+    # lock is not reported as a lock that was lifted
+    was = ui_lock(settings)
+    said = []
+    for key, label in (('ui_layout_lock', 'layout'), ('ui_language_lock', 'language')):
+        before = was[label]
+        if key in changes and changes[key] != before:
+            said.append(f"{label} {before or 'users choose'} -> {changes[key] or 'users choose'}")
+    if 'ui_lock_admins' in changes and changes['ui_lock_admins'] != was['admins']:
+        said.append('administrators ' + ('included' if changes['ui_lock_admins'] else 'exempt'))
+    settings.update(changes)
+    return ('Interface lock: ' + ', '.join(said)) if said else '', None
+
+
+def ui_lock(settings=None):
+    """The lock as GET /api/interface/lock hands it out: {'layout', 'language', 'admins'}.
+
+    A stored value outside the lists counts as no lock, as a restored or hand-edited
+    config can bring one."""
+    if settings is None:
+        settings = load_server_settings()
+    layout = settings.get('ui_layout_lock')
+    language = settings.get('ui_language_lock')
+    layout = layout if isinstance(layout, str) and layout in UI_LAYOUT_LOCKS else ''
+    language = language if isinstance(language, str) and language in UI_LANGUAGE_LOCKS else ''
+    return {'layout': layout, 'language': language, 'admins': settings.get('ui_lock_admins') is True}
+
+
+def ui_lock_holds(role, lock):
+    """Whether the lock binds an account of this role.
+
+    role is the stored one, what auth_login and auth_check report as user.role (fresh_role
+    there) and what the browser goes by, so the UI and the server agree on who is held.
+    So an admin a tenant mapping lowers is exempt as well, and so is an admin's API token
+    bound to a lower role: the preferences are the account's, not the token's."""
+    if not (lock['layout'] or lock['language']):
+        return False
+    return lock['admins'] or role != ROLE_ADMIN
 
 
 def get_session_timeout():
@@ -509,6 +616,72 @@ def caller_is_scoped(user, cluster_id):
     return False
 
 
+def affinity_rules_in_view(user, rules, cluster_id=None):
+    """The affinity rules `user` may read. A rule names every guest it groups, so a caller
+    confined in the rule's cluster (caller_is_scoped) only gets the rules whose members it
+    may all view; a rule without members or with a member that is no vmid stays out.
+
+    MK Nov 2026 - one place for the cluster route and the flat /api/affinity-rules list,
+    which had only filtered by cluster and so named the other pools' guests. The cluster
+    is `cluster_id`, else the rule's own cluster_id (the flat list mixes clusters)."""
+    from pegaprox.utils.rbac import user_can_access_vm, acts_as_admin
+    scoped = {}
+
+    def _visible(rule):
+        cid = cluster_id or rule.get('cluster_id')
+        if not cid:
+            # a row without a cluster belongs to no tenant
+            return acts_as_admin(user)
+        if cid not in scoped:
+            scoped[cid] = caller_is_scoped(user, cid)
+        if not scoped[cid]:
+            return True
+        members = rule.get('vm_ids') or rule.get('vms') or []
+        if not members:
+            return False
+        try:
+            return all(user_can_access_vm(user, cid, int(v), 'vm.view') for v in members)
+        except (TypeError, ValueError):
+            return False
+
+    return [r for r in rules if _visible(r)]
+
+
+def alert_scope(user, cluster_id):
+    """Which alerts of `cluster_id` `user` may read: a predicate over what an alert is
+    about (target_type, target_id), or None for all of them.
+
+    A caller confined in the cluster (caller_is_scoped) gets the cluster's own and those
+    of the guests it may view. Nothing about a node: its pools, OSDs, clock and QDevice, a
+    node threshold, a task without a guest - a pool or guest grant reaches none of them,
+    and the alerts name the nodes. A cluster-wide caller gets them all, a node's only with
+    node.view, which the node pages ask. The active-alerts list and the push inbox both
+    go by this, so the bell shows nothing the list does not. Fails closed."""
+    from pegaprox.utils.rbac import user_can_access_vm, has_permission
+    try:
+        confined = caller_is_scoped(user, cluster_id)
+    except Exception:
+        confined = True
+    if confined:
+        def _sees(target_type, target_id):
+            if target_type == 'cluster':
+                return True
+            if target_type != 'vm':
+                return False
+            try:
+                return bool(user_can_access_vm(user, cluster_id, int(target_id), 'vm.view'))
+            except Exception:
+                return False
+        return _sees
+    try:
+        sees_nodes = has_permission(user, 'node.view')
+    except Exception:
+        sees_nodes = False
+    if sees_nodes:
+        return None
+    return lambda target_type, target_id: target_type != 'node'
+
+
 # MK Oct 2026 - what a confined caller does not get of a node's maintenance: the guests in it
 # (moving, pending, failed, placed off their pin, the templates moved or left behind) and the
 # HA rules held off over them, which the maintenance plan does not show such a caller either.
@@ -550,17 +723,164 @@ def nodes_without_maintenance_guests(nodes):
             for name, n in nodes.items()}
 
 
-def node_maintenance_for_caller(cluster_id, nodes):
-    """The node map as the caller of this request may see it. The caller is only looked up
-    when a node is in maintenance: /metrics is polled from every open tab."""
-    if not nodes_in_maintenance_view(nodes):
-        return nodes
+# MK Nov 2026 - the node reads a confined caller polls (/metrics from every open tab) take the
+# guest list the broadcast loop read a moment ago instead of walking the cluster once more.
+# Placing a guest (restore, clone, migrate) asks a fresh one.
+GUEST_NODES_AGE = 6
+
+
+def guest_nodes_of(user, cluster_id, mgr, max_age=0):
+    """The nodes of `cluster_id` a guest `user` may see (vm.view) runs on, as a set.
+
+    One rule for where a confined caller may place a guest (restore, clone, migrate) and for
+    which nodes they may read. Asked guest by guest: get_user_vms knows the VM-ACLs only, so a
+    caller confined by a pool came back as unrestricted (#1081). Raises when the guest list did
+    not answer - an unread list is not a caller without guests."""
+    from pegaprox.utils.rbac import user_can_access_vm
+    if mgr is None:
+        raise LookupError(f'no manager for {cluster_id}')
+    rows = mgr.get_vm_resources(max_age=max_age) if max_age else mgr.get_vm_resources()
+    if getattr(rows, 'unavailable', False):
+        raise RuntimeError(f'the guest list of {cluster_id} did not answer')
+    nodes = set()
+    for r in rows or []:
+        node = r.get('node')
+        # one guest per node is enough, the rest of that node is not asked
+        if not node or node in nodes or not str(r.get('vmid', '')).isdigit():
+            continue
+        if user_can_access_vm(user, cluster_id, int(r['vmid']), 'vm.view', r.get('type')):
+            nodes.add(node)
+    return nodes
+
+
+def _request_caller():
+    """acting_user() with the username its stored record does not carry, which the pool and
+    ACL checks key on. No load of the whole users table: these run on polled reads."""
     from flask import request
-    from pegaprox.utils.auth import build_authz_user
-    if sees_whole_maintenance(build_authz_user(request.session.get('user', ''), request.session),
-                              cluster_id):
+    user = acting_user()
+    if not user:
+        return None
+    user = dict(user)
+    user.setdefault('username', request.session.get('user', ''))
+    return user
+
+
+# MK Nov 2026 - a polled node read of a confined caller takes the node set its stream's
+# resources pass found (realtime._sse_node_scope, renewed about every 10 s while a tab is
+# open), or one an earlier read worked out, when that is at most this many seconds old. The
+# Client Portal case, one guest among 10k, asks nearly every guest for its one node, and
+# /metrics alone is polled every 15 s per tab. Placing a guest (max_age=0) never takes it.
+GUEST_SCOPE_REUSE = 30
+_read_node_scope = {}
+_read_node_scope_lock = threading.Lock()
+
+
+def _node_scope_key(cluster_id, who):
+    """The key the stream keeps a node set under: cluster, account, the role it acts with.
+    None without a username, so two callers can never share one."""
+    username = who.get('username')
+    if not username:
+        return None
+    return (cluster_id, username, who.get('effective_role', who.get('role')))
+
+
+def _reused_node_scope(key):
+    now = time.monotonic()
+    try:
+        from pegaprox.utils import realtime
+        had = realtime._sse_node_scope.get(key)
+    except Exception:
+        had = None
+    # only a node set: "whole cluster" or "unseen" of the stream are no answer for a read
+    if had is not None and isinstance(had[1], frozenset) and now - had[0] <= GUEST_SCOPE_REUSE:
+        return set(had[1])
+    had = _read_node_scope.get(key)
+    if had is not None and now - had[0] <= GUEST_SCOPE_REUSE:
+        return set(had[1])
+    return None
+
+
+def _keep_node_scope(key, nodes):
+    now = time.monotonic()
+    with _read_node_scope_lock:
+        _read_node_scope[key] = (now, frozenset(nodes))
+        if len(_read_node_scope) > 4096:
+            for k in [k for k, (t, _n) in _read_node_scope.items() if now - t > GUEST_SCOPE_REUSE]:
+                del _read_node_scope[k]
+            if len(_read_node_scope) > 4096:
+                _read_node_scope.clear()
+
+
+def forget_node_scopes():
+    """Drop every node set kept for the reads and the streams (tests: the next cluster_1 has
+    other guests on other nodes)."""
+    with _read_node_scope_lock:
+        _read_node_scope.clear()
+    try:
+        from pegaprox.utils import realtime
+        with realtime._sse_node_scope_lock:
+            realtime._sse_node_scope.clear()
+    except Exception:
+        pass
+
+
+def caller_guest_nodes(cluster_id, max_age=GUEST_NODES_AGE, user=None):
+    """None when the caller of this request sees every node of `cluster_id` (the admin, an
+    operator of the cluster), else the set of nodes their guests run on (guest_nodes_of).
+    Confined when caller_is_scoped cannot tell. Raises when the guests cannot be read.
+    max_age > 0 (a polled read) may take a node set of the last GUEST_SCOPE_REUSE seconds."""
+    who = user if user is not None else _request_caller()
+    if not who:
+        return set()
+    try:
+        scoped = caller_is_scoped(who, cluster_id)
+    except Exception as e:
+        logging.warning(f"[SCOPE] scope on {cluster_id} unknown, asked as confined: {e}")
+        scoped = True
+    if not scoped:
+        return None
+    key = _node_scope_key(cluster_id, who) if max_age else None
+    if key is not None:
+        reused = _reused_node_scope(key)
+        if reused is not None:
+            return reused
+    nodes = guest_nodes_of(who, cluster_id, cluster_managers.get(cluster_id), max_age)
+    if key is not None:
+        _keep_node_scope(key, nodes)
+    return nodes
+
+
+def node_map_for_caller(cluster_id, nodes):
+    """A node map of get_node_status() or of /node-progress as the caller of this request may
+    see it. Whole for the admin and an operator of the cluster. A confined caller gets the
+    nodes their own guests run on, a maintenance there without the guests in it, and {} when
+    their guests cannot be read. The map is the manager's cache, which the broadcast loop
+    shares: a cut is a new dict, the map is never written to."""
+    if not isinstance(nodes, dict):
         return nodes
-    return nodes_without_maintenance_guests(nodes)
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.warning(f"[SCOPE] guests on {cluster_id} unread, no nodes for a confined caller: {e}")
+        return {}
+    if mine is None:
+        return nodes
+    return nodes_without_maintenance_guests({name: n for name, n in nodes.items() if name in mine})
+
+
+def require_guest_node(cluster_id, node, user=None, max_age=GUEST_NODES_AGE):
+    """Gate for a route about one node of `cluster_id`. None when the caller sees every node
+    there or one of their guests runs on `node`, else the error response to return: 403 when
+    none does, 503 when their guests cannot be read."""
+    from flask import jsonify
+    try:
+        mine = caller_guest_nodes(cluster_id, max_age=max_age, user=user)
+    except Exception as e:
+        logging.error(f"[SCOPE] cannot read the caller's guests on {cluster_id}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
+    if mine is None or (isinstance(node, str) and node in mine):
+        return None
+    return jsonify({'error': 'Access denied: none of your guests run on this node'}), 403
 
 
 def scope_vm_rows(cluster_id, rows, *, vmid_key='vmid', type_key='type'):
@@ -663,7 +983,7 @@ def bounded_limit(value, default=50, maximum=1000):
     return min(n, maximum)
 
 
-def require_unconfined(cluster_id):
+def require_unconfined(cluster_id, user=None):
     """sec (audit): guard for a WHOLE-CLUSTER operation — one with no per-object notion, so
     user_can_access_vm has nothing to ask about: rebooting a node, draining it, rewriting the
     cluster's credentials or network, arming fencing, wiping a disk.
@@ -672,10 +992,14 @@ def require_unconfined(cluster_id):
     pool-/ACL-scoped caller, deferring the real decision downstream. For these routes downstream
     is where the decision has to happen, and the only correct answer for a confined caller is no.
 
+    user: the identity to ask about. A read the UI polls passes _request_caller(), which is
+    the record require_auth already fetched; without it the whole users table is loaded.
+
     Returns an error response to `return`, or None when the caller may proceed."""
     from flask import request, jsonify
     from pegaprox.utils.auth import build_authz_user
-    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user is None:
+        user = build_authz_user(request.session.get('user', ''), request.session)
     if caller_is_scoped(user, cluster_id):
         return jsonify({'error': 'Access denied: this action affects the whole cluster'}), 403
     return None
@@ -818,6 +1142,33 @@ def guest_size(manager, node, vm_type, vmid):
     return cfg or {}
 
 
+# MK Oct 2026 (#1159) - a PBS datastore or a share that only takes backups, ISOs and templates
+# is not room for guests, and it made the storage figure of a cluster look far bigger
+GUEST_DISK_CONTENT = ('images', 'rootdir')
+
+
+def holds_guest_disks(storage):
+    """True when a storage takes VM or CT disks: its content (a comma list as Proxmox sends
+    it, or a list) names images or rootdir."""
+    content = storage.get('content') if isinstance(storage, dict) else None
+    if isinstance(content, str):
+        content = content.split(',')
+    if not isinstance(content, (list, tuple, set)):
+        return False
+    return any(str(c).strip() in GUEST_DISK_CONTENT for c in content)
+
+
+def guest_storage_totals(rows):
+    """(used, total) bytes over the storages that hold guest disks. One row per storage, so
+    a shared one has to come in once and not once per node."""
+    used = total = 0
+    for row in rows or ():
+        if holds_guest_disks(row):
+            used += int(row.get('used') or 0)
+            total += int(row.get('total') or 0)
+    return used, total
+
+
 def node_shell_address(mgr, node):
     """The address a shell for `node` logs in at, or None: then there is no shell.
 
@@ -838,6 +1189,26 @@ def node_shell_address(mgr, node):
     except Exception as e:
         logging.warning(f"[SHELL] no address for node {node!r}: {e}")
         return None
+
+
+NODE_SHELL_SSH_OFF = ('SSH is switched off for this cluster in its settings, so the node '
+                      'shell stays closed')
+
+
+def node_shell_refusal(mgr):
+    """Why the node shell of this cluster stays closed - a sentence, or None.
+
+    MK Nov 2026 - neither shell asked the cluster's SSH switch: both log in with what the
+    operator types into the dialog and never went through _ssh_connect, so with SSH
+    switched off a node shell still opened. Only the switch counts here. A cluster
+    without SSH credentials of its own still has a shell, the login is the operator's.
+    Asked by the main port shell and by the two answers the SSH server on port+2 opens
+    its shell with (ws token validate, cluster-creds), so that server cannot get round it.
+    """
+    from pegaprox.utils.ssh import ssh_blocked_for
+    if mgr is not None and ssh_blocked_for(mgr) == 'SSH_DISABLED':
+        return NODE_SHELL_SSH_OFF
+    return None
 
 
 # NS Oct 2026 - an XCP-ng pool asks for its own xapi.vm.* permission next to the vm.* one,
@@ -993,6 +1364,58 @@ def upstream_failure(status, error='', system='Proxmox VE', default=500, **extra
         return jsonify({**extra, 'error': f'{msg}: {error}' if error else msg,
                         'code': UPSTREAM_AUTH, 'upstream_status': status}), 502
     return jsonify({**extra, 'error': error}), status or default
+
+
+# MK Nov 2026 - reads that answered 200 with [] or {} when Proxmox VE refused them or did not
+# answer at all, so a node looked as if it had no interfaces, tasks, pools or certificates.
+# One shape for all of them: 502 with the reason and the status PVE sent, 503 when the
+# cluster is out of reach, 504 when PVE took the read and was too slow (timed_out). `what`
+# names the read in English ("the task list of node pve1").
+PVE_READ_FAILED = 'PVE_READ_FAILED'
+PVE_UNREACHABLE = 'PVE_UNREACHABLE'
+PVE_TIMEOUT = 'PVE_TIMEOUT'
+
+
+def pve_read_failed(status, text, what, **extra):
+    """(response, status) for a read Proxmox VE answered with `status` instead of 200.
+    text: the body it sent (or a reason of our own when status is 0). 401 and 403 go out
+    as UPSTREAM_AUTH (#1142); another 4xx keeps its status, as the passthroughs do; a 5xx
+    or no status at all is a 502."""
+    from flask import jsonify
+    reason = parse_pve_error(text or '', f'HTTP {status}' if status else 'no answer')
+    if status in UPSTREAM_AUTH_STATUSES:
+        return upstream_failure(status, reason, **extra)
+    body = {**extra, 'error': f'Could not read {what}: {reason}', 'code': PVE_READ_FAILED}
+    if status:
+        body['upstream_status'] = status
+    return jsonify(body), status if 400 <= (status or 0) < 500 else 502
+
+
+def pve_unreachable(what, **extra):
+    from flask import jsonify
+    return jsonify({**extra, 'error': f'Cluster temporarily unreachable: could not read {what}',
+                    'code': PVE_UNREACHABLE, 'offline': True}), 503
+
+
+def pve_timed_out(what, **extra):
+    """504 for a read Proxmox VE took but did not answer in time: the cluster is there and
+    the read was too slow, so this is no 'offline'."""
+    from flask import jsonify
+    return jsonify({**extra, 'error': f'Proxmox VE took too long to send {what}',
+                    'code': PVE_TIMEOUT, 'timeout': True}), 504
+
+
+def unread_failure(result, what, **extra):
+    """None for an answer that was read. For the UnreadList or UnreadDict a manager read
+    hands back when it did not answer (core/manager.py), the error response to send."""
+    if not getattr(result, 'unavailable', False):
+        return None
+    if getattr(result, 'timed_out', False):
+        return pve_timed_out(what, **extra)
+    if getattr(result, 'offline', False):
+        return pve_unreachable(what, **extra)
+    return pve_read_failed(getattr(result, 'status', 0) or 0, getattr(result, 'text', '') or '',
+                           what, **extra)
 
 
 # MK Oct 2026 (#763, #954) - the two evacuation options of a rolling update. The run started

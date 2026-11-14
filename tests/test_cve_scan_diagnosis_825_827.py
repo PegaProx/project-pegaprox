@@ -86,7 +86,8 @@ def test_a_sudo_refusal_is_named_as_one(stderr, expect):
 def test_the_717_hints_still_classify():
     """Regression guard: the sudo branch sits after these and must not shadow them."""
     assert 'key auth only' in _ssh_auth_hint('Permission denied (publickey).')
-    assert 'password rejected' in _ssh_auth_hint('Permission denied (publickey,password).')
+    assert 'password rejected' in _ssh_auth_hint('Permission denied (publickey,password).',
+                                                 tried='password')
     assert 'host key' in _ssh_auth_hint('Host key verification failed.')
     assert 'invalid format' in _ssh_auth_hint('Load key "/tmp/k": invalid format')
 

@@ -279,9 +279,20 @@ FORWARDED_READS = LEADER_ONLY_READS | XCPNG_TASK_READS | frozenset((
     # a bulk migration runs in the process of the instance that started it (#952)
     '/api/bulk-migrations',
     '/api/bulk-migrations/<run_id>',
+    # and an ESXi bulk run as well (core/esxi_bulk.py)
+    '/api/vmware/bulk-migrate',
+    '/api/vmware/bulk-migrate/<run_id>',
     # and so does a batch restore
     '/api/batch-restores',
     '/api/batch-restores/<run_id>',
+    # a QDevice setup, removal or bulk setup (core/qnetd.py), and what the active asks
+    # the QNetd hosts and nodes: a 'local' QNetd host is the active's own machine
+    '/api/qnetd/jobs',
+    '/api/qnetd/jobs/<job_id>',
+    '/api/qnetd/hosts',
+    '/api/qnetd/hosts/<host_id>/status',
+    '/api/clusters/<cluster_id>/qdevice/preflight',
+    '/api/clusters/<cluster_id>/qdevice/plan',
 ))
 # The one rule every plugin route is served behind (api/plugins.py plugin_proxy). A
 # plugin handler serves every method from one function and most never look at which
@@ -341,13 +352,20 @@ SYNC_TABLES = (
     'recovery_targets', 'restore_test_marks',
     # manual confirmations of a guest's recoverability, beside the automatic facts
     'recovery_confirmations',
+    # the QNetd hosts and which cluster votes through which (core/qnetd.py)
+    'qnetd_hosts', 'qnetd_attachments',
+    # the custom node hardening profiles, picks of the built-in controls
+    'hardening_profiles',
+    # VM blueprints: a library image or a PVE template plus hardware and Cloud-Init, and
+    # the template each cluster deploys one from (#1220)
+    'vm_blueprints', 'blueprint_templates',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
     # the signed checkpoints of this host's audit chain, one chain per instance
     'audit_checkpoints',
     'active_alerts', 'site_recovery_events', 'cve_history', 'backup_verifications',
-    'status_uptime', 'cloud_init_deployments', 'dr_drills', 'dr_drill_checks',
+    'status_uptime', 'cloud_init_deployments', 'blueprint_deployments', 'dr_drills', 'dr_drill_checks',
     # the boot screenshots of a test failover, beside the event they belong to
     'site_recovery_screenshots',
     'snapshot_runs', 'drift_events', 'auto_install_runs', 'push_inbox',
@@ -399,6 +417,7 @@ ENCRYPTED_COLUMNS = {
     'esxi_storages': ('password_encrypted',),
     'node_bmc_endpoints': ('bmc_password_encrypted',),
     'cluster_node_credentials': ('password_encrypted',),
+    'qnetd_hosts': ('password_encrypted', 'ssh_key_encrypted'),
     'pbs_servers': ('pass_encrypted', 'api_token_secret_encrypted', 'ssh_key_encrypted'),
     'vmware_servers': ('pass_encrypted',),
     'auto_install_profiles': ('answer_encrypted',),
@@ -1594,6 +1613,7 @@ def _refresh_managers():
     PVE manager otherwise only reads at its start. Returns how many values changed."""
     from pegaprox import globals as g
     from pegaprox.core.db import get_db
+    from pegaprox.models.tasks import predictive_threshold
     db = get_db()
     changed = 0
     for cid, data in (db.get_all_clusters() or {}).items():
@@ -1603,8 +1623,14 @@ def _refresh_managers():
             continue
         ha_changed = False
         for key in _REFRESH_CLUSTER_FIELDS:
-            if key in data and hasattr(cfg, key) and getattr(cfg, key) != data[key]:
-                setattr(cfg, key, data[key])
+            if key not in data or not hasattr(cfg, key):
+                continue
+            value = data[key]
+            if key == 'predictive_threshold':
+                # the row of an older cluster holds 0.0 or NULL, its manager runs the default
+                value = predictive_threshold(value)
+            if getattr(cfg, key) != value:
+                setattr(cfg, key, value)
                 changed += 1
                 ha_changed = ha_changed or key in ('ha_enabled', 'ha_settings')
         if is_active():
@@ -4062,6 +4088,19 @@ def apply_snapshot(snap):
         raise
 
     # the rows are in; nothing below raises, so a caller that got here can count them
+    # MK Nov 2026 - on disk before the state file says this cv is held here (the
+    # connections run synchronous=NORMAL): a power cut that kept the record and took
+    # the rows would leave this member naming a cv it lacks the content of, also once
+    # it leads. A sync that fails takes nothing back, the rows are committed: what
+    # follows from them still happens, only the cv is not recorded, and the next sync
+    # compares row by row
+    from pegaprox.core import dbcrypto
+    unsynced = ''
+    try:
+        dbcrypto.sync_wal(db.db_path)
+    except OSError as e:
+        unsynced = f'the rows were not synced to disk ({e})'
+        logging.error(f"[HA] sync from {snap.get('instance_id')}: {unsynced}")
     with _journal_lock:
         _journal['pending'] = []
     _orphans['not_kept'] = None
@@ -4073,8 +4112,10 @@ def apply_snapshot(snap):
     problem = _adopt_group(snap)
     if problem:
         summary['file_errors'].append(problem)
+    if unsynced:
+        summary['file_errors'].append(unsynced)
     summary['tombstones_owed'] = _tombstones_owed(snap)
-    rec = _note_applied(snap, lineage, their_epoch, held, mark)
+    rec = None if unsynced else _note_applied(snap, lineage, their_epoch, held, mark)
     _after_apply()
     if rec and rec.get('mark'):
         # last: it gives the hub away once more, and everything else is in place
@@ -4635,6 +4676,12 @@ def note_config_etag(raw, upto=None, data=None, held=None):
         rec['hist'] = hist[-LINEAGE_KEEP:]
         if rec != old:
             try:
+                # MK Nov 2026 - the content this cv names on disk before the record: the
+                # members get it under that cv, and a power cut that took it here
+                # (synchronous=NORMAL) would have them wipe it with the next step
+                from pegaprox.core import dbcrypto
+                from pegaprox.core.db import get_db
+                dbcrypto.sync_wal(get_db().db_path)
                 _commit_locked(dict(st, cv=rec))
             except Exception as e:
                 raise HaError(f'The config version could not be saved: {e}')
@@ -8022,6 +8069,12 @@ def set_group_timezone(name):
             try:
                 if st['role'] != ROLE_ACTIVE or group_timezone() != before:
                     raise HaError("The group's time zone changed meanwhile - try again")
+                # MK Nov 2026 - the stamps on disk before the zone: under synchronous=NORMAL a
+                # power cut could keep the state file and take them, and after a first change
+                # nothing in the database would say which zone they are in (stamps_settle)
+                from pegaprox.core import dbcrypto
+                from pegaprox.core.db import get_db
+                dbcrypto.sync_wal(get_db().db_path)
                 _commit_locked(dict(st, timezone=name))
                 return True
             except Exception as e:
@@ -10659,12 +10712,15 @@ def lease_status(st=None, checks=None):
 # --- what each instance measures and announces -----------------------------------
 
 def _reaches(mgr):
+    from pegaprox.core.manager import PegaProxManager
     hosts = [getattr(mgr, 'host', None)]
     hosts += list(getattr(getattr(mgr, 'config', None), 'fallback_hosts', None) or [])
     for host in [h for h in hosts if isinstance(h, str) and h][:REACH_HOSTS]:
         try:
+            # mgr.host comes bracketed, a fallback host as it was found or typed
             resp = mgr._create_session().get(
-                f"https://{host}:{mgr.api_port}/api2/json/version", timeout=REACH_TIMEOUT)
+                f"https://{PegaProxManager._bracket_ipv6(host)}:{mgr.api_port}/api2/json/version",
+                timeout=REACH_TIMEOUT)
             # an answer is an answer: a ticket that ran out says the API is there
             if resp.status_code in (200, 401):
                 return True
@@ -12990,13 +13046,19 @@ def _recovery_table(cur):
 
 def _recovery_write(sql, args):
     try:
+        from pegaprox.core import dbcrypto
         from pegaprox.core.db import get_db
-        conn = get_db().conn
+        db = get_db()
+        conn = db.conn
         with _recovery_lock:
             cur = conn.cursor()
             _recovery_table(cur)
             cur.execute(sql, args)
             conn.commit()
+            # MK Nov 2026 - a step is written down before it is taken, and some cannot be
+            # taken back (a fence, a config moved off the node): on disk first, also under
+            # synchronous=NORMAL
+            dbcrypto.sync_wal(db.db_path)
         return True
     except Exception as e:
         logging.error(f"[HA] could not write the recovery journal: {e}")

@@ -9,19 +9,23 @@ import uuid
 import re
 import shlex
 from datetime import datetime, timedelta
+import requests
 from flask import Blueprint, jsonify, request
 
 from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117
-from pegaprox.utils.sanitization import task_ref_ok
+from pegaprox.utils.sanitization import task_ref_ok, mask_url_logins
 from pegaprox.core.db import get_db
 
 from pegaprox.utils.auth import require_auth, load_users, verify_password
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.ssh import read_capped as _read_capped
-from pegaprox.api.helpers import check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined, bounded_limit
+from pegaprox.api.helpers import (check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined,
+                                  bounded_limit, upstream_failure, UPSTREAM_AUTH_STATUSES, parse_pve_error,
+                                  require_guest_node, caller_guest_nodes)
+from pegaprox.api.helpers import unread_failure
 
 bp = Blueprint('nodes', __name__)
 
@@ -36,6 +40,10 @@ def get_node_summary_api(cluster_id, node):
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    # a caller confined to some guests reads the nodes those run on, as /metrics lists them
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     
     manager = cluster_managers[cluster_id]
     return jsonify(manager.get_node_summary(node))
@@ -56,6 +64,9 @@ def get_node_ip_api(cluster_id, node):
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     
     mgr = cluster_managers[cluster_id]
     # #781 (Panxatony) — read only what this endpoint uses. It formerly unpacked mgr.api_port too
@@ -97,6 +108,9 @@ def get_node_rrddata_api(cluster_id, node):
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     
     manager = cluster_managers[cluster_id]
     timeframe = request.args.get('timeframe', 'hour')
@@ -108,12 +122,69 @@ def get_node_rrddata_api(cluster_id, node):
 def get_node_network_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the host's interfaces, addresses and gateways: not for a caller confined to some guests.
+    # The NIC dialog of their guest reads the bridge list of its node (vms.get_network_list_api)
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
 
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_network_config(node))
+    # MK Nov 2026 - a failed read says so, it is not a node without interfaces
+    got = manager.get_node_network_config(node)
+    return unread_failure(got, f'the network configuration of node {node}') or jsonify(got)
+
+
+# MK Nov 2026 - what waits in interfaces.new until Apply. PVE sends it as the 'changes'
+# attribute next to the list (a unified diff, left out when nothing waits); the list read above
+# hands on only the list. Read only, same access as the list. A read that fails says so with
+# its reason and is never handed on as "nothing waits"
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/changes', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_network_changes_api(cluster_id, node):
+    """The changes that wait for Apply on a node's network, as the diff Proxmox VE sends. Read only."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    bad, status = _reject_bad_node(node)
+    if bad is not None:
+        return bad, status
+
+    manager = cluster_managers[cluster_id]
+    if getattr(manager, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'Pending network changes are a Proxmox VE feature', 'code': 'NOT_SUPPORTED'}), 501
+    if not manager.is_connected and not manager.connect_to_proxmox():
+        return jsonify({'error': 'Cluster not connected', 'offline': True}), 503
+
+    url = f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{node}/network"
+    try:
+        resp = manager._api_get(url)
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {_sl(cluster_id)} unreachable for the pending network changes: {e}")
+        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
+    if resp.status_code != 200:
+        if resp.status_code in UPSTREAM_AUTH_STATUSES:
+            return upstream_failure(resp.status_code, parse_pve_error(resp.text))
+        return jsonify({'error': parse_pve_error(resp.text, 'Could not read the network configuration'),
+                        'upstream_status': resp.status_code}), 502
+    try:
+        body = resp.json()
+    except ValueError:
+        return jsonify({'error': 'Proxmox VE sent an answer that is not JSON', 'upstream_status': 200}), 502
+    # only a left out attribute means nothing waits; any other shape is an answer we cannot read
+    changes = body.get('changes') if isinstance(body, dict) else 0
+    if changes is None:
+        changes = ''
+    if not isinstance(changes, str):
+        return jsonify({'error': 'Proxmox VE sent an unexpected answer for the pending changes', 'upstream_status': 200}), 502
+    return jsonify({'changes': changes})
 
 
 # MK May 2026 — node-name regex (mirrors vms.py:2718 hardening). RFC-1035-ish
@@ -142,6 +213,9 @@ def _reject_bad_node(node):
 def get_node_netstats_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
@@ -160,6 +234,10 @@ def get_node_netstats_api(cluster_id, node):
 def get_node_cluster_health_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # corosync and quorum of the whole cluster
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
@@ -208,6 +286,9 @@ def get_cluster_qdevice_api(cluster_id):
 def get_node_sensors_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
@@ -232,6 +313,9 @@ def get_node_sensors_api(cluster_id, node):
 def get_node_temperature_history_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     from pegaprox.background.metrics import load_node_temps
@@ -262,6 +346,9 @@ def get_node_metrics_history_api(cluster_id, node):
     if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     from pegaprox.background.metrics import history_range, load_metrics_range, history_series
     start, end, why = history_range(request.args)
     if why:
@@ -329,6 +416,22 @@ def get_hw_monitoring_consent():
     })
 
 
+def _refuse_confined_consent():
+    """403 unless the caller sees every cluster and no tenant override lowers them where
+    they live. Both opt-ins switch the hardware reads on for every node of every cluster,
+    so they take the bar of the interface lock and the banners. Fails closed."""
+    try:
+        from pegaprox.api.ha import _unconfined
+        from pegaprox.utils.auth import build_authz_user
+        session = getattr(request, 'session', None) or {}
+        if _unconfined(build_authz_user(session.get('user', ''), session)):
+            return None
+    except Exception as e:
+        logging.warning(f"[Hardware] could not resolve the caller's cluster scope: {e}")
+    return jsonify({'error': 'Hardware monitoring is switched on and off by administrators who '
+                             'are not limited to a tenant or to specific clusters'}), 403
+
+
 @bp.route('/api/hardware-monitoring/consent', methods=['POST'])
 @require_auth(perms=['admin.settings'])
 def set_hw_monitoring_consent():
@@ -338,6 +441,9 @@ def set_hw_monitoring_consent():
     version, so a stale UI cannot silently opt in under an old warning. The
     acknowledgement is persisted to the audit log with who/when/which-version.
     """
+    refused = _refuse_confined_consent()
+    if refused:
+        return refused
     from pegaprox.api.helpers import load_server_settings, save_server_settings
     from pegaprox.core import bmc
     data = request.get_json(silent=True) or {}
@@ -393,6 +499,10 @@ def get_node_hardware_api(cluster_id, node):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the host's hardware, which no pool or guest grant covers
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
@@ -438,6 +548,9 @@ def get_redfish_consent():
 def set_redfish_consent():
     """Enable/disable out-of-band Redfish monitoring. Enabling requires the current
     warning version to be acknowledged; the acknowledgement + language are audited."""
+    refused = _refuse_confined_consent()
+    if refused:
+        return refused
     from pegaprox.api.helpers import load_server_settings, save_server_settings
     from pegaprox.core import bmc
     data = request.get_json(silent=True) or {}
@@ -494,6 +607,11 @@ def _require_redfish_consent():
 def list_bmc_endpoints_api(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - the BMC host and login name of every node: what the writes below keep
+    # from a caller confined to some guests here, they do not get to read either
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     return jsonify({'endpoints': get_db().list_bmc_endpoints(cluster_id)})
 
 
@@ -502,6 +620,9 @@ def list_bmc_endpoints_api(cluster_id):
 def get_bmc_endpoint_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     ep = get_db().get_bmc_endpoint(cluster_id, node, decrypt=False)
@@ -517,6 +638,11 @@ def get_bmc_endpoint_api(cluster_id, node):
 def set_bmc_endpoint_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - one BMC watches the whole host and every tenant on it: like the DELETE
+    # below, not for a caller confined to some guests here
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     consent_err = _require_redfish_consent()
@@ -580,6 +706,11 @@ def test_bmc_endpoint_api(cluster_id, node):
     Returns {available, health?, reason?} — read-only, no config change."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # it sends the stored BMC login and answers with the host's health, which /hardware
+    # keeps from a confined caller too
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     consent_err = _require_redfish_consent()
@@ -619,6 +750,9 @@ def get_cluster_hardware_health_api(cluster_id):
     populates the cache. Consent-gated like the per-node read."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     from pegaprox.core import bmc
@@ -870,7 +1004,51 @@ def get_cluster_networks_api(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
-    return jsonify(mgr.get_cluster_networks())
+    # decided before the walk, which fires one config read per guest
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[API] cannot read the caller's guests on {_sl(cluster_id)}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
+    got = mgr.get_cluster_networks()
+    # XCP-ng: the pool's networks with counts, no guest and no node in them, nothing to cut
+    if mine is None or getattr(mgr, 'cluster_type', None) == 'xcpng':
+        return jsonify(got)
+    return jsonify(_networks_for_confined(cluster_id, got, mine))
+
+
+def _networks_for_confined(cluster_id, got, mine):
+    """The /networks answer for a caller confined to some guests: the guests they may see,
+    the nodes in `mine` (where those run) and the bridges there. `got` is the manager's
+    30 s cache that every caller is served from, so the cut is made of copies."""
+    if not isinstance(got, dict):
+        return got
+    nets = [n for n in got.get('networks') or [] if isinstance(n, dict)]
+    stores = [s for s in got.get('storage_assignments') or [] if isinstance(s, dict)]
+    rows = [r for x in nets + stores for r in x.get('vms') or [] if isinstance(r, dict)]
+    # one pass over every guest the answer names, not one per bridge or storage
+    allowed = {(r.get('vmid'), r.get('type')) for r in scope_vm_rows(cluster_id, rows)}
+
+    def theirs(vms):
+        return [r for r in vms or [] if isinstance(r, dict) and (r.get('vmid'), r.get('type')) in allowed]
+
+    out = []
+    for n in nets:
+        vms = theirs(n.get('vms'))
+        nodes = [x for x in n.get('nodes') or [] if x in mine]
+        if not vms and not nodes:
+            continue
+        row = dict(n, vms=vms, nodes=nodes)
+        # the settings of a bridge are those of the first node that listed it
+        if (n.get('nodes') or [None])[0] not in mine:
+            row.update(cidr='', address='', gateway='', bridge_ports='', comments='')
+        out.append(row)
+    kept = []
+    for s in stores:
+        vms = theirs(s.get('vms'))
+        if vms:
+            kept.append(dict(s, vms=vms))
+    return dict(got, networks=out, storage_assignments=kept)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/dns', methods=['GET'])
@@ -880,12 +1058,27 @@ def get_node_dns_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_dns(node))
+    read = getattr(manager, 'get_node_dns', None)
+    if not callable(read):
+        return jsonify({'error': 'DNS settings are not available for this cluster type'}), 501
+    # MK Oct 2026 (#1163) - a read that failed is not a node without DNS. It goes out as a
+    # 502, a 401/403 of Proxmox VE with the stored-credentials wording of #1142
+    result = read(node)
+    if isinstance(result, dict) and result.get('error'):
+        status = result.get('upstream_status')
+        if status in UPSTREAM_AUTH_STATUSES:
+            return upstream_failure(status, 'reading the DNS settings needs Sys.Audit on the node'
+                                    if status == 403 else '')
+        return jsonify({'error': result['error'], 'upstream_status': status}), 502
+    return jsonify(result)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/dns', methods=['PUT'])
@@ -913,6 +1106,9 @@ def update_node_dns_api(cluster_id, node):
 def get_node_hosts_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -952,8 +1148,12 @@ def get_node_time_api(cluster_id, node):
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     
-    return jsonify(cluster_managers[cluster_id].get_node_time(node))
+    got = cluster_managers[cluster_id].get_node_time(node)
+    return unread_failure(got, f'the time settings of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/time', methods=['PUT'])
@@ -996,7 +1196,8 @@ def get_node_syslog_api(cluster_id, node):
     manager = cluster_managers[cluster_id]
     start = request.args.get('start', 0, type=int)
     limit = bounded_limit(request.args.get('limit'), 500, 5000)
-    return jsonify(manager.get_node_syslog(node, start, limit))
+    got = manager.get_node_syslog(node, start, limit)
+    return unread_failure(got, f'the system log of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/certificates', methods=['GET'])
@@ -1005,12 +1206,16 @@ def get_node_certificates_api(cluster_id, node):
     """Get node certificates"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_certificates(node))
+    got = manager.get_node_certificates(node)
+    return unread_failure(got, f'the certificates of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/certificates/renew', methods=['POST'])
@@ -1120,6 +1325,10 @@ def get_node_tasks_api(cluster_id, node):
     vmid = request.args.get('vmid', None, type=int)
     
     tasks = manager.get_node_tasks(node, start, limit * 3 if vmid else limit, errors)  # Get more if filtering
+    # MK Nov 2026 - before the scoping below, which hands on a plain list
+    failed = unread_failure(tasks, f'the task list of node {node}')
+    if failed:
+        return failed
 
     # sec (private disclosure Sep 2026 — audit): node-level twin of the confined cluster task log —
     # a scoped caller could read every VM's task history here instead. Confine the same way; admins
@@ -1142,9 +1351,15 @@ def get_node_tasks_api(cluster_id, node):
                 _scoped.append(t)
         tasks = _scoped
 
-    # Filter by vmid if specified
+    # Filter by vmid if specified. The guest is field 6 of the UPID, as the log route below
+    # reads it; the number anywhere in the UPID also matched a pid, a start time or the
+    # longer id of another guest. An XCP-ng row has no UPID of that shape and names its
+    # guest in `vmid`
     if vmid and tasks:
-        filtered = [t for t in tasks if t.get('id') == str(vmid) or str(vmid) in str(t.get('upid', ''))]
+        want = str(vmid)
+        filtered = [t for t in tasks
+                    if t.get('id') == want or str(t.get('vmid')) == want
+                    or str(t.get('upid', '')).split(':')[6:7] == [want]]
         return jsonify(filtered[:limit])
     
     return jsonify(tasks)
@@ -1184,6 +1399,8 @@ def get_node_task_log_api(cluster_id, node, upid):
     limit = bounded_limit(request.args.get('limit'), 500, 5000)
 
     log_lines = manager.get_node_task_log(node, upid, start, limit)
+    # a download task names its URL as given, with a mirror login (user:pass@) in it
+    log_lines = [mask_url_logins(line) for line in log_lines or []]
     # Join lines into a single string for display
     log_text = '\n'.join(log_lines) if log_lines else ''
 
@@ -1232,12 +1449,17 @@ def get_node_subscription_api(cluster_id, node):
     """Get node subscription status"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # hands the key unmasked, the aggregate in datacenter.py masks it
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_subscription(node))
+    got = manager.get_node_subscription(node)
+    return unread_failure(got, f'the subscription of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/subscription', methods=['PUT'])
@@ -1336,6 +1558,22 @@ def _ssh_sudo_prefix(ssh):
     except Exception:
         pass
     return prefix
+
+
+# MK Nov 2026 - the SMBIOS status reads ran without a channel timeout: a node that took the
+# SSH login and then hung kept the request open (paramiko waits an hour for the channel and
+# forever for its output). 20 s, as the starlvm probe has.
+_SMBIOS_PROBE_TIMEOUT = 20
+
+
+def _smbios_answer(stdout):
+    """Output of a status command run with timeout=_SMBIOS_PROBE_TIMEOUT. TimeoutError when
+    the node did not finish answering in that time: read_capped stops at the timeout without
+    a word, and an empty answer would read as "not installed"."""
+    text = _read_capped(stdout)
+    if not stdout.channel.eof_received:
+        raise TimeoutError(f'No answer from the node within {_SMBIOS_PROBE_TIMEOUT} s')
+    return text
 
 
 def _ssh_run_script(ssh, script, timeout=180):
@@ -1475,6 +1713,7 @@ Deployed by PegaProx - automatically configures SMBIOS for new VMs
 Runs as a systemd service, monitors for new VMs and sets SMBIOS data.
 """
 
+import base64
 import subprocess
 import time
 import os
@@ -1490,6 +1729,8 @@ FAMILY = "{family}"
 # Paths
 LOG_FILE = "/var/log/pegaprox-smbios.log"
 PROCESSED_VMS_FILE = "/var/lib/pegaprox-smbios-processed.txt"  # keeps track of what we already did
+VMLIST_FILE = "/etc/pve/.vmlist"
+CONF_DIR = "/etc/pve/qemu-server"
 
 def log_message(message):
     """write to log file, nothing fancy"""
@@ -1507,7 +1748,7 @@ def get_all_vms():
     """read vmids from /etc/pve/.vmlist instead of spawning qm list (way cheaper)"""
     try:
         import json as _json
-        with open('/etc/pve/.vmlist', 'r') as f:
+        with open(VMLIST_FILE, 'r') as f:
             data = _json.load(f)
         return [str(vmid) for vmid, info in data.get('ids', {{}}).items() if info.get('type') == 'qemu']
     except Exception as e:
@@ -1538,7 +1779,7 @@ def get_current_smbios(vmid):
     and are ignored.
     """
     try:
-        conf_path = f"/etc/pve/qemu-server/{{vmid}}.conf"
+        conf_path = f"{{CONF_DIR}}/{{vmid}}.conf"
         if not os.path.exists(conf_path):
             return None
         main_val = None
@@ -1560,8 +1801,19 @@ def get_current_smbios(vmid):
     except:
         return None
 
+def encode_value(value):
+    return base64.b64encode(value.encode('utf-8')).decode('ascii')
+
+def decode_value(value):
+    try:
+        return base64.b64decode(value, validate=True).decode('utf-8')
+    except Exception:
+        return value  # not base64 after all, keep it as it is
+
 def parse_smbios_string(smbios_str):
-    """Parse SMBIOS string into dictionary"""
+    """Parse SMBIOS string into dictionary. With base64=1 (the PVE GUI and this daemon
+    write it so) every value but the uuid is base64 and comes back decoded; the flag
+    itself is no value"""
     params = {{}}
     if not smbios_str:
         return params
@@ -1569,6 +1821,8 @@ def parse_smbios_string(smbios_str):
         if '=' in part:
             key, value = part.split('=', 1)
             params[key.strip()] = value.strip()
+    if params.pop('base64', '').lower() in ('1', 'on', 'yes', 'true'):
+        params = {{k: (v if k == 'uuid' else decode_value(v)) for k, v in params.items()}}
     return params
 
 def needs_smbios_update(vmid):
@@ -1597,21 +1851,24 @@ def generate_unique_serial():
     return f"PVE{{timestamp}}{{random_part}}"
 
 def set_smbios(vmid):
-    """Set SMBIOS configuration"""
+    """Set SMBIOS configuration. qemu-server takes only [A-Za-z0-9+/] in a value, so
+    every value but the uuid goes in base64 with base64=1, as the PVE GUI writes it;
+    a value left empty in the settings is left out"""
     current_smbios_str = get_current_smbios(vmid)
     current_params = parse_smbios_string(current_smbios_str) if current_smbios_str else {{}}
     uuid_value = current_params.get('uuid', '')
     serial = generate_unique_serial()
     
-    smbios_parts = [
-        f"manufacturer={{MANUFACTURER}}",
-        f"product={{PRODUCT}}",
-        f"version={{VERSION}}",
-        f"serial={{serial}}",
-    ]
+    smbios_parts = []
+    for key, value in (('manufacturer', MANUFACTURER), ('product', PRODUCT),
+                       ('version', VERSION), ('serial', serial)):
+        if value:
+            smbios_parts.append(f"{{key}}={{encode_value(value)}}")
     if uuid_value:
         smbios_parts.append(f"uuid={{uuid_value}}")
-    smbios_parts.append(f"family={{FAMILY}}")
+    if FAMILY:
+        smbios_parts.append(f"family={{encode_value(FAMILY)}}")
+    smbios_parts.append("base64=1")
     
     smbios_string = ",".join(smbios_parts)
     cmd = ['qm', 'set', vmid, '-smbios1', smbios_string]
@@ -1626,7 +1883,7 @@ def set_smbios(vmid):
 
 def check_vm_exists(vmid):
     """Check if VM config exists on this node"""
-    return os.path.exists(f"/etc/pve/qemu-server/{{vmid}}.conf")
+    return os.path.exists(f"{{CONF_DIR}}/{{vmid}}.conf")
 
 def cleanup_processed_list(processed):
     """Remove VMs that no longer exist"""
@@ -1704,28 +1961,53 @@ StandardError=journal
 WantedBy=multi-user.target
 '''
 
+# MK Nov 2026 - one set of defaults for the form (GET), a save (PUT) and both deploy routes.
+# PUT used to fall back to 'Virtual Machine' / 'PVE8' while the rest used these, so every
+# save that left a key out moved it from one set to the other
+SMBIOS_AUTOCONFIG_DEFAULTS = {
+    'enabled': False,
+    'manufacturer': 'Proxmox',
+    'product': 'PegaProxManagment',
+    'version': 'v1',
+    'family': 'ProxmoxVE',
+}
+_SMBIOS_TEXT_KEYS = ('manufacturer', 'product', 'version', 'family')
+
+
+def _smbios_settings(mgr):
+    """The saved settings of the cluster over the defaults. A key never saved, or saved as
+    something other than its type, reads as its default."""
+    stored = getattr(mgr.config, 'smbios_autoconfig', None)
+    stored = stored if isinstance(stored, dict) else {}
+    settings = dict(SMBIOS_AUTOCONFIG_DEFAULTS)
+    if isinstance(stored.get('enabled'), bool):
+        settings['enabled'] = stored['enabled']
+    for key in _SMBIOS_TEXT_KEYS:
+        if isinstance(stored.get(key), str):
+            settings[key] = stored[key]
+    return settings
+
+
+def _smbios_script(settings):
+    """The node daemon with the cluster's values (defense-in-depth: they land in Python
+    string literals, so strip quotes/backslashes - NS Feb 2026)"""
+    def _clean(val):
+        return re.sub(r'[^a-zA-Z0-9 ._-]', '', str(val))[:64]
+    return SMBIOS_SCRIPT_TEMPLATE.format(**{key: _clean(settings[key]) for key in _SMBIOS_TEXT_KEYS})
+
+
 @bp.route('/api/clusters/<cluster_id>/smbios-autoconfig', methods=['GET'])
 @require_auth(perms=['node.view'])
 def get_smbios_autoconfig(cluster_id):
     """get smbios settings for the cluster, returns defaults if not configured yet"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+
     try:
         if cluster_id not in cluster_managers:
             return jsonify({'error': 'Cluster not found'}), 404
-        
-        # defaults if nothing configured - NS: proxmox doesnt allow underscores so no spaces either
-        mgr = cluster_managers[cluster_id]
-        settings = getattr(mgr.config, 'smbios_autoconfig', None) or {
-            'enabled': False,
-            'manufacturer': 'Proxmox',
-            'product': 'PegaProxManagment',
-            'version': 'v1',
-            'family': 'ProxmoxVE'
-        }
-        
-        return jsonify(settings)
+
+        return jsonify(_smbios_settings(cluster_managers[cluster_id]))
     except Exception as e:
         logging.error(f"Error getting SMBIOS config: {e}")
         return jsonify({'error': safe_error(e, 'Failed to get SMBIOS config')}), 500
@@ -1744,32 +2026,40 @@ def update_smbios_autoconfig(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Expected a JSON object'}), 400
     mgr = cluster_managers[cluster_id]
 
-    # NS Feb 2026: Validate SMBIOS values to prevent template injection
-    for key in ['manufacturer', 'product', 'version', 'family']:
-        val = data.get(key, '')
-        if val and not re.match(r'^[a-zA-Z0-9 ._-]{1,64}$', val):
-            return jsonify({'error': f'Invalid {key}: only alphanumeric, spaces, dots, hyphens allowed (max 64 chars)'}), 400
+    # MK Nov 2026 - a key the body leaves out keeps its saved value; it used to fall
+    # back to a default ('enabled' to False on every save that did not send it)
+    settings = _smbios_settings(mgr)
+    if 'enabled' in data:
+        if not isinstance(data['enabled'], bool):
+            return jsonify({'error': 'Invalid enabled: must be true or false'}), 400
+        settings['enabled'] = data['enabled']
 
-    # Update settings
-    mgr.config.smbios_autoconfig = {
-        'enabled': data.get('enabled', False),
-        'manufacturer': data.get('manufacturer', 'Proxmox'),
-        'product': data.get('product', 'Virtual Machine'),
-        'version': data.get('version', 'PVE8'),
-        'family': data.get('family', 'ProxmoxVE')
-    }
-    
+    # NS Feb 2026: Validate SMBIOS values to prevent template injection
+    for key in _SMBIOS_TEXT_KEYS:
+        if key not in data:
+            continue
+        val = data[key]
+        if not isinstance(val, str):
+            return jsonify({'error': f'Invalid {key}: must be a string'}), 400
+        if val and not re.fullmatch(r'[a-zA-Z0-9 ._-]{1,64}', val):
+            return jsonify({'error': f'Invalid {key}: only alphanumeric, spaces, dots, hyphens allowed (max 64 chars)'}), 400
+        settings[key] = val
+
+    mgr.config.smbios_autoconfig = settings
+
     # Save to database
     db = get_db()
     db.update_cluster(cluster_id, {'smbios_autoconfig': json.dumps(mgr.config.smbios_autoconfig)})
     
     usr = getattr(request, 'session', {}).get('user', 'system')
     log_audit(usr, 'smbios_autoconfig.updated', f"SMBIOS auto-config updated", cluster=mgr.config.name)
-    
-    return jsonify({'success': True, 'message': 'Settings saved'})
+
+    return jsonify({'success': True, 'message': 'Settings saved', 'settings': settings})
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/smbios-autoconfig/status', methods=['GET'])
@@ -1778,6 +2068,9 @@ def get_smbios_autoconfig_status(cluster_id, node):
     """Check if SMBIOS auto-config service is running on node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1795,20 +2088,24 @@ def get_smbios_autoconfig_status(cluster_id, node):
         if not ssh:
             return jsonify({'installed': False, 'running': False, 'error': 'SSH not available - check SSH key in cluster settings'})
         
-        # Check if script exists
-        stdin, stdout, stderr = ssh.exec_command('test -f /opt/pegaprox-smbios-autoconfig.py && echo exists')
-        installed = 'exists' in _read_capped(stdout)
-        
-        # Check if service is running
-        stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig 2>/dev/null || echo inactive')
-        status = _read_capped(stdout).strip()
-        running = status == 'active'
-        
-        # Get last log entries
-        stdin, stdout, stderr = ssh.exec_command('tail -5 /var/log/pegaprox-smbios.log 2>/dev/null || echo "No logs yet"')
-        logs = _read_capped(stdout).strip()
-        
-        ssh.close()
+        try:
+            # Check if script exists
+            stdin, stdout, stderr = ssh.exec_command('test -f /opt/pegaprox-smbios-autoconfig.py && echo exists',
+                                                     timeout=_SMBIOS_PROBE_TIMEOUT)
+            installed = 'exists' in _smbios_answer(stdout)
+            
+            # Check if service is running
+            stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig 2>/dev/null || echo inactive',
+                                                     timeout=_SMBIOS_PROBE_TIMEOUT)
+            status = _smbios_answer(stdout).strip()
+            running = status == 'active'
+            
+            # Get last log entries
+            stdin, stdout, stderr = ssh.exec_command('tail -5 /var/log/pegaprox-smbios.log 2>/dev/null || echo "No logs yet"',
+                                                     timeout=_SMBIOS_PROBE_TIMEOUT)
+            logs = _smbios_answer(stdout).strip()
+        finally:
+            ssh.close()
         
         return jsonify({
             'installed': installed,
@@ -1817,6 +2114,8 @@ def get_smbios_autoconfig_status(cluster_id, node):
             'logs': logs
         })
         
+    except TimeoutError as e:
+        return jsonify({'installed': False, 'running': False, 'error': str(e)})
     except Exception as e:
         logging.error(f"Error checking SMBIOS autoconfig status: {e}")
         return jsonify({'installed': False, 'running': False, 'error': safe_error(e, 'Failed to get node status')})
@@ -1836,8 +2135,8 @@ def deploy_smbios_autoconfig(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     mgr = cluster_managers[cluster_id]
-    settings = getattr(mgr.config, 'smbios_autoconfig', None) or {}
-    
+    settings = _smbios_settings(mgr)
+
     ssh = None
     try:
         # PR #324: resolve SSH-reachable mgmt IP via manager (not cluster/status)
@@ -1855,16 +2154,7 @@ def deploy_smbios_autoconfig(cluster_id, node):
         if not ssh:
             return jsonify({'error': 'SSH connection failed after 3 attempts - check SSH key in cluster settings'}), 500
 
-        # Generate script with settings (defense-in-depth: strip quotes/backslashes - NS Feb 2026)
-        def _sanitize_smbios(val):
-            """Strip characters dangerous in Python string literals as defense-in-depth."""
-            return re.sub(r'[^a-zA-Z0-9 ._-]', '', str(val))[:64]
-        script = SMBIOS_SCRIPT_TEMPLATE.format(
-            manufacturer=_sanitize_smbios(settings.get('manufacturer', 'Proxmox')),
-            product=_sanitize_smbios(settings.get('product', 'PegaProxManagment')),
-            version=_sanitize_smbios(settings.get('version', 'v1')),
-            family=_sanitize_smbios(settings.get('family', 'ProxmoxVE'))
-        )
+        script = _smbios_script(settings)
 
         # Write script and service to node (SFTP with exec_command fallback) — raises on failure
         _ssh_write_file(ssh, '/opt/pegaprox-smbios-autoconfig.py', script, 0o755)
@@ -2021,6 +2311,9 @@ def get_smbios_autoconfig_status_all(cluster_id):
     """Get SMBIOS auto-config status for ALL nodes in cluster"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2072,12 +2365,14 @@ def get_smbios_autoconfig_status_all(cluster_id):
                 
                 try:
                     # Check if script exists
-                    stdin, stdout, stderr = ssh.exec_command('test -f /opt/pegaprox-smbios-autoconfig.py && echo exists')
-                    installed = 'exists' in _read_capped(stdout)
+                    stdin, stdout, stderr = ssh.exec_command('test -f /opt/pegaprox-smbios-autoconfig.py && echo exists',
+                                                             timeout=_SMBIOS_PROBE_TIMEOUT)
+                    installed = 'exists' in _smbios_answer(stdout)
                     
                     # Check if service is running
-                    stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig 2>/dev/null || echo inactive')
-                    status = _read_capped(stdout).strip()
+                    stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig 2>/dev/null || echo inactive',
+                                                             timeout=_SMBIOS_PROBE_TIMEOUT)
+                    status = _smbios_answer(stdout).strip()
                     running = status == 'active'
                     
                     results[node_name] = {
@@ -2088,6 +2383,8 @@ def get_smbios_autoconfig_status_all(cluster_id):
                 finally:
                     ssh.close()
                     
+            except TimeoutError as e:
+                results[node_name] = {'installed': False, 'running': False, 'error': str(e)}
             except Exception as e:
                 results[node_name] = {'installed': False, 'running': False, 'error': safe_error(e, 'Failed to get node status')}
         
@@ -2112,8 +2409,10 @@ def deploy_smbios_autoconfig_all(cluster_id):
         return jsonify({'error': 'Cluster not found'}), 404
     
     mgr = cluster_managers[cluster_id]
-    settings = getattr(mgr.config, 'smbios_autoconfig', None) or {}
-    
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'SMBIOS auto-config is Proxmox-only'}), 400
+    settings = _smbios_settings(mgr)
+
     # Get all nodes in cluster. PR #324: we no longer pre-pin IPs from
     # cluster/status (that's the corosync ring IP on VLAN setups) --
     # each node gets resolved via _get_node_ip inside the loop.
@@ -2137,15 +2436,7 @@ def deploy_smbios_autoconfig_all(cluster_id):
         return jsonify({'error': 'No nodes found in cluster'}), 404
     
     results = []
-    def _sanitize_smbios_val(val):
-        """Strip characters dangerous in Python string literals as defense-in-depth."""
-        return re.sub(r'[^a-zA-Z0-9 ._-]', '', str(val))[:64]
-    script = SMBIOS_SCRIPT_TEMPLATE.format(
-        manufacturer=_sanitize_smbios_val(settings.get('manufacturer', 'Proxmox')),
-        product=_sanitize_smbios_val(settings.get('product', 'PegaProxManagment')),
-        version=_sanitize_smbios_val(settings.get('version', 'v1')),
-        family=_sanitize_smbios_val(settings.get('family', 'ProxmoxVE'))
-    )
+    script = _smbios_script(settings)
 
     for node in nodes:
         node_ip = mgr._get_node_ip(node)
@@ -2421,6 +2712,11 @@ def starlvm_plugin_status(cluster_id):
     """Per-node install state of the StarWind starlvm plugin (read-only probe)."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - an SSH probe of every node of the cluster: not for a confined caller,
+    # and refused before the first connection
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -2788,6 +3084,9 @@ def run_custom_script(cluster_id, script_id):
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    # the node list below is read from PVE's cluster/status, an XCP-ng pool has none
+    if getattr(cluster_managers[cluster_id], 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'Custom scripts run on Proxmox VE clusters only'}), 400
     
     # SECURITY: Require password confirmation before running any script
     data = request.json or {}
@@ -3028,6 +3327,10 @@ def restore_deleted_script(cluster_id, script_id):
 def get_node_pifs_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # host network configuration, as /network above
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -3041,6 +3344,9 @@ def get_node_pifs_api(cluster_id, node):
 def get_node_bonds_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -3059,7 +3365,8 @@ def get_pool_ha_api(cluster_id):
     mgr = cluster_managers[cluster_id]
     if not hasattr(mgr, 'get_ha_status'):
         return jsonify({'enabled': False})
-    return jsonify(mgr.get_ha_status())
+    from pegaprox.api.clusters import ha_status_answer
+    return ha_status_answer(cluster_id, mgr)
 
 
 @bp.route('/api/clusters/<cluster_id>/ha/enable', methods=['POST'])

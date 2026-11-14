@@ -114,7 +114,8 @@ class VMwareManager:
                 auth=(self.username, self.password),
                 headers={'Content-Type': 'application/json'},
                 verify=self.ssl_verify,
-                timeout=15
+                timeout=15,
+                allow_redirects=False
             )
             
             if resp.status_code == 201:
@@ -138,7 +139,8 @@ class VMwareManager:
                                 f"{self._base_url}{legacy_path}",
                                 headers=headers,
                                 verify=self.ssl_verify,
-                                timeout=15
+                                timeout=15,
+                                allow_redirects=False
                             )
                         else:
                             resp = requests.post(
@@ -146,7 +148,8 @@ class VMwareManager:
                                 auth=(self.username, self.password),
                                 headers=headers,
                                 verify=self.ssl_verify,
-                                timeout=15
+                                timeout=15,
+                                allow_redirects=False
                             )
                         if resp.status_code in (200, 201):
                             try:
@@ -164,7 +167,9 @@ class VMwareManager:
                     # Check if host is reachable at all
                     reachable = False
                     try:
-                        check = requests.get(f"{self._base_url}/", verify=self.ssl_verify, timeout=10)
+                        # ESXi sends / on to /ui/, any answer below 500 is enough here
+                        check = requests.get(f"{self._base_url}/", verify=self.ssl_verify, timeout=10,
+                                             allow_redirects=False)
                         reachable = check.status_code < 500 or check.status_code == 503
                     except:
                         pass
@@ -188,7 +193,7 @@ class VMwareManager:
                 logging.warning(f"[VMware:{self.id}] Connection failed: {self.last_error}")
                 return False
             else:
-                self.last_error = f'Connection failed: HTTP {resp.status_code}'
+                self.last_error = self._redirect_error(resp) or f'Connection failed: HTTP {resp.status_code}'
                 self.connected = False
                 logging.warning(f"[VMware:{self.id}] Connection failed: {self.last_error}")
                 return False
@@ -208,7 +213,7 @@ class VMwareManager:
                         test_resp = requests.get(
                             f"{self._base_url}{test_path}",
                             headers=self._headers(),
-                            verify=self.ssl_verify, timeout=10)
+                            verify=self.ssl_verify, timeout=10, allow_redirects=False)
                         if test_resp.status_code == 200:
                             validation_ok = True
                             break
@@ -389,7 +394,19 @@ class VMwareManager:
     def _headers(self) -> dict:
         return {'vmware-api-session-id': self.session_id} if self.session_id else {}
 
-    def _build_validated_url(self, path: str) -> str:
+    def _redirect_error(self, resp) -> str:
+        """The error for an answer that redirects, '' for any other.
+
+        No request in this class follows a redirect (allow_redirects=False on each one).
+        The host check looked at the configured host only, a Location can name any other
+        host or plain http, and a 307 would send the body and the session id along.
+        """
+        code = getattr(resp, 'status_code', None)
+        if code in (301, 302, 303, 307, 308):
+            return f'ESXi host {self.host} answered with a redirect (HTTP {code}), which PegaProx does not follow'
+        return ''
+
+    def _build_validated_url(self, path: str, query: str = '') -> str:
         """Build the full vSphere URL from base + path with defensive validation.
 
         MK May 2026 (Aikido #489 manual port) — every caller passes a hardcoded
@@ -402,9 +419,19 @@ class VMwareManager:
         """
         if not path.startswith('/'):
             raise ValueError('path must start with /')
-        if '/../' in path or re.search(r'/%2e%2e/', path, re.IGNORECASE):
+        # MK Nov 2026 - urlunparse writes a '?' or '#' in the path out as it is, and requests
+        # then reads what follows as the query or drops it: a VM id 'vm-12?' (or 'vm-12#')
+        # from the route turned the delete of one snapshot into the delete of the VM. The
+        # query a call needs comes in `query`
+        if '?' in path or '#' in path:
+            raise ValueError("a '?' or '#' in the path")
+        # and a '.' or '..' segment anywhere, the last one too: a snapshot id '..' made
+        # .../vm/vm-12/snapshots/.. a DELETE of .../vm/vm-12/ once urllib3 folded it away,
+        # and '%2e%2e' went out as '..' as well. The old check wanted a '/' after the dots
+        from pegaprox.utils.sanitization import url_path_climbs
+        if url_path_climbs(path):
             raise ValueError('path traversal blocked')
-        parsed = urlparse(self._base_url)._replace(path=path, query='', fragment='')
+        parsed = urlparse(self._base_url)._replace(path=path, query=query, fragment='')
         return urlunparse(parsed)
 
     def api_get(self, path: str, params: dict = None) -> dict:
@@ -420,13 +447,14 @@ class VMwareManager:
                 headers=self._headers(),
                 params=params,
                 verify=self.ssl_verify,
-                timeout=30
+                timeout=30,
+                allow_redirects=False
             )
             if resp.status_code == 401:
                 # Session expired, try reconnect
                 if self.connect():
-                    resp = requests.get(url, headers=self._headers(),
-                                       params=params, verify=self.ssl_verify, timeout=30)
+                    resp = requests.get(url, headers=self._headers(), params=params,
+                                        verify=self.ssl_verify, timeout=30, allow_redirects=False)
             if resp.status_code == 200:
                 try:
                     self._consecutive_400s = 0  # Reset on success
@@ -435,15 +463,16 @@ class VMwareManager:
                     return {'data': resp.text}
             if resp.status_code == 400:
                 self._consecutive_400s = getattr(self, '_consecutive_400s', 0) + 1
-            return {'error': f'HTTP {resp.status_code}: {resp.text[:200]}', 'status_code': resp.status_code}
+            return {'error': self._redirect_error(resp) or f'HTTP {resp.status_code}: {resp.text[:200]}',
+                    'status_code': resp.status_code}
         except Exception as e:
             return {'error': str(e)}
     
-    def api_post(self, path: str, data: dict = None) -> dict:
+    def api_post(self, path: str, data: dict = None, query: str = '') -> dict:
         """POST request to vSphere REST API"""
         try:
             try:
-                url = self._build_validated_url(path)
+                url = self._build_validated_url(path, query)
             except ValueError as ve:
                 return {'error': f'invalid path: {ve}'}
             # asked at the exit and once its connection is up in an automatic group (#625)
@@ -453,20 +482,23 @@ class VMwareManager:
                 headers={**self._headers(), 'Content-Type': 'application/json'},
                 json=data,
                 verify=self.ssl_verify,
-                timeout=60
+                timeout=60,
+                allow_redirects=False
             )
             if resp.status_code == 401:
                 if self.connect():
                     # the same call once more: checked again, the lease may be gone by now
                     resp = ha_transport.http('POST', url, again=True,
                                              headers={**self._headers(), 'Content-Type': 'application/json'},
-                                             json=data, verify=self.ssl_verify, timeout=60)
+                                             json=data, verify=self.ssl_verify, timeout=60,
+                                             allow_redirects=False)
             if resp.status_code in (200, 201, 204):
                 try:
                     return {'data': resp.json()}
                 except Exception:
                     return {'data': 'ok'}
-            return {'error': f'HTTP {resp.status_code}: {resp.text[:200]}', 'status_code': resp.status_code}
+            return {'error': self._redirect_error(resp) or f'HTTP {resp.status_code}: {resp.text[:200]}',
+                    'status_code': resp.status_code}
         except Exception as e:
             return {'error': str(e)}
     
@@ -482,11 +514,12 @@ class VMwareManager:
                 'DELETE', url,
                 headers=self._headers(),
                 verify=self.ssl_verify,
-                timeout=30
+                timeout=30,
+                allow_redirects=False
             )
             if resp.status_code in (200, 204):
                 return {'data': 'ok'}
-            return {'error': f'HTTP {resp.status_code}: {resp.text[:200]}'}
+            return {'error': self._redirect_error(resp) or f'HTTP {resp.status_code}: {resp.text[:200]}'}
         except Exception as e:
             return {'error': str(e)}
     
@@ -715,8 +748,11 @@ class VMwareManager:
                 'vm': vm._moId,
                 'name': cfg.name if cfg else vm.name,
                 'power_state': str(runtime.powerState).replace('powered', 'POWERED_').upper() if runtime else 'UNKNOWN',
-                'cpu': {'count': cpu_count, 'sockets': sockets, 'cores_per_socket': cores_per_socket},
-                'memory': {'size_MiB': cfg.hardware.memoryMB if cfg and cfg.hardware else 0},
+                # hot_add_enabled as in the REST detail, the settings tab shows it
+                'cpu': {'count': cpu_count, 'sockets': sockets, 'cores_per_socket': cores_per_socket,
+                        'hot_add_enabled': bool(getattr(cfg, 'cpuHotAddEnabled', False))},
+                'memory': {'size_MiB': cfg.hardware.memoryMB if cfg and cfg.hardware else 0,
+                           'hot_add_enabled': bool(getattr(cfg, 'memoryHotAddEnabled', False))},
                 'guest_OS': cfg.guestFullName if cfg else '',
                 'guest_id': guest_id,
                 'hardware': {
@@ -931,10 +967,11 @@ class VMwareManager:
             import time as _t
             for _ in range(120):
                 _t.sleep(1)
+                # JB Nov 2026 (#1249) - the state is the plain word, the suffix test never matched
                 state = str(t.info.state)
-                if state.endswith('.success'):
+                if state == 'success':
                     return {'data': 'deleted'}
-                if state.endswith('.error'):
+                if state == 'error':
                     return {'error': f'remove failed: {getattr(t.info.error, "msg", t.info.error)}'}
             return {'error': 'remove timed out'}
         except Exception as e:
@@ -1158,31 +1195,11 @@ class VMwareManager:
         """
         if self._connection_type == 'soap':
             return self._soap_update_vm_config(vm_id, config)
-        
-        # REST API approach
-        spec = {}
-        if 'cpu_count' in config:
-            spec['cpu'] = {'count': int(config['cpu_count'])}
-        if 'memory_mb' in config:
-            spec['memory'] = {'size_MiB': int(config['memory_mb'])}
-        if not spec:
-            return {'error': 'No configuration changes specified'}
-        
-        result = self.api_post(f'/api/vcenter/vm/{vm_id}', spec)
-        # REST PATCH for notes
-        if 'notes' in config and 'error' not in result:
-            from pegaprox.core import ha_transport
-            try:
-                url = f"{self._base_url}/api/vcenter/vm/{vm_id}"
-                resp = ha_transport.http(
-                    'PATCH', url,
-                    headers={**self._headers(), 'Content-Type': 'application/json'},
-                    json={'annotation': config['notes']},
-                    verify=self.ssl_verify, timeout=30
-                )
-            except:
-                pass
-        return result if 'error' not in result else result
+        # MK Nov 2026 - the REST API has no call for this. The POST, and the notes PATCH after
+        # it, went to the VM itself, which takes neither (CPU and memory are PATCHes on
+        # .../hardware/cpu and .../hardware/memory, the notes are not in the REST model), and a
+        # notes-only edit was refused as no change at all. Same answer as update_vm_network.
+        return {'error': 'Configuration change requires SOAP/pyvmomi connection'}
     
     def _soap_update_vm_config(self, vm_id: str, config: dict) -> dict:
         """Update VM config via pyvmomi."""
@@ -1365,12 +1382,12 @@ class VMwareManager:
     def get_tags(self, category_id: str = None) -> dict:
         """List tags, optionally filtered by category"""
         if category_id:
-            return self.api_post(f'/api/cis/tagging/tag/id:{{category_id}}?~action=list-tags-for-category')
+            return self.api_post(f'/api/cis/tagging/tag/id:{{category_id}}', query='~action=list-tags-for-category')
         return self.api_get('/api/cis/tagging/tag')
     
     def get_vm_tags(self, vm_id: str) -> dict:
         """List tags attached to a VM"""
-        return self.api_post('/api/cis/tagging/tag-association?~action=list-attached-tags', data={
+        return self.api_post('/api/cis/tagging/tag-association', query='~action=list-attached-tags', data={
             'object_id': {'type': 'VirtualMachine', 'id': vm_id}
         })
     
@@ -1397,7 +1414,7 @@ class VMwareManager:
     
     def get_library_items(self, library_id: str) -> dict:
         """List items in a content library"""
-        return self.api_get(f'/api/content/library/item?library_id={library_id}')
+        return self.api_get('/api/content/library/item', params={'library_id': library_id})
     
     # -- Alarms --
     
@@ -1418,7 +1435,7 @@ class VMwareManager:
     
     def rename_vm(self, vm_id: str, new_name: str) -> dict:
         """Rename a VM"""
-        return self.api_post(f'/api/vcenter/vm/{vm_id}?~action=rename', data={'name': new_name})
+        return self.api_post(f'/api/vcenter/vm/{vm_id}', query='~action=rename', data={'name': new_name})
     
     def clone_vm(self, vm_id: str, name: str, folder: str = None, resource_pool: str = None, datastore: str = None) -> dict:
         """Clone a VM (instant clone or full clone depending on vSphere version)"""
@@ -1435,7 +1452,7 @@ class VMwareManager:
             placement['datastore'] = datastore
         if placement:
             spec['placement'] = placement
-        return self.api_post('/api/vcenter/vm?~action=clone', data={'spec': spec})
+        return self.api_post('/api/vcenter/vm', query='~action=clone', data={'spec': spec})
     
     def delete_vm(self, vm_id: str) -> dict:
         """Delete a VM (must be powered off)"""
@@ -1470,6 +1487,19 @@ class VMwareManager:
                         'vmdk_file': backing.get('vmdk_file', ''),
                         'snapshot_delta': backing.get('snapshot_delta'),
                     })
+        # MK Nov 2026 - the network adapters as well, so a migration plan can offer a network
+        # for each. The SOAP answer lists them, the REST one keys them by device id
+        raw_nics = data.get('nics')
+        if isinstance(raw_nics, dict):
+            raw_nics = [v for _k, v in sorted(raw_nics.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0)
+                        if isinstance(v, dict)]
+        nics = []
+        for n in raw_nics if isinstance(raw_nics, list) else []:
+            if isinstance(n, dict):
+                backing = n.get('backing') if isinstance(n.get('backing'), dict) else {}
+                nics.append({'label': n.get('label', '') or '',
+                             'network': n.get('network') or backing.get('network_name') or '',
+                             'mac_address': n.get('mac_address', '') or ''})
         cpu = data.get('cpu', {})
         mem = data.get('memory', {})
         return {'data': {
@@ -1479,7 +1509,12 @@ class VMwareManager:
             'cpu_count': cpu.get('count', 0) if isinstance(cpu, dict) else data.get('cpu_count', 0),
             'memory_mb': mem.get('size_MiB', 0) if isinstance(mem, dict) else data.get('memory_size_MiB', 0),
             'guest_os': data.get('guest_OS', ''),
+            # JB Nov 2026 (#1253) - the migration dialog reads these from the plan: without them
+            # an EFI guest said "Auto (bios)", while the migration read them from get_vm itself
+            'guest_OS': data.get('guest_OS', ''),
+            'hardware': data.get('hardware') or {},
             'disks': disks,
+            'nics': nics,
             'total_disk_gb': sum(d.get('capacity_gb', 0) for d in disks),
         }}
     
@@ -1575,6 +1610,7 @@ class VMwareManager:
                     headers=self._headers(),
                     verify=self.ssl_verify,
                     timeout=8,
+                    allow_redirects=False,
                 )
                 self._last_ping = now
                 if resp.status_code in (200, 201):

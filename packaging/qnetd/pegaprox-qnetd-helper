@@ -1,0 +1,2673 @@
+#!/usr/bin/python3 -I
+# -*- coding: utf-8 -*-
+"""PegaProx QNetd helper: the one thing that touches the QNetd side of a QDevice.
+
+PegaProx sets up corosync QDevices for its clusters and relays the certificates itself,
+so no cluster node ever needs access to the QNetd host. On that host everything goes
+through this script, with a fixed set of operations:
+
+    pegaprox-qnetd-helper version
+    pegaprox-qnetd-helper init
+    pegaprox-qnetd-helper ca
+    pegaprox-qnetd-helper sign --name <cluster>    stdin: {"crq_b64": "...", "replace": false}
+    pegaprox-qnetd-helper status
+    pegaprox-qnetd-helper uuid
+    pegaprox-qnetd-helper firewall --name <cluster>
+                                    stdin: {"action": "inspect|allow|remove", "sources": [...]}
+
+Each prints exactly one JSON object on stdout and exits 0 (ok) or 1 (error). It runs as
+root over SSH, as `pegaprox-qnetd-helper serve` for the PegaProx on this host, or in the
+QNetd sidecar of the Docker setup. `serve` is what pegaprox-qnetd-helper@.service starts
+for each connection of pegaprox-qnetd-helper.socket (packaging/qnetd/install.sh writes
+both units): the connection is stdin and stdout, one JSON line in and one out, and only
+root and the PegaProx service user are answered. The sidecar
+(`pegaprox_multi_cluster.py qnetd run`) loads this file and serves the same lines on a
+Unix socket of its own.
+
+`status` names the connected clusters and their nodes, and the cluster names that have a
+certificate on file here (names only): a setup sees before it starts that `sign` would
+need "replace" for its name.
+
+`firewall` opens the port of corosync-qnetd for the addresses the nodes of one cluster come
+from (ufw or firewalld; the name of the cluster is the tag of its rules) and takes exactly
+those rules out again. It never takes the port from the request, and never deletes a rule
+it did not add itself.
+
+The NSS database is the one corosync-qnetd-certutil makes: same directory, file names,
+nicknames, serial file and certificate validity. A QNetd that the stock tools (or pvecm)
+set up keeps its CA, and the stock tools keep working on a QNetd this script set up.
+
+Standalone on purpose: python 3.6 or later, standard library only, nothing imported from
+pegaprox. Installed root-owned at /usr/lib/pegaprox/qnetd/pegaprox-qnetd-helper.
+
+MK Oct 2026
+"""
+
+import base64
+import errno
+import fcntl
+import grp
+import hashlib
+import ipaddress
+import json
+import os
+import pwd
+import queue
+import re
+import secrets
+import select
+import shlex
+import shutil
+import signal
+import socket
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+PROTOCOL = 2
+
+# corosync-qnetd-certutil, word for word
+CONFIG_DIR = '/etc/corosync/qnetd'
+CRT_VALIDITY = '1200'           # months
+CA_NICKNAME = 'QNet CA'
+SERVER_NICKNAME = 'QNetd Cert'
+CA_SUBJECT = 'CN=QNet CA'
+SERVER_SUBJECT = 'CN=Qnetd Server'
+PWD_FILE = 'pwdfile.txt'
+NOISE_FILE = 'noise.txt'
+SERIAL_FILE = 'serial.txt'
+CA_EXPORT = 'qnetd-cacert.crt'
+SERVICE = 'corosync-qnetd.service'
+PACKAGES = ('corosync-qnetd', 'libnss3-tools')
+# what init installs, by the package manager it finds first (in this order)
+PACKAGE_SETS = (
+    ('apt', 'apt-get', PACKAGES),
+    ('dnf', 'dnf', ('corosync-qnetd', 'nss-tools')),
+    ('yum', 'yum', ('corosync-qnetd', 'nss-tools')),
+    ('zypper', 'zypper', ('corosync-qnetd', 'mozilla-nss-tools')),
+)
+
+RUN_DIR = '/run/corosync-qnetd'
+SOCKET_PATH = '/run/pegaprox-qnetd/helper.sock'     # the sidecar's
+PRODUCT_UUID = '/sys/class/dmi/id/product_uuid'
+# the environment file of the distribution's unit: Debian and Ubuntu, then RHEL, its
+# rebuilds and SUSE
+DEFAULTS_FILE = '/etc/default/corosync-qnetd'
+SYSCONFIG_FILE = '/etc/sysconfig/corosync-qnetd'
+# the rules the firewall op added (root's, 0700 and 0600)
+STATE_DIR = '/var/lib/pegaprox-qnetd'
+# who `serve` answers besides root (the socket unit gives the socket to this group)
+SERVICE_USER = 'pegaprox'
+
+BINARIES = {
+    'certutil': ('/usr/bin/certutil',),
+    'corosync-qnetd': ('/usr/bin/corosync-qnetd', '/usr/sbin/corosync-qnetd'),
+    'corosync-qnetd-tool': ('/usr/bin/corosync-qnetd-tool', '/usr/sbin/corosync-qnetd-tool'),
+    'systemctl': ('/usr/bin/systemctl', '/bin/systemctl'),
+    'apt-get': ('/usr/bin/apt-get',),
+    'apt-config': ('/usr/bin/apt-config',),
+    'dnf': ('/usr/bin/dnf',),
+    'yum': ('/usr/bin/yum',),
+    'zypper': ('/usr/bin/zypper',),
+    'pve-firewall': ('/usr/sbin/pve-firewall',),
+    'firewall-cmd': ('/usr/bin/firewall-cmd',),
+    'ufw': ('/usr/sbin/ufw',),
+    'nft': ('/usr/sbin/nft',),
+    'iptables': ('/usr/sbin/iptables', '/sbin/iptables'),
+    'ip6tables': ('/usr/sbin/ip6tables', '/sbin/ip6tables'),
+}
+SAFE_PATH = '/usr/sbin:/usr/bin:/sbin:/bin'
+
+# only for an unprivileged run (the tests, a sidecar that wants other paths): under root
+# or sudo the paths above are fixed, and setting one of these is an error
+OVERRIDES = ('PEGAPROX_QNETD_CONFIG_DIR', 'PEGAPROX_QNETD_BIN_DIR', 'PEGAPROX_QNETD_RUN_DIR',
+             'PEGAPROX_QNETD_SERVICE_USER', 'PEGAPROX_QNETD_STATE_DIR')
+
+OPS = ('version', 'init', 'ca', 'sign', 'status', 'uuid', 'firewall')
+# the ops that act for one cluster: --name <cluster>, and a request on stdin
+NAMED_OPS = ('sign', 'firewall')
+USAGE = ('usage: pegaprox-qnetd-helper version|init|ca|sign --name <cluster>|status|uuid'
+         '|firewall --name <cluster>|serve')
+
+# the options of corosync-qnetd that take a value (its getopt string: 46dfhvl:p:s:c:m:S:)
+TAKES_VALUE = 'lpscmS'
+_OPTIONS_LINE = re.compile(r'^(\s*)COROSYNC_QNETD_OPTIONS=(.*)$')
+_PLAIN_OPTIONS = re.compile(r'[A-Za-z0-9 _.,:=/@%+-]*')
+
+# PVE's cluster name rule (pve-node format, at most 15 characters) without the dots:
+# what goes into a file name, a certificate subject and a certutil argument
+NAME_RE = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,13}[A-Za-z0-9])?')
+UUID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+
+MAX_REQUEST = 64 * 1024         # a request on stdin or the socket
+MAX_CRQ = 16 * 1024             # decoded
+MAX_FILE = 64 * 1024            # CA export, a cluster certificate
+MAX_RAW = 64 * 1024             # corosync-qnetd-tool output handed back as is
+MAX_LISTING = 4 * 1024 * 1024   # what of that output gets parsed
+MAX_CERTS = 4096                # cluster names status lists a certificate on file for
+STDIN_WAIT = 15
+LOCK_WAIT = 60
+
+T_SHORT = 15
+T_CERTUTIL = 60
+T_KEYGEN = 180
+T_SERVICE = 90
+# every apt-get (or dnf, yum, zypper) of one init together: init has to answer within the
+# 600 s PegaProx waits
+T_APT = 420
+# whether apt-get gets to its package sources at all: a resolver that cannot reach its
+# servers waits 5 s per server and try, a dropped connect as long as it is let
+T_PROBE = 15
+T_CONNECT = 5
+PROBE_MAX = 16
+
+
+class Refused(Exception):
+    """An answer {"ok": false, "error": text, "code": code}. The text is short and never
+    carries a secret or a raw tool dump. extra goes into the answer next to them (the
+    manual firewall lines of firewall_unmanaged)."""
+
+    def __init__(self, text, code='failed', extra=None):
+        Exception.__init__(self, text)
+        self.text = text
+        self.code = code
+        self.extra = extra or {}
+
+
+def overrides_allowed(environ=None):
+    """Path overrides are for an unprivileged process only: never as root, never under
+    sudo (whatever the target user)."""
+    environ = os.environ if environ is None else environ
+    if os.geteuid() == 0 or os.getuid() == 0:
+        return False
+    return not any(k.startswith('SUDO_') for k in environ)
+
+
+def _clean(text, limit=300):
+    """Printable, one line, bounded: for an error text built from a tool's output."""
+    if isinstance(text, bytes):
+        text = text.decode('utf-8', 'replace')
+    text = re.sub(r'[\x00-\x1f\x7f]+', ' ', text).strip()
+    return text[:limit]
+
+
+def _last_line(data):
+    lines = [ln for ln in _clean_lines(data) if ln]
+    return lines[-1] if lines else ''
+
+
+def _clean_lines(data):
+    if isinstance(data, bytes):
+        data = data.decode('utf-8', 'replace')
+    return [_clean(ln, 200) for ln in data.splitlines()[-20:]]
+
+
+class Host:
+    """Where things are on this QNetd host. mode 'systemd': the CLI (SSH, install.sh) and
+    `serve` of the socket unit, the service belongs to systemd. mode 'sidecar': the supervisor of `qnetd run` holds
+    corosync-qnetd as its child and tells whether it runs."""
+
+    def __init__(self, mode='systemd', environ=None):
+        environ = os.environ if environ is None else environ
+        self.mode = mode
+        self.overrides = overrides_allowed(environ)
+        given = [k for k in OVERRIDES if environ.get(k)]
+        if given and not self.overrides:
+            raise Refused('%s is honoured for an unprivileged run only' % given[0], 'bad_request')
+        self.config_dir = environ.get('PEGAPROX_QNETD_CONFIG_DIR') or CONFIG_DIR
+        self.bin_dir = environ.get('PEGAPROX_QNETD_BIN_DIR') or None
+        self.run_dir = environ.get('PEGAPROX_QNETD_RUN_DIR') or RUN_DIR
+        self.state_dir = environ.get('PEGAPROX_QNETD_STATE_DIR') or STATE_DIR
+        for path in (self.config_dir, self.run_dir, self.state_dir) + ((self.bin_dir,) if self.bin_dir else ()):
+            if not os.path.isabs(path) or '\0' in path:
+                raise Refused('paths have to be absolute', 'bad_request')
+        self.db_dir = os.path.join(self.config_dir, 'nssdb')
+        # beside the /etc the config directory is in: /etc/default and /etc/sysconfig for real
+        if self.config_dir == CONFIG_DIR:
+            self.defaults_files = (DEFAULTS_FILE, SYSCONFIG_FILE)
+        else:
+            etc = os.path.dirname(os.path.dirname(self.config_dir))
+            self.defaults_files = (os.path.join(etc, 'default', 'corosync-qnetd'),
+                                   os.path.join(etc, 'sysconfig', 'corosync-qnetd'))
+        self.service_user = environ.get('PEGAPROX_QNETD_SERVICE_USER') or SERVICE_USER
+        self.qnetd_alive = None
+        self.host_uuid = ''
+        if mode == 'sidecar':
+            # the container cannot read the DMI uuid of its host (root only): compose
+            # hands it over (docs/qdevice.md)
+            given_uuid = (environ.get('PEGAPROX_QNETD_HOST_UUID') or '').strip().lower()
+            if UUID_RE.fullmatch(given_uuid):
+                self.host_uuid = given_uuid
+
+    def bin(self, name):
+        """Absolute path of a binary, None where it is missing."""
+        if self.bin_dir:
+            cands = (os.path.join(self.bin_dir, name),)
+        else:
+            cands = BINARIES[name]
+        for path in cands:
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+        return None
+
+    def need(self, name):
+        path = self.bin(name)
+        if not path:
+            raise Refused('%s is not installed' % name, 'not_installed')
+        return path
+
+    @property
+    def defaults_file(self):
+        """The environment file of corosync-qnetd's unit: /etc/default/corosync-qnetd on
+        Debian and Ubuntu, /etc/sysconfig/corosync-qnetd on RHEL, its rebuilds and SUSE.
+        The one that is there (the package ships it); else the one the unit reads; else the
+        one of the distribution's package manager."""
+        debian, rpm = self.defaults_files
+        for path in (debian, rpm):
+            if os.path.lexists(path):
+                return path
+        named = _unit_environment_file(self)
+        if named is not None:
+            return self.defaults_files[named]
+        if self.bin('apt-get') or not os.path.isdir(os.path.dirname(rpm)):
+            return debian
+        return rpm
+
+    @property
+    def ipc_socket(self):
+        return os.path.join(self.run_dir, 'corosync-qnetd.sock')
+
+    def ipc_args(self):
+        # the default socket, unless this run has its own place for it
+        if self.mode == 'sidecar' or self.run_dir != RUN_DIR:
+            return ['-p', self.ipc_socket]
+        return []
+
+    def path(self, name):
+        return os.path.join(self.db_dir, name)
+
+
+def run(argv, timeout, data=None, extra_env=None):
+    """(returncode, stdout, stderr) of argv: absolute binary, no shell, a clean
+    environment, stdin closed unless data is given, killed after timeout."""
+    env = {'PATH': SAFE_PATH, 'LANG': 'C', 'LC_ALL': 'C'}
+    if extra_env:
+        env.update(extra_env)
+    # python before 3.8 refuses stdin next to input even as None
+    feed = {'input': data} if data is not None else {'stdin': subprocess.DEVNULL}
+    try:
+        proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=timeout, env=env, cwd='/', close_fds=True, **feed)
+    except subprocess.TimeoutExpired:
+        raise Refused('%s did not finish within %d s' % (os.path.basename(argv[0]), timeout))
+    except OSError as e:
+        raise Refused('could not run %s (%s)' % (os.path.basename(argv[0]), e.strerror or e))
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+# --- DER, as far as a certificate request and a certificate need it ----------------------
+
+OID_CN = b'\x06\x03\x55\x04\x03'
+STRING_TAGS = (0x0c, 0x13, 0x16)    # UTF8String, PrintableString, IA5String
+
+
+def _tlv(buf, pos, end):
+    """(tag, content start, content end) of the DER element at pos, strict: one-byte tags,
+    definite minimal lengths, nothing past end."""
+    if pos + 2 > end:
+        raise ValueError('short')
+    tag = buf[pos]
+    if tag & 0x1f == 0x1f:
+        raise ValueError('long tag')
+    first = buf[pos + 1]
+    pos += 2
+    if first < 0x80:
+        length = first
+    else:
+        n = first & 0x7f
+        if n == 0 or n > 3 or pos + n > end:
+            raise ValueError('length')
+        length = int.from_bytes(bytes(buf[pos:pos + n]), 'big')
+        if length < 0x80 or buf[pos] == 0:
+            raise ValueError('not minimal')
+        pos += n
+    if pos + length > end:
+        raise ValueError('overrun')
+    return tag, pos, pos + length
+
+
+def _items(buf, start, end):
+    out = []
+    pos = start
+    while pos < end:
+        tag, cs, ce = _tlv(buf, pos, end)
+        out.append((tag, pos, cs, ce))
+        pos = ce
+    return out
+
+
+def _single_cn(buf, start, end):
+    """The value of a Name that is exactly one RDN holding exactly one CN, else None."""
+    rdns = _items(buf, start, end)
+    if len(rdns) != 1 or rdns[0][0] != 0x31:
+        return None
+    atvs = _items(buf, rdns[0][2], rdns[0][3])
+    if len(atvs) != 1 or atvs[0][0] != 0x30:
+        return None
+    parts = _items(buf, atvs[0][2], atvs[0][3])
+    if len(parts) != 2:
+        return None
+    (otag, opos, _ocs, oce), (vtag, _vpos, vcs, vce) = parts
+    if otag != 0x06 or bytes(buf[opos:oce]) != OID_CN or vtag not in STRING_TAGS:
+        return None
+    try:
+        return bytes(buf[vcs:vce]).decode('ascii')
+    except UnicodeDecodeError:
+        return None
+
+
+def parse_crq(der):
+    """(cn, subject public key info) of a PKCS#10 request as corosync-qdevice-net-certutil
+    -r makes it: subject exactly CN=<name>, and no attributes at all. certutil -C copies
+    the extensions a request asks for into the certificate it signs (a basicConstraints
+    CA:TRUE makes a sub-CA, a subjectAltName a certificate for other names): a request
+    with any attribute is refused. Raises Refused."""
+    try:
+        tag, cs, ce = _tlv(der, 0, len(der))
+        if tag != 0x30 or ce != len(der):
+            raise ValueError('outer')
+        top = _items(der, cs, ce)
+        if len(top) != 3 or top[0][0] != 0x30 or top[1][0] != 0x30 or top[2][0] != 0x03:
+            raise ValueError('shape')
+        info = _items(der, top[0][2], top[0][3])
+        if len(info) != 4:
+            raise ValueError('info')
+        version, subject, spki, attrs = info
+        if version[0] != 0x02 or bytes(der[version[2]:version[3]]) != b'\x00':
+            raise ValueError('version')
+        if subject[0] != 0x30 or spki[0] != 0x30 or attrs[0] != 0xa0:
+            raise ValueError('fields')
+    except ValueError:
+        raise Refused('crq_b64 is not a certificate request', 'bad_request')
+    if attrs[3] != attrs[2]:
+        raise Refused('the certificate request carries attributes or extensions - refused', 'bad_request')
+    try:
+        cn = _single_cn(der, subject[2], subject[3])
+    except ValueError:
+        cn = None
+    if cn is None:
+        raise Refused('the certificate request has to name exactly CN=<cluster>', 'bad_request')
+    return cn, bytes(der[spki[1]:spki[3]])
+
+
+def parse_cert(der):
+    """(subject cn or None, subject public key info) of an X.509 certificate. ValueError."""
+    tag, cs, ce = _tlv(der, 0, len(der))
+    if tag != 0x30 or ce != len(der):
+        raise ValueError('outer')
+    top = _items(der, cs, ce)
+    if len(top) != 3 or top[0][0] != 0x30:
+        raise ValueError('shape')
+    tbs = _items(der, top[0][2], top[0][3])
+    if tbs and tbs[0][0] == 0xa0:
+        tbs = tbs[1:]
+    # serial, signature, issuer, validity, subject, spki
+    if len(tbs) < 6 or tbs[4][0] != 0x30 or tbs[5][0] != 0x30:
+        raise ValueError('tbs')
+    subject, spki = tbs[4], tbs[5]
+    return _single_cn(der, subject[2], subject[3]), bytes(der[spki[1]:spki[3]])
+
+
+def _pem_or_der(raw, label):
+    """DER bytes of raw, which may be PEM with the given label (or any label)."""
+    if raw[:1] == b'\x30':
+        return raw
+    m = re.search(rb'-----BEGIN ([A-Z ]+)-----\s+([A-Za-z0-9+/=\s]+?)-----END \1-----', raw)
+    if not m or (label and label not in m.group(1)):
+        raise ValueError('no %s' % label)
+    return base64.b64decode(re.sub(rb'\s+', b'', m.group(2)), validate=True)
+
+
+# --- files of the NSS directory ------------------------------------------------------------
+
+def _read(path, cap=MAX_FILE):
+    """Bytes of a regular file, no symlink followed, at most cap."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Refused('%s is not a regular file' % os.path.basename(path))
+        data = b''
+        while len(data) <= cap:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        os.close(fd)
+    if len(data) > cap:
+        raise Refused('%s is larger than expected' % os.path.basename(path))
+    return data
+
+
+def _owner(host):
+    """(uid, gid) new files get as root: those of the config directory, as the stock
+    tool's chown --reference does. None when not root."""
+    if os.geteuid() != 0:
+        return None
+    st = os.stat(host.config_dir)
+    return st.st_uid, st.st_gid
+
+
+def _put(host, path, data, mode):
+    """Write a file of the NSS directory in one step: a temp file next to it, then a
+    rename (a symlink at path is replaced, never followed)."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.pegaprox-')
+    try:
+        owner = _owner(host)
+        if owner:
+            os.fchown(fd, owner[0], owner[1])
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, 'wb') as fh:
+            fd = None
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _fix(host, path, mode):
+    """Owner and mode of a file or directory the helper made, never through a symlink:
+    the config directory of the rpm packages belongs to the daemon's own user (coroqnetd,
+    0770), which could put one in its place."""
+    flags = (os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0)
+             | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_NOCTTY', 0))
+    try:
+        fd = os.open(path, flags)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise Refused('%s is a symlink - left alone' % path)
+        raise
+    try:
+        st = os.fstat(fd)
+        if not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
+            raise Refused('%s is neither a file nor a directory - left alone' % path)
+        owner = _owner(host)
+        if owner:
+            os.fchown(fd, owner[0], owner[1])
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
+class _Lock:
+    """flock on the config directory, for what changes the NSS directory (init, sign):
+    the serial file and a new database are not safe to share. Separate opens conflict,
+    so the threads of the sidecar wait for each other as two processes would. With fd,
+    the lock is on that directory instead (the state directory of the firewall op)."""
+
+    def __init__(self, host, fd=None, busy='another helper run holds the NSS database', wait=None):
+        self.host = host
+        self.fd = fd
+        self.busy = busy
+        self.wait = LOCK_WAIT if wait is None else wait
+
+    def __enter__(self):
+        if self.fd is None:
+            try:
+                self.fd = os.open(self.host.config_dir, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+            except OSError:
+                raise Refused('%s is missing - is corosync-qnetd installed?' % self.host.config_dir,
+                              'not_installed')
+        deadline = time.monotonic() + self.wait
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError as e:
+                if e.errno not in (errno.EAGAIN, errno.EACCES) or time.monotonic() > deadline:
+                    os.close(self.fd)
+                    raise Refused(self.busy, 'busy')
+            time.sleep(0.2)
+
+    def __exit__(self, *exc):
+        os.close(self.fd)
+        return False
+
+
+def db_kind(host):
+    """'sql' (cert9.db), 'dbm' (cert8.db, the old format) or None, as the stock tool
+    looks for them."""
+    if os.path.isfile(host.path('cert9.db')):
+        return 'sql'
+    if os.path.isfile(host.path('cert8.db')):
+        return 'dbm'
+    return None
+
+
+def _certutil(host, args, timeout=T_CERTUTIL, data=None, what='certutil'):
+    rc, out, err = run([host.need('certutil')] + args, timeout, data=data)
+    if rc != 0:
+        raise Refused('%s failed: %s' % (what, _last_line(err) or _last_line(out) or 'rc %d' % rc))
+    return out
+
+
+def _has_nick(host, nick):
+    rc, _out, _err = run([host.need('certutil'), '-L', '-d', host.db_dir, '-n', nick], T_CERTUTIL)
+    return rc == 0
+
+
+def _next_serial(host):
+    """Serial file as the stock tool keeps it: 100 to start, each certificate takes the
+    next number."""
+    path = host.path(SERIAL_FILE)
+    try:
+        text = _read(path, 64).decode('ascii', 'replace').strip()
+    except FileNotFoundError:
+        text = '100'
+    if not re.fullmatch(r'[0-9]{1,15}', text):
+        raise Refused('%s is damaged - fix it by hand' % path)
+    serial = int(text) + 1
+    _put(host, path, ('%d\n' % serial).encode(), 0o640)
+    return str(serial)
+
+
+def _export_ca(host):
+    """qnetd-cacert.crt as the stock tool writes it: certutil's listing of the CA, then
+    the same in PEM. The nodes import it with corosync-qdevice-net-certutil -i."""
+    text = _certutil(host, ['-L', '-d', host.db_dir, '-n', CA_NICKNAME], what='exporting the CA')
+    pem = _certutil(host, ['-L', '-d', host.db_dir, '-n', CA_NICKNAME, '-a'], what='exporting the CA')
+    if b'-----BEGIN CERTIFICATE-----' not in pem:
+        raise Refused('certutil gave no PEM of the CA')
+    _put(host, host.path(CA_EXPORT), text + pem, 0o644)
+
+
+def _server_cert(host):
+    _certutil(host, ['-S', '-n', SERVER_NICKNAME, '-s', SERVER_SUBJECT, '-c', CA_NICKNAME,
+                     '-t', 'u,u,u', '-m', _next_serial(host), '-v', CRT_VALIDITY,
+                     '-d', host.db_dir, '-z', host.path(NOISE_FILE), '-f', host.path(PWD_FILE)],
+              timeout=T_KEYGEN, what='making the server certificate')
+
+
+def _create_db(host):
+    """corosync-qnetd-certutil -i -G, as the Debian package runs it when it is installed:
+    a new NSS database, the CA, its export and the server certificate. What this run made
+    is removed again when a step fails, so the next init starts clean."""
+    made = []
+    db = host.db_dir
+    try:
+        if not os.path.isdir(db):
+            os.mkdir(db, 0o750)
+            made.append(db)
+        _fix(host, db, 0o750)
+        pwd = host.path(PWD_FILE)
+        if not os.path.exists(pwd):
+            made.append(pwd)
+        _put(host, pwd, b'', 0o640)
+        for name in ('cert9.db', 'key4.db', 'pkcs11.txt'):
+            if not os.path.exists(host.path(name)):
+                made.append(host.path(name))
+        _certutil(host, ['-N', '-d', db, '-f', pwd], what='making the NSS database')
+        if db_kind(host) != 'sql':
+            raise Refused('certutil made no cert9.db in %s' % db)
+        for name in ('cert9.db', 'key4.db', 'pkcs11.txt'):
+            if os.path.exists(host.path(name)):
+                _fix(host, host.path(name), 0o640)
+        noise = host.path(NOISE_FILE)
+        if not os.path.exists(noise):
+            made.append(noise)
+            _put(host, noise, (secrets.token_hex(20) + '\n').encode(), 0o640)
+        serial = host.path(SERIAL_FILE)
+        if not os.path.exists(serial):
+            made.append(serial)
+        # the self-signed CA: certutil -2 asks whether it is a CA, the path length and
+        # whether the extension is critical, the answers are the stock tool's
+        _certutil(host, ['-S', '-n', CA_NICKNAME, '-s', CA_SUBJECT, '-x', '-t', 'CT,,',
+                         '-m', _next_serial(host), '-v', CRT_VALIDITY, '-d', db,
+                         '-z', noise, '-f', pwd, '-2'],
+                  timeout=T_KEYGEN, data=b'y\n0\ny\n', what='making the CA')
+        if not os.path.exists(host.path(CA_EXPORT)):
+            made.append(host.path(CA_EXPORT))
+        _export_ca(host)
+        _server_cert(host)
+        _debian_group(host)
+    except BaseException:
+        for path in reversed(made):
+            try:
+                if os.path.isdir(path) and not os.path.islink(path):
+                    os.rmdir(path)
+                else:
+                    os.unlink(path)
+            except OSError:
+                pass
+        raise
+
+
+def _debian_group(host):
+    """Debian's postinst gives the group coroqnetd read access to the database (the
+    daemon runs as that user): the same here where the config directory is root's."""
+    owner = _owner(host)
+    if not owner or owner[1] != 0:
+        return
+    try:
+        gid = grp.getgrnam('coroqnetd').gr_gid
+    except KeyError:
+        return
+    for path in (host.db_dir, host.path('cert9.db'), host.path('key4.db')):
+        os.chown(path, -1, gid, follow_symlinks=False)
+
+
+def ensure_db(host):
+    """The NSS database with the CA, its export and the server certificate. An existing
+    CA is never made again; a missing export or server certificate is put back. Returns
+    True where this call made the database."""
+    if not os.path.isdir(host.config_dir):
+        raise Refused('%s is missing - is corosync-qnetd installed?' % host.config_dir, 'not_installed')
+    host.need('certutil')
+    with _Lock(host):
+        if os.path.islink(host.db_dir):
+            # the database is never followed elsewhere (see _fix)
+            raise Refused('%s is a symlink - left alone' % host.db_dir, 'not_initialised')
+        kind = db_kind(host)
+        if kind == 'dbm':
+            raise Refused('the NSS database in %s is in the old format - convert it with: certutil -N -d '
+                          'sql:%s -f %s -@ %s' % (host.db_dir, host.db_dir, host.path(PWD_FILE),
+                                                    host.path(PWD_FILE)), 'not_initialised')
+        if kind is None:
+            _create_db(host)
+            return True
+        if not _has_nick(host, CA_NICKNAME):
+            raise Refused('the NSS database in %s has no "%s" - left alone' % (host.db_dir, CA_NICKNAME),
+                          'not_initialised')
+        if not os.path.isfile(host.path(CA_EXPORT)):
+            _export_ca(host)
+        if not _has_nick(host, SERVER_NICKNAME):
+            _server_cert(host)
+        return False
+
+
+def initialised(host):
+    return db_kind(host) == 'sql' and os.path.isfile(host.path(CA_EXPORT))
+
+
+# --- the service ---------------------------------------------------------------------------
+
+def qnetd_active(host):
+    if host.mode == 'sidecar':
+        return bool(host.qnetd_alive and host.qnetd_alive())
+    systemctl = host.bin('systemctl')
+    if not systemctl:
+        return False
+    rc, _out, _err = run([systemctl, 'is-active', '--quiet', SERVICE], T_SHORT)
+    return rc == 0
+
+
+_URI = re.compile(rb"'?([A-Za-z][A-Za-z0-9+.-]*)://([^/'\s]+)")
+_URI_HOST = re.compile(r'(?:\[([0-9A-Fa-f:.]{2,45})\]|([A-Za-z0-9._-]{1,253}))(?::([0-9]{1,5}))?')
+# what apt-get says when it did not get to a package source at all
+_APT_NET = re.compile(r'Temporary failure resolving|Could not resolve|Could not connect|Unable to connect'
+                      r'|Connection timed out|Network is unreachable|No route to host')
+
+
+def _apt_targets(host, apt):
+    """[(name, port)] of the package sources apt-get would use for PACKAGES: the hosts of
+    the packages and of the lists an update fetches. [] where nothing is to be fetched,
+    None where that cannot be told without apt-get itself going there (a proxy in its
+    configuration, a method other than http and https, more sources than PROBE_MAX)."""
+    cfg = host.bin('apt-config')
+    if not cfg:
+        return None
+    rc, out, _err = run([cfg, 'dump'], T_SHORT)
+    if rc != 0 or re.search(rb'^Acquire::[A-Za-z]+::Proxy', out, re.M):
+        return None
+    rc, pkgs, _err = run([apt, '-qq', 'install', '--print-uris', '--no-install-recommends'] + list(PACKAGES),
+                         T_SHORT)
+    if rc != 0:
+        pkgs = b''                  # no lists yet, or apt-get does not know the packages
+    elif not pkgs.strip():
+        return []
+    rc, lists, _err = run([apt, 'indextargets', '--no-release-info', '--format', '$(REPO_URI)'], T_SHORT)
+    targets = set()
+    for line in (pkgs + b'\n' + (lists if rc == 0 else b'')).splitlines():
+        if not line.strip():
+            continue
+        u = _URI.match(line.strip())
+        if not u:
+            return None             # file:, cdrom:, mirror+file: and the like
+        scheme = u.group(1).decode('ascii').lower()
+        m = _URI_HOST.fullmatch(u.group(2).decode('ascii', 'replace').rpartition('@')[2])
+        port = int(m.group(3) or 0) if m else 0
+        if scheme not in ('http', 'https') or not m or port > 65535:
+            return None
+        targets.add((m.group(1) or m.group(2), port or (443 if scheme == 'https' else 80)))
+    if not targets or len(targets) > PROBE_MAX:
+        return None
+    return sorted(targets)
+
+
+def _reach(target, deadline, answers, stage):
+    """('', target) on answers when a connect to target got through, else (why, target).
+    stage says where one that never answers hangs."""
+    name, port = target
+    stage[target] = 'no DNS answer'
+    try:
+        addrs = socket.getaddrinfo(name, port, 0, socket.SOCK_STREAM)
+    except (OSError, UnicodeError) as e:
+        answers.put(('no address (%s)' % _clean(getattr(e, 'strerror', None) or e, 80), target))
+        return
+    stage[target] = 'no connection to port %d' % port
+    for family, kind, proto, _cname, addr in addrs[:4]:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        try:
+            s = socket.socket(family, kind, proto)
+        except OSError:
+            continue
+        try:
+            s.settimeout(min(T_CONNECT, left))
+            s.connect(addr)
+            answers.put(('', target))
+            return
+        except OSError:
+            pass
+        finally:
+            s.close()
+    answers.put(('no connection to port %d' % port, target))
+
+
+def sources_unreachable(host, apt):
+    """None, or why apt-get gets to none of its package sources. Without DNS or a route,
+    apt-get waits on every package and tries each again, the update and the second
+    install wait as long once more: far past the time PegaProx gives an init. One lookup
+    and one connect per host, all at once and T_PROBE at most, tell it up front."""
+    targets = _apt_targets(host, apt)
+    if not targets:
+        return None
+    answers, stage = queue.Queue(), {}
+    deadline = time.monotonic() + T_PROBE
+    for t in targets:
+        threading.Thread(target=_reach, args=(t, deadline, answers, stage), daemon=True).start()
+    why = {}
+    while len(why) < len(targets):
+        try:
+            reason, t = answers.get(timeout=max(0.01, deadline - time.monotonic()))
+        except queue.Empty:
+            break
+        if not reason:
+            return None
+        why[t] = reason
+    first = targets[0]
+    return '%s: %s' % (first[0], why.get(first) or '%s within %d s' % (stage.get(first, 'no answer'), T_PROBE))
+
+
+def _net_error(err):
+    for line in reversed(_clean_lines(err)):
+        if _APT_NET.search(line):
+            return line
+    return ''
+
+
+def package_manager(host):
+    """(name, binary, packages) of the package manager init installs corosync-qnetd with:
+    apt-get, else dnf, yum or zypper. None where there is none, and in the sidecar, whose
+    image carries everything and never installs."""
+    if host.mode != 'systemd':
+        return None
+    for name, binary, packages in PACKAGE_SETS:
+        path = host.bin(binary)
+        if path:
+            return name, path, packages
+    return None
+
+
+def _install_packages(host):
+    """corosync-qnetd and the NSS tools from the distribution: apt-get on Debian and
+    Ubuntu, dnf or yum on RHEL, its rebuilds and Fedora, zypper on SUSE."""
+    pm = package_manager(host)
+    if pm is None:
+        raise Refused('corosync-qnetd is not installed and this host has no apt-get, dnf, yum or zypper - '
+                      'install corosync-qnetd and the NSS tools (nss-tools) with its package manager',
+                      'not_installed')
+    if pm[0] != 'apt':
+        return _install_rpm(host, *pm)
+    apt = pm[1]
+    why = sources_unreachable(host, apt)
+    if why:
+        raise Refused('apt-get cannot reach the package sources of this host (%s) - give it DNS and a '
+                      'route to its mirror, or install %s by hand' % (why, ' '.join(PACKAGES)),
+                      'no_package_sources')
+    env = {'DEBIAN_FRONTEND': 'noninteractive'}
+    cmd = [apt, '-q', '-y', '-o', 'DPkg::Lock::Timeout=120', '-o', 'Dpkg::Options::=--force-confdef',
+           '-o', 'Dpkg::Options::=--force-confold', 'install', '--no-install-recommends'] + list(PACKAGES)
+    deadline = time.monotonic() + T_APT
+
+    def left():
+        n = int(deadline - time.monotonic())
+        if n < 30:
+            raise Refused('apt-get did not finish within %d s' % T_APT, 'not_installed')
+        return n
+
+    # the umask of an admin's shell, not this process's 077: maintainer scripts that make
+    # a directory or a file without a mode of their own would leave it to root alone
+    old = os.umask(0o022)
+    try:
+        rc, _out, err = run(cmd, left(), extra_env=env)
+        if rc != 0:
+            run([apt, '-q', '-y', 'update'], left(), extra_env=env)
+            rc, _out, err = run(cmd, left(), extra_env=env)
+    finally:
+        os.umask(old)
+    if rc != 0:
+        net = _net_error(err)
+        if net:
+            raise Refused('apt-get cannot reach the package sources of this host: %s' % net,
+                          'no_package_sources')
+        raise Refused('apt-get could not install %s: %s' % (' '.join(PACKAGES), _last_line(err)),
+                      'not_installed')
+
+
+# what dnf, yum and zypper say when they did not get to a package source at all, and when
+# no source they reach has the package
+_RPM_NET = re.compile(r"Could not resolve host|Couldn't resolve host|Curl error \((?:5|6|7|28)\)|curl#(?:5|6|7|28)\b"
+                      r'|Cannot download repomd|Failed to download metadata|Cannot find a valid baseurl'
+                      r'|Could not retrieve mirrorlist|Download \(curl\) error|Timeout was reached'
+                      r'|Connection timed out|Network is unreachable|No route to host'
+                      r'|Temporary failure in name resolution')
+_RPM_MISSING = re.compile(r'No match for argument|Unable to find a match|No package \S+ available'
+                          r'|No provider of|not found in package names')
+ZYPPER_NOT_FOUND = 104          # ZYPPER_EXIT_INF_CAP_NOT_FOUND
+
+
+def _install_rpm(host, name, binary, packages):
+    """dnf, yum or zypper, once, inside the budget of apt-get. They refresh their metadata
+    themselves where it is old. dnf and yum get short download time limits and few
+    retries, so a host without DNS or a route answers within the budget. Nothing is
+    trusted on the way that the host does not trust already: zypper never runs with
+    --gpg-auto-import-keys, and a repository whose key zypper does not know makes the
+    install fail. dnf and yum, given -y, import a key the configuration of a repository on
+    this host names (gpgkey=), as for an admin who answers yes."""
+    if name == 'zypper':
+        cmd = [binary, '--non-interactive', 'install', '--no-recommends'] + list(packages)
+        # wait for a zypper of someone else, as apt-get does for its lock
+        env = {'ZYPP_LOCK_TIMEOUT': '120'}
+    else:
+        cmd = [binary, '-y', '--setopt=timeout=15', '--setopt=retries=2']
+        if name == 'dnf':
+            cmd.append('--setopt=install_weak_deps=False')
+        cmd += ['install'] + list(packages)
+        env = None
+    old = os.umask(0o022)
+    try:
+        rc, out, err = run(cmd, T_APT, extra_env=env)
+    finally:
+        os.umask(old)
+    if rc == 0:
+        return
+    lines = _clean_lines(out) + _clean_lines(err)
+    net = next((ln for ln in reversed(lines) if _RPM_NET.search(ln)), '')
+    if net:
+        raise Refused('%s cannot reach the package sources of this host: %s - give it DNS and a route to its '
+                      'mirror, or install %s by hand' % (name, net, ' '.join(packages)), 'no_package_sources')
+    if (rc == ZYPPER_NOT_FOUND and name == 'zypper') or any(_RPM_MISSING.search(ln) for ln in lines):
+        raise Refused('%s finds no %s in the repositories of this host - on RHEL and its rebuilds it is in the '
+                      'High Availability repository (dnf config-manager --set-enabled highavailability, or '
+                      'the RHEL High Availability Add-On), on SUSE in the High Availability extension: '
+                      'enable it, then check again' % (name, packages[0]), 'not_installed')
+    raise Refused('%s could not install %s: %s' % (name, ' '.join(packages), _last_line(err) or _last_line(out)),
+                  'not_installed')
+
+
+def _start_service(host, restart=False):
+    systemctl = host.bin('systemctl')
+    if not systemctl:
+        raise Refused('this host has no systemd - start corosync-qnetd by hand', 'not_installed')
+    rc, _out, err = run([systemctl, 'enable', '--now', SERVICE], T_SERVICE)
+    if rc != 0:
+        raise Refused('could not start %s: %s' % (SERVICE, _last_line(err)))
+    if restart:
+        # the package started it before its options were in place
+        rc, _out, err = run([systemctl, 'restart', SERVICE], T_SERVICE)
+        if rc != 0:
+            raise Refused('could not restart %s: %s' % (SERVICE, _last_line(err)))
+
+
+def tls_words(words):
+    """The options of corosync-qnetd as words, with -s req in place of whatever -s they
+    had and every other option kept (also inside a group such as -ds on). None where an
+    option lacks its value: such a line is not touched."""
+    out, i = [], 0
+    while i < len(words):
+        w = words[i]
+        i += 1
+        if len(w) < 2 or w[0] != '-' or w.startswith('--'):
+            out.append(w)
+            continue
+        flags = ''
+        for pos in range(1, len(w)):
+            c = w[pos]
+            if c not in TAKES_VALUE:
+                flags += c
+                continue
+            value = w[pos + 1:]
+            if not value:
+                if i >= len(words):
+                    return None
+                value = words[i]
+                i += 1
+            if flags:
+                out.append('-' + flags)
+                flags = ''
+            if c != 's':
+                out += ['-' + c, value]
+            break
+        if flags:
+            out.append('-' + flags)
+    return out + ['-s', 'req']
+
+
+def _unit_environment_file(host):
+    """0 for DEFAULTS_FILE, 1 for SYSCONFIG_FILE: which of the two the unit of
+    corosync-qnetd reads, as systemd says. None where it says neither (or nothing)."""
+    systemctl = host.bin('systemctl') if host.mode == 'systemd' else None
+    if not systemctl:
+        return None
+    try:
+        rc, out, _err = run([systemctl, 'show', '-p', 'EnvironmentFiles', SERVICE], T_SHORT)
+    except Refused:
+        return None
+    if rc != 0:
+        return None
+    text = out[:4096].decode('utf-8', 'replace')
+    for n, path in enumerate((DEFAULTS_FILE, SYSCONFIG_FILE)):
+        if re.search(r'(?:^|[=\s])-?%s(?:\s|$)' % re.escape(path), text):
+            return n
+    return None
+
+
+def _plain_value(raw):
+    """The value of a shell assignment that is plain words in plain quotes, else None."""
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in '"\'':
+        raw = raw[1:-1]
+    return raw if _PLAIN_OPTIONS.fullmatch(raw) else None
+
+
+def require_tls(host):
+    """COROSYNC_QNETD_OPTIONS with -s req, for a corosync-qnetd this run installed. Its
+    default (-s on) lets a client go without TLS, and such a client is asked for no
+    certificate: whoever reaches the port could join the vote of any cluster name. Every
+    QDevice PegaProx (or pvecm) sets up speaks TLS. A file that is not plain assignments
+    of plain options is left as it is. Returns True when the file asks for TLS now."""
+    path = host.defaults_file
+    if not os.path.isdir(os.path.dirname(path)):
+        return False
+    try:
+        text = _read(path).decode('utf-8')
+    except FileNotFoundError:
+        text = ''
+    except (OSError, Refused, UnicodeDecodeError):
+        return False
+    lines = text.splitlines()
+    at = [n for n, ln in enumerate(lines) if _OPTIONS_LINE.match(ln)]
+    if not at:
+        lines.append('COROSYNC_QNETD_OPTIONS="-s req"')
+    else:
+        m = _OPTIONS_LINE.match(lines[at[-1]])
+        value = _plain_value(m.group(2))
+        words = tls_words(value.split()) if value is not None else None
+        if words is None:
+            return False
+        lines[at[-1]] = '%sCOROSYNC_QNETD_OPTIONS="%s"' % (m.group(1), ' '.join(words))
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.pegaprox-')
+    try:
+        if os.geteuid() == 0:
+            os.fchown(fd, 0, 0)
+        os.fchmod(fd, 0o644)
+        with os.fdopen(fd, 'w') as fh:
+            fd = None
+            fh.write('\n'.join(lines) + '\n')
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return True
+
+
+def tls_state(host):
+    """Whether the running corosync-qnetd requires TLS: its status line says Required, or
+    Supported / Unsupported. None where that cannot be read."""
+    tool = host.bin('corosync-qnetd-tool')
+    if not tool:
+        return None
+    try:
+        rc, out, _err = run([tool, '-s'] + host.ipc_args(), T_SHORT)
+    except Refused:
+        return None
+    if rc != 0:
+        return None
+    m = re.search(rb'^TLS:[ \t]*([A-Za-z]+)', out[:MAX_RAW], re.M)
+    return {b'Required': True, b'Supported': False, b'Unsupported': False}.get(m.group(1)) if m else None
+
+
+# --- status --------------------------------------------------------------------------------
+
+def parse_listing(text):
+    """corosync-qnetd-tool -l [-v] as a list of clusters, each with its nodes."""
+    clusters = []
+    cluster = node = None
+    for line in text.splitlines():
+        line = line.rstrip()
+        m = re.fullmatch(r'Cluster "(.*)":', line)
+        if m:
+            if len(clusters) >= 5000:
+                break
+            cluster = {'name': _clean(m.group(1), 64), 'algorithm': '', 'tie_breaker': '', 'nodes': []}
+            clusters.append(cluster)
+            node = None
+            continue
+        if cluster is None:
+            continue
+        m = re.fullmatch(r'\s+Node ID (\d{1,10}):', line)
+        if m:
+            if len(cluster['nodes']) >= 512:
+                node = None
+                continue
+            node = {'node_id': int(m.group(1)), 'addr': '', 'vote': '', 'tls': ''}
+            cluster['nodes'].append(node)
+            continue
+        key, sep, value = line.strip().partition(':')
+        if not sep:
+            continue
+        value = _clean(value, 128)
+        if key == 'Algorithm' and node is None:
+            cluster['algorithm'] = value
+        elif key == 'Tie-breaker':
+            cluster['tie_breaker'] = value
+        elif node is not None and key == 'Client address':
+            node['addr'] = value
+        elif node is not None and key == 'Vote':
+            node['vote'] = value
+        elif node is not None and key == 'TLS active':
+            node['tls'] = value
+    return clusters
+
+
+def listing(host):
+    """(active, clusters, raw). clusters is None where the QNetd runs and its tool did not
+    answer: nobody can tell then which clusters it serves."""
+    if not qnetd_active(host):
+        return False, [], ''
+    tool = host.bin('corosync-qnetd-tool')
+    if not tool:
+        return True, None, ''
+    try:
+        rc, out, _err = run([tool, '-l', '-v'] + host.ipc_args(), T_SHORT)
+    except Refused:
+        return True, None, ''
+    if rc != 0:
+        return True, None, ''
+    out = out[:MAX_LISTING]
+    return True, parse_listing(out.decode('utf-8', 'replace')), out[:MAX_RAW].decode('utf-8', 'replace')
+
+
+# --- operations ----------------------------------------------------------------------------
+
+def _self_digest():
+    try:
+        return hashlib.sha256(_read(os.path.abspath(__file__), 4 * 1024 * 1024)).hexdigest()
+    except (OSError, Refused, NameError):
+        return ''
+
+
+def op_version(host, name, req):
+    pm = package_manager(host)
+    return {'ok': True, 'protocol': PROTOCOL, 'mode': host.mode, 'ops': list(OPS),
+            'package_manager': pm[0] if pm else None, 'packages': list(pm[2]) if pm else [],
+            'qnetd_installed': host.bin('corosync-qnetd') is not None,
+            'certutil_installed': host.bin('certutil') is not None,
+            'initialised': initialised(host), 'active': qnetd_active(host),
+            'sha256': _self_digest()}
+
+
+def op_init(host, name, req):
+    installed = fresh = tls_set = False
+    if host.mode == 'systemd' and (not host.bin('corosync-qnetd') or not host.bin('certutil')):
+        fresh = not host.bin('corosync-qnetd')
+        _install_packages(host)
+        installed = True
+    for b in ('corosync-qnetd', 'certutil'):
+        host.need(b)
+    if fresh:
+        # a QNetd this run put here requires TLS from the start; one that was here before
+        # is its admin's, status says how it runs
+        tls_set = require_tls(host)
+    created = ensure_db(host)
+    if host.mode == 'systemd':
+        _start_service(host, restart=tls_set)
+    return {'ok': True, 'active': qnetd_active(host), 'created': created, 'installed': installed,
+            'tls_set': tls_set}
+
+
+def op_ca(host, name, req):
+    try:
+        data = _read(host.path(CA_EXPORT))
+    except FileNotFoundError:
+        raise Refused('the QNetd CA is not there yet - run init', 'not_initialised')
+    except OSError:
+        raise Refused('%s cannot be read as a plain file' % CA_EXPORT)
+    if b'-----BEGIN CERTIFICATE-----' not in data:
+        raise Refused('%s holds no certificate' % CA_EXPORT, 'not_initialised')
+    return {'ok': True, 'ca_b64': base64.b64encode(data).decode('ascii')}
+
+
+def _cert_files(host):
+    """(cluster name, file name) of every cluster-<name>.crt in the NSS directory. Raises
+    OSError where the directory cannot be listed."""
+    out = []
+    for entry in os.listdir(host.db_dir):
+        m = re.fullmatch(r'cluster-(.+)\.crt', entry)
+        if m:
+            out.append((m.group(1), entry))
+    return out
+
+
+def _existing_certs(host, name):
+    """The cluster certificates on file for name. qnetd matches a client certificate to
+    its cluster name the way a host name is matched, without regard to case: PVE and pve
+    are the same name here."""
+    want = name.lower()
+    try:
+        files = _cert_files(host)
+    except OSError:
+        return []
+    return sorted(host.path(entry) for cn, entry in files if cn.lower() == want)
+
+
+def cert_names(host):
+    """The cluster names with a certificate on file, as status lists them: the listing of
+    _existing_certs, names a cluster can have only, sorted, at most MAX_CERTS. Names and
+    nothing of what the files hold. [] where there is no NSS directory yet, None where it
+    cannot be listed."""
+    try:
+        files = _cert_files(host)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return None
+    return sorted({cn for cn, _entry in files if NAME_RE.fullmatch(cn)})[:MAX_CERTS]
+
+
+def _cert_key(path):
+    try:
+        return parse_cert(_pem_or_der(_read(path), b'CERTIFICATE'))[1]
+    except (OSError, ValueError, Refused):
+        return None
+
+
+def op_sign(host, name, req):
+    """corosync-qnetd-certutil -s -c <crq> -n <name>, with what the stock tool leaves out:
+
+    - the request names exactly CN=<name> and carries no attributes (parse_crq);
+    - a certificate on file for that name with another key is never replaced while a
+      cluster of that name is connected to this QNetd (code name_in_use), nor while that
+      cannot be told (status_unknown); otherwise only with "replace": true in the request
+      (code name_exists). Two clusters of one name would count as one cluster on the
+      QNetd. The same key again (the same cluster, its nodes keep their keys) is signed;
+    - certutil writes into a private temp directory: on a failure it leaves an empty file
+      behind, which must not land on the cluster's certificate;
+    - the new certificate is checked for the subject and key of the request before it
+      goes into place.
+    """
+    raw = req.get('crq_b64')
+    if not isinstance(raw, str) or not raw:
+        raise Refused('sign needs crq_b64', 'bad_request')
+    if len(raw) > (MAX_CRQ * 4) // 3 + 4:
+        raise Refused('the certificate request is too large', 'bad_request')
+    try:
+        der = _pem_or_der(base64.b64decode(raw.encode('ascii'), validate=True), b'REQUEST')
+    except (ValueError, UnicodeEncodeError):
+        raise Refused('crq_b64 is not base64 of a certificate request', 'bad_request')
+    if len(der) > MAX_CRQ:
+        raise Refused('the certificate request is too large', 'bad_request')
+    cn, key = parse_crq(der)
+    if cn != name:
+        raise Refused('the certificate request is for "%s", not for "%s"' % (_clean(cn, 64), name),
+                      'bad_request')
+    replace = req.get('replace', False)
+    if not isinstance(replace, bool):
+        raise Refused('replace is true or false', 'bad_request')
+    host.need('certutil')
+    if db_kind(host) != 'sql' or not _has_nick(host, CA_NICKNAME):
+        raise Refused('the QNetd CA is not there yet - run init', 'not_initialised')
+
+    with _Lock(host):
+        existing = _existing_certs(host, name)
+        same = any(_cert_key(p) == key for p in existing)
+        if not same:
+            _active, clusters, _raw = listing(host)
+            connected = None if clusters is None else {c['name'].lower() for c in clusters}
+            if connected is None:
+                raise Refused('corosync-qnetd runs but does not say which clusters it serves - not '
+                              'signing for "%s" blind' % name, 'status_unknown')
+            if name.lower() in connected:
+                raise Refused('a cluster named "%s" is connected to this QNetd with another key - two '
+                              'clusters of one name would count as one' % name, 'name_in_use')
+            if existing and not replace:
+                raise Refused('this QNetd holds a certificate for a cluster named "%s" with another key '
+                              '(%s) - if that cluster is gone or this is it set up anew, ask again with '
+                              'replace' % (name, os.path.basename(existing[0])), 'name_exists')
+        work = tempfile.mkdtemp(prefix='pegaprox-qnetd-', dir=None if host.overrides else '/tmp')
+        try:
+            os.chmod(work, 0o700)
+            crq = os.path.join(work, 'qdevice-net-node.crq')
+            out = os.path.join(work, 'cluster.crt')
+            fd = os.open(crq, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, 'wb') as fh:
+                fh.write(der)
+            _certutil(host, ['-C', '-v', CRT_VALIDITY, '-m', _next_serial(host), '-i', crq, '-o', out,
+                             '-c', CA_NICKNAME, '-d', host.db_dir, '-f', host.path(PWD_FILE)],
+                      what='signing the cluster certificate')
+            crt = _read(out)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        try:
+            got_cn, got_key = parse_cert(crt)
+        except ValueError:
+            raise Refused('certutil gave no certificate')
+        if got_cn != name or got_key != key:
+            raise Refused('the signed certificate does not match the request')
+        _put(host, host.path('cluster-%s.crt' % name), crt, 0o640)
+    return {'ok': True, 'crt_b64': base64.b64encode(crt).decode('ascii'),
+            'replaced': bool(existing) and not same}
+
+
+def op_status(host, name, req):
+    """What runs and who is connected; certificates: the cluster names a sign would find
+    a certificate on file for (cert_names), so a plan can tell before anything runs."""
+    active, clusters, raw = listing(host)
+    if clusters is None:
+        raise Refused('corosync-qnetd runs but corosync-qnetd-tool did not answer', 'status_unknown')
+    return {'ok': True, 'active': active, 'clusters': clusters, 'raw': raw,
+            'tls_required': tls_state(host) if active else None, 'certificates': cert_names(host)}
+
+
+def read_product_uuid(path=PRODUCT_UUID):
+    """This host's SMBIOS uuid, lower case; '' where it cannot be read or is a dummy."""
+    try:
+        text = _read(path, 128).decode('ascii', 'replace').strip().lower()
+    except (OSError, Refused):
+        return ''
+    if not UUID_RE.fullmatch(text) or set(text) <= set('0-') or set(text) <= set('f-'):
+        return ''
+    return text
+
+
+def op_uuid(host, name, req):
+    return {'ok': True, 'product_uuid': read_product_uuid() or host.host_uuid}
+
+
+# --- the firewall (op firewall) ------------------------------------------------------------
+#
+# The port of corosync-qnetd, opened with ufw or firewalld for the addresses the nodes of
+# one cluster come from; the cluster name is the tag. Every rule the helper added is
+# written down in the state file, and remove takes out what is written down there and
+# nothing else: a rule an admin made stays, also one exactly like the helper's own.
+# pve-firewall and an nftables or iptables policy of drop are left as they are; the answer
+# names the lines an admin runs there.
+
+FIREWALL_STATE = 'firewall.json'
+QNETD_PORT = 5403
+MAX_SOURCES = 64
+MAX_STATE = 1024 * 1024
+# what the state file holds at most, as _check_state reads it back: allow refuses to write
+# down more (state_full) instead of leaving a file every later op refuses
+MAX_TAG_RULES = 4 * MAX_SOURCES
+MAX_TAGS = 10000
+T_FIREWALL = 30                 # one call of a firewall tool
+# every call of one firewall op together, and the wait for another run's lock: inside the
+# 120 s PegaProx waits for the op
+T_FIREWALL_ALL = 80
+LOCK_WAIT_FIREWALL = 20
+FW_ACTIONS = ('inspect', 'allow', 'remove')
+FW_MANAGED = ('firewalld', 'ufw')
+FW_COMMENT = 'pegaprox-qnetd '
+_OUR_COMMENT = re.compile(r'pegaprox-qnetd [A-Za-z0-9](?:[A-Za-z0-9-]{0,13}[A-Za-z0-9])?')
+ZONE_RE = re.compile(r'[A-Za-z0-9_-]{1,64}')
+NFT_NAME_RE = re.compile(r'[A-Za-z][A-Za-z0-9_.-]{0,63}')
+_DOTTED = re.compile(r'(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}')
+# a rich rule of firewalld exactly of the shape the helper adds, as firewalld lists it
+_RICH = re.compile(r'rule family="(ipv4|ipv6)" source address="([0-9A-Fa-f:.]{2,45})" '
+                   r'port port="([0-9]{1,5})" protocol="tcp" accept')
+PLACEHOLDER = '<node address>'
+_NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0)
+
+
+def _canonical(text):
+    """The address in text as ipaddress writes it, an IPv4-mapped IPv6 one as IPv4; None
+    for anything that is no single address."""
+    try:
+        addr = ipaddress.ip_address(text)
+    except ValueError:
+        return None
+    if addr.version == 6 and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return str(addr)
+
+
+def fw_source(raw):
+    """One source address of a request, canonical. Refused (bad_request) for anything but
+    one plain address a node can come from: no network, no name, no zone index (it would
+    end up inside a firewall rule), nothing unspecified, multicast or loopback."""
+    bad = Refused('a source is one IP address of a node (%s is not)' % _clean(repr(raw), 60), 'bad_request')
+    if not isinstance(raw, str) or not 2 <= len(raw) <= 45 or '%' in raw or '/' in raw:
+        raise bad
+    if ':' not in raw and not _DOTTED.fullmatch(raw):
+        raise bad                   # 010.0.0.1 reads as 8.0.0.1 to some tools, 10.0.0.1 to others
+    text = _canonical(raw)
+    if text is None:
+        raise bad
+    addr = ipaddress.ip_address(text)
+    if addr.is_unspecified or addr.is_multicast or addr.is_loopback:
+        raise bad
+    return text
+
+
+def fw_sources(raw):
+    if not isinstance(raw, list):
+        raise Refused('sources is a list of IP addresses', 'bad_request')
+    if len(raw) > MAX_SOURCES:
+        raise Refused('at most %d sources at a time' % MAX_SOURCES, 'bad_request')
+    out = []
+    for item in raw:
+        text = fw_source(item)
+        if text not in out:
+            out.append(text)
+    return out
+
+
+def option_value(words, want):
+    """The value of corosync-qnetd's option -<want> in its option words, as its getopt
+    reads them (the last one counts, also inside a group such as -dp 5404). None where it
+    is not given, False where an option lacks its value."""
+    found, i = None, 0
+    while i < len(words):
+        w = words[i]
+        i += 1
+        if len(w) < 2 or w[0] != '-' or w.startswith('--'):
+            continue
+        for pos in range(1, len(w)):
+            c = w[pos]
+            if c not in TAKES_VALUE:
+                continue
+            value = w[pos + 1:]
+            if not value:
+                if i >= len(words):
+                    return False
+                value = words[i]
+                i += 1
+            if c == want:
+                found = value
+            break
+    return found
+
+
+def qnetd_port(host):
+    """The TCP port corosync-qnetd listens on: -p in COROSYNC_QNETD_OPTIONS of its unit's
+    environment file, 5403 where none is set. Never a request's: the op opens no other
+    port. A file another user than root could have written, or options the helper cannot
+    read plainly, give no port at all."""
+    path = host.defaults_file
+    try:
+        fd = os.open(path, os.O_RDONLY | _NOFOLLOW | getattr(os, 'O_NONBLOCK', 0))
+    except FileNotFoundError:
+        return QNETD_PORT
+    except OSError:
+        raise Refused('%s is not a plain file - the port of corosync-qnetd cannot be told' % path)
+    try:
+        st = os.fstat(fd)
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid not in (0, os.geteuid()) or st.st_mode & 0o022
+                or st.st_size > MAX_FILE):
+            raise Refused('%s is not root\'s alone (or not a plain file) - the port in it is not taken' % path)
+        data = b''
+        while len(data) <= MAX_FILE:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        os.close(fd)
+    try:
+        lines = [ln for ln in data.decode('utf-8').splitlines() if _OPTIONS_LINE.match(ln)]
+    except UnicodeDecodeError:
+        lines = None
+    if lines == []:
+        return QNETD_PORT
+    value = _plain_value(_OPTIONS_LINE.match(lines[-1]).group(2)) if lines else None
+    port = option_value(value.split(), 'p') if value is not None else False
+    if port is None:
+        return QNETD_PORT
+    if not port or not re.fullmatch(r'[0-9]{1,5}', port) or not 0 < int(port) < 65536:
+        raise Refused('the options of corosync-qnetd in %s do not say its port plainly - open it by hand'
+                      % path)
+    return int(port)
+
+
+class _Budget:
+    """One time limit for all firewall tool calls of an op, each of them T_FIREWALL at most."""
+
+    def __init__(self, secs=T_FIREWALL_ALL):
+        self.secs = secs
+        self.end = time.monotonic() + secs
+
+    def left(self):
+        n = int(self.end - time.monotonic())
+        if n < 2:
+            raise Refused('the firewall tools did not finish within %d s' % self.secs, 'firewall_failed')
+        return min(T_FIREWALL, n)
+
+
+def _fw(host, budget, name, args):
+    rc, out, err = run([host.need(name)] + list(args), budget.left())
+    return rc, out[:MAX_LISTING], err[-MAX_RAW:]
+
+
+def _systemd_booted(host):
+    """systemd runs this host (and its systemctl is there). A test run's stand-in
+    systemctl (bin_dir) counts as that."""
+    if not host.bin('systemctl'):
+        return False
+    return bool(host.bin_dir) or os.path.isdir('/run/systemd/system')
+
+
+def firewall_backend(host, budget, port):
+    """What filters incoming connections on this host, the first of: pve-firewall (the host
+    is a node of a Proxmox cluster), firewalld, ufw, an nftables or iptables policy of drop
+    on input; else none. {backend, managed, blocking, ...}: blocking True or False, None
+    where it cannot be told."""
+    if host.bin('pve-firewall'):
+        rc, _out, _err = _fw(host, budget, 'systemctl', ['is-active', '--quiet', 'pve-firewall.service'])
+        if rc == 0:
+            rc, out, _err = _fw(host, budget, 'pve-firewall', ['status'])
+            m = re.search(rb'^Status:\s*(enabled|disabled)', out, re.M) if rc == 0 else None
+            return {'backend': 'pve-firewall', 'managed': False,
+                    'blocking': (m.group(1) == b'enabled') if m else None}
+    if host.bin('firewall-cmd'):
+        rc, out, _err = _fw(host, budget, 'firewall-cmd', ['--state'])
+        if rc == 0 and out.strip() == b'running':
+            return _firewalld_state(host, budget, port)
+    if host.bin('ufw'):
+        rc, out, _err = _fw(host, budget, 'ufw', ['status'])
+        if rc == 0 and out.strip().split(b'\n', 1)[0].strip() == b'Status: active':
+            return _ufw_state(host, budget, port)
+    return _packet_filter(host, budget)
+
+
+def _rich(source, port):
+    """The rich rule of firewalld for one source, as firewalld itself writes it."""
+    return 'rule family="%s" source address="%s" port port="%d" protocol="tcp" accept' % (
+        'ipv6' if ':' in source else 'ipv4', source, port)
+
+
+def _firewalld_state(host, budget, port):
+    rc, out, err = _fw(host, budget, 'firewall-cmd', ['--get-default-zone'])
+    zone = out.decode('ascii', 'replace').strip()
+    if rc != 0 or not ZONE_RE.fullmatch(zone):
+        raise Refused('firewalld names no default zone the helper takes (%s)'
+                      % _clean(zone or _last_line(err), 64), 'firewall_failed')
+    blocking = True
+    rc, out, _err = _fw(host, budget, 'firewall-cmd', ['--permanent', '--zone=' + zone, '--get-target'])
+    if rc == 0 and out.strip() == b'ACCEPT':
+        blocking = False
+    else:
+        rc, out, _err = _fw(host, budget, 'firewall-cmd', ['--zone=' + zone, '--list-ports'])
+        if rc == 0 and ('%d/tcp' % port).encode() in out.split():
+            blocking = False
+    return {'backend': 'firewalld', 'managed': True, 'blocking': blocking, 'zone': zone}
+
+
+def _rich_rules(host, budget, zone, permanent):
+    """{(source, port)} of the rich rules of zone that are of exactly the helper's shape,
+    whoever added them; permanent or in the running firewall."""
+    args = (['--permanent'] if permanent else []) + ['--zone=' + zone, '--list-rich-rules']
+    rc, out, err = _fw(host, budget, 'firewall-cmd', args)
+    if rc != 0:
+        raise Refused('firewalld does not list the rules of the zone %s: %s'
+                      % (zone, _last_line(err) or _last_line(out) or 'rc %d' % rc), 'firewall_failed')
+    found = set()
+    for line in out.decode('utf-8', 'replace').splitlines():
+        m = _RICH.fullmatch(' '.join(line.split()))
+        if not m:
+            continue
+        source = _canonical(m.group(2))
+        if source and (m.group(1) == 'ipv6') == (':' in source) and 0 < int(m.group(3)) < 65536:
+            found.add((source, int(m.group(3))))
+    return found
+
+
+def _ufw_rule(line):
+    """{action, direction, iface, src, sport, dst, dport, proto, comment, app} of one line of
+    `ufw show added` (ufw's own command form of a rule); None for a line of another shape."""
+    try:
+        w = shlex.split(line)
+    except ValueError:
+        return None
+    if len(w) < 3 or w[0] != 'ufw' or w[1] not in ('allow', 'deny', 'reject', 'limit'):
+        return None
+    r = {'action': w[1], 'direction': 'in', 'iface': '', 'src': 'any', 'sport': '', 'dst': 'any',
+         'dport': '', 'proto': 'any', 'comment': '', 'app': False}
+    i = 2
+    if i < len(w) and w[i] in ('log', 'log-all'):
+        i += 1
+    if i < len(w) and w[i] in ('in', 'out'):
+        r['direction'] = w[i]
+        i += 1
+        if i + 1 < len(w) and w[i] == 'on':
+            r['iface'] = w[i + 1]
+            i += 2
+    if i < len(w) and w[i] not in ('from', 'to', 'proto', 'comment'):
+        # the short form: PORT[/PROTO], or the name of an application
+        port, _sep, proto = w[i].partition('/')
+        r['dport'], r['proto'] = port, proto or 'any'
+        r['app'] = not re.fullmatch(r'[0-9]{1,5}', port)
+        i += 1
+    while i < len(w):
+        if w[i] in ('from', 'to') and i + 1 < len(w):
+            side = w[i]
+            r['src' if side == 'from' else 'dst'] = w[i + 1]
+            i += 2
+            if i + 1 < len(w) and w[i] == 'port':
+                r['sport' if side == 'from' else 'dport'] = w[i + 1]
+                i += 2
+            elif i + 1 < len(w) and w[i] == 'app':
+                r['app'] = True
+                i += 2
+        elif w[i] in ('proto', 'comment') and i + 1 < len(w):
+            r[w[i]] = w[i + 1]
+            i += 2
+        else:
+            return None
+    return r
+
+
+def _ufw_rules(host, budget):
+    """(rules, odd): the rules of `ufw show added` as _ufw_rule reads them, and the lines of
+    rules it does not read (an admin's comment with a quote in it, a syntax of a later ufw)."""
+    rc, out, err = _fw(host, budget, 'ufw', ['show', 'added'])
+    if rc != 0:
+        raise Refused('ufw does not list its rules: %s' % (_last_line(err) or _last_line(out) or 'rc %d' % rc),
+                      'firewall_failed')
+    rules, odd = [], []
+    for line in out.decode('utf-8', 'replace').splitlines():
+        if line.startswith('ufw '):
+            rule = _ufw_rule(line)
+            if rule is not None:
+                rules.append(rule)
+            else:
+                odd.append(line)
+    return rules, odd
+
+
+def _ufw_maybe(odd, source, port):
+    """Whether a line the helper does not read could be the rule it adds for source: then
+    it is left to the admin, as ufw would take its comment over."""
+    return any(re.search(r'(?:^|\s)%s(?:\s|$)' % re.escape(source), ln) and re.search(r'\b%d\b' % port, ln)
+               for ln in odd)
+
+
+def _ufw_same(rule, source, port):
+    """Whether a rule of ufw is the very rule the helper adds for source. ufw keeps one rule
+    of a shape whatever its comment: adding it again would only take its comment over."""
+    return (rule['action'] == 'allow' and rule['direction'] == 'in' and not rule['iface'] and not rule['app']
+            and not rule['sport'] and rule['dst'] == 'any' and rule['dport'] == str(port)
+            and rule['proto'] == 'tcp' and _canonical(rule['src']) == source)
+
+
+def _ufw_open(rule, port):
+    """Whether a rule of ufw lets everyone reach the port."""
+    return (rule['action'] == 'allow' and rule['direction'] == 'in' and not rule['iface'] and not rule['app']
+            and rule['src'] in ('any', '0.0.0.0/0', '::/0') and rule['dst'] == 'any'
+            and rule['dport'] == str(port) and rule['proto'] in ('tcp', 'any'))
+
+
+def _ufw_state(host, budget, port):
+    rules, odd = _ufw_rules(host, budget)
+    blocking = None
+    rc, out, _err = _fw(host, budget, 'ufw', ['status', 'verbose'])
+    m = re.search(rb'^Default:\s*([a-z]+) \(incoming\)', out, re.M) if rc == 0 else None
+    if m:
+        blocking = m.group(1) != b'allow'
+    if any(_ufw_open(r, port) for r in rules):
+        blocking = False
+    return {'backend': 'ufw', 'managed': True, 'blocking': blocking, 'ufw_rules': rules, 'ufw_odd': odd}
+
+
+def _nft_drop_chains(out):
+    """[(family, table, chain)] of the base chains on hook input with a policy of drop, read
+    from `nft list chains`."""
+    chains, table, chain = [], None, None
+    for raw in out.decode('utf-8', 'replace').splitlines():
+        line = raw.strip()
+        m = re.fullmatch(r'table (\S+) (\S+) \{', line)
+        if m:
+            table, chain = (m.group(1), m.group(2)), None
+            continue
+        m = re.fullmatch(r'chain (\S+) \{', line)
+        if m and table:
+            chain = m.group(1)
+            continue
+        if line == '}':
+            if chain is not None:
+                chain = None
+            else:
+                table = None
+            continue
+        if table and chain and re.search(r'\bhook input\b', line) and re.search(r'\bpolicy drop\b', line):
+            chains.append((table[0], table[1], chain))
+    return chains[:16]
+
+
+def _packet_filter(host, budget):
+    """An nftables or iptables policy of drop on input: the helper does not change it."""
+    chains, xt, unsure = [], [], False
+    if host.bin('nft'):
+        rc, out, _err = _fw(host, budget, 'nft', ['list', 'chains'])
+        if rc == 0:
+            chains = _nft_drop_chains(out)
+        else:
+            unsure = True
+    for name, version in (('iptables', 4), ('ip6tables', 6)):
+        if host.bin(name):
+            rc, out, _err = _fw(host, budget, name, ['-S', 'INPUT'])
+            if rc != 0:
+                unsure = True
+            elif re.search(rb'^-P INPUT DROP\s*$', out, re.M):
+                xt.append(version)
+    # iptables-nft keeps its own tables in nftables: such a chain is the one iptables names
+    native = [c for c in chains if not (c[1:] == ('filter', 'INPUT') and {'ip': 4, 'ip6': 6}.get(c[0]) in xt)]
+    if native:
+        return {'backend': 'nftables', 'managed': False, 'blocking': True, 'chains': native, 'xt': xt}
+    if xt:
+        return {'backend': 'iptables', 'managed': False, 'blocking': True, 'chains': [], 'xt': xt}
+    return {'backend': 'none', 'managed': False, 'blocking': None if unsure else False}
+
+
+def _node_name():
+    name = socket.gethostname().split('.', 1)[0]
+    return name if re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', name) else '<node>'
+
+
+def fw_manual(fw, port, sources, name):
+    """The lines an admin runs (or puts into the firewall's configuration) where the helper
+    does not change the firewall, for these sources (a placeholder where there are none).
+    '' for ufw, firewalld and no firewall at all."""
+    if fw['managed'] or fw['backend'] == 'none':
+        return ''
+    srcs = list(sources or [PLACEHOLDER])
+
+    def version(s):
+        return None if s == PLACEHOLDER else (6 if ':' in s else 4)
+
+    lines = []
+    if fw['backend'] == 'pve-firewall':
+        lines.append('# in /etc/pve/nodes/%s/host.fw, section [RULES]' % _node_name())
+        lines += ['IN ACCEPT -source %s -p tcp -dport %d # %s%s' % (s, port, FW_COMMENT, name) for s in srcs]
+        return '\n'.join(lines)
+    nft = []
+    for family, table, chain in fw.get('chains', ()):
+        if family not in ('ip', 'ip6', 'inet'):
+            continue
+        if not (NFT_NAME_RE.fullmatch(table) and NFT_NAME_RE.fullmatch(chain)):
+            table, chain = '<table>', '<chain>'
+        for s in srcs:
+            v = version(s)
+            if (family == 'ip' and v == 6) or (family == 'ip6' and v == 4):
+                continue
+            nft.append('nft insert rule %s %s %s %s saddr %s tcp dport %d accept'
+                       % (family, table, chain, 'ip6' if v == 6 or family == 'ip6' else 'ip', s, port))
+    if nft:
+        if PLACEHOLDER in srcs:
+            nft.append('# ip6 saddr for a node with an IPv6 address')
+        nft.append('# and the same in the nftables configuration (/etc/nftables.conf), or it is gone after a reboot')
+    ipt = []
+    for v in fw.get('xt', ()):
+        for s in srcs:
+            if version(s) in (None, v):
+                ipt.append('%s -I INPUT -p tcp -s %s --dport %d -j ACCEPT' % ('iptables' if v == 4 else 'ip6tables',
+                                                                             s, port))
+    if ipt:
+        ipt.append('# and save them (netfilter-persistent save, or iptables-save and ip6tables-save into '
+                   '/etc/iptables), or they are gone after a reboot')
+    return '\n'.join(nft + ipt)
+
+
+# the state file: {tag: [{source, port, backend[, zone]}]}
+
+def _state_dir(host, create):
+    """An fd of the state directory; None where there is none and create is not set. It is
+    root's (this process's user), 0700 and no symlink: anything else is not the helper's
+    and is refused (state_untrusted)."""
+    path = host.state_dir
+    if create:
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+        except OSError as e:
+            raise Refused('could not make %s (%s)' % (path, e.strerror or e))
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | _NOFOLLOW)
+    except FileNotFoundError:
+        if create:
+            raise Refused('%s went away' % path, 'state_untrusted')
+        return None
+    except OSError:
+        raise Refused('%s is not a plain directory - left alone' % path, 'state_untrusted')
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077:
+        os.close(fd)
+        raise Refused('%s is not the helper\'s (uid %d, mode %04o; the helper makes it root\'s and 0700) '
+                      '- left alone' % (path, st.st_uid, st.st_mode & 0o7777), 'state_untrusted')
+    return fd
+
+
+def _load_state(dfd, where):
+    try:
+        fd = os.open(FIREWALL_STATE, os.O_RDONLY | _NOFOLLOW | getattr(os, 'O_NONBLOCK', 0), dir_fd=dfd)
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        raise Refused('%s is not a plain file - left alone' % where, 'state_untrusted')
+    try:
+        st = os.fstat(fd)
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077
+                or st.st_nlink != 1 or st.st_size > MAX_STATE):
+            raise Refused('%s is not the helper\'s (uid %d, mode %04o, %d links; the helper writes it root\'s, '
+                          '0600 and once) - left alone' % (where, st.st_uid, st.st_mode & 0o7777, st.st_nlink),
+                          'state_untrusted')
+        data = b''
+        while len(data) <= MAX_STATE:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        os.close(fd)
+    try:
+        if len(data) > MAX_STATE:
+            raise ValueError('large')
+        obj = json.loads(data.decode('utf-8'))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        obj = None
+    return _check_state(obj, where)
+
+
+def _check_state(obj, where):
+    """The state as the helper wrote it, every field checked again; Refused for anything
+    else: the helper acts on no rule it cannot tell is its own."""
+    bad = Refused('%s is damaged - the helper does not act on it; repair it or move it away by hand' % where,
+                  'state_untrusted')
+    if not isinstance(obj, dict) or len(obj) > MAX_TAGS:
+        raise bad
+    state = {}
+    for tag, rows in obj.items():
+        if not NAME_RE.fullmatch(tag) or not isinstance(rows, list) or len(rows) > MAX_TAG_RULES:
+            raise bad
+        out = []
+        for row in rows:
+            if not isinstance(row, dict) or row.get('backend') not in FW_MANAGED:
+                raise bad
+            if set(row) != {'source', 'port', 'backend'} | ({'zone'} if row['backend'] == 'firewalld' else set()):
+                raise bad
+            try:
+                plain = fw_source(row['source']) == row['source']
+            except Refused:
+                plain = False
+            port = row['port']
+            if not plain or type(port) is not int or not 0 < port < 65536:
+                raise bad
+            if 'zone' in row and not (isinstance(row['zone'], str) and ZONE_RE.fullmatch(row['zone'])):
+                raise bad
+            if row in out:
+                raise bad
+            out.append(dict(row))
+        if out:
+            state[tag] = out
+    return state
+
+
+def _state_bytes(state):
+    return (json.dumps({t: rows for t, rows in state.items() if rows}, sort_keys=True, indent=1) + '\n').encode()
+
+
+def _room(state, name, rows):
+    """Refused (state_full) when writing down `rows` for name as well would make a state
+    file _check_state refuses: more rules for one name, more names or more bytes than it
+    reads back. Asked before the first rule goes in, with every row that may be new."""
+    mine = state.get(name) or []
+    new = [r for r in rows if not any(_same_rule(m, r) for m in mine)]
+    if not new:
+        return
+    if len(mine) + len(new) > MAX_TAG_RULES:
+        raise Refused('the helper records %d firewall rules for %s on this host already, %d at most: remove the '
+                      'QDevice of that cluster (its rules go with it), then try again'
+                      % (len(mine), name, MAX_TAG_RULES), 'state_full')
+    if not mine and sum(1 for t, r in state.items() if r) >= MAX_TAGS:
+        raise Refused('the helper records firewall rules for %d cluster names on this host, the most it keeps'
+                      % MAX_TAGS, 'state_full')
+    after = dict(state)
+    after[name] = mine + new
+    if len(_state_bytes(after)) > MAX_STATE:
+        raise Refused('the firewall record of the helper on this host is full (%d bytes at most)' % MAX_STATE,
+                      'state_full')
+
+
+def _save_state(dfd, state):
+    """The state file in one step: a temp file in the state directory, then a rename."""
+    data = _state_bytes(state)
+    tmp = '.%s.%s' % (FIREWALL_STATE, secrets.token_hex(6))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600, dir_fd=dfd)
+    try:
+        os.fchmod(fd, 0o600)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        os.replace(tmp, FIREWALL_STATE, src_dir_fd=dfd, dst_dir_fd=dfd)
+        tmp = None
+        os.fsync(dfd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if tmp is not None:
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
+
+
+def _same_rule(a, b):
+    return all(a.get(k) == b.get(k) for k in ('source', 'port', 'backend', 'zone'))
+
+
+def _holders(state, row, but):
+    """The tags besides but that record this very rule."""
+    return [tag for tag, rows in state.items() if tag != but and any(_same_rule(r, row) for r in rows)]
+
+
+def _pairs(rows):
+    return [{'source': r['source'], 'port': r['port']} for r in rows]
+
+
+def _fw_answer(fw, port, state, name, manual, added=(), removed=(), **extra):
+    answer = {'ok': True, 'backend': fw['backend'], 'managed': fw['managed'], 'port': port,
+              'blocking': fw['blocking'], 'rules': _pairs(state.get(name, [])), 'added': _pairs(added),
+              'removed': _pairs(removed), 'manual': manual}
+    answer.update(extra)
+    return answer
+
+
+def op_firewall(host, name, req):
+    """inspect: which firewall this host has, whether it blocks the QNetd port, and the
+    rules the helper holds for the cluster name. allow: open the port for sources (ufw or
+    firewalld; any other firewall that blocks is refused with the lines to run by hand).
+    remove: take out the rules the helper added for name (of sources only, where given),
+    except one another cluster's record still needs. The request names action and
+    sources, nothing else; the port is corosync-qnetd's own (qnetd_port)."""
+    if host.mode != 'systemd':
+        raise Refused('Docker publishes port %d itself; open it on the Docker host' % QNETD_PORT, 'not_supported')
+    if not _systemd_booted(host):
+        raise Refused('this host runs without systemd: the helper leaves its firewall alone - open the port '
+                      'of corosync-qnetd for the nodes by hand', 'not_supported')
+    action = req.get('action')
+    if not isinstance(action, str) or action not in FW_ACTIONS:
+        raise Refused('action is inspect, allow or remove', 'bad_request')
+    sources = None
+    if 'sources' in req:
+        if action == 'inspect':
+            raise Refused('inspect takes no sources', 'bad_request')
+        sources = fw_sources(req['sources'])
+    if action == 'allow' and not sources:
+        raise Refused('allow needs the sources: the addresses the nodes come from', 'bad_request')
+    port = qnetd_port(host)
+    where = os.path.join(host.state_dir, FIREWALL_STATE)
+    if action == 'inspect':
+        dfd = _state_dir(host, create=False)
+        try:
+            state = _load_state(dfd, where) if dfd is not None else {}
+        finally:
+            if dfd is not None:
+                os.close(dfd)
+        fw = firewall_backend(host, _Budget(), port)
+        return _fw_answer(fw, port, state, name, fw_manual(fw, port, None, name))
+    with _Lock(host, _state_dir(host, create=True), 'another helper run changes the firewall - try again',
+               LOCK_WAIT_FIREWALL) as lock:
+        budget = _Budget()
+        state = _load_state(lock.fd, where)
+        fw = firewall_backend(host, budget, port)
+        if action == 'allow':
+            return _fw_allow(host, budget, fw, port, name, sources, state, lock.fd)
+        return _fw_remove(host, budget, fw, port, name, sources, state, lock.fd)
+
+
+def _fw_allow(host, budget, fw, port, name, sources, state, dfd):
+    manual = fw_manual(fw, port, sources, name)
+    if not fw['managed']:
+        if fw['backend'] != 'none' and fw['blocking'] is not False:
+            raise Refused('this host filters with %s, which PegaProx does not change - open TCP port %d for the '
+                          'nodes by hand:\n%s' % (fw['backend'], port, manual), 'firewall_unmanaged',
+                          extra={'backend': fw['backend'], 'managed': False, 'port': port,
+                                 'blocking': fw['blocking'], 'manual': manual})
+        return _fw_answer(fw, port, state, name, manual, already=[])
+    zone = {'zone': fw['zone']} if fw['backend'] == 'firewalld' else {}
+    _room(state, name, [dict({'source': s, 'port': port, 'backend': fw['backend']}, **zone) for s in sources])
+    added, already = [], []
+    mine = state.setdefault(name, [])
+
+    def note(row, save=True):
+        mine.append(row)
+        added.append(row)
+        if save:
+            _save_state(dfd, state)
+
+    if fw['backend'] == 'ufw':
+        _ufw_allow(host, budget, fw, port, name, sources, state, mine, note, already)
+    else:
+        _firewalld_allow(host, budget, fw, port, name, sources, state, mine, note, already, dfd)
+    return _fw_answer(fw, port, state, name, manual, added, already=already)
+
+
+def _ufw_allow(host, budget, fw, port, name, sources, state, mine, note, already):
+    rules, odd = fw['ufw_rules'], fw['ufw_odd']
+    comment = FW_COMMENT + name
+    for source in sources:
+        row = {'source': source, 'port': port, 'backend': 'ufw'}
+        have = any(_same_rule(r, row) for r in mine)
+        if any(_ufw_same(r, source, port) for r in rules):
+            if not have:
+                if _holders(state, row, but=name):
+                    note(row)           # the helper's rule for another cluster: shared from now on
+                else:
+                    already.append(source)  # an admin's: never written down, never deleted
+            continue
+        if _ufw_maybe(odd, source, port):
+            already.append(source)
+            continue
+        try:
+            rc, out, err = _fw(host, budget, 'ufw', ['allow', 'proto', 'tcp', 'from', source, 'to', 'any',
+                                                     'port', str(port), 'comment', comment])
+            why = '' if rc == 0 else (_last_line(err) or _last_line(out) or 'rc %d' % rc)
+        except Refused as e:
+            why = e.text
+        if why:
+            # it may have gone in before ufw stopped (a time limit): then it is the helper's
+            try:
+                after, _odd = _ufw_rules(host, budget)
+            except Refused:
+                after = []
+            if not have and any(_ufw_same(r, source, port) and r['comment'] == comment for r in after):
+                note(row)
+            raise Refused('ufw did not add the rule for %s: %s' % (source, why), 'firewall_failed')
+        if re.search(rb'Skipping|Rule updated', out):
+            # ufw held one of this shape after all, in a form show added did not say: not ours
+            already.append(source)
+            continue
+        if not have:
+            note(row)
+
+
+def _firewalld_allow(host, budget, fw, port, name, sources, state, mine, note, already, dfd):
+    zone = fw['zone']
+    perm = _rich_rules(host, budget, zone, True)
+    live = _rich_rules(host, budget, zone, False)
+    to_perm, to_live, new = [], [], []
+    for source in sources:
+        row = {'source': source, 'port': port, 'backend': 'firewalld', 'zone': zone}
+        have = any(_same_rule(r, row) for r in mine)
+        key = (source, port)
+        if (key in perm or key in live) and not (have or _holders(state, row, but=name)):
+            already.append(source)      # an admin's
+            continue
+        if key not in perm:
+            to_perm.append(source)
+        if key not in live:
+            to_live.append(source)
+        if not have:
+            new.append(row)
+    failure = ''
+    if to_perm:
+        try:
+            rc, out, err = _fw(host, budget, 'firewall-cmd', ['--permanent', '--zone=' + zone]
+                               + ['--add-rich-rule=' + _rich(s, port) for s in to_perm])
+            failure = '' if rc == 0 else (_last_line(err) or _last_line(out) or 'rc %d' % rc)
+        except Refused as e:
+            failure = e.text
+        if failure:
+            # firewalld may have taken some of them before it stopped: those are the helper's
+            try:
+                perm = _rich_rules(host, budget, zone, True)
+            except Refused:
+                perm = set()
+            new = [r for r in new if (r['source'], port) in perm]
+            to_live = []
+    for row in new:
+        note(row, save=False)
+    if new:
+        _save_state(dfd, state)
+    if failure:
+        raise Refused('firewalld did not add the rules: %s' % failure, 'firewall_failed')
+    if to_live:
+        rc, out, err = _fw(host, budget, 'firewall-cmd', ['--zone=' + zone]
+                           + ['--add-rich-rule=' + _rich(s, port) for s in to_live])
+        if rc != 0:
+            raise Refused('firewalld has the rules in its configuration but not in the running firewall: %s'
+                          % (_last_line(err) or _last_line(out) or 'rc %d' % rc), 'firewall_failed')
+
+
+def _fw_remove(host, budget, fw, port, name, sources, state, dfd):
+    mine = state.get(name, [])
+    picked = [r for r in mine if sources is None or r['source'] in sources]
+    # a rule another cluster's record needs stays: only this record goes
+    shared = [r for r in picked if _holders(state, r, but=name)]
+    rest = [r for r in picked if not any(r is s for s in shared)]
+    gone, kept, failed = [], list(shared), []
+    try:
+        _ufw_remove(host, budget, [r for r in rest if r['backend'] == 'ufw'], gone, kept, failed)
+        _firewalld_remove(host, budget, [r for r in rest if r['backend'] == 'firewalld'], gone, failed)
+    finally:
+        done = shared + gone
+        if done:
+            state[name] = [r for r in mine if not any(r is d for d in done)]
+            _save_state(dfd, state)
+    if failed:
+        raise Refused('not every rule of %s came out: %s' % (name, failed[0]), 'firewall_failed')
+    return _fw_answer(fw, port, state, name, fw_manual(fw, port, sources, name), removed=done,
+                      kept=_pairs(kept))
+
+
+def _ufw_remove(host, budget, rows, gone, kept, failed):
+    if not rows:
+        return
+    if not host.bin('ufw'):
+        gone.extend(rows)               # ufw went, and its rules with it
+        return
+    try:
+        rules, _odd = _ufw_rules(host, budget)
+    except Refused as e:
+        failed.append(e.text)
+        return
+    for row in rows:
+        same = next((r for r in rules if _ufw_same(r, row['source'], row['port'])), None)
+        if same is None:
+            gone.append(row)            # taken out by someone else already
+            continue
+        if not _OUR_COMMENT.fullmatch(same['comment']):
+            # someone gave it a comment of their own: theirs now, it stays
+            gone.append(row)
+            kept.append(row)
+            continue
+        # ufw deletes only the rule with exactly this comment
+        rc, out, err = _fw(host, budget, 'ufw', ['delete', 'allow', 'proto', 'tcp', 'from', row['source'], 'to',
+                                                 'any', 'port', str(row['port']), 'comment', same['comment']])
+        if rc == 0:
+            gone.append(row)
+        else:
+            failed.append('ufw: %s' % (_last_line(err) or _last_line(out) or 'rc %d' % rc))
+
+
+def _firewalld_remove(host, budget, rows, gone, failed):
+    if not rows:
+        return
+    if not host.bin('firewall-cmd'):
+        gone.extend(rows)
+        return
+    for zone in sorted({r['zone'] for r in rows}):
+        group = [r for r in rows if r['zone'] == zone]
+        try:
+            for permanent in (True, False):
+                have = _rich_rules(host, budget, zone, permanent)
+                drop = [r for r in group if (r['source'], r['port']) in have]
+                if not drop:
+                    continue
+                rc, out, err = _fw(host, budget, 'firewall-cmd', (['--permanent'] if permanent else [])
+                                   + ['--zone=' + zone]
+                                   + ['--remove-rich-rule=' + _rich(r['source'], r['port']) for r in drop])
+                if rc != 0:
+                    failed.append('firewalld: %s' % (_last_line(err) or _last_line(out) or 'rc %d' % rc))
+            left = _rich_rules(host, budget, zone, True) | _rich_rules(host, budget, zone, False)
+        except Refused as e:
+            failed.append(e.text)
+            continue
+        gone.extend(r for r in group if (r['source'], r['port']) not in left)
+
+
+HANDLERS = {'version': op_version, 'init': op_init, 'ca': op_ca, 'sign': op_sign,
+            'status': op_status, 'uuid': op_uuid, 'firewall': op_firewall}
+REQUEST_KEYS = {'sign': ('crq_b64', 'replace'), 'firewall': ('action', 'sources')}
+
+
+def dispatch(host, op, name, req):
+    """The answer to one operation, as a dict; never raises."""
+    try:
+        if op not in HANDLERS:
+            raise Refused(USAGE, 'bad_request')
+        if op in NAMED_OPS:
+            if not isinstance(name, str) or not NAME_RE.fullmatch(name):
+                raise Refused('the cluster name is not allowed (letters, digits and inner hyphens, '
+                              'at most 15)', 'bad_request')
+        elif name is not None:
+            raise Refused('%s takes no name' % op, 'bad_request')
+        allowed = REQUEST_KEYS.get(op, ())
+        extra = [k for k in req if k not in allowed]
+        if extra:
+            raise Refused('%s takes no %s' % (op, _clean(str(extra[0]), 40)), 'bad_request')
+        return HANDLERS[op](host, name, req)
+    except Refused as e:
+        answer = dict(e.extra)
+        answer.update(ok=False, error=e.text, code=e.code)
+        return answer
+    except Exception as e:      # an answer in any case, the details stay on this host
+        sys.stderr.write('pegaprox-qnetd-helper: %s failed: %s\n' % (op, type(e).__name__))
+        return {'ok': False, 'error': '%s failed on the QNetd host (%s)' % (op, type(e).__name__),
+                'code': 'failed'}
+
+
+# --- the command line ----------------------------------------------------------------------
+
+def parse_argv(argv):
+    """(op, name): one operation, and --name <cluster> for sign and firewall only.
+    Anything else is refused: an SSH command line, or a sudo rule for this file on an ssh
+    host, passes any argument through."""
+    if not argv or argv[0] not in OPS:
+        raise Refused(USAGE, 'bad_request')
+    op, rest = argv[0], list(argv[1:])
+    if op in NAMED_OPS:
+        if len(rest) != 2 or rest[0] != '--name':
+            raise Refused('usage: pegaprox-qnetd-helper %s --name <cluster> < request' % op, 'bad_request')
+        return op, rest[1]
+    if rest:
+        raise Refused('%s takes no arguments' % op, 'bad_request')
+    return op, None
+
+
+def read_stdin(cap=MAX_REQUEST, wait=STDIN_WAIT):
+    """The request on stdin, at most cap bytes, ended (EOF) within wait seconds."""
+    try:
+        fd = sys.stdin.fileno()
+    except (AttributeError, ValueError, OSError):
+        return b''
+    if os.isatty(fd):
+        return b''
+    data = b''
+    deadline = time.monotonic() + wait
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise Refused('the request on stdin did not end in time', 'bad_request')
+        ready, _w, _x = select.select([fd], [], [], left)
+        if not ready:
+            continue
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            return data
+        data += chunk
+        if len(data) > cap:
+            raise Refused('the request is larger than %d bytes' % cap, 'bad_request')
+
+
+def parse_request(data):
+    if not data.strip():
+        return {}
+    try:
+        req = json.loads(data.decode('utf-8'))
+    except (UnicodeDecodeError, ValueError):
+        raise Refused('the request is not JSON', 'bad_request')
+    if not isinstance(req, dict):
+        raise Refused('the request is not a JSON object', 'bad_request')
+    return req
+
+
+def _emit(answer):
+    sys.stdout.write(json.dumps(answer, sort_keys=True) + '\n')
+    sys.stdout.flush()
+    return 0 if answer.get('ok') else 1
+
+
+def main(argv=None):
+    os.umask(0o077)
+    argv = sys.argv[1:] if argv is None else argv
+    if argv == ['serve']:
+        return serve_one()
+    try:
+        op, name = parse_argv(argv)
+        host = Host('systemd')
+        req = parse_request(read_stdin()) if op in NAMED_OPS else {}
+    except Refused as e:
+        return _emit({'ok': False, 'error': e.text, 'code': e.code})
+    return _emit(dispatch(host, op, name, req))
+
+
+# --- the Docker sidecar: `pegaprox_multi_cluster.py qnetd run|health` --------------------------
+
+READ_WAIT = 5           # for the request line of a connection
+SEND_WAIT = 10
+MAX_CLIENTS = 8
+
+
+def _log(text):
+    sys.stderr.write('pegaprox-qnetd: %s\n' % text)
+    sys.stderr.flush()
+
+
+def socket_path(environ=None):
+    environ = os.environ if environ is None else environ
+    path = environ.get('PEGAPROX_QNETD_SOCKET') or SOCKET_PATH
+    if not os.path.isabs(path) or '\0' in path or os.path.normpath(path) != path or len(path) > 100:
+        raise Refused('PEGAPROX_QNETD_SOCKET has to be a plain absolute path', 'bad_request')
+    return path
+
+
+def _private_dir(path, mode):
+    """A directory of this user, mode as given, no symlink."""
+    try:
+        os.mkdir(path, mode)
+    except FileExistsError:
+        pass
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode):
+        raise Refused('%s is not a directory' % path)
+    if st.st_uid != os.geteuid():
+        raise Refused('%s belongs to another user' % path)
+    os.chmod(path, mode)
+
+
+def _peer_ids(conn):
+    """(uid, gid) of the process at the other end of a Unix socket, None where the system
+    cannot tell (no SO_PEERCRED)."""
+    if not hasattr(socket, 'SO_PEERCRED'):
+        return None
+    creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i'))
+    _pid, uid, gid = struct.unpack('3i', creds)
+    return uid, gid
+
+
+def _peer_ok(conn):
+    """Only this user, its group or root: the socket file says the same (0660), this
+    holds where a mount does not keep the mode."""
+    try:
+        ids = _peer_ids(conn)
+    except (OSError, struct.error):
+        return False
+    if ids is None:
+        return False
+    uid, gid = ids
+    return uid in (0, os.geteuid()) or gid == os.getegid()
+
+
+def handle_line(host, line):
+    """The answer to one request line of the socket."""
+    try:
+        req = parse_request(line)
+        op = req.pop('op', None)
+        name = req.pop('name', None)
+        if not isinstance(op, str):
+            raise Refused('the request names no op', 'bad_request')
+    except Refused as e:
+        return {'ok': False, 'error': e.text, 'code': e.code}
+    return dispatch(host, op, name, req)
+
+
+class SocketServer:
+    """The helper's operations on a Unix socket: one JSON request line per connection
+    (at most MAX_REQUEST), one JSON answer line, then the connection is closed. The
+    accept loop never reads from a client: each connection gets a thread with its own
+    deadlines, at most MAX_CLIENTS at a time, and one more is told busy at once."""
+
+    def __init__(self, host, path):
+        self.host = host
+        self.path = path
+        self.sock = None
+        self.thread = None
+        self.stopping = threading.Event()
+        self.slots = threading.BoundedSemaphore(MAX_CLIENTS)
+
+    def start(self):
+        _private_dir(os.path.dirname(self.path), 0o770)
+        try:
+            st = os.lstat(self.path)
+        except FileNotFoundError:
+            st = None
+        if st is not None:
+            if not stat.S_ISSOCK(st.st_mode):
+                raise Refused('%s is there and not a socket - left alone' % self.path)
+            os.unlink(self.path)
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        old = os.umask(0o117)
+        try:
+            sock.bind(self.path)
+        finally:
+            os.umask(old)
+        os.chmod(self.path, 0o660)
+        sock.listen(16)
+        sock.settimeout(1.0)
+        self.sock = sock
+        self.thread = threading.Thread(target=self._accept, name='qnetd-socket', daemon=True)
+        self.thread.start()
+
+    def alive(self):
+        return self.thread is not None and self.thread.is_alive()
+
+    def close(self):
+        self.stopping.set()
+        if self.thread is not None:
+            self.thread.join(5)
+        if self.sock is not None:
+            self.sock.close()
+        try:
+            if stat.S_ISSOCK(os.lstat(self.path).st_mode):
+                os.unlink(self.path)
+        except OSError:
+            pass
+
+    def _accept(self):
+        while not self.stopping.is_set():
+            try:
+                conn, _addr = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError as e:
+                if self.stopping.is_set():
+                    return
+                if e.errno in (errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM, errno.EINTR):
+                    time.sleep(0.5)
+                    continue
+                _log('the helper socket failed: %s' % e)
+                return
+            if not _peer_ok(conn):
+                conn.close()
+                continue
+            if not self.slots.acquire(blocking=False):
+                self._reply(conn, {'ok': False, 'error': 'the QNetd helper is busy - try again',
+                                   'code': 'busy'}, 0.5)
+                continue
+            try:
+                threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+            except RuntimeError:
+                self.slots.release()
+                conn.close()
+
+    def _serve(self, conn):
+        try:
+            line = self._read_line(conn)
+            if line is None:
+                answer = {'ok': False, 'error': 'the request did not arrive in time or is too large',
+                          'code': 'bad_request'}
+            else:
+                answer = handle_line(self.host, line)
+            self._reply(conn, answer, SEND_WAIT)
+        except Exception as e:
+            _log('a helper request failed: %s' % type(e).__name__)
+            conn.close()
+        finally:
+            self.slots.release()
+
+    @staticmethod
+    def _read_line(conn):
+        deadline = time.monotonic() + READ_WAIT
+        data = b''
+        while b'\n' not in data:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            conn.settimeout(left)
+            try:
+                chunk = conn.recv(65536)
+            except (socket.timeout, OSError):
+                return None
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > MAX_REQUEST + 1:
+                return None
+        line = data.split(b'\n', 1)[0]
+        return line if len(line) <= MAX_REQUEST else None
+
+    @staticmethod
+    def _reply(conn, answer, wait):
+        try:
+            conn.settimeout(wait)
+            conn.sendall((json.dumps(answer, sort_keys=True) + '\n').encode('utf-8'))
+        except (OSError, socket.timeout):
+            pass
+        finally:
+            conn.close()
+
+
+def ask(path, request, wait=10):
+    """One request to the helper socket, its answer as a dict (Refused where none)."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(wait)
+        sock.connect(path)
+        sock.sendall((json.dumps(request) + '\n').encode('utf-8'))
+        data = b''
+        while b'\n' not in data and len(data) < 8 * 1024 * 1024:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    except (OSError, socket.timeout) as e:
+        raise Refused('the helper socket %s does not answer (%s)' % (path, e.strerror or e))
+    finally:
+        sock.close()
+    try:
+        answer = json.loads(data.split(b'\n', 1)[0].decode('utf-8'))
+    except (UnicodeDecodeError, ValueError):
+        raise Refused('the helper socket gave no JSON')
+    if not isinstance(answer, dict):
+        raise Refused('the helper socket gave no JSON object')
+    return answer
+
+
+def serve_one(fd=0, environ=None):
+    """`pegaprox-qnetd-helper serve`: one request of the PegaProx on this host, as
+    pegaprox-qnetd-helper@.service starts it for a connection of the socket unit
+    (Accept=yes, StandardInput=socket). The line protocol of the sidecar: one JSON request
+    line of at most MAX_REQUEST within READ_WAIT, one JSON answer line. The socket file is
+    root's and the service group's (0660); the peer itself has to be root or the service
+    user, wherever the system says who it is. Exit 0 once an answer went out."""
+    environ = os.environ if environ is None else environ
+    os.umask(0o077)
+    try:
+        conn = socket.fromfd(fd, socket.AF_UNIX, socket.SOCK_STREAM)
+    except OSError:
+        return _emit({'ok': False, 'error': 'serve answers on a socket only', 'code': 'bad_request'})
+    try:
+        try:
+            family = conn.getsockopt(socket.SOL_SOCKET, getattr(socket, 'SO_DOMAIN', 39))
+            ids = _peer_ids(conn)
+        except (OSError, struct.error):
+            # stdin is no socket (a pipe, a terminal): the answer goes to stdout as for an op
+            return _emit({'ok': False, 'error': 'serve answers on a socket only', 'code': 'bad_request'})
+        if family != socket.AF_UNIX:
+            SocketServer._reply(conn, {'ok': False, 'error': 'serve answers on a Unix socket only',
+                                       'code': 'refused'}, SEND_WAIT)
+            return 1
+        try:
+            host = Host('systemd', environ)
+        except Refused as e:
+            SocketServer._reply(conn, {'ok': False, 'error': e.text, 'code': e.code}, SEND_WAIT)
+            return 1
+        if ids is not None and not _serves(ids[0], host.service_user):
+            _log('refused a request of uid %d' % ids[0])
+            SocketServer._reply(conn, {'ok': False, 'error': 'this socket answers root and %s only'
+                                       % _clean(host.service_user, 32), 'code': 'refused'}, SEND_WAIT)
+            return 1
+        line = SocketServer._read_line(conn)
+        if line is None:
+            answer = {'ok': False, 'error': 'the request did not arrive in time or is too large',
+                      'code': 'bad_request'}
+        else:
+            answer = handle_line(host, line)
+        SocketServer._reply(conn, answer, SEND_WAIT)
+        return 0
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def _serves(uid, user):
+    """root, and the service user where there is one (an rpm install runs PegaProx as root)."""
+    if uid == 0:
+        return True
+    try:
+        return uid == pwd.getpwnam(user).pw_uid
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def qnetd_argv(host, qnetd):
+    """corosync-qnetd of the sidecar, in the foreground, with its IPC socket and lock file
+    in the run directory. TLS is required (-s req; the man page says "required", the
+    binary takes only on, off and req): with the default (-s on) a client may skip TLS,
+    and then no certificate is asked for at all - whoever reaches the port could join the
+    vote of any cluster name. Every QDevice PegaProx sets up speaks TLS (tls: on)."""
+    argv = [qnetd, '-f', '-s', 'req', '-S', 'local_socket_file=%s,lock_file=%s' % (
+        host.ipc_socket, os.path.join(host.run_dir, 'corosync-qnetd.pid'))]
+    if host.config_dir != CONFIG_DIR:
+        argv[-1] += ',nss_db_dir=%s' % host.db_dir
+    return argv
+
+
+def run_sidecar(environ=None):
+    """corosync-qnetd -f as a child and the helper socket next to it, until either of them
+    ends (exit 1, so the container restarts) or a SIGTERM/SIGINT comes (exit 0)."""
+    environ = os.environ if environ is None else environ
+    os.umask(0o027)
+    try:
+        host = Host('sidecar', environ)
+        path = socket_path(environ)
+        qnetd = host.need('corosync-qnetd')
+        host.need('certutil')
+        _private_dir(host.run_dir, 0o770)
+        created = ensure_db(host)
+    except Refused as e:
+        _log(e.text)
+        return 1
+    _log('NSS database %s in %s' % ('made' if created else 'found', host.db_dir))
+
+    stop = threading.Event()
+    stopped_by = []
+
+    def on_signal(signum, _frame):
+        stopped_by.append(signum)
+        stop.set()
+
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
+
+    argv = qnetd_argv(host, qnetd)
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, cwd='/', close_fds=True,
+                                env={'PATH': SAFE_PATH, 'LANG': 'C', 'LC_ALL': 'C'})
+    except OSError as e:
+        _log('could not start corosync-qnetd: %s' % (e.strerror or e))
+        return 1
+    host.qnetd_alive = lambda: proc.poll() is None
+    server = SocketServer(host, path)
+    try:
+        server.start()
+    except (Refused, OSError) as e:
+        _log('could not open the helper socket %s: %s' % (path, getattr(e, 'text', None) or e))
+        _stop_child(proc)
+        return 1
+    _log('corosync-qnetd runs (pid %d), the helper answers on %s' % (proc.pid, path))
+
+    rc = 0
+    try:
+        while not stop.wait(1.0):
+            if proc.poll() is not None:
+                _log('corosync-qnetd ended with %s' % proc.returncode)
+                rc = 1
+                break
+            if not server.alive():
+                _log('the helper socket stopped')
+                rc = 1
+                break
+    finally:
+        server.close()
+        _stop_child(proc)
+    if stopped_by:
+        _log('stopped')
+    return rc
+
+
+def _stop_child(proc):
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(5)
+
+
+def health(environ=None):
+    """0 when the helper socket answers version with this protocol, its corosync-qnetd
+    runs and answers on its own IPC socket; 1 otherwise. For the compose healthcheck."""
+    environ = os.environ if environ is None else environ
+    try:
+        host = Host('sidecar', environ)
+        answer = ask(socket_path(environ), {'op': 'version'}, wait=5)
+        if not answer.get('ok') or answer.get('protocol') != PROTOCOL:
+            raise Refused('the helper socket answers %s' % _clean(answer.get('error') or 'another protocol', 80))
+        if not answer.get('active'):
+            raise Refused('corosync-qnetd does not run')
+        tool = host.need('corosync-qnetd-tool')
+        rc, _out, err = run([tool, '-s', '-p', host.ipc_socket], 5)
+        if rc != 0:
+            raise Refused('corosync-qnetd does not answer on its IPC socket: %s' % _last_line(err))
+    except Refused as e:
+        print('unhealthy: %s' % e.text)
+        return 1
+    print('healthy')
+    return 0
+
+
+def sidecar_main(args):
+    """`pegaprox_multi_cluster.py qnetd run|health`."""
+    if args == ['run']:
+        return run_sidecar()
+    if args == ['health']:
+        return health()
+    sys.stderr.write('usage: pegaprox_multi_cluster.py qnetd run|health\n'
+                     '  run     corosync-qnetd and the helper socket (the QNetd sidecar, docs/qdevice.md)\n'
+                     '  health  0 when both answer\n')
+    return 0 if args in (['-h'], ['--help']) else 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

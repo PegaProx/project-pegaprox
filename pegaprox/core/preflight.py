@@ -110,8 +110,11 @@ def guest_nics(cfg):
     return out
 
 
-def cdrom_images(cfg):
-    """[(ide2, storage, volid)] of the CD/DVD drives holding an image from a storage."""
+def cdrom_images(cfg, paths=False):
+    """[(ide2, storage, volid)] of the CD/DVD drives holding an image from a storage, on any
+    bus. Never a cloud-init drive, the host's own drive (cdrom, /dev/...) or an empty one.
+    paths=True also lists an image file set by path as (key, None, path); the eject before a
+    live move takes those out too (manager.migrate_vm, #1169)."""
     out = []
     for key in sorted(k for k in cfg if re.fullmatch(r'(?:ide|sata|scsi)\d+', k)):
         val = cfg.get(key)
@@ -120,7 +123,12 @@ def cdrom_images(cfg):
         vol = val.split(',')[0]
         if vol.startswith('file='):
             vol = vol[5:]
-        if ':' in vol and 'cloudinit' not in vol and not vol.startswith('/'):
+        if 'cloudinit' in vol:
+            continue
+        if vol.startswith('/'):
+            if paths and not vol.startswith('/dev/'):
+                out.append((key, None, vol))
+        elif ':' in vol:
             out.append((key, vol.split(':', 1)[0], vol))
     return out
 

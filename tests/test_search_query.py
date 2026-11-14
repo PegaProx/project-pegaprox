@@ -12,6 +12,7 @@ MK Oct 2026
 import ast
 import inspect
 import json
+import threading
 import time
 
 import pytest
@@ -525,10 +526,12 @@ def test_ten_thousand_guests_one_expression(api, seed):
     spent = time.monotonic() - t0
     assert code == 200 and body['count'] > 0 and len(body['results']) <= 100
     assert spent < 5, spent
-    # one read of the guest list for both readings of a plain query that finds nothing
-    m.get_vm_resources.reset_mock()
+    # one read of the guest list for both readings of a plain query that finds nothing. Counted on
+    # this thread: the drift scanner the app starts reads every registered cluster on its own
+    reads = []
+    m.get_vm_resources.side_effect = lambda *a, **kw: (reads.append(threading.get_ident()), fleet)[1]
     assert _get(client, 'nothing here')[1]['count'] == 0
-    assert m.get_vm_resources.call_count == 1
+    assert reads.count(threading.get_ident()) == 1, reads
 
 
 def test_a_tag_list_of_empty_parts_finds_nothing(estate, seed):

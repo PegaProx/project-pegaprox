@@ -25,7 +25,8 @@ sessions_lock = threading.Lock()  # NS: Feb 2026 - SECURITY: protect session dic
 # User database (in-memory)
 users_db = {}
 
-# Audit log (in-memory cache)
+# Audit log: the entries are in SQLite (get_db().get_audit_log) and nothing fills this list.
+# It stays for code that imports the name.
 audit_log = []
 
 # Login brute force tracking
@@ -43,6 +44,12 @@ _auth_action_lock = threading.Lock()
 # "loopback works"; a specific address means it does not. MK Sep 2026 (#957)
 SERVER_BIND_HOST = ''
 SERVER_BIND_PORT = None
+
+# What answers plain HTTP while TLS is on, as this process came up; the server settings
+# show it and never store it. same_port: the TLS port when its plain branch redirects.
+# extra_port: the extra redirect port asked for, extra_error: why it is not listening
+# ('' when it is). Changed in place, other modules hold the dict. MK Nov 2026
+HTTP_REDIRECT_STATE = {'same_port': None, 'extra_port': None, 'extra_error': ''}
 
 # Session secret
 SESSION_SECRET = None

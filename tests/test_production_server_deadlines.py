@@ -6,7 +6,8 @@ and speaks TLS, and the body clock now stands in wsgi.input for every request, a
 included. Both WebSocket libraries have to keep finding their stream behind it.
 
 The real _start_gevent_server runs in a subprocess with a pool of two and one-second
-deadlines. MK
+deadlines. Its TLS port is a DualProtocolWSGIServer, which looks at the first byte of each
+connection before the handshake, as in production. MK
 """
 import json
 import os
@@ -78,7 +79,7 @@ def echo_gws():
 
 sock.init_app(web)
 app_mod._start_gevent_server(web, '127.0.0.1', int(sys.argv[1]), (sys.argv[2], sys.argv[3]),
-                             None, 2, http_redirect_port=-1)
+                             None, 2)
 '''
 
 

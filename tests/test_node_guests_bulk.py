@@ -129,7 +129,9 @@ def test_a_refusal_of_proxmox_is_passed_on_without_an_audit_entry(api, seed):
 @pytest.mark.parametrize('body,error', [
     ({}, 'Target node is required'),
     ({'target': 'pve1'}, 'The target is the node itself'),
-    ({'target': '../pve2'}, 'Target node is required'),
+    # a value that would not stay one path segment is refused by the request hook first
+    ({'target': '../pve2'}, 'Invalid target name'),
+    ({'target': 'pve 2'}, 'Target node is required'),
     ({'target': 'pve9'}, 'pve9 is no node of this cluster'),
     ({'target': 'pve3'}, 'pve3 is not online'),
     ({'target': 'pve2', 'maxworkers': 0}, 'maxworkers is a number from 1 to 16'),

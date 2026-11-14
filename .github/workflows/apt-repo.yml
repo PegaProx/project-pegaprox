@@ -5,9 +5,9 @@
 # NS Oct 2026 - from prototype to the real thing (packaging/apt/README.md has the whole
 # story). One job per privilege:
 #   build    no secret, read-only token. The pegaprox .deb from the source being released,
-#            python3-flask-sock and python3-xenapi from pinned wheels, then a smoke test:
-#            a repo of exactly these debs signed with a throwaway key, installed on plain
-#            trixie and booted.
+#            python3-flask-sock, python3-xenapi and python3-sqlcipher3 (amd64, arm64) from
+#            pinned wheels, then a smoke test: a repo of exactly these debs signed with a
+#            throwaway key, installed on plain trixie and booted.
 #   publish  holds the signing key and builds nothing. The pegaprox debs of the earlier
 #            releases (their provenance checked), this run's debs, signed dists/ + pool/.
 #   deploy   hands that to Pages, in the github-pages environment.
@@ -89,10 +89,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/wheels" "$RUNNER_TEMP/debs"
-          # exactly the pinned wheels, and nothing they would pull in
-          python3 -m pip download --disable-pip-version-check --no-cache-dir --isolated \
-            --no-deps --require-hashes --only-binary=:all: --index-url https://pypi.org/simple \
-            -r packaging/apt/python-debs/requirements.txt -d "$RUNNER_TEMP/wheels"
+          # exactly the pinned wheels, and nothing they would pull in. NS Nov 2026 (#1226): once
+          # for each machine the repo carries, as trixie's Python 3.13 takes them; the pure ones
+          # fit both and come twice, the same file
+          for platform in manylinux_2_28_x86_64 manylinux_2_28_aarch64; do
+            python3 -m pip download --disable-pip-version-check --no-cache-dir --isolated \
+              --no-deps --require-hashes --only-binary=:all: --index-url https://pypi.org/simple \
+              --platform "$platform" --python-version 3.13 --implementation cp --abi cp313 \
+              -r packaging/apt/python-debs/requirements.txt -d "$RUNNER_TEMP/wheels"
+          done
           # the script goes in as an argument, not on stdin: whatever reads stdin in there
           # would read the rest of the script (#973)
           docker run --rm \
@@ -177,16 +182,20 @@ jobs:
 
           echo "----- pegaprox.service"
           sudo journalctl -M pegaprox-smoke -u pegaprox.service --no-pager -n 150 || tail -n 60 "$smoke/nspawn.log"
-          echo "----- what PegaProx says about its database (no sqlcipher3 in Debian)"
+          echo "----- what PegaProx says about its key and its database"
           timeout 60 sudo systemd-run -M pegaprox-smoke --wait --pipe --quiet -p User=pegaprox \
-            -p WorkingDirectory=/var/lib/pegaprox /usr/bin/pegaprox/pegaprox-wrapper --keystore-status || true
+            -p WorkingDirectory=/var/lib/pegaprox /usr/bin/pegaprox/pegaprox-wrapper --keystore-status \
+            > "$smoke/keystore-status.json" || true
+          cat "$smoke/keystore-status.json"
           sudo machinectl poweroff pegaprox-smoke 2>/dev/null || true
           for _ in $(seq 1 30); do sudo machinectl status pegaprox-smoke >/dev/null 2>&1 || break; sleep 1; done
           sudo machinectl terminate pegaprox-smoke 2>/dev/null || true
 
           [ "$ok" -eq 1 ] || { echo "::error::PegaProx did not answer on port 5000"; exit 1; }
           grep -qi pegaprox "$smoke/answer.html" || { echo "::error::port 5000 answered, but not with PegaProx"; exit 1; }
-          echo "Smoke test passed: pegaprox $DEB_VERSION installs from trixie plus this repo and answers on 5000."
+          # NS Nov 2026 (#1226): the first start encrypted the database, with a key of its own in /etc
+          sudo python3 -I packaging/apt/smoke_encrypted.py "$smoke/keystore-status.json" "$root"
+          echo "Smoke test passed: pegaprox $DEB_VERSION installs from trixie plus this repo, answers on 5000 and keeps its database encrypted."
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -335,8 +344,8 @@ jobs:
             echo
             echo '| package | version |'
             echo '|---|---|'
-            awk -F': ' '$1 == "Package" { p = $2 } $1 == "Version" { print "| " p " | " $2 " |" }' \
-              "$site/dists/trixie/main/binary-all/Packages"
+            cat "$site"/dists/trixie/main/binary-*/Packages \
+              | awk -F': ' '$1 == "Package" { p = $2 } $1 == "Version" { print "| " p " | " $2 " |" }' | sort -u
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Forget the key

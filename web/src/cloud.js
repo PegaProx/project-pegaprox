@@ -210,7 +210,11 @@
                     if (menuRef.current && !menuRef.current.contains(e.target) &&
                         btnRef.current && !btnRef.current.contains(e.target)) setOpen(false);
                 };
-                const onScroll = () => setOpen(false);
+                // a short window scrolls the menu itself, which must not close it
+                const onScroll = (e) => {
+                    if (menuRef.current && e.target instanceof Node && menuRef.current.contains(e.target)) return;
+                    setOpen(false);
+                };
                 document.addEventListener('mousedown', onDoc);
                 window.addEventListener('scroll', onScroll, true);
                 window.addEventListener('resize', onScroll);
@@ -220,6 +224,12 @@
                     window.removeEventListener('resize', onScroll);
                 };
             }, [open]);
+            // the items are as tall as half a screen: the lower rows of a list open it upwards as far as needed
+            React.useLayoutEffect(() => {
+                if (!open || !menuRef.current) return;
+                const room = window.innerHeight - menuRef.current.offsetHeight - 8;
+                setPos(p => (p.top > room ? { ...p, top: Math.max(8, room) } : p));
+            }, [open]);
             const toggle = (e) => {
                 e.stopPropagation();
                 if (!open && btnRef.current) {
@@ -228,24 +238,40 @@
                 }
                 setOpen(o => !o);
             };
+            // the menu is the last thing on the page now, Tab would jump past it from the button
+            const onTriggerKey = (e) => {
+                if (!open || e.key !== 'Tab' || e.shiftKey || !menuRef.current) return;
+                const first = menuRef.current.querySelector('button:not(:disabled)');
+                if (first) { e.preventDefault(); first.focus(); }
+            };
+            const onMenuKey = (e) => {
+                if (e.key !== 'Tab') return;
+                const btns = menuRef.current.querySelectorAll('button:not(:disabled)');
+                if (e.target !== (e.shiftKey ? btns[0] : btns[btns.length - 1])) return;
+                e.preventDefault();
+                if (btnRef.current) btnRef.current.focus();
+                if (!e.shiftKey) setOpen(false);
+            };
             const visible = (items || []).filter(Boolean);
             return (
                 <>
                     {triggerNode ? (
-                        <button type="button" ref={btnRef} className="cloud-menu-trigger-plain" onClick={toggle} title={label || 'Actions'}>
+                        <button type="button" ref={btnRef} className="cloud-menu-trigger-plain" onClick={toggle} onKeyDown={onTriggerKey} title={label || 'Actions'}>
                             {triggerNode}
                         </button>
                     ) : triggerLabel ? (
-                        <button type="button" ref={btnRef} className="cloud-btn" onClick={toggle} title={label || 'Actions'}>
+                        <button type="button" ref={btnRef} className="cloud-btn" onClick={toggle} onKeyDown={onTriggerKey} title={label || 'Actions'}>
                             {triggerLabel} <Icons.ChevronDown />
                         </button>
                     ) : (
-                        <button type="button" ref={btnRef} className="cloud-icon-btn" onClick={toggle} title={label || 'Actions'}>
+                        <button type="button" ref={btnRef} className="cloud-icon-btn" onClick={toggle} onKeyDown={onTriggerKey} title={label || 'Actions'}>
                             <Icons.MoreVertical />
                         </button>
                     )}
-                    {open && (
-                        <div ref={menuRef} className="cloud-menu cloud-menu-fixed" style={{ top: pos.top, left: pos.left }} onClick={(e) => e.stopPropagation()}>
+                    {/* JB Nov 2026 - on the body: a hovered .cloud-card has a transform, which turns the card into
+                        what fixed means, and the overflow of the table card then cut this menu off */}
+                    {open && ReactDOM.createPortal(
+                        <div ref={menuRef} className="cloud-menu cloud-menu-fixed" style={{ top: pos.top, left: pos.left, maxHeight: 'calc(100vh - 16px)', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()} onKeyDown={onMenuKey}>
                             {visible.map((it, i) => it.divider ? <div className="cloud-menu-sep" key={'s' + i} /> : (
                                 <button
                                     type="button"
@@ -258,7 +284,8 @@
                                     <span>{it.label}</span>
                                 </button>
                             ))}
-                        </div>
+                        </div>,
+                        document.body
                     )}
                 </>
             );
@@ -324,11 +351,11 @@
         }
 
         // simple horizontal bar chart (top consumers)
-        function CloudBarChart({ rows, color }) {
+        function CloudBarChart({ rows, color, t }) {
             const max = Math.max(1, ...rows.map(r => Number(r.value) || 0));
             return (
                 <div className="cloud-barchart">
-                    {rows.length === 0 && <div className="cloud-empty">No data.</div>}
+                    {rows.length === 0 && <div className="cloud-empty">{t('cloud.noData') || 'No data.'}</div>}
                     {rows.map((r, i) => (
                         <div className="cloud-bar-row" key={i}>
                             <span className="cloud-bar-label" title={r.label}>{r.label}</span>
@@ -386,59 +413,60 @@
         function CloudSideNav({ active, onSelect, isAdmin, canAutoInstall, canChanges, collapsed, onToggle }) {
             const { t } = useTranslation();
             const groups = [
-                { label: 'DASHBOARD', items: [{ id: 'overview', label: 'Overview', icon: 'Grid' }] },
-                { label: 'COMPUTE', items: [
-                    { id: 'vms', label: 'Virtual Machines', icon: 'Server' },
-                    { id: 'containers', label: 'Containers', icon: 'Box' },
+                { label: t('cloudNavDashboard'), items: [{ id: 'overview', label: t('overview'), icon: 'Grid' }] },
+                { label: t('cloudNavCompute'), items: [
+                    { id: 'vms', label: t('virtualMachines'), icon: 'Server' },
+                    { id: 'containers', label: t('containers'), icon: 'Box' },
                     // LW Oct 2026 - containers from OCI images
                     { id: 'apps', label: t('ociTabLabel'), icon: 'Container' },
                 ] },
-                { label: 'STORAGE', items: [
-                    { id: 'datastores', label: 'Datastores', icon: 'Database' },
-                    { id: 'storage', label: 'Storage Config', icon: 'HardDrive' },
-                    { id: 'pools', label: 'Resource Pools', icon: 'Layers' },
-                    { id: 'ceph', label: 'Ceph', icon: 'Database' },
+                { label: t('storage'), items: [
+                    { id: 'datastores', label: t('datastores'), icon: 'Database' },
+                    { id: 'storage', label: t('cloudNavStorageConfig'), icon: 'HardDrive' },
+                    { id: 'pools', label: t('cloudNavResourcePools'), icon: 'Layers' },
+                    { id: 'ceph', label: t('ceph'), icon: 'Database' },
                 ] },
-                { label: 'NETWORK', items: [
-                    { id: 'networks', label: 'Networks', icon: 'Network' },
-                    { id: 'sdn', label: 'SDN', icon: 'Globe' },
-                    { id: 'firewall', label: 'Firewall', icon: 'Lock' },
-                    { id: 'topology', label: 'Topology', icon: 'Share2' },
+                { label: t('network'), items: [
+                    { id: 'networks', label: t('cloudNavNetworks'), icon: 'Network' },
+                    { id: 'sdn', label: t('sdn'), icon: 'Globe' },
+                    { id: 'firewall', label: t('firewall'), icon: 'Lock' },
+                    { id: 'topology', label: t('topologyView'), icon: 'Share2' },
                 ] },
-                { label: 'DATA PROTECTION', items: [
-                    { id: 'backups', label: 'Backups', icon: 'Archive' },
-                    { id: 'replication', label: 'Replication', icon: 'Copy' },
-                    { id: 'pbs', label: 'Backup Servers', icon: 'Server' },
-                    { id: 'siterecovery', label: 'Site Recovery', icon: 'LifeBuoy' },
+                { label: t('cloudNavDataProtection'), items: [
+                    { id: 'backups', label: t('backups'), icon: 'Archive' },
+                    { id: 'replication', label: t('replication'), icon: 'Copy' },
+                    { id: 'pbs', label: t('backupServers'), icon: 'Server' },
+                    { id: 'siterecovery', label: t('siteRecovery'), icon: 'LifeBuoy' },
                 ] },
-                { label: 'AUTOMATION', items: [
-                    { id: 'schedules', label: 'Schedules', icon: 'Clock' },
-                    { id: 'scripts', label: 'Scripts', icon: 'Terminal' },
-                    { id: 'snapshotpolicies', label: 'Snapshot Policies', icon: 'Camera' },
-                    { id: 'templates', label: 'Templates', icon: 'Copy' },
-                    { id: 'alerts', label: 'Alert Channels', icon: 'Bell' },
+                { label: t('automation'), items: [
+                    { id: 'schedules', label: t('schedules'), icon: 'Clock' },
+                    { id: 'scripts', label: t('cloudNavScripts'), icon: 'Terminal' },
+                    { id: 'snapshotpolicies', label: t('cloudNavSnapshotPolicies'), icon: 'Camera' },
+                    // LW Nov 2026 (#1220) - the blueprints sit above the library there
+                    { id: 'templates', label: t('bpNavTab'), icon: 'Copy' },
+                    { id: 'alerts', label: t('alertChannels'), icon: 'Bell' },
                 ] },
-                { label: 'INFRASTRUCTURE', items: [
-                    { id: 'clusters', label: 'Clusters', icon: 'Cloud' },
-                    { id: 'nodes', label: 'Hosts', icon: 'Cpu' },
-                    ...(canAutoInstall ? [{ id: 'autoinstall', label: 'Automated Installs', icon: 'Disc' }] : []),
+                { label: t('cloudNavInfrastructure'), items: [
+                    { id: 'clusters', label: t('cloudNavClusters'), icon: 'Cloud' },
+                    { id: 'nodes', label: t('hosts'), icon: 'Cpu' },
+                    ...(canAutoInstall ? [{ id: 'autoinstall', label: t('cloudNavAutoInstall'), icon: 'Disc' }] : []),
                     // LW Oct 2026 - directory, PCI and USB mappings of the selected cluster
                     { id: 'mappings', label: t('rmTitle'), icon: 'Link' },
-                    { id: 'ha', label: 'High Availability', icon: 'Shield' },
-                    { id: 'updates', label: 'Update Manager', icon: 'Download' },
+                    { id: 'ha', label: t('cloudNavHa'), icon: 'Shield' },
+                    { id: 'updates', label: t('updateManager'), icon: 'Download' },
                 ] },
-                { label: 'MONITORING', items: [{ id: 'monitoring', label: 'Monitoring', icon: 'Activity' }] },
-                { label: 'REPORTS', items: [
-                    { id: 'insights', label: 'Insights', icon: 'Zap' },
-                    { id: 'costs', label: 'Costs', icon: 'DollarSign' },
-                    { id: 'power', label: 'Power & Carbon', icon: 'Zap' },
+                { label: t('cloudNavMonitoring'), items: [{ id: 'monitoring', label: t('cloudNavMonitoring'), icon: 'Activity' }] },
+                { label: t('reports'), items: [
+                    { id: 'insights', label: t('insights'), icon: 'Zap' },
+                    { id: 'costs', label: t('cloudNavCosts'), icon: 'DollarSign' },
+                    { id: 'power', label: t('powerTitle'), icon: 'Zap' },
                     // LW Oct 2026 - what-if simulator of the selected cluster
                     { id: 'whatif', label: t('whatifTitle'), icon: 'Scale' },
-                    { id: 'apihealth', label: 'API Health', icon: 'Activity' },
-                    { id: 'cve', label: 'CVE Scanner', icon: 'Shield' },
+                    { id: 'apihealth', label: t('apiHealth'), icon: 'Activity' },
+                    { id: 'cve', label: t('cveScanner'), icon: 'Shield' },
                 ] },
-                { label: 'ACTIVITY', items: [
-                    { id: 'tasks', label: 'Tasks', icon: 'ClipboardList' },
+                { label: t('cloudNavActivity'), items: [
+                    { id: 'tasks', label: t('tasks'), icon: 'ClipboardList' },
                     // LW Oct 2026 - the flight recorder of the selected cluster
                     { id: 'timeline', label: t('tlTab'), icon: 'Clock' },
                     // NS Oct 2026 - change plans of the selected cluster, for whoever may see them
@@ -446,15 +474,15 @@
                 ] },
             ];
             if (isAdmin) {
-                groups.push({ label: 'GOVERNANCE', items: [
-                    { id: 'compliance', label: 'Compliance', icon: 'Shield' },
-                    { id: 'drift', label: 'Config Drift', icon: 'Activity' },
+                groups.push({ label: t('cloudNavGovernance'), items: [
+                    { id: 'compliance', label: t('compliance'), icon: 'Shield' },
+                    { id: 'drift', label: t('cloudNavConfigDrift'), icon: 'Activity' },
                     { id: 'siem', label: 'SIEM', icon: 'AlertTriangle' },
                 ] });
-                groups.push({ label: 'SYSTEM', items: [
-                    { id: 'plugins', label: 'Plugins', icon: 'Box' },
-                    { id: 'users', label: 'Users', icon: 'Users' },
-                    { id: 'settings', label: 'Settings', icon: 'Settings' },
+                groups.push({ label: t('cloudNavSystem'), items: [
+                    { id: 'plugins', label: t('plugins'), icon: 'Box' },
+                    { id: 'users', label: t('users'), icon: 'Users' },
+                    { id: 'settings', label: t('settings'), icon: 'Settings' },
                 ] });
             }
             return (
@@ -519,6 +547,8 @@
             };
             const uname = (currentUser && (currentUser.username || currentUser.name)) || 'User';
             const initial = (uname[0] || 'U').toUpperCase();
+            // the switcher draws nothing while the language is pinned, and an empty box would still take a gap
+            const { languageLocked } = useTranslation();
             const userMenu = [
                 { label: t('cloud.profile') || 'Profile & preferences', icon: 'User', onClick: () => onOpenProfile && onOpenProfile() },
                 isAdmin && { label: t('cloud.settings') || 'Settings', icon: 'Settings', onClick: () => onOpenSettings && onOpenSettings() },
@@ -550,7 +580,7 @@
                                 </select>
                             </div>
                         )}
-                        <div className="cloud-lang"><LanguageSwitcher /></div>
+                        {!languageLocked && <div className="cloud-lang"><LanguageSwitcher /></div>}
                         <CloudIconBtn icon={theme === 'light' ? 'Moon' : 'Sun'} title={theme === 'light' ? 'Dark theme' : 'Light theme'} onClick={onToggleTheme} />
                         <CloudIconBtn icon="RefreshCw" title={t('cloud.refresh') || 'Refresh'} onClick={onRefresh} />
                         {isAdmin && <CloudIconBtn icon="Settings" title={t('cloud.settings') || 'Settings'} onClick={() => onOpenSettings && onOpenSettings()} />}
@@ -604,19 +634,19 @@
             const recentTasks = (Array.isArray(tasks) ? tasks : []).slice(0, 6);
 
             const kpis = [
-                { icon: 'Server', value: vms.length, label: t('cloud.vms') || 'Virtual Machines', accent: '#6366f1', sub: `${vms.filter(v => v.status === 'running').length} running`, nav: 'vms' },
-                { icon: 'Box', value: cts.length, label: t('cloud.containers') || 'Containers', accent: '#14b8a6', sub: `${cts.filter(v => v.status === 'running').length} running`, nav: 'containers' },
-                { icon: 'Cpu', value: nodeNames.length, label: t('cloud.hosts') || 'Hosts', accent: '#a855f7', sub: `${connected}/${safeClusters.length} clusters`, nav: 'nodes' },
-                { icon: 'Activity', value: running.length, label: t('cloud.running') || 'Running guests', accent: '#22c55e', sub: `${safeRes.length} total`, nav: null },
-                { icon: 'Cpu', value: vcpu, label: t('cloud.vcpu') || 'vCPU allocated', accent: '#0ea5e9', sub: null, nav: null },
-                { icon: 'MemoryStick', value: cloudBytesToGiB(ramAllocB).toFixed(1) + ' GiB', label: t('cloud.ram') || 'RAM allocated', accent: '#f59e0b', sub: null, nav: null },
+                { icon: 'Server', value: vms.length, label: t('cloud.vms') || 'Virtual Machines', accent: '#6366f1', sub: `${vms.filter(v => v.status === 'running').length} ${t('cloud.runningUnit') || 'running'}`, nav: 'vms' },
+                { icon: 'Box', value: cts.length, label: t('cloud.containers') || 'Containers', accent: '#14b8a6', sub: `${cts.filter(v => v.status === 'running').length} ${t('cloud.runningUnit') || 'running'}`, nav: 'containers' },
+                { icon: 'Cpu', value: nodeNames.length, label: t('cloud.hosts') || 'Hosts', accent: '#a855f7', sub: `${connected}/${safeClusters.length} ${t('cloud.clustersUnit') || 'clusters'}`, nav: 'nodes' },
+                { icon: 'Activity', value: running.length, label: t('cloud.runningGuests') || 'Running guests', accent: '#22c55e', sub: `${safeRes.length} ${t('cloud.totalUnit') || 'total'}`, nav: null },
+                { icon: 'Cpu', value: vcpu, label: t('cloud.vcpuAllocated') || 'vCPU allocated', accent: '#0ea5e9', sub: null, nav: null },
+                { icon: 'MemoryStick', value: cloudBytesToGiB(ramAllocB).toFixed(1) + ' GiB', label: t('cloud.ramAllocated') || 'RAM allocated', accent: '#f59e0b', sub: null, nav: null },
             ];
 
             return (
                 <div className="cloud-body">
                     <CloudPageHeader
                         title={t('cloud.overview') || 'Overview'}
-                        sub={`${connected} / ${safeClusters.length} ${t('cloud.clustersConnected') || 'clusters connected'} · ${safeRes.length} ${t('cloud.guestsShort') || 'guests'}`}
+                        sub={`${connected} / ${safeClusters.length} ${t('cloud.clustersConnected') || 'clusters connected'} · ${safeRes.length} ${t('cloud.guestsUnit') || 'guests'}`}
                     />
                     <div className="cloud-kpi-grid">
                         {kpis.map((k, i) => (
@@ -630,15 +660,15 @@
                             <CloudSectionTitle>{t('cloud.utilization') || 'Cluster utilization'}</CloudSectionTitle>
                             <div className="cloud-util-body">
                                 <div className="cloud-util-gauges">
-                                    <CloudGauge pct={cpuAvg} color="var(--cloud-accent)" label={t('cloud.avgCpu') || 'Avg CPU'} sub={`${nodeNames.length} hosts`} />
+                                    <CloudGauge pct={cpuAvg} color="var(--cloud-accent)" label={t('cloud.avgCpu') || 'Avg CPU'} sub={`${nodeNames.length} ${t('cloud.hostsUnit') || 'hosts'}`} />
                                     <CloudGauge pct={memAvg} color="#a855f7" label={t('cloud.avgRam') || 'Avg RAM'} sub={dcStatus?.resources?.memory ? cloudFmtBytes(dcStatus.resources.memory.used) : null} />
                                 </div>
                                 <div className="cloud-util-breakdown">
                                     <div className="cloud-util-row"><span>{t('cloud.running') || 'Running'}</span><span>{running.length} / {safeRes.length}</span></div>
-                                    <div className="cloud-util-row"><span>{t('cloud.vcpu') || 'vCPU allocated'}</span><span>{vcpu}</span></div>
-                                    <div className="cloud-util-row"><span>{t('cloud.ram') || 'RAM allocated'}</span><span>{cloudBytesToGiB(ramAllocB).toFixed(1)} GiB</span></div>
+                                    <div className="cloud-util-row"><span>{t('cloud.vcpuAllocated') || 'vCPU allocated'}</span><span>{vcpu}</span></div>
+                                    <div className="cloud-util-row"><span>{t('cloud.ramAllocated') || 'RAM allocated'}</span><span>{cloudBytesToGiB(ramAllocB).toFixed(1)} GiB</span></div>
                                     {dcStatus?.resources?.storage && (
-                                        <div className="cloud-util-row"><span>{t('cloud.storage') || 'Storage used'}</span><span>{cloudFmtBytes(dcStatus.resources.storage.used)} / {cloudFmtBytes(dcStatus.resources.storage.total)}</span></div>
+                                        <div className="cloud-util-row"><span>{t('cloud.storageUsed') || 'Storage used'}</span><span>{cloudFmtBytes(dcStatus.resources.storage.used)} / {cloudFmtBytes(dcStatus.resources.storage.total)}</span></div>
                                     )}
                                 </div>
                             </div>
@@ -646,7 +676,7 @@
 
                         <div className="cloud-card">
                             <CloudSectionTitle>{t('cloud.topMem') || 'Top memory consumers'}</CloudSectionTitle>
-                            <CloudBarChart rows={topMem} color="#6366f1" />
+                            <CloudBarChart rows={topMem} color="#6366f1" t={t} />
                         </div>
                     </div>
 
@@ -655,7 +685,7 @@
                             {t('cloud.recentTasks') || 'Recent activity'}
                         </CloudSectionTitle>
                         {recentTasks.length === 0 ? (
-                            <div className="cloud-empty">{t('cloud.noTasks') || 'No recent tasks.'}</div>
+                            <div className="cloud-empty">{t('cloud.noRecentTasks') || 'No recent tasks.'}</div>
                         ) : (
                             <div className="cloud-tasklist">
                                 {recentTasks.map((tk, i) => (
@@ -675,7 +705,7 @@
         }
 
         // ── instances list (VMs / Containers) ──────────────────────
-        function CloudInstanceList({ rows, kind, clusterId, act, onOpen, onCreate, t }) {
+        function CloudInstanceList({ rows, kind, clusterId, act, onOpen, onCreate, onBlueprints, t }) {
             const safe = Array.isArray(rows) ? rows : [];
             const [query, setQuery] = React.useState('');
             const [statusFilter, setStatusFilter] = React.useState('all');
@@ -741,7 +771,13 @@
 
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={title} sub={`${safe.length} ${kind === 'lxc' ? (t('cloud.containers') || 'containers') : (t('cloud.vms') || 'virtual machines')}`}>
+                    <CloudPageHeader title={title} sub={`${safe.length} ${kind === 'lxc' ? (t('cloud.containersUnit') || 'containers') : (t('cloud.vmsUnit') || 'virtual machines')}`}>
+                        {/* LW Nov 2026 (#1220) - to the blueprints of this cluster */}
+                        {onBlueprints && kind !== 'lxc' && (
+                            <button type="button" className="cloud-btn" onClick={onBlueprints} data-bp-nav="cloud-vms">
+                                <Icons.Template /> {t('crBpNavDeploy')}
+                            </button>
+                        )}
                         {canCreate && (
                             <button type="button" className="cloud-btn cloud-btn-primary" onClick={() => onCreate(kind === 'lxc' ? 'lxc' : 'qemu')}>
                                 <Icons.Plus /> {kind === 'lxc' ? (t('newContainer') || 'New Container') : (t('newVm') || 'New VM')}
@@ -792,13 +828,13 @@
                                 {statusFilter !== 'all' && (
                                     <span className="cloud-filterchip">
                                         {(t('cloud.colStatus') || 'Status')}: {statusFilter === 'running' ? (t('cloud.running') || 'Running') : (t('cloud.stopped') || 'Stopped')}
-                                        <button type="button" onClick={() => { setStatusFilter('all'); setPage(0); }} aria-label="Remove filter"><Icons.X /></button>
+                                        <button type="button" onClick={() => { setStatusFilter('all'); setPage(0); }} aria-label={t('cloud.removeFilter') || 'Remove filter'}><Icons.X /></button>
                                     </span>
                                 )}
                                 {q && (
                                     <span className="cloud-filterchip">
                                         {(t('cloud.search') || 'Search')}: “{query}”
-                                        <button type="button" onClick={() => { setQuery(''); setPage(0); }} aria-label="Remove filter"><Icons.X /></button>
+                                        <button type="button" onClick={() => { setQuery(''); setPage(0); }} aria-label={t('cloud.removeFilter') || 'Remove filter'}><Icons.X /></button>
                                     </span>
                                 )}
                                 <button type="button" className="cloud-clearfilters" onClick={() => { setStatusFilter('all'); setQuery(''); setPage(0); }}>{t('cloud.clearFilters') || 'Clear all filters'}</button>
@@ -821,7 +857,7 @@
                                 <table className="cloud-table cloud-table-selectable">
                                     <thead>
                                         <tr>
-                                            <th className="cloud-th-check"><input type="checkbox" checked={pageAllOn} onChange={toggleAllPage} aria-label="Select page" /></th>
+                                            <th className="cloud-th-check"><input type="checkbox" checked={pageAllOn} onChange={toggleAllPage} aria-label={t('cloud.selectPage') || 'Select page'} /></th>
                                             <SortTh k="name">{t('cloud.colName') || 'Name'}</SortTh>
                                             <SortTh k="vmid">{t('cloud.colId') || 'ID'}</SortTh>
                                             <SortTh k="status">{t('cloud.colStatus') || 'Status'}</SortTh>
@@ -840,7 +876,7 @@
                                             return (
                                                 <tr key={k} className={'cloud-table-row' + (isChecked ? ' cloud-table-row-checked' : '')} onClick={() => onOpen(r)}>
                                                     <td className="cloud-td-check" onClick={(e) => { e.stopPropagation(); toggleOne(k); }}>
-                                                        <input type="checkbox" checked={isChecked} onChange={() => {}} tabIndex={-1} aria-label="Select" />
+                                                        <input type="checkbox" checked={isChecked} onChange={() => {}} tabIndex={-1} aria-label={t('cloud.selectRow') || 'Select'} />
                                                     </td>
                                                     <td>
                                                         <span className="cloud-table-name">
@@ -956,7 +992,7 @@
                             </CloudKVPanel>
                             <CloudKVPanel title={t('cloud.tabCapacity') || 'Capacity'}>
                                 <CloudKVRow label={t('cloud.vcpu') || 'vCPU'} value={Number(r.maxcpu) || '—'} />
-                                <CloudKVRow label={t('cloud.colCpu') || 'CPU usage'} value={cpuP + '%'} />
+                                <CloudKVRow label={t('cloud.cpuUsage') || 'CPU usage'} value={cpuP + '%'} />
                                 <CloudKVRow label={t('cloud.ram') || 'Memory'} value={memMax ? cloudFmtBytes(memMax) : '—'} />
                                 <CloudKVRow label={t('cloud.ramInUse') || 'Memory used'} value={`${cloudFmtBytes(memUse)} (${memP}%)`} />
                                 {diskMax > 0 && <CloudKVRow label={t('cloud.disk') || 'Disk'} value={`${cloudFmtBytes(diskUse)} / ${cloudFmtBytes(diskMax)}`} />}
@@ -1159,7 +1195,7 @@
             const names = Object.keys(map).sort();
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.hosts') || 'Hosts'} sub={`${names.length} ${t('cloud.hosts') || 'hosts'}`} />
+                    <CloudPageHeader title={t('cloud.hosts') || 'Hosts'} sub={`${names.length} ${t('cloud.hostsUnit') || 'hosts'}`} />
                     {names.length === 0 ? <div className="cloud-card"><CloudEmpty icon="Cpu" title={t('cloud.noNodes') || 'No host data'} text={t('cloud.selectCluster') || 'Select a connected cluster.'} /></div> : (
                         <div className="cloud-card-grid cloud-card-grid-wide">
                             {names.map(name => {
@@ -1266,7 +1302,7 @@
                                                 <tr className="cloud-table-row cloud-table-row-static" key={tk.upid || i}>
                                                     <td>{run ? <CloudPill color="#2f9fe0" bg="rgba(56,189,248,0.14)" border="rgba(56,189,248,0.36)" dot>Running</CloudPill>
                                                         : ok ? <CloudPill color="#1bbf8a" bg="rgba(45,212,167,0.16)" border="rgba(45,212,167,0.42)" dot>OK</CloudPill>
-                                                        : <CloudPill color="#e0686c" bg="rgba(248,113,113,0.14)" border="rgba(248,113,113,0.36)" dot>{tk.status || 'Error'}</CloudPill>}</td>
+                                                        : <CloudPill color="#e0686c" bg="rgba(248,113,113,0.14)" border="rgba(248,113,113,0.36)" dot>{tk.exitstatus || tk.status || 'Error'}</CloudPill>}</td>
                                                     <td className="cloud-table-mono">{tk.type || '—'}</td>
                                                     <td className="cloud-table-mono">{tk.id || '—'}</td>
                                                     <td>{tk.node || '—'}</td>
@@ -1703,7 +1739,7 @@
                     <CloudPageHeader title={t('cloud.ceph') || 'Ceph'} sub={t('cloud.cephSub') || 'Distributed storage'}>
                         <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
                     </CloudPageHeader>
-                    <CloudSectionState loading={loading} err={err} empty={notAvail} emptyIcon="Database" emptyTitle={t('cloud.cephNA') || 'Ceph is not configured on this cluster'} t={t}>
+                    <CloudSectionState loading={loading} err={err || (c.read_failed ? t('cephReadFailedDesc') : null)} empty={notAvail} emptyIcon="Database" emptyTitle={t('cloud.cephNA') || 'Ceph is not configured on this cluster'} t={t}>
                         <div className="cloud-kpi-grid">{kpis.map((k, i) => <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} />)}</div>
                         {pools.length ? (
                             <div className="cloud-card cloud-table-card">
@@ -2279,6 +2315,11 @@
                 if (!String(form.vmid).trim() || !form.time) return;
                 const body = { cluster_id: clusterId, vmid: Number(form.vmid), vm_type: form.vm_type, action: form.action, schedule_type: form.schedule_type, time: form.time };
                 if (form.schedule_type === 'once' && form.date) body.date = form.date;
+                // JB Nov 2026 - weekly was on offer with nothing to pick the days with, and the route wants them
+                if (form.schedule_type === 'weekly') {
+                    if (!(form.days || []).length) return;
+                    body.days = form.days;
+                }
                 mut.run('newsched', 'POST', '/api/schedules', body);
                 setShowNew(false); setForm({ vmid: '', vm_type: 'qemu', action: 'start', schedule_type: 'daily', time: '03:00', date: '' });
             };
@@ -2302,7 +2343,6 @@
                                         <td><CloudConnChip connected={isOn(s)} t={t} /></td>
                                         <CloudRowActions>
                                             {mut.acts && (<>
-                                            <CloudIconBtn icon="Play" title={t('cloud.runNow') || 'Run now'} onClick={() => mut.run('r' + s.id, 'POST', `/api/schedules/${s.id}/run`)} />
                                             <CloudIconBtn icon="Power" title={isOn(s) ? (t('disable') || 'Disable') : (t('enable') || 'Enable')} onClick={() => mut.run('t' + s.id, 'PUT', `/api/schedules/${s.id}`, { enabled: isOn(s) ? 0 : 1 })} />
                                             <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + s.id, 'DELETE', `/api/schedules/${s.id}`, undefined, (t('cloud.confirmDelSchedule') || 'Delete this schedule?'))} />
                                             </>)}
@@ -2323,6 +2363,19 @@
                                 <CloudField label={t('cloud.colWhen') || 'Schedule'}><select className="cloud-input" value={form.schedule_type} onChange={e => setForm({ ...form, schedule_type: e.target.value })}>{['once', 'daily', 'weekly', 'weekdays', 'weekends'].map(x => <option key={x} value={x}>{x}</option>)}</select></CloudField>
                                 <CloudField label={t('cloud.colTime') || 'Time'}><input className="cloud-input" type="time" value={form.time} onChange={e => setForm({ ...form, time: e.target.value })} /></CloudField>
                             </div>
+                            {/* not a CloudField: a wrapping label would hand every click on the caption or gap to the first checkbox */}
+                            {form.schedule_type === 'weekly' && <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: '.8rem', color: 'var(--cloud-text-secondary)' }}>
+                                <span>{t('days') || 'Days'}</span>
+                                <div data-cloud-sched-days="" style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                                    {['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map(d => (
+                                        <label key={d} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                            <input type="checkbox" data-cloud-sched-day={d} checked={(form.days || []).includes(d)}
+                                                onChange={e => setForm({ ...form, days: e.target.checked ? [...(form.days || []), d] : (form.days || []).filter(x => x !== d) })} />
+                                            {t(d)}
+                                        </label>
+                                    ))}
+                                </div>
+                            </div>}
                             {form.schedule_type === 'once' && <CloudField label={t('cloud.colDate') || 'Date'}><input className="cloud-input" type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></CloudField>}
                         </CloudModal>
                     )}
@@ -2349,7 +2402,12 @@
                 if (res.nodes && typeof res.nodes === 'object') return Object.entries(res.nodes).map(([node, v]) => ({ node, ...(v || {}) }));
                 return [];
             }, [res]);
-            const totalVulns = nodes.reduce((a, n) => a + (((n.packages || n.vulnerabilities || n.cves || []).length) || Number(n.count) || 0), 0);
+            // JB Nov 2026 - packages is always there and holds pending updates, so an empty one hid the CVEs behind it and a
+            // node with CVEs read as clean. Without debsecan the security updates are the closest there is
+            const nodeVulns = (n) => (n.cves && n.cves.length ? n.cves
+                : (n.vulnerabilities && n.vulnerabilities.length ? n.vulnerabilities
+                : (n.debsecan_available ? [] : (n.packages || []).filter(p => p.security))));
+            const totalVulns = nodes.reduce((a, n) => a + (nodeVulns(n).length || Number(n.count) || 0), 0);
             return (
                 <div className="cloud-body">
                     <CloudPageHeader title={t('cveScanner') || 'CVE Scanner'} sub={t('cloud.cveSub') || 'Package vulnerability scan (debsecan)'}>
@@ -2365,17 +2423,17 @@
                                 <CloudKpiCard icon={totalVulns ? 'AlertTriangle' : 'Shield'} value={totalVulns} label={t('cloud.cveVulns') || 'Vulnerabilities'} accent={totalVulns ? '#ef4444' : '#22c55e'} />
                             </div>
                             {nodes.map((n, i) => {
-                                const pkgs = n.packages || n.vulnerabilities || n.cves || [];
+                                const pkgs = nodeVulns(n);
                                 return (
                                     <div className="cloud-card cloud-table-card" key={n.node || i}>
                                         {cloudHead({ icon: <Icons.Cpu />, title: n.node || ('node ' + i), count: pkgs.length })}
                                         {n.error ? <div className="cloud-empty" style={{ padding: 14 }}>{n.error}</div> : (pkgs.length ? <div className="cloud-table-scroll"><table className="cloud-table">
                                             <thead><tr><th>{t('cloud.colPackage') || 'Package'}</th><th>{t('cloud.colInstalled') || 'Installed'}</th><th>CVE</th><th>{t('cloud.colSeverity') || 'Severity'}</th></tr></thead>
-                                            <tbody>{pkgs.slice(0, 200).map((p, j) => { const sev = String(p.severity || '').toLowerCase(); return (<tr className="cloud-table-row cloud-table-row-static" key={j}>
+                                            <tbody>{pkgs.slice(0, 200).map((p, j) => { const level = p.severity || p.urgency; const sev = String(level || '').toLowerCase(); return (<tr className="cloud-table-row cloud-table-row-static" key={j}>
                                                 <td className="cloud-table-mono">{p.package || p.pkg || p.name || '—'}</td>
-                                                <td className="cloud-cell-muted">{p.installed || p.version || '—'}</td>
+                                                <td className="cloud-cell-muted">{p.installed || p.version || p.current || '—'}</td>
                                                 <td className="cloud-table-mono">{p.cve || p.id || '—'}</td>
-                                                <td>{p.severity ? <span className={'cloud-chip ' + (sev.indexOf('high') >= 0 || sev.indexOf('crit') >= 0 ? 'cloud-chip-err' : 'cloud-chip-soft')}>{p.severity}</span> : <span className="cloud-cell-muted">—</span>}</td>
+                                                <td>{level ? <span className={'cloud-chip ' + (sev.indexOf('high') >= 0 || sev.indexOf('crit') >= 0 ? 'cloud-chip-err' : 'cloud-chip-soft')}>{level}</span> : <span className="cloud-cell-muted">—</span>}</td>
                                             </tr>); })}</tbody>
                                         </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{t('cloud.cveClean') || 'No known vulnerabilities.'}</div>)}
                                     </div>
@@ -2422,10 +2480,12 @@
             // server-computed, already false for tenant/cluster-confined users; a standby
             // installs nothing (#625), like the sidebar entry in the other two layouts. Not
             // even a forwarding one: the answer URL it would show is this instance's own.
-            const { ha, haStandby, haConsolesElsewhere } = useAuth();
+            const { ha, haStandby, haConsolesElsewhere, haReadOnly } = useAuth();
             const canAutoInstall = !!(currentUser && currentUser.autoinstall_access) && !haStandby;
             const holdsPerm = (perm) => !!isAdmin || (Array.isArray(currentUser && currentUser.permissions) && currentUser.permissions.includes(perm));
             const canChanges = holdsPerm('changes.view');
+            // LW Nov 2026 (#1220) - the blueprints (blueprints.js) read with vm.create, a standby lists them and changes nothing
+            const canBp = holdsPerm('vm.create');
 
             // PegaProx t() ECHOES the key back on a miss, so `t('cloud.x') || 'Fallback'`
             // would render the raw key. treat key-echo as "no translation". -- NS
@@ -2504,7 +2564,7 @@
                 topology: T('topology') || 'Topology',
                 compliance: T('compliance') || 'Compliance',
                 snapshotpolicies: T('snapshotPolicies') || 'Snapshot Policies',
-                templates: T('templatesLibrary') || 'Templates',
+                templates: T('bpNavTab') || 'Blueprints & Templates',
                 insights: T('insights') || 'Insights',
                 costs: T('costDashboard') || 'Costs',
                 power: T('powerTitle') || 'Power & Carbon',
@@ -2526,14 +2586,57 @@
                 settings: T('cloud.settings') || 'Settings',
             };
 
+            // LW Nov 2026 (#1220) - a guest of a blueprint deploy on another cluster: it opens once the first
+            // list of that cluster has it, else that list says it is gone. Leaving the page or the cluster drops it
+            const [bpWant, setBpWant] = React.useState(null);
+            const bpGone = (vmid) => addToast && addToast(String(T('guestNotInClusterList') || 'Guest {id} is not in the list of this cluster').replace('{id}', vmid), 'warning');
+            React.useEffect(() => {
+                if (!bpWant) return undefined;
+                if (bpWant.cid !== cid) { setBpWant(null); return undefined; }
+                const onFrame = (e) => {
+                    const d = (e && e.detail) || {};
+                    if (d.cluster_id !== bpWant.cid || !Array.isArray(d.rows)) return;
+                    const hit = d.rows.find(r => r && r.vmid === bpWant.vmid && r.type === bpWant.type);
+                    setBpWant(null);
+                    if (hit) setDetailRes({ ...hit, _clusterId: bpWant.cid });
+                    else bpGone(bpWant.vmid);
+                };
+                window.addEventListener('pegaprox-resources-frame', onFrame);
+                return () => window.removeEventListener('pegaprox-resources-frame', onFrame);
+            }, [bpWant, cid]);
+
             const selectSection = (id) => {
                 // Settings + Users open the full admin modal (same one classic uses) rather
                 // than a placeholder page — keep the current content underneath. -- NS
                 if (id === 'settings' || id === 'users') { onOpenSettings && onOpenSettings(); return; }
                 setSection(id);
                 setDetailRes(null);
+                setBpWant(null);
             };
             const openDetail = (r) => setDetailRes(r);
+            // where the blueprints lead: the guest a deploy made opens on the VMs page of its cluster,
+            // and the editor suggests the bridges of a node of this one. A guest this cluster does not list
+            // (deleted since) is said, not drawn as a guest of unknown state with a Start button
+            const bpNav = {
+                nodesOf: (id) => (id === cid ? clusterMetrics : null),
+                openGuest: (id, guest) => {
+                    const cl = safeClusters.find(c => c && c.id === id);
+                    if (!cl || !guest) return;
+                    if (id === cid) {
+                        const known = safeResources.find(r => r && r.vmid === guest.vmid && r.type === guest.type);
+                        if (!known) { bpGone(guest.vmid); return; }
+                        setSection('vms');
+                        setDetailRes({ ...known, _clusterId: id });
+                        return;
+                    }
+                    setSelectedCluster(cl);
+                    setSection('vms');
+                    setDetailRes(null);
+                    setBpWant({ cid: id, vmid: guest.vmid, type: guest.type });
+                },
+            };
+            const pveCluster = !!selectedCluster && (!selectedCluster.cluster_type || selectedCluster.cluster_type === 'proxmox');
+            const toBlueprints = canBp && !haReadOnly && pveCluster ? () => selectSection('templates') : undefined;
 
             // detail crumb when open
             const crumbs = ['Cloud', sectionLabels[section] || 'Overview'];
@@ -2548,7 +2651,7 @@
                         body = <CloudDashboard clusters={safeClusters} resources={safeResources} metrics={clusterMetrics} dcStatus={dcStatus} tasks={tasks} onNav={selectSection} t={T} />;
                         break;
                     case 'vms':
-                        body = <CloudInstanceList rows={vms} kind="qemu" clusterId={cid} act={act} onOpen={openDetail} onCreate={act.createVm} t={T} />;
+                        body = <CloudInstanceList rows={vms} kind="qemu" clusterId={cid} act={act} onOpen={openDetail} onCreate={act.createVm} onBlueprints={toBlueprints} t={T} />;
                         break;
                     case 'containers':
                         body = <CloudInstanceList rows={cts} kind="lxc" clusterId={cid} act={act} onOpen={openDetail} onCreate={act.createVm} t={T} />;
@@ -2635,7 +2738,12 @@
                         break;
                     case 'templates':
                         body = (
-                            <div className="cloud-mounted">
+                            <div className="cloud-mounted cloud-body">
+                                {/* the blueprints above the library, as in Modern */}
+                                {cid && (
+                                    <Blueprints key={cid} cluster={selectedCluster} clusters={safeClusters} authFetch={authFetch} addToast={addToast}
+                                        canRead={canBp} canWrite={canBp && !haReadOnly} nav={bpNav} cloud />
+                                )}
                                 <TemplatesLibraryTab clusterId={cid} clusterName={selectedCluster && selectedCluster.name} authFetch={authFetch} addToast={addToast} t={T} isAdmin={isAdmin} isCorporate={false} />
                             </div>
                         );
@@ -2680,7 +2788,7 @@
                             : <CloudDashboard clusters={safeClusters} resources={safeResources} metrics={clusterMetrics} dcStatus={dcStatus} tasks={tasks} onNav={selectSection} t={T} />;
                         break;
                     case 'updates':
-                        body = <div className="cloud-mounted"><UpdateManagerSection clusterId={cid} addToast={addToast} /></div>;
+                        body = <div className="cloud-mounted"><UpdateManagerSection clusterId={cid} clusterName={selectedCluster && (selectedCluster.display_name || selectedCluster.name)} addToast={addToast} /></div>;
                         break;
                     case 'plugins':
                         body = <CloudPlugins clusterId={cid} t={T} />;

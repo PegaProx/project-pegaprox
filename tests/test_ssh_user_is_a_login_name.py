@@ -370,7 +370,8 @@ def v2p(api, monkeypatch):
     fake.host = 'esxi01.lab'
     fake.get_vm.return_value = {'data': {'name': 'vm1', 'nics': []}}
     monkeypatch.setitem(vmwareapi.vmware_managers, 'v1', fake)
-    monkeypatch.setitem(vmwareapi.cluster_managers, 'c1', MagicMock())
+    # with the node list a real manager has: the start asks target_node against it (#1224)
+    monkeypatch.setitem(vmwareapi.cluster_managers, 'c1', MagicMock(nodes={'pve1': {'node': 'pve1'}}))
     monkeypatch.setattr(vmwareapi, 'user_can_access_vmware_vm', lambda *a, **k: True)
     monkeypatch.setattr(vmwareapi, 'caller_is_scoped', lambda *a, **k: False)
     monkeypatch.setattr(vmwareapi, 'check_cluster_access', lambda *a, **k: (True, None))

@@ -91,13 +91,35 @@ def create_app():
     # else: no CORS init = browser same-origin policy applies (safest default)
 
     # Gzip compression
+    # MK Nov 2026 - text/javascript is what Python 3.12+ guesses for .js, Flask's /static
+    # sends that, and react, chart, jspdf and noVNC went out uncompressed
     app.config['COMPRESS_MIMETYPES'] = [
-        'text/html', 'text/css', 'text/xml', 'text/plain',
+        'text/html', 'text/css', 'text/xml', 'text/plain', 'text/javascript',
         'application/json', 'application/javascript', 'application/xml'
     ]
     app.config['COMPRESS_LEVEL'] = 6
     app.config['COMPRESS_MIN_SIZE'] = 500
-    Compress(app)
+    # MK Nov 2026 - a file response is a stream, and flask-compress leaves gzip out for
+    # streams by default: a client that only offers gzip got /static/css as it is
+    app.config['COMPRESS_ALGORITHM_STREAMING'] = ['zstd', 'br', 'gzip', 'deflate']
+    # The page (utils/index_page.py) brings its own codings and ETags and is marked for it.
+    # flask-compress must not touch it, it would even gzip the plain one for "gzip;q=0".
+    app.config['COMPRESS_REGISTER'] = False
+    _compress = Compress(app)
+
+    @app.after_request
+    def compress_response(response):
+        if getattr(response, 'pp_encoded', False):
+            return response
+        coded = 'Content-Encoding' in response.headers
+        response = _compress.after_request(response)
+        # send_file compared If-None-Match with the file's plain ETag before flask-compress put
+        # ":gzip" (":zstd", ...) behind it, and for a stream flask-compress only looks again on
+        # /static. So /portal, /status and /sw.js never got their 304 once they were compressed.
+        if (response.is_streamed and not coded and 'Content-Encoding' in response.headers
+                and request.method in ('GET', 'HEAD')):
+            response.make_conditional(request)
+        return response
 
     # Max request size - NS: Feb 2026 - separate limit for file uploads (#82)
     _default_max = int(os.environ.get('PEGAPROX_MAX_REQUEST_SIZE', 10 * 1024 * 1024))  # 10 MB default for API
@@ -159,6 +181,8 @@ def create_app():
                 from pegaprox.api.ha import signed_member_call
                 peer_call = signed_member_call()
             if not peer_call and not any(request.path.startswith(p) for p in skip_paths):
+                # the portal_only hook below looks API tokens up only for a counted request
+                request.environ['pegaprox.rate_counted'] = True
                 # NS: Mar 2026 - use centralized get_client_ip, respects trusted_proxies
                 from pegaprox.utils.audit import get_client_ip
                 client_ip = get_client_ip()
@@ -430,6 +454,84 @@ def create_app():
 
     # Register all API blueprints
     register_blueprints(app)
+
+    # MK Oct 2026 - portal_only on the routes require_auth does not guard. require_auth holds
+    # the account on every route behind it, with the record it loads anyway; the rest find
+    # their caller themselves (a ws or SSE token, ?session=, the cookie the SSH server sends)
+    # or take none, and are held here before their body runs. A route behind require_auth
+    # costs a lookup of its view and nothing more. After the IP lists, before the standby
+    # hands a write on.
+    @app.before_request
+    def hold_portal_only_accounts():
+        if request.endpoint is None or not request.path.startswith('/api/'):
+            return None
+        view = app.view_functions.get(request.endpoint)
+        if getattr(view, '_pp_auth', None) is not None:
+            return None
+        from pegaprox.utils.auth import portal_only_request_refusal
+        return portal_only_request_refusal(
+            look_up_tokens=bool(request.environ.get('pegaprox.rate_counted')))
+
+    # MK Nov 2026 - the arguments of the cluster and PBS routes go into the API path of the
+    # cluster as they are, in every route that takes one. One that holds what no name there
+    # holds (sanitization.odd_route_argument) is refused here, before any route asks the
+    # cluster with it and before a standby hands the call on.
+    _ARG_LABELS = {'node': 'node name', 'node_name': 'node name', 'storage': 'storage name',
+                   'storage_name': 'storage name', 'storage_id': 'storage name',
+                   'snapname': 'snapshot name', 'vm_type': 'guest type', 'vmtype': 'guest type'}
+
+    def _request_names():
+        """The query string, an urlencoded form and a JSON object of the request. A multipart
+        body is left out: parsing it here would spool a whole upload before require_auth has
+        looked at the caller, and the one cluster route that takes one checks its node."""
+        out = [request.args]
+        # MK Nov 2026 - the same goes for any body on that route: it may be as large as an
+        # upload (validate_request), and a JSON or form body sent to it was read here whole,
+        # from a client nobody had signed in yet. Only what an API call may carry, with its
+        # length told up front
+        if (request.max_content_length or 0) > _default_max and \
+                (request.content_length is None or request.content_length > _default_max):
+            return out
+        if request.mimetype == 'application/x-www-form-urlencoded':
+            request.get_data(cache=True)    # parsed from the cached bytes, a standby forwards them
+            out.append(request.form)
+        elif request.is_json:
+            # silent covers a ValueError only: a body nested too deep raised a RecursionError
+            # here, a 500 before require_auth had looked at the caller. It is no object then,
+            # and the route answers for it as before
+            try:
+                body = request.get_json(silent=True)
+            except (RecursionError, ValueError):
+                body = None
+            if isinstance(body, dict):
+                out.append(body)
+        return out
+
+    @app.before_request
+    def refuse_odd_route_arguments():
+        rule = request.url_rule
+        if rule is None or not request.view_args:
+            return None
+        on_cluster = rule.rule.startswith('/api/clusters/')
+        if not on_cluster and not rule.rule.startswith('/api/pbs/'):
+            return None
+        from pegaprox.utils.sanitization import odd_route_argument, odd_request_name
+        name = odd_route_argument(rule.rule, request.view_args)
+        label = None if name is None else _ARG_LABELS.get(name, name.replace('_', ' '))
+        if label is None and rule.rule.startswith('/api/clusters/<cluster_id>/'):
+            # MK Nov 2026 - and the names a cluster route takes from the query string or the
+            # body (sanitization.NAME_VALUE_LABELS), which reach the API path the same way
+            label = odd_request_name(*_request_names())
+        if label is None:
+            return None
+        if on_cluster:
+            # an XCP-ng pool and an ESXi host name their hosts freely ('xen host #1') and
+            # put no argument into a URL path. Looked up only here: a standby refuses its
+            # consoles before anything asks the cluster registry
+            mgr = g.cluster_managers.get(request.view_args.get('cluster_id'))
+            if mgr is not None and getattr(mgr, 'cluster_type', 'proxmox') in ('xcpng', 'esxi'):
+                return None
+        return jsonify({'error': f'Invalid {label}'}), 400
 
     # MK Sep 2026 (#625) - a standby takes its configuration from the active instance
     # and would lose a local change at the next sync, so it refuses writes. With the
@@ -748,11 +850,13 @@ _LENGTH_RE = re.compile(r'[0-9]{1,9}')
 # the hooks the fast path stands in for, by name: what each does for these two routes is
 # done above or cannot apply (refuse_writes_on_standby lets /api/ha/ through,
 # count_around_a_read and tell_the_members_about_a_write look at other methods and paths,
-# say_no_lease_after_a_refused_write at a refusal of an exit, and these send through none)
+# say_no_lease_after_a_refused_write at a refusal of an exit, and these send through none;
+# hold_portal_only_accounts holds an account, and a call carrying one goes to Flask below;
+# refuse_odd_route_arguments looks at the cluster and PBS routes only)
 _STOOD_IN_FOR = {
-    'before': ('validate_request', 'check_ip_whitelist', 'refuse_writes_on_standby',
-               'count_around_a_read'),
-    'after': ('after_request', 'add_security_headers', 'tell_the_members_about_a_write',
+    'before': ('validate_request', 'check_ip_whitelist', 'hold_portal_only_accounts',
+               'refuse_odd_route_arguments', 'refuse_writes_on_standby', 'count_around_a_read'),
+    'after': ('compress_response', 'add_security_headers', 'tell_the_members_about_a_write',
               'say_no_lease_after_a_refused_write', '_say_we_hold_the_key'),
 }
 
@@ -810,9 +914,11 @@ class _LeaseFastPath:
         get = environ.get
         length = get('CONTENT_LENGTH') or ''
         # the size, content-type and CSRF checks of validate_request, met the one way a
-        # member's call meets them: JSON, X-Requested-With and neither Origin nor Referer
+        # member's call meets them: JSON, X-Requested-With and neither Origin nor Referer.
+        # A member signs and sends no account: a session or token is Flask's to judge
         if (get('QUERY_STRING') or get('SCRIPT_NAME') or get('HTTP_TRANSFER_ENCODING')
                 or get('HTTP_UPGRADE') or get('HTTP_ORIGIN') or get('HTTP_REFERER')
+                or get('HTTP_COOKIE') or get('HTTP_X_SESSION_ID') or get('HTTP_AUTHORIZATION')
                 or get('HTTP_X_REQUESTED_WITH') != 'XMLHttpRequest'
                 or 'application/json' not in (get('CONTENT_TYPE') or '')
                 or (get('HTTP_ACCEPT_ENCODING') or 'identity').strip().lower() != 'identity'
@@ -1288,6 +1394,14 @@ def _unloadable(cert_file, key_file):
         return e
 
 
+def _tls_server_context(cert_file, key_file):
+    """The context of the HTTPS listener, with the pair loaded."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(cert_file, key_file)
+    return ctx
+
+
 def _generate_self_signed(cert_file, key_file, domain, app_name):
     from OpenSSL import crypto
     key = crypto.PKey()
@@ -1310,6 +1424,43 @@ def _generate_self_signed(cert_file, key_file, domain, app_name):
     # Write each to a temp file, fsync, then rename over the target.
     _write_atomic(key_file, crypto.dump_privatekey(crypto.FILETYPE_PEM, key), 0o600)
     _write_atomic(cert_file, crypto.dump_certificate(crypto.FILETYPE_PEM, cert), 0o644)
+
+
+def _acme_renewal_check():
+    """One round of the ACME renewal thread. A renewal is written to the audit log like
+    one from the settings page, and production logs at WARNING, so a renewed pair that
+    a listener did not take up is said at that level."""
+    from pegaprox.api.helpers import load_server_settings, acme_dns_config_from_settings
+    settings = load_server_settings()
+    domain = settings.get('domain')
+    if not (settings.get('acme_enabled') and domain):
+        return
+    from pegaprox.core.acme import check_and_renew, get_cert_info
+    # renew INTO the dir the TLS listener loads from (config/ssl). The old heuristic
+    # wrote to the retired <root>/ssl, so a renewed cert was issued but never served.
+    renewed = check_and_renew(
+        domain, settings.get('acme_email', ''),
+        SSL_DIR, staging=settings.get('acme_staging', False),
+        directory_url=settings.get('acme_directory_url', ''),
+        challenge_type=settings.get('acme_challenge_type') or 'http-01',
+        dns_provider=settings.get('acme_dns_provider') or 'manual',
+        dns_config=acme_dns_config_from_settings(settings)
+    )
+    if not renewed:
+        return
+    from pegaprox.utils.audit import log_audit
+    from pegaprox.utils.served_pair import serves, load_error
+    expires = (get_cert_info(SSL_DIR) or {}).get('expires', '?')
+    if serves(SSL_CERT_FILE) is False:
+        error = load_error(SSL_CERT_FILE)
+        todo = f"it does not load: {error}" if error else "restart PegaProx to serve it"
+        logging.warning(f"[ACME] Certificate for {domain} renewed (expires {expires}), but the "
+                        f"previous one is still served, {todo}")
+        log_audit('system', 'settings.acme_renewed',
+                  f"Certificate renewed for {domain}, expires {expires}. Not served yet, {todo}")
+    else:
+        logging.info(f"[ACME] Certificate for {domain} renewed and served, expires {expires}")
+        log_audit('system', 'settings.acme_renewed', f"Certificate renewed for {domain}, expires {expires}")
 
 
 def _write_atomic(path, data, mode):
@@ -1607,8 +1758,12 @@ def main(debug_mode=False):
             if _r.get('action') == 'migrated':
                 print(f"  ✓ {_db_name} auto-encrypted ({_r['rows_copied']} rows, {_r['duration_s']}s)")
                 print(f"    backup: {_r['backup_path']}")
+            elif _r.get('action') == 'no-backend' and _dbcrypto.SQLCIPHER_ERROR:
+                print(f"  ⚠ sqlcipher3 is installed but does not load here ({_dbcrypto.SQLCIPHER_ERROR}) - "
+                      f"{_db_name} stays plain until a package built for this machine and this Python "
+                      f"version is installed")
             elif _r.get('action') == 'no-backend':
-                print(f"  ⚠ sqlcipher3 not installed — {_db_name} stays plain (field-level Fernet still active)")
+                print(f"  ⚠ sqlcipher3 not installed - {_db_name} stays plain (field-level encryption still active)")
     except RuntimeError as _e:
         # corrupt / unknown-key — refuse to start
         print(f"\n[FATAL] {_e}\n")
@@ -1652,8 +1807,8 @@ def main(debug_mode=False):
 
     # Init audit log
     print("Initializing audit log...")
-    load_audit_log()
-    print(f"Loaded {len(g.audit_log)} audit entries (retention: {AUDIT_RETENTION_DAYS} days)")
+    n_audit = load_audit_log()
+    print(f"Loaded {n_audit} audit entries (retention: {AUDIT_RETENTION_DAYS} days)")
 
     # Load sessions
     print("Loading sessions...")
@@ -1757,6 +1912,12 @@ def main(debug_mode=False):
     start_guest_index_thread()
     print("Started guest search index thread")
 
+    # a PBS that was not up when its manager connected is tried again (#1156). On a
+    # standby without the live view there is no PBS manager, and the loop idles
+    from pegaprox.core.pbs import start_reconnect_loop
+    start_reconnect_loop()
+    print("Started PBS reconnect thread")
+
     try:
         start_syslog_server()
         print("Started integrated syslog server")
@@ -1798,27 +1959,10 @@ def main(debug_mode=False):
         time.sleep(30)  # wait for server to fully start
         while True:
             try:
-                _settings = load_server_settings()
-                if _settings.get('acme_enabled') and _settings.get('domain'):
-                    from pegaprox.core.acme import check_and_renew
-                    # #725 (nvaert1986) — renew INTO the dir the TLS listener loads
-                    # from (config/ssl). The old heuristic wrote to the retired
-                    # <root>/ssl, so a renewed cert was issued but never served.
-                    _ssl = SSL_DIR
-                    _challenge_type = _settings.get('acme_challenge_type') or 'http-01'
-                    _dns_provider = _settings.get('acme_dns_provider') or 'manual'
-                    renewed = check_and_renew(
-                        _settings['domain'], _settings.get('acme_email', ''),
-                        _ssl, staging=_settings.get('acme_staging', False),
-                        directory_url=_settings.get('acme_directory_url', ''),
-                        challenge_type=_challenge_type,
-                        dns_provider=_dns_provider,
-                        dns_config=acme_dns_config_from_settings(_settings)
-                    )
-                    if renewed:
-                        logging.info("[ACME] Certificate renewed, restart required for new cert")
+                _acme_renewal_check()
             except Exception as e:
-                logging.debug(f"[ACME] Renewal check error: {e}")
+                # at debug level a production start never showed this
+                logging.warning(f"[ACME] Renewal check error: {e}")
             time.sleep(86400)  # check once per day
 
     threading.Thread(target=acme_renewal_loop, daemon=True).start()
@@ -1886,20 +2030,19 @@ def main(debug_mode=False):
     # to warn and fall through to plain HTTP on the port that was supposed to be TLS.
     ssl_context = _resolve_ssl_context(reverse_proxy, domain, app_name)
 
-    # Start HTTP redirect server if SSL is enabled (not needed behind reverse proxy)
-    http_redirect_port = server_settings.get('http_redirect_port', 0)
-    if http_redirect_port == 0:
-        http_redirect_port = 80 if os.geteuid() == 0 else -1
-    http_redirect_port = int(os.environ.get('PEGAPROX_HTTP_PORT', http_redirect_port))
+    # Start the extra HTTP redirect port if SSL is enabled (not needed behind reverse proxy).
+    # Plain HTTP on the TLS port itself is redirected whatever this says.
+    http_redirect_port = -1
+    if ssl_context and not reverse_proxy:
+        http_redirect_port = _resolve_http_redirect_port(server_settings.get('http_redirect_port'), port)
 
-    if ssl_context and http_redirect_port > 0 and not reverse_proxy:
+    if http_redirect_port > 0:
         redirect_thread = threading.Thread(
             target=_start_http_redirect,
             args=(bind_host, http_redirect_port, port, domain),
             daemon=True
         )
         redirect_thread.start()
-        print(f"Started additional HTTP -> HTTPS redirect on port {http_redirect_port}")
 
     # Determine workers
     # MK 2026-05-31 (v2) — auto-scale with CPU, no hardcoded cap.
@@ -1936,7 +2079,7 @@ def main(debug_mode=False):
 
     if use_gevent == 'gevent' or (use_gevent == 'auto' and GEVENT_AVAILABLE):
         if GEVENT_AVAILABLE:
-            _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, http_redirect_port)
+            _start_gevent_server(app, bind_host, port, ssl_context, domain, workers)
             return
 
     # Fallback to Flask development server
@@ -1952,7 +2095,9 @@ def main(debug_mode=False):
 
     if ssl_context:
         print(f"HTTPS on https://{bind_host}:{port}")
-        app.run(host=bind_host, port=port, debug=False, ssl_context=ssl_context, threaded=True)
+        from pegaprox.utils.served_pair import ServedPair
+        app.run(host=bind_host, port=port, debug=False, threaded=True,
+                ssl_context=ServedPair(ssl_context[0], ssl_context[1], _tls_server_context).context)
     else:
         print(f"HTTP on http://{bind_host}:{port}")
         app.run(host=bind_host, port=port, debug=False, threaded=True)
@@ -2032,8 +2177,245 @@ def _host_for_location(host_value):
     return hv.rsplit(':', 1)[0] if ':' in hv else hv
 
 
+# what a port below 1024 takes, in the log and in http_redirect_state
+_NEEDS_PORT_PRIVILEGE = 'needs root or CAP_NET_BIND_SERVICE'
+
+# where _may_bind_port80 looks; tests point these at files of their own
+_PROC_STATUS = '/proc/self/status'
+_UNPRIVILEGED_PORT_START = '/proc/sys/net/ipv4/ip_unprivileged_port_start'
+_CAP_NET_BIND_SERVICE = 10
+
+
+def _may_bind_port80():
+    """Whether this process may open port 80: as root, with CAP_NET_BIND_SERVICE in its
+    effective set (the systemd units of the deb, deploy.sh and the appliances hand it over
+    as an ambient capability), or where the kernel lets anyone have it (Docker sets
+    ip_unprivileged_port_start to 0 inside a container)."""
+    if os.geteuid() == 0:
+        return True
+    try:
+        with open(_PROC_STATUS) as fh:
+            for line in fh:
+                if line.startswith('CapEff:'):
+                    if int(line.split()[1], 16) >> _CAP_NET_BIND_SERVICE & 1:
+                        return True
+                    break
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        with open(_UNPRIVILEGED_PORT_START) as fh:
+            return int(fh.read().strip()) <= 80
+    except (OSError, ValueError):
+        return False
+
+
+def _resolve_http_redirect_port(setting, https_port):
+    """The extra plain-HTTP port to open next to the TLS one, or -1 for none.
+
+    -1 or nothing stored: none. 0 (auto): 80 where _may_bind_port80() says it can be
+    opened, otherwise none and one line in the log. Anything above: that port, unless it is
+    https_port itself. PEGAPROX_HTTP_PORT, when set, wins over the setting.
+
+    MK Nov 2026 - auto looked at the uid only, and the deb, deploy.sh, the appliances
+    and the Docker image all run as the pegaprox user, so 0 meant the same as -1
+    there although the units allow port 80. A PEGAPROX_HTTP_PORT that is no number
+    stopped the start.
+    """
+    raw = os.environ.get('PEGAPROX_HTTP_PORT', '').strip()
+    if raw:
+        try:
+            setting = int(raw)
+        except ValueError:
+            print(f"WARNING: PEGAPROX_HTTP_PORT={raw!r} is not a port number, ignoring it")
+    try:
+        wanted = -1 if setting is None else int(setting)
+    except (TypeError, ValueError):
+        wanted = -1
+    if wanted == 0 and _may_bind_port80():
+        wanted = 80
+    elif wanted == 0:
+        try:
+            import pwd
+            user = pwd.getpwuid(os.geteuid()).pw_name
+        except Exception:
+            user = f'uid {os.geteuid()}'
+        print(f"HTTP redirect auto: port 80 not available for user {user} "
+              f"({_NEEDS_PORT_PRIVILEGE}), HTTP on port {https_port} still redirects")
+        g.HTTP_REDIRECT_STATE.update(extra_port=80, extra_error=_NEEDS_PORT_PRIVILEGE)
+        return -1
+    if wanted > 65535:
+        print(f"WARNING: HTTP redirect port {wanted} is out of range, no extra port opened")
+        return -1
+    # MK Nov 2026 - the TLS port itself: the extra listener took it first, the main one then
+    # stopped the start with "Address already in use", and plain HTTP there redirects anyway
+    if wanted == https_port:
+        print(f"HTTP redirect port {wanted} is the HTTPS port, which redirects plain HTTP "
+              f"itself, no extra port opened")
+        return -1
+    return wanted if wanted > 0 else -1
+
+
+def _read_request_head(sock, limit=8192):
+    """A plain-HTTP request head, read up to its blank line under one deadline.
+
+    Both redirect listeners read through this: the plain branch of the TLS port and the
+    extra port. The deadline is PEGAPROX_HEADER_TIMEOUT for the whole head (below, with the
+    other server timeouts), the one the TLS side gets in _IdleTimeoutMixin; each recv waits
+    5 s at most. With 5 s per recv alone, a byte every 4 s held a pool slot for hours.
+    Returns the text, which is '' when the client closed without sending anything, or None
+    once the deadline has passed.
+
+    MK Nov 2026 - a blank line of LF alone ends it too (printf 'GET / HTTP/1.0\\n\\n' | nc).
+    Such a head never showed CRLF CRLF, and the next recv ran out without an answer.
+    """
+    until = time.monotonic() + _HEADER_TIMEOUT if _HEADER_TIMEOUT > 0 else None
+    data = b''
+    while b'\r\n\r\n' not in data and b'\n\n' not in data and len(data) < limit:
+        left = 5.0 if until is None else min(5.0, until - time.monotonic())
+        if left <= 0:
+            return None
+        sock.settimeout(left)
+        chunk = sock.recv(1024)
+        if not chunk:
+            break
+        data += chunk
+    return data.decode('utf-8', errors='ignore')
+
+
+def _port_number(value):
+    """value as a TCP port, 1-65535, or None"""
+    value = (value or '').strip()
+    if not re.fullmatch(r'[0-9]{1,5}', value):
+        return None
+    port = int(value)
+    return port if 0 < port <= 65535 else None
+
+
+def _port_of_host(host_value):
+    """The port a Host header names ("name:8443", "[2001:db8::10]:8443"), or None."""
+    hv = (host_value or '').strip()
+    if hv.startswith('['):
+        if not _host_for_location(hv):
+            return None
+        rest = hv.partition(']')[2]
+    elif hv.count(':') == 1:
+        rest = hv[hv.index(':'):]
+    else:
+        return None
+    return _port_number(rest[1:]) if rest.startswith(':') else None
+
+
+def _http_reply(status, body='', location=None):
+    head = f"HTTP/1.1 {status}\r\n"
+    if location:
+        head += f"Location: {location}\r\n"
+    data = body.encode()
+    if data:
+        head += "Content-Type: text/plain\r\n"
+    return (head + f"Content-Length: {len(data)}\r\nConnection: close\r\n\r\n").encode() + data
+
+
+def _plain_http_reply(request, addr, https_port, domain='', same_port=False):
+    """The answer to one plain-HTTP request head, for both redirect listeners: the plain
+    branch of the TLS port (`same_port`) and the extra port.
+
+    An ACME token it asks for, a 301 to the HTTPS port, or a 400 for a trusted proxy that
+    says its client spoke HTTPS already. There is nothing to redirect that one to, and
+    closing without a word showed up as a 502 at the proxy.
+
+    MK Nov 2026 - X-Forwarded-Proto and X-Forwarded-Port count only from a trusted proxy
+    (loopback, PEGAPROX_TRUSTED_PROXIES or the trusted_proxies setting), the port only as
+    a number. The redirect followed an X-Forwarded-Port from anyone, a value that was no
+    number ended it without an answer, and on the TLS port X-Forwarded-Proto https from
+    anyone closed the connection.
+    """
+    # a line may end in LF alone, as pywsgi takes it on the TLS side (_read_request_head)
+    lines = [l.rstrip('\r') for l in re.split(r'\r?\n\r?\n', request, maxsplit=1)[0].split('\n')]
+    parts = lines[0].split(' ')
+    path = parts[1].replace('\r', '').replace('\n', '') if len(parts) >= 2 else '/'
+    # MK Nov 2026 - only a path goes after the host. A target that starts with an at sign
+    # made the Location https://host:5000@other.host/x, which names other.host. The absolute
+    # form of a client that takes us for a proxy keeps its path, any other target is /.
+    if not path.startswith('/'):
+        m = re.match(r'[A-Za-z][A-Za-z0-9+.-]*://[^/]*(/.*)?$', path)
+        path = (m.group(1) if m else None) or '/'
+
+    # MK: Mar 2026 - serve ACME challenges on port 80 instead of redirecting
+    # MK Nov 2026 - on the TLS port as well: with port 80 forwarded to it, the redirect went
+    # to :5000, and Let's Encrypt follows a redirect only to port 80 or 443. The answer is
+    # public anyway, an unknown token is redirected like any other path.
+    if path.startswith('/.well-known/acme-challenge/'):
+        from pegaprox.core.acme import get_challenge_response
+        key_auth = get_challenge_response(path.split('/')[-1])
+        if key_auth:
+            return _http_reply('200 OK', key_auth)
+
+    host_value, fwd_proto, fwd_port = None, '', ''
+    for line in lines[1:]:
+        low = line.lower()
+        if low.startswith('host:'):
+            if host_value is None:
+                host_value = line.split(':', 1)[1]
+        elif low.startswith('x-forwarded-proto:'):
+            fwd_proto = line.split(':', 1)[1].strip().lower()
+        elif low.startswith('x-forwarded-port:'):
+            fwd_port = line.split(':', 1)[1]
+
+    from pegaprox.utils.audit import _is_trusted_proxy
+    trusted = bool(addr) and _is_trusted_proxy(addr[0])
+    if trusted and fwd_proto == 'https':
+        return _http_reply('400 Bad Request', 'Plain HTTP here only redirects to HTTPS, and '
+                                              'X-Forwarded-Proto says the client used HTTPS already.\n')
+
+    # NS Jul 2026 (CodeAnt http-response-splitting) - the Host header is untrusted; reject
+    # non-hostname chars before it can reach the Location header. A configured domain wins.
+    host = _host_for_location(host_value) or 'localhost'
+    if not re.match(r'^[A-Za-z0-9._\-\[\]:]+$', host):
+        host = 'localhost'
+    if domain:
+        host = domain.rsplit(':', 1)[0] if ':' in domain and not domain.startswith('[') else domain
+
+    # MK Nov 2026 - on the TLS port, the port in the Host header is the one the client reached
+    # this listener through (docker -p 8443:5000, a port forward), so HTTPS is there as well.
+    # The extra port is no such port and sends the client to the TLS port.
+    port = _port_number(fwd_port) if trusted else None
+    if port is None and same_port:
+        port = _port_of_host(host_value)
+    port = port or https_port
+    location = f'https://{host}{path}' if port == 443 else f'https://{host}:{port}{path}'
+    return _http_reply('301 Moved Permanently', location=location)
+
+
+def _answer_plain_http(client, addr, https_port, domain='', same_port=False):
+    """Read one plain-HTTP request head from `client`, send what _plain_http_reply says, close."""
+    try:
+        request = _read_request_head(client)
+        if request is None:
+            return
+        client.settimeout(5.0)
+        client.sendall(_plain_http_reply(request, addr, https_port, domain, same_port))
+    except Exception:
+        pass
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+# clients the extra redirect port serves at once; the next one waits in the backlog
+_REDIRECT_CLIENTS = 64
+
+
 def _start_http_redirect(bind_host, http_redirect_port, https_port, domain):
-    """Start a simple HTTP server that redirects to HTTPS using raw sockets"""
+    """Start a simple HTTP server that redirects to HTTPS using raw sockets
+
+    MK Nov 2026 - it answered one client after the other with a 5 s timeout on each, so
+    three connections that sent nothing held the next redirect back for 15 s, and its one
+    recv(4096) lost the Host of a head that came in two segments. Each client now gets a
+    thread of its own, a greenlet under gevent, at most _REDIRECT_CLIENTS at a time, and
+    its head is read the way the TLS port reads it (_read_request_head).
+    """
     try:
         use_ipv6 = ':' in bind_host
         af = socket.AF_INET6 if use_ipv6 else socket.AF_INET
@@ -2044,105 +2426,51 @@ def _start_http_redirect(bind_host, http_redirect_port, https_port, domain):
         sock.bind((bind_host, http_redirect_port))
         sock.listen(100)
         sock.settimeout(1.0)
-
-        print(f"HTTP redirect server listening on port {http_redirect_port}")
-
-        while True:
-            try:
-                client, addr = sock.accept()
-                client.settimeout(5.0)
-                try:
-                    request = client.recv(4096).decode('utf-8', errors='ignore')
-                    path = '/'
-                    if request:
-                        first_line = request.split('\r\n')[0]
-                        parts = first_line.split(' ')
-                        if len(parts) >= 2:
-                            path = parts[1].replace('\r', '').replace('\n', '')
-
-                    # MK: Mar 2026 - serve ACME challenges on port 80 instead of redirecting (#96)
-                    if path.startswith('/.well-known/acme-challenge/'):
-                        acme_token = path.split('/')[-1]
-                        from pegaprox.core.acme import get_challenge_response
-                        challenge_resp = get_challenge_response(acme_token)
-                        if challenge_resp:
-                            http_resp = (
-                                f"HTTP/1.1 200 OK\r\n"
-                                f"Content-Type: text/plain\r\n"
-                                f"Content-Length: {len(challenge_resp)}\r\n"
-                                f"Connection: close\r\n"
-                                f"\r\n"
-                                f"{challenge_resp}"
-                            )
-                            client.sendall(http_resp.encode())
-                            client.close()
-                            continue
-
-                    host_header = ''
-                    fwd_proto = ''
-                    fwd_port = ''
-                    for line in request.split('\r\n'):
-                        low = line.lower()
-                        if low.startswith('host:'):
-                            host_header = _host_for_location(line.split(':', 1)[1])
-                        elif low.startswith('x-forwarded-proto:'):
-                            fwd_proto = line.split(':', 1)[1].strip().lower()
-                        elif low.startswith('x-forwarded-port:'):
-                            fwd_port = line.split(':', 1)[1].strip()
-
-                    # behind reverse proxy with SSL termination? skip redirect (#125)
-                    from pegaprox.utils.audit import _is_trusted_proxy
-                    if fwd_proto == 'https' and _is_trusted_proxy(addr[0]):
-                        continue
-
-                    # NS Jul 2026 (CodeAnt http-response-splitting) — host_header is untrusted;
-                    # strip CR/LF + reject non-hostname chars before it can reach the Location header.
-                    import re as _re
-                    redirect_host = (host_header or 'localhost').split('/')[0].strip()
-                    if not _re.match(r'^[A-Za-z0-9._\-\[\]:]+$', redirect_host):
-                        redirect_host = 'localhost'
-                    if domain:
-                        if ':' in domain and not domain.startswith('['):
-                            redirect_host = domain.rsplit(':', 1)[0]
-                        else:
-                            redirect_host = domain
-
-                    port = int(fwd_port) if fwd_port else https_port
-                    if port == 443:
-                        redirect_url = f'https://{redirect_host}{path}'
-                    else:
-                        redirect_url = f'https://{redirect_host}:{port}{path}'
-
-                    response = (
-                        f"HTTP/1.1 301 Moved Permanently\r\n"
-                        f"Location: {redirect_url}\r\n"
-                        f"Content-Length: 0\r\n"
-                        f"Connection: close\r\n"
-                        f"\r\n"
-                    )
-                    client.sendall(response.encode())
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        client.close()
-                    except Exception:
-                        pass
-            except socket.timeout:
-                continue
-            except Exception as e:
-                if 'Bad file descriptor' not in str(e):
-                    logging.debug(f"HTTP redirect accept error: {e}")
-                continue
     except PermissionError:
-        print(f"WARNING: Cannot bind to port {http_redirect_port} (requires root). HTTP redirect not available.")
+        print(f"WARNING: Cannot bind to port {http_redirect_port} ({_NEEDS_PORT_PRIVILEGE}). "
+              f"HTTP redirect not available on it.")
+        g.HTTP_REDIRECT_STATE.update(extra_port=http_redirect_port, extra_error=_NEEDS_PORT_PRIVILEGE)
+        return
     except OSError as e:
-        if 'Address already in use' in str(e):
-            print(f"WARNING: Port {http_redirect_port} already in use. HTTP redirect not available.")
+        if e.errno == errno.EADDRINUSE:
+            print(f"WARNING: Port {http_redirect_port} already in use. HTTP redirect not available on it.")
+            why = 'already in use'
         else:
             print(f"WARNING: HTTP redirect server failed: {e}")
+            why = e.strerror or str(e)
+        g.HTTP_REDIRECT_STATE.update(extra_port=http_redirect_port, extra_error=why)
+        return
     except Exception as e:
         print(f"WARNING: HTTP redirect server failed: {e}")
+        g.HTTP_REDIRECT_STATE.update(extra_port=http_redirect_port, extra_error=str(e) or 'failed')
+        return
+
+    print(f"HTTP redirect server listening on port {http_redirect_port}")
+    g.HTTP_REDIRECT_STATE.update(extra_port=http_redirect_port, extra_error='')
+    slots = threading.BoundedSemaphore(_REDIRECT_CLIENTS)
+
+    def serve(client, addr):
+        try:
+            _answer_plain_http(client, addr, https_port, domain)
+        finally:
+            slots.release()
+
+    while True:
+        try:
+            client, addr = sock.accept()
+        except socket.timeout:
+            continue
+        except Exception as e:
+            if 'Bad file descriptor' not in str(e):
+                logging.debug(f"HTTP redirect accept error: {e}")
+            continue
+        slots.acquire()
+        try:
+            threading.Thread(target=serve, args=(client, addr), daemon=True).start()
+        except Exception as e:
+            slots.release()
+            client.close()
+            logging.debug(f"HTTP redirect client not served: {e}")
 
 
 def _create_listener(bind_host, port_num):
@@ -2437,7 +2765,7 @@ def _should_bypass_gevent_upgrade(app, environ):
         return False
 
 
-def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, http_redirect_port=-1):
+def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
     """Start production server with Gevent."""
     from gevent.pywsgi import WSGIServer
 
@@ -2680,8 +3008,12 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
                 # #777 — bound the pre-request wait: a client that opens the socket but never
                 # sends a byte would otherwise park here holding a pool slot until TCP gives up.
                 # Drop it after the keep-alive idle window (None = disabled = old blocking behaviour).
+                # MK Nov 2026 - by the handshake timeout, as on a port without the check. Every
+                # TLS port runs it now, and the keep-alive window held a silent socket 75 s
+                # instead of 30. A real client sends its hello right after connecting.
                 import gevent as _gv
-                _pk = _KEEPALIVE_IDLE_TIMEOUT if _KEEPALIVE_IDLE_TIMEOUT > 0 else None
+                _pk = (_HANDSHAKE_TIMEOUT if _HANDSHAKE_TIMEOUT > 0
+                       else _KEEPALIVE_IDLE_TIMEOUT if _KEEPALIVE_IDLE_TIMEOUT > 0 else None)
                 try:
                     with _gv.Timeout(_pk):
                         first_byte = client_socket.recv(1, socket.MSG_PEEK)
@@ -2719,88 +3051,9 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
                     pass
 
         def _handle_http_redirect(self, client_socket, address):
-            """Send HTTP 301 redirect to HTTPS version"""
-            try:
-                # NS Oct 2026 (#997) - the 5s was per recv, so a byte every 4s held this
-                # pool slot for hours. One deadline for the whole request head, the same
-                # PEGAPROX_HEADER_TIMEOUT the TLS side gets in _IdleTimeoutMixin.
-                until = time.monotonic() + _HEADER_TIMEOUT if _HEADER_TIMEOUT > 0 else None
-                request_data = b''
-                while b'\r\n\r\n' not in request_data and len(request_data) < 8192:
-                    left = 5.0 if until is None else min(5.0, until - time.monotonic())
-                    if left <= 0:
-                        return
-                    client_socket.settimeout(left)
-                    chunk = client_socket.recv(1024)
-                    if not chunk:
-                        break
-                    request_data += chunk
-
-                request = request_data.decode('utf-8', errors='ignore')
-                path = '/'
-                if request:
-                    first_line = request.split('\r\n')[0]
-                    parts = first_line.split(' ')
-                    if len(parts) >= 2:
-                        path = parts[1].replace('\r', '').replace('\n', '')
-
-                host = self._redirect_domain or 'localhost'
-                for line in request.split('\r\n'):
-                    if line.lower().startswith('host:'):
-                        host = _host_for_location(line.split(':', 1)[1])
-                        break
-
-                # NS Jul 2026 (CodeAnt http-response-splitting) — the Host header is untrusted;
-                # reject non-hostname chars before it can reach the Location header (open-redirect
-                # / header injection). A configured _redirect_domain (below) always wins.
-                import re as _re
-                if not _re.match(r'^[A-Za-z0-9._\-\[\]:]+$', host or ''):
-                    host = 'localhost'
-
-                if self._redirect_domain:
-                    d = self._redirect_domain
-                    if ':' in d and not d.startswith('['):
-                        host = d.rsplit(':', 1)[0]
-                    else:
-                        host = d
-
-                # NS: #125 - respect proxy headers so we don't redirect to internal port
-                fwd_proto = ''
-                fwd_port = ''
-                for line in request.split('\r\n'):
-                    lower = line.lower()
-                    if lower.startswith('x-forwarded-proto:'):
-                        fwd_proto = line.split(':', 1)[1].strip().lower()
-                    elif lower.startswith('x-forwarded-port:'):
-                        fwd_port = line.split(':', 1)[1].strip()
-
-                if fwd_proto == 'https':
-                    # already behind SSL-terminating proxy, don't redirect
-                    return
-
-                port = int(fwd_port) if fwd_port else self.server_port
-                if port == 443:
-                    redirect_url = f'https://{host}{path}'
-                else:
-                    redirect_url = f'https://{host}:{port}{path}'
-
-                response = (
-                    f"HTTP/1.1 301 Moved Permanently\r\n"
-                    f"Location: {redirect_url}\r\n"
-                    f"Content-Type: text/html\r\n"
-                    f"Content-Length: 0\r\n"
-                    f"Connection: close\r\n"
-                    f"\r\n"
-                )
-                client_socket.settimeout(5.0)
-                client_socket.sendall(response.encode())
-            except Exception:
-                pass
-            finally:
-                try:
-                    client_socket.close()
-                except Exception:
-                    pass
+            """Send HTTP 301 redirect to HTTPS version, under one deadline for the head"""
+            _answer_plain_http(client_socket, address, self.server_port, self._redirect_domain,
+                               same_port=True)
 
     # Server args - add WebSocket handler if available
     # MK 2026-05-31 — actually wire `workers` into the request-handler pool.
@@ -2827,24 +3080,22 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
 
     if ssl_context:
         print(f"HTTPS on https://{bind_host}:{port}", flush=True)
-        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        ssl_ctx.load_cert_chain(ssl_context[0], ssl_context[1])
-        # NS: http_redirect_port == -1 disables ALL http→https redirect (#125)
-        # including the dual-protocol detection on the main port
-        if http_redirect_port < 0:
-            http_server = QuietWSGIServer(
-                _create_listener(bind_host, port), app,
-                ssl_context=ssl_ctx,
-                **server_kwargs
-            )
-        else:
-            http_server = DualProtocolWSGIServer(
-                _create_listener(bind_host, port), app,
-                ssl_context=ssl_ctx,
-                redirect_domain=domain,
-                **server_kwargs
-            )
+        # the context follows cert.pem/key.pem, a renewal is served without a restart
+        # (pegaprox/utils/served_pair.py)
+        from pegaprox.utils.served_pair import ServedPair
+        ssl_ctx = ServedPair(ssl_context[0], ssl_context[1], _tls_server_context).context
+        # MK Nov 2026 - plain HTTP on this port is always answered with a redirect.
+        # http_redirect_port -1 used to switch this check off too, and with -1 being the
+        # default every plain request got a reset, a trusted proxy with X-Forwarded-Proto
+        # included. TLS clients see no difference: a Cloudflare tunnel of type HTTPS with
+        # No TLS Verify is served here as before. -1 now only means no extra port.
+        http_server = DualProtocolWSGIServer(
+            _create_listener(bind_host, port), app,
+            ssl_context=ssl_ctx,
+            redirect_domain=domain,
+            **server_kwargs
+        )
+        g.HTTP_REDIRECT_STATE['same_port'] = port
     else:
         print(f"HTTP on http://{bind_host}:{port}", flush=True)
         print("WARNING: Running without HTTPS - noVNC console may not work!", flush=True)

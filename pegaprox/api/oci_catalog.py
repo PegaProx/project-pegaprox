@@ -495,6 +495,9 @@ def _create(mgr, job, spec):
             if not ok:
                 raise _Failed(why)
             _set(job, vmid=vmid)
+        # the quota hold names the id only now, when the create takes it
+        from pegaprox.utils.rbac import quota_hold_update
+        quota_hold_update(job.get('_hold'), vmids=[vmid])
     _set(job, status='creating')
     upid = _start_task(mgr, job, f'/nodes/{node}/lxc', create_params(spec, vmid),
                        'The container was not created')
@@ -680,11 +683,14 @@ def deploy(cluster_id):
         'pull_upid': '', 'create_upid': '', 'started_by': username,
         'started_at': _now(), 'finished_at': '',
         '_spec': spec, '_auto_vmid': auto_vmid, '_tenant': tenant, '_ip': get_client_ip(),
-        '_cluster_name': getattr(mgr.config, 'name', cluster_id),
+        '_cluster_name': getattr(mgr.config, 'name', cluster_id), '_hold': held,
     }
     _remember(job)
-    # held until the container shows, or the job fails
-    _rbac.quota_hold_update(held, vmids=[vmid], alive=lambda: job['status'] != 'failed')
+    # held until the container shows, or the job fails. A picked id is only a guess until
+    # the create (nextid reserves nothing, a deploy next to this one gets the same), so
+    # until then the hold names no id and counts in full; _create pins it
+    _rbac.quota_hold_update(held, vmids=[] if auto_vmid else [vmid],
+                            alive=lambda: job['status'] != 'failed')
     log_audit(username, 'container.create',
               f"Creating CT {vmid} ({spec['hostname']}) on {node} from OCI image {spec['reference']}",
               cluster=job['_cluster_name'])

@@ -247,19 +247,38 @@ def test_ws_action_frames_are_scoped_per_vm(api, seed, db):
 
 
 def test_ws_non_vm_action_frames_still_broadcast(api, seed, db):
-    # node/cluster-level events carry no vmid — they must not be swallowed by the filter
-    from pegaprox.utils.realtime import broadcast_action
+    # node/cluster-level events carry no vmid - they must not be swallowed by the filter.
+    # MK Nov 2026 (#1218) - a client confined to a pool gets the one about a node its own guest
+    # runs on (the node scope its stream's resources pass keeps) and not the others; a viewer
+    # of the owning tenant gets them all
+    import pegaprox.utils.realtime as rt
+    from pegaprox.utils.realtime import broadcast_action, broadcast_sse
     seed.tenant('tenant_x', clusters=['cluster_1'])
     seed.user('mallory2', role='viewer', tenant_id='tenant_x', permissions=['cluster.view'])
+    seed.user('olivia', role='viewer', tenant_id='tenant_x')
     seed.pool('cluster_1', 'pool_1', 'mallory2', ['pool.view', 'vm.view'])
     _seed_pool_membership('cluster_1', {100: ('qemu', 'pool_1')})
+    with ppglobals.sse_clients_lock:
+        ppglobals.sse_clients['test-sse-mallory2'] = {'queue': queue.Queue(), 'user': 'mallory2',
+                                                      'clusters': ['cluster_1'], 'is_admin': False,
+                                                      'effective_role': None}
     mws, mcid = _register_ws('mallory2', False, ['cluster_1'])
+    ows, ocid = _register_ws('olivia', False, ['cluster_1'])
     try:
+        broadcast_sse('resources', [{'vmid': 100, 'node': 'n1', 'type': 'qemu'},
+                                    {'vmid': 200, 'node': 'n2', 'type': 'qemu'}], 'cluster_1')
         broadcast_action('maintenance', 'node', 'n1', {}, 'cluster_1', 'root')
         assert len(mws.sent) == 1, "a node-level event is not per-VM and must still arrive"
+        broadcast_action('maintenance', 'node', 'n2', {}, 'cluster_1', 'root')
+        assert len(mws.sent) == 1, "n2 runs none of the pool's guests"
+        assert len(ows.sent) == 2
     finally:
         with ppglobals.ws_clients_lock:
             ppglobals.ws_clients.pop(mcid, None)
+            ppglobals.ws_clients.pop(ocid, None)
+        with ppglobals.sse_clients_lock:
+            ppglobals.sse_clients.pop('test-sse-mallory2', None)
+        getattr(rt, '_sse_node_scope', {}).clear()
 
 
 # ── TOTP codes were replayable inside the ~90s acceptance window ──────────────
