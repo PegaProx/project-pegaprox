@@ -1001,6 +1001,61 @@ def test_a_lease_runs_out_and_the_gate_closes(tmp_path):
         assert federation.takes_writes_for('c2') is False
 
 
+def test_a_rebooted_lease_clock_expires_its_deadlines(tmp_path):
+    """CLOCK_BOOTTIME starts over at a reboot, and a deadline written before it
+    lies far in the future of the new clock: a voter would hold its promise (and
+    an owner its gate) for the uptime the clock forgot. The load moves every
+    deadline that cannot be live back to now, which expires it - a live one
+    stands."""
+    a = Side(tmp_path, 'a')
+    huge = federation._lease_now() + 10 ** 7
+    live = federation._lease_now() + federation.LEASE_SECONDS
+
+    def seed(state):
+        state['my_leases'] = {'c1': {'term': 3, 'expires': huge, 'votes': 2},
+                              'c3': {'term': 5, 'expires': live, 'votes': 2}}
+        state['lease_promises'] = {'c2': {'term': 1, 'candidate': 'b' * 32,
+                                          'until': huge}}
+        return True
+    with at(a):
+        federation._mutate(seed)
+        leases = federation.my_leases()
+        assert leases['c1']['expires'] <= federation._lease_now()
+        assert leases['c3']['expires'] == live
+        until = federation._load()['lease_promises']['c2']['until']
+        assert until <= federation._lease_now()
+    # the gate: a row this instance owns writes nothing on a lease the reset
+    # expired - the reboot cost the lease, not the whole boot's worth of it
+    _add_cluster(a, 'c1')
+    conn = _db_of(a).conn
+    conn.execute("UPDATE clusters SET fed_owner = ? WHERE id = 'c1'",
+                 (federation_ref_id(a),))
+    conn.commit()
+    with at_db(a):
+        assert federation.takes_writes_for('c1') is False
+
+
+def test_an_owner_that_cannot_be_written_fails_loudly(tmp_path, monkeypatch):
+    """The owner write is no warning: an enroll (or adopt) whose fed_owner write
+    fails raises, instead of reporting success over a row the federation does not
+    rule."""
+    a, b, c = _three(tmp_path)
+    _add_cluster(a, 'c-brk')
+    with at_db(a):
+        conn = federation._identities_conn()
+
+        class ReadOnly:
+            def execute(self, sql, *args):
+                if sql.strip().upper().startswith('UPDATE'):
+                    raise RuntimeError('the disk is read-only')
+                return conn.execute(sql, *args)
+
+        monkeypatch.setattr(federation, '_identities_conn', lambda: ReadOnly())
+        with pytest.raises(federation.FederationError) as err:
+            federation.enroll_cluster('c-brk')
+        assert 'owner' in str(err.value)
+
+
 def test_a_renewal_extends_the_lease(tmp_path):
     a, b, c = _three(tmp_path)
     _add_cluster(a, 'c3')
@@ -1156,6 +1211,39 @@ def test_a_cluster_mirror_reaches_the_others(tmp_path):
         from pegaprox.core.db import get_db
         assert 'pve-1' not in get_db().get_all_clusters()
         assert get_db().get_cluster('pve-1') is None
+
+
+def test_a_home_that_cannot_read_refuses_the_pull(tmp_path, monkeypatch):
+    """The fail-closed pull: a home whose tables cannot be read answers 503
+    instead of an empty snapshot - an empty one would read as 'nothing there',
+    and the puller's diff would drop every mirror it keeps of the home."""
+    a, b, c = _three(tmp_path)
+    a_id = federation_ref_id(a)
+    _add_local_user(a, 'ada')
+    _add_cluster(a, 'pve-r')
+    with at_db(a):
+        federation.enroll_cluster('pve-r')
+    with at_db(b):
+        federation.sync_identities()
+        assert _db_of(b).conn.execute(
+            "SELECT fed_home FROM users WHERE username = 'ada'").fetchone()
+        assert _db_of(b).conn.execute(
+            "SELECT id FROM clusters WHERE id = 'pve-r'").fetchone()
+    # the home's tables break: not a snapshot of nothing, a refusal
+    def broken():
+        raise RuntimeError('the disk is gone')
+    with at_db(a):
+        monkeypatch.setattr(federation, '_identities_conn', broken)
+        with pytest.raises(federation.FederationError):
+            federation.identity_snapshot_body()
+    # the puller hears the refusal, keeps its mirrors, says 'failed'
+    with at_db(b):
+        report = federation.pull_identities(a_id)
+        assert report.get('failed') is True
+        assert _db_of(b).conn.execute(
+            "SELECT fed_home FROM users WHERE username = 'ada'").fetchone()
+        assert _db_of(b).conn.execute(
+            "SELECT id FROM clusters WHERE id = 'pve-r'").fetchone()
 
 
 def test_the_field_keys_travel_sealed(tmp_path):

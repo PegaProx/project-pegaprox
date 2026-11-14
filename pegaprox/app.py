@@ -68,6 +68,31 @@ def add_allowed_origin(origin: str):
         logging.info(f"Auto-allowed CORS origin: {origin}")
 
 
+# The read-only POSTs under a cluster path (the tail after /api/clusters/<id>/):
+# connection checks, pre-flights and what-if runs that change nothing where they
+# read - POST because they log in to a node or take a body a GET should not. The
+# federation lease gate passes them like a GET: the lease rules writes, not
+# probes, and a mirror of another member's cluster stays diagnosable. Anything
+# that ACTS on the cluster (a verify that restores and boots, a join that writes)
+# stays behind the gate.
+_FED_READ_ONLY_POSTS = frozenset((
+    'connection-check',          # clusters.py - the on-demand probe of one cluster
+    'transfer-network/check',    # clusters.py - TCP probes from a node, nothing changed
+    'node-credentials/check',    # clusters.py - one SSH login per node with what it gets
+    'ha/agent-check',            # clusters.py - which agent every node runs, read over SSH
+    'storage-preflight',         # pbs.py - validates a storage config before PVE sees it
+    'updates/check',             # settings.py - reads the repos, serves a cached answer
+    'whatif',                    # whatif.py - one scenario's report, a simulation
+    'whatif/ranking',            # whatif.py - every failure ranked by the guests it takes
+    'nodes/join/test',           # vms.py - the SSH pre-flight before a node joins
+    'migration-preflight',       # vms.py - what a migration would run into, reads only
+))
+# the same, where a path piece sits between: a node's BMC endpoint is a live read
+_FED_READ_ONLY_POST_RES = (
+    re.compile(r'^nodes/[^/]+/bmc-endpoint/test$'),
+)
+
+
 def create_app():
     """Flask application factory."""
     # root_path must point to the project root (parent of pegaprox/)
@@ -515,7 +540,11 @@ def create_app():
         gate, which answers first.
 
         An HA standby stands aside: its writes go to the active host (which holds
-        the lease there), so the forwarding hook below must see them first."""
+        the lease there), so the forwarding hook below must see them first.
+
+        The read-only POSTs pass as a GET does: connection checks, pre-flights
+        and what-if runs change nothing where they read, and a mirror must stay
+        diagnosable - the lease rules writes, not probes."""
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
             return None
         try:
@@ -525,8 +554,13 @@ def create_app():
         except Exception:
             pass
         import re as _re
-        m = _re.match(r'^/api/clusters/([^/?]+)', request.path)
+        m = _re.match(r'^/api/clusters/([^/?]+)(?:/([^?]*))?', request.path)
         if not m or m.group(1) == 'reorder':
+            return None
+        if request.method == 'POST' and m.group(2) in _FED_READ_ONLY_POSTS:
+            return None
+        if request.method == 'POST' and m.group(2) is not None and any(
+                rx.fullmatch(m.group(2)) for rx in _FED_READ_ONLY_POST_RES):
             return None
         from pegaprox.api.federation import refuse_unleased
         return refuse_unleased(m.group(1), f'Cluster {m.group(1)}')

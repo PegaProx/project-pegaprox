@@ -121,6 +121,9 @@ def _load():
     for key in ('members', 'tombstones'):
         if not isinstance(state[key], dict):
             state[key] = {}
+    # a reboot resets CLOCK_BOOTTIME: deadlines written before it would lie far in
+    # the future and block every takeover - they move to now (which expires them)
+    _reset_rebooted_lease_clocks(state)
     return state
 
 
@@ -1475,6 +1478,11 @@ def sync_identities():
 LEASE_SECONDS = 30
 LEASE_RENEW_AFTER = 10
 LEASE_WRITE_MARGIN = 2.0
+# the longest lease the protocol grants, whatever asked for it: a deadline in the
+# state file that lies further ahead than this cannot be a live one - the lease
+# clock restarted underneath it (a reboot resets CLOCK_BOOTTIME), and the load
+# moves it back to now
+MAX_LEASE_SECONDS = 300
 # how long a voter holds a promise beyond its end before another candidate may
 # have it: the clocks of the members may be this far apart (ha_vote's SKEW_LIMIT)
 LEASE_SKEW = 5
@@ -1495,6 +1503,42 @@ def _lease_now():
         return time.monotonic()
 
 
+def _deadline_past_reboot(value, horizon):
+    """True of a lease deadline that cannot be live: a number further ahead than
+    the longest lease the protocol grants reaches (the clock counts floats - now
+    plus a lease span). CLOCK_BOOTTIME starts over at a reboot, so what was 'in
+    thirty seconds' before it is a huge number after it."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) \
+        and value > horizon
+
+
+def _reset_rebooted_lease_clocks(state):
+    """Move every lease deadline the rebooted clock left in the future back to now:
+    a voter's promise (or an owner's gate) must not hold for the uptime the clock
+    forgot - until and expires move to now, which expires them. Called from _load;
+    the next _mutate that saves what it read writes the fix back to the file."""
+    now = _lease_now()
+    horizon = now + MAX_LEASE_SECONDS + LEASE_SKEW
+    reset = 0
+    promises = state.get('lease_promises')
+    if isinstance(promises, dict):
+        for rec in promises.values():
+            if isinstance(rec, dict) and _deadline_past_reboot(rec.get('until'),
+                                                              horizon):
+                rec['until'] = now
+                reset += 1
+    leases = state.get('my_leases')
+    if isinstance(leases, dict):
+        for rec in leases.values():
+            if isinstance(rec, dict) and _deadline_past_reboot(rec.get('expires'),
+                                                              horizon):
+                rec['expires'] = now
+                reset += 1
+    if reset:
+        logging.warning(f'[FED] {reset} lease deadline(s) ahead of this boot were '
+                        'reset to now - the lease clock restarted underneath them')
+
+
 def _lease_check_vote(candidate, cluster_id, term, lease_s, now=None):
     """The voter's half, one request: (verdict-dict, granted-promise-or-None).
     Rules above; the caller persists the promise before it answers."""
@@ -1505,7 +1549,7 @@ def _lease_check_vote(candidate, cluster_id, term, lease_s, now=None):
         return {'granted': False, 'reason': 'cluster'}, None
     if not isinstance(term, int) or isinstance(term, bool) or not 0 < term < 1 << 30:
         return {'granted': False, 'reason': 'term'}, None
-    lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= 300 \
+    lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= MAX_LEASE_SECONDS \
         else LEASE_SECONDS
     if candidate not in members() and candidate != instance_id():
         return {'granted': False, 'reason': 'member'}, None
@@ -1642,7 +1686,7 @@ def acquire_lease(cluster_id, lease_s=None):
     """Become the writer of `cluster_id`, with a majority behind it. Returns the
     lease, or why it did not work (a lease still held elsewhere says when its
     holder's time is up, so a claim can wait)."""
-    lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= 300 \
+    lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= MAX_LEASE_SECONDS \
         else LEASE_SECONDS
     me = instance_id()
     # the term this instance already knows on the cluster: its lease, and its own
@@ -2244,7 +2288,7 @@ def lease_vote_atomic(sender, body):
         return {'granted': False, 'reason': 'cluster'}
     if not isinstance(term, int) or isinstance(term, bool) or not 0 < term < 1 << 30:
         return {'granted': False, 'reason': 'term'}
-    lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= 300 \
+    lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= MAX_LEASE_SECONDS \
         else LEASE_SECONDS
 
     now = _lease_now()
@@ -2295,7 +2339,7 @@ def lease_vote_atomic(sender, body):
 def acquire_lease_arch(cluster_id, lease_s=None):
     """The Q15/Q16-repaired acquire: the expiry counts from the round's START
     (not its end), and the vote carries the voter count both sides check."""
-    lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= 300 \
+    lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= MAX_LEASE_SECONDS \
         else LEASE_SECONDS
     me = instance_id()
 

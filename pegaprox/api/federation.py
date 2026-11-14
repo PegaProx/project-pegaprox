@@ -508,8 +508,9 @@ def _snapshot_etag():
     now = time.time()
     with _etag_lock:
         held = dict(_etag_cache)
-    if held['etag'] and held['home'] == home and held['schema'] == schema \
-            and now - held['at'] < _ETAG_CACHE_SECONDS:
+    if held.get('etag') and held.get('home') == home \
+            and held.get('schema') == schema \
+            and now - held.get('at', 0.0) < _ETAG_CACHE_SECONDS:
         return held['etag'], None
     body = federation.identity_snapshot_body()
     with _etag_lock:
@@ -533,7 +534,13 @@ def peer_identities():
     if refused:
         return refused
     held = request.headers.get('If-None-Match', '').strip().strip('"')
-    etag, body = _snapshot_etag()
+    try:
+        etag, body = _snapshot_etag()
+    except federation.FederationError as e:
+        # a table that cannot be read is no snapshot of nothing: refuse the pull
+        # outright, or the peer's diff would read the failure as "delete it all"
+        return jsonify({'code': 'FED_UNAVAILABLE',
+                        'error': f'The identity snapshot cannot be built: {e}'}), 503
     if held and held == etag:
         resp = jsonify({'etag': etag})
         resp.status_code = 304
@@ -542,7 +549,12 @@ def peer_identities():
     if body is None:
         # the cache answered the conditional ask alone; the body is built only
         # now, to serve it
-        body = federation.identity_snapshot_body()
+        try:
+            body = federation.identity_snapshot_body()
+        except federation.FederationError as e:
+            return jsonify({'code': 'FED_UNAVAILABLE',
+                            'error': f'The identity snapshot cannot be built: '
+                                     f'{e}'}), 503
     federation.touch(peer['instance_id'])
     resp = jsonify(body)
     resp.headers['ETag'] = f'"{body["etag"]}"'
