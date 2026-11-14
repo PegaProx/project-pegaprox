@@ -215,8 +215,8 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
 ### Advanced Features
 - 🌐 **Offline Mode** - Works without internet (local assets, air-gap mode disables external CVE/sponsor lookups for VS-NfD / classified networks)
 - 🎨 **Themes** - 17 themes including Dark/Light, Proxmox, Corporate (light/dark), Dracula, Nord, Monokai, Solarized, Cyberpunk, etc.
-- 🏢 **Corporate Layout** - Tree-based sidebar with dense tables
-- 🌍 **Multi-Language** - English, German, French, Spanish, Portuguese, Polish, Korean, Italian, Simplified Chinese
+- 🏢 **Corporate Redesigned** - Tree-based sidebar with dense tables, in place of classic Corporate in the layout choice (classic Corporate is deprecated)
+- 🌍 **Multi-Language** - English, German, French, Spanish, Portuguese, Polish, Korean, Italian, Simplified Chinese, Russian
 - 📱 **Responsive + PWA** - Works on desktop and mobile, installable as native-feeling app
 - 📦 **PBS Integration** - Proxmox Backup Server management with backup verification
 - 🔭 **Prometheus Exporter** - Scrape `/api/metrics` with a bearer token (an admin's or one with `metrics.view`) for cluster, node, guest, storage, replication and backup-age metrics
