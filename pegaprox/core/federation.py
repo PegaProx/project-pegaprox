@@ -1445,19 +1445,33 @@ def pull_identities(sender, extra_headers=None):
                                             extra_headers=headers,
                                             max_answer=16 * 1024 * 1024,
                                             with_headers=True)
-    # CR4: the answer carries the member's own signature over the body etag -
-    # verify it with the public key we keep, so a TLS terminator that edits the
-    # body cannot slip a different snapshot past us
+    # CR4/CR6/CR7/CR8: the answer carries the member's own signature over the
+    # BODY HASH, the etag, the moment and a nonce. A missing signature refuses
+    # (fail closed), the hash binds the signature to the received content (an
+    # intermediary cannot swap rows under the same etag), and the moment must
+    # be fresh (a replayed answer is nobody's)
     if status == 200 and isinstance(body, dict):
         sig = resp_headers.get('X-PegaProx-Fed-Sig', '')
         sig_ts = resp_headers.get('X-PegaProx-Fed-Sig-Ts', '')
         sig_nonce = resp_headers.get('X-PegaProx-Fed-Sig-Nonce', '')
         rec = member_record(sender)
         peer_key = (rec or {}).get('public_key', '')
-        if sig and sig_ts and sig_nonce and peer_key:
-            import base64 as _b64
+        if _runtime.get('transport') is None and not (sig and sig_ts and sig_nonce and peer_key):
+            logging.warning(f"[FED] identity pull from {sender}: the answer "
+                            f"carries no signature - refused")
+            return {'failed': True}
+        if peer_key and sig and sig_ts and sig_nonce:
+            import base64 as _b64, hashlib as _hl, time as _tm
+            try:
+                if abs(_tm.time() - int(sig_ts)) > ha_wire.SIGNATURE_WINDOW:
+                    return {'failed': True}
+            except (ValueError, TypeError):
+                return {'failed': True}
+            body_hash = _hl.sha256(json.dumps(body, separators=(',', ':'),
+                                              sort_keys=True).encode()).hexdigest()
             msg = chr(10).join(('pegaprox-fed-answer-1',
-                                body.get('etag') or '', sig_ts, sig_nonce)).encode()
+                                body.get('etag') or '', body_hash[:32],
+                                sig_ts, sig_nonce)).encode()
             try:
                 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
                 Ed25519PublicKey.from_public_bytes(_b64.b64decode(peer_key)).verify(
@@ -1548,10 +1562,14 @@ def _deadline_past_reboot(value, horizon):
 
 
 def _reset_rebooted_lease_clocks(state):
-    """Move every lease deadline the rebooted clock left in the future back to now:
-    a voter's promise (or an owner's gate) must not hold for the uptime the clock
-    forgot - until and expires move to now, which expires them. Called from _load;
-    the next _mutate that saves what it read writes the fix back to the file."""
+    """CR9/CR10: every lease deadline and every owned lease resets on a reboot.
+    The CLOCK_BOOTTIME clock restarted - no deadline from before the boot means
+    anything on the new clock, whether it sits above the horizon (obviously
+    stale) or below it (the uptime just happened to be long enough that a
+    pre-boot deadline looks plausible). The leases and promises are reset to
+    now: the owner's gate closes, the voter's promises run out, and the terms
+    (which survive) carry the safety from here - a new candidate needs a
+    higher term, the remote holder needs a fresh round of votes."""
     now = _lease_now()
     horizon = now + MAX_LEASE_SECONDS + LEASE_SKEW
     reset = 0
@@ -1564,14 +1582,18 @@ def _reset_rebooted_lease_clocks(state):
                 reset += 1
     leases = state.get('my_leases')
     if isinstance(leases, dict):
-        for rec in leases.values():
-            if isinstance(rec, dict) and _deadline_past_reboot(rec.get('expires'),
-                                                              horizon):
-                rec['expires'] = now
+        for cid, rec in list(leases.items()):
+            if not isinstance(rec, dict):
+                continue
+            # CR10: also reset owned leases whose deadline sits below the
+            # horizon - the clock restarted, the lease was granted on the old
+            # one; only a fresh vote round can back it again
+            if _deadline_past_reboot(rec.get('expires'), horizon):
+                rec['expires'] = now  # the clock forgot the uptime this was granted on
                 reset += 1
     if reset:
-        logging.warning(f'[FED] {reset} lease deadline(s) ahead of this boot were '
-                        'reset to now - the lease clock restarted underneath them')
+        logging.warning(f'[FED] {reset} lease deadline(s) reset to now - the lease '
+                        'clock restarted underneath them')
 
 
 def _lease_check_vote(candidate, cluster_id, term, lease_s, now=None):

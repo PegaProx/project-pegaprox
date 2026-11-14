@@ -23,6 +23,7 @@ decides trust on its own.
 
 Nov 2026, three-leader federation Phase 1.
 """
+import json
 import logging
 import threading
 import time
@@ -563,7 +564,10 @@ def peer_identities():
     _ts = str(int(_time.time()))
     _nonce = __import__('secrets').token_urlsafe(12)
     _domain = 'pegaprox-fed-answer-1'
-    _msg = chr(10).join((_domain, body['etag'], _ts, _nonce)).encode()
+    import hashlib as _hl
+    _body_hash = _hl.sha256(json.dumps(body, separators=(',', ':'),
+                                       sort_keys=True).encode()).hexdigest()
+    _msg = chr(10).join((_domain, body['etag'], _body_hash[:32], _ts, _nonce)).encode()
     _sig = federation._private().sign(_msg)
     resp.headers['X-PegaProx-Fed-Sig'] = _b64.b64encode(_sig).decode()
     resp.headers['X-PegaProx-Fed-Sig-Ts'] = _ts
