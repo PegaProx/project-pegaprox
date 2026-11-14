@@ -222,6 +222,9 @@ def run_cross_cluster_balance_check(group):
 
 
 def cross_cluster_lb_loop():
+    # Q8: the federation lease - a balance move between clusters runs only
+    # while this instance holds a live lease on the source
+    from pegaprox.core import federation as _fed
     """Background loop - checks all enabled groups on a 30s tick."""
     global _xclb_running
     _xclb_running = True

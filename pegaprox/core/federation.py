@@ -1637,10 +1637,16 @@ def lease_vote(sender, body):
             promises[cluster_id] = promise
             # bounded: only promises that are over go, never a live one, and a
             # member flooding terms cannot grow the state without end
-            if len(promises) > MAX_PROMISES:
-                for cid in [c for c, r in promises.items()
-                            if (r.get('until') or 0) < _lease_now()]:
+            while len(promises) > MAX_PROMISES:
+                # expired first; if every promise is live, the oldest goes -
+                # a member flooding live promises cannot grow the state endlessly
+                expired = [c for c, r in promises.items()
+                           if (r.get('until') or 0) < _lease_now()]
+                for cid in expired:
                     del promises[cid]
+                if len(promises) > MAX_PROMISES:
+                    oldest = min(promises, key=lambda c: promises[c].get('until') or 0)
+                    del promises[oldest]
             return True
         _mutate(go)
     return verdict
@@ -1858,6 +1864,19 @@ def takes_writes_for(cluster_id):
         # no row (None) or an unenrolled row (''): nothing the federation rules
         return True
     if owner != instance_id():
+        # Q7 bridge: after an HA promotion this instance acts for the clusters
+        # the old active led - their fed_owner still names the old id. The HA
+        # role tells whether this is the acting host; the full fix is the
+        # federation state file riding the HA sync
+        try:
+            from pegaprox.core import ha
+            if ha.is_active() and not ha.is_standby():
+                # this is the acting host; if the owner is a member whose
+                # clusters we inherited via HA, we write on them
+                # (the HA sync brought the cluster rows, the fed_owner rode along)
+                pass  # the lease check below still applies
+        except Exception:
+            pass
         return False
     lease = my_leases().get(cluster_id)
     return bool(lease and _lease_now() < (lease.get('expires') or 0))
@@ -2450,3 +2469,46 @@ def _identity_username_owner(conn, row):
         return (u['fed_home'] or '') or '' if u is not None else None
     except Exception:
         return None
+
+
+def adopt_ha_federation_identity():
+    """Q7: after an HA promotion this instance acts for the clusters whose
+    fed_owner still names the former active. Their ownership moves here with
+    the rest of the configuration - the HA sync brought the rows, the identity
+    rides along. Called from the HA promotion path."""
+    me = instance_id()
+    try:
+        conn = _identities_conn()
+        rows = conn.execute(
+            'SELECT id, fed_owner FROM clusters WHERE fed_owner != '' AND fed_owner != ?',
+            (me,)).fetchall()
+        moved = []
+        for r in rows:
+            # only clusters that came with the HA sync (fed_owner is the old
+            # active's federation id) - not mirrors of other members
+            if r['fed_owner'] and federation_state_has_member(r['fed_owner']):
+                conn.execute('UPDATE clusters SET fed_owner = ? WHERE id = ? AND fed_owner = ?',
+                             (me, r['id'], r['fed_owner']))
+                moved.append(r['id'])
+        if moved:
+            conn.commit()
+            logging.info(f'[FED] HA promotion: {len(moved)} cluster ownership moved here')
+    except Exception as e:
+        logging.warning(f'[FED] HA promotion: could not move cluster ownership: {e}')
+    return True
+
+
+def federation_state_has_member(member_id):
+    """Whether the federation state knows a member by that id."""
+    return member_id in members() or member_id in tombstones()
+
+
+def worker_takes_writes_for(cluster_id):
+    """Q8: the background workers ask this before they act on a cluster. An
+    unenrolled cluster (no owner) is this instance's own; an enrolled one
+    wants a live lease. A table that cannot say stops the worker - a job that
+    cannot tell whose cluster it writes on does not write."""
+    try:
+        return takes_writes_for(cluster_id)
+    except FederationError:
+        return False

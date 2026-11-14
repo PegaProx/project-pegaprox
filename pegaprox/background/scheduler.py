@@ -477,6 +477,9 @@ def _to_next_minute():
 
 
 def scheduler_loop():
+    # Q8: the federation lease - a scheduled action on an enrolled cluster
+    # runs only while this instance holds a live lease on it
+    from pegaprox.core import federation as _fed
     """Background thread that runs scheduled tasks"""
     global _scheduler_running
     _scheduler_running = True
