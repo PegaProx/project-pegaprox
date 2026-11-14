@@ -1278,3 +1278,76 @@ def test_a_dropped_lease_recovers_across_a_fresh_voter(tmp_path):
         lease = federation.acquire_lease('pve-9')
         assert not lease.get('failed'), lease
         assert federation.takes_writes_for('pve-9') is True
+
+
+# --- the linked-mode view (the ELM view) ------------------------------------------------
+
+def test_the_view_lists_what_each_side_leads(tmp_path):
+    """A's enrolled cluster shows at A as led, at B as the peer's; B's local
+    cluster shows at B as local, at A as the peer's local one. A mirror never
+    shows as its holder's own."""
+    a, b, c = _three(tmp_path)
+    a_id = federation_ref_id(a)
+    _add_cluster(a, 'clx', name='Led by A')
+    with at_db(a):
+        federation.enroll_cluster('clx')
+    _add_cluster(b, 'cly', name='B local')
+    with at_db(b):
+        federation.sync_identities()
+        # the mirror of clx arrived here; B's own list must not carry it
+        own = federation.own_clusters_body()
+        ids = [r['id'] for r in own]
+        assert 'clx' not in ids, "a mirror is not its holder's cluster to report"
+        assert 'cly' in ids
+        assert [r for r in own if r['id'] == 'cly'][0]['enrolled'] is False
+    with at_db(a):
+        own = federation.own_clusters_body()
+        clx = [r for r in own if r['id'] == 'clx']
+        assert len(clx) == 1 and clx[0]['enrolled'] is True
+
+
+def test_the_view_skips_mirrors_but_counts_them_once(tmp_path):
+    """The combined view: A leads clx, B holds the mirror. The federation view
+    at A shows clx exactly once - in self, not again from the peer."""
+    a, b, c = _three(tmp_path)
+    _add_cluster(a, 'clx2')
+    with at_db(a):
+        federation.enroll_cluster('clx2')
+    with at_db(b):
+        federation.sync_identities()
+    # the view at A: self has clx2, B reports nothing of its own
+    with at_db(a):
+        view = federation.federation_clusters()
+        assert any(r['id'] == 'clx2' for r in view['self'])
+        for pid, p in view['peers'].items():
+            if p.get('clusters'):
+                assert all(r['id'] != 'clx2' for r in p['clusters'])
+
+
+def test_the_peer_route_answers_only_for_members(tmp_path):
+    """The peer clusters route carries the member's clusters alone - nothing that
+    opens a login - and answers only a signed member."""
+    a, b, c = _three(tmp_path)
+    _add_cluster(a, 'clx3')
+    with at_db(a):
+        federation.enroll_cluster('clx3')
+        body = federation.own_clusters_body()
+        for rec in body:
+            assert 'pass' not in str(rec).lower()
+            assert 'ssh' not in str(rec).lower()
+            assert 'token' not in str(rec).lower()
+    # the route itself: unsigned nobody, signed member
+    from pegaprox.api import federation as api_fed
+    with at_db(a):
+        r = a.client.get('/api/federation/peer/clusters',
+                         headers={'X-Requested-With': 'XMLHttpRequest'})
+        assert r.status_code == 401
+        # b signs for a (the receiver), as the asking member does
+        with at(b):
+            hdrs = federation.signed_headers(federation_ref_id(a), 'GET',
+                                             '/api/federation/peer/clusters')
+        r = a.client.get('/api/federation/peer/clusters', headers=hdrs)
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data['instance_id'] == federation.instance_id()
+        assert any(cl['id'] == 'clx3' for cl in data['clusters'])
