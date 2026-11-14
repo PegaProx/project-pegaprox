@@ -1455,3 +1455,28 @@ def test_the_peer_route_answers_only_for_members(tmp_path):
         data = r.get_json()
         assert data['instance_id'] == federation.instance_id()
         assert any(cl['id'] == 'clx3' for cl in data['clusters'])
+
+
+def test_a_cluster_owner_error_never_opens_the_gate(tmp_path):
+    """The Q3 proof: a clusters table that cannot answer raises, the gate
+    catches it, and the write is refused with 503 - never treated as an
+    unenrolled cluster whose writes go through."""
+    a, b = Side(tmp_path, 'a'), Side(tmp_path, 'b')
+    t = transport_for([a, b])
+    for s in (a, b):
+        s.runtime['transport'] = t
+    _pair_with_identities(a, b)
+    _add_cluster(a, 'q3-proof')
+    with at_db(a):
+        federation.enroll_cluster('q3-proof')
+    # sabotage AFTER the enrollment: the gate asks, the table is gone
+    with at_db(a):
+        conn = _db_of(a).conn
+        conn.execute('DROP TABLE clusters')
+        conn.commit()
+        # the core proof: the ownership lookup raises, never returns empty
+        with pytest.raises(federation.FederationError):
+            federation.cluster_owner('q3-proof')
+        # and the gate inherits the refusal (takes_writes_for propagates)
+        with pytest.raises(federation.FederationError):
+            federation.takes_writes_for('q3-proof')

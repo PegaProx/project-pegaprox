@@ -1864,16 +1864,18 @@ def _set_cluster_owner(cluster_id, owner):
 
 def cluster_owner(cluster_id):
     """The member a cluster row says its writes belong to: '' for one this
-    instance holds alone, None for a row that is not there. A table that cannot
-    be read says '' (the gate's own fail-closed answer covers it)."""
+    instance holds alone, None for a row that is not there. A table that
+    cannot be read raises FederationError - the write gate fails closed on
+    it, and so does everything else that asks. An unreadable ownership is
+    never an unenrolled cluster."""
     try:
         row = _identities_conn().execute(
             'SELECT fed_owner FROM clusters WHERE id = ?', (cluster_id,)).fetchone()
-        if row is None:
-            return None
-        return (row['fed_owner'] or '') or ''
-    except Exception:
-        return ''
+    except Exception as e:
+        raise FederationError(f'The clusters table cannot be read: {e}')
+    if row is None:
+        return None
+    return (row['fed_owner'] or '') or ''
 
 
 def takes_writes_for(cluster_id):
