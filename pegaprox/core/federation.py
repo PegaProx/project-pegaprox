@@ -2034,13 +2034,18 @@ def own_clusters_body():
                 mgrs = getattr(g, 'cluster_managers', None) or {}
             mgr = mgrs.get(r['id'])
             if mgr is not None:
-                nodes = getattr(mgr, 'nodes', None) or {}
-                rec['nodes'] = len(nodes)
-                rec['vms'] = sum(len(getattr(n, 'vms', None) or {}) for n in nodes.values()) \
-                    if nodes and all(hasattr(n, 'vms') for n in nodes.values()) else None
-                rec['connected'] = bool(getattr(mgr, 'connected', False))
-        except Exception:
-            pass
+                rec['connected'] = bool(getattr(mgr, 'is_connected', False)
+                                        or getattr(mgr, 'connected', False))
+                # what the manager really holds: node names from its status answer
+                # (one key per node) and the guest list from get_vms
+                node_status = mgr.get_node_status() if rec['connected'] else {}
+                if isinstance(node_status, dict):
+                    rec['nodes'] = len(node_status)
+                guests = mgr.get_vms() if rec['connected'] else None
+                if isinstance(guests, list):
+                    rec['vms'] = len(guests)
+        except Exception as e:
+            logging.debug(f"[FED] no counts for {r['id']}: {e}")
         out.append(rec)
     return out
 
