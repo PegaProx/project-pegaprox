@@ -1530,8 +1530,12 @@ def oidc_provision_user(user_info: dict, role_mapping: dict, auth_source: str = 
                 logging.info(f"[OIDC] '{username}' is a federation mirror - left to "
                              f"its home instance")
                 return {**users[username], 'username': username}
-        except Exception:
-            pass
+        except Exception as e:
+            # fail closed: a table that cannot say whose account this is does not
+            # let the provider overwrite a row that may not be ours
+            logging.warning(f"[OIDC] '{username}': the federation ownership check "
+                            f"failed - provisioning refused: {e}")
+            return None
     if username in users:
         logging.info(f"[OIDC] Updated user '{username}' (role={user['role']}, source={auth_source})")
     else:

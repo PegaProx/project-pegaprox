@@ -1211,8 +1211,10 @@ def auth_login():
         try:
             from pegaprox.core import federation as _fed_core
             _fed_2fa_home = _fed_core.foreign_home('users', (username,))
-        except Exception:
-            _fed_2fa_home = ''
+        except _fed_core.FederationError:
+            # fail closed: an account whose home cannot be named does not sign in
+            # on the password alone
+            _fed_2fa_home = 'unknown'
         if _fed_2fa_home:
             return jsonify({'code': 'FED_2FA_HOME', 'home': _fed_2fa_home,
                             'error': "This account's second factor lives at its home "
@@ -1287,8 +1289,10 @@ def auth_login():
     try:
         from pegaprox.core import federation as _fed_core
         _fed_foreign = bool(_fed_core.foreign_home('users', (username,)))
-    except Exception:
-        pass
+    except _fed_core.FederationError as e:
+        # fail closed: without knowing whose row this is, the hash stays as it is
+        logging.warning(f"[FED] rehash check for {username} refused: {e}")
+        _fed_foreign = True
     if (not ldap_authenticated and not ha.is_standby() and not _fed_foreign
             and needs_password_rehash(user.get('password_salt', ''), user.get('password_hash', ''))):
         try:
@@ -2054,7 +2058,13 @@ def auth_change_password():
     # Federation Phase 2: a mirrored user's password is the home's to change - the
     # same refusal the identity provider gets, with the instance named
     from pegaprox.core import federation as _fed_core
-    _fed_home = _fed_core.foreign_home('users', (username,))
+    try:
+        _fed_home = _fed_core.foreign_home('users', (username,))
+    except _fed_core.FederationError:
+        return jsonify({'code': 'FED_UNAVAILABLE',
+                        'error': 'Cannot tell where this account lives - the '
+                                 'password stays as it is until the federation '
+                                 'answers'}), 503
     if _fed_home:
         return jsonify({'code': 'FED_FOREIGN', 'home': _fed_home,
                         'error': 'This account is managed by another instance of the '
@@ -2465,16 +2475,19 @@ def create_api_token_endpoint():
     return jsonify(result)
 
 
-@bp.route('/api/auth/tokens/<int:token_id>', methods=['DELETE'])
-@require_auth()
 def _refuse_own_mirror(what):
     """409 when the signed-in user is a mirror of another federation member: their
-    password, second factor and tokens are the home's to change. None when not."""
+    password, second factor and tokens are the home's to change. None when not.
+    Fail closed: a table that cannot say raises, and a protected change stays
+    refused rather than slipping through as local."""
     try:
         from pegaprox.core import federation as _fed_core
         home = _fed_core.foreign_home('users', (request.session['user'],))
-    except _fed_core.FederationError:
-        return None
+    except _fed_core.FederationError as e:
+        logging.warning(f"[FED] mirror check for {what} could not tell: {e}")
+        return jsonify({'code': 'FED_UNAVAILABLE',
+                        'error': f'Cannot tell where this account lives - {what} '
+                                 f'is refused until the federation answers'}), 503
     if not home:
         return None
     return jsonify({'code': 'FED_FOREIGN', 'home': home,
@@ -2482,6 +2495,8 @@ def _refuse_own_mirror(what):
                              f'federation - {what} there'}), 409
 
 
+@bp.route('/api/auth/tokens/<int:token_id>', methods=['DELETE'])
+@require_auth()
 def revoke_api_token_endpoint(token_id):
     """Revoke an API token"""
     username = request.session['user']

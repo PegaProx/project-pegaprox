@@ -795,6 +795,14 @@ def reset_all_password_expiry():
     # this makes all passwords appear expired
     old_date = (datetime.now() - timedelta(days=9999)).isoformat()
 
+    _fed_foreign_users = set()
+    try:
+        from pegaprox.core import federation as _fed_core
+        _fed_foreign_users = {u for u in users_db
+                              if _fed_core.foreign_home('users', (u,))}
+    except _fed_core.FederationError:
+        # fail closed: a table that cannot say owns every account's expiry
+        _fed_foreign_users = set(users_db.keys())
     for username, user in users_db.items():
         if _ct is not None and (user.get('tenant_id', DEFAULT_TENANT_ID) != _ct
                                 or not _account_reach(user) <= _held):
@@ -805,11 +813,7 @@ def reset_all_password_expiry():
         if not user.get('enabled', True):
             continue  # skip disabled users
         # Federation Phase 2: a mirrored user's expiry is the home's to reset
-        try:
-            from pegaprox.core import federation as _fed_core
-            if _fed_core.foreign_home('users', (username,)):
-                continue
-        except _fed_core.FederationError:
+        if username in _fed_foreign_users:
             continue
         user['password_changed_at'] = old_date
         reset_count += 1
@@ -1979,6 +1983,11 @@ def update_custom_role(role_id):
             return jsonify({'error': 'Access denied - cannot update roles in other tenants'}), 403
         # pin to own tenant — a non-admin can't reach a global role this way
         tenant_id = user_tenant
+        # NS Aug 2026 (audit) — a non-admin must not raise a role's perms above what it holds
+        # itself; without this an admin.roles delegate rewrites its own role to admin.* and
+        # self-escalates on the next request (require_auth re-resolves perms live).
+        if permissions is not None and not _caller_can_grant_perms(permissions):
+            return jsonify({'error': 'Cannot grant permissions beyond your own'}), 403
 
     # Federation Phase 2: a mirrored role is the home's to change. The guard runs
     # after the tenant pinning, so it sees the row the write will really touch -
@@ -1987,11 +1996,6 @@ def update_custom_role(role_id):
                             f"Role '{role_id}'")
     if denied:
         return denied
-        # NS Aug 2026 (audit) — a non-admin must not raise a role's perms above what it holds
-        # itself; without this an admin.roles delegate rewrites its own role to admin.* and
-        # self-escalates on the next request (require_auth re-resolves perms live).
-        if permissions is not None and not _caller_can_grant_perms(permissions):
-            return jsonify({'error': 'Cannot grant permissions beyond your own'}), 403
 
     # validate before touching anything: get_custom_roles hands back the live cached dict, and
     # the name used to be written into it before the permission list was checked — so a request

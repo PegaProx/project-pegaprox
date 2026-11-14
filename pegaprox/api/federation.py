@@ -184,6 +184,14 @@ def peer_member_added():
     if refused:
         return refused
     rec = _body().get('member')
+    # a member-added notice may introduce a NEW member (the issuer vouches for
+    # the joiner), but an EXISTING member's key or URL moves only with that
+    # member's own word - nobody replaces a peer's identity for it
+    if isinstance(rec, dict) and rec.get('instance_id') and \
+            rec.get('instance_id') != peer['instance_id'] and \
+            federation.member_record(rec['instance_id']) is not None:
+        return jsonify({'error': 'That member is already known - only its own word '
+                                 'replaces its key or address'}), 409
     kept = federation.add_member(rec, origin=peer['instance_id'])
     if kept is None:
         full = len(federation.members()) >= federation.MAX_MEMBERS

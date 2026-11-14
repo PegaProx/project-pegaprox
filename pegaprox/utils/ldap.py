@@ -708,8 +708,12 @@ def ldap_provision_user(ldap_result: dict) -> dict:
                 logging.info(f"[LDAP] '{username}' is a federation mirror - left to "
                              f"its home instance")
                 return existing
-        except Exception:
-            pass
+        except Exception as e:
+            # fail closed: the directory does not overwrite a row whose home it
+            # cannot name
+            logging.warning(f"[LDAP] '{username}': the federation ownership check "
+                            f"failed - provisioning refused: {e}")
+            return existing
     user = ldap_build_user_row(ldap_result, existing)
     if user is None:
         return None  # Caller should handle None return
