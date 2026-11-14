@@ -2041,7 +2041,15 @@ def own_clusters_body():
                 node_status = mgr.get_node_status() if rec['connected'] else {}
                 if isinstance(node_status, dict):
                     rec['nodes'] = len(node_status)
-                guests = mgr.get_vms() if rec['connected'] else None
+                guests = None
+                if rec['connected']:
+                    # the overview needs no second-fresh answer: a 15 s old count
+                    # is the same to the eye and costs the hypervisor nothing on
+                    # every panel refresh everywhere in the federation
+                    try:
+                        guests = mgr.get_vm_resources(max_age=15)
+                    except TypeError:
+                        guests = mgr.get_vms()
                 if isinstance(guests, list):
                     rec['vms'] = len(guests)
         except Exception as e:
@@ -2056,8 +2064,18 @@ def federation_clusters():
     out = {'self': own_clusters_body(), 'peers': {}}
     for iid, rec in members().items():
         status, body = call_peer(iid, 'GET', CLUSTERS_PATH, timeout=5)
+        rows = []
         if status == 200 and isinstance(body, dict) and isinstance(body.get('clusters'), list):
-            out['peers'][iid] = {'site': rec.get('site') or '', 'clusters': body['clusters']}
+            # a member's answer is taken as any peer's: checked and bounded,
+            # so a member with ten thousand rows cannot flood the panel
+            for r in body['clusters'][:100]:
+                if isinstance(r, dict) and CLUSTER_ID_RE.fullmatch(r.get('id') or ''):
+                    rows.append({'id': r['id'],
+                                 'name': str(r.get('name') or '')[:80],
+                                 'type': r.get('type') or 'proxmox',
+                                 'enabled': bool(r.get('enabled')),
+                                 'enrolled': bool(r.get('enrolled'))})
+            out['peers'][iid] = {'site': rec.get('site') or '', 'clusters': rows}
         else:
             out['peers'][iid] = {'site': rec.get('site') or '', 'clusters': None}
     return out

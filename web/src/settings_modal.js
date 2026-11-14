@@ -10737,8 +10737,8 @@
                                                     <tr key={'self-' + c.id} className="border-b border-proxmox-border/50">
                                                         <td className="py-2 pr-3"><code className="text-xs">{c.id}</code> <span className="text-gray-400">{c.name}</span></td>
                                                         <td className="py-2 pr-3">{status.site || t('fedMe')}</td>
-                                                        <td className="py-2 pr-3 text-gray-400 tabular-nums">{c.nodes ?? '—'}</td>
-                                                        <td className="py-2 pr-3 text-gray-400 tabular-nums">{c.vms ?? '—'}</td>
+                                                        <td className="py-2 pr-3 text-gray-400">{c.nodes ?? '-'}</td>
+                                                        <td className="py-2 pr-3 text-gray-400">{c.vms ?? '-'}</td>
                                                         <td className="py-2">{c.enrolled
                                                             ? <span className="inline-flex items-center gap-1.5 text-green-400"><Icons.Shield className="w-3 h-3" />{t('fedLedHere')}</span>
                                                             : <span className="text-gray-500">{t('fedLocalOnly')}</span>}</td>
@@ -10749,8 +10749,8 @@
                                                         <tr key={pid + '-' + c.id} className="border-b border-proxmox-border/50" data-fed-peer-cluster={c.id}>
                                                             <td className="py-2 pr-3"><code className="text-xs">{c.id}</code> <span className="text-gray-400">{c.name}</span></td>
                                                             <td className="py-2 pr-3">{p.site || pid.slice(0, 8)}</td>
-                                                            <td className="py-2 pr-3 text-gray-400 tabular-nums">{c.nodes ?? '—'}</td>
-                                                            <td className="py-2 pr-3 text-gray-400 tabular-nums">{c.vms ?? '—'}</td>
+                                                            <td className="py-2 pr-3 text-gray-400">{c.nodes ?? '-'}</td>
+                                                            <td className="py-2 pr-3 text-gray-400">{c.vms ?? '-'}</td>
                                                             <td className="py-2">{c.enrolled
                                                                 ? <span className="inline-flex items-center gap-1.5 text-green-400"><Icons.Shield className="w-3 h-3" />{t('fedLedThere').replace('{site}', p.site || pid.slice(0, 8))}</span>
                                                                 : <span className="text-gray-500">{t('fedLocalOnly')}</span>}</td>
