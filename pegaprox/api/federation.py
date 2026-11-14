@@ -26,8 +26,10 @@ Nov 2026, three-leader federation Phase 1.
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Blueprint, jsonify, request
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from pegaprox.core import federation
 from pegaprox.models.permissions import ROLE_ADMIN
@@ -49,9 +51,14 @@ _MAX_BODY = federation.MAX_PEER_BODY
 _PEER_VERDICT = 'pegaprox.federation_peer'
 
 
-def _body():
-    # force, as the HA peer routes read a notice: the signature covers the body, not
-    # the header a proxy might touch on the way
+def _body(limit=None):
+    """The request body as a dict, {} when it is no dict. With `limit`, the raw
+    body is read and measured first and one that runs past it is refused with
+    413: a chunked request carries no Content-Length, so a header check alone
+    never sees how large it is. force, as the HA peer routes read a notice: the
+    signature covers the body, not the header a proxy might touch on the way."""
+    if limit is not None and len(request.get_data(cache=True)) > limit:
+        raise RequestEntityTooLarge()
     data = request.get_json(silent=True, force=True)
     return data if isinstance(data, dict) else {}
 
@@ -147,13 +154,19 @@ def peer_join():
         resp = jsonify({'error': 'Too many pairing attempts - wait a few minutes'})
         resp.headers['Retry-After'] = '300'
         return resp, 429
-    data = _body()
+    # this route reads the body before any peer gate does, so the bound is set
+    # here: the platform limit where Werkzeug can run it (an oversized
+    # Content-Length is refused outright) and _body()'s measured read for a
+    # chunked request, which carries no length to check against
+    request.max_content_length = _MAX_BODY
+    data = _body(_MAX_BODY)
     try:
         out = federation.accept_join(_str(data.get('code'), 1024),
                                      _str(data.get('url'), 512),
                                      _str(data.get('instance_id'), 64),
                                      _str(data.get('public_key'), 128),
-                                     _str(data.get('site'), 64))
+                                     _str(data.get('site'), 64),
+                                     _str(data.get('key_sealed'), 2048))
     except federation.FederationError as e:
         logging.warning(f"[FED] pairing attempt from {ip} refused: {e}")
         return jsonify({'error': str(e)}), 403
@@ -199,14 +212,9 @@ def peer_member_added():
                                  f'{federation.MAX_MEMBERS} members already'
                                  if full else 'No member in that notice',
                         'code': 'FED_FULL' if full else 'FED_NO_MEMBER'}), 409
-    # Phase 4: the notice may carry the sender's OWN field key - what a later
-    # adoption of its clusters opens. It binds to the signature: nobody hands a
-    # key over another member's name (H1), and only the member itself replaces
-    # the key its peers already hold of it.
-    key = _body().get('field_key')
-    if isinstance(key, str) and key:
-        federation._remember_field_keys({peer['instance_id']: key},
-                                        only_self_of=peer['instance_id'])
+    # a field key never travels in a notice: it crosses under the pairing code's
+    # seal alone (the join body, the issuer's sealed answer). One left in the
+    # body here is dropped - nothing on the way can hand a key over a name.
     log_audit('system', 'federation.member_added',
               f"member {kept['instance_id']} ({kept['url']}) told by "
               f"{peer['instance_id']}", ip_address=get_client_ip())
@@ -308,7 +316,9 @@ def _refuse_without_reauth(what):
 @require_auth(roles=[ROLE_ADMIN])
 def federation_status():
     """This instance, its members and the reachability it last saw. members carries
-    what the registry holds; reachable says which answered a status call just now."""
+    what the registry holds; reachable says which answered a status call just now.
+    The member calls go out side by side - up to four at once, one silent site costs
+    its own timeout and not the sum of everybody's."""
     denied = _refuse_confined_admin()
     if denied:
         return denied
@@ -317,19 +327,25 @@ def federation_status():
     out = {'instance_id': me, 'public_key': federation.public_key(),
            'site': federation.own_site(), 'members': [], 'max_members':
            federation.MAX_MEMBERS}
-    for iid, rec in sorted(federation.members().items()):
+
+    def ask(iid, rec):
         status, body = federation.call_peer(iid, 'GET', federation.STATUS_PATH,
                                             timeout=3)
-        entry = {'instance_id': iid, 'url': rec.get('url') or '',
-                 'site': rec.get('site') or '',
-                 'paired_at': rec.get('paired_at') or 0,
-                 'last_seen': rec.get('last_seen') or 0,
-                 'reachable': status == 200 and isinstance(body, dict)
-                 and body.get('instance_id') == iid,
-                 'fed': body.get('fed') if isinstance(body, dict) and status == 200
-                 else None,
-                 'identity_sync': sync.get(iid)}
-        out['members'].append(entry)
+        return {'instance_id': iid, 'url': rec.get('url') or '',
+                'site': rec.get('site') or '',
+                'paired_at': rec.get('paired_at') or 0,
+                'last_seen': rec.get('last_seen') or 0,
+                'reachable': status == 200 and isinstance(body, dict)
+                and body.get('instance_id') == iid,
+                'fed': body.get('fed') if isinstance(body, dict) and status == 200
+                else None,
+                'identity_sync': sync.get(iid)}
+    roster = sorted(federation.members().items())
+    if roster:
+        # map keeps the answer in the registry's sorted order, whatever order the
+        # members answer in
+        with ThreadPoolExecutor(max_workers=min(len(roster), 4)) as pool:
+            out['members'] = list(pool.map(ask, *zip(*roster)))
     pairing = federation._load().get('pairing')
     if pairing and pairing.get('expires', 0) > time.time():
         out['pairing_open'] = {'url': pairing.get('url') or '',
@@ -340,6 +356,12 @@ def federation_status():
 @bp.route('/api/federation/members', methods=['GET'])
 @require_auth(roles=[ROLE_ADMIN])
 def federation_members():
+    """The registry - the whole deployment's trust surface. An admin capped to a
+    tenant or a set of clusters has no business reading who else is in the
+    federation."""
+    denied = _refuse_confined_admin()
+    if denied:
+        return denied
     return jsonify({'instance_id': federation.instance_id(),
                     'members': sorted(federation.members().keys()),
                     'tombstones': sorted(federation.tombstones().keys())})
@@ -458,26 +480,82 @@ def reconcile():
 
 # --- identity federation (Phase 2) -------------------------------------------------------
 
+# the etag of the identity snapshot, kept for a moment: a poller's conditional GET
+# costs one PRAGMA this way, not a hash of every identity row, every minute per
+# member. The schema mark (SQLite bumps it on DDL, the 5 s window bounds DML) and
+# the age together say when the cache is stale - as ha.py caches its reads.
+_ETAG_CACHE_SECONDS = 5
+_etag_lock = threading.Lock()
+_etag_cache = {'home': '', 'etag': '', 'at': 0.0, 'schema': None}
+
+
+def _snapshot_etag():
+    """(etag, body or None) of the identity snapshot: the etag out of the short
+    cache while neither the schema mark nor five seconds have moved, both built
+    fresh when they have. The entry is kept per instance id - a process that
+    acts for more than one (the test harness) never answers with another's etag.
+    The body rides along only when it had to be built anyway - a 304 needs the
+    etag alone, and the body is never cached: it is built to be served, at the
+    moment it is served."""
+    home = federation.instance_id()
+    try:
+        schema = federation._identities_conn().execute(
+            'PRAGMA schema_version').fetchone()[0]
+    except Exception as e:
+        logging.warning(f"[FED] could not read the schema mark of the snapshot "
+                        f"etag cache: {e}")
+        schema = None
+    now = time.time()
+    with _etag_lock:
+        held = dict(_etag_cache)
+    if held['etag'] and held['home'] == home and held['schema'] == schema \
+            and now - held['at'] < _ETAG_CACHE_SECONDS:
+        return held['etag'], None
+    body = federation.identity_snapshot_body()
+    with _etag_lock:
+        _etag_cache.update(home=home, etag=body['etag'], at=now, schema=schema)
+    return body['etag'], body
+
+
 @bp.route('/api/federation/peer/identities', methods=['GET'])
 def peer_identities():
+    """The identity snapshot, signed by this member's federation key: the body
+    travels under TLS, but the answer also carries the member's own signature
+    over the body digest and the moment - a caller without a cert pin can
+    still tell who answered (Q2)."""
     """The users, custom roles and API tokens homed at this instance, and the
     deletes noted here - what another member pulls to mirror our identities. Signed
     by the asking member; an If-None-Match it sends against the etag it holds turns
-    the answer into a 304, as the HA snapshot poll does it. Nothing homed at another
-    member is served: a member answers for itself alone."""
+    the answer into a 304, as the HA snapshot poll does it - and that ask is answered
+    from a short-lived etag cache, so a poller that changes nothing costs nothing.
+    Nothing homed at another member is served: a member answers for itself alone."""
     peer, refused = _peer_or_refuse()
     if refused:
         return refused
     held = request.headers.get('If-None-Match', '').strip().strip('"')
-    body = federation.identity_snapshot_body()
-    if held and held == body['etag']:
-        resp = jsonify({'etag': body['etag']})
+    etag, body = _snapshot_etag()
+    if held and held == etag:
+        resp = jsonify({'etag': etag})
         resp.status_code = 304
-        resp.headers['ETag'] = f'"{body["etag"]}"'
+        resp.headers['ETag'] = f'"{etag}"'
         return resp
+    if body is None:
+        # the cache answered the conditional ask alone; the body is built only
+        # now, to serve it
+        body = federation.identity_snapshot_body()
     federation.touch(peer['instance_id'])
     resp = jsonify(body)
     resp.headers['ETag'] = f'"{body["etag"]}"'
+    # Q2: sign the answer - the caller verifies with our known public key
+    import base64 as _b64, time as _time
+    _ts = str(int(_time.time()))
+    _nonce = __import__('secrets').token_urlsafe(12)
+    _domain = 'pegaprox-fed-answer-1'
+    _msg = chr(10).join((_domain, body['etag'], _ts, _nonce)).encode()
+    _sig = federation._private().sign(_msg)
+    resp.headers['X-PegaProx-Fed-Sig'] = _b64.b64encode(_sig).decode()
+    resp.headers['X-PegaProx-Fed-Sig-Ts'] = _ts
+    resp.headers['X-PegaProx-Fed-Sig-Nonce'] = _nonce
     return resp
 
 
@@ -787,8 +865,9 @@ def renew_cluster_lease(cluster_id):
         return denied
     # no re-auth: the worker asks the same round every ten seconds with no admin
     # at the keyboard - a manual renew asks nothing the lease does not already
-    # back (it extends the caller's own lease, it takes nothing over)
-    report = federation.renew_leases()
+    # back (it extends the caller's own lease, it takes nothing over). The round
+    # is this cluster's alone: the worker renews the estate, not the admin's ask
+    report = federation.renew_leases(cluster_id=cluster_id)
     return jsonify({'cluster': cluster_id,
                     'renewed': (report.get(cluster_id) or {}).get('renewed', False),
                     'report': report.get(cluster_id)})

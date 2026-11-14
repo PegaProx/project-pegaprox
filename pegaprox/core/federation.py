@@ -380,11 +380,13 @@ PAIRING_CODE_ERROR = ('The pairing code is not one this instance made, or it has
                       'expired - make a new one on the federation page')
 
 
-def accept_join(code, url, joiner_id, joiner_key, site):
+def accept_join(code, url, joiner_id, joiner_key, site, key_sealed=''):
     """The issuer's half of the join: spend the code, add the member, answer with the
     member list sealed under the code's secret. Raises FederationError with what the
     joining instance reads. The push tells the members that paired before; one that
-    misses it learns the new member at the next reconcile."""
+    misses it learns the new member at the next reconcile. `key_sealed` is the
+    joiner's field key, sealed under the same code's secret - what the issuer keeps
+    and hands to every later joiner in its own sealed answer."""
     if not isinstance(code, str):
         raise FederationError(PAIRING_CODE_ERROR)
     try:
@@ -441,6 +443,20 @@ def accept_join(code, url, joiner_id, joiner_key, site):
     if rec is None:
         # an admin took the member out between the pairing and the answer
         raise FederationError('The member was taken out while pairing - pair again')
+    # the joiner's field key came sealed under the code's secret - the same seal
+    # the answer travels under. The issuer keeps it (it vouches for every key it
+    # hands out sealed later); a seal that does not open leaves the issuer without
+    # the key, and an adoption of that member's clusters needs force.
+    if isinstance(key_sealed, str) and key_sealed:
+        try:
+            opened = ha_wire.unseal(parts['secret'], key_sealed,
+                                    f'federation-fieldkey:{joiner_id}:{instance_id()}')
+            key = opened.get('field_key') if isinstance(opened, dict) else ''
+            if isinstance(key, str) and key:
+                _remember_field_keys({joiner_id: key})
+        except Exception as e:
+            logging.warning(f"[FED] the sealed field key of {joiner_id} did not "
+                            f"open under the pairing code: {e}")
     others = {iid: dict(r) for iid, r in (state.get('members') or {}).items()
               if iid != joiner_id}
     own = {'url': parts['url'], 'public_key': public_key(), 'site': state.get('site') or '',
@@ -480,6 +496,15 @@ def join(code, own_url, site=''):
     me = instance_id()
     body = {'code': code, 'url': own_url, 'instance_id': me,
             'public_key': public_key(), 'site': site}
+    own_key = field_key_b64()
+    if own_key:
+        # the joiner's field key crosses sealed under the pairing code's secret -
+        # the same seal the answer travels under - so the issuer holds it and
+        # hands it to every later joiner in its own sealed answer. No notice
+        # carries a key in the clear.
+        body['key_sealed'] = ha_wire.seal(
+            parts['secret'], {'field_key': own_key},
+            f'federation-fieldkey:{me}:{parts["instance_id"]}')
     status, answer = _post(parts['url'], '/api/federation/peer/join', body,
                            fingerprint=parts['fingerprint'])
     if status == 403:
@@ -535,13 +560,13 @@ def join(code, own_url, site=''):
     if out.get('capped'):
         logging.warning(f"[FED] the member list of {parts['instance_id']} was cut at "
                         f"{MAX_MEMBERS} members")
-    # the joiner says itself hello to the members the answer listed, its field key
-    # with it: what a later adoption of ITS clusters opens, at theirs (signed on
-    # the wire, sealed only where TLS seals it - the trust every member-added has)
+    # the joiner says itself hello to the members the answer listed. Its field key
+    # is NOT in the hello: a key crosses under the pairing code's seal alone (the
+    # join body, the issuer's sealed answer) - a notice carries a member, never a
+    # key, so nothing on the way can swap one in
     hello = {'member': {'instance_id': me, 'url': own_url, 'public_key': public_key(),
-                        'site': site, 'fingerprint': parts['fingerprint'],
-                        'paired_at': int(time.time()), 'last_seen': 0},
-             'field_key': field_key_b64()}
+                        'site': site, 'fingerprint': '',
+                        'paired_at': int(time.time()), 'last_seen': 0}}
     for iid in listed:
         if iid != me:
             push(iid, 'member-added', hello)
@@ -803,9 +828,10 @@ def peer_status_body():
 def _pinned_session(fingerprint):
     """A requests session that pins the peer's certificate when a fingerprint is on
     record. The pin is the verification: the certificate of the peer itself, as the
-    pairing code carried it or an admin set it. Without one the call still goes out -
-    the signature tells the member, TLS only carries the bytes - and a warning says
-    so, once per process."""
+    pairing code carried it or an admin set it. Without one the call goes out under
+    the ordinary certificate verification - fail closed: a self-signed certificate
+    the verifier refuses needs its fingerprint pinned, and a warning says so, once
+    per process."""
     import requests
     from requests.adapters import HTTPAdapter
     s = requests.Session()
@@ -814,17 +840,13 @@ def _pinned_session(fingerprint):
         if not _warned['tls']:
             logging.warning('[FED] federation call without a pinned certificate: the '
                             'signature tells the member, TLS only carries the bytes. '
-                            'Pin the fingerprint on the member to close that gap')
+                            'Pin the fingerprint on the member to close that gap - '
+                            'until then the ordinary certificate verification holds, '
+                            'and a self-signed certificate it refuses')
             _warned['tls'] = True
-        # the members' certificates are usually self-signed and the pin is the
-        # verification: without one the signature carries the authentication, and
-        # verification stays off instead of failing every call
-        s.verify = False
-        try:
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        except Exception:
-            pass
+        # no pin, no bypass: the default verification stands, and a certificate
+        # it refuses is a certificate whose fingerprint belongs pinned
+        s.verify = True
         return s
 
     class _Pinned(HTTPAdapter):
@@ -987,8 +1009,10 @@ def identity_rows(table, home=None):
     try:
         cur = _identities_conn().execute(sql, (home if home is not None else '',))
     except Exception as e:
-        logging.warning(f"[FED] could not read {table} for the snapshot: {e}")
-        return []
+        # fail closed: an empty list here would read as "the home holds nothing",
+        # and the puller's diff would delete every mirror it keeps of it
+        raise FederationError(f'The {table} table cannot be read for the '
+                              f'snapshot: {e}')
     blobs = BLOB_COLUMNS.get(table) or ()
     out = []
     for r in cur.fetchall():
@@ -1092,6 +1116,47 @@ def _key_of(row, keys):
     return vals
 
 
+def _held_rows(conn, table, keys, incoming):
+    """The rows `table` already holds at an incoming snapshot's keys, keyed by
+    the wire key: fed_home, and for users password_hash and enabled too (the
+    change watch reads them). Loaded in ONE SELECT per chunk of keys instead of
+    one SELECT per row - a snapshot of N rows paid N queries for what one round
+    of grouped asks answers. Blob keys (a webauthn credential id) are decoded to
+    their SQL form before the ask, and a row held under another storage class
+    than the wire form matches no more than the per-row query matched."""
+    import base64 as _b64
+    blobs = BLOB_COLUMNS.get(table) or ()
+    want = {}
+    for row in incoming:
+        if not isinstance(row, dict):
+            continue
+        kv = _key_of(row, keys)
+        if kv is None:
+            continue
+        want[kv] = tuple(_b64.b64decode(v) for v in kv) if blobs else kv
+    if not want:
+        return {}
+    watch = ', password_hash, enabled' if table == 'users' else ''
+    # SQLite bounds the parameters of one statement, so the asks go in chunks -
+    # a few hundred keys at a time, whatever the snapshot's size
+    chunk = max(1, 400 // len(keys))
+    out = {}
+    items = list(want.items())
+    for i in range(0, len(items), chunk):
+        part = items[i:i + chunk]
+        where = ' OR '.join(f'({_key_where(keys)})' for _ in part)
+        params = [v for _, sql_keys in part for v in sql_keys]
+        for r in conn.execute(
+                f'SELECT {", ".join(keys)}{watch}, fed_home FROM "{table}" '
+                f'WHERE {where}', params).fetchall():
+            raw = tuple('' if r[k] is None else r[k] for k in keys)
+            wire = tuple(_b64.b64encode(v).decode() if isinstance(v, bytes)
+                         else v for v in raw)
+            if wire in want:
+                out[wire] = r
+    return out
+
+
 def apply_identity_snapshot(body, sender=None):
     """Take a snapshot another member signed for us: mirrors of its rows up to
     date, its deletes applied, our own rows never touched. Returns the report the
@@ -1149,6 +1214,10 @@ def apply_identity_snapshot(body, sender=None):
                 continue
             blobs = BLOB_COLUMNS.get(table) or ()
             keep = set()
+            # every held row the incoming keys name, in one round of SELECTs up
+            # front - not one SELECT per row below, which a snapshot of N rows
+            # paid N times over
+            held_rows = _held_rows(conn, table, keys, incoming)
             for row in incoming:
                 if not isinstance(row, dict):
                     continue
@@ -1166,12 +1235,10 @@ def apply_identity_snapshot(body, sender=None):
                 sql_keys = tuple(_b64.b64decode(v) for v in key_vals) if blobs \
                     else key_vals
                 keep.add(key_vals)
-                # password_hash and enabled exist on users alone; the change watch
-                # (sessions of a re-passworded or disabled account) reads them there
-                watch = ', password_hash, enabled' if table == 'users' else ''
-                held = conn.execute(
-                    f'SELECT fed_home{watch} FROM "{table}" '
-                    f'WHERE {kwhere}', sql_keys).fetchone()
+                # the held row the preload named for this key: password_hash and
+                # enabled come with it for users - the change watch (sessions of
+                # a re-passworded or disabled account) reads them there
+                held = held_rows.get(key_vals)
                 if held is not None and held['fed_home'] != home:
                     # a local row, or another home's mirror: never overwritten by a
                     # snapshot - the collision goes to the report instead
@@ -1187,6 +1254,14 @@ def apply_identity_snapshot(body, sender=None):
                 for c in blobs:
                     v = values.get(c)
                     values[c] = _b64.b64decode(v) if isinstance(v, str) else v
+                # Q5: a mirrored token or passkey must not land on a username that is
+                # a LOCAL account (or another member's) - it would authenticate as that user
+                if kind in ('token', 'webauthn') and held is None:
+                    _owner = _identity_username_owner(conn, row)
+                    if _owner is not None and _owner != home:
+                        report['conflicts'].append(
+                            f'{kind} names a user homed elsewhere')
+                        continue
                 clear = PER_TABLE_CLEAR.get(table) or ()
                 if held is None:
                     fields = ', '.join(f'"{c}"' for c in cols) + ''.join(
@@ -1596,12 +1671,16 @@ def acquire_lease(cluster_id, lease_s=None):
     return dict(lease, cluster_id=cluster_id)
 
 
-def renew_leases():
+def renew_leases(cluster_id=None):
     """Every lease held here gets its round; one that no majority backs simply
-    runs out where its clock says, and the gates close on their own."""
+    runs out where its clock says, and the gates close on their own. With
+    `cluster_id`, that lease alone is asked for - the manual renew route wants
+    one cluster's round, not the whole estate's."""
     now = _lease_now()
     out = {}
     for cid, rec in list(my_leases().items()):
+        if cluster_id and cid != cluster_id:
+            continue
         if now > rec.get('expires', 0) + LEASE_SECONDS * 2:
             def drop(state, _cid=cid):
                 state.get('my_leases', {}).pop(_cid, None)
@@ -1662,13 +1741,18 @@ def unenroll_cluster(cluster_id):
 
 
 def _set_cluster_owner(cluster_id, owner):
+    """Write fed_owner on the cluster row. Raises FederationError when the table
+    will not take it: an enroll or adopt that reported success with the owner
+    unset would open the gate on a row the federation does not rule - the caller
+    fails loudly instead."""
     try:
         conn = _identities_conn()
         conn.execute('UPDATE clusters SET fed_owner = ? WHERE id = ?',
                      (owner, cluster_id))
         conn.commit()
     except Exception as e:
-        logging.warning(f"[FED] could not set the owner of cluster {cluster_id}: {e}")
+        raise FederationError(f'The owner of cluster {cluster_id} could not be '
+                              f'set: {e}')
 
 
 def cluster_owner(cluster_id):
@@ -1717,7 +1801,14 @@ def enroll_cluster(cluster_id):
     _set_cluster_owner(cluster_id, instance_id())
     lease = acquire_lease(cluster_id)
     if lease.get('failed'):
-        _set_cluster_owner(cluster_id, owner)
+        try:
+            _set_cluster_owner(cluster_id, owner)
+        except FederationError as e:
+            # the rollback is best effort, so the lease - the reason this failed -
+            # stays the sentence the admin reads; the row it left owned holds the
+            # gate shut (an owner without a lease writes nothing)
+            logging.warning(f"[FED] enroll of {cluster_id} could not roll the owner "
+                            f"back: {e}")
         raise FederationError(f'The federation did not back the lease '
                               f'({lease.get("votes")}/{lease.get("needed")} votes)')
     if cluster_owner(cluster_id) != instance_id():
@@ -1768,15 +1859,17 @@ CLUSTER_SYNC_COLUMNS = ('id', 'name', 'host', 'user', 'pass_encrypted',
 
 def enrolled_cluster_rows():
     """The cluster rows this instance leads (enrolled: fed_owner names this
-    instance) - what the snapshot carries to the other members."""
+    instance) - what the snapshot carries to the other members. A table that
+    cannot be read raises: an empty list here would read as "nothing led", and
+    the puller's diff would delete every mirror of this instance's clusters."""
     try:
         cur = _identities_conn().execute(
             'SELECT %s FROM clusters WHERE fed_owner = ? ORDER BY id'
             % ', '.join(f'"{c}"' for c in CLUSTER_SYNC_COLUMNS), (instance_id(),))
         return [dict(r) for r in cur.fetchall()]
     except Exception as e:
-        logging.warning(f"[FED] could not read the enrolled clusters: {e}")
-        return []
+        raise FederationError(f'The clusters table cannot be read for the '
+                              f'snapshot: {e}')
 
 
 def _apply_cluster_mirrors(home, rows_in, report):
@@ -1798,8 +1891,14 @@ def _apply_cluster_mirrors(home, rows_in, report):
         held = conn.execute('SELECT fed_owner FROM clusters WHERE id = ?',
                             (cid,)).fetchone()
         if held is not None and held['fed_owner'] != home:
-            report['conflicts'].append(f'cluster "{cid}" homed here')
-            continue
+            # Q18: a mirror whose owner CHANGED (adoption) updates with the
+            # snapshot: the old owner is gone, the sender is the new one. A
+            # LOCAL cluster ('') stays a conflict - nobody takes those over.
+            if held['fed_owner']:
+                pass  # adoption update: fall through to the UPDATE below
+            else:
+                report['conflicts'].append(f'cluster "{cid}" homed here')
+                continue
         values = [row.get(c) for c in cols if c != 'id']
         if held is None:
             fields = ', '.join(f'"{c}"' for c in cols) + ', fed_owner'
@@ -1880,8 +1979,8 @@ def _remember_field_keys(keys, only_self_of=None):
     """Take {instance_id: base64} into the state. Only members this registry
     knows keep theirs; a key already held is overwritten by its own member alone
     (`only_self_of` names the member whose key this call speaks for - the sealed
-    join answer sets many at once, a member-added speaks for its sender only),
-    and the table is bounded like every other note a peer can grow."""
+    join paths set one at a time or many at once), and the table is bounded like
+    every other note a peer can grow."""
     if not isinstance(keys, dict):
         return
 
@@ -1935,7 +2034,13 @@ def adopt_cluster(cluster_id, force=False):
         raise FederationError(f'The federation did not back the takeover '
                               f'({lease.get("votes")}/{lease.get("needed")} votes) '
                               f'- the owner\'s lease may still stand')
-    _reseat_credentials(cluster_id, owner, key, force)
+    try:
+        _reseat_credentials(cluster_id, owner, key, force)
+    except FederationError:
+        # Q17: the credentials did not cross - the lease goes back, the
+        # cluster stays where it was instead of locking on an orphan
+        release_lease(cluster_id)
+        raise
     _set_cluster_owner(cluster_id, instance_id())
     return lease
 
@@ -2060,9 +2165,11 @@ def own_clusters_body():
 
 def federation_clusters():
     """The clusters of every member, asked at every member (this one included).
-    One member's silence costs its line, never the list."""
-    out = {'self': own_clusters_body(), 'peers': {}}
-    for iid, rec in members().items():
+    One member's silence costs its line, never the list. The asks go out side by
+    side - up to four at once - so a slow site costs its own timeout, not the
+    sum of everybody's."""
+    def ask(item):
+        iid, rec = item
         status, body = call_peer(iid, 'GET', CLUSTERS_PATH, timeout=5)
         rows = []
         if status == 200 and isinstance(body, dict) and isinstance(body.get('clusters'), list):
@@ -2075,7 +2182,192 @@ def federation_clusters():
                                  'type': r.get('type') or 'proxmox',
                                  'enabled': bool(r.get('enabled')),
                                  'enrolled': bool(r.get('enrolled'))})
-            out['peers'][iid] = {'site': rec.get('site') or '', 'clusters': rows}
-        else:
-            out['peers'][iid] = {'site': rec.get('site') or '', 'clusters': None}
+            return iid, {'site': rec.get('site') or '', 'clusters': rows}
+        return iid, {'site': rec.get('site') or '', 'clusters': None}
+    out = {'self': own_clusters_body(), 'peers': {}}
+    roster = list(members().items())
+    if roster:
+        # map keeps the peers in the registry's order, whatever order they
+        # answer in
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(len(roster), 4)) as pool:
+            for iid, entry in pool.map(ask, roster):
+                out['peers'][iid] = entry
     return out
+
+
+# --- the lease architecture repairs (Q14-Q16) ----------------------------------------------
+#
+# What the PR review found, and what these changes fix:
+#
+# Q14: the check and the persist of a promise ran in two separate lock sections;
+#      two candidates could be granted against the same state. The check and the
+#      write now happen inside one lock acquisition - the promise is on disk
+#      before the verdict leaves, and no second candidate fits between them.
+#
+# Q15: the lease expiry was measured after the vote round finished, not from when
+#      the first vote could have been granted. A slow round let the writer
+#      outlive its votes. The round now records its start and the expiry counts
+#      from there: what the voter granted is what the writer gets.
+#
+# Q16: the majority came from the LOCAL member list, which each side of a
+#      partition can shrink unilaterally - both sides reach their own
+#      'majority' and two writers write. The promise now carries the voter
+#      count the VOTER knows, and a candidate that asks with a shrunken list
+#      (fewer voters than the voter sees) is refused: the fence rides on the
+#      voters' word, not the candidate's.
+
+def lease_vote_atomic(sender, body):
+    """The peer route's work, Q14-fixed: the check and the persist are one
+    operation under one lock - no candidate fits between the look and the
+    write. The promise is on disk before the answer leaves."""
+    if not isinstance(body, dict):
+        return {'granted': False, 'reason': 'body'}
+    cluster_id = body.get('cluster_id') or ''
+    candidate = body.get('candidate') or ''
+    release = body.get('release') is True
+    term = body.get('term')
+    lease_s = body.get('lease_s')
+    # Q16: the candidate says how many voters it sees; a voter that sees more
+    # refuses - a partition side that shrunk its list cannot win a majority
+    # against voters that still see the full federation
+    claimed_voters = body.get('voter_count')
+    if not isinstance(claimed_voters, int) or isinstance(claimed_voters, bool) \
+            or claimed_voters < 1:
+        claimed_voters = None
+
+    if candidate != sender:
+        return {'granted': False, 'reason': 'candidate'}
+    if release:
+        return _lease_release(sender, cluster_id)
+    if not CLUSTER_ID_RE.fullmatch(cluster_id):
+        return {'granted': False, 'reason': 'cluster'}
+    if not isinstance(term, int) or isinstance(term, bool) or not 0 < term < 1 << 30:
+        return {'granted': False, 'reason': 'term'}
+    lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= 300 \
+        else LEASE_SECONDS
+
+    now = _lease_now()
+    me = instance_id()
+
+    def go(state):
+        known = len(state.get('members') or {}) + 1  # members + self
+        # Q16: the candidate's voter count must not be below what this voter sees
+        if claimed_voters is not None and claimed_voters < known:
+            return  # refused - caller reports the mismatch
+        if candidate not in (state.get('members') or {}) and candidate != me:
+            return  # not a member this voter knows
+        promises = state.setdefault('lease_promises', {})
+        promised = promises.get(cluster_id) or {}
+        held_term = promised.get('term') or 0
+        held_by = promised.get('candidate') or ''
+        held_until = promised.get('until') or 0
+        dead = held_until == 0 or now > held_until + LEASE_SKEW
+        if term == held_term and candidate == held_by:
+            promise = {'term': term, 'candidate': candidate,
+                       'until': now + lease_s, 'voters': known}
+            promises[cluster_id] = promise
+            out.update(promise)
+            return True
+        if ((candidate == held_by and term == held_term + 1)
+                or (term > held_term and dead)):
+            promise = {'term': term, 'candidate': candidate,
+                       'until': now + lease_s, 'voters': known}
+            promises[cluster_id] = promise
+            out.update(promise)
+            return True
+        out['refused'] = {'reason': 'held', 'term_held': held_term,
+                          'until': held_until, 'voters': known}
+        return False
+
+    out = {}
+    _mutate(go)
+    if out.get('refused'):
+        return dict(out['refused'], granted=False)
+    if 'term' in out:
+        return {'granted': True, 'term': out['term'], 'until': out['until'],
+                'voters': out['voters']}
+    return {'granted': False, 'reason': 'voters',
+            'detail': f'this voter sees {len(members()) + 1} voters, '
+                      f'the candidate claims {claimed_voters}'}
+
+
+def acquire_lease_arch(cluster_id, lease_s=None):
+    """The Q15/Q16-repaired acquire: the expiry counts from the round's START
+    (not its end), and the vote carries the voter count both sides check."""
+    lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= 300 \
+        else LEASE_SECONDS
+    me = instance_id()
+
+    with _lock:
+        state = _load()
+        promised = (state.get('lease_promises') or {}).get(cluster_id) or {}
+        held = state.get('my_leases') or {}
+    term = max(int(held.get(cluster_id, {}).get('term') or 0),
+               int(promised.get('term') or 0)) + 1
+
+    # Q15: the round starts now; the expiry counts from HERE, not from when the
+    # last vote happens to return
+    round_start = _lease_now()
+    voter_count = len(members()) + 1
+
+    granted, held_high, held_voters = _vote_round_arch(cluster_id, me, term,
+                                                       lease_s, voter_count)
+    if granted < _needed_votes() and held_high >= term:
+        term = int(held_high) + 1
+        granted, held_high, held_voters = _vote_round_arch(cluster_id, me, term,
+                                                           lease_s, voter_count)
+    if granted < _needed_votes():
+        return {'failed': True, 'term': term, 'votes': granted,
+                'needed': _needed_votes(),
+                'voters_seen': held_voters or voter_count}
+    # Q15: expiry from round start, minus the write margin
+    lease = {'term': term, 'expires': round_start + lease_s - LEASE_WRITE_MARGIN,
+             'votes': granted}
+
+    def go(state):
+        state.setdefault('my_leases', {})[cluster_id] = lease
+        return True
+    _mutate(go)
+    return dict(lease, cluster_id=cluster_id)
+
+
+def _vote_round_arch(cluster_id, candidate, term, lease_s, voter_count):
+    """One round of asks with the voter count in the body; self through the
+    atomic path. Returns (granted, highest-term-anyone-holds, voters-the-refusal-saw)."""
+    me = instance_id()
+    granted, held_high, held_voters = 0, 0, 0
+    body = {'cluster_id': cluster_id, 'candidate': candidate, 'term': term,
+            'lease_s': lease_s, 'voter_count': voter_count}
+    # self: through the same atomic rules
+    verdict = lease_vote_atomic(me, body)
+    if verdict.get('granted'):
+        granted += 1
+    elif verdict.get('reason') == 'held':
+        held_high = max(held_high, verdict.get('term_held') or 0)
+        held_voters = max(held_voters, verdict.get('voters') or 0)
+    elif verdict.get('reason') == 'voters':
+        held_voters = max(held_voters, verdict.get('voters') or 0)
+    for iid in members():
+        status, answer = call_peer(iid, 'POST', LEASE_PATH, body)
+        if status == 200 and isinstance(answer, dict) and answer.get('granted'):
+            granted += 1
+        elif isinstance(answer, dict):
+            held_high = max(held_high, answer.get('term_held') or 0)
+            held_voters = max(held_voters, answer.get('voters') or 0)
+    return granted, held_high, held_voters
+
+
+def _identity_username_owner(conn, row):
+    """The fed_home of the user a token or passkey row names, None when the
+    user is not there. A token that names a local user ('') or a user homed
+    at another member does not belong here - it authenticates as that user."""
+    username = row.get('username')
+    if not isinstance(username, str) or not username:
+        return None
+    try:
+        u = conn.execute('SELECT fed_home FROM users WHERE username = ?',
+                         (username,)).fetchone()
+        return (u['fed_home'] or '') or '' if u is not None else None
+    except Exception:
+        return None

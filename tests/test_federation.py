@@ -429,10 +429,15 @@ def test_a_member_added_notice_keeps_a_good_record(paired, tmp_path):
     for s in sides:
         s.runtime['transport'] = shared
     c_id = federation_ref_id(c)
+    # a key in a notice is not taken: keys cross under the pairing code's seal
+    # alone, so even a signed notice cannot plant one
+    import base64 as _b64
+    stowaway = _b64.b64encode(b'K' * 32).decode()
     notice = {'member': {'instance_id': c_id, 'url': URL['c'],
                          'public_key': some_key(), 'site': 'site-c',
                          'fingerprint': '', 'paired_at': int(time.time()),
-                         'last_seen': 0}}
+                         'last_seen': 0},
+              'field_key': stowaway}
     headers = _signed_headers_of(a, federation_ref_id(b), method='POST',
                                  path='/api/federation/peer/member-added',
                                  body=notice)
@@ -440,6 +445,7 @@ def test_a_member_added_notice_keeps_a_good_record(paired, tmp_path):
     assert r.status_code == 200
     with at(b):
         assert federation.members()[c_id]['site'] == 'site-c'
+        assert federation.peer_field_keys().get(c_id) != stowaway
 
 
 def test_three_instances_reach_a_full_mesh(tmp_path):
@@ -1153,18 +1159,24 @@ def test_a_cluster_mirror_reaches_the_others(tmp_path):
 
 
 def test_the_field_keys_travel_sealed(tmp_path):
+    """Keys cross under the pairing code's seal alone: the joiner seals its own
+    key into the join body, the issuer answers sealed with every key it holds. A
+    member that paired before a later joiner hears no key of it - a notice never
+    carries one, so b learns c's key only where a seal delivers it."""
     a, b, c = _three(tmp_path)
     a_id, b_id, c_id = federation_ref_id(a), federation_ref_id(b), federation_ref_id(c)
     with at_db(a):
-        assert federation.peer_field_keys().get(b_id)
-        assert federation.peer_field_keys().get(c_id)
+        keys = federation.peer_field_keys()
+        assert keys.get(b_id) == federation_ref_key(b)
+        assert keys.get(c_id) == federation_ref_key(c)
     with at_db(b):
-        assert federation.peer_field_keys().get(a_id)
-        assert federation.peer_field_keys().get(c_id)
+        keys = federation.peer_field_keys()
+        assert keys.get(a_id) == federation_ref_key(a)
+        assert keys.get(c_id) is None      # b paired before c: no seal reached it
     with at_db(c):
         keys = federation.peer_field_keys()
-        assert keys.get(a_id) and keys.get(b_id)
-        assert keys[a_id] == federation_ref_key(a)
+        assert keys.get(a_id) == federation_ref_key(a)
+        assert keys.get(b_id) == federation_ref_key(b)
         assert keys[a_id] != keys[b_id]
 
 

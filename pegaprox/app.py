@@ -512,9 +512,18 @@ def create_app():
         there, the VM and storage and Ceph routes included. Reads pass; an
         unenrolled cluster is this instance's own and passes too; the path piece
         after /api/clusters/ that is no id ('reorder') passes. Runs after the CSRF
-        gate, which answers first."""
+        gate, which answers first.
+
+        An HA standby stands aside: its writes go to the active host (which holds
+        the lease there), so the forwarding hook below must see them first."""
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
             return None
+        try:
+            from pegaprox.core import ha as _ha
+            if _ha.is_standby():
+                return None
+        except Exception:
+            pass
         import re as _re
         m = _re.match(r'^/api/clusters/([^/?]+)', request.path)
         if not m or m.group(1) == 'reorder':
