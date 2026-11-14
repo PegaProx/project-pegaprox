@@ -120,7 +120,7 @@ PegaProx implements the following security measures:
   installs with `deploy.sh` or pip on Linux x86_64 and aarch64, macOS and Windows, for the
   amd64 and arm64 Docker images and appliance images, and for the Debian package on amd64.
   The 32-bit ARM Docker image uses plain SQLite, and so does the Debian package on arm64
-  where its `python3-sqlcipher3` holds the x86_64 module only (the one of apt.pegaprox.com,
+  where its `python3-sqlcipher3` holds the x86_64 module only (the one of apt.pegaprox.com, once that repository is live,
   and the one the appliance images build, is built for arm64). On every install,
   sensitive fields (cluster passwords, SSH keys, API token secrets, TOTP secrets) are also
   encrypted individually with AES-256-GCM. PegaProx warns at startup when the database stays
