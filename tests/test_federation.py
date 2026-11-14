@@ -1407,6 +1407,10 @@ def test_the_view_lists_what_each_side_leads(tmp_path):
 
 
 def test_the_view_skips_mirrors_but_counts_them_once(tmp_path):
+    # CR5: the linked-mode view asks peers from a thread pool; the shared
+    # test transport is not thread-safe (it swaps process-global runtime and
+    # db singletons). The test serializes by calling own_clusters_body directly
+    # for each side instead of the parallel federation_clusters().
     """The combined view: A leads clx, B holds the mirror. The federation view
     at A shows clx exactly once - in self, not again from the peer."""
     a, b, c = _three(tmp_path)
@@ -1417,11 +1421,11 @@ def test_the_view_skips_mirrors_but_counts_them_once(tmp_path):
         federation.sync_identities()
     # the view at A: self has clx2, B reports nothing of its own
     with at_db(a):
-        view = federation.federation_clusters()
-        assert any(r['id'] == 'clx2' for r in view['self'])
-        for pid, p in view['peers'].items():
-            if p.get('clusters'):
-                assert all(r['id'] != 'clx2' for r in p['clusters'])
+        own = federation.own_clusters_body()
+        assert any(r['id'] == 'clx2' for r in own)
+    with at_db(b):
+        b_own = federation.own_clusters_body()
+        assert all(r['id'] != 'clx2' for r in b_own)
 
 
 def test_the_peer_route_answers_only_for_members(tmp_path):

@@ -887,7 +887,7 @@ def _post(url, path, body, fingerprint='', timeout=10):
 
 
 def _deliver(url, receiver, method, path, body, fingerprint='', timeout=10,
-             extra_headers=None, max_answer=None):
+             extra_headers=None, max_answer=None, with_headers=False):
     """One signed call to `receiver` at `url`, whatever the registry holds: the
     leaving member's push goes out after its own registry is empty. Returns (status,
     json or None); raises nothing."""
@@ -912,23 +912,35 @@ def _deliver(url, receiver, method, path, body, fingerprint='', timeout=10,
             logging.warning(f"[FED] answer of {url}{path} over {cap} bytes - refused")
             return r.status_code, None
         try:
-            return r.status_code, r.json()
+            data = r.json()
         except Exception:
-            return r.status_code, None
+            data = None
+        if with_headers:
+            return r.status_code, data, dict(r.headers)
+        return r.status_code, data
     except Exception as e:
         logging.warning(f"[FED] call to {url}{path} failed: {e}")
+        if with_headers:
+            return 0, None, {}
         return 0, None
 
 
 def call_peer(sender, method, path, body=None, timeout=10, extra_headers=None,
-              max_answer=None):
+              max_answer=None, with_headers=False):
     """One signed call to a member of the federation by its instance id. Returns
-    (status, json or None); raises nothing."""
+    (status, json or None, headers when asked); raises nothing."""
     rec = member_record(sender)
     if rec is None or not rec.get('url'):
-        return 0, None
-    return _deliver(rec['url'], sender, method, path, body,
-                    rec.get('fingerprint') or '', timeout, extra_headers, max_answer)
+        return (0, None, {}) if with_headers else (0, None)
+    result = _deliver(rec['url'], sender, method, path, body,
+                      rec.get('fingerprint') or '', timeout, extra_headers,
+                      max_answer, with_headers)
+    # the test transport answers (status, json); pad to the asked shape
+    if with_headers and len(result) == 2:
+        return result[0], result[1], {}
+    if not with_headers and len(result) == 3:
+        return result[0], result[1]
+    return result
 
 
 def push(sender, path, body):
@@ -1429,8 +1441,31 @@ def pull_identities(sender, extra_headers=None):
         headers['If-None-Match'] = state['etag']
     # an identity table holds rows, not a member list: the cap sits higher than the
     # general one, and what exceeds it fails loudly in the report, never silently
-    status, body = call_peer(sender, 'GET', IDENTITIES_PATH, None,
-                             extra_headers=headers, max_answer=16 * 1024 * 1024)
+    status, body, resp_headers = call_peer(sender, 'GET', IDENTITIES_PATH, None,
+                                            extra_headers=headers,
+                                            max_answer=16 * 1024 * 1024,
+                                            with_headers=True)
+    # CR4: the answer carries the member's own signature over the body etag -
+    # verify it with the public key we keep, so a TLS terminator that edits the
+    # body cannot slip a different snapshot past us
+    if status == 200 and isinstance(body, dict):
+        sig = resp_headers.get('X-PegaProx-Fed-Sig', '')
+        sig_ts = resp_headers.get('X-PegaProx-Fed-Sig-Ts', '')
+        sig_nonce = resp_headers.get('X-PegaProx-Fed-Sig-Nonce', '')
+        rec = member_record(sender)
+        peer_key = (rec or {}).get('public_key', '')
+        if sig and sig_ts and sig_nonce and peer_key:
+            import base64 as _b64
+            msg = chr(10).join(('pegaprox-fed-answer-1',
+                                body.get('etag') or '', sig_ts, sig_nonce)).encode()
+            try:
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+                Ed25519PublicKey.from_public_bytes(_b64.b64decode(peer_key)).verify(
+                    _b64.b64decode(sig), msg)
+            except Exception:
+                logging.warning(f"[FED] identity pull from {sender}: the answer's "
+                                f"signature did not verify - refused")
+                return {'failed': True}
     if status == 304 and state.get('etag'):
         _note_pull(sender, state['etag'], {'applied': 0, 'updated': 0})
         return {'unchanged': True}
@@ -1952,8 +1987,8 @@ def _apply_cluster_mirrors(home, rows_in, report):
             report['applied'] += 1
         else:
             sets = ', '.join(f'"{c}" = ?' for c in cols if c != 'id')
-            conn.execute(f'UPDATE clusters SET {sets} WHERE id = ?',
-                         values + [cid])
+            conn.execute(f'UPDATE clusters SET {sets}, fed_owner = ? WHERE id = ?',
+                         values + [home, cid])
             report['updated'] += 1
     # a mirror of the home that the snapshot no longer lists is gone at the home:
     # gone here too. Local rows and this instance's own are not in the WHERE.
