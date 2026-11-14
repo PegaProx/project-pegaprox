@@ -485,6 +485,13 @@ def create_app():
         body is left out: parsing it here would spool a whole upload before require_auth has
         looked at the caller, and the one cluster route that takes one checks its node."""
         out = [request.args]
+        # MK Nov 2026 - the same goes for any body on that route: it may be as large as an
+        # upload (validate_request), and a JSON or form body sent to it was read here whole,
+        # from a client nobody had signed in yet. Only what an API call may carry, with its
+        # length told up front
+        if (request.max_content_length or 0) > _default_max and \
+                (request.content_length is None or request.content_length > _default_max):
+            return out
         if request.mimetype == 'application/x-www-form-urlencoded':
             request.get_data(cache=True)    # parsed from the cached bytes, a standby forwards them
             out.append(request.form)

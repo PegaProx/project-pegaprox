@@ -15,12 +15,14 @@ arguments. A list of guests in the body is no top-level value: the bulk migratio
 the node of each guest itself.
 MK Nov 2026
 """
+import io
 import json
 import types
 
 import pytest
 import requests
 from requests.adapters import HTTPAdapter
+from werkzeug.test import EnvironBuilder
 
 from pegaprox.core.manager import PegaProxManager
 
@@ -213,6 +215,48 @@ def test_a_multipart_body_is_left_to_the_route(api, monkeypatch):
                   content_type='multipart/form-data') as request:
         assert api.app.preprocess_request() is None
         assert request.__dict__.get('_cached_data') is None and 'form' not in request.__dict__
+
+
+class _CountedBody(io.RawIOBase):
+    """A request body of `size` bytes that counts how much of it was read."""
+    def __init__(self, size):
+        self.size, self.taken = size, 0
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        n = min(len(b), self.size - self.taken)
+        b[:n] = b'a' * n
+        self.taken += n
+        return n
+
+
+@pytest.mark.parametrize('length_told', [True, False], ids=['content-length', 'chunked'])
+@pytest.mark.parametrize('ctype', ['application/json', 'application/x-www-form-urlencoded'])
+def test_a_large_body_on_the_upload_route_is_not_read_before_the_sign_in(api, monkeypatch, ctype, length_told):
+    """The upload route takes as much as an upload does. A JSON or form body sent there was
+    read whole by the hook from a client not signed in yet, 12 MB here and up to the upload
+    cap in a real request, before require_auth answered 401."""
+    monkeypatch.setattr('pegaprox.app._check_api_rate_limit', lambda ip: True)
+    api.set_manager('cluster_1', api.make_fake_manager(cluster_id='cluster_1'))
+    size = 12 * 1024 * 1024
+    env = EnvironBuilder(path='/api/clusters/cluster_1/datastores/local/upload', method='POST',
+                         base_url='http://localhost', content_type=ctype,
+                         headers={'X-Requested-With': 'XMLHttpRequest',
+                                  'Origin': 'http://localhost'}).get_environ()
+    body = _CountedBody(size)
+    env['wsgi.input'] = io.BufferedReader(body)
+    if length_told:
+        env['CONTENT_LENGTH'] = str(size)
+    else:
+        env.pop('CONTENT_LENGTH', None)
+        env['HTTP_TRANSFER_ENCODING'] = 'chunked'
+        env['wsgi.input_terminated'] = True
+    status = []
+    b''.join(api.app.wsgi_app(env, lambda st, headers, *a: status.append(st)))
+    assert body.taken < 64 * 1024, f'{body.taken} bytes read before the sign-in'
+    assert status[0].startswith('401'), status
 
 
 def test_a_body_nested_too_deep_is_left_to_the_route(api, monkeypatch):
