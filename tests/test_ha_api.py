@@ -107,11 +107,19 @@ def _url_stand_in(url):
 @pytest.fixture
 def ha_env(api, tmp_path, monkeypatch):
     from pegaprox.core import ha
+    from pegaprox.core import federation as fed_core
     import pegaprox.api.ha as ha_api
     monkeypatch.setattr(ha, 'STATE_FILE', str(tmp_path / 'ha_state.json'))
     monkeypatch.setattr(ha, 'AES_KEY_FILE', str(tmp_path / '.pegaprox_aes256.key'))
     monkeypatch.setattr(ha, 'KNOWN_HOSTS_FILE', str(tmp_path / '.ssh_known_hosts'))
     monkeypatch.setattr(ha, 'BRANDING_DIR', str(tmp_path / 'branding'))
+    # a promotion adopts the federation identity of the old active
+    # (core/ha._promote -> federation.adopt_ha_federation_identity): the
+    # federation's state file is its own, and without a redirect the promote
+    # wrote it into the config directory the process started with
+    monkeypatch.setitem(fed_core._runtime, 'file',
+                        str(tmp_path / 'federation_state.json'))
+    fed_core._runtime.pop('instance_id_cache', None)
     if not hasattr(ha, 'valid_https_url'):
         monkeypatch.setattr(ha, 'valid_https_url', _url_stand_in, raising=False)
     env = types.SimpleNamespace(ha=ha, api=api, tmp=tmp_path, restarts=[], installed=[], calls=[])
@@ -123,6 +131,8 @@ def ha_env(api, tmp_path, monkeypatch):
         window.reset()
     yield env
     ha.reset_for_tests()
+    # an id cached for this test's state file must not answer for the next one
+    fed_core._runtime.pop('instance_id_cache', None)
     for window in (ha_api._pair_attempts, ha_api._peer_failures, ha_api._reauth_attempts):
         window.reset()
 

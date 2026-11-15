@@ -1386,6 +1386,20 @@ def _heartbeat_check():
         if plan_id in _cooldowns and now < _cooldowns[plan_id]:
             continue
 
+        # the worker lease check: a cluster enrolled in the federation fails over only
+        # while this instance holds a live lease on it - the replicas an emergency
+        # failover starts write on the target site. Held, without an outage clock:
+        # the clock starts fresh where this instance may act again.
+        try:
+            from pegaprox.core import federation as _fed
+            if not _fed.worker_takes_writes_for(plan.get('target_cluster') or ''):
+                _last_fail_times.pop(plan_id, None)
+                logger.info(f"[SR] Auto-failover for '{_sl(plan['name'])}' held: this instance "
+                            f"holds no live lease on its target cluster")
+                continue
+        except ImportError:
+            pass
+
         src_mgr = cluster_managers.get(plan['source_cluster'])
         if src_mgr is None:
             # "not configured in PegaProx" is not "the site is down", and folding the two

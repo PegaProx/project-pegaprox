@@ -562,6 +562,31 @@ def create_app():
         if request.method == 'POST' and m.group(2) is not None and any(
                 rx.fullmatch(m.group(2)) for rx in _FED_READ_ONLY_POST_RES):
             return None
+        # the caller first: a 409 that says whose the cluster is answers only a request
+        # with a valid login behind it. Without one the gate stands aside (return None)
+        # and the auth middleware of the route answers its 401 - a probe with nothing
+        # but an X-Requested-With must not learn from a FED_FOREIGN whether a cluster
+        # id exists and who owns it. The credentials checked are the ones require_auth
+        # accepts for these routes: a session (header, cookie, ?session=) or an API
+        # token, so the gate keeps holding token-authenticated writes as before.
+        try:
+            from pegaprox.utils.auth import validate_api_token, validate_session
+            _caller = None
+            for _sid in (request.headers.get('X-Session-ID'),
+                         request.cookies.get('session_id'),
+                         request.cookies.get('session'),
+                         request.args.get('session')):
+                if _sid:
+                    _caller = validate_session(_sid)
+                    if _caller:
+                        break
+            _authz = request.headers.get('Authorization', '')
+            if not _caller and _authz.startswith('Bearer pgx_'):
+                _caller = validate_api_token(_authz[7:])
+            if not _caller:
+                return None
+        except Exception:
+            pass
         from pegaprox.api.federation import refuse_unleased
         return refuse_unleased(m.group(1), f'Cluster {m.group(1)}')
 

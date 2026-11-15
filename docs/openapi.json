@@ -35,6 +35,12 @@
         "name": "X-PegaProx-Peer",
         "description": "Only for the other members of a standby group: the instance id of the caller, with X-PegaProx-Peer-Ts, -Nonce and -Sig, an Ed25519 signature over method, path, body, time, nonce and the instance id of the receiver, under the key every other member holds since the pairing. A member paired before the keys sends <its instance id>:<its own secret> until it has published one."
       },
+      "federationPeer": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-PegaProx-Peer",
+        "description": "Only for members of a federation: the instance id of the caller, with X-PegaProx-Peer-Ts, -Nonce and -Sig, an Ed25519 signature over method, path, body digest, time, nonce and the instance id of the receiver, over the federation's own signature domain, checked against the member key every other member holds since the pairing. A member the federation removed gets 410 FED_REMOVED."
+      },
       "sessionId": {
         "type": "apiKey",
         "in": "header",
@@ -791,7 +797,7 @@
     },
     "/api/auth/tokens/{token_id}": {
       "delete": {
-        "operationId": "auth._refuse_own_mirror_delete",
+        "operationId": "auth.revoke_api_token_endpoint_delete",
         "tags": [
           "auth"
         ],
@@ -806,7 +812,7 @@
             "description": "Not authenticated"
           }
         },
-        "summary": "409 when the signed-in user is a mirror of another federation member: their password, second factor and tokens are the home's to change. None when not.",
+        "summary": "Revoke an API token",
         "parameters": [
           {
             "name": "token_id",
@@ -50349,6 +50355,9 @@
           },
           "400": {
             "description": "Bad request"
+          },
+          "403": {
+            "description": "Wrong, expired or spent pairing code"
           }
         },
         "summary": "The joining instance's half of the pairing handshake.",
@@ -50363,7 +50372,8 @@
             }
           }
         },
-        "x-pegaprox-auth": "public"
+        "x-pegaprox-auth": "inline",
+        "security": []
       }
     },
     "/api/federation/peer/status": {
@@ -50380,17 +50390,17 @@
             "description": "Bad request"
           },
           "401": {
-            "description": "Not the paired instance"
+            "description": "Not a paired federation member"
           },
           "410": {
-            "description": "HA_REMOVED: the caller was removed from the group"
+            "description": "FED_REMOVED: the caller was removed from the federation"
           }
         },
         "summary": "Who we are, who we know, and a summary count. Signed by the asking member.",
-        "x-pegaprox-auth": "inline",
+        "x-pegaprox-auth": "federation-peer",
         "security": [
           {
-            "haPeer": []
+            "federationPeer": []
           }
         ]
       }
@@ -50409,10 +50419,10 @@
             "description": "Bad request"
           },
           "401": {
-            "description": "Not the paired instance"
+            "description": "Not a paired federation member"
           },
           "410": {
-            "description": "HA_REMOVED: the caller was removed from the group"
+            "description": "FED_REMOVED: the caller was removed from the federation"
           }
         },
         "summary": "A member tells us of another: any member may vouch, as the issuer of a pairing tells the members that paired before. The record is checked as a pairing's is.",
@@ -50426,10 +50436,10 @@
             }
           }
         },
-        "x-pegaprox-auth": "inline",
+        "x-pegaprox-auth": "federation-peer",
         "security": [
           {
-            "haPeer": []
+            "federationPeer": []
           }
         ]
       }
@@ -50448,10 +50458,10 @@
             "description": "Bad request"
           },
           "401": {
-            "description": "Not the paired instance"
+            "description": "Not a paired federation member"
           },
           "410": {
-            "description": "HA_REMOVED: the caller was removed from the group"
+            "description": "FED_REMOVED: the caller was removed from the federation"
           }
         },
         "summary": "A member tells us another is out. It lands as a tombstone: the next call of the removed member hears 410 and knows to let go.",
@@ -50465,10 +50475,10 @@
             }
           }
         },
-        "x-pegaprox-auth": "inline",
+        "x-pegaprox-auth": "federation-peer",
         "security": [
           {
-            "haPeer": []
+            "federationPeer": []
           }
         ]
       }
@@ -50487,10 +50497,10 @@
             "description": "Bad request"
           },
           "401": {
-            "description": "Not the paired instance"
+            "description": "Not a paired federation member"
           },
           "410": {
-            "description": "HA_REMOVED: the caller was removed from the group"
+            "description": "FED_REMOVED: the caller was removed from the federation"
           }
         },
         "summary": "A member leaves the federation; the push it makes on its way out. Only the leaving member's own signature says this - no member can throw another out by claiming it left.",
@@ -50504,10 +50514,10 @@
             }
           }
         },
-        "x-pegaprox-auth": "inline",
+        "x-pegaprox-auth": "federation-peer",
         "security": [
           {
-            "haPeer": []
+            "federationPeer": []
           }
         ]
       }
@@ -50532,7 +50542,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "This instance, its members and the reachability it last saw. members carries what the registry holds; reachable says which answered a status call just now.",
+        "summary": "This instance, its members and the reachability it last saw. members carries what the registry holds; reachable says which answered a status call just now. The member calls go out side by side - up to four at once, one silent site costs its own timeout and not the sum of everybody's.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -50567,6 +50577,7 @@
             "description": "Insufficient permissions"
           }
         },
+        "summary": "The registry - the whole deployment's trust surface. An admin capped to a tenant or a set of clusters has no business reading who else is in the federation.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -50830,17 +50841,17 @@
             "description": "Bad request"
           },
           "401": {
-            "description": "Not the paired instance"
+            "description": "Not a paired federation member"
           },
           "410": {
-            "description": "HA_REMOVED: the caller was removed from the group"
+            "description": "FED_REMOVED: the caller was removed from the federation"
           }
         },
-        "summary": "The users, custom roles and API tokens homed at this instance, and the deletes noted here - what another member pulls to mirror our identities. Signed by the asking member; an If-None-Match it sends against the etag it holds turns the answer into a 304, as the HA snapshot poll does it. Nothing homed at another member is served: a member answers for itself alone.",
-        "x-pegaprox-auth": "inline",
+        "summary": "The identity snapshot, signed by this member's federation key: the body travels under TLS, but the answer also carries the member's own signature over the body digest and the moment - a caller without a cert pin can still tell who answered (the answer signature).",
+        "x-pegaprox-auth": "federation-peer",
         "security": [
           {
-            "haPeer": []
+            "federationPeer": []
           }
         ]
       }
@@ -50904,10 +50915,10 @@
             "description": "Bad request"
           },
           "401": {
-            "description": "Not the paired instance"
+            "description": "Not a paired federation member"
           },
           "410": {
-            "description": "HA_REMOVED: the caller was removed from the group"
+            "description": "FED_REMOVED: the caller was removed from the federation"
           }
         },
         "summary": "One member's ask for a lease on a cluster - or its word that it is done with one. Signed by the asking member; a member asks for its own lease alone, and a promise it wins here is on this disk before the grant leaves.",
@@ -50921,10 +50932,10 @@
             }
           }
         },
-        "x-pegaprox-auth": "inline",
+        "x-pegaprox-auth": "federation-peer",
         "security": [
           {
-            "haPeer": []
+            "federationPeer": []
           }
         ]
       }
@@ -50943,17 +50954,17 @@
             "description": "Bad request"
           },
           "401": {
-            "description": "Not the paired instance"
+            "description": "Not a paired federation member"
           },
           "410": {
-            "description": "HA_REMOVED: the caller was removed from the group"
+            "description": "FED_REMOVED: the caller was removed from the federation"
           }
         },
         "summary": "What this instance leads, for the overview of the member that asks: names, type and counts alone - a login never travels in this answer.",
-        "x-pegaprox-auth": "inline",
+        "x-pegaprox-auth": "federation-peer",
         "security": [
           {
-            "haPeer": []
+            "federationPeer": []
           }
         ]
       }

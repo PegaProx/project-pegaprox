@@ -9504,7 +9504,7 @@
                                 <QnetdHostsPanel t={t} addToast={addToast} getAuthHeaders={getAuthHeaders} />
                             )}
 
-                            {/* MK Nov 2026 - the federation of instances: members, identities, leases, adoption */}
+                            {/* LW Nov 2026 - the federation of instances: members, identities, leases, adoption */}
                             {activeTab === 'federation' && isAdmin && (
                                 <FederationPanel t={t} addToast={addToast} getAuthHeaders={getAuthHeaders} />
                             )}
@@ -10342,7 +10342,7 @@
             );
         }
 
-        // MK Nov 2026 - the federation of instances (three leaders): members, identities,
+        // LW Nov 2026 - the federation of instances (three leaders): members, identities,
         // cluster leases and the disaster-recovery adoption, on the API the federation
         // module serves (/api/federation/*). The panel polls two answers: the status
         // (who is here, who answers) and the leases (who leads what).

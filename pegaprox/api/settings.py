@@ -6412,6 +6412,25 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                       else f"=== Processing {node_name} ({idx+1}/{total}) ==="))
             logging.info(f"[RollingUpdate] Processing node: {node_name}")
 
+            # the worker lease check: a cluster enrolled in the federation takes a rolling
+            # update only while this instance holds a live lease on it - every phase of a
+            # node (evacuate, update, reboot) writes on the cluster. The run waits, paused,
+            # until it does; Cancel ends it as any other hold.
+            try:
+                from pegaprox.core import federation as _fed
+                if not _fed.worker_takes_writes_for(cluster_id):
+                    status = _hold('federation_lease', 'paused_lease',
+                                   {'node': node_name,
+                                    'message': 'This instance holds no live federation lease '
+                                               'on the cluster - the run waits for it.'},
+                                   {'index': idx, 'phase': from_phase},
+                                   f"⏸ PAUSED - no live federation lease on {cluster_id}. "
+                                   f"Continue once this instance holds it, or Cancel.")
+                    if status != 'running':
+                        break
+            except ImportError:
+                pass
+
             try:
                 if run_node(idx, node_name, from_phase, resuming and resume.get('recheck', True)) == 'stop':
                     break

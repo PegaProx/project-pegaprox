@@ -20680,6 +20680,15 @@ echo "AGENT_INSTALLED_OK"
         # standby instance: no migrations from here (defence in depth, see start_ha_monitor)
         if not ha.is_active():
             return
+        # the worker lease check: a cluster enrolled in the federation is balanced only
+        # while this instance holds a live lease on it - every move the balancer makes
+        # is a write on the cluster
+        try:
+            from pegaprox.core import federation as _fed
+            if not _fed.worker_takes_writes_for(self.id):
+                return
+        except ImportError:
+            pass
         try:
             self.logger.info("=" * 60)
             self.logger.info(f"Starting balance check for cluster: {self.config.name}")

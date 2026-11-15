@@ -82,6 +82,10 @@ class FederationError(Exception):
 def _default_state():
     return {'instance_id': '', 'signing_key': '', 'site': '', 'members': {},
             'tombstones': {}, 'pairing': None, 'created_at': int(time.time()),
+            # CR10/32: the mark of the process that last wrote the state - a
+            # lease deadline a file from ANOTHER process names says nothing
+            # about this one's clock, and the load resets it (_apply_boot_reset)
+            'boot_id': '',
             # Phase 3: the leases held here and the promises given - state like the
             # rest, persisted and read back (a key not named here is dropped on
             # load, as _load takes only what the default knows)
@@ -115,15 +119,20 @@ def _load():
     of it (as ha._load is for the HA group)."""
     raw = _read(_runtime['file'])
     if raw is None:
-        return _default_state()
-    state = _default_state()
-    state.update({k: raw[k] for k in state if k in raw})
+        state = _default_state()
+    else:
+        state = _default_state()
+        state.update({k: raw[k] for k in state if k in raw})
     for key in ('members', 'tombstones'):
         if not isinstance(state[key], dict):
             state[key] = {}
     # a reboot resets CLOCK_BOOTTIME: deadlines written before it would lie far in
     # the future and block every takeover - they move to now (which expires them)
     _reset_rebooted_lease_clocks(state)
+    # CR10/32: and the boot marker catches what the horizon cannot see - a state
+    # file another PROCESS wrote (a restart, a crash, a promotion) carries
+    # deadlines of a clock this process never ran
+    _apply_boot_reset(state)
     return state
 
 
@@ -867,6 +876,11 @@ def _pinned_session(fingerprint):
             kw['cert_reqs'] = 'CERT_NONE'
             return super().init_poolmanager(*args, **kw)
 
+    # the pin IS the verification: a verify left on (the session's default) makes
+    # requests override the adapter's cert_reqs, and the chain check refuses the
+    # self-signed certificate the fingerprint belongs to before the fingerprint
+    # ever ran. Off here - the fingerprint alone decides, fail closed on a mismatch.
+    s.verify = False
     s.mount('https://', _Pinned())
     return s
 
@@ -882,7 +896,10 @@ def _post(url, path, body, fingerprint='', timeout=10):
         return transport(url, 'POST', path, body, fingerprint, timeout)
     try:
         s = _pinned_session(fingerprint)
+        # no redirects: a 307/308 would carry the body of the join to whatever the
+        # peer's Location names - another host, another member - unchecked
         r = s.post(url + path, data=ha_wire.wire_body(body), timeout=timeout,
+                   allow_redirects=False,
                    headers={'Content-Type': 'application/json',
                             'X-Requested-With': PEER_XHR})
         try:
@@ -913,14 +930,25 @@ def _deliver(url, receiver, method, path, body, fingerprint='', timeout=10,
             # the worst a wrong one does is fetch a body that was due anyway
             headers.update({k: v for k, v in extra_headers.items()
                             if isinstance(k, str) and isinstance(v, str)})
+        # no redirects: a 307/308 repeats the request - with these signed headers -
+        # at whatever the peer's Location names, another host entirely
         r = s.request(method, url + path,
                       data=ha_wire.wire_body(body) if body is not None else None,
-                      headers=headers, timeout=timeout)
-        if len(r.content or b'') > cap:
-            logging.warning(f"[FED] answer of {url}{path} over {cap} bytes - refused")
-            return r.status_code, None
+                      headers=headers, timeout=timeout, allow_redirects=False,
+                      stream=True)
+        # streamed, and only up to the cap: an answer that runs past it is cut off
+        # here, not buffered whole first
+        chunks = []
+        size = 0
+        for chunk in r.iter_content(chunk_size=65536):
+            size += len(chunk or b'')
+            if size > cap:
+                logging.warning(f"[FED] answer of {url}{path} over {cap} bytes - refused")
+                r.close()
+                return (r.status_code, None, {}) if with_headers else (r.status_code, None)
+            chunks.append(chunk)
         try:
-            data = r.json()
+            data = json.loads(b''.join(chunks))
         except Exception:
             data = None
         if with_headers:
@@ -1203,7 +1231,29 @@ def apply_identity_snapshot(body, sender=None):
     import base64 as _b64
     rows_in, tombs_in = body['rows'], body.get('tombstones') or []
     report = {'applied': 0, 'updated': 0, 'deleted': 0, 'tombstoned': 0,
-              'conflicts': []}
+              'conflicts': [], 'confiscated': 0}
+    # 15: a snapshot of a home this registry does not know, over an EMPTY registry -
+    # the federation state did not ride the HA sync, and the promoted standby holds
+    # nothing that says who is who. The rows still apply (a repair tool reading a
+    # saved snapshot), but as confiscated: readable, enabled=0, nobody signs in with
+    # them until an admin here takes them over or drops them
+    known_members = members()
+    confiscate = home not in known_members and not known_members
+    if confiscate:
+        report['conflicts'].append(
+            f'the home {home[:8]}… is no member and this registry holds no members '
+            f'- its mirrors arrive confiscated (enabled = 0)')
+    # 13: the custom role names this same snapshot carries, so a role the home
+    # defines itself counts as one that exists here the moment its row lands
+    incoming_roles = set()
+    if isinstance(rows_in.get('custom_roles'), list):
+        for r in rows_in['custom_roles']:
+            if isinstance(r, dict) and isinstance(r.get('name'), str):
+                incoming_roles.add(r['name'])
+    # 12: what this snapshot changed here, one note per change - written to the
+    # audit log after the commit, so no member's write on another's accounts
+    # happens off the record
+    audit_notes = []
     changed_users = set()
     dropped_users = set()
     conn = _identities_conn()
@@ -1227,8 +1277,9 @@ def apply_identity_snapshot(body, sender=None):
                 continue
             if table in BLOB_COLUMNS:
                 key_vals = tuple(_b64.b64decode(v) for v in key_vals)
-            _drop_row(conn, table, keys, key_vals, home, dropped_users)
-            report['tombstoned'] += 1
+            if _drop_row(conn, table, keys, key_vals, home, dropped_users):
+                report['tombstoned'] += 1
+                audit_notes.append((kind, key, ' (deleted)', False))
         for table in IDENTITY_TABLES:
             kind = IDENTITY_KIND[table]
             keys, cols = IDENTITY_KEYS[table], IDENTITY_COLUMNS[table]
@@ -1278,6 +1329,21 @@ def apply_identity_snapshot(body, sender=None):
                 for c in blobs:
                     v = values.get(c)
                     values[c] = _b64.b64decode(v) if isinstance(v, str) else v
+                # 13: a tenant or a role never crosses by name - B's tenant
+                # 'customer' and A's tenant 'customer' are two tenants, and a user
+                # confined to one must not land in the other. What does not
+                # resolve HERE lands least-privileged, with the conflict said
+                if kind == 'user':
+                    values['tenant'], values['role'], scope_conflicts = \
+                        _resolve_user_scope(conn, row, incoming_roles)
+                    report['conflicts'].extend(scope_conflicts)
+                    # 15: the confiscated mirror - enabled=0 however it arrives, a
+                    # session it already opened here does not survive that
+                    if confiscate and values.get('enabled'):
+                        values['enabled'] = 0
+                        report['confiscated'] += 1
+                        if held is not None and held['enabled']:
+                            changed_users.add(key_vals[0])
                 # the username ownership check: a mirrored token or passkey must
                 # not land on a username that is a LOCAL account (or another
                 # member's) - it would authenticate as that user
@@ -1297,6 +1363,9 @@ def apply_identity_snapshot(body, sender=None):
                     conn.execute(f'INSERT INTO "{table}" ({fields}) VALUES ({marks})',
                                  ins_vals + [''] * len(clear) + [home])
                     report['applied'] += 1
+                    _note_change(audit_notes, kind, key_vals[0], '',
+                                 values.get('role') if kind == 'user' else None,
+                                 confiscate and kind == 'user')
                 else:
                     sets = ', '.join(f'"{c}" = ?' for c in cols if c not in keys)
                     sets += ''.join(f", \"{c}\" = ''" for c in clear)
@@ -1305,6 +1374,9 @@ def apply_identity_snapshot(body, sender=None):
                                  f'WHERE {kwhere}',
                                  vals + [home, *sql_keys])
                     report['updated'] += 1
+                    _note_change(audit_notes, kind, key_vals[0], ' (updated)',
+                                 values.get('role') if kind == 'user' else None,
+                                 confiscate and kind == 'user')
                 if kind == 'user':
                     if held is None or (held['password_hash'] or '') != (row.get('password_hash') or '') \
                             or (1 if row.get('enabled') else 0) != (1 if held['enabled'] else 0):
@@ -1319,12 +1391,14 @@ def apply_identity_snapshot(body, sender=None):
                 key_vals = tuple(_b64.b64encode(v).decode() if isinstance(v, bytes)
                                  else v for v in raw)
                 if key_vals not in keep:
-                    _drop_row(conn, table, keys, raw, home, dropped_users, key_vals)
-                    report['deleted'] += 1
+                    if _drop_row(conn, table, keys, raw, home, dropped_users,
+                                 key_vals):
+                        report['deleted'] += 1
+                        audit_notes.append((kind, key_vals[0], ' (deleted)', False))
         # Phase 4: the clusters the home leads become mirrors in the same
         # transaction - one snapshot, one commit, and the etag below only says
         # 'pulled' when both halves went in
-        _apply_cluster_mirrors(home, body.get('clusters'), report)
+        _apply_cluster_mirrors(home, body.get('clusters'), report, audit_notes)
         conn.commit()
     except Exception:
         try:
@@ -1342,6 +1416,25 @@ def apply_identity_snapshot(body, sender=None):
         rbac.invalidate_roles_cache()
     except Exception:
         pass
+    # 12: every change the snapshot took is in THIS instance's audit log - the
+    # tamper-proof record of the receiver, not the sender's word about it. What a
+    # member did to the accounts of the others stands somewhere it cannot reach
+    if audit_notes:
+        try:
+            from pegaprox.utils.audit import log_audit
+            for kind, key, extra, warn in audit_notes:
+                key = str(key)[:64]
+                log_audit('system', 'federation.identity_applied',
+                          f'{kind} "{key}" from {home[:8]}…{extra}',
+                          ip_address='federation')
+                if warn:
+                    # the escalation is the one entry that must not read as
+                    # routine: a mirrored admin is a grant this site received,
+                    # and it goes to the log as a warning on top of the audit row
+                    logging.warning(f'[FED] the mirror of {home[:8]}… granted the '
+                                    f'admin role: {kind} "{key}"')
+        except Exception as e:
+            logging.warning(f'[FED] the applied snapshot could not be audited: {e}')
     _note_pull(home, body.get('etag') or '', report)
     return report
 
@@ -1370,11 +1463,75 @@ def _clashes_locally(conn, keys, key_vals):
     return row is not None
 
 
+def _tenant_here(conn, tenant_id):
+    """Whether a tenant of exactly this ID exists here (13): ids, not names - two
+    instances may each hold a 'customer', and they are not the same tenant however
+    they are spelled. A table that cannot be read answers 'not here': the fallback
+    is the least-privileged one, never the hopeful one."""
+    try:
+        return conn.execute('SELECT 1 FROM tenants WHERE id = ?',
+                            (tenant_id,)).fetchone() is not None
+    except Exception:
+        return False
+
+
+def _custom_role_here(conn, name):
+    """Whether a custom role of this name sits in this instance's table - local or
+    mirrored, rbac resolves the name across homes (13)."""
+    try:
+        return conn.execute(
+            "SELECT 1 FROM custom_roles WHERE COALESCE(name, '') = COALESCE(?, '')",
+            (name,)).fetchone() is not None
+    except Exception:
+        return False
+
+
+def _resolve_user_scope(conn, row, incoming_roles):
+    """The tenant and the role a mirrored user may take HERE (13): a tenant that
+    names no tenant of this instance does not cross over, and neither does a role
+    this instance does not hold - the builtin three always resolve, a custom one
+    only where its row sits (here already, or in this same snapshot). What does
+    not resolve lands least-privileged - tenant 'default', role 'viewer' - and the
+    conflict says so; an empty tenant (a global account) crosses as it is."""
+    from pegaprox.models.permissions import BUILTIN_ROLES
+    username = row.get('username') if isinstance(row.get('username'), str) else ''
+    conflicts = []
+    tenant, role = row.get('tenant'), row.get('role')
+    if isinstance(tenant, str) and tenant and not _tenant_here(conn, tenant):
+        conflicts.append(f'user "{username}" names tenant "{tenant[:40]}" - no '
+                         f'tenant of that id here; confined to default as viewer')
+        return 'default', 'viewer', conflicts
+    if not isinstance(role, str) or not role:
+        role = 'viewer'
+    elif role not in BUILTIN_ROLES and role not in incoming_roles \
+            and not _custom_role_here(conn, role):
+        conflicts.append(f'user "{username}" carries role "{role[:40]}" - no such '
+                         f'role here; viewer instead')
+        role = 'viewer'
+    return tenant, role, conflicts
+
+
+def _note_change(audit_notes, kind, key, extra, role=None, confiscated=False):
+    """One audit note for one applied change (12): kind, key, what happened, and
+    whether the row landed carrying the admin role - the one grant the receiver's
+    log must not let read as routine."""
+    parts = [extra] if extra else []
+    warn = False
+    if role == 'admin':
+        parts.append('role admin')
+        warn = True
+    if confiscated:
+        parts.append('confiscated')
+    audit_notes.append(
+        (kind, key, f' ({", ".join(parts)})' if parts else '', warn))
+
+
 def _drop_row(conn, table, keys, sql_keys, home, dropped_users, logical_keys=None):
     """Delete one mirrored row (and what hangs on it, for a user: grants, favorites,
     open sessions) - but ONLY if the row actually belongs to the home the snapshot
     names. A local account of the same username is never touched by another
-    member's delete."""
+    member's delete. Returns whether a row actually went (12: only a real change
+    is an audit entry)."""
     kwhere = _key_where(keys)
     # Critical #3: check that the row is actually this home's mirror before
     # purging grants and sessions - a local row of the same name stays
@@ -1383,7 +1540,7 @@ def _drop_row(conn, table, keys, sql_keys, home, dropped_users, logical_keys=Non
         check = conn.execute(
             f'SELECT fed_home FROM "{table}" WHERE {kwhere}', sql_keys).fetchone()
         if check is None or check['fed_home'] != home:
-            return  # not this home's mirror: the delete does not reach it
+            return False  # not this home's mirror: the delete does not reach it
         try:
             from pegaprox.core.db import get_db
             get_db().purge_user_grants(name)
@@ -1391,8 +1548,9 @@ def _drop_row(conn, table, keys, sql_keys, home, dropped_users, logical_keys=Non
         except Exception as e:
             logging.warning(f"[FED] could not purge the grants of {name}: {e}")
         dropped_users.add(name)
-    conn.execute(f'DELETE FROM "{table}" WHERE {kwhere} AND fed_home = ?',
-                 (*sql_keys, home))
+    cur = conn.execute(f'DELETE FROM "{table}" WHERE {kwhere} AND fed_home = ?',
+                       (*sql_keys, home))
+    return bool(cur.rowcount)
 
 
 def _end_sessions_of(username):
@@ -1613,6 +1771,45 @@ def _reset_rebooted_lease_clocks(state):
     if reset:
         logging.warning(f'[FED] {reset} lease deadline(s) reset to now - the lease '
                         'clock restarted underneath them')
+
+
+def _apply_boot_reset(state):
+    """The CR10 reboot reset, built this time: a boot_id in the state file marks the
+    process that wrote it, and a fresh process draws its own on the first load. A
+    file whose boot_id is not this process's carries lease deadlines granted on a
+    clock this process never ran - a service restart leaves CLOCK_BOOTTIME running,
+    so the horizon check above cannot tell them from live ones, and an old lease
+    would hold its gate for the minutes it had left of a life that already ended.
+    Every deadline (owned leases, promises given) moves to now - expired, not
+    forgotten - while the terms survive: a new candidate still needs a higher one,
+    and the holder wins its lease back with a fresh round of votes, never by
+    inheritance."""
+    boot = _runtime.get('boot_id')
+    if not boot:
+        boot = _runtime['boot_id'] = secrets.token_hex(16)
+    if state.get('boot_id') == boot:
+        return
+    now = _lease_now()
+    reset = 0
+    promises = state.get('lease_promises')
+    if isinstance(promises, dict):
+        for rec in promises.values():
+            if isinstance(rec, dict) and rec.get('until') != now:
+                rec['until'] = now
+                reset += 1
+    leases = state.get('my_leases')
+    if isinstance(leases, dict):
+        for rec in leases.values():
+            if isinstance(rec, dict) and rec.get('expires') != now:
+                rec['expires'] = now
+                reset += 1
+    # the file learns this process's mark with the next save; until then every
+    # load finds the same foreign one and resets again - harmlessly, for the
+    # deadlines it reads are the same dead ones
+    state['boot_id'] = boot
+    if reset:
+        logging.warning(f'[FED] {reset} lease deadline(s) reset to now - the state '
+                        'file was written by another process (boot id differs)')
 
 
 def _lease_check_vote(candidate, cluster_id, term, lease_s, now=None):
@@ -2046,12 +2243,16 @@ def enrolled_cluster_rows():
                               f'snapshot: {e}')
 
 
-def _apply_cluster_mirrors(home, rows_in, report):
+def _apply_cluster_mirrors(home, rows_in, report, audit_notes=None):
     """The mirror half of the cluster sync: rows the home leads become mirrors
     here. A local cluster (unenrolled, '') or one this instance leads is never
-    touched - an id that collides goes to the report, not over the local row."""
+    touched - an id that collides goes to the report, not over the local row.
+    The changes land in `audit_notes` as the identity rows do (12): a cluster
+    mirror is a row this snapshot changed, and it is on the record too."""
     if not isinstance(rows_in, list):
         return
+    if audit_notes is None:
+        audit_notes = []
     conn = _identities_conn()
     cols = CLUSTER_SYNC_COLUMNS
     keep = set()
@@ -2088,11 +2289,13 @@ def _apply_cluster_mirrors(home, rows_in, report):
             conn.execute(f'INSERT INTO clusters ({fields}) VALUES ({marks})',
                          [cid] + values + [home])
             report['applied'] += 1
+            audit_notes.append(('cluster', cid, '', False))
         else:
             sets = ', '.join(f'"{c}" = ?' for c in cols if c != 'id')
             conn.execute(f'UPDATE clusters SET {sets}, fed_owner = ? WHERE id = ?',
                          values + [home, cid])
             report['updated'] += 1
+            audit_notes.append(('cluster', cid, ' (updated)', False))
     # a mirror of the home that the snapshot no longer lists is gone at the home:
     # gone here too. Local rows and this instance's own are not in the WHERE.
     for held_row in conn.execute('SELECT id FROM clusters WHERE fed_owner = ?',
@@ -2101,6 +2304,7 @@ def _apply_cluster_mirrors(home, rows_in, report):
             conn.execute('DELETE FROM clusters WHERE id = ? AND fed_owner = ?',
                          (held_row['id'], home))
             report['deleted'] += 1
+            audit_notes.append(('cluster', held_row['id'], ' (deleted)', False))
 
 
 def _cluster_mirror_body():
@@ -2185,12 +2389,27 @@ def _remember_field_keys(keys, only_self_of=None):
     _mutate(go)
 
 
+def _owner_released_lease(owner, cluster_id):
+    """Whether this voter's promise says the owner GAVE THE LEASE BACK (#27): a
+    release (until = 0 on the owner's own promise) is the owner's word that it is
+    done writing - the handover permission, said while the owner still answers.
+    Without a promise, or with one that never came from this owner, the release
+    is not this instance's to claim."""
+    promised = (_load().get('lease_promises') or {}).get(cluster_id) or {}
+    return promised.get('candidate') == owner and not promised.get('until')
+
+
 def adopt_cluster(cluster_id, force=False):
     """Take over the cluster of a member that is gone for good. The lease is the
     fence: the voters grant it only past the old owner's promise, so a live
-    owner (or a partitioned one, until its lease runs out) blocks the adoption.
-    The mirrored credentials open under the owner's field key and seal under
-    this instance's own. Raises FederationError with what stands in the way."""
+    owner (or a partitioned one, until its lease runs out) blocks the adoption -
+    unless it RELEASED the lease: the release is the permission to take over
+    while the owner still answers (#27), for an owner that has handed its lease
+    back writes nothing itself and nobody else could ever take the cluster. The
+    mirrored credentials open under the owner's field key and seal under this
+    instance's own; a re-encrypt that fails leaves the lease won and the row as
+    it was, so the adoption is retryable without force (#33). Raises
+    FederationError with what stands in the way."""
     if not CLUSTER_ID_RE.fullmatch(cluster_id or ''):
         raise FederationError('That cluster id cannot be adopted')
     owner = cluster_owner(cluster_id)
@@ -2201,27 +2420,37 @@ def adopt_cluster(cluster_id, force=False):
         raise FederationError('That cluster is this instance\'s own already')
     if owner == instance_id():
         raise FederationError('That cluster is already led here')
-    # the belt before the fence: an owner that answers is not gone
-    status, _ = call_peer(owner, 'GET', STATUS_PATH, timeout=5)
-    if status == 200:
-        raise FederationError('The owner answered - it is not gone. Take the '
-                              'cluster over there, or remove the member first')
+    mine = my_leases().get(cluster_id) or {}
+    already = _lease_now() < (mine.get('expires') or 0)
+    if not already:
+        # the belt before the fence: an owner that answers is not gone - unless
+        # it gave the lease back, which is the handover it promised (#27)
+        status, _ = call_peer(owner, 'GET', STATUS_PATH, timeout=5)
+        if status == 200 and not _owner_released_lease(owner, cluster_id):
+            raise FederationError('The owner answered - it is not gone. Take the '
+                                  'cluster over there, or remove the member first')
     keys = peer_field_keys()
     key = keys.get(owner)
     if not key and not force:
         raise FederationError(f'The field key of the owner is not held here - '
                               f'without it the credentials cannot cross over')
-    lease = acquire_lease_arch(cluster_id)
-    if lease.get('failed'):
-        raise FederationError(f'The federation did not back the takeover '
-                              f'({lease.get("votes")}/{lease.get("needed")} votes) '
-                              f'- the owner\'s lease may still stand')
+    if already:
+        # 33: a takeover that broke after the lease was won leaves the lease
+        # here - the retry picks it up and goes straight at the credentials
+        lease = dict(mine, cluster_id=cluster_id)
+    else:
+        lease = acquire_lease_arch(cluster_id)
+        if lease.get('failed'):
+            raise FederationError(f'The federation did not back the takeover '
+                                  f'({lease.get("votes")}/{lease.get("needed")} votes) '
+                                  f'- the owner\'s lease may still stand')
     try:
         _reseat_credentials(cluster_id, owner, key, force)
     except FederationError:
-        # the failed-takeover rollback: the credentials did not cross - the lease goes back, the
-        # cluster stays where it was instead of locking on an orphan
-        release_lease(cluster_id)
+        # 33: the re-encrypt failed - the lease STAYS (a retry without force
+        # finds it here and tries the credentials again), and the old,
+        # foreign-sealed row stays untouched: no half-taken-over cluster, no
+        # credentials cleared by an error that was nobody's decision
         raise
     _set_cluster_owner(cluster_id, instance_id())
     return lease
@@ -2360,11 +2589,23 @@ def federation_clusters():
             # so a member with ten thousand rows cannot flood the panel
             for r in body['clusters'][:100]:
                 if isinstance(r, dict) and CLUSTER_ID_RE.fullmatch(r.get('id') or ''):
-                    rows.append({'id': r['id'],
-                                 'name': str(r.get('name') or '')[:80],
-                                 'type': r.get('type') or 'proxmox',
-                                 'enabled': bool(r.get('enabled')),
-                                 'enrolled': bool(r.get('enrolled'))})
+                    rec_out = {'id': r['id'],
+                               'name': str(r.get('name') or '')[:80],
+                               'type': r.get('type') or 'proxmox',
+                               'enabled': bool(r.get('enabled')),
+                               'enrolled': bool(r.get('enrolled'))}
+                    # 35: the peer's counts and its connection state cross with
+                    # the row - dropped here, the linked view showed every
+                    # foreign cluster as '-' no matter what its owner knew.
+                    # Checked as strictly as the rest: a count is a plain
+                    # number, a state a plain yes or no, nothing else rides
+                    for field, cast in (('nodes', int), ('vms', int)):
+                        v = r.get(field)
+                        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+                            rec_out[field] = v
+                    if 'connected' in r:
+                        rec_out['connected'] = bool(r.get('connected'))
+                    rows.append(rec_out)
             return iid, {'site': rec.get('site') or '', 'clusters': rows}
         return iid, {'site': rec.get('site') or '', 'clusters': None}
     out = {'self': own_clusters_body(), 'peers': {}}

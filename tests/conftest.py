@@ -39,6 +39,38 @@ from pegaprox.background import metrics_store as _metrics_store  # noqa: E402
 _metrics_store.start_backfill = lambda delay=60: None
 _metrics_store._check_every_save = True
 
+# The first import of pegaprox.api.settings builds a database: the module runs
+# load_ip_whitelist() at import, which calls get_db() with whatever the db
+# module's globals say - and until a fixture points them elsewhere that is
+# constants.CONFIG_DIR, the checkout's config/ next to a developer's live
+# instance (or PEGAPROX_CONFIG_DIR). The session's DEFAULTS live in a throwaway
+# dir from here on: a get_db() that runs before any per-test redirect builds a
+# database nobody misses. The per-test fixtures (db, _integration_app) re-point
+# these as before; they save what they find and restore it.
+import atexit as _atexit  # noqa: E402
+import tempfile as _tempfile  # noqa: E402
+import pegaprox.constants as _constants  # noqa: E402
+import pegaprox.core.db as _dbmod  # noqa: E402
+_BOOT_CONFIG_DIR = _tempfile.mkdtemp(prefix='pp_test_boot_')
+_dbmod.CONFIG_DIR = _BOOT_CONFIG_DIR
+_dbmod.DATABASE_FILE = os.path.join(_BOOT_CONFIG_DIR, 'pegaprox.db')
+_dbmod.KEY_FILE = os.path.join(_BOOT_CONFIG_DIR, '.pegaprox.key')
+# core/dbcrypto's heavy reads and core/keystore's legacy tier read these two
+# straight from the constants module at call time, not from the db module
+_constants.DATABASE_FILE = _dbmod.DATABASE_FILE
+_constants.KEY_FILE = _dbmod.KEY_FILE
+# the same for the federation state file: a promotion adopts the federation
+# identity of the old active (core/ha._promote -> federation's identity
+# adoption), and any test that runs one without its own state file wrote
+# federation_state.json into the config directory the process started with.
+# Harnesses that manage a state file per test (the federation suites, the HA
+# env) override this; this is only the default nobody should land on.
+import pegaprox.core.federation as _federation  # noqa: E402
+_FED_STATE = os.path.join(_BOOT_CONFIG_DIR, 'federation_state.json')
+_federation._STATE_FILE = _FED_STATE
+_federation._runtime['file'] = _FED_STATE
+_atexit.register(shutil.rmtree, _BOOT_CONFIG_DIR, True)
+
 
 def _poll(done):
     import gevent

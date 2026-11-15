@@ -109,6 +109,56 @@ def _fresh_budgets():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _defaults_out_of_the_config_dir(tmp_path, monkeypatch):
+    """Nothing a test here does may reach the config directory the process
+    started with - neither the checkout's config/ nor PEGAPROX_CONFIG_DIR, both
+    of which sit next to a live database. The conftest already moves the
+    session's defaults into a throwaway dir (the import-time database the
+    api.settings module builds among them); this tightens it to this test's
+    tmp dir, because a federation test writes through three defaults:
+
+    * the DEFAULT database: every get_db() outside a side's own at_db() - the
+      audit entry a join writes, the sessions a login saves;
+    * the federation state file a call outside the at() swap would have taken
+      (the module binds it to CONFIG_DIR at import);
+    * the heavy reads of core/dbcrypto, which open constants.DATABASE_FILE
+      directly, whatever the db module was pointed at.
+
+    _db_of then swaps a side's own database in on top of that."""
+    import pegaprox.constants as constants
+    import pegaprox.core.db as db_mod
+    import pegaprox.core.dbcrypto as dbcrypto
+    from pegaprox.background import metrics_store
+    cfg = tmp_path / 'config'
+    cfg.mkdir()
+    saved = (db_mod.CONFIG_DIR, db_mod.DATABASE_FILE, db_mod.KEY_FILE,
+             constants.DATABASE_FILE)
+    db_mod.CONFIG_DIR = str(cfg)
+    db_mod.DATABASE_FILE = str(cfg / 'pegaprox.db')
+    db_mod.KEY_FILE = str(cfg / '.pegaprox.key')
+    constants.DATABASE_FILE = db_mod.DATABASE_FILE
+    # the field-key fallback (field_key_b64) and the import-time state file name
+    monkeypatch.setattr(federation, 'CONFIG_DIR', str(cfg))
+    monkeypatch.setitem(federation._runtime, 'file',
+                        str(tmp_path / 'federation_state.json'))
+    federation._runtime.pop('instance_id_cache', None)
+    # a default database left over from the test before would keep its handle
+    db_mod._db = None
+    db_mod.PegaProxDB._instance = None
+    dbcrypto._HEAVY_CACHE.clear()
+    metrics_store.forget()
+    yield
+    db_mod._db = None
+    db_mod.PegaProxDB._instance = None
+    db_mod.CONFIG_DIR, db_mod.DATABASE_FILE, db_mod.KEY_FILE, \
+        constants.DATABASE_FILE = saved
+    dbcrypto._HEAVY_CACHE.clear()
+    metrics_store.forget()
+    # an id cached for this test's state file must not answer for the next one
+    federation._runtime.pop('instance_id_cache', None)
+
+
 @pytest.fixture
 def sides(tmp_path):
     out = [Side(tmp_path, 'a'), Side(tmp_path, 'b')]
@@ -142,14 +192,15 @@ def _post(side, path, body=None, headers=None, query=''):
 
 
 def test_the_wire_says_the_word_the_csrf_gate_takes(sides):
-    """The CSRF gate of the real app (app.py) takes state-changing /api calls with no
-    Origin only when X-Requested-With says exactly XMLHttpRequest - the HA peer calls
-    send that word, and a federation call sends the same. A bare test client has no
-    gate, so this holds the word in place where the smoke test found it once."""
+    """The CSRF gate of the real app (app.py) takes state-changing /api calls with
+    no Origin only when X-Requested-With says exactly XMLHttpRequest - the HA peer
+    calls send that word, and a federation call sends the same. The gate itself is
+    held in place over the real app in tests/test_federation_auth_guards.py
+    (test_the_peer_word_passes_the_real_csrf_gate); what this side of the harness
+    pins is that signed_headers actually carry that word on every peer call."""
     a = sides[0]
     with at(a):
         headers = federation.signed_headers('0' * 32, 'GET', '/x')
-    assert federation.PEER_XHR == 'XMLHttpRequest'
     assert headers['X-Requested-With'] == federation.PEER_XHR
 
 
@@ -890,10 +941,10 @@ def test_a_role_delete_noted_here_is_served_there(identity_sides):
 
 
 def test_a_second_factor_never_travels_as_ciphertext(identity_sides):
-    """The E1 regression: a TOTP secret is ciphertext under the home's field key -
-    left on a mirror it breaks every reader of the users table (load_users answers
-    {} and no login works at all). The mirror carries the row without it, the flag
-    still travels, and the readers keep working."""
+    """A TOTP secret is ciphertext under the home's field key - left on a mirror
+    it breaks every reader of the users table (load_users answers {} and no
+    login works at all). The mirror carries the row without it, the flag still
+    travels, and the readers keep working."""
     a, b = identity_sides
     a_id = federation_ref_id(a)
     _pair_with_identities(a, b)
@@ -928,6 +979,52 @@ def test_a_second_factor_never_travels_as_ciphertext(identity_sides):
         row = conn.execute("SELECT totp_secret_encrypted FROM users "
                            "WHERE username = 'gina'").fetchone()
         assert row['totp_secret_encrypted'] == ''
+
+
+def test_a_user_disabled_at_the_home_is_signed_out_at_the_mirror(identity_sides):
+    """A disable at the home is a sign-out at the mirror: the enabled flag
+    travels with the row, and the sessions the account opened here do not
+    outlive it. Without this, turning an account off at its home instance
+    would leave a working sign-in at every other member."""
+    from pegaprox.utils import auth as auth_mod
+    a, b = identity_sides
+    a_id = federation_ref_id(a)
+    _pair_with_identities(a, b)
+    _add_local_user(a, 'oskar')
+    with at_db(a):
+        conn = _db_of(a).conn
+        conn.execute("UPDATE users SET enabled = 1 WHERE username = 'oskar'")
+        conn.commit()
+    with at_db(b):
+        federation.sync_identities()
+    # the mirror holds the account enabled; a session opened at the mirror works
+    with auth_mod.sessions_lock:
+        auth_mod.active_sessions.clear()
+    try:
+        with at_db(b):
+            with b.app.test_request_context('/', base_url=URL['b']):
+                sid = auth_mod.create_session('oskar', 'viewer')
+        with auth_mod.sessions_lock:
+            assert sid in auth_mod.active_sessions
+        # the home turns the account off; the next pull carries the flag
+        with at_db(a):
+            conn = _db_of(a).conn
+            conn.execute("UPDATE users SET enabled = 0 WHERE username = 'oskar'")
+            conn.commit()
+        with at_db(b):
+            report = federation.sync_identities()
+            row = _db_of(b).conn.execute(
+                "SELECT enabled, fed_home FROM users WHERE username = 'oskar'"
+            ).fetchone()
+        assert row['enabled'] == 0 and row['fed_home'] == a_id
+        # and the session the mirror had opened for the account is gone
+        with auth_mod.sessions_lock:
+            left = [s for s in auth_mod.active_sessions.values()
+                    if s.get('user') == 'oskar']
+        assert left == [], report
+    finally:
+        with auth_mod.sessions_lock:
+            auth_mod.active_sessions.clear()
 
 
 # --- partition leases (Phase 3) -------------------------------------------------------
@@ -1383,9 +1480,15 @@ def test_a_dropped_lease_recovers_across_a_fresh_voter(tmp_path):
 # --- the linked-mode view (the ELM view) ------------------------------------------------
 
 def test_the_view_lists_what_each_side_leads(tmp_path):
+    # the linked-mode view (federation_clusters) asks the peers from a thread
+    # pool; the shared test transport is not thread-safe (it swaps process-global
+    # runtime and db singletons). This test serializes by calling
+    # own_clusters_body directly for each side - the combined view is built from
+    # exactly these answers, so a mirror appears in it once, from its holder.
     """A's enrolled cluster shows at A as led, at B as the peer's; B's local
     cluster shows at B as local, at A as the peer's local one. A mirror never
-    shows as its holder's own."""
+    shows as its holder's own - which is what keeps it to one entry in the
+    combined view: only the holder's own list carries it."""
     a, b, c = _three(tmp_path)
     a_id = federation_ref_id(a)
     _add_cluster(a, 'clx', name='Led by A')
@@ -1404,28 +1507,6 @@ def test_the_view_lists_what_each_side_leads(tmp_path):
         own = federation.own_clusters_body()
         clx = [r for r in own if r['id'] == 'clx']
         assert len(clx) == 1 and clx[0]['enrolled'] is True
-
-
-def test_the_view_skips_mirrors_but_counts_them_once(tmp_path):
-    # CR5: the linked-mode view asks peers from a thread pool; the shared
-    # test transport is not thread-safe (it swaps process-global runtime and
-    # db singletons). The test serializes by calling own_clusters_body directly
-    # for each side instead of the parallel federation_clusters().
-    """The combined view: A leads clx, B holds the mirror. The federation view
-    at A shows clx exactly once - in self, not again from the peer."""
-    a, b, c = _three(tmp_path)
-    _add_cluster(a, 'clx2')
-    with at_db(a):
-        federation.enroll_cluster('clx2')
-    with at_db(b):
-        federation.sync_identities()
-    # the view at A: self has clx2, B reports nothing of its own
-    with at_db(a):
-        own = federation.own_clusters_body()
-        assert any(r['id'] == 'clx2' for r in own)
-    with at_db(b):
-        b_own = federation.own_clusters_body()
-        assert all(r['id'] != 'clx2' for r in b_own)
 
 
 def test_the_peer_route_answers_only_for_members(tmp_path):
@@ -1458,17 +1539,17 @@ def test_the_peer_route_answers_only_for_members(tmp_path):
 
 
 def test_a_cluster_owner_error_never_opens_the_gate(tmp_path):
-    """The Q3 proof: a clusters table that cannot answer raises, the gate
-    catches it, and the write is refused with 503 - never treated as an
-    unenrolled cluster whose writes go through."""
+    """The fail-closed ownership proof: a clusters table that cannot answer
+    raises, the gate catches it, and the write is refused with 503 - never
+    treated as an unenrolled cluster whose writes go through."""
     a, b = Side(tmp_path, 'a'), Side(tmp_path, 'b')
     t = transport_for([a, b])
     for s in (a, b):
         s.runtime['transport'] = t
     _pair_with_identities(a, b)
-    _add_cluster(a, 'q3-proof')
+    _add_cluster(a, 'gate-proof')
     with at_db(a):
-        federation.enroll_cluster('q3-proof')
+        federation.enroll_cluster('gate-proof')
     # sabotage AFTER the enrollment: the gate asks, the table is gone
     with at_db(a):
         conn = _db_of(a).conn
@@ -1476,7 +1557,7 @@ def test_a_cluster_owner_error_never_opens_the_gate(tmp_path):
         conn.commit()
         # the core proof: the ownership lookup raises, never returns empty
         with pytest.raises(federation.FederationError):
-            federation.cluster_owner('q3-proof')
+            federation.cluster_owner('gate-proof')
         # and the gate inherits the refusal (takes_writes_for propagates)
         with pytest.raises(federation.FederationError):
-            federation.takes_writes_for('q3-proof')
+            federation.takes_writes_for('gate-proof')

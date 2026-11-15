@@ -125,6 +125,18 @@ def _xcrepl_loop():
                 now = time.time()
                 for job in jobs:
                     job = dict(job)
+                    # the worker lease check: a job of a cluster enrolled in the federation
+                    # runs only while this instance holds a live lease on it - source and
+                    # target both, the copy writes on either
+                    try:
+                        from pegaprox.core import federation as _fed
+                        if not (_fed.worker_takes_writes_for(job.get('source_cluster') or '')
+                                and _fed.worker_takes_writes_for(job.get('target_cluster') or '')):
+                            logger.info(f"[XCREPL] Job {job['id']} (VM {job['vmid']}) held: its "
+                                        "cluster(s) are enrolled without a live lease here")
+                            continue
+                    except ImportError:
+                        pass
                     # a NULL in the column raised here and ended the tick for every job after it
                     interval = _parse_interval_seconds(str(job.get('schedule') or '0 */6 * * *'))
                     last_run = job.get('last_run', '')
