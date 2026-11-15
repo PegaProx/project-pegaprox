@@ -2259,6 +2259,7 @@
                     case 'sessionId': return t('apiRefSchemeSession');
                     case 'installToken': return t('apiRefSchemeInstall');
                     case 'haPeer': return t('apiRefSchemePeer');
+                    case 'federationPeer': return t('apiRefSchemeFedPeer');
                     default: return name;
                 }
             };
