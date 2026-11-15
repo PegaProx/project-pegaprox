@@ -1498,7 +1498,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "path"
             }
           }
         ],
@@ -1551,7 +1552,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "path"
             }
           }
         ],
