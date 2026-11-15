@@ -1278,8 +1278,9 @@ def apply_identity_snapshot(body, sender=None):
                 for c in blobs:
                     v = values.get(c)
                     values[c] = _b64.b64decode(v) if isinstance(v, str) else v
-                # Q5: a mirrored token or passkey must not land on a username that is
-                # a LOCAL account (or another member's) - it would authenticate as that user
+                # the username ownership check: a mirrored token or passkey must
+                # not land on a username that is a LOCAL account (or another
+                # member's) - it would authenticate as that user
                 if kind in ('token', 'webauthn'):
                     _owner = _identity_username_owner(conn, row)
                     if _owner is not None and _owner != home:
@@ -1462,8 +1463,9 @@ def pull_identities(sender, extra_headers=None):
                                             extra_headers=headers,
                                             max_answer=16 * 1024 * 1024,
                                             with_headers=True)
-    # CR4/CR6/CR7/CR8: the answer carries the member's own signature over the
-    # BODY HASH, the etag, the moment and a nonce. A missing signature refuses
+    # the answer-signature checks: the answer carries the member's own
+    # signature over the BODY HASH, the etag, the moment and a nonce. A
+    # missing signature refuses
     # (fail closed), the hash binds the signature to the received content (an
     # intermediary cannot swap rows under the same etag), and the moment must
     # be fresh (a replayed answer is nobody's)
@@ -1579,7 +1581,7 @@ def _deadline_past_reboot(value, horizon):
 
 
 def _reset_rebooted_lease_clocks(state):
-    """CR9/CR10: every lease deadline and every owned lease resets on a reboot.
+    """The reboot reset: every lease deadline and every owned lease resets on a reboot.
     The CLOCK_BOOTTIME clock restarted - no deadline from before the boot means
     anything on the new clock, whether it sits above the horizon (obviously
     stale) or below it (the uptime just happened to be long enough that a
@@ -1602,9 +1604,9 @@ def _reset_rebooted_lease_clocks(state):
         for cid, rec in list(leases.items()):
             if not isinstance(rec, dict):
                 continue
-            # CR10: also reset owned leases whose deadline sits below the
-            # horizon - the clock restarted, the lease was granted on the old
-            # one; only a fresh vote round can back it again
+            # the reboot reset also catches owned leases whose deadline sits
+            # below the horizon - the clock restarted, the lease was granted
+            # on the old one; only a fresh vote round can back it again
             if _deadline_past_reboot(rec.get('expires'), horizon):
                 rec['expires'] = now  # the clock forgot the uptime this was granted on
                 reset += 1
@@ -1810,12 +1812,11 @@ def renew_leases(cluster_id=None):
     runs out where its clock says, and the gates close on their own. With
     `cluster_id`, that lease alone is asked for.
 
-    #4: the expiry counts from the cluster's OWN round start, not from a global
+    The expiry counts from the cluster's OWN round start, not from a global
     timestamp taken before every round ran - a slow member must not eat into
-    another cluster's remaining lease time.
-    #20: a lease that ran out is re-acquired, not just dropped - a WAN blip of
-    two minutes does not orphan the site's clusters until an admin re-enrolls
-    each one by hand."""
+    another cluster's remaining lease time. A lease that ran out is re-acquired,
+    not just dropped - a WAN blip of two minutes does not orphan the site's
+    clusters until an admin re-enrolls each one by hand."""
     out = {}
     for cid, rec in list(my_leases().items()):
         if cluster_id and cid != cluster_id:
@@ -1827,7 +1828,7 @@ def renew_leases(cluster_id=None):
                 state.get('my_leases', {}).pop(_cid, None)
                 return True
             _mutate(drop)
-            # #20: auto re-acquire for clusters this instance still owns
+            # auto re-acquire for clusters this instance still owns
             owner = cluster_owner(cid)
             if owner == instance_id():
                 lease = acquire_lease_arch(cid)
@@ -1939,7 +1940,7 @@ def takes_writes_for(cluster_id):
         # no row (None) or an unenrolled row (''): nothing the federation rules
         return True
     if owner != instance_id():
-        # Q7 bridge: after an HA promotion this instance acts for the clusters
+        # the HA ownership bridge: after an HA promotion this instance acts for the clusters
         # the old active led - their fed_owner still names the old id. The HA
         # role tells whether this is the acting host; the full fix is the
         # federation state file riding the HA sync
@@ -2072,7 +2073,7 @@ def _apply_cluster_mirrors(home, rows_in, report):
                 report['conflicts'].append(
                     f'cluster "{cid}" is led here - not another member\'s to write')
                 continue
-            # Q18: a mirror whose owner CHANGED (adoption) updates with the
+            # the adoption update: a mirror whose owner CHANGED (adoption) updates with the
             # snapshot: the old owner is gone, the sender is the new one. A
             # LOCAL cluster ('') stays a conflict - nobody takes those over.
             if held['fed_owner']:
@@ -2218,7 +2219,7 @@ def adopt_cluster(cluster_id, force=False):
     try:
         _reseat_credentials(cluster_id, owner, key, force)
     except FederationError:
-        # Q17: the credentials did not cross - the lease goes back, the
+        # the failed-takeover rollback: the credentials did not cross - the lease goes back, the
         # cluster stays where it was instead of locking on an orphan
         release_lease(cluster_id)
         raise
@@ -2283,9 +2284,10 @@ def _reseat_credentials(cluster_id, owner, key_b64, force):
 
 # --- the clusters of the federation (the ELM view) ----------------------------------------
 #
-# What every member leads, asked live at each member - on demand, the way vCenter's
-# linked mode reads the inventory of its partners: no copy, the owner answers. The
-# answer carries names and counts alone; credentials never leave their host.
+# What every member leads, asked live at each member - on demand, following the
+# linked-mode principle: the inventory of every partner is read where it lives,
+# no copy, the owner answers. The answer carries names and counts alone;
+# credentials never leave their host.
 
 CLUSTERS_PATH = '/api/federation/peer/clusters'
 
@@ -2377,29 +2379,31 @@ def federation_clusters():
     return out
 
 
-# --- the lease architecture repairs (Q14-Q16) ----------------------------------------------
+# --- the lease architecture repairs ---------------------------------------------------------
 #
 # What the PR review found, and what these changes fix:
 #
-# Q14: the check and the persist of a promise ran in two separate lock sections;
-#      two candidates could be granted against the same state. The check and the
-#      write now happen inside one lock acquisition - the promise is on disk
-#      before the verdict leaves, and no second candidate fits between them.
+# The atomic promise: the check and the persist of a promise ran in two separate
+#      lock sections; two candidates could be granted against the same state.
+#      The check and the write now happen inside one lock acquisition - the
+#      promise is on disk before the verdict leaves, and no second candidate
+#      fits between them.
 #
-# Q15: the lease expiry was measured after the vote round finished, not from when
-#      the first vote could have been granted. A slow round let the writer
-#      outlive its votes. The round now records its start and the expiry counts
-#      from there: what the voter granted is what the writer gets.
+# The round-start expiry: the lease expiry was measured after the vote round
+#      finished, not from when the first vote could have been granted. A slow
+#      round let the writer outlive its votes. The round now records its start
+#      and the expiry counts from there: what the voter granted is what the
+#      writer gets.
 #
-# Q16: the majority came from the LOCAL member list, which each side of a
-#      partition can shrink unilaterally - both sides reach their own
+# The honest majority: the majority came from the LOCAL member list, which each
+#      side of a partition can shrink unilaterally - both sides reach their own
 #      'majority' and two writers write. The promise now carries the voter
 #      count the VOTER knows, and a candidate that asks with a shrunken list
 #      (fewer voters than the voter sees) is refused: the fence rides on the
 #      voters' word, not the candidate's.
 
 def lease_vote_atomic(sender, body):
-    """The peer route's work, Q14-fixed: the check and the persist are one
+    """The peer route's work, with the atomic promise: the check and the persist are one
     operation under one lock - no candidate fits between the look and the
     write. The promise is on disk before the answer leaves."""
     if not isinstance(body, dict):
@@ -2409,7 +2413,7 @@ def lease_vote_atomic(sender, body):
     release = body.get('release') is True
     term = body.get('term')
     lease_s = body.get('lease_s')
-    # Q16: the candidate says how many voters it sees; a voter that sees more
+    # the honest majority: the candidate says how many voters it sees; a voter that sees more
     # refuses - a partition side that shrunk its list cannot win a majority
     # against voters that still see the full federation
     claimed_voters = body.get('voter_count')
@@ -2433,7 +2437,7 @@ def lease_vote_atomic(sender, body):
 
     def go(state):
         known = len(state.get('members') or {}) + 1  # members + self
-        # Q16: the candidate's voter count must not be below what this voter sees
+        # the honest majority: the candidate's voter count must not be below what this voter sees
         if claimed_voters is not None and claimed_voters < known:
             return  # refused - caller reports the mismatch
         if candidate not in (state.get('members') or {}) and candidate != me:
@@ -2474,7 +2478,8 @@ def lease_vote_atomic(sender, body):
 
 
 def acquire_lease_arch(cluster_id, lease_s=None):
-    """The Q15/Q16-repaired acquire: the expiry counts from the round's START
+    """The acquire, with the round-start expiry and the honest majority: the
+    expiry counts from the round's START
     (not its end), and the vote carries the voter count both sides check."""
     lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= MAX_LEASE_SECONDS \
         else LEASE_SECONDS
@@ -2487,7 +2492,7 @@ def acquire_lease_arch(cluster_id, lease_s=None):
     term = max(int(held.get(cluster_id, {}).get('term') or 0),
                int(promised.get('term') or 0)) + 1
 
-    # Q15: the round starts now; the expiry counts from HERE, not from when the
+    # the round-start expiry: the round starts now; the expiry counts from HERE, not from when the
     # last vote happens to return
     round_start = _lease_now()
     voter_count = len(members()) + 1
@@ -2502,7 +2507,7 @@ def acquire_lease_arch(cluster_id, lease_s=None):
         return {'failed': True, 'term': term, 'votes': granted,
                 'needed': _needed_votes(),
                 'voters_seen': held_voters or voter_count}
-    # Q15: expiry from round start, minus the write margin
+    # expiry from round start, minus the write margin
     lease = {'term': term, 'expires': round_start + lease_s - LEASE_WRITE_MARGIN,
              'votes': granted}
 
@@ -2555,7 +2560,7 @@ def _identity_username_owner(conn, row):
 
 
 def adopt_ha_federation_identity():
-    """Q7: after an HA promotion this instance acts for the clusters whose
+    """The HA identity adoption: after an HA promotion this instance acts for the clusters whose
     fed_owner still names the former active. Their ownership moves here with
     the rest of the configuration - the HA sync brought the rows, the identity
     rides along. Called from the HA promotion path."""
@@ -2611,7 +2616,8 @@ def federation_state_has_member(member_id):
 
 
 def worker_takes_writes_for(cluster_id):
-    """Q8: the background workers ask this before they act on a cluster. An
+    """The worker lease check: the background workers ask this before they act
+    on a cluster. An
     unenrolled cluster (no owner) is this instance's own; an enrolled one
     wants a live lease. A table that cannot say stops the worker - a job that
     cannot tell whose cluster it writes on does not write."""

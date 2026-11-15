@@ -836,7 +836,7 @@ class PegaProxDB:
         except Exception as e:
             logging.error(f"user_favorites migration failed, favorites stay unavailable: {e}")
 
-        # Federation Phase 2 (Nov 2026) — identity federation between PegaProx
+        # Federation Phase 2 (Nov 2026) - identity federation between PegaProx
         # instances: every row of users, custom_roles and api_tokens says which
         # instance it is homed at. '' is a local row, an instance id is a mirror of
         # that member's row, and writes to a mirror are refused where they are made

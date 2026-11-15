@@ -136,7 +136,7 @@ def register_blueprints(app):
     except Exception as e:
         logging.warning(f"snapshot scheduler start failed: {e}")
 
-    # Nov 2026 — federation Phase 2: identity sync worker (60s tick, no-op without
+    # Nov 2026 - federation Phase 2: identity sync worker (60s tick, no-op without
     # members)
     try:
         from pegaprox.api.federation import start_sync_worker

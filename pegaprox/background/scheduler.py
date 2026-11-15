@@ -403,7 +403,7 @@ PVE_REFUSAL = ('This action is not supported for Proxmox VE scheduled tasks. Use
 def task_refusal(cluster_id, action):
     """Why a task of `action` cannot run on the cluster, None when it can.
     A cluster enrolled in the federation runs scheduled actions only while
-    this instance holds a live lease on it (Q8)."""
+    this instance holds a live lease on it (the worker lease check)."""
     try:
         from pegaprox.core import federation as _fed
         if not _fed.worker_takes_writes_for(cluster_id):
@@ -486,7 +486,7 @@ def _to_next_minute():
 
 
 def scheduler_loop():
-    # Q8: the federation lease - a scheduled action on an enrolled cluster
+    # the worker lease check: the federation lease - a scheduled action on an enrolled cluster
     # runs only while this instance holds a live lease on it
     from pegaprox.core import federation as _fed
     """Background thread that runs scheduled tasks"""

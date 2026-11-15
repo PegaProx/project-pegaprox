@@ -531,7 +531,7 @@ def peer_identities():
     """The identity snapshot, signed by this member's federation key: the body
     travels under TLS, but the answer also carries the member's own signature
     over the body digest and the moment - a caller without a cert pin can
-    still tell who answered (Q2)."""
+    still tell who answered (the answer signature)."""
     """The users, custom roles and API tokens homed at this instance, and the
     deletes noted here - what another member pulls to mirror our identities. Signed
     by the asking member; an If-None-Match it sends against the etag it holds turns
@@ -566,7 +566,7 @@ def peer_identities():
     federation.touch(peer['instance_id'])
     resp = jsonify(body)
     resp.headers['ETag'] = f'"{body["etag"]}"'
-    # Q2: sign the answer - the caller verifies with our known public key
+    # the answer signature: sign the answer - the caller verifies with our known public key
     import base64 as _b64, time as _time
     _ts = str(int(_time.time()))
     _nonce = __import__('secrets').token_urlsafe(12)
@@ -689,8 +689,8 @@ def start_sync_worker():
 # --- partition leases (Phase 3) ----------------------------------------------------------
 
 # lease votes per member: a renewal asks one a round, a flood of terms is no
-# renewal - the budget keeps a member from writing this disk raw (F4). What it
-# must carry is every member's renewals together: a member leading L clusters
+# renewal - the budget keeps a member from writing this disk raw (the vote
+# budget). What it must carry is every member's renewals together: a member leading L clusters
 # asks 3L times per 30 s window (one round per LEASE_RENEW_AFTER, one call per
 # round), and the receiver does not know L when the window opens - so the limit
 # is a generous constant that holds the largest sane federation (8 members,

@@ -10436,6 +10436,10 @@
             const members = (status && Array.isArray(status.members)) ? status.members : [];
             const me = status ? status.instance_id : '';
             const joined = members.length > 0;
+            // a pairing code can be handed out as long as the federation has
+            // room: members lists everyone but this instance, the limit counts it
+            const maxMembers = (status && status.max_members) || 8;
+            const canPairMore = members.length < maxMembers;
             const enrolled = (leases && leases.enrolled) || {};
             const myLeases = (leases && leases.leases) || {};
             const own = Object.entries(enrolled).filter(([, v]) => v.owner === me);
@@ -10444,7 +10448,10 @@
             const unenrolled = (clusters || []).filter(c => c && c.id && !enrolledIds.has(c.id));
             const codeLeft = code ? Math.max(0, Math.floor((code.expires_at * 1000 - now) / 1000)) : 0;
 
-            async function act(what, path, body, doneToast) {
+            // `judge` looks at a 200 answer that is not a clean success: a
+            // renewal without a majority or a sync that found nothing new
+            // says so, and the toast becomes an info instead of a done
+            async function act(what, path, body, doneToast, judge) {
                 setBusy(what);
                 const r = await fedSend('POST', path, body, t('fedActionFailed'));
                 setBusy('');
@@ -10452,7 +10459,9 @@
                 setPasswords(p => ({ ...p, confirm: '', code: '', join: '' }));
                 if (r.ok) {
                     setConfirmBox(null); setTyped(''); setForce(false);
-                    addToast(doneToast, 'success');
+                    const verdict = judge ? judge(r.data) : null;
+                    if (verdict && verdict.kind === 'info') addToast(verdict.text, 'info');
+                    else addToast(doneToast, 'success');
                     refreshStatus(); refreshLeases(); refreshClusters();
                     return true;
                 }
@@ -10488,6 +10497,58 @@
                 if (c.kind === 'adopt') return void await act('adopt', `clusters/${c.id}/adopt`, { confirm: 'ADOPT', force: force, ...pw }, t('fedAdopted'));
                 if (c.kind === 'enroll') return void await act('enroll', `clusters/${c.id}/enroll`, { ...pw }, t('fedEnrolled'));
             }
+
+            // ---- the pairing card: a code for the next site, on the empty
+            // panel and on the joined one as long as the federation has room
+            const pairingCard = (
+                <div className={HA_GROUP_CARD} data-fed-pairing="issue">
+                    <h4 className="font-medium text-white flex items-center gap-2"><Icons.Key className="w-4 h-4 text-proxmox-orange" />{t('fedStartTitle')}</h4>
+                    <p className="text-sm text-gray-400">{t('fedStartDesc')}</p>
+                    <div>
+                        <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-own-url">{t('fedOwnUrl')}</label>
+                        <input id="fed-own-url" value={ownUrl} onChange={e => setOwnUrl(e.target.value)} placeholder="https://pegaprox-a.example:5000" className={`w-full font-mono ${HA_GROUP_FIELD}`} />
+                        <div className="text-[11px] text-gray-500 mt-1">{t('fedOwnUrlHint')}</div>
+                    </div>
+                    <div>
+                        <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-own-site">{t('fedSite')}</label>
+                        <input id="fed-own-site" value={ownSite} onChange={e => setOwnSite(e.target.value)} placeholder="berlin" className={`w-full ${HA_GROUP_FIELD}`} />
+                    </div>
+                    {!sso && (
+                        <div>
+                            <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-code-pw">{t('fedPassword')}</label>
+                            <input id="fed-code-pw" type="password" autoComplete="current-password" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"
+                                value={passwords.code} onChange={e => setPasswords(p => ({ ...p, code: e.target.value }))} className={`w-full ${HA_GROUP_FIELD}`} />
+                        </div>
+                    )}
+                    <button className={`${HA_GROUP_BTN} bg-proxmox-orange hover:bg-proxmox-orange/90 text-white`} data-fed-make-code
+                        disabled={!!busy || !ownUrl || (!sso && !passwords.code)}
+                        onClick={async () => {
+                            setBusy('code');
+                            const r = await fedSend('POST', 'pairing-code', sso ? { url: ownUrl, site: ownSite } : { url: ownUrl, site: ownSite, user_password: passwords.code }, t('fedCodeFailed'));
+                            setBusy('');
+                            if (r.ok) { setCode(r.data); addToast(t('fedCodeMade'), 'success'); refreshStatus(); }
+                            else addToast(r.error, 'error');
+                        }}>{busy === 'code' ? t('fedWorking') : t('fedMakeCode')}</button>
+                    {code && (
+                        <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl p-3 space-y-2" data-fed-code={codeLeft > 0 ? 'open' : 'expired'}>
+                            <div className="text-xs font-medium text-yellow-200 flex items-center gap-2"><Icons.AlertTriangle className="w-3.5 h-3.5" />{t('fedCodeOnce')}</div>
+                            {codeLeft > 0 ? (
+                                <>
+                                    <div className="flex items-start gap-2">
+                                        <code className="flex-1 px-3 py-2 bg-black/40 rounded text-xs text-yellow-200 break-all font-mono select-all">{code.code}</code>
+                                        <button className="flex items-center gap-1 text-xs text-gray-400 hover:text-white px-2" aria-label={t('copy')}
+                                            onClick={() => { navigator.clipboard && navigator.clipboard.writeText(code.code).catch(() => {}); addToast(t('copied'), 'success'); }}>
+                                            <Icons.Copy className="w-3.5 h-3.5" />{t('copy')}
+                                        </button>
+                                    </div>
+                                    <div className="flex items-center gap-2 text-xs text-gray-400"><Icons.Clock className="w-3.5 h-3.5" />{t('fedCodeExpires').replace('{time}', `${Math.floor(codeLeft / 60)}:${String(codeLeft % 60).padStart(2, '0')}`)}</div>
+                                    <p className="text-xs text-gray-400">{t('fedCodeNext')}</p>
+                                </>
+                            ) : <p className="text-sm text-red-300">{t('fedCodeExpired')}</p>}
+                        </div>
+                    )}
+                </div>
+            );
 
             // ---- the confirm box: one for every word-and-password action
             const box = confirmBox && (
@@ -10534,54 +10595,8 @@
 
                     {!joined && (
                         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                            {/* start: hand out a pairing code */}
-                            <div className={HA_GROUP_CARD} data-fed-pairing="issue">
-                                <h4 className="font-medium text-white flex items-center gap-2"><Icons.Key className="w-4 h-4 text-proxmox-orange" />{t('fedStartTitle')}</h4>
-                                <p className="text-sm text-gray-400">{t('fedStartDesc')}</p>
-                                <div>
-                                    <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-own-url">{t('fedOwnUrl')}</label>
-                                    <input id="fed-own-url" value={ownUrl} onChange={e => setOwnUrl(e.target.value)} placeholder="https://pegaprox-a.example:5000" className={`w-full font-mono ${HA_GROUP_FIELD}`} />
-                                    <div className="text-[11px] text-gray-500 mt-1">{t('fedOwnUrlHint')}</div>
-                                </div>
-                                <div>
-                                    <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-own-site">{t('fedSite')}</label>
-                                    <input id="fed-own-site" value={ownSite} onChange={e => setOwnSite(e.target.value)} placeholder="berlin" className={`w-full ${HA_GROUP_FIELD}`} />
-                                </div>
-                                {!sso && (
-                                    <div>
-                                        <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-code-pw">{t('fedPassword')}</label>
-                                        <input id="fed-code-pw" type="password" autoComplete="current-password" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"
-                                            value={passwords.code} onChange={e => setPasswords(p => ({ ...p, code: e.target.value }))} className={`w-full ${HA_GROUP_FIELD}`} />
-                                    </div>
-                                )}
-                                <button className={`${HA_GROUP_BTN} bg-proxmox-orange hover:bg-proxmox-orange/90 text-white`} data-fed-make-code
-                                    disabled={!!busy || !ownUrl || (!sso && !passwords.code)}
-                                    onClick={async () => {
-                                        setBusy('code');
-                                        const r = await fedSend('POST', 'pairing-code', sso ? { url: ownUrl, site: ownSite } : { url: ownUrl, site: ownSite, user_password: passwords.code }, t('fedCodeFailed'));
-                                        setBusy('');
-                                        if (r.ok) { setCode(r.data); addToast(t('fedCodeMade'), 'success'); refreshStatus(); }
-                                        else addToast(r.error, 'error');
-                                    }}>{busy === 'code' ? t('fedWorking') : t('fedMakeCode')}</button>
-                                {code && (
-                                    <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl p-3 space-y-2" data-fed-code={codeLeft > 0 ? 'open' : 'expired'}>
-                                        <div className="text-xs font-medium text-yellow-200 flex items-center gap-2"><Icons.AlertTriangle className="w-3.5 h-3.5" />{t('fedCodeOnce')}</div>
-                                        {codeLeft > 0 ? (
-                                            <>
-                                                <div className="flex items-start gap-2">
-                                                    <code className="flex-1 px-3 py-2 bg-black/40 rounded text-xs text-yellow-200 break-all font-mono select-all">{code.code}</code>
-                                                    <button className="flex items-center gap-1 text-xs text-gray-400 hover:text-white px-2" aria-label={t('copy')}
-                                                        onClick={() => { navigator.clipboard && navigator.clipboard.writeText(code.code).catch(() => {}); addToast(t('copiedToClipboard'), 'success'); }}>
-                                                        <Icons.Copy className="w-3.5 h-3.5" />{t('copy')}
-                                                    </button>
-                                                </div>
-                                                <div className="flex items-center gap-2 text-xs text-gray-400"><Icons.Clock className="w-3.5 h-3.5" />{t('fedCodeExpires').replace('{time}', `${Math.floor(codeLeft / 60)}:${String(codeLeft % 60).padStart(2, '0')}`)}</div>
-                                                <p className="text-xs text-gray-400">{t('fedCodeNext')}</p>
-                                            </>
-                                        ) : <p className="text-sm text-red-300">{t('fedCodeExpired')}</p>}
-                                    </div>
-                                )}
-                            </div>
+                            {/* start: hand out a pairing code (while room is left) */}
+                            {canPairMore && pairingCard}
 
                             {/* join: the other side of the pairing */}
                             <div className={HA_GROUP_CARD} data-fed-pairing="join">
@@ -10629,7 +10644,16 @@
                                     <code className="text-xs text-gray-400">ID {String(status.instance_id || '').slice(0, 8)}…</code>
                                     <span className="text-xs text-gray-500">{t('fedMaxMembers').replace('{max}', String(status.max_members || 8))}</span>
                                     <span className="flex-1"></span>
-                                    <button className={HA_GROUP_GHOST} data-fed-sync disabled={!!busy} onClick={() => act('sync', 'sync', {}, t('fedSynced'))}>
+                                    <button className={HA_GROUP_GHOST} data-fed-sync disabled={!!busy} onClick={() => act('sync', 'sync', {}, t('fedSynced'), (d) => {
+                                        // the answer says per member what the pull found:
+                                        // one that stayed away, or a round with nothing new
+                                        const rows = Object.values(d.members || {});
+                                        if (rows.length === 0) return null;
+                                        const failed = rows.filter(x => (x || {}).failed).length;
+                                        if (failed > 0) return { kind: 'info', text: t('fedSyncPartial').replace('{failed}', String(failed)).replace('{total}', String(rows.length)) };
+                                        if (rows.every(x => (x || {}).unchanged)) return { kind: 'info', text: t('fedSyncUnchanged') };
+                                        return null;
+                                    })}>
                                         <Icons.RefreshCw className="w-3.5 h-3.5" />{t('fedSyncNow')}
                                     </button>
                                 </div>
@@ -10648,18 +10672,18 @@
                                         <tbody>
                                             <tr className="border-b border-proxmox-border/50">
                                                 <td className="py-2 pr-3"><code className="text-xs">{String(me).slice(0, 8)}…</code></td>
-                                                <td className="py-2 pr-3">{status.site || '—'} <span className="text-[11px] text-gray-500">({t('fedMe')})</span></td>
+                                                <td className="py-2 pr-3">{status.site || '-'} <span className="text-[11px] text-gray-500">({t('fedMe')})</span></td>
                                                 <td className="py-2 pr-3"><span className="inline-flex items-center gap-1.5 text-green-400"><span className="w-2 h-2 rounded-full bg-green-500"></span>{t('fedOnline')}</span></td>
-                                                <td className="py-2 pr-3 text-gray-400">—</td><td className="py-2 text-right text-gray-500">—</td>
+                                                <td className="py-2 pr-3 text-gray-400">-</td><td className="py-2 text-right text-gray-500">-</td>
                                             </tr>
                                             {members.map(m => (
                                                 <tr key={m.instance_id} className="border-b border-proxmox-border/50" data-fed-member={m.instance_id.slice(0, 8)}>
                                                     <td className="py-2 pr-3"><code className="text-xs">{String(m.instance_id).slice(0, 8)}…</code></td>
-                                                    <td className="py-2 pr-3">{m.site || '—'}</td>
+                                                    <td className="py-2 pr-3">{m.site || '-'}</td>
                                                     <td className="py-2 pr-3">{m.reachable
                                                         ? <span className="inline-flex items-center gap-1.5 text-green-400"><span className="w-2 h-2 rounded-full bg-green-500"></span>{t('fedOnline')}</span>
                                                         : <span className="inline-flex items-center gap-1.5 text-red-400"><Icons.WifiOff className="w-3 h-3" />{t('fedOffline')}</span>}</td>
-                                                    <td className="py-2 pr-3 text-gray-400">{m.identity_sync ? t('fedIdSyncAt').replace('{rows}', String(m.identity_sync.rows || 0)) : '—'}</td>
+                                                    <td className="py-2 pr-3 text-gray-400">{m.identity_sync ? t('fedIdSyncAt').replace('{rows}', String(m.identity_sync.rows || 0)) : '-'}</td>
                                                     <td className="py-2 text-right">
                                                         <button className="text-xs text-red-400 hover:text-red-300" data-fed-remove={m.instance_id.slice(0, 8)}
                                                             disabled={!!busy} onClick={() => setConfirmBox(confirmProps('remove', m.instance_id, m.site || m.instance_id.slice(0, 8), 'REMOVE', true))}>{t('fedRemove')}</button>
@@ -10677,6 +10701,10 @@
                                     </button>
                                 </div>
                             </div>
+
+                            {/* a further site joins with a code from here: the
+                                pairing card stays while the federation has room */}
+                            {canPairMore && pairingCard}
 
                             {/* own enrolled clusters */}
                             <div className={HA_GROUP_CARD} data-fed-own-leases>
@@ -10701,7 +10729,13 @@
                                                             <td className="py-2 text-right">
                                                                 <div className="flex gap-3 justify-end">
                                                                     <button className="text-xs text-gray-400 hover:text-white" disabled={!!busy} data-fed-renew={cid}
-                                                                        onClick={() => act('renew-' + cid, `clusters/${cid}/renew`, {}, t('fedRenewed'))}>{t('fedRenew')}</button>
+                                                                        onClick={() => act('renew-' + cid, `clusters/${cid}/renew`, {}, t('fedRenewed'), (d) => {
+                                                                            // a 200 without a renewal: only a reacquire counts
+                                                                            // as done, a plain refusal is an info
+                                                                            if (d.renewed !== false) return null;
+                                                                            if (d.report && d.report.reacquired) return null;
+                                                                            return { kind: 'info', text: t('fedRenewRefused') };
+                                                                        })}>{t('fedRenew')}</button>
                                                                     <button className="text-xs text-gray-400 hover:text-white" disabled={!!busy} data-fed-release={cid}
                                                                         onClick={() => setConfirmBox(confirmProps('release', cid, info.name || cid, 'RELEASE', true))}>{t('fedRelease')}</button>
                                                                     <button className="text-xs text-gray-400 hover:text-white" disabled={!!busy} data-fed-unenroll={cid}
@@ -10805,7 +10839,7 @@
                                                 <th className="py-2 pr-3">{t('fedCluster')}</th><th className="py-2 text-right">{t('actions')}</th>
                                             </tr></thead>
                                             <tbody>
-                                                {unenrolled.slice(0, 12).map(c => (
+                                                {unenrolled.map(c => (
                                                     <tr key={c.id} className="border-b border-proxmox-border/50" data-fed-enrollable={c.id}>
                                                         <td className="py-2 pr-3"><code className="text-xs">{c.id}</code> <span className="text-gray-400">{c.name}</span></td>
                                                         <td className="py-2 text-right">

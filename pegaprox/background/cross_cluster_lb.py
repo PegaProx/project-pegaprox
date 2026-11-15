@@ -71,11 +71,11 @@ def run_cross_cluster_balance_check(group):
     """Core logic: compare cluster scores within a group, migrate if needed.
     NS: Intentionally conservative - one VM per cycle, dry_run default on.
     A cluster enrolled in the federation migrates only while this instance
-    holds a live lease on it (Q8)."""
+    holds a live lease on it (the worker lease check)."""
     # a standby migrates nothing, from the loop or from the manual trigger
     if not ha.is_active():
         return
-    # Q8: the federation lease - a balance move is a write on the source
+    # the worker lease check: the federation lease - a balance move is a write on the source
     try:
         from pegaprox.core import federation as _fed
         _fed_lb_gate = _fed.worker_takes_writes_for
@@ -232,7 +232,7 @@ def run_cross_cluster_balance_check(group):
 
 
 def cross_cluster_lb_loop():
-    # Q8: the federation lease - a balance move between clusters runs only
+    # the worker lease check: the federation lease - a balance move between clusters runs only
     # while this instance holds a live lease on the source
     from pegaprox.core import federation as _fed
     """Background loop - checks all enabled groups on a 30s tick."""
