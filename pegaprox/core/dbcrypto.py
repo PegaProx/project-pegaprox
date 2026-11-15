@@ -24,6 +24,8 @@ MK May 2026 — "Stufe 3" of the security review response.
 """
 from __future__ import annotations
 
+import contextlib
+import errno
 import logging
 import math
 import os
@@ -34,6 +36,8 @@ from typing import Optional
 
 
 _LOG = logging.getLogger(__name__)
+# a name of its own so the tests can take the Windows branches on Linux
+_WINDOWS = os.name == 'nt'
 
 
 # MK Nov 2026 (#1226) - a sqlcipher3 built for another machine or another Python installs
@@ -253,7 +257,8 @@ def connect(db_path: str, *, timeout: float = 30.0, **kwargs):
       3. Sets `PRAGMA cipher_compatibility = 4` for the latest format
       4. Verifies the key by running a sentinel query
 
-    When the plain SQLite backend is active, the key step is a no-op.
+    When the plain SQLite backend is active, the key step is a no-op. It is skipped as
+    well for a plain file that stays plain (opens_plain).
 
     A database in WAL mode gets synchronous=NORMAL on the connection (wal_normal).
 
@@ -261,10 +266,50 @@ def connect(db_path: str, *, timeout: float = 30.0, **kwargs):
     are forwarded.
     """
     conn = _sqlite_module.connect(db_path, timeout=timeout, **kwargs)
-    if BACKEND == 'sqlcipher':
-        _apply_sqlcipher_pragmas(conn, db_path)
+    if BACKEND == 'sqlcipher' and not opens_plain(db_path):
+        try:
+            _apply_sqlcipher_pragmas(conn, db_path)
+        except BaseException:
+            conn.close()
+            raise
     wal_normal(conn)
     return conn
+
+
+def auto_encrypt_disabled() -> bool:
+    """PEGAPROX_DISABLE_AUTO_ENCRYPT is set: a plain database is not encrypted at the start
+    and opens without the key, it stays plain SQLite."""
+    return os.environ.get('PEGAPROX_DISABLE_AUTO_ENCRYPT', '').strip().lower() in ('1', 'true', 'yes')
+
+
+# MK Nov 2026 - with sqlcipher3 every connection was keyed, and a keyed connection does not
+# read a plain file ("file is not a database"). So PEGAPROX_DISABLE_AUTO_ENCRYPT left a plain
+# database PegaProx could not open, and so did a start whose encryption failed (a full disk).
+# A file opened without a key is plain SQLite to SQLCipher, so a plain database is opened that
+# way where the opt-out is set or its encryption failed in this process. An encrypted file and
+# a new one are keyed as before, so a new database is still created encrypted. Decided once
+# per path, from the first 16 bytes of the file; later connections only look it up.
+_OPENS_PLAIN: dict = {}         # the path as connect() got it -> True: no key
+_CONVERSION_FAILED: set = set()  # absolute paths whose encryption failed in this process
+
+
+def opens_plain(db_path) -> bool:
+    """True when connect() opens `db_path` without the key: a plain file, with the opt-out
+    set or after a failed encryption at this start."""
+    try:
+        return _OPENS_PLAIN[db_path]
+    except KeyError:
+        pass
+    real = os.path.abspath(db_path)
+    plain = ((real in _CONVERSION_FAILED or auto_encrypt_disabled())
+             and file_state(real) == 'plain')
+    _OPENS_PLAIN[db_path] = plain
+    return plain
+
+
+def _forget_open_modes() -> None:
+    """After a database changed its state (encrypted, or left plain), decide afresh."""
+    _OPENS_PLAIN.clear()
 
 
 # MK Nov 2026 - SQLite's default synchronous=FULL syncs the WAL at every commit, 8 to 9 ms
@@ -287,6 +332,14 @@ def wal_normal(conn) -> bool:
         return False
 
 
+# MK Nov 2026 - on Windows os.fsync is FlushFileBuffers, which wants a handle that may write:
+# on one opened read-only it fails with EBADF, so the plain copy before the encryption and a
+# key a first start makes could not be synced there. Nor can a directory be opened to sync
+# it (NTFS journals the name itself), so sync_file stops at the file there.
+def _sync_flags() -> int:
+    return os.O_RDWR if _WINDOWS else os.O_RDONLY
+
+
 def sync_wal(db_path) -> bool:
     """fsync the WAL of `db_path`: for a commit made under NORMAL, what FULL does in the
     commit. Called after one that something outside the database relies on (a file
@@ -297,7 +350,7 @@ def sync_wal(db_path) -> bool:
     what was to follow must not happen then."""
     try:
         # SQLite keeps the WAL beside the file a symlinked database points at
-        fd = os.open(os.path.realpath(db_path) + '-wal', os.O_RDONLY)
+        fd = os.open(os.path.realpath(db_path) + '-wal', _sync_flags())
     except FileNotFoundError:
         return False
     try:
@@ -312,11 +365,13 @@ def sync_file(path) -> None:
     database depends on (a key, the plain copy before the encryption): whole, and there by
     its name, after a power cut. Raises OSError when the file cannot be synced; a directory
     that cannot be is logged, some filesystems never sync one."""
-    fd = os.open(path, os.O_RDONLY)
+    fd = os.open(path, _sync_flags())
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
+    if _WINDOWS:
+        return
     parent = os.path.dirname(os.path.abspath(path))
     try:
         dfd = os.open(parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
@@ -374,13 +429,24 @@ def _apply_sqlcipher_pragmas(conn, db_path: str) -> None:
         except Exception as e:
             raise RuntimeError(
                 f"[DBCRYPTO] SQLCipher could not unlock {db_path}: {e}. "
-                f"Master key source: {mk.source}. "
-                f"If you recently rotated the key, run "
-                f"`pegaprox migrate-db --reencrypt` with both old and new "
-                f"keys available."
+                f"Master key source: {mk.source}. {_unlock_hint(db_path)}"
             ) from e
     finally:
         cur.close()
+
+
+def _unlock_hint(db_path) -> str:
+    """What to do about a file a keyed connection did not open, by what the file is.
+
+    It used to advise a re-encryption option of migrate-db that never existed, also where
+    the file was simply still plain (a failed encryption, the opt-out)."""
+    if file_state(db_path) == 'plain':
+        return ("The file is still plain SQLite: the next start of PegaProx encrypts it "
+                "(pegaprox_multi_cluster.py --migrate-db does it by hand, with PegaProx "
+                "stopped), and PEGAPROX_DISABLE_AUTO_ENCRYPT=1 keeps it plain.")
+    return ("This key does not open it, or the file is damaged. Put the key it was encrypted "
+            "with in place (pegaprox_multi_cluster.py --keystore-status shows which key is "
+            "used) or restore a backup together with its key.")
 
 
 # ─── Off-hub heavy reads (scaling) ───────────────────────────────────────────
@@ -741,20 +807,26 @@ def _shred_file(path: str) -> bool:
         return False
 
 
+def plain_backup_retention() -> int:
+    """Seconds a plain copy is kept: PEGAPROX_PLAIN_BACKUP_RETENTION_S, one hour by default."""
+    try:
+        return int(os.environ.get('PEGAPROX_PLAIN_BACKUP_RETENTION_S', '3600'))
+    except ValueError:
+        return 3600
+
+
 def purge_stale_plain_backups(db_path: str, retention_s: int = None):
     """Securely remove plaintext migration backups (<db>.plain.bak.<ts>) once
     they're older than the retention window. H-5 (security audit): a plaintext
     copy of the SQLCipher DB is every stored cluster password in cleartext,
     sitting next to the keystore. The auto-migration keeps one for a short
     rollback window; this sweep (every startup) shreds anything past it. Default
-    1h, PEGAPROX_PLAIN_BACKUP_RETENTION_S to override (0 = shred immediately)."""
+    1h, PEGAPROX_PLAIN_BACKUP_RETENTION_S to override (0 = shred immediately).
+    The age is that of the file's mtime, which make_plain_copy sets to the conversion."""
     import glob
     import time as _time
     if retention_s is None:
-        try:
-            retention_s = int(os.environ.get('PEGAPROX_PLAIN_BACKUP_RETENTION_S', '3600'))
-        except ValueError:
-            retention_s = 3600
+        retention_s = plain_backup_retention()
     now = _time.time()
     purged = []
     for p in glob.glob(f"{os.path.abspath(db_path)}.plain.bak.*"):
@@ -770,6 +842,23 @@ def purge_stale_plain_backups(db_path: str, retention_s: int = None):
     return purged
 
 
+def plain_copy_note(backup_path: str) -> str:
+    """What the log says about the plain copy a conversion keeps."""
+    s = plain_backup_retention()
+    if s <= 0:
+        kept = 'is shredded at the next start of PegaProx'
+    else:
+        if s % 3600 == 0:
+            span = 'about an hour' if s == 3600 else f'about {s // 3600} hours'
+        elif s >= 60:
+            span = f'about {round(s / 60)} minutes'
+        else:
+            span = f'{s} seconds'
+        kept = f'is kept for {span}, then the first start of PegaProx after that shreds it'
+    return (f"The plain copy {backup_path} {kept}. It holds every stored credential in the "
+            f"clear: copy it somewhere safe if you want to keep it.")
+
+
 def ensure_db_encrypted(db_path: str) -> dict:
     """Idempotent: encrypt the DB at `db_path` if it's still plain and the
     SQLCipher backend is available.  Called once per DB during app startup.
@@ -777,7 +866,12 @@ def ensure_db_encrypted(db_path: str) -> dict:
     Returns a dict with: action, state_before, state_after, [backup_path,
     duration_s, rows_copied].  Does NOT raise on routine cases; raises only
     for unrecoverable situations (corrupt DB, unknown-key encrypted DB, an
-    encrypted DB without SQLCipher).
+    encrypted DB without SQLCipher, a master key the key store refuses, a file
+    this process cannot open at all: no permission, a full disk).
+
+    A conversion that fails on its way (a full disk, any OS or SQLite error) changes
+    nothing: the action is 'failed', the database stays plain and connect() opens it
+    plain in this process, and the next start tries again.
 
     Opt-out: set PEGAPROX_DISABLE_AUTO_ENCRYPT=1 to keep a plain DB.
     """
@@ -795,12 +889,11 @@ def ensure_db_encrypted(db_path: str) -> dict:
                                 "not open. Install the SQLCipher package of requirements.txt "
                                 "(python3-sqlcipher3 for the Debian package).")
             + " Refusing to start.")
-    if os.environ.get('PEGAPROX_DISABLE_AUTO_ENCRYPT', '').lower() in ('1', 'true', 'yes'):
-        _LOG.info("[DBCRYPTO] PEGAPROX_DISABLE_AUTO_ENCRYPT set — skipping auto-encrypt check")
-        _AUTO_MIG_DONE.add(db_path)
-        return {'action': 'opt-out'}
+    if auto_encrypt_disabled():
+        return _keep_plain(db_path)
     if BACKEND != 'sqlcipher':
         # No sqlcipher3 → can't encrypt anyway. Field-level encryption still applies.
+        _purge_plain_copies(db_path)
         _AUTO_MIG_DONE.add(db_path)
         return {'action': 'no-backend',
                 'reason': 'sqlcipher3 does not load' if SQLCIPHER_ERROR else 'sqlcipher3 not installed'}
@@ -812,11 +905,8 @@ def ensure_db_encrypted(db_path: str) -> dict:
         # create a fresh one below — a backup made by THIS boot's migration is
         # younger than the retention window, so it survives this boot for
         # rollback and gets shredded on a later start).
-        try:
-            purge_stale_plain_backups(db_path)
-        except Exception as _pe:
-            _LOG.debug("[DBCRYPTO] plain-backup purge soft-fail: %s", _pe)
-        state = detect_db_state(db_path)
+        _purge_plain_copies(db_path)
+        state = _checked_state(db_path)
 
         if state in ('missing', 'encrypted'):
             # missing → SQLCipher creates an encrypted DB on first connect()
@@ -824,116 +914,493 @@ def ensure_db_encrypted(db_path: str) -> dict:
             _AUTO_MIG_DONE.add(db_path)
             return {'action': 'noop', 'state_before': state, 'state_after': state}
 
-        if state == 'unknown-key':
-            raise RuntimeError(
-                f"[DBCRYPTO] {db_path} is encrypted but the current master key "
-                f"does not unlock it. Refusing to start. Check that the right "
-                f"PEGAPROX_DB_KEY / secret.key file is in place, or restore a "
-                f"matching backup. (See docs/SECURITY.md §4)"
-            )
-        if state == 'corrupt':
-            raise RuntimeError(
-                f"[DBCRYPTO] {db_path} is neither plain SQLite nor a valid "
-                f"encrypted DB — refusing to start. Restore from backup."
-            )
-
         # state == 'plain' → run the migration inline
+        # the key on its own first: one the key store refuses (loose permissions,
+        # unreadable) stops the start with that reason, as before. What fails after this is
+        # the conversion's, and leaves the database as it was.
+        _usable_key()
         _LOG.warning("[DBCRYPTO] plain DB detected at %s — auto-encrypting before "
                      "first connection. This is a one-time operation.", db_path)
-        result = _run_inline_migration(db_path)
+        try:
+            result = _run_inline_migration(db_path)
+        except Exception as e:
+            result = _conversion_failed(db_path, e)
         _AUTO_MIG_DONE.add(db_path)
+        _forget_open_modes()
         return result
+
+
+def _keep_plain(db_path: str) -> dict:
+    """ensure_db_encrypted with PEGAPROX_DISABLE_AUTO_ENCRYPT set: only the conversion is
+    skipped. A plain database stays plain and connect() opens it without the key; an
+    encrypted one is checked as without the opt-out and opens with the key."""
+    with _AUTO_MIG_LOCK:
+        if db_path in _AUTO_MIG_DONE:
+            return {'action': 'already-checked'}
+        # a copy from a conversion before the opt-out was set goes after its window as well,
+        # the log line of that conversion said so
+        _purge_plain_copies(db_path)
+        state = file_state(db_path)
+        if BACKEND == 'sqlcipher' and state not in ('missing', 'empty', 'plain'):
+            _checked_state(db_path)
+        if state == 'plain':
+            _LOG.info("[DBCRYPTO] PEGAPROX_DISABLE_AUTO_ENCRYPT is set: %s stays plain SQLite and "
+                      "opens without the key. Field-level encryption (AES-256-GCM) still applies.",
+                      db_path)
+        else:
+            _LOG.info("[DBCRYPTO] PEGAPROX_DISABLE_AUTO_ENCRYPT is set: nothing to encrypt in %s (%s)",
+                      db_path, state)
+        _AUTO_MIG_DONE.add(db_path)
+        _forget_open_modes()
+        return {'action': 'opt-out'}
+
+
+def _purge_plain_copies(db_path: str) -> None:
+    """purge_stale_plain_backups at a start; a sweep that fails does not stop the start."""
+    try:
+        purge_stale_plain_backups(db_path)
+    except Exception as e:
+        _LOG.debug("[DBCRYPTO] plain-backup purge soft-fail: %s", e)
+
+
+def _usable_key():
+    """The master key, or a RuntimeError that says why it cannot be used: the key store's
+    own (loose permissions, not 32 bytes) or one for a key file it could not read or write."""
+    from pegaprox.core.keystore import load_master_key
+    try:
+        return load_master_key()
+    except OSError as e:
+        raise RuntimeError(f"[KEYSTORE] the master key cannot be loaded: {e}.") from e
+
+
+def _checked_state(db_path: str) -> str:
+    """detect_db_state, raising the RuntimeError that refuses the start where the database
+    is encrypted and this start cannot open it, or is no database at all."""
+    try:
+        state = detect_db_state(db_path)
+    except FileUnusable as e:
+        raise RuntimeError(f"[DBCRYPTO] {e} Refusing to start.") from e
+    except RuntimeError as e:
+        # a key file with loose permissions read as "the current master key does not
+        # unlock it", and admins went looking for another key
+        raise RuntimeError(f"[DBCRYPTO] {db_path} is encrypted, and its master key cannot be "
+                           f"used: {e} Refusing to start.") from e
+    if state == 'unknown-key':
+        raise RuntimeError(
+            f"[DBCRYPTO] {db_path} is encrypted but the current master key "
+            f"does not unlock it. Refusing to start. Check that the right "
+            f"PEGAPROX_DB_KEY / secret.key file is in place, or restore a "
+            f"matching backup. (See docs/SECURITY.md §4)"
+        )
+    if state == 'corrupt':
+        raise RuntimeError(
+            f"[DBCRYPTO] {db_path} is neither plain SQLite nor a valid "
+            f"encrypted DB - refusing to start. Restore from backup."
+        )
+    return state
+
+
+class _ConversionFailed(Exception):
+    """A conversion that stopped before the swap. `cause` is what stopped it, `stuck` what
+    it made and could not remove again."""
+
+    def __init__(self, cause: BaseException, stuck):
+        super().__init__(str(cause))
+        self.cause = cause
+        self.stuck = list(stuck)
+
+
+# MK Nov 2026 - a conversion that failed (a full disk, Windows without fcntl) was only logged
+# as "auto-encrypt check failed", and then every connection keyed the plain file: nobody could
+# sign in, the log advised a migrate-db option that does not exist, and each restart systemd
+# made left one more plain copy. The database is intact at that point, so this start runs on
+# it plain, as with the opt-out, says once why, and the next start tries again.
+def _conversion_failed(db_path: str, exc: Exception) -> dict:
+    cause = exc.cause if isinstance(exc, _ConversionFailed) else exc
+    stuck = exc.stuck if isinstance(exc, _ConversionFailed) else []
+    _CONVERSION_FAILED.add(db_path)
+    _forget_open_modes()
+    if _disk_full(cause, db_path):
+        why = _space_words(db_path)
+        then = "Free up that much there and restart PegaProx, the next start tries again."
+    elif isinstance(cause, InUse):
+        why = str(cause)
+        then = "The next start tries again."
+    else:
+        why = f"{type(cause).__name__}: {' '.join(str(cause).split())}"
+        then = "The next start tries again."
+    msg = (f"could not encrypt {db_path} ({why}). Nothing was changed: it is still plain "
+           f"SQLite and PegaProx runs on it, sensitive fields stay encrypted with AES-256-GCM. "
+           f"{then} Until then pegaprox_multi_cluster.py --keystore-status lists it as plain.")
+    if stuck:
+        msg += (f" The failed attempt could not remove {', '.join(stuck)}: delete "
+                f"{'it' if len(stuck) == 1 else 'them'} by hand.")
+    _LOG.error("[DBCRYPTO] %s", msg)
+    return {'action': 'failed', 'state_before': 'plain', 'state_after': 'plain', 'error': msg}
+
+
+def _disk_full(e: BaseException, db_path: Optional[str] = None) -> bool:
+    """`e` is what a full disk raised. With db_path, a plain SQLite "disk I/O error" counts
+    too where the directory has less free than the conversion of db_path needs: SQLite
+    reports some writes a full disk refused that way (a -shm it cannot grow, a page)."""
+    full = {errno.ENOSPC}
+    if hasattr(errno, 'EDQUOT'):
+        full.add(errno.EDQUOT)
+    if isinstance(e, OSError) and e.errno in full:
+        return True
+    # SQLITE_FULL, what sqlcipher_export and the row counts raise on a full disk
+    if 'database or disk is full' in str(e):
+        return True
+    if db_path and 'disk I/O error' in str(e):
+        free = _free_bytes(os.path.dirname(db_path))
+        return free is not None and free < _space_needed(db_path)
+    return False
+
+
+def _free_bytes(where: str) -> Optional[int]:
+    import shutil
+    try:
+        return shutil.disk_usage(where).free
+    except OSError:
+        return None
+
+
+# the journal of the encrypted copy, a -shm and a few pages: what a small database needs on
+# top of its two copies
+_SPACE_MARGIN = 64 * 1024
+
+
+def _space_needed(db_path: str) -> int:
+    """Bytes the conversion of db_path writes: a plain copy and an encrypted one, which is a
+    little larger (SQLCipher keeps 80 bytes of each 4 KB page for its IV and HMAC)."""
+    size = 0
+    for p in (db_path, db_path + '-wal'):
+        try:
+            size += os.path.getsize(p)
+        except OSError:
+            pass
+    return 2 * size + size // 32 + _SPACE_MARGIN
+
+
+def _space_words(db_path: str) -> str:
+    """For the message of a full disk: how much the conversion of db_path needs, a plain
+    copy plus an encrypted copy, and how much is free now. The free space is left out where
+    it is not below that: it would contradict the reason (another writer filled the disk
+    for a while, or a quota did)."""
+    where = os.path.dirname(db_path)
+    need = _space_needed(db_path)
+    words = (f"not enough free space in {where}: the encryption writes a plain copy and an "
+             f"encrypted copy of the database, so it needs about {_size_words(need)} free")
+    free = _free_bytes(where)
+    if free is not None and free < need:
+        words += f", {_size_words(free)} are free now"
+    return words
+
+
+def _size_words(n: int) -> str:
+    if n >= 1024 ** 3:
+        return f"{n / 1024 ** 3:.1f} GB"
+    # a decimal below 10 MB: "needs about 2 MB free, 2 MB are free now" was 2.3 against 1.9
+    if n >= 10 * 1024 ** 2:
+        return f"{n / 1024 ** 2:.0f} MB"
+    if n >= 1024 ** 2:
+        return f"{n / 1024 ** 2:.1f} MB"
+    if n < 1024:
+        return f"{n} bytes"
+    return f"{round(n / 1024)} KB"
+
+
+@contextlib.contextmanager
+def _migration_lock(lock_path: str, db_path: str, wait: bool = True):
+    """The cross-process lock of one database's conversion, held for the with block. Yields
+    True when another process held it first: that one may have done the work by now. With
+    wait=False it raises BlockingIOError instead of waiting for that process.
+
+    MK Nov 2026 - this imported fcntl, which Windows does not have. Since 1.5.0 sqlcipher3
+    is installed there too, so every Windows start with a plain database failed here. Windows
+    locks the first byte of the lock file with msvcrt instead."""
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_BINARY', 0), 0o600)
+    try:
+        try:
+            import fcntl
+        except ImportError:
+            fcntl = None
+        if fcntl is not None:
+            waited = False
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if not wait:
+                    raise
+                _LOG.info("[DBCRYPTO] another process is encrypting %s, waiting for it", db_path)
+                waited = True
+                fcntl.flock(fd, fcntl.LOCK_EX)
+
+            def unlock():
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        else:
+            import msvcrt
+            waited = _lock_first_byte(msvcrt, fd, db_path, wait)
+
+            def unlock():
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        try:
+            yield waited
+        finally:
+            # closing the file lets go of the lock as well, on both
+            with contextlib.suppress(OSError):
+                unlock()
+    finally:
+        os.close(fd)
+
+
+def _lock_first_byte(msvcrt, fd: int, db_path: str, wait: bool = True) -> bool:
+    """Lock byte 0 of `fd` with msvcrt, waiting as long as another process holds it. True
+    when it had to wait. With wait=False a held lock raises BlockingIOError."""
+    busy = {errno.EACCES, getattr(errno, 'EDEADLOCK', errno.EDEADLK)}
+    os.lseek(fd, 0, os.SEEK_SET)
+    try:
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        return False
+    except OSError as e:
+        if e.errno not in busy:
+            raise
+        if not wait:
+            raise BlockingIOError(errno.EAGAIN, f'{db_path} is being converted by another process') from e
+    _LOG.info("[DBCRYPTO] another process is encrypting %s, waiting for it", db_path)
+    while True:
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            # LK_LOCK gives up after ten tries a second apart, a big database takes longer
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            return True
+        except OSError as e:
+            if e.errno not in busy:
+                raise
+
+
+def make_plain_copy(db_path: str, backup_path: str) -> str:
+    """The plain copy a conversion keeps: owner-only from its first byte, dated now, and on
+    disk before the swap takes the plain file away (sync_file). A copy cut short is removed
+    before the error goes on. Returns the path of the copy: backup_path, or backup_path.1,
+    .2 and so on where a file of that name is there already.
+
+    MK Nov 2026 - it was made with copy2, which keeps the mtime of the database, and
+    purge_stale_plain_backups counts the hour from the mtime. A database last written more
+    than an hour before the update (stopped for the backup the upgrade guide asks for) lost
+    its copy at the next start, seconds after the conversion. The name only changes once a
+    second, so a copy left from the same second (a start killed half way and started again
+    at once) made the new one fail on O_EXCL; it takes the next free name now."""
+    import shutil
+    path = backup_path
+    for n in range(1, 100):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, 'O_BINARY', 0), 0o600)
+            break
+        except FileExistsError:
+            path = f"{backup_path}.{n}"
+    else:
+        raise FileExistsError(errno.EEXIST, 'no free name for the plain copy', backup_path)
+    os.close(fd)
+    try:
+        os.chmod(path, 0o600)
+        shutil.copyfile(db_path, path)
+        os.utime(path, None)
+        sync_file(path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(path)
+        raise
+    return path
+
+
+class InUse(RuntimeError):
+    """The plain database is not this conversion's alone: another process has it open, or
+    wrote to it while it was converted. Nothing was changed."""
+
+
+def _file_mark(path: str):
+    """What tells whether a database file was written: its inode, size and mtime, and the
+    header, whose change counter every commit in rollback-journal mode moves on."""
+    st = os.stat(path)
+    with open(path, 'rb') as fh:
+        head = fh.read(100)
+    return st.st_ino, st.st_size, st.st_mtime_ns, head
+
+
+# MK Nov 2026 - the conversion took the plain file as it found it. Another process with it
+# open (a sqlite3 shell, a backup job, a PegaProx still running beside --migrate-db) kept
+# commits in its -wal the copy did not get, and the swap put the encrypted file next to that
+# plain -wal and -shm: the first connection after it wrote plain pages into the encrypted
+# file, "database disk image is malformed" at every start from then on. Leaving WAL mode
+# needs the database to itself, folds the -wal into the file and removes it and the -shm;
+# with anybody else on it SQLite says "database is locked" at once. db.py puts the database
+# back into WAL mode at its first connection, encrypted or, after a failure, plain.
+def plain_alone(db_path: str):
+    """Make sure nothing else has the plain database open and that all of it is in the one
+    file, before the conversion copies it. Returns its _file_mark for check_before_swap.
+    Raises InUse when another process has it open, or its -wal or -shm cannot be written;
+    other errors (a full disk) go on as they are."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(db_path, timeout=5, isolation_level=None)
+        try:
+            mode = str(conn.execute('PRAGMA journal_mode = DELETE').fetchone()[0]).lower()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as e:
+        text = ' '.join(str(e).split())
+        if 'locked' in text or 'busy' in text:
+            raise InUse(f"another process has {db_path} open (a PegaProx still running, a sqlite3 "
+                        f"shell, a backup job) and the conversion needs it to itself: {text}") from e
+        if 'readonly' in text:
+            raise InUse(f"{db_path} or its -wal or -shm file cannot be written by this user, and "
+                        f"the conversion has to fold the -wal into the database first: {text}") from e
+        raise
+    left = [p for p in _sqlite_files(db_path)[1:] if os.path.exists(p)]
+    if mode != 'delete' or left:
+        raise InUse(f"{db_path} could not be taken out of {mode} journal mode"
+                    + (f", {', '.join(left)} stayed" if left else '')
+                    + ": another process may have it open")
+    return _file_mark(db_path)
+
+
+def check_before_swap(db_path: str, mark) -> None:
+    """Right before the encrypted file takes the place of the plain one: nothing opened the
+    plain one for writing since plain_alone. A -wal, -shm or -journal left beside it would
+    be read into the encrypted file, and a commit made meanwhile is not in it. Raises InUse."""
+    left = [p for p in _sqlite_files(db_path)[1:] if os.path.exists(p)]
+    if left:
+        raise InUse(f"{', '.join(left)} turned up while {db_path} was converted: another "
+                    f"process opened it")
+    if _file_mark(db_path) != mark:
+        raise InUse(f"another process wrote to {db_path} while it was converted")
+
+
+def _sqlite_files(path: str) -> list:
+    """`path` and the files SQLite keeps beside it."""
+    return [path, path + '-journal', path + '-wal', path + '-shm']
+
+
+def _remove_files(paths) -> list:
+    """Remove each of `paths` that is there; returns those that stayed."""
+    stuck = []
+    for p in paths:
+        if not p:
+            continue
+        try:
+            os.remove(p)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            stuck.append(p)
+    return stuck
 
 
 def _run_inline_migration(db_path: str) -> dict:
     """Inline plain→encrypted migration. Mirrors `cli.migrate_db` but with
     no prompts, no argparse, and a per-DB on-disk lock file so two parallel
-    starts (e.g. systemd restart-storm) don't fight each other."""
-    import fcntl
+    starts (e.g. systemd restart-storm) don't fight each other.
+
+    An attempt that stops before the swap removes what it made (the encrypted candidate,
+    the plain copy) and raises _ConversionFailed; the database is then as it was."""
     import time
 
     lock_path = f"{db_path}.migration.lock"
-    backup_path = f"{db_path}.plain.bak.{int(time.time())}"
     new_path = f"{db_path}.encrypted.new"
 
     # Cross-process lock so a concurrent boot can't double-migrate.
     # Held until this function returns.
-    lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
-    try:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            # Another instance is migrating — wait for it.
-            _LOG.info("[DBCRYPTO] another process is migrating %s — waiting", db_path)
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    with _migration_lock(lock_path, db_path) as waited:
+        if waited:
             # By the time we get the lock, the other process should have
             # already swapped in the encrypted DB. Re-check state.
-            new_state = detect_db_state(db_path)
-            if new_state == 'encrypted':
+            if detect_db_state(db_path) == 'encrypted':
                 return {'action': 'waited-for-peer', 'state_after': 'encrypted'}
             # Otherwise fall through and try again.
+        backup_path = None
+        try:
+            # Lazy imports to keep this module light
+            from pegaprox.core.keystore import load_master_key
+            # the CLI's helpers, underscored but stable within the package
+            from pegaprox.cli.migrate_db import (
+                _encrypt_via_sqlcipher_export,
+                _verify_row_counts,
+            )
 
-        # Lazy imports to keep this module light
-        import shutil
-        from pegaprox.core.keystore import load_master_key
-        # Reuse the CLI helpers — they're public-ish (underscore-prefixed but
-        # stable within the package).
-        from pegaprox.cli.migrate_db import (
-            _encrypt_via_sqlcipher_export,
-            _verify_row_counts,
-        )
+            mk = load_master_key()
+            t0 = time.time()
+            mark = plain_alone(db_path)
 
-        mk = load_master_key()
-        t0 = time.time()
+            # 1. backup, on disk before the swap takes the plain file away: it is the
+            # one copy that opens without the key
+            backup_path = make_plain_copy(db_path, f"{db_path}.plain.bak.{int(t0)}")
+            _LOG.info("[DBCRYPTO] backup → %s", backup_path)
 
-        # 1. backup
-        shutil.copy2(db_path, backup_path)
-        os.chmod(backup_path, 0o600)
-        # MK Nov 2026 - on disk before the swap takes the plain file away: it is the one
-        # copy that opens without the key
-        sync_file(backup_path)
-        _LOG.info("[DBCRYPTO] backup → %s", backup_path)
+            # 2. encrypt
+            rows = _encrypt_via_sqlcipher_export(db_path, new_path, mk.key_raw)
+            _LOG.info("[DBCRYPTO] sqlcipher_export OK (%d rows)", rows)
 
-        # 2. encrypt
-        rows = _encrypt_via_sqlcipher_export(db_path, new_path, mk.key_raw)
-        _LOG.info("[DBCRYPTO] sqlcipher_export OK (%d rows)", rows)
+            # 3. verify
+            _verify_row_counts(db_path, new_path)
+            _LOG.info("[DBCRYPTO] row-count verification OK")
 
-        # 3. verify
-        _verify_row_counts(db_path, new_path)
-        _LOG.info("[DBCRYPTO] row-count verification OK")
-
-        # 4. atomic swap
-        os.replace(new_path, db_path)
+            # 4. atomic swap
+            check_before_swap(db_path, mark)
+            os.replace(new_path, db_path)
+        except BaseException as e:
+            stuck = _remove_files([backup_path] + _sqlite_files(new_path))
+            if isinstance(e, Exception):
+                raise _ConversionFailed(e, stuck) from e
+            raise
+    # swapped: the database is encrypted from here on, whatever follows
+    try:
         os.chmod(db_path, 0o600)
-        dt = time.time() - t0
-        _LOG.warning(
-            "[DBCRYPTO] auto-encrypt complete: %s (%.1fs, %d rows). "
-            "Plain backup retained at %s — delete manually after you've "
-            "verified the encrypted DB works.",
-            db_path, dt, rows, backup_path)
-        return {
-            'action': 'migrated',
-            'state_before': 'plain',
-            'state_after': 'encrypted',
-            'backup_path': backup_path,
-            'duration_s': round(dt, 2),
-            'rows_copied': rows,
-        }
-    finally:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        except Exception:
-            pass
-        os.close(lock_fd)
-        # Best-effort cleanup of stale candidate file
-        try:
-            if os.path.exists(new_path):
-                os.remove(new_path)
-        except Exception:
-            pass
+    except OSError as e:
+        _LOG.warning("[DBCRYPTO] could not make %s owner-only: %s", db_path, e)
+    _remove_files(_sqlite_files(new_path))
+    dt = time.time() - t0
+    _LOG.warning("[DBCRYPTO] auto-encrypt complete: %s (%.1fs, %d rows). %s",
+                 db_path, dt, rows, plain_copy_note(backup_path))
+    return {
+        'action': 'migrated',
+        'state_before': 'plain',
+        'state_after': 'encrypted',
+        'backup_path': backup_path,
+        'duration_s': round(dt, 2),
+        'rows_copied': rows,
+    }
 
 
 # ─── Plain-vs-Encrypted detection on an existing file ──────────────────────
+
+class FileUnusable(RuntimeError):
+    """detect_db_state: a database file this process cannot open, for a reason that is
+    neither the key nor damage (no permission, a full disk). The message names the file and
+    the cause, and never advises a restore."""
+
+
+# below this much free space an I/O error on opening is taken for a full disk: the -shm
+# alone needs 32 KB
+_OPEN_ROOM = 1024 * 1024
+
+
+def _cannot_open_words(db_path: str, e: BaseException) -> str:
+    where = os.path.dirname(os.path.abspath(db_path))
+    cause = f"{type(e).__name__}: {' '.join(str(e).split())}"
+    free = _free_bytes(where)
+    if _disk_full(e) or ('disk I/O error' in str(e) and free is not None and free < _OPEN_ROOM):
+        left = f"{_size_words(free)} free" if free is not None else 'no space left'
+        return (f"{db_path} is plain SQLite, and it cannot be opened because {where} is full "
+                f"({left}; {cause}). Free up space there.")
+    if 'locked' in str(e):
+        return (f"{db_path} is plain SQLite, and another process holds a lock on it ({cause}). "
+                f"Stop that process.")
+    return (f"{db_path} is plain SQLite, and SQLite cannot open it here ({cause}). The user "
+            f"PegaProx runs as needs read and write access to it, to its -wal and -shm files and "
+            f"to {where}" + (f", where {_size_words(free)} are free." if free is not None else "."))
+
 
 def detect_db_state(db_path: str) -> str:
     """Probe a DB file to detect whether it's:
@@ -943,28 +1410,56 @@ def detect_db_state(db_path: str) -> str:
       - 'corrupt'      — neither plain SQLite nor a valid encrypted DB
       - 'unknown-key'  — encrypted but our current key doesn't unlock it
 
-    Used by the auto-migration trigger on startup and the CLI tool.
+    Used by the auto-migration trigger on startup and the CLI tool. Raises RuntimeError
+    with the key store's reason when a file that is not plain meets a master key that
+    cannot be used (loose permissions, unreadable, not 32 bytes), and FileUnusable for a
+    file this process cannot read, or a plain one SQLite cannot open here.
     """
     if not os.path.exists(db_path):
         return 'missing'
+    try:
+        with open(db_path, 'rb') as fh:
+            head = 'plain' if fh.read(16) == _SQLITE_MAGIC else 'other'
+    except OSError as e:
+        # was 'neither plain SQLite nor a valid encrypted DB ... Restore from backup'
+        raise FileUnusable(
+            f"{db_path} cannot be read by this process ({type(e).__name__}: {e.strerror or e}). "
+            f"The user PegaProx runs as needs read and write access to it, to its -wal and -shm "
+            f"files and to {os.path.dirname(os.path.abspath(db_path))}.") from e
 
     # First try plain sqlite3 — cheapest test
     import sqlite3 as _plain
+    plain_error = None
     try:
         c = _plain.connect(db_path)
         try:
             c.execute("SELECT count(*) FROM sqlite_master").fetchone()
-            c.close()
             return 'plain'
-        except Exception:
+        except Exception as e:
+            plain_error = e
+        finally:
             c.close()
-    except Exception:
-        pass
+    except Exception as e:
+        plain_error = e
+    # MK Nov 2026 - a plain file SQLite could not open went on to the key, and the start
+    # refused with "is encrypted but the current master key does not unlock it ... restore a
+    # matching backup": on a full disk (no room for the -shm), and where the -wal or -shm
+    # cannot be written. An OperationalError on a plain header is the place, not the file.
+    # Damage (not a database, malformed) is a DatabaseError, and a damaged plain file is
+    # 'corrupt': the keyed probe took it for 'unknown-key' as well.
+    if head == 'plain':
+        if isinstance(plain_error, _plain.OperationalError):
+            raise FileUnusable(_cannot_open_words(db_path, plain_error))
+        return 'corrupt'
 
     # Try SQLCipher if available
     if BACKEND != 'sqlcipher':
         return 'corrupt'  # encrypted-looking but we can't decrypt anyway
 
+    # the key on its own first: the key store refuses a key file with loose permissions
+    # with a RuntimeError, the same type as a key that does not unlock, and that was taken
+    # for 'unknown-key'. It goes to the caller with its own reason now.
+    _usable_key()
     try:
         c = connect(db_path)
         c.execute("SELECT count(*) FROM sqlite_master").fetchone()

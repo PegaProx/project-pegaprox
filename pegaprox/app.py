@@ -1764,6 +1764,10 @@ def main(debug_mode=False):
                       f"version is installed")
             elif _r.get('action') == 'no-backend':
                 print(f"  ⚠ sqlcipher3 not installed - {_db_name} stays plain (field-level encryption still active)")
+            elif _r.get('action') == 'failed':
+                # the database is as it was and opens plain, the log has the reason
+                print(f"  ⚠ {_db_name} could not be encrypted and stays plain for now (see the [DBCRYPTO] "
+                      f"error in the log), the next start tries again")
     except RuntimeError as _e:
         # corrupt / unknown-key — refuse to start
         print(f"\n[FATAL] {_e}\n")

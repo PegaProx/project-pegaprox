@@ -374,7 +374,7 @@ A fresh install has no default credentials:
 - Session tokens expire after inactivity; optional strict-IP binding.
 - Per-IP rate limiting on login + every authenticated endpoint.
 - Input sanitization, CSRF Origin matching, RBAC enforced server-side on every route.
-- Auto-encryption on first boot - operators can opt out with `PEGAPROX_DISABLE_AUTO_ENCRYPT=1` if they want to take their own pre-encryption backup first.
+- Auto-encryption on first boot - operators can opt out with `PEGAPROX_DISABLE_AUTO_ENCRYPT=1` if they want to take their own pre-encryption backup first; the database then stays plain SQLite and opens without the key. A conversion that fails (a full disk, it needs about twice the database size free) leaves the database plain and running, and the next start tries again.
 
 ## 📖 Documentation
 
