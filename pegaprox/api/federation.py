@@ -709,7 +709,7 @@ def peer_lease_vote():
                         'error': 'Too many lease votes - the renewal asks one a round'})
         resp.headers['Retry-After'] = '30'
         return resp, 429
-    answer = federation.lease_vote(peer['instance_id'], _body())
+    answer = federation.lease_vote_atomic(peer['instance_id'], _body())
     code = 200 if (answer.get('granted') or answer.get('released')) else 409
     return jsonify(answer), code
 

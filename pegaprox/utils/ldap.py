@@ -699,21 +699,23 @@ def ldap_provision_user(ldap_result: dict) -> dict:
     username = ldap_result['username'].lower()
     users = load_users()
     existing = users.get(username)
-    # Federation Phase 2: a user mirrored from another instance is the home's to
-    # provision - this directory would overwrite rights it does not own
+    # Federation Phase 2 / Critical #1: a user mirrored from another instance is
+    # NOT this directory's to sign in - the home's password, not the directory's,
+    # is the one that belongs to it. A mirrored account is refused outright:
+    # the login path treats every non-None return as authenticated.
     if existing is not None:
         try:
             from pegaprox.core import federation as _fed_core
             if _fed_core.foreign_home('users', (username,)):
-                logging.info(f"[LDAP] '{username}' is a federation mirror - left to "
-                             f"its home instance")
-                return existing
+                logging.warning(f"[LDAP] '{username}' is a federation mirror - "
+                                f"the directory does not sign it in")
+                return None
         except Exception as e:
-            # fail closed: the directory does not overwrite a row whose home it
-            # cannot name
+            # fail closed: the directory cannot tell whose account this is,
+            # and a return value would skip the password check entirely
             logging.warning(f"[LDAP] '{username}': the federation ownership check "
-                            f"failed - provisioning refused: {e}")
-            return existing
+                            f"failed - login refused: {e}")
+            return None
     user = ldap_build_user_row(ldap_result, existing)
     if user is None:
         return None  # Caller should handle None return

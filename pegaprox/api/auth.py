@@ -1184,6 +1184,14 @@ def auth_login():
     # NS Apr 2026 — 2FA: TOTP and/or WebAuthn. If a user has EITHER registered,
     # they must pass ONE of them. WebAuthn short-circuits TOTP when a fresh
     # proof token is supplied.
+    # Critical #10: an enabled second factor with an unreadable secret is a
+    # login refused, not a login on the password alone - a key rotation that
+    # failed or a restore under another key must lock, not open
+    if user.get('totp_enabled') and not user.get('totp_secret'):
+        logging.warning(f"[LOGIN] '{username}' has 2FA enabled but the secret is "
+                        f"unreadable - sign-in refused (check the field key)")
+        return jsonify({'error': 'The second factor of this account cannot be read - '
+                                 'check the server logs', 'code': 'TOTP_UNREADABLE'}), 403
     has_totp = bool(user.get('totp_enabled') and user.get('totp_secret'))
     has_webauthn = False
     try:

@@ -984,7 +984,8 @@ IDENTITY_COLUMNS = {
               'tenant', 'created_at', 'password_expiry',
               'totp_enabled', 'enabled', 'auth_source', 'display_name', 'email',
               'ldap_dn', 'ldap_permissions', 'ldap_tenant', 'tenant_permissions',
-              'denied_permissions', 'oidc_sub', 'directory_groups'),
+              'denied_permissions', 'oidc_sub', 'directory_groups',
+              'portal_only', 'force_password_change'),
     'custom_roles': ('name', 'permissions', 'description', 'tenant_id', 'created_at'),
     'api_tokens': ('token_hash', 'token_prefix', 'username', 'name', 'role',
                    'permissions', 'expires_at', 'created_at', 'revoked'),
@@ -1362,10 +1363,18 @@ def _clashes_locally(conn, keys, key_vals):
 
 def _drop_row(conn, table, keys, sql_keys, home, dropped_users, logical_keys=None):
     """Delete one mirrored row (and what hangs on it, for a user: grants, favorites,
-    open sessions), under the home the snapshot names."""
+    open sessions) - but ONLY if the row actually belongs to the home the snapshot
+    names. A local account of the same username is never touched by another
+    member's delete."""
     kwhere = _key_where(keys)
+    # Critical #3: check that the row is actually this home's mirror before
+    # purging grants and sessions - a local row of the same name stays
     if table == 'users':
         name = (logical_keys or sql_keys)[0]
+        check = conn.execute(
+            f'SELECT fed_home FROM "{table}" WHERE {kwhere}', sql_keys).fetchone()
+        if check is None or check['fed_home'] != home:
+            return  # not this home's mirror: the delete does not reach it
         try:
             from pegaprox.core.db import get_db
             get_db().purge_user_grants(name)
@@ -1795,8 +1804,8 @@ def renew_leases(cluster_id=None):
             _mutate(drop)
             out[cid] = {'dropped': True}
             continue
-        granted, held_high = _vote_round(cid, instance_id(), int(rec.get('term') or 0),
-                                         LEASE_SECONDS)
+        granted, held_high, _v = _vote_round_arch(cid, instance_id(), int(rec.get('term') or 0),
+                                         LEASE_SECONDS, len(members()) + 1)
         if granted >= _needed_votes():
             fresh = {'term': rec.get('term'),
                      'expires': now + LEASE_SECONDS - LEASE_WRITE_MARGIN,
@@ -1921,7 +1930,7 @@ def enroll_cluster(cluster_id):
     # the owner first: a crash after this and before the lease leaves the gate
     # shut on an unleased cluster (fail closed), and the next attempt heals it
     _set_cluster_owner(cluster_id, instance_id())
-    lease = acquire_lease(cluster_id)
+    lease = acquire_lease_arch(cluster_id)
     if lease.get('failed'):
         try:
             _set_cluster_owner(cluster_id, owner)
@@ -2013,6 +2022,14 @@ def _apply_cluster_mirrors(home, rows_in, report):
         held = conn.execute('SELECT fed_owner FROM clusters WHERE id = ?',
                             (cid,)).fetchone()
         if held is not None and held['fed_owner'] != home:
+            # Critical #5: a cluster THIS instance leads is never another
+            # member's snapshot to write - a delayed answer from a former
+            # owner after adoption must not reach it, and no peer's write
+            # replaces credentials on a row we hold the lease on
+            if held['fed_owner'] == instance_id():
+                report['conflicts'].append(
+                    f'cluster "{cid}" is led here - not another member\'s to write')
+                continue
             # Q18: a mirror whose owner CHANGED (adoption) updates with the
             # snapshot: the old owner is gone, the sender is the new one. A
             # LOCAL cluster ('') stays a conflict - nobody takes those over.
@@ -2151,7 +2168,7 @@ def adopt_cluster(cluster_id, force=False):
     if not key and not force:
         raise FederationError(f'The field key of the owner is not held here - '
                               f'without it the credentials cannot cross over')
-    lease = acquire_lease(cluster_id)
+    lease = acquire_lease_arch(cluster_id)
     if lease.get('failed'):
         raise FederationError(f'The federation did not back the takeover '
                               f'({lease.get("votes")}/{lease.get("needed")} votes) '

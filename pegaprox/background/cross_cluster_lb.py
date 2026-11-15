@@ -99,9 +99,9 @@ def run_cross_cluster_balance_check(group):
     scored = []
     for r in rows:
         mgr = cluster_managers.get(r['id'])
-    if not _fed_lb_gate(r['id']):
-        logging.info(f"[LB] cluster {r['id']} is enrolled without a live lease here - skipped")
-        continue
+        if not _fed_lb_gate(r['id']):
+            logging.info(f"[LB] cluster {r['id']} is enrolled without a live lease here - skipped")
+            continue
         if not mgr:
             continue
         score = compute_cluster_score(mgr)
