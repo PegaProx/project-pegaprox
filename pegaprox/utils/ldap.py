@@ -568,6 +568,14 @@ def ldap_build_user_row(ldap_result: dict, existing: dict = None):
     """
     username = ldap_result['username'].lower()
 
+    # MK Nov 2026 - a mirror of another federation member belongs to its home: the home's
+    # password signs it in, never this directory, in either state of the switch. The
+    # standby branch of the login asks this same question.
+    if existing is not None and existing.get('fed_home'):
+        logging.warning(f"[LDAP] '{username}' is mirrored from another federation member - "
+                        f"the directory does not sign it in")
+        return None
+
     if existing is not None:
         # MK Sep 2026 - this asked two questions and got both slightly wrong.
         #

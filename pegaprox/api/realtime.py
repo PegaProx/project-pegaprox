@@ -326,7 +326,10 @@ def _stream_identity(username):
         stored = get_db().get_user(username)
     except Exception:
         stored = None
-    if not stored:
+    from pegaprox.utils.auth import mirror_switched_off
+    if not stored or mirror_switched_off(stored):
+        # a federation mirror with the federation off here signs in nowhere: the stream
+        # closes as it does for an account that is gone
         return None
     u = dict(stored)
     u['username'] = username
@@ -413,7 +416,8 @@ def validate_ws_token_api():
         _acct = _gdb().get_user(data.get('user'))
     except Exception:
         _acct = None
-    if _acct is not None and not _acct.get('enabled', True):
+    from pegaprox.utils.auth import mirror_switched_off
+    if _acct is not None and (not _acct.get('enabled', True) or mirror_switched_off(_acct)):
         logging.warning(f"[WS-TOKEN] user '{_sl(data.get('user'))}' is disabled")
         return jsonify({'error': 'Account disabled', 'code': 'ACCOUNT_DISABLED'}), 401
 

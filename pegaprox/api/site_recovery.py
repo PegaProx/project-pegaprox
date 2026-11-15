@@ -847,6 +847,13 @@ def execute_planned_failover(plan_id):
     busy = _run_under_way(plan_id)
     if busy:
         return busy
+    # MK Nov 2026 - a planned failover stops guests at the source and starts them at the
+    # target: both need this instance's federation lease before anything starts
+    from pegaprox.api.federation import refuse_unleased
+    for _cid in (plan['source_cluster'], plan['target_cluster']):
+        refused = refuse_unleased(_cid, f'cluster {_cid}')
+        if refused:
+            return refused
 
     src_mgr = cluster_managers.get(plan['source_cluster'])
     tgt_mgr = cluster_managers.get(plan['target_cluster'])

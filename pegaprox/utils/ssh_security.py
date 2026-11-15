@@ -276,13 +276,15 @@ def pin_as(client, paramiko, hostname, pinned_as, port=22):
     return True
 
 
-def secure_ssh_client(paramiko):
+def secure_ssh_client(paramiko, cluster_id=None):
     """Return a fresh ``paramiko.SSHClient`` with known_hosts loaded + policy set.
 
-    Its commands ask the transport guard of an automatic group (#625)."""
+    Its commands ask the transport guard of an automatic group (#625), and with
+    `cluster_id` (the Proxmox VE cluster the host is a node of) the federation's lease."""
     client = paramiko.SSHClient()
     from pegaprox.core import ha_transport
-    return ha_transport.guard_client(apply_host_key_policy(client, paramiko))
+    return ha_transport.guard_client(apply_host_key_policy(client, paramiko),
+                                     cluster_id=cluster_id)
 
 
 def persist_host_keys(client):

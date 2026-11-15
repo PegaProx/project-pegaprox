@@ -1412,6 +1412,12 @@ def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, u
             logging.warning(f"[OIDC] Rejected login for '{username}' - a {existing_source} "
                             f"account of that name exists and cannot be taken over by OIDC")
             return None  # Caller should handle None return
+        # MK Nov 2026 - nor a mirror of another federation member: it signs in at its home,
+        # and this provider would take it over with whatever role the mapping gives
+        if users[username].get('fed_home'):
+            logging.warning(f"[OIDC] '{username}' is mirrored from another federation member "
+                            f"- refused")
+            return None
         refusal = oidc_subject_refusal(username, users[username], user_info, subjects, name=name)
         if refusal:
             logging.warning(f"[OIDC] Rejected login for '{username}' - {refusal}")

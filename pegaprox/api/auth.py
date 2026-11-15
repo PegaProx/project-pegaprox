@@ -27,7 +27,7 @@ from pegaprox.utils.auth import (
     generate_api_token, create_api_token, validate_api_token, revoke_user_api_tokens,
     list_user_tokens, revoke_api_token, require_auth,
     generate_session_id, mark_admin_initialized, ensure_api_tokens_table,
-    dummy_verify_password,
+    dummy_verify_password, mirror_switched_off,
     ARGON2_AVAILABLE, TOTP_AVAILABLE,
     mfa_enrolment_state, MFA_DUE, MFA_SKIPPED_ON_STANDBY,
 )
@@ -1146,8 +1146,9 @@ def auth_login():
 
         user = users_db[username]
 
-        # check user is enabled
-        if not user.get('enabled', True):
+        # check user is enabled - a mirror of a federation member counts as disabled while
+        # the federation is off here: nothing syncs it, and no mirror guard runs
+        if not user.get('enabled', True) or mirror_switched_off(user):
             # burn the same ~100ms even on disabled accounts so existence isn't leaked
             dummy_verify_password(password)
             logging.warning(f"Login attempt for disabled user: {username} from {client_ip}")
@@ -1181,6 +1182,15 @@ def auth_login():
             logging.warning(f"LDAP user '{username}' is disabled locally")
             return jsonify({'error': 'Invalid credentials'}), 401
     
+    # MK Nov 2026 - a mirror of another federation member whose home asks for a new
+    # password: the change is the home's to take (this instance refuses it), so the account
+    # is sent there instead of into a change it cannot make. A mirror only gets this far
+    # with the federation on.
+    if user.get('fed_home') and user.get('force_password_change'):
+        return jsonify({'code': 'FED_PASSWORD_HOME', 'home': user['fed_home'],
+                        'error': 'This account has to change its password at its home '
+                                 'instance first'}), 409
+
     # NS Apr 2026 — 2FA: TOTP and/or WebAuthn. If a user has EITHER registered,
     # they must pass ONE of them. WebAuthn short-circuits TOTP when a fresh
     # proof token is supplied.
@@ -1202,6 +1212,16 @@ def auth_login():
             'error': 'Cannot verify second-factor enrolment - check the server logs',
             'code': 'MFA_STATE_UNAVAILABLE',
         }), 503
+
+    # Federation: a mirror's TOTP secret never travels (it is sealed at its home), only
+    # totp_enabled does. Without a passkey such an account signs in at its home; falling
+    # back to the password alone would drop the second factor. With one, the passkey is
+    # the second factor here and has_totp stays False.
+    if user.get('fed_home') and user.get('totp_enabled') and not user.get('totp_secret'):
+        if not has_webauthn:
+            return jsonify({'code': 'FED_2FA_HOME', 'home': user['fed_home'],
+                            'error': "This account's second factor lives at its home "
+                                     'instance of the federation - sign in there'}), 409
 
     if has_totp or has_webauthn:
         # Path A: caller submitted a WebAuthn proof (from /api/webauthn/auth/finish)
@@ -1266,7 +1286,9 @@ def auth_login():
     # #625: not on a standby. Its users table is the active's copy; a rehash here comes
     # back as a changed hash with the next sync, and that ends the user's sessions.
     # The active migrates the hash at the user's next login there.
-    if (not ldap_authenticated and not ha.is_standby()
+    # The same holds for a mirror of another federation member: the home migrates the
+    # hash, and the next sync brings it here.
+    if (not ldap_authenticated and not ha.is_standby() and not user.get('fed_home')
             and needs_password_rehash(user.get('password_salt', ''), user.get('password_hash', ''))):
         try:
             new_salt, new_hash = hash_password(password)
@@ -1511,7 +1533,7 @@ def auth_check():
     user = users_db.get(session['user'], {})
     
     # NS: Feb 2026 - If user was disabled while session is active, force logout
-    if not user or not user.get('enabled', True):
+    if not user or not user.get('enabled', True) or mirror_switched_off(user):
         logging.info(f"[AUTH_CHECK] User '{session['user']}' is disabled or deleted, invalidating session")
         invalidate_session(session_id)
         return jsonify({'authenticated': False, 'reason': 'account_disabled'}), 401
@@ -1528,7 +1550,10 @@ def auth_check():
     is_admin = session['role'] == ROLE_ADMIN
     is_external_auth = user.get('auth_source', 'local') in ('ldap', 'oidc', 'entra')
     include_admins = settings.get('password_expiry_include_admins', False)
-    should_check_expiry = settings.get('password_expiry_enabled') and not is_external_auth and (not is_admin or include_admins)
+    # MK Nov 2026 - a mirror of a federation member is held to its home's policy: its
+    # password_changed_at does not travel, and the change it would be sent to is refused here
+    should_check_expiry = (settings.get('password_expiry_enabled') and not is_external_auth
+                           and not user.get('fed_home') and (not is_admin or include_admins))
     
     if should_check_expiry:
         expiry_days = settings.get('password_expiry_days', 90)
@@ -2027,6 +2052,13 @@ def auth_change_password():
     if user.get('auth_source', 'local') in ('ldap', 'oidc', 'entra'):
         provider_name = {'ldap': 'LDAP/Active Directory', 'oidc': 'your OIDC provider', 'entra': 'Microsoft Entra ID'}.get(user['auth_source'], 'your identity provider')
         return jsonify({'error': f'Password is managed by {provider_name}. Please change it there.'}), 400
+
+    # a mirror's password is its home's to change - the same refusal the identity
+    # provider gets, with the instance named
+    from pegaprox.api.federation import refuse_own_mirror
+    refused = refuse_own_mirror('change the password')
+    if refused:
+        return refused
     
     # Verify current password
     if not verify_password(current_password, user['password_salt'], user['password_hash']):
@@ -2082,6 +2114,9 @@ def setup_2fa():
     """Generate TOTP secret and QR code for 2FA setup"""
     global users_db
     
+    refused = _refuse_own_mirror('set up the second factor')
+    if refused:
+        return refused
     refused = _refuse_api_token('Setting up 2FA')
     if refused:
         return refused
@@ -2159,6 +2194,9 @@ def verify_2fa_setup():
     """Verify TOTP code and activate 2FA"""
     global users_db
     
+    refused = _refuse_own_mirror('set up the second factor')
+    if refused:
+        return refused
     refused = _refuse_api_token('Setting up 2FA')
     if refused:
         return refused
@@ -2216,6 +2254,9 @@ def disable_2fa():
     """Disable 2FA for current user"""
     global users_db
     
+    refused = _refuse_own_mirror('disable the second factor')
+    if refused:
+        return refused
     refused = _refuse_api_token('Disabling 2FA')
     if refused:
         return refused
@@ -2374,6 +2415,9 @@ def list_api_tokens():
 @require_auth()
 def create_api_token_endpoint():
     """Create a new API token for the current user"""
+    refused = _refuse_own_mirror('draw API tokens')
+    if refused:
+        return refused
     # before the body is read: the race in _refuse_api_token was won while it arrived
     refused = _refuse_api_token('Creating an API token')
     if refused:
@@ -2421,6 +2465,11 @@ def create_api_token_endpoint():
     return jsonify(result)
 
 
+def _refuse_own_mirror(what):
+    from pegaprox.api.federation import refuse_own_mirror
+    return refuse_own_mirror(what)
+
+
 @bp.route('/api/auth/tokens/<int:token_id>', methods=['DELETE'])
 @require_auth()
 def revoke_api_token_endpoint(token_id):
@@ -2438,6 +2487,17 @@ def revoke_api_token_endpoint(token_id):
             cursor.execute('SELECT username, name FROM api_tokens WHERE id = ?', (token_id,))
             row = cursor.fetchone()
             if row:
+                # Federation Phase 2: a mirrored token is the home's to revoke
+                from pegaprox.core import federation as _fed_core
+                if _fed_core.enabled():
+                    _fed = get_db().conn.execute(
+                        'SELECT token_hash FROM api_tokens WHERE id = ?', (token_id,)).fetchone()
+                    _fed_owner = _fed_core.foreign_home(
+                        'api_tokens', (_fed['token_hash'],)) if _fed is not None else ''
+                    if _fed_owner:
+                        return jsonify({'code': 'FED_FOREIGN', 'home': _fed_owner,
+                                        'error': 'This token belongs to another instance '
+                                                 'of the federation - revoke it there'}), 409
                 _scope = _api_token_admin_scope()
                 if (_scope is not None
                         and _token_owner_tenant(dict(row)['username']) != _scope):
@@ -2452,6 +2512,18 @@ def revoke_api_token_endpoint(token_id):
         except Exception as e:
             return jsonify({'error': safe_error(e, 'Failed to revoke token')}), 500
 
+    # Federation Phase 2: a token of a mirrored account is the home's to revoke
+    from pegaprox.core import federation as _fed_core
+    if _fed_core.enabled():
+        _fed_row = get_db().conn.execute(
+            'SELECT token_hash FROM api_tokens WHERE id = ? AND username = ?',
+            (token_id, username)).fetchone()
+        _fed_owner = _fed_core.foreign_home(
+            'api_tokens', (_fed_row['token_hash'],)) if _fed_row is not None else ''
+        if _fed_owner:
+            return jsonify({'code': 'FED_FOREIGN', 'home': _fed_owner,
+                            'error': 'This token belongs to another instance of the '
+                                     'federation - revoke it there'}), 409
     if revoke_api_token(token_id, username):
         log_audit(username, 'token.revoked', f"Revoked API token id={token_id}")
         return jsonify({'success': True})

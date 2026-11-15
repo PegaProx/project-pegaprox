@@ -180,6 +180,14 @@ def create_app():
             if request.path.startswith('/api/ha/peer/'):
                 from pegaprox.api.ha import signed_member_call
                 peer_call = signed_member_call()
+            # MK Nov 2026 - the same for a federation member's signed call: a lease round
+            # and the sync come from one member address. Switched off (the default), no
+            # call is a member's and none is checked
+            if request.path.startswith('/api/federation/peer/'):
+                from pegaprox.core import federation as _fed_core
+                if _fed_core.enabled():
+                    from pegaprox.api.federation import request_fed_peer
+                    peer_call = request_fed_peer()[0] == 'member'
             if not peer_call and not any(request.path.startswith(p) for p in skip_paths):
                 # the portal_only hook below looks API tokens up only for a counted request
                 request.environ['pegaprox.rate_counted'] = True
@@ -662,6 +670,10 @@ def create_app():
         path = request.path
         if not path.startswith('/api/') or path.startswith('/api/ha/') or path in _STANDBY_WRITABLE:
             return None
+        # a federation member's call to this host is answered here, never forwarded: a
+        # standby answers 503 FED_STANDBY itself (api/federation._peer_or_refuse)
+        if path.startswith('/api/federation/peer/'):
+            return None
         if (request.method, rule) in _STANDBY_LOCAL_WRITES:
             return None
         from pegaprox.core import ha
@@ -796,8 +808,21 @@ def create_app():
     # call, and they answered 400 or 500 with the guard's own words. The caller hears what
     # the write gate says instead: 503 HA_NO_LEASE, try again. A 2xx for what did go out
     # and a 503 of the route's own stay as they are.
+    #
+    # MK Nov 2026 - the same for a write the federation refused at its exit: this
+    # instance holds no live lease on the enrolled cluster it went to. The route answered
+    # whatever its failed cluster call made of it; the caller hears 409 FED_NO_LEASE. One
+    # environ lookup, no federation call, when nothing was refused.
     @app.after_request
     def say_no_lease_after_a_refused_write(response):
+        if 400 <= response.status_code < 600:
+            from pegaprox.core.federation import FED_REFUSED_ENVIRON
+            refused = request.environ.get(FED_REFUSED_ENVIRON)
+            if refused:
+                from pegaprox.api.federation import lease_refusal
+                resp, status = lease_refusal(refused[0])
+                resp.status_code = status
+                return resp
         if 400 <= response.status_code < 600 and response.status_code != 503:
             from pegaprox.core import ha
             if request.environ.get(ha.GUARD_REFUSED_ENVIRON):
@@ -809,11 +834,17 @@ def create_app():
 
     # and the same for a refusal that no route caught on its way up
     from pegaprox.core.ha import NoLease
+    from pegaprox.core.federation import LeaseRefused
 
     @app.errorhandler(NoLease)
     def refused_at_the_exit(e):
         from pegaprox.api.ha import guard_refusal
         return guard_refusal()
+
+    @app.errorhandler(LeaseRefused)
+    def refused_by_the_federation(e):
+        from pegaprox.api.federation import lease_refusal
+        return lease_refusal(e.cluster_id)
 
     # the lease calls of automatic failover, answered before Flask where Flask would
     # answer them with 200 anyway (_LeaseFastPath). It takes the hooks as they are now,

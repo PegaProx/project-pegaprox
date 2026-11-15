@@ -349,6 +349,17 @@ def load_users(readonly: bool = False) -> dict:
     return {}
 
 
+def mirror_switched_off(user: dict) -> bool:
+    """Whether `user` is a mirror of another federation member while the federation is off
+    here (forced off, or a database restored onto a plain install). Nothing syncs such a row
+    and none of the mirror guards run, so it is treated like a disabled account. Asks the
+    federation only for a row that has a home at all."""
+    if not (user or {}).get('fed_home'):
+        return False
+    from pegaprox.core import federation
+    return not federation.enabled()
+
+
 def apply_token_role(user: dict, token_role: str) -> dict:
     """Return a COPY of `user` carrying the effective_role an API token acts under.
 
@@ -434,7 +445,9 @@ def resolve_authz_user(auth: dict):
     except Exception as e:
         logging.warning(f"[AUTHZ] could not read account {username!r}: {type(e).__name__}")
         return None
-    if not stored:
+    if not stored or mirror_switched_off(stored):
+        # MK Nov 2026 - a federation mirror with the federation off here is a disabled
+        # account for the consoles too, not only for the require_auth routes
         return None
     user = dict(stored, username=username)
     role = auth.get('role')
@@ -1377,7 +1390,8 @@ def ensure_api_tokens_table():
                 last_used_at TEXT,
                 last_used_ip TEXT,
                 created_at TEXT NOT NULL,
-                revoked INTEGER DEFAULT 0
+                revoked INTEGER DEFAULT 0,
+                fed_home TEXT NOT NULL DEFAULT ''
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash)')
@@ -1519,7 +1533,7 @@ def require_auth(roles: list = None, perms: list = None):
                 _g.current_user = user
             except Exception:
                 pass
-            if not user.get('enabled', True):
+            if not user.get('enabled', True) or mirror_switched_off(user):
                 return jsonify({'error': 'Account is disabled', 'code': 'ACCOUNT_DISABLED'}), 401
             # MK Oct 2026 - a portal_only account reaches the Client Portal and nothing else,
             # by session or by one of its API tokens (PORTAL_ONLY_ENDPOINTS)

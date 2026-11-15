@@ -49,7 +49,7 @@ def remove(api, admin, monkeypatch):
     fake.SSHClient.return_value = client
     monkeypatch.setattr(vms, 'get_paramiko', lambda: fake)
     monkeypatch.setattr(vms, 'apply_host_key_policy', lambda *a, **k: None)
-    monkeypatch.setattr(vms, 'secure_ssh_client', lambda pm: client)
+    monkeypatch.setattr(vms, 'secure_ssh_client', lambda pm, cluster_id=None: client)
     monkeypatch.setattr(vms, 'persist_host_keys', lambda *a, **k: None)
 
     class _Time:

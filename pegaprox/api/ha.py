@@ -671,6 +671,13 @@ def join_active():
         return jsonify({'error': 'Enter the https:// address the active instance will use to reach this one'}), 400
     if ha.role() != ha.ROLE_STANDALONE or ha.members():
         return jsonify({'error': 'Only a standalone, unpaired instance can become a standby'}), 409
+    # MK Nov 2026 - as a standby this instance takes the active's federation identity with
+    # the sync, and its own would be gone while the other sites still count it
+    from pegaprox.core import federation as _fed
+    if _fed.enabled() and _fed.members():
+        return jsonify({'code': 'FED_MEMBER',
+                        'error': 'Leave the federation first: as a standby this instance takes '
+                                 'the active\'s federation identity'}), 409
     try:
         info = ha.decode_code(code)
     except ha.HaError as e:

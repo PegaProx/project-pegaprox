@@ -359,6 +359,9 @@ SYNC_TABLES = (
     # VM blueprints: a library image or a PVE template plus hardware and Cloud-Init, and
     # the template each cluster deploys one from (#1220)
     'vm_blueprints', 'blueprint_templates',
+    # which tenant and role of this instance a federation member's tenants and roles map
+    # onto: the group is one member, and a promoted standby keeps the admin's mapping
+    'federation_identity_map',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
@@ -376,6 +379,9 @@ LOCAL_TABLES = (
     'ha_change_journal', 'ha_cv_dirty',
     # the parts of this host's metrics snapshots and the guest rosters they share
     'metrics_part', 'metrics_roster',
+    # what this host last pulled from which federation member: a promoted standby pulls
+    # everything once, and an unchanged row writes nothing
+    'federation_sync_state',
 )
 
 # server_settings keys that describe this host, not the deployment
@@ -12850,6 +12856,18 @@ def _in_request():
     return bool(_request_method())
 
 
+def in_read_request():
+    """True in a GET or HEAD this thread serves, or a fan-out of one. The federation's exit
+    guard lets SSH commands pass there, as guard() does."""
+    return _request_method() in _READ_METHODS
+
+
+def reading_now():
+    """True inside `with reading()` in this thread: the READ_SITES inventory serves the
+    federation's exit guard as well."""
+    return bool(getattr(_guard_tls, 'reading', 0))
+
+
 def _refusals():
     """The list a refusal at an exit goes into for the request this thread serves: the
     one carry() handed a fan-out of it, or the request's own. None outside a request."""
@@ -12969,7 +12987,8 @@ def carry(fn):
     A refusal in fn is noted for that request too. Once fn is done the worker has what
     it had before, so nothing fn confirmed serves its next task. fn itself where the
     lease is not in force."""
-    if not guard_on():
+    fed_refused = _federation_refusals()
+    if not guard_on() and fed_refused is None:
         return fn
     ctx = ([_request_method()] + [getattr(_guard_tls, k, d) for k, d in _CARRIED[1:-1]]
            + [_refusals()])
@@ -12979,12 +12998,33 @@ def carry(fn):
         saved = [getattr(_guard_tls, k, d) for k, d in _CARRIED]
         for (k, _d), v in zip(_CARRIED, ctx):
             setattr(_guard_tls, k, v)
+        fed_saved = _bind_federation_refusals(fed_refused) if fed_refused is not None else None
         try:
             return fn(*args, **kwargs)
         finally:
             for (k, _d), v in zip(_CARRIED, saved):
                 setattr(_guard_tls, k, v)
+            if fed_refused is not None:
+                _bind_federation_refusals(fed_saved)
     return run
+
+
+def _federation_refusals():
+    """Where the federation's exit guard notes a refusal for the request this thread
+    serves, so a fan-out notes it there too; None while the federation is off or outside
+    a request."""
+    try:
+        from pegaprox.core import federation
+        if not federation.enabled():
+            return None
+        return federation._refusal_list()
+    except Exception:
+        return None
+
+
+def _bind_federation_refusals(said):
+    from pegaprox.core import federation
+    return federation.bind_refusals(said)
 
 
 def as_job(fn, what):

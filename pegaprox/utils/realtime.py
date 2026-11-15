@@ -251,7 +251,8 @@ def validate_sse_token(token: str) -> dict:
         _acct = get_db().get_user(token_data.get('user'))
     except Exception:
         _acct = None
-    if _acct is not None and not _acct.get('enabled', True):
+    from pegaprox.utils.auth import mirror_switched_off
+    if _acct is not None and (not _acct.get('enabled', True) or mirror_switched_off(_acct)):
         with sse_tokens_lock:
             sse_tokens.pop(token, None)
         return None

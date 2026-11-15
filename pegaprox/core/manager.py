@@ -1206,8 +1206,9 @@ class PegaProxManager:
         from pegaprox.utils.sanitization import refuse_climbing_paths
         refuse_climbing_paths(session)
         _refuse_redirects(session)
-        # an automatic leader that lost its lease sends no change from here (#625)
-        ha_transport.guard_session(session)
+        # an automatic leader that lost its lease sends no change from here (#625), nor
+        # does an instance without the federation's lease on this cluster
+        ha_transport.guard_session(session, cluster_id=getattr(self, 'id', None))
 
         self._session_cache = session
         self._session_auth_key = auth_key
@@ -1717,7 +1718,7 @@ class PegaProxManager:
                         session.mount('https://', _NoHostnameCheckAdapter())  # MK: #88
                     _refuse_redirects(session)
                     # the login passes in every role, the token it may mint needs the lease
-                    ha_transport.guard_session(session)
+                    ha_transport.guard_session(session, cluster_id=getattr(self, 'id', None))
 
                     if self._using_api_token:
                         # API Token auth - no ticket needed!
@@ -6220,6 +6221,15 @@ class PegaProxManager:
                     continue
                 self.logger.warning("[HA] HA monitor ends - this PegaProx instance is a standby now")
                 break
+            # MK Nov 2026 - an enrolled cluster this instance holds no live federation lease
+            # on is the leading site's to watch and to fence: this tick checks nothing
+            from pegaprox.core import federation as _fed
+            if _fed.enabled() and not _fed.worker_takes_writes_for(self.id):
+                for _ in range(self._ha_interval()):
+                    if not self.ha_enabled or self.stop_event.is_set():
+                        break
+                    time.sleep(1)
+                continue
             try:
                 self._ha_check_nodes()
                 
@@ -7805,7 +7815,7 @@ class PegaProxManager:
         try:
             from pegaprox.utils.audit import log_audit
             log_audit('system', action, f"Cluster {self.config.name}: {details}", cluster=self.config.name,
-                      cluster_id=self.id)
+                      cluster_id=getattr(self, 'id', None))
         except Exception:
             pass
         try:
@@ -8070,10 +8080,12 @@ class PegaProxManager:
         env = {**os.environ, 'IPMITOOL_PASSWORD': password, 'IPMI_PASSWORD': password}
         try:
             # the answer to "off" is not the proof, the status after it is
-            node_cmd(base + ['power', 'off'], capture_output=True, timeout=30, env=env, host=str(host))
+            node_cmd(base + ['power', 'off'], capture_output=True, timeout=30, env=env, host=str(host),
+                     cluster_id=getattr(self, 'id', None))
             for _ in range(self.FENCE_VERIFY_READS):
                 status = node_cmd(base + ['power', 'status'], capture_output=True, text=True,
-                                  timeout=15, env=env, host=str(host), read=True)
+                                  timeout=15, env=env, host=str(host), read=True,
+                                  cluster_id=getattr(self, 'id', None))
                 if status.returncode == 0 and re.search(r'power is off', status.stdout or '', re.I):
                     self.__dict__.setdefault('_ha_verified_fences', {})[node] = time.monotonic()
                     self.logger.info(f"[HA] ✓ {node} is powered off (read back from its BMC)")
@@ -8703,7 +8715,7 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
                     # of -P on the argv, which is visible in `ps` to any local user during
                     # a fence.
                     env={**os.environ, 'IPMITOOL_PASSWORD': ipmi_pass, 'IPMI_PASSWORD': ipmi_pass},
-                    host=str(ipmi_host)
+                    host=str(ipmi_host), cluster_id=getattr(self, 'id', None)
                 )
                 
                 if result.returncode == 0:
@@ -8726,7 +8738,7 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
                     ['ssh', '-o', 'ConnectTimeout=5', '-o', f'StrictHostKeyChecking={_hkc}',
                      '-o', f'UserKnownHostsFile={_kh}', *self._ssh_port_args(),
                      '--', f'{ssh_user}@{ssh_host}', 'poweroff'],
-                    capture_output=True, timeout=15, host=str(ssh_host)
+                    capture_output=True, timeout=15, host=str(ssh_host), cluster_id=getattr(self, 'id', None)
                 )
                 
                 # SSH might fail if node is really dead, that's OK
@@ -11036,7 +11048,7 @@ echo "AGENT_INSTALLED_OK"
                 ['ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                  '-o', f'UserKnownHostsFile={_kh}',
                  '-o', 'BatchMode=yes', *self._ssh_port_args(), *login, command],
-                capture_output=True, text=True, timeout=timeout, host=host
+                capture_output=True, text=True, timeout=timeout, host=host, cluster_id=getattr(self, 'id', None)
             )
             if result.returncode == 0:
                 return result.stdout
@@ -11101,7 +11113,8 @@ echo "AGENT_INSTALLED_OK"
                     ['ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                      '-o', f'UserKnownHostsFile={_kh}',
                      '-i', key_file, *self._ssh_port_args(), *login, command],
-                    capture_output=True, text=True, timeout=timeout, host=host
+                    capture_output=True, text=True, timeout=timeout, host=host,
+                    cluster_id=getattr(self, 'id', None)
                 )
                 if result.returncode == 0:
                     return result.stdout
@@ -11161,7 +11174,8 @@ echo "AGENT_INSTALLED_OK"
                 ['sshpass', '-e', 'ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                  '-o', f'UserKnownHostsFile={_kh}',
                  *self._ssh_port_args(), *login, command],
-                capture_output=True, text=True, timeout=timeout, env=env, host=host
+                capture_output=True, text=True, timeout=timeout, env=env, host=host,
+                cluster_id=getattr(self, 'id', None)
             )
             if result.returncode == 0:
                 return result.stdout
@@ -12204,7 +12218,8 @@ echo "AGENT_INSTALLED_OK"
             
             self.logger.info(f"[HA] Running: ssh {user}@{host} '{command}'")
             
-            result = node_cmd(ssh_cmd, capture_output=True, text=True, timeout=30, host=host, need=need)
+            result = node_cmd(ssh_cmd, capture_output=True, text=True, timeout=30, host=host, need=need,
+                              cluster_id=getattr(self, 'id', None))
 
             if result.returncode == 0:
                 self.logger.info(f"[HA] ✓ Command successful: {result.stdout.strip()}")
@@ -12345,7 +12360,7 @@ echo "AGENT_INSTALLED_OK"
             self.logger.info(f"[HA] Running: sshpass ssh {user}@{host} '{command}'")
             
             result = node_cmd(ssh_cmd, capture_output=True, text=True, timeout=30, env=env, host=host,
-                              need=need)
+                              need=need, cluster_id=getattr(self, 'id', None))
             
             if result.returncode == 0:
                 self.logger.info(f"[HA] ✓ Command successful: {result.stdout.strip()}")
@@ -13768,7 +13783,8 @@ echo "AGENT_INSTALLED_OK"
 
                 # SUCCESS - release semaphore immediately, connection is established
                 # This allows new connections while this session runs
-                return ha_transport.guard_client(ssh, host, again=guard_asked)
+                return ha_transport.guard_client(ssh, host, again=guard_asked,
+                                                 cluster_id=getattr(self, 'id', None))
                 
             except paramiko.ssh_exception.AuthenticationException as e:
                 self.logger.error(f"SSH auth failed for {username}@{host}: {e}")
@@ -14080,7 +14096,7 @@ echo "AGENT_INSTALLED_OK"
                             # Get transport and open channel with PTY for sudo support
                             transport = ssh.get_transport()
                             # past exec_command, so asked here (#625)
-                            ha_transport.guard_ssh(node_ip, 'shutdown')
+                            ha_transport.guard_ssh(node_ip, 'shutdown', cluster_id=getattr(self, 'id', None))
                             channel = transport.open_session()
                             channel.get_pty()
                             channel.settimeout(10)
@@ -16600,7 +16616,7 @@ echo "AGENT_INSTALLED_OK"
             from pegaprox.utils.sanitization import refuse_climbing_paths
             refuse_climbing_paths(s)
             _refuse_redirects(s)
-            ha_transport.guard_session(s)
+            ha_transport.guard_session(s, cluster_id=getattr(self, 'id', None))
             # self.host is already IPv6-bracketed by the property — use it directly.
             login_url = f"https://{self.host}:{self.api_port}/api2/json/access/ticket"
             # failed over to a node with a root password of its own: that one (#1136)
@@ -20679,6 +20695,12 @@ echo "AGENT_INSTALLED_OK"
         """
         # standby instance: no migrations from here (defence in depth, see start_ha_monitor)
         if not ha.is_active():
+            return
+        # the worker lease check: a cluster enrolled in the federation is balanced only
+        # while this instance holds a live lease on it - every move the balancer makes
+        # is a write on the cluster. Nothing is asked while the federation is off
+        from pegaprox.core import federation as _fed
+        if _fed.enabled() and not _fed.worker_takes_writes_for(self.id):
             return
         try:
             self.logger.info("=" * 60)
