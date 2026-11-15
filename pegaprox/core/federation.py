@@ -428,6 +428,7 @@ def accept_join(code, url, joiner_id, joiner_key, site, key_sealed=''):
         replaced = state.get('tombstones', {}).pop(joiner_id, None) is not None \
             or members_.get(joiner_id) is not None
         rec = {'url': url, 'public_key': joiner_key, 'site': site,
+               'paired_by': instance_id(),
                'fingerprint': '', 'paired_at': int(time.time()), 'last_seen': 0}
         old = members_.get(joiner_id)
         if old is not None:
@@ -749,6 +750,13 @@ def leave():
     before = members()
     for iid in before:
         drop_mirror_rows(iid)
+
+        # 18: the field keys go with the mirrors - a lone
+        # instance cannot adopt a running member cluster
+        def _clear_keys(state):
+            state['field_keys'] = {}
+            return True
+        _mutate(_clear_keys)
     # what this instance led it leads no more: the leases go, the rows unenroll
     try:
         conn = _identities_conn()
@@ -1272,7 +1280,7 @@ def apply_identity_snapshot(body, sender=None):
                     values[c] = _b64.b64decode(v) if isinstance(v, str) else v
                 # Q5: a mirrored token or passkey must not land on a username that is
                 # a LOCAL account (or another member's) - it would authenticate as that user
-                if kind in ('token', 'webauthn') and held is None:
+                if kind in ('token', 'webauthn'):
                     _owner = _identity_username_owner(conn, row)
                     if _owner is not None and _owner != home:
                         report['conflicts'].append(
@@ -1613,7 +1621,7 @@ def _lease_check_vote(candidate, cluster_id, term, lease_s, now=None):
         return {'granted': False, 'reason': 'candidate'}, None
     if not CLUSTER_ID_RE.fullmatch(cluster_id or ''):
         return {'granted': False, 'reason': 'cluster'}, None
-    if not isinstance(term, int) or isinstance(term, bool) or not 0 < term < 1 << 30:
+    if not isinstance(term, int) or isinstance(term, bool) or not 0 < term < 1000000:
         return {'granted': False, 'reason': 'term'}, None
     lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= MAX_LEASE_SECONDS \
         else LEASE_SECONDS
@@ -1748,10 +1756,20 @@ def _vote_round(cluster_id, candidate, term, lease_s):
 
 
 def _needed_votes():
-    """Majority of the members including this one (majority as ha_vote counts it:
-    n // 2 + 1).
-    """
-    return (len(members()) + 1) // 2 + 1
+    """Majority of the members including this one. 17: the voter
+    count comes from what the PEERS' promises say, not from the local
+    member list that any side of a partition can shrink unilaterally."""
+    local_count = len(members()) + 1
+    try:
+        state = _load()
+        max_voters = 0
+        for rec in (state.get('lease_promises') or {}).values():
+            if isinstance(rec, dict) and isinstance(rec.get('voters'), int):
+                max_voters = max(max_voters, rec['voters'])
+    except Exception:
+        max_voters = 0
+    voters = max(local_count, max_voters)
+    return voters // 2 + 1
 
 
 def acquire_lease(cluster_id, lease_s=None):
@@ -1790,25 +1808,49 @@ def acquire_lease(cluster_id, lease_s=None):
 def renew_leases(cluster_id=None):
     """Every lease held here gets its round; one that no majority backs simply
     runs out where its clock says, and the gates close on their own. With
-    `cluster_id`, that lease alone is asked for - the manual renew route wants
-    one cluster's round, not the whole estate's."""
-    now = _lease_now()
+    `cluster_id`, that lease alone is asked for.
+
+    #4: the expiry counts from the cluster's OWN round start, not from a global
+    timestamp taken before every round ran - a slow member must not eat into
+    another cluster's remaining lease time.
+    #20: a lease that ran out is re-acquired, not just dropped - a WAN blip of
+    two minutes does not orphan the site's clusters until an admin re-enrolls
+    each one by hand."""
     out = {}
     for cid, rec in list(my_leases().items()):
         if cluster_id and cid != cluster_id:
             continue
+        now = _lease_now()
         if now > rec.get('expires', 0) + LEASE_SECONDS * 2:
+            # long gone: drop the dead entry and try to get the lease back
             def drop(state, _cid=cid):
                 state.get('my_leases', {}).pop(_cid, None)
                 return True
             _mutate(drop)
+            # #20: auto re-acquire for clusters this instance still owns
+            owner = cluster_owner(cid)
+            if owner == instance_id():
+                lease = acquire_lease_arch(cid)
+                if not lease.get('failed'):
+                    out[cid] = {'reacquired': True}
+                    continue
             out[cid] = {'dropped': True}
             continue
-        granted, held_high, _v = _vote_round_arch(cid, instance_id(), int(rec.get('term') or 0),
-                                         LEASE_SECONDS, len(members()) + 1)
+        if now > rec.get('expires', 0):
+            # expired but recent: try a fresh acquire before giving up (#20)
+            owner = cluster_owner(cid)
+            if owner == instance_id():
+                lease = acquire_lease_arch(cid)
+                if not lease.get('failed'):
+                    out[cid] = {'reacquired': True}
+                    continue
+        round_start = _lease_now()
+        granted, held_high, _v = _vote_round_arch(cid, instance_id(),
+                                                   int(rec.get('term') or 0),
+                                                   LEASE_SECONDS, len(members()) + 1)
         if granted >= _needed_votes():
             fresh = {'term': rec.get('term'),
-                     'expires': now + LEASE_SECONDS - LEASE_WRITE_MARGIN,
+                     'expires': round_start + LEASE_SECONDS - LEASE_WRITE_MARGIN,
                      'votes': granted}
 
             def go(state, _cid=cid, _fresh=fresh):
@@ -2381,7 +2423,7 @@ def lease_vote_atomic(sender, body):
         return _lease_release(sender, cluster_id)
     if not CLUSTER_ID_RE.fullmatch(cluster_id):
         return {'granted': False, 'reason': 'cluster'}
-    if not isinstance(term, int) or isinstance(term, bool) or not 0 < term < 1 << 30:
+    if not isinstance(term, int) or isinstance(term, bool) or not 0 < term < 1000000:
         return {'granted': False, 'reason': 'term'}
     lease_s = lease_s if isinstance(lease_s, int) and 5 <= lease_s <= MAX_LEASE_SECONDS \
         else LEASE_SECONDS
@@ -2518,25 +2560,49 @@ def adopt_ha_federation_identity():
     the rest of the configuration - the HA sync brought the rows, the identity
     rides along. Called from the HA promotion path."""
     me = instance_id()
+    conn = _identities_conn()
+    moved = []
     try:
-        conn = _identities_conn()
         rows = conn.execute(
-            'SELECT id, fed_owner FROM clusters WHERE fed_owner != '' AND fed_owner != ?',
+            "SELECT id, fed_owner FROM clusters "
+            "WHERE fed_owner != '' AND fed_owner != ?",
             (me,)).fetchall()
-        moved = []
-        for r in rows:
-            # only clusters that came with the HA sync (fed_owner is the old
-            # active's federation id) - not mirrors of other members
-            if r['fed_owner'] and federation_state_has_member(r['fed_owner']):
-                conn.execute('UPDATE clusters SET fed_owner = ? WHERE id = ? AND fed_owner = ?',
-                             (me, r['id'], r['fed_owner']))
+    except Exception as e:
+        logging.warning(f'[FED] HA promotion: could not read cluster ownership: {e}')
+        return False
+    for r in rows:
+        old_owner = r['fed_owner']
+        # after an HA sync the fed_owner names the OLD active's federation id.
+        # This instance just became the HA leader: what the old leader led,
+        # this one leads now. Not mirrors of OTHER federation members - those
+        # stay whose they are.
+        if old_owner and not _is_foreign_federation_mirror(old_owner, me):
+            try:
+                conn.execute(
+                    'UPDATE clusters SET fed_owner = ? WHERE id = ? AND fed_owner = ?',
+                    (me, r['id'], old_owner))
                 moved.append(r['id'])
-        if moved:
+            except Exception:
+                pass
+    if moved:
+        try:
             conn.commit()
             logging.info(f'[FED] HA promotion: {len(moved)} cluster ownership moved here')
-    except Exception as e:
-        logging.warning(f'[FED] HA promotion: could not move cluster ownership: {e}')
+        except Exception as e:
+            logging.warning(f'[FED] HA promotion: commit failed: {e}')
     return True
+
+
+def _is_foreign_federation_mirror(owner_id, me):
+    """Whether a fed_owner names a member of a federation this instance knows
+    (a mirror that must stay whose it is), as opposed to the old HA leader
+    whose clusters this instance inherits on promotion."""
+    # if the federation state knows this member, it is a live peer's mirror
+    if owner_id in members() or owner_id in tombstones():
+        return True
+    # if the federation state does not know it, it is most likely the old
+    # HA leader's id - the sync brought the rows, the state file did not
+    return False
 
 
 def federation_state_has_member(member_id):

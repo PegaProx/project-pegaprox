@@ -233,6 +233,13 @@ def peer_member_removed():
     if sender == peer['instance_id']:
         # the member that says it is out itself says it in /peer/left
         return jsonify({'error': 'That member speaks for itself'}), 409
+    # #9: only the member that INTRODUCED the departing member (or the
+    # admin route) removes it - a third member cannot throw another out
+    # and shrink the voter list to its own advantage
+    removing_rec = federation.member_record(sender)
+    if removing_rec is not None and removing_rec.get('paired_by') != peer['instance_id']:
+        return jsonify({'error': 'Only the member that introduced it (or the '
+                                 'admin route) removes it'}), 403
     gone = federation.remove_member(sender, by=f"peer:{peer['instance_id']}")
     if gone:
         log_audit('system', 'federation.member_removed',
