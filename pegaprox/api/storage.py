@@ -2223,7 +2223,7 @@ def rescan_storage(cluster_id, storage_id):
                             # Try to connect via SSH
                             # its commands ask the transport guard of an automatic group (#625)
                             from pegaprox.utils.ssh_security import secure_ssh_client, persist_host_keys
-                            ssh = secure_ssh_client(paramiko)
+                            ssh = secure_ssh_client(paramiko, cluster_id=cluster_id)
 
                             connect_kwargs = {
                                 'hostname': node_host,

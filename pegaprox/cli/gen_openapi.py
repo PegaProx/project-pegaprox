@@ -40,7 +40,10 @@ _INLINE_AUTH = ('_require_session', 'validate_session(', 'validate_api_token(',
                 # #625 - the other PegaProx instance of a standby pair
                 '_peer_or_refuse', 'accept_pairing',
                 # and its witness: the code at pairing, its signature after
-                'accept_witness', 'witness_verdict', 'request_witness')
+                'accept_witness', 'witness_verdict', 'request_witness',
+                # MK Nov 2026 - the joining member of a federation: the pairing
+                # code in the body, spent by the call
+                'accept_join')
 
 # ...and those two take that token only, so advertising apiToken/sessionId on them
 # sends an integrator straight into a 403.
@@ -52,6 +55,20 @@ _HA_PEER_AUTH = ('_peer_or_refuse', 'witness_verdict', 'request_witness')
 _HA_PAIRING_AUTH = ('accept_pairing', 'accept_witness')
 # the witness code bundle: the witness's signature, or the open witness code in the body
 _HA_WITNESS_CODE = ('witness_code_ok',)
+
+# MK Nov 2026 - the three-leader federation carries peer routes of its own whose
+# helper carries the same NAME as the standby group's (_peer_or_refuse), but under
+# its own trust: an Ed25519 signature over the federation's SIGN_DOMAIN, checked
+# against the member key the pairing recorded, 403 FED_NOT_MEMBER or FED_CLOCK for
+# a call it refuses (never a 401: no browser session is involved) and 410
+# FED_REMOVED for a member the federation took out. The blueprint tells the two
+# apart where the name cannot - the HA peer routes live in 'ha', the federation's
+# in 'federation'. Advertising haPeer on them sent an integrator at the wrong
+# trust domain.
+_FED_PEER_AUTH = ('_peer_or_refuse',)
+# /api/federation/peer/join runs before any member exists: the one-time pairing
+# code in its body authenticates the call and is spent by it, like the HA pair.
+_FED_PAIRING_AUTH = ('accept_join',)
 
 _CONVERTER_TYPES = {
     'int': ('integer', None),
@@ -187,7 +204,40 @@ def build(app):
                 op['security'] = [{'installToken': []}]
                 op['responses'].pop('401', None)
                 op['responses']['403'] = {'description': 'Unknown, revoked or spent token'}
-            if kind == 'inline' and _uses(fn, _HA_PEER_AUTH) and _uses(fn, _HA_WITNESS_CODE):
+            if kind == 'inline' and tag == 'federation' and _uses(fn, _FED_PAIRING_AUTH):
+                # no session and no peer header: the one-time pairing code in the
+                # body, which no scheme describes
+                op['security'] = []
+                op['responses'].pop('401', None)
+                op['responses']['403'] = {'description': 'Wrong, expired or spent pairing code'}
+                op['responses']['409'] = {'description': 'FED_NO_QUORUM: no majority of the '
+                                                         'federation took the new member in, '
+                                                         'or FED_FULL; the code stays open'}
+            elif kind == 'inline' and tag == 'federation' and _uses(fn, _FED_PEER_AUTH):
+                # the federation's own peer scheme, not the standby group's: same
+                # headers, different signature domain and different key material,
+                # checked against the member record. A refusal is a 403 with a code.
+                # The auth kind stays 'inline', as on the HA peer routes; the scheme
+                # says which trust it is
+                op['security'] = [{'federationPeer': []}]
+                op['responses'].pop('401', None)
+                op['responses']['403'] = {'description': 'FED_NOT_MEMBER: not a paired '
+                                                         'federation member, or FED_CLOCK: '
+                                                         'the clocks are too far apart'}
+                op['responses']['410'] = {'description': 'FED_REMOVED: the caller was '
+                                                         'removed from the federation'}
+                op['responses']['503'] = {'description': 'FED_STANDBY: this host is not the '
+                                                         'acting one of its HA group'}
+                if rule.endpoint == 'federation.peer_membership':
+                    op['responses']['409'] = {'description': 'FED_NO_LOCK: the caller holds no '
+                                                             'members lock granted here, or '
+                                                             'FED_VIEW: the change does not '
+                                                             'follow the view held here'}
+                elif rule.endpoint == 'federation.peer_lease_vote':
+                    op['responses']['409'] = {'description': 'The batch is refused: reason view '
+                                                             '(another member list), member or '
+                                                             'candidate'}
+            elif kind == 'inline' and _uses(fn, _HA_PEER_AUTH) and _uses(fn, _HA_WITNESS_CODE):
                 # MK Oct 2026 (#625): or no scheme at all, the open code in the body
                 op['security'] = [{'haPeer': []}, {}]
                 op['responses']['401'] = {'description': 'Not the witness of this group'}
@@ -201,6 +251,13 @@ def build(app):
                 op['security'] = []
                 op['responses'].pop('401', None)
                 op['responses']['403'] = {'description': 'Wrong, expired or spent pairing code'}
+            if tag == 'federation' and rule.endpoint not in ('federation.federation_status',
+                                                              'federation.federation_switch'):
+                # the federation is experimental and switched off by default: off, these
+                # routes answer 404 before anything else (the switch and its status
+                # answer either way)
+                op['responses']['404'] = {'description': 'FED_DISABLED: the federation is '
+                                                         'not enabled on this instance'}
             if auth is not None:
                 if auth['perms'] or auth['roles']:
                     op['responses']['403'] = {'description': 'Insufficient permissions'}
@@ -317,6 +374,19 @@ def spec(app, version):
                                    'the pairing. A member paired before the keys sends '
                                    '<its instance id>:<its own secret> until it has '
                                    'published one.',
+                },
+                'federationPeer': {
+                    'type': 'apiKey', 'in': 'header', 'name': 'X-PegaProx-Peer',
+                    'description': 'Only for members of a federation: the instance id of '
+                                   'the caller, with X-PegaProx-Peer-Ts, -Nonce and -Sig, '
+                                   'an Ed25519 signature over method, path, body digest, '
+                                   'time, nonce and the instance id of the receiver, over '
+                                   "the federation's own signature domain, checked against "
+                                   'the key the agreed member view holds. Every answer '
+                                   'carries X-PegaProx-Fed-Answer, the signature of the '
+                                   'member over the request nonce, the status and the body. '
+                                   'A member the federation removed gets 410 FED_REMOVED, '
+                                   'an HA standby answers 503 FED_STANDBY.',
                 },
                 'sessionId': {
                     'type': 'apiKey', 'in': 'header', 'name': 'X-Session-ID',

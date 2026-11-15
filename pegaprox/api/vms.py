@@ -3808,7 +3808,7 @@ def join_node_to_cluster(cluster_id):
             return jsonify({'success': False, 'error': 'Could not get cluster fingerprint. Check server logs for details.'}), 500
         
         # Connect to new node via SSH
-        ssh = secure_ssh_client(paramiko)
+        ssh = secure_ssh_client(paramiko, cluster_id=cluster_id)
         ssh.connect(node_ip, port=ssh_port, username=username, password=password, timeout=30)
         persist_host_keys(ssh)
         
@@ -3859,7 +3859,7 @@ def join_node_to_cluster(cluster_id):
             # Reconnect SSH after pve-cluster restart
             ssh.close()
             time.sleep(2)
-            ssh = secure_ssh_client(paramiko)
+            ssh = secure_ssh_client(paramiko, cluster_id=cluster_id)
             ssh.connect(node_ip, port=ssh_port, username=username, password=password, timeout=30)
             persist_host_keys(ssh)
         
@@ -4140,7 +4140,7 @@ def remove_node_from_cluster(cluster_id, node_name):
         # Connect to an online node via SSH (its commands ask the transport guard, #625).
         # Each of the two nodes gets its own password where it has one (#1136)
         ssh_password = ssh_password_to(mgr, online_node_ip)
-        ssh = secure_ssh_client(paramiko)
+        ssh = secure_ssh_client(paramiko, cluster_id=cluster_id)
         
         # Try SSH key first, then password
         connected = False
@@ -4198,7 +4198,7 @@ def remove_node_from_cluster(cluster_id, node_name):
         if removed_node_ip:
             try:
                 logging.info(f"[RemoveNode] Cleaning up cluster config on removed node {node_name} ({removed_node_ip})")
-                ssh_cleanup = secure_ssh_client(paramiko)
+                ssh_cleanup = secure_ssh_client(paramiko, cluster_id=cluster_id)
                 
                 # Try to connect to the removed node
                 cleanup_connected = False
@@ -4442,7 +4442,7 @@ def node_action_api(cluster_id, node_name, action):
             # Always use PTY for reliable execution. The channel of a transport is no
             # exec of the guarded client: the shutdown asks the guard itself (#625)
             transport = ssh.get_transport()
-            ha_transport.guard_ssh(node_ip, 'shutdown')
+            ha_transport.guard_ssh(node_ip, 'shutdown', cluster_id=cluster_id)
             channel = transport.open_session()
             channel.get_pty()
             channel.settimeout(10)
@@ -11428,7 +11428,8 @@ def _console_authz(user, cluster_id, vmid, vm_type=None, by_session=False):
         return False, 'no user'
     # NS Aug 2026 (audit re-verify) — a disabled account keeps no console access, even via a
     # pre-minted ws_token (this path is reached without require_auth's account-state gate).
-    if not user.get('enabled', True):
+    from pegaprox.utils.auth import mirror_switched_off
+    if not user.get('enabled', True) or mirror_switched_off(user):
         return False, 'account disabled'
     # MK Oct 2026 - a portal_only account opens a console with the ws token the portal's
     # vm/console route mints, which asks whether the hoster offers consoles at all. The
@@ -15168,6 +15169,13 @@ def cross_cluster_migrate_api():
     _xu = build_authz_user(request.session.get('user', ''), request.session)
     if caller_is_scoped(_xu, target_cluster_id):
         return jsonify({'error': 'Access denied to the target cluster'}), 403
+    # MK Nov 2026 - the migration writes on both clusters: neither may be one this instance
+    # holds no federation lease on
+    from pegaprox.api.federation import refuse_unleased
+    for _cid in (source_cluster_id, target_cluster_id):
+        refused = refuse_unleased(_cid, f'cluster {_cid}')
+        if refused:
+            return refused
     from pegaprox.utils.rbac import acts_as_admin
     if not acts_as_admin(_xu):
         from pegaprox.utils.rbac import check_tenant_vmid, DEFAULT_TENANT_ID

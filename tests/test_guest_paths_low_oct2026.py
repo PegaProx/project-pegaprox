@@ -597,7 +597,8 @@ def test_the_join_fingerprint_is_one_the_cluster_reports(api, seed, tls_peer, mo
     assert r.get_json().get('fingerprint') != wire, 'the unverified handshake was offered'
     state['join'] = True
     ssh = []
-    monkeypatch.setattr(vms, 'secure_ssh_client', lambda paramiko: ssh.append(1) or 1 / 0)
+    monkeypatch.setattr(vms, 'secure_ssh_client',
+                        lambda paramiko, cluster_id=None: ssh.append(1) or 1 / 0)
     r = c.post('/api/clusters/cluster_1/nodes/join', json={'node_ip': '10.0.0.5', 'password': 'pw'})
     assert ssh == [], 'the join went on to the new node with an unconfirmed fingerprint'
     assert r.status_code == 500 and 'fingerprint' in r.get_json()['error']

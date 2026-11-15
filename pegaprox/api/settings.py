@@ -4467,7 +4467,7 @@ def add_cors_origin():
 def index():
     """Serve the web interface
 
-    NS May 2026 — when air-gap mode is on, inject the localStorage flag
+    NS May 2026 - when air-gap mode is on, inject the localStorage flag
     *before* the boot loader runs. Otherwise the very first page load on
     a fresh browser (no localStorage yet) hits cdn.jsdelivr while waiting
     for /auth/check to come back. We rewrite a tiny prelude into <head>
@@ -5845,6 +5845,25 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                  current_node=nodes_to_update[at] if at < total else '', current_step=resume_at['phase'])
         return status
 
+    def _lease_holds(idx, node_name, phase):
+        """MK Nov 2026 - a cluster enrolled in the federation takes a step of a rolling
+        update only while this instance holds a live lease on it: every phase of a node
+        writes on the cluster. The run waits, paused, and each Continue looks again, so a
+        Continue never gets past the fence. False when the run was cancelled meanwhile.
+        Nothing is asked while the federation is off."""
+        from pegaprox.core import federation as _fed
+        while _fed.enabled() and not _fed.worker_takes_writes_for(cluster_id):
+            status = _hold('federation_lease', 'paused_lease',
+                           {'node': node_name,
+                            'message': 'This instance holds no live federation lease on the '
+                                       'cluster - the run waits for it.'},
+                           {'index': idx, 'phase': phase},
+                           f"⏸ PAUSED - no live federation lease on {cluster_id}. "
+                           f"Continue once this instance holds it, or Cancel.")
+            if status != 'running':
+                return False
+        return True
+
     def _quorum_holds(idx, node_name, phase):
         """MK Oct 2026 - before node_name goes into maintenance and before its update: the
         cluster keeps its quorum with it down, or the run waits (paused, reason 'quorum'), and
@@ -6000,6 +6019,8 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 logging.info(f"[RollingUpdate] Node {node_name} has {update_count} updates available")
 
         if todo('maintenance'):
+            if not _lease_holds(idx, node_name, 'maintenance'):
+                return 'stop'
             if not _quorum_holds(idx, node_name, 'maintenance'):
                 return 'stop'
             # NS: force-refresh maintenance state from PVE before each node (#141)
@@ -6127,6 +6148,8 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 rolling_moved_guests(mgr, node_name, running, maintenance_task)
 
         if todo('updating'):
+            if not _lease_holds(idx, node_name, 'updating'):
+                return 'stop'
             if not _quorum_holds(idx, node_name, 'updating'):
                 return 'stop'
             # Step 2: Run apt update/upgrade
@@ -6250,6 +6273,8 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             return 'stop'
 
         if todo('finishing'):
+            if not _lease_holds(idx, node_name, 'finishing'):
+                return 'stop'
             # Step 5: Disable maintenance mode. A node that came back while nobody watched is a
             # target for migrations again as well
             _set(current_step='finishing', node=(node_name, {'phase': 'finishing'}), drop={'rebooting_nodes': node_name},
@@ -6411,6 +6436,10 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                  log=(f"=== Continuing {node_name} ({idx+1}/{total}) from phase {from_phase} ===" if resuming
                       else f"=== Processing {node_name} ({idx+1}/{total}) ==="))
             logging.info(f"[RollingUpdate] Processing node: {node_name}")
+
+            # the federation lease before the node, and again before each of its phases
+            if not _lease_holds(idx, node_name, from_phase):
+                break
 
             try:
                 if run_node(idx, node_name, from_phase, resuming and resume.get('recheck', True)) == 'stop':

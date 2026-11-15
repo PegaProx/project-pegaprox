@@ -99,7 +99,8 @@ def wire(monkeypatch):
 
     monkeypatch.setattr(socket, 'create_connection', tcp)
     monkeypatch.setattr(paramiko, 'SSHClient', _Client)
-    monkeypatch.setattr(ha_transport, 'guard_ssh', lambda host, cmd='', again=False: seen.guard.append(host))
+    monkeypatch.setattr(ha_transport, 'guard_ssh',
+                        lambda host, cmd='', again=False, cluster_id=None: seen.guard.append(host))
     monkeypatch.setattr(ha_transport, 'node_cmd', node_cmd)
     return seen
 
@@ -250,7 +251,7 @@ def node_ssh(api, monkeypatch):
     fake.SSHClient.return_value = client
     monkeypatch.setattr(vms, 'get_paramiko', lambda: fake)
     monkeypatch.setattr(vms, 'apply_host_key_policy', lambda *a, **k: None)
-    monkeypatch.setattr(vms, 'secure_ssh_client', lambda pm: client)
+    monkeypatch.setattr(vms, 'secure_ssh_client', lambda pm, cluster_id=None: client)
     mgr = api.make_fake_manager(CID)
     mgr.host, mgr.api_port = BRACKETED, 8006
     mgr.config.name = 'lab'

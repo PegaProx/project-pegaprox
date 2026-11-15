@@ -288,7 +288,7 @@ def _func(rel, qualname):
 #   read      reads only
 #   local     this host (systemctl, dpkg, ping, ip route, scp to here, a local convert)
 #   external  not a cluster: the update server, webhooks, OIDC, ACME, SMTP, SIEM, push
-#   peer      the other PegaProx members (signed peer calls, ha.py)
+#   peer      the other PegaProx members (signed peer calls, ha.py, federation.py)
 #   unused    no caller; the first one has to guard it
 
 EXITS = {
@@ -471,6 +471,9 @@ EXITS = {
     # the kept connections of the lease calls (_LeaseLink), to members only
     ('pegaprox/core/ha.py', '_LeaseLink._connect', 'socket'): (1, 'peer'),
     ('pegaprox/witness.py', 'https_call', 'http-session'): (1, 'peer'),
+    # the members of a federation: signed calls to other PegaProx instances on kept
+    # sessions, never to a cluster, and none at all while the federation is switched off
+    ('pegaprox/core/federation.py', '_session_for', 'http-session'): (1, 'peer'),
     # the health check of a witness: its own port
     ('pegaprox/witness.py', 'cmd_health', 'socket'): (1, 'local'),
     # and its own port at the address it paired with (the other socket only binds, to
@@ -518,12 +521,13 @@ def test_the_inventory_counts_what_the_report_says():
     # S4 with the witness and the lease link, and the connection check, the three restarts
     # asking systemctl in one helper, the join fingerprint read through tls_fingerprint,
     # and the QDevice setup with its QNetd hosts, and the stored key's leg of _pve_node_exec,
-    # less the ESXi guest config over REST (the API has no such call):
-    # 259 calls out of this process, 154 (function, kind) pairs in 140 functions; 45 of
+    # less the ESXi guest config over REST (the API has no such call), and the session of
+    # the federation's member calls (kept per member address since the batched rounds):
+    # 260 calls out of this process, 155 (function, kind) pairs in 141 functions; 45 of
     # them guarded at the exit and 88 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 259 and len(EXITS) == 154
-    assert len({(f, q) for f, q, _k in EXITS}) == 140
+    assert sum(n for n, _v in EXITS.values()) == 260 and len(EXITS) == 155
+    assert len({(f, q) for f, q, _k in EXITS}) == 141
     assert by['guard'] == 45 and by['client'] == 88
 
 
@@ -764,6 +768,11 @@ AUTOMATIONS = {
     # one thread (a greenlet under gevent) per client of the extra HTTP redirect port
     ('pegaprox/app.py', '_start_http_redirect'): (1, 'local'),
     ('pegaprox/core/ha.py', 'pull_soon'): (1, 'peer'),
+    # the federation's sync (60 s) and lease rounds (10 s): member calls and this host's
+    # database, no cluster call of their own; started when the federation is switched on.
+    # A cluster this instance lost to another member has its manager stopped in the
+    # same thread, nothing new is started for it
+    ('pegaprox/core/federation.py', 'start_workers'): (2, 'peer'),
     # the lease loop, the etag tick and when_active (the deferred boot gates)
     ('pegaprox/core/ha.py', '_lease_spawn'): (1, 'lease'),
     ('pegaprox/api/vms.py', 'cross_cluster_migrate_api'): (1, 'job'),

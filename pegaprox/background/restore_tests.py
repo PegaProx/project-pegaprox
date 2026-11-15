@@ -144,6 +144,17 @@ def _run_slot(slot, policy):
             if not ha.is_active():
                 report['state'], report['reason'] = 'stopped', 'this instance is no longer the active one'
                 break
+            # the worker lease check: a cluster enrolled in the federation takes a
+            # restore test only while this instance holds a live lease on it - a
+            # restore writes a guest on the cluster it copies from. Not asked while
+            # the federation is off
+            from pegaprox.core import federation as _fed
+            if _fed.enabled() and not _fed.worker_takes_writes_for(cid):
+                entry['cause'] = ('the cluster is enrolled in the federation and this '
+                                  'instance holds no live lease on it')
+                report['results'].append(entry)
+                _write(report)
+                continue
             mgr = cluster_managers.get(cid)
             if mgr is None or not getattr(mgr, 'is_connected', False):
                 entry['cause'] = 'the cluster is not connected'
@@ -235,7 +246,15 @@ def _loop():
         try:
             if ha.is_active():
                 from pegaprox.core import backup_verify
-                backup_verify.sweep(cluster_managers)
+                # the worker lease check: the leftovers of a test are removed where this
+                # instance holds a live lease; the rows of the other clusters wait for
+                # theirs. With the federation off the sweep sees every manager, as before
+                from pegaprox.core import federation as _fed
+                if _fed.enabled():
+                    backup_verify.sweep({cid: m for cid, m in cluster_managers.items()
+                                         if _fed.worker_takes_writes_for(cid)})
+                else:
+                    backup_verify.sweep(cluster_managers)
         except Exception as e:
             logging.error(f"[RESTORE-TESTS] leftovers: {e}")
         time.sleep(TICK)

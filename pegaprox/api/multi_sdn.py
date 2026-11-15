@@ -1209,6 +1209,13 @@ def reapply_multi_vnet(vid):
     defn = rec.get('desired_state') or {}
     if not defn:
         return jsonify({'error': 'record has no stored definition'}), 500
+    # MK Nov 2026 - every member is written: none may be a cluster this instance holds no
+    # federation lease on
+    from pegaprox.api.federation import refuse_unleased
+    for _cid in members:
+        refused = refuse_unleased(_cid, f'cluster {_cid}')
+        if refused:
+            return refused
 
     prev = rec.get('per_cluster_status', {})
     # 'in_sync' (from a drift scan) is as healthy as 'applied' — don't re-apply it and

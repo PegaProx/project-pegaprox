@@ -747,7 +747,8 @@ def _run_xcpng_to_pve(task):
                 pve_port = int(getattr(tgt_mgr.config, 'ssh_port', 22))
 
                 ssh = _connect_ssh(pve_host, pve_user, pve_pass,
-                                   key_path=pve_key, port=pve_port)
+                                   key_path=pve_key, port=pve_port,
+                                   cluster_id=getattr(tgt_mgr, 'id', None))
 
                 # allocate the target volume ONCE (resume writes into it at an offset)
                 alloc_cmd = f"pvesm alloc {shlex.quote(task.target_storage)} {new_vmid} '' {size_kb}"
@@ -924,7 +925,8 @@ def _run_xcpng_to_pve(task):
                 # #546: don't leave the partial target volume behind on an unexpected error
                 if vol_id and pve_host:
                     try:
-                        _s = _connect_ssh(pve_host, pve_user, pve_pass, key_path=pve_key, port=pve_port)
+                        _s = _connect_ssh(pve_host, pve_user, pve_pass, key_path=pve_key, port=pve_port,
+                                          cluster_id=getattr(tgt_mgr, 'id', None))
                         _s.exec_command(f"pvesm free {vol_id}", timeout=15)
                         _s.close()
                     except Exception:
@@ -1263,7 +1265,8 @@ def _run_pve_to_xcpng(task):
                 pve_port = int(getattr(src_mgr.config, 'ssh_port', 22))
 
                 ssh = _connect_ssh(pve_host, pve_user, pve_pass,
-                                   key_path=pve_key, port=pve_port)
+                                   key_path=pve_key, port=pve_port,
+                                   cluster_id=getattr(src_mgr, 'id', None))
 
                 # NS: for LVM-thin (local-lvm), the LV might not be activated
                 # when the VM is stopped. Activate before reading.
@@ -1702,9 +1705,10 @@ def _resolve_pve_node_ip(pve_mgr, node_name):
     return None
 
 
-def _connect_ssh(host, user, password, key_path=None, port=22):
+def _connect_ssh(host, user, password, key_path=None, port=22, cluster_id=None):
     """Connect to SSH with multiple auth methods (matches _ssh_exec behavior).
-    Returns connected paramiko.SSHClient or raises Exception."""
+    Returns connected paramiko.SSHClient or raises Exception. `cluster_id`: the Proxmox
+    VE cluster the host is a node of, whose federation lease its commands need."""
     import paramiko
     from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys, verify_transport_host_key
 
@@ -1721,7 +1725,7 @@ def _connect_ssh(host, user, password, key_path=None, port=22):
             persist_host_keys(client)
             try: client.get_transport().set_keepalive(30)  # #546: keep the channel alive through long disk transfers
             except Exception: pass
-            return ha_transport.guard_client(client, host)
+            return ha_transport.guard_client(client, host, cluster_id=cluster_id)
         except Exception as e:
             logger.debug(f"[SSH] key auth failed for {user}@{host}: {e}")
 
@@ -1743,7 +1747,7 @@ def _connect_ssh(host, user, password, key_path=None, port=22):
             client._transport = transport
             try: transport.set_keepalive(30)  # #546: keep the channel alive through long disk transfers
             except Exception: pass
-            return ha_transport.guard_client(client, host)
+            return ha_transport.guard_client(client, host, cluster_id=cluster_id)
         transport.close()
     except Exception as e:
         logger.debug(f"[SSH] keyboard-interactive failed for {user}@{host}: {e}")
@@ -1760,7 +1764,7 @@ def _connect_ssh(host, user, password, key_path=None, port=22):
     persist_host_keys(client2)
     try: client2.get_transport().set_keepalive(30)  # #546: keep the channel alive through long disk transfers
     except Exception: pass
-    return ha_transport.guard_client(client2, host)
+    return ha_transport.guard_client(client2, host, cluster_id=cluster_id)
 
 
 def _scp_host(host):
@@ -2104,7 +2108,8 @@ def _run_esxi_to_pve(task):
 
             try:
                 ssh_pve = _connect_ssh(pve_host, pve_user, pve_pass,
-                                       key_path=pve_key, port=pve_port)
+                                       key_path=pve_key, port=pve_port,
+                                       cluster_id=getattr(tgt_mgr, 'id', None))
 
                 # MK Apr 2026 (#359) — VMware datastore folders / VM-name folders can
                 # legitimately contain spaces (and parens). Every shell interpolation

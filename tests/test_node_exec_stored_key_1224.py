@@ -581,7 +581,8 @@ def test_the_command_is_asked_for_once_and_its_exec_as_the_same_call(db, monkeyp
     events = []
     monkeypatch.setattr(ha, 'guard_on', lambda: True)
     monkeypatch.setattr(ha_transport, 'guard_ssh',
-                        lambda host, cmd='', again=False: events.append(('ask', host, cmd, again)))
+                        lambda host, cmd='', again=False, cluster_id=None:
+                        events.append(('ask', host, cmd, again)))
     _no_password_leg(monkeypatch)
     _fake_paramiko(monkeypatch, events)
     m = _real_manager()

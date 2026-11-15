@@ -1444,6 +1444,13 @@ def start_vmware_migration(vmware_id, vm_id):
     allowed, err_response = check_cluster_access(data['target_cluster'])
     if not allowed:
         return err_response
+    # MK Nov 2026 - the guest lands on the target cluster over many steps: none of them
+    # starts where this instance holds no federation lease on it
+    if not dry_run:
+        from pegaprox.api.federation import refuse_unleased
+        refused = refuse_unleased(data['target_cluster'], f"cluster {data['target_cluster']}")
+        if refused:
+            return refused
     # MK Nov 2026 (#1224) - the planning step runs commands on target_node over SSH with the
     # target cluster's key or password: one of its nodes, nothing else
     try:
@@ -2266,6 +2273,12 @@ def start_vmware_bulk_migration(vmware_id):
         return err_response
     me = request.session.get('user', '')
     if not dry_run:
+        # the guests land on the target over many steps: none starts without the
+        # federation lease on it
+        from pegaprox.api.federation import refuse_unleased
+        refused = refuse_unleased(target, f'cluster {target}')
+        if refused:
+            return refused
         busy = ebulk.room(vmware_id, me)
         if busy:
             return jsonify({'error': busy}), 409

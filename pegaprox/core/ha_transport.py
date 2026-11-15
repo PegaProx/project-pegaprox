@@ -22,6 +22,11 @@ automatic group a call is asked once, and a call that goes out again (a new logi
 fallback, a retry of urllib3) or whose connection comes up late is checked again on what
 it went out on (again=True): no new round while that still fits (ha.guard).
 
+The exits to a Proxmox VE cluster also name it (cluster_id=): with the federation
+switched on, a write there goes out only while federation.guard_exit() lets it, which
+asks whether this instance holds the cluster's lease. That check comes before the HA
+guard and does not depend on it.
+
 MK Oct 2026 (#625)
 """
 import os
@@ -37,6 +42,7 @@ from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 
 from pegaprox.core import ha
+from pegaprox.core import federation
 
 WRITE_METHODS = frozenset(('POST', 'PUT', 'DELETE', 'PATCH'))
 # the console proxies hand out a ticket for a console; they change nothing on the guest.
@@ -165,15 +171,32 @@ def guard_adapter(adapter):
     return adapter
 
 
-def guard_session(session, again=False):
+def _fed_guard(cluster_id, action, kind):
+    """`action` may be a callable that builds the text: with the federation off, nothing
+    of it is worked out (no URL parsed, no peer address asked)."""
+    if cluster_id and federation.enabled():
+        federation.guard_exit(cluster_id, action() if callable(action) else action, kind)
+
+
+def _fed_on(cluster_id):
+    return bool(cluster_id) and federation.enabled()
+
+
+def guard_session(session, again=False, cluster_id=None):
     """Every request of a requests session asks the guard before it is sent, and again
     once its connection is up. Mount adapters before this. `again` for a session of one
-    call that sends a call once more (http). Returns the session."""
+    call that sends a call once more (http). `cluster_id`: the Proxmox VE cluster the
+    session talks to, whose federation lease every write needs. Returns the session."""
     send = getattr(session, 'send', None)
     if send is None or getattr(session, '_ha_guarded', False) is True:
         return session
+    session._fed_cluster = cluster_id
 
     def guarded_send(request, **kwargs):
+        if _fed_on(cluster_id):
+            action, kind = http_action(request.method, request.url)
+            if action:
+                _fed_guard(cluster_id, action, kind)
         guard_http(request.method, request.url, again=again)
         return send(request, **kwargs)
     session.send = guarded_send
@@ -272,28 +295,37 @@ def _first_word(cmd):
     return os.path.basename(words[0])[:40] if words else ''
 
 
-def guard_ssh(host, cmd='', again=False):
+def guard_ssh(host, cmd='', again=False, cluster_id=None):
     """Ask the guard for one SSH command to `host`; `again` for the same command once
     more. Every SSH command counts as a change (5.3) except in a GET; a caller that only
-    reads says so with ha.reading()."""
+    reads says so with ha.reading(). `cluster_id`: the Proxmox VE cluster the host is a
+    node of."""
+    _fed_guard(cluster_id, lambda: f'SSH {host} {_first_word(cmd)}'.strip(), 'ssh')
     if not ha.guard_on():
         return
     ha.guard(f'SSH {host} {_first_word(cmd)}'.strip(), kind='ssh', again=again)
 
 
-def guard_client(client, host='', again=False):
+def guard_client(client, host='', again=False, cluster_id=None):
     """exec_command, invoke_shell and open_sftp of a paramiko client ask the guard first.
     Returns the client. `again`: the caller asked guard_ssh for its command before it
-    connected, so the ask here is that same command once more."""
+    connected, so the ask here is that same command once more. `cluster_id`: the Proxmox
+    VE cluster the host is a node of."""
     for name in ('exec_command', 'invoke_shell', 'open_sftp'):
         real = getattr(client, name, None)
         if real is None:
             continue
 
         def guarded(*args, _real=real, _name=name, **kwargs):
-            if ha.guard_on():
+            fed_on, guard_on = _fed_on(cluster_id), ha.guard_on()
+            if fed_on or guard_on:
                 cmd = (args[0] if args else kwargs.get('command', '')) if _name == 'exec_command' else _name
-                guard_ssh(host or _peer(client), cmd, again=again)
+                if fed_on:
+                    _fed_guard(cluster_id,
+                               lambda: f'SSH {host or _peer(client)} {_first_word(cmd)}'.strip(),
+                               'ssh')
+                if guard_on:
+                    guard_ssh(host or _peer(client), cmd, again=again)
             return _real(*args, **kwargs)
         setattr(client, name, guarded)
     return client
@@ -323,7 +355,8 @@ def _kill_group(pgid):
         pass
 
 
-def node_cmd(argv, *, timeout, host='', read=False, need=None, again=False, **kwargs):
+def node_cmd(argv, *, timeout, host='', read=False, need=None, again=False, cluster_id=None,
+             **kwargs):
     """subprocess.run() for ssh, sshpass and ipmitool on the way to a node or a BMC
     (design 5.4).
 
@@ -335,7 +368,10 @@ def node_cmd(argv, *, timeout, host='', read=False, need=None, again=False, **kw
     then runs in a session of its own under `timeout -k 2 <timeout>`, so it is bounded
     even while this process is frozen, and its process group is registered: losing the
     lease kills it (ha.kill_children). A timeout raises subprocess.TimeoutExpired, as
-    subprocess.run does."""
+    subprocess.run does. `cluster_id`: the Proxmox VE cluster the node belongs to, whose
+    federation lease a command that is no read needs."""
+    if cluster_id and not read:
+        _fed_guard(cluster_id, lambda: f'{os.path.basename(str(argv[0]))} {host}'.strip(), 'ssh')
     if not ha.guard_on():
         return subprocess.run(argv, timeout=timeout, **kwargs)
     if not read:
