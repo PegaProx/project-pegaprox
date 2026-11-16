@@ -78,3 +78,31 @@ def test_the_run_asks_nothing_while_the_federation_is_off(api, seed, db, root, f
     _start(api, root)
     _worker_gone()
     assert rolling_runs.current(cluster)['status'] == 'completed' and asked == []
+
+
+def test_a_reboot_refused_at_its_exit_is_no_reboot(monkeypatch):
+    """The lease runs out between the upgrade and the reboot: the reboot is refused at its
+    exit. The task says so and fails; it neither records a reboot nor sends the reboot
+    alert, and waits for no node that never goes down."""
+    import pegaprox.core.manager as mgrmod
+    from pegaprox.core import ha_transport
+    from pegaprox.core.manager import PegaProxManager, UpdateTask
+    from test_rolling_update_reboot_953 import _FastTime, _updating_manager
+    monkeypatch.setattr(mgrmod, 'time', _FastTime())
+    monkeypatch.setattr(mgrmod, '_read_capped', lambda s, *a, **k: '0')
+
+    def refuse(host, cmd='', again=False, cluster_id=None):
+        if cmd == 'shutdown':
+            raise federation.LeaseRefused('c1', f'SSH {host} shutdown')
+    monkeypatch.setattr(ha_transport, 'guard_ssh', refuse)
+    alerts = []
+    import pegaprox.background.alerts as alerts_mod
+    monkeypatch.setattr(alerts_mod, 'emit_rolling_update_reboot_event',
+                        lambda *a, **k: alerts.append(a))
+    m = _updating_manager(True)
+    m.id = 'c1'
+    m._rolling_update = {'status': 'running', 'current_node': 'blade1'}
+    task = UpdateTask('blade1', reboot=True)
+    PegaProxManager._perform_node_update(m, 'blade1', task)
+    assert task.status == 'failed' and 'federation lease' in (task.error or ''), task.error
+    assert task.reboot_issued is False and alerts == []

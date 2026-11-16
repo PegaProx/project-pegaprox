@@ -973,6 +973,57 @@ def test_an_active_without_a_peer_can_be_unpaired(ha_env, seed, monkeypatch):
     assert r.status_code == 409 and 'not paired' in r.get_json()['error']
 
 
+# --- an HA group that is a federation member ------------------------------------------
+
+@pytest.mark.parametrize('switched_on', [True, False])
+def test_an_active_with_a_standby_stays_paired_while_the_federation_runs(ha_env, seed,
+                                                                        monkeypatch, switched_on):
+    """The standbys keep the group's federation identity (only a standby that leaves drops
+    it), so an active unpaired would act as that member next to them. While the federation
+    is on that is refused before any member is told; with it off the active unpairs as it
+    always did."""
+    from pegaprox.core import federation
+    ha, admin = ha_env.ha, _admin(ha_env.api, seed)
+    _active_with_standby(ha_env)
+    _wire_to(ha_env, monkeypatch, str(ha_env.tmp / 'gone.json'), down=True)
+    monkeypatch.setenv(federation.ENV_SWITCH, '1' if switched_on else '0')
+    r = admin.post('/api/ha/unpair', json={'confirm': 'UNPAIR', 'user_password': ADMIN_PW})
+    if switched_on:
+        assert r.status_code == 409, r.data
+        assert r.get_json() == {'code': 'HA_FEDERATION', 'error': ha.FED_UNPAIR_ERROR}
+        assert ha.role() == 'active' and [m['instance_id'] for m in ha.members()] == [B_ID]
+        assert ha_env.calls == [] and not _audit('ha.unpaired')
+    else:
+        assert r.status_code == 200, r.data
+        assert ha.role() == 'standalone' and ha.members() == []
+
+
+def test_an_active_without_a_standby_unpairs_while_the_federation_runs(ha_env, seed,
+                                                                      monkeypatch):
+    from pegaprox.core import federation
+    ha, admin = ha_env.ha, _admin(ha_env.api, seed)
+    monkeypatch.setenv(federation.ENV_SWITCH, '1')
+    _be(ha_env, 'active', instance_id=B_ID, epoch=2)
+    r = admin.post('/api/ha/unpair', json={'confirm': 'UNPAIR', 'user_password': ADMIN_PW})
+    assert r.status_code == 200, r.data
+    assert ha.role() == 'standalone'
+
+
+def test_the_active_still_removes_a_dead_standby_while_the_federation_runs(ha_env, seed,
+                                                                          monkeypatch):
+    """The way out the refusal names: a standby that is gone for good is removed on the
+    active as before, and the active, alone again, is the member."""
+    from pegaprox.core import federation
+    ha, admin = ha_env.ha, _admin(ha_env.api, seed)
+    monkeypatch.setenv(federation.ENV_SWITCH, '1')
+    _active_with_standby(ha_env)
+    _wire_to(ha_env, monkeypatch, str(ha_env.tmp / 'gone.json'), down=True)
+    r = admin.post(f'/api/ha/members/{B_ID}/remove',
+                   json={'confirm': 'REMOVE', 'shut_down': True, 'user_password': ADMIN_PW})
+    assert r.status_code == 200, r.data
+    assert ha.members() == [] and ha.role() == 'standalone'
+
+
 # --- settings ------------------------------------------------------------------------
 
 def test_the_interval(ha_env, seed):

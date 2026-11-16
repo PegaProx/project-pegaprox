@@ -1209,20 +1209,19 @@ def reapply_multi_vnet(vid):
     defn = rec.get('desired_state') or {}
     if not defn:
         return jsonify({'error': 'record has no stored definition'}), 500
-    # MK Nov 2026 - every member is written: none may be a cluster this instance holds no
-    # federation lease on
-    from pegaprox.api.federation import refuse_unleased
-    for _cid in members:
-        refused = refuse_unleased(_cid, f'cluster {_cid}')
-        if refused:
-            return refused
-
     prev = rec.get('per_cluster_status', {})
     # 'in_sync' (from a drift scan) is as healthy as 'applied' — don't re-apply it and
     # trigger a needless cluster-wide reload. Only members that are actually off get redone.
     todo = [c for c in members if (prev.get(c) or {}).get('status') not in ('applied', 'in_sync')]
     if not todo:
         todo = members  # allow a full re-apply if everything already applied
+    # MK Nov 2026 - every member that is written again: none may be a cluster this
+    # instance holds no federation lease on. A member left alone is not asked
+    from pegaprox.api.federation import refuse_unleased
+    for _cid in todo:
+        refused = refuse_unleased(_cid, f'cluster {_cid}')
+        if refused:
+            return refused
     results = run_per_node(
         {cid: (lambda c=cid: _apply_on_cluster(c, defn)) for cid in todo},
         max_concurrent=8, timeout=180) or {}

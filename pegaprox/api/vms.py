@@ -15170,12 +15170,15 @@ def cross_cluster_migrate_api():
     if caller_is_scoped(_xu, target_cluster_id):
         return jsonify({'error': 'Access denied to the target cluster'}), 403
     # MK Nov 2026 - the migration writes on both clusters: neither may be one this instance
-    # holds no federation lease on
-    from pegaprox.api.federation import refuse_unleased
-    for _cid in (source_cluster_id, target_cluster_id):
-        refused = refuse_unleased(_cid, f'cluster {_cid}')
-        if refused:
-            return refused
+    # holds no federation lease on. A dry run only reads (the preflight), as on the ESXi
+    # migrations
+    _dry = str((data or {}).get('dry_run', '')).lower() in ('1', 'true', 'yes')
+    if not _dry:
+        from pegaprox.api.federation import refuse_unleased
+        for _cid in (source_cluster_id, target_cluster_id):
+            refused = refuse_unleased(_cid, f'cluster {_cid}')
+            if refused:
+                return refused
     from pegaprox.utils.rbac import acts_as_admin
     if not acts_as_admin(_xu):
         from pegaprox.utils.rbac import check_tenant_vmid, DEFAULT_TENANT_ID
@@ -15200,7 +15203,6 @@ def cross_cluster_migrate_api():
     source_manager = cluster_managers[source_cluster_id]
     target_manager = cluster_managers[target_cluster_id]
 
-    _dry = str((data or {}).get('dry_run', '')).lower() in ('1', 'true', 'yes')
     # MK Oct 2026 - the quota before the preflight (a refused preflight answers 409 and lets the
     # hold go again); a dry run takes no hold, its preflight weighs the quota itself.
     # The guest lands as a new one on the target; kept at the source too it is

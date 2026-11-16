@@ -842,22 +842,28 @@ class PegaProxDB:
         # that member's row, and writes to a mirror are refused where they are made
         # (the home decides). custom_roles keeps its fed_home column, always '':
         # roles are mapped between the members, never copied.
-        try:
-            for table in ('users', 'custom_roles', 'api_tokens',
-                          'webauthn_credentials'):
+        # Each step on its own: one that fails (a locked database, a full disk) leaves the
+        # others done, and the reads of the clusters table cope without fed_owner
+        # (_clusters_have_fed_owner)
+        for table in ('users', 'custom_roles', 'api_tokens', 'webauthn_credentials'):
+            try:
                 cursor.execute(f"PRAGMA table_info({table})")
                 columns = [col[1] for col in cursor.fetchall()]
                 if columns and 'fed_home' not in columns:
                     cursor.execute(
                         f"ALTER TABLE {table} ADD COLUMN fed_home TEXT NOT NULL DEFAULT ''")
-            # Phase 3: the federation's lease on a cluster - '' is a cluster this
-            # instance owns alone (no federation, no lease), an instance id is the
-            # member whose writes a majority of the federation backs
-            cursor.execute("PRAGMA table_info(clusters)")
-            columns = [col[1] for col in cursor.fetchall()]
-            if columns and 'fed_owner' not in columns:
-                cursor.execute(
-                    "ALTER TABLE clusters ADD COLUMN fed_owner TEXT NOT NULL DEFAULT ''")
+            except Exception as e:
+                logging.error(f"federation migration of {table} failed, its rows stay "
+                              f"local: {e}")
+        # Phase 3: the federation's lease on a cluster - '' is a cluster this
+        # instance owns alone (no federation, no lease), an instance id is the
+        # member whose writes a majority of the federation backs
+        try:
+            self._clusters_have_fed_owner(cursor)
+        except Exception as e:
+            logging.error(f"federation migration of clusters failed, every cluster row "
+                          f"stays this instance's own: {e}")
+        try:
             # the tenants and roles the members' accounts name, and what an admin here
             # mapped each onto ('' = not mapped, the accounts naming it cannot sign in)
             cursor.execute('''
@@ -881,7 +887,8 @@ class PegaProxDB:
                 )
             ''')
         except Exception as e:
-            logging.error(f"federation identity migration failed, identities stay local: {e}")
+            logging.error(f"federation identity tables could not be created, identities "
+                          f"stay local: {e}")
 
         # Scheduled actions table - NS Jan 2026
         cursor.execute('''
@@ -4081,6 +4088,28 @@ class PegaProxDB:
             return {}
         return json.loads(value)
 
+    def _clusters_have_fed_owner(self, cursor=None) -> bool:
+        """Whether the clusters table has its fed_owner column, added here when it is
+        missing (the migration in _init_db failed, a locked database). False when it
+        cannot be added: no row can be a federation's then, every row is this
+        instance's own."""
+        if getattr(self, '_fed_owner_ok', False):
+            return True
+        cursor = cursor or self.conn.cursor()
+        cursor.execute("PRAGMA table_info(clusters)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if columns and 'fed_owner' not in columns:
+            try:
+                cursor.execute(
+                    "ALTER TABLE clusters ADD COLUMN fed_owner TEXT NOT NULL DEFAULT ''")
+                self.conn.commit()
+                columns.append('fed_owner')
+            except Exception as e:
+                logging.error(f"clusters.fed_owner is missing and cannot be added: {e}")
+                return False
+        self._fed_owner_ok = 'fed_owner' in columns
+        return self._fed_owner_ok
+
     def get_all_clusters(self) -> dict:
         """Get all clusters (returns dict like legacy format).
 
@@ -4095,7 +4124,9 @@ class PegaProxDB:
         joined a federation has no such row and reads every row, as it always did."""
         cursor = self.conn.cursor()
         from pegaprox.core import federation as _fed
-        if not _fed.enabled():
+        if not self._clusters_have_fed_owner(cursor):
+            cursor.execute("SELECT * FROM clusters")
+        elif not _fed.enabled():
             cursor.execute("SELECT * FROM clusters WHERE fed_owner = ''")
         else:
             try:
@@ -4172,15 +4203,16 @@ class PegaProxDB:
         # no row a federation owns is read (get_all_clusters says why), and the
         # federation is asked nothing
         from pegaprox.core import federation as _fed
+        owner = row['fed_owner'] if 'fed_owner' in row.keys() else ''
         if not _fed.enabled():
-            if row['fed_owner']:
+            if owner:
                 return None
         else:
             try:
-                if row['fed_owner'] and row['fed_owner'] != _fed.instance_id():
+                if owner and owner != _fed.instance_id():
                     return None
             except Exception:
-                if row['fed_owner']:
+                if owner:
                     return None
         
         # NS: Auto-migrate encrypted fields to AES-256-GCM if needed - Jan 2026
@@ -4268,6 +4300,28 @@ class PegaProxDB:
         """Save or update cluster"""
         cursor = self.conn.cursor()
         now = datetime.now().isoformat()
+
+        # MK Nov 2026 - a row another member of the federation leads is its mirror here,
+        # written by the sync alone. A restore (get_cluster hides the mirror, so the row
+        # looks new) or a save racing the row's change into a mirror would keep the foreign
+        # owner and put this instance's ciphertext into credential columns that hold only
+        # empty or wrapped ('fedk1:') values. Switched off, no federation row is saved.
+        held_owner = ''
+        if self._clusters_have_fed_owner(cursor):
+            got = cursor.execute('SELECT fed_owner FROM clusters WHERE id = ?',
+                                 (cluster_id,)).fetchone()
+            held_owner = (got[0] if got is not None else '') or ''
+        if held_owner:
+            from pegaprox.core import federation as _fed
+            ours = False
+            if _fed.enabled():
+                try:
+                    ours = held_owner == _fed.instance_id()
+                except Exception:
+                    ours = False
+            if not ours:
+                raise ValueError(f'cluster {cluster_id} belongs to another member of the '
+                                 f'federation - not saved here')
 
         # MK: Mar 2026 - preserve group_id/display_name/sort_order that aren't in config data (#111)
         cursor.execute('SELECT group_id, display_name, sort_order, created_at, '

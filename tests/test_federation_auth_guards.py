@@ -17,6 +17,8 @@ test_ha_api.py drives the HA routes, and makes one guard refuse one caller:
     without one, and an API token (which can never type one), get no code;
   * a user mirrored from another member is that member's to change: not this
     instance's users route, not its token revocation, not its password change;
+  * a mirrored admin administers neither this instance's accounts, tenants and roles
+    nor the role an LDAP or OIDC sign-in gets here, nor an OIDC binding;
   * the switch: any unconfined local admin flips it, no password; a forced switch
     cannot be flipped, switching off says what keeps it on, and the workers follow it;
   * a signed member call passes the real app: the CSRF gate, the rate limit and the
@@ -30,6 +32,8 @@ import time
 
 import pytest
 
+from pegaprox.api.settings import (EXTERNAL_ROLE_SETTINGS, EXTERNAL_SOURCE_SECRETS,
+                                   EXTERNAL_SOURCE_SETTINGS)
 from pegaprox.core import federation, ha_wire
 
 # a member id this instance is not: what fed_home names on a mirrored row
@@ -46,7 +50,8 @@ def fed(api, monkeypatch):
     from pegaprox.globals import login_attempts_by_ip, login_attempts_by_user
     monkeypatch.setenv(federation.ENV_SWITCH, '1')
     for window in (api_fed._pair_attempts, api_fed._peer_failures,
-                   api_fed._reauth_attempts, api_fed._lease_votes):
+                   api_fed._reauth_attempts, api_fed._lease_votes, api_fed._lease_ticks,
+                   api_fed._lease_returns):
         window.reset()
     # the sign-ins below fail on purpose, all from the one address of the test client
     login_attempts_by_ip.clear()
@@ -817,6 +822,213 @@ def test_a_mirrored_admin_changes_no_federation_state(fed, seed, path, body):
         'FED_MIRROR_ADMIN', 'FED_REAUTH', 'FED_REAUTH_RECENT'), (path, r.data)
 
 
+def _template_id():
+    from pegaprox.api import users as users_api
+    return next(iter(users_api.ROLE_TEMPLATES))
+
+
+def test_a_mirrored_admin_administers_no_account_tenant_or_role_here(fed, seed):
+    """FED_MIRROR_ADMIN keeps a mirrored admin out of the trust changes of the federation.
+    A local admin account it could create, give a password or raise to admin would make
+    every one of them under that name, so the routes that administer this instance's
+    accounts, tenants and roles refuse it as well."""
+    miriam = fed.as_user(_mirror(seed, 'miriam', role='admin'))
+    seed.user('lotte', role='viewer')
+    pw = 'Sup3r-Secret-Pass!word9'
+    for method, path, body in (
+            ('post', '/api/users', {'username': 'shadow', 'password': pw, 'role': 'admin'}),
+            ('put', '/api/users/lotte', {'role': 'admin'}),
+            ('put', '/api/users/lotte/password', {'password': pw}),
+            ('delete', '/api/users/lotte/2fa', None),
+            ('put', '/api/users/lotte/permissions', {'permissions': ['vm.view']}),
+            ('delete', '/api/users/lotte', None),
+            ('post', '/api/tenants', {'name': 'shadow-tenant'}),
+            ('put', '/api/tenants/default', {'name': 'x'}),
+            ('delete', '/api/tenants/no-such-tenant', None),
+            ('post', '/api/roles', {'id': 'shadow', 'name': 'Shadow',
+                                    'permissions': ['vm.view']}),
+            ('put', '/api/roles/no-such-role', {'permissions': ['vm.view']}),
+            ('delete', '/api/roles/no-such-role', None),
+            ('post', f'/api/roles/templates/{_template_id()}/apply', {'role_id': 'shadow'}),
+            ('delete', '/api/users/lotte/oidc-binding', None),
+            ('post', '/api/config/restore', None),
+            ('post', '/api/settings/server', {'ldap_group_mappings': [
+                {'group_dn': 'CN=ops,DC=example,DC=org', 'role': 'admin'}]})):
+        r = getattr(miriam, method)(path, **({'json': body} if body is not None else {}))
+        assert r.status_code == 403, (path, r.status_code, r.data)
+        assert r.get_json()['code'] == 'FED_MIRROR_ADMIN' and r.get_json()['home'] == FOREIGN
+    assert seed.db.get_user('shadow') is None
+    assert seed.db.get_user('lotte')['role'] == 'viewer'
+    # counterproof: a local admin creates the same account
+    root = fed.as_user(seed.user('root', role='admin'))
+    r = root.post('/api/users', json={'username': 'shadow', 'password': pw, 'role': 'admin'})
+    assert r.status_code in (200, 201), r.data
+    assert seed.db.get_user('shadow')['role'] == 'admin'
+
+
+# --- the role a directory or single sign-on account gets here ----------------------------------
+
+def _changed(key):
+    """A value of `key` (EXTERNAL_ROLE_SETTINGS) that is not the default."""
+    return {'ldap_group_mappings': [{'group_dn': 'CN=ops,DC=example,DC=org', 'role': 'admin'}],
+            'oidc_group_mappings': [{'group_id': 'g-ops', 'role': 'admin'}],
+            'ldap_auto_create_users': False, 'oidc_auto_create_users': False,
+            'ldap_default_role': 'admin', 'oidc_default_role': 'admin',
+            'ldap_group_filter': '(objectClass=group)'}.get(key, 'CN=ops,DC=example,DC=org')
+
+
+def _settings():
+    from pegaprox.api.helpers import load_server_settings
+    return load_server_settings()
+
+
+@pytest.mark.parametrize('key', sorted(EXTERNAL_ROLE_SETTINGS))
+def test_a_mirrored_admin_changes_no_role_an_external_sign_in_gets(fed, seed, key):
+    """A mirrored admin that maps a directory group it is in to admin (or makes admin the
+    default role, or widens the group filter) is an admin of this instance at its next
+    LDAP or OIDC sign-in, under a local account. Refused for the whole request: the other
+    setting it carries is not saved either. Counterproof: a local admin saves the same."""
+    before = _settings()
+    miriam = fed.as_user(_mirror(seed, 'miriam', role='admin'))
+    r = miriam.post('/api/settings/server', json={key: _changed(key), 'domain': 'pp.example.org'})
+    assert r.status_code == 403, (key, r.data)
+    assert r.get_json()['code'] == 'FED_MIRROR_ADMIN' and r.get_json()['home'] == FOREIGN
+    after = _settings()
+    assert after[key] == before[key] and after['domain'] == before['domain']
+    root = fed.as_user(seed.user('root', role='admin'))
+    r = root.post('/api/settings/server', json={key: _changed(key), 'domain': 'pp.example.org'})
+    assert r.status_code == 200, (key, r.data)
+    assert _settings()[key] == _changed(key) and _settings()['domain'] == 'pp.example.org'
+
+
+def _ca_pem():
+    import datetime
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'Shadow CA')])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(1)
+            .not_valid_before(now).not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256()))
+    return cert.public_bytes(serialization.Encoding.PEM).decode()
+
+
+def _source_value(key, before):
+    """A value of `key` (EXTERNAL_SOURCE_SETTINGS or a secret) other than the stored one."""
+    if key in EXTERNAL_SOURCE_SECRETS:
+        return 'Sh4dow-secret'
+    if EXTERNAL_SOURCE_SETTINGS[key] is bool:
+        return not before.get(key)
+    return {'ldap_server': 'dc2.example.org', 'ldap_port': 6363, 'ldap_ca_cert': _ca_pem(),
+            'ldap_username_attribute': 'uid', 'oidc_provider': 'okta',
+            'oidc_cloud_environment': 'gcc', 'oidc_username_claim': 'upn',
+            'oidc_authority': 'https://idp.example.org'}.get(key, 'CN=ops,DC=example,DC=org')
+
+
+@pytest.mark.parametrize('key', sorted(EXTERNAL_SOURCE_SETTINGS) + list(EXTERNAL_SOURCE_SECRETS))
+def test_a_mirrored_admin_points_no_sign_in_at_a_directory_of_its_own(fed, seed, key):
+    """A directory or identity provider the mirrored admin runs would hand the group
+    mappings to any account it makes up there. So whether LDAP and OIDC are on, where they
+    point, what checks them and how a name is read are refused as well, the whole request
+    with them. Counterproof: a local admin saves the same."""
+    # a directory set up before (without one the TLS switches read as the new defaults)
+    seed.db.save_server_settings({'ldap_server': 'dc1.example.org'})
+    before = _settings()
+    value = _source_value(key, before)
+    miriam = fed.as_user(_mirror(seed, 'miriam', role='admin'))
+    r = miriam.post('/api/settings/server', json={key: value, 'domain': 'pp.example.org'})
+    assert r.status_code == 403, (key, r.data)
+    assert r.get_json()['code'] == 'FED_MIRROR_ADMIN' and r.get_json()['home'] == FOREIGN
+    after = _settings()
+    assert after.get(key) == before.get(key) and after['domain'] == before['domain']
+    root = fed.as_user(seed.user('root', role='admin'))
+    r = root.post('/api/settings/server', json={key: value, 'domain': 'pp.example.org'})
+    assert r.status_code == 200, (key, r.data)
+    assert _settings().get(key) != before.get(key) and _settings()['domain'] == 'pp.example.org'
+
+
+def test_a_mirrored_admin_saves_the_whole_settings_form_with_them_as_they_are(fed, seed):
+    """The settings page sends the whole form. A mirrored admin that changes an unrelated
+    setting sends the LDAP and OIDC role settings back as they are stored, and the save
+    goes through; group mappings set before by a local admin included."""
+    root = fed.as_user(seed.user('root', role='admin'))
+    r = root.post('/api/settings/server', json={
+        'ldap_group_mappings': [{'group_dn': ' CN=ops,DC=example,DC=org ', 'role': 'user'}],
+        'oidc_group_mappings': [{'group_dn': 'g-ops', 'role': 'viewer'}],
+        'oidc_default_role': ''})
+    assert r.status_code == 200, r.data
+    miriam = fed.as_user(_mirror(seed, 'miriam', role='admin'))
+    form = miriam.get('/api/settings/server').get_json()
+    form['domain'] = 'pp.example.org'
+    r = miriam.post('/api/settings/server', json=form)
+    assert r.status_code == 200, r.data
+    assert _settings()['domain'] == 'pp.example.org'
+    assert _settings()['ldap_group_mappings'] == [{'group_dn': 'CN=ops,DC=example,DC=org',
+                                                   'role': 'user'}]
+    # counterproof: one mapping more in the same form is refused
+    form['oidc_group_mappings'] = form['oidc_group_mappings'] + [{'group_id': 'g-x', 'role': 'admin'}]
+    r = miriam.post('/api/settings/server', json=form)
+    assert r.status_code == 403 and r.get_json()['code'] == 'FED_MIRROR_ADMIN', r.data
+    # saved mappings clear the built-in groups: a form that would clear an admin group set
+    # next to them (a save of that field alone) changes it as well
+    r = root.post('/api/settings/server', json={'ldap_admin_group': 'CN=admins,DC=example,DC=org'})
+    assert r.status_code == 200, r.data
+    form = miriam.get('/api/settings/server').get_json()
+    r = miriam.post('/api/settings/server', json=form)
+    assert r.status_code == 403 and r.get_json()['code'] == 'FED_MIRROR_ADMIN', r.data
+    assert _settings()['ldap_admin_group'] == 'CN=admins,DC=example,DC=org'
+
+
+def test_with_the_federation_off_a_mirrored_admin_reaches_no_settings_at_all(switchable, seed,
+                                                                             monkeypatch):
+    """The switch is off: a mirror counts as disabled. It does not sign in, its session is
+    refused before the route runs, and the mirror check is never asked. A local admin
+    changes the role settings as before, and the save asks the check then (the tripwire
+    sits where the route looks)."""
+    from pegaprox.api import settings as settings_api
+    asked = []
+    monkeypatch.setattr(settings_api, 'refuse_mirror_caller', lambda *a: asked.append(a))
+    mira = _admin_with_password(seed, 'mira')
+    seed.db.conn.execute("UPDATE users SET fed_home = ? WHERE username = 'mira'", (FOREIGN,))
+    seed.db.conn.commit()
+    r = _login(switchable, 'mira')
+    assert r.status_code == 401 and _no_session(r), r.data
+    body = {'ldap_group_mappings': [{'group_dn': 'CN=ops,DC=example,DC=org', 'role': 'admin'}]}
+    r = switchable.as_user(mira).post('/api/settings/server', json=body)
+    assert r.status_code == 401 and r.get_json()['code'] == 'ACCOUNT_DISABLED', r.data
+    assert asked == [] and _settings()['ldap_group_mappings'] == []
+    r = switchable.as_user(seed.user('root', role='admin')).post('/api/settings/server', json=body)
+    assert r.status_code == 200, r.data
+    assert _settings()['ldap_group_mappings'] == body['ldap_group_mappings'] and len(asked) == 1
+
+
+def test_a_mirrored_admin_resets_no_oidc_binding(fed, seed, db):
+    """Whoever signs in next through the identity provider under the name gets the account
+    a reset unbinds. A mirrored admin does not reset one here, and a mirrored account's
+    binding is its home's. Counterproof: a local admin resets a local account's."""
+    db.save_user('ops', {'password_salt': '', 'password_hash': '', 'role': 'admin',
+                         'auth_source': 'oidc', 'oidc_sub': 'sub-1', 'enabled': True})
+    miriam = fed.as_user(_mirror(seed, 'miriam', role='admin'))
+    r = miriam.delete('/api/users/ops/oidc-binding')
+    assert r.status_code == 403 and r.get_json()['code'] == 'FED_MIRROR_ADMIN', r.data
+    assert db.get_user('ops')['oidc_sub'] == 'sub-1'
+    root = fed.as_user(seed.user('root', role='admin'))
+    db.save_user('otto', {'password_salt': '', 'password_hash': '', 'role': 'viewer',
+                          'auth_source': 'oidc', 'oidc_sub': 'sub-2', 'enabled': True})
+    db.conn.execute("UPDATE users SET fed_home = ? WHERE username = 'otto'", (FOREIGN,))
+    db.conn.commit()
+    r = root.delete('/api/users/otto/oidc-binding')
+    assert r.status_code == 409 and r.get_json()['code'] == 'FED_FOREIGN', r.data
+    r = root.delete('/api/users/ops/oidc-binding')
+    assert r.status_code == 200, r.data
+    assert db.get_user('ops')['oidc_sub'] == ''
+
+
 def test_the_mapping_routes_map_and_unmap(fed, seed, db, monkeypatch):
     import pegaprox.api.federation as api_fed
     audits = []
@@ -858,19 +1070,21 @@ def test_the_mapping_routes_map_and_unmap(fed, seed, db, monkeypatch):
 
 
 def test_the_last_local_admin_cannot_go_while_mirrored_admins_exist(fed, seed, db):
-    seed.user('root', role='admin')
+    root = fed.as_user(seed.user('root', role='admin'))
     _from_member(db, [_account('miri', role='admin')])
     miri = fed.as_user({'username': 'miri', 'role': 'admin'})
-    r = miri.put('/api/users/root', json={'role': 'user'})
+    # the mirrored admin administers no account of this instance at all
+    for r in (miri.put('/api/users/root', json={'role': 'user'}),
+              miri.put('/api/users/root', json={'enabled': False}),
+              miri.delete('/api/users/root')):
+        assert r.status_code == 403 and r.get_json()['code'] == 'FED_MIRROR_ADMIN', r.data
+    # and does not count as an admin here: root is the last one
+    r = root.put('/api/users/root', json={'enabled': False})
     assert r.status_code == 400 and 'last admin' in r.get_json()['error'], r.data
-    r = miri.put('/api/users/root', json={'enabled': False})
-    assert r.status_code == 400 and 'last admin' in r.get_json()['error'], r.data
-    r = miri.delete('/api/users/root')
-    assert r.status_code == 400 and 'last admin' in r.get_json()['error'], r.data
-    assert db.get_user('root')['role'] == 'admin'
+    assert db.get_user('root')['role'] == 'admin' and db.get_user('root')['enabled']
     # counterproof: with a second admin of this instance the delete goes through
-    seed.user('root2', role='admin')
-    assert miri.delete('/api/users/root').status_code == 200
+    root2 = fed.as_user(seed.user('root2', role='admin'))
+    assert root2.delete('/api/users/root').status_code == 200
     assert db.get_user('root') is None
 
 
@@ -967,3 +1181,121 @@ def test_the_expiry_reset_leaves_the_mirrors_alone(fed, seed, db):
                                   (u,)).fetchone()[0] for u in ('local-user', 'mirror-user')}
     assert changed['mirror-user'] == '2026-11-01T00:00:00'
     assert changed['local-user'] != '2026-11-01T00:00:00'
+
+
+# --- a delegate revoking another tenant's mirrored token ------------------------------------
+
+def test_a_delegate_learns_nothing_of_another_tenants_mirrored_token(fed, seed):
+    """ann holds admin.api inside tenant_a. A token of tenant_b, mirrored from another
+    site, answers her as any out-of-tenant token does (404), not with its home. A global
+    admin is still sent to the home."""
+    import pegaprox.api.auth as authapi
+    seed.tenant('tenant_a', clusters=['cluster_1'])
+    seed.tenant('tenant_b', clusters=['cluster_2'])
+    ann = seed.user('ann', role='user', tenant_id='tenant_a', permissions=['admin.api'])
+    seed.user('bert', role='user', tenant_id='tenant_b')
+    root = seed.user('root', role='admin')
+    seed.db.conn.execute("UPDATE users SET fed_home = ? WHERE username = 'bert'", (FOREIGN,))
+    authapi.ensure_api_tokens_table()
+    seed.db.conn.execute(
+        "INSERT INTO api_tokens (token_hash, token_prefix, username, name, role, created_at, "
+        "fed_home) VALUES ('th-bert', 'pgx_b', 'bert', 'ci', 'viewer', '2026', ?)", (FOREIGN,))
+    seed.db.conn.commit()
+    tid = seed.db.conn.execute("SELECT id FROM api_tokens WHERE token_hash = 'th-bert'").fetchone()[0]
+    r = fed.as_user(ann).delete(f'/api/auth/tokens/{tid}')
+    assert r.status_code == 404, r.data
+    assert 'home' not in (r.get_json() or {}) and FOREIGN not in r.get_data(as_text=True)
+    r = fed.as_user(root).delete(f'/api/auth/tokens/{tid}')
+    assert r.status_code == 409 and r.get_json()['home'] == FOREIGN, r.data
+
+
+# --- the passkey routes with the switch off ----------------------------------------------------
+
+def test_a_leftover_mirror_session_registers_and_removes_no_passkey(switchable, seed):
+    """The switch went off (forced, or a database restored onto a plain install) while a
+    mirror's session lived on. The passkey routes check the session, not the account: they
+    refuse it as require_auth does, so no second factor this site's home does not know of
+    is left behind. Counterproof: the same session of a local account gets through."""
+    from pegaprox.api import webauthn as wa
+    if not wa.FIDO2_AVAILABLE:
+        pytest.skip('fido2 is not installed')
+    mira = _mirror(seed, 'mira')
+    seed.db.conn.execute(
+        "INSERT INTO webauthn_credentials (username, credential_id, public_key, name, "
+        "user_handle, created_at, fed_home) VALUES ('mira', 'Y3JlZA==', X'00', 'key', X'00', "
+        "'2026', ?)", (FOREIGN,))
+    seed.db.conn.commit()
+    cred = seed.db.conn.execute("SELECT id FROM webauthn_credentials").fetchone()[0]
+    c = switchable.as_user(mira)
+    for method, path in (('post', '/api/webauthn/register/begin'),
+                         ('post', '/api/webauthn/register/finish'),
+                         ('delete', f'/api/webauthn/credentials/{cred}')):
+        r = getattr(c, method)(path, json={})
+        assert r.status_code == 401 and r.get_json()['code'] == 'ACCOUNT_DISABLED', (path, r.data)
+    assert seed.db.conn.execute("SELECT COUNT(*) FROM webauthn_credentials").fetchone()[0] == 1
+    seed.db.conn.execute("UPDATE users SET fed_home = '' WHERE username = 'mira'")
+    seed.db.conn.commit()
+    r = c.delete(f'/api/webauthn/credentials/{cred}', json={})
+    assert r.status_code != 401, r.data
+
+
+# --- forced second factor and a mirror -----------------------------------------------------------
+
+def test_a_mirror_with_a_passkey_is_enrolled_under_force_2fa(fed, db):
+    """force_2fa holds every account without a factor this site can ask for. A mirror's
+    TOTP secret never travels and the setup routes refuse it here, so its passkey is that
+    factor: a mirror with one is not held. A local account with only a passkey still is."""
+    from pegaprox.utils.auth import mfa_enrolment_state, MFA_DUE, MFA_NOT_DUE
+    _from_member(db, [_account('kai', totp_enabled=1), _account('noa')],
+                 passkeys=[_passkey('kai')])
+    settings = {'force_2fa': True}
+    assert mfa_enrolment_state(db.get_user('kai'), settings, 'kai') == MFA_NOT_DUE
+    assert mfa_enrolment_state(db.get_user('noa'), settings, 'noa') == MFA_DUE
+    db.save_user('lena', {'password_salt': 's', 'password_hash': 'h', 'role': 'user',
+                          'enabled': True})
+    db.conn.execute("INSERT INTO webauthn_credentials (username, credential_id, public_key, "
+                    "name, user_handle, created_at) VALUES ('lena', 'bGVuYQ==', X'00', 'k', "
+                    "X'00', '2026')")
+    db.conn.commit()
+    assert mfa_enrolment_state(db.get_user('lena'), settings, 'lena') == MFA_DUE
+
+
+def test_a_mirror_signs_in_with_its_passkey_and_works_under_force_2fa(fed, db):
+    """The same over the routes: the sign-in, validate_session and the session check each
+    hand mfa_enrolment_state the account's name, which is what finds the passkey. A mapped
+    mirror that signs in with it is not sent to the enrolment, and its session reaches the
+    API. Counterproof: a mirror without one is held to an enrolment it cannot do here."""
+    from pegaprox.api import webauthn as wa
+    from pegaprox.api.helpers import save_server_settings
+    pytest.importorskip('pyotp')
+    s = _settings()
+    s['force_2fa'] = True
+    save_server_settings(s)
+    _from_member(db, [_account('kai'), _account('noa')], passkeys=[_passkey('kai')])
+    proof = secrets.token_urlsafe(32)
+    wa._challenges[('kai', 'proof')] = (proof, time.time() + 60)
+    r = _login(fed, 'kai', webauthn_proof=proof)
+    assert r.status_code == 200 and r.get_json()['requires_2fa_setup'] is False, r.data
+    sid = {'X-Session-ID': r.get_json()['session_id']}
+    assert fed.anon().get('/api/pbs', headers=sid).status_code == 200
+    r = fed.anon().get('/api/auth/check', headers=sid)
+    assert r.status_code == 200 and r.get_json()['requires_2fa_setup'] is False, r.data
+    r = _login(fed, 'noa')
+    assert r.status_code == 200 and r.get_json()['requires_2fa_setup'] is True, r.data
+    sid = {'X-Session-ID': r.get_json()['session_id']}
+    r = fed.anon().get('/api/pbs', headers=sid)
+    assert r.status_code == 403 and r.get_json()['code'] == 'MFA_ENROLMENT_REQUIRED', r.data
+
+
+# --- the reconcile and the renewal are on record --------------------------------------------------
+
+def test_reconcile_and_renew_are_audited(fed, seed, db):
+    admin = fed.as_user(seed.user('root', role='admin'))
+    federation.ensure_identity()
+    assert admin.post('/api/federation/reconcile', json={}).status_code == 200
+    r = admin.post('/api/federation/clusters/c1/renew', json={})
+    assert r.status_code == 200, r.data
+    rows = {r['action']: (r['user'], r['details']) for r in db.conn.execute(
+        "SELECT user, action, details FROM audit_log WHERE action LIKE 'federation.%'")}
+    assert rows['federation.reconciled'][0] == 'root'
+    assert rows['federation.lease_renewed'][0] == 'root' and 'c1' in rows['federation.lease_renewed'][1]

@@ -261,7 +261,11 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
     # right before the command goes out either way
     from pegaprox.core import ha_transport
     from pegaprox.core.ha import GuardRefused
-    ha_transport.guard_ssh(host, cmd, cluster_id=cluster_id)
+    from pegaprox.core.federation import LeaseRefused
+    # refusals of this instance's own guards (the HA lease, the federation's): nothing
+    # left for the node, so neither a reason to try another way nor a failure of the node
+    refused_here = (GuardRefused, LeaseRefused)
+    wrote = ha_transport.guard_ssh(host, cmd, cluster_id=cluster_id)
 
     def _make_sock():
         """Pre-create socket with explicit connect_timeout — paramiko.Transport
@@ -418,7 +422,13 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
 
         # Execute command (the connects above may have taken a while: checked again, #625)
         try:
-            ha_transport.guard_ssh(host, cmd, again=True, cluster_id=cluster_id)
+            if wrote:
+                # a write: closed with its channel if the cluster's federation lease goes
+                # meanwhile. Kept before the ask below, so a hand-over while it connected
+                # is refused there or finds it to close
+                ha_transport.track_client(client, cluster_id)
+            if ha_transport.guard_ssh(host, cmd, again=True, cluster_id=cluster_id):
+                ha_transport.track_client(client, cluster_id)
             stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
             if stdin_data is not None:
                 _feed_stdin(stdin, stdin_data)
@@ -430,11 +440,11 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         except Exception as e:
             try: client.close()
             except: pass
-            if isinstance(e, GuardRefused):
+            if isinstance(e, refused_here):
                 raise
             raise Exception(f'Paramiko exec failed: {e}')
 
-    except GuardRefused:
+    except refused_here:
         raise
     except Exception as paramiko_err:
         last_err = str(paramiko_err)
@@ -480,7 +490,7 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
             return result.returncode, result.stdout, result.stderr
         # sshpass also failed
         return result.returncode, result.stdout, result.stderr or last_err
-    except GuardRefused:
+    except refused_here:
         raise
     except Exception as sub_err:
         return 1, '', f'All SSH methods failed: {last_err}; subprocess: {sub_err}'
@@ -907,8 +917,10 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
         return rc, out, err
     except Exception as e:
         from pegaprox.core.ha import GuardRefused
-        if isinstance(e, GuardRefused):
-            # this instance may not send it (#625): that says nothing about the node
+        from pegaprox.core.federation import LeaseRefused
+        if isinstance(e, (GuardRefused, LeaseRefused)):
+            # this instance may not send it (#625, or no federation lease): that says
+            # nothing about the node
             return 1, '', str(e)
         try:
             pve_mgr._register_node_failure(node)

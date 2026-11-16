@@ -1320,7 +1320,7 @@ def auth_login():
     
     # NS: Feb 2026 - Check if user needs to set up 2FA (force_2fa setting)
     # NS Oct 2026 (#1076) - the same decision validate_session holds the session to
-    _mfa = mfa_enrolment_state(user, settings)
+    _mfa = mfa_enrolment_state(user, settings, username)
     requires_2fa_setup = _mfa == MFA_DUE
     if _mfa == MFA_SKIPPED_ON_STANDBY:
         # MK Sep 2026 (#625) - enrolment is a write, and a standby that cannot hand
@@ -1611,7 +1611,7 @@ def auth_check():
     # NS: Feb 2026 - Check if user needs to set up 2FA (force_2fa setting)
     # skip OIDC/Entra users (they use their IdP's MFA), optionally admins, and #625 admins
     # on a standby that cannot enrol them (see auth_login)
-    requires_2fa_setup = mfa_enrolment_state(user, settings) == MFA_DUE
+    requires_2fa_setup = mfa_enrolment_state(user, settings, session['user']) == MFA_DUE
     
     from pegaprox.api.auto_install import autoinstall_access
     return jsonify({
@@ -2487,7 +2487,13 @@ def revoke_api_token_endpoint(token_id):
             cursor.execute('SELECT username, name FROM api_tokens WHERE id = ?', (token_id,))
             row = cursor.fetchone()
             if row:
-                # Federation Phase 2: a mirrored token is the home's to revoke
+                _scope = _api_token_admin_scope()
+                if (_scope is not None
+                        and _token_owner_tenant(dict(row)['username']) != _scope):
+                    return jsonify({'error': 'Token not found'}), 404
+                # Federation Phase 2: a mirrored token is the home's to revoke. Asked after
+                # the tenant check: a delegate learns nothing of another tenant's tokens
+                # here, not even where one is homed
                 from pegaprox.core import federation as _fed_core
                 if _fed_core.enabled():
                     _fed = get_db().conn.execute(
@@ -2498,10 +2504,6 @@ def revoke_api_token_endpoint(token_id):
                         return jsonify({'code': 'FED_FOREIGN', 'home': _fed_owner,
                                         'error': 'This token belongs to another instance '
                                                  'of the federation - revoke it there'}), 409
-                _scope = _api_token_admin_scope()
-                if (_scope is not None
-                        and _token_owner_tenant(dict(row)['username']) != _scope):
-                    return jsonify({'error': 'Token not found'}), 404
                 cursor.execute('UPDATE api_tokens SET revoked = 1 WHERE id = ?', (token_id,))
                 db.conn.commit()
                 token_owner = dict(row)['username']

@@ -211,6 +211,29 @@ def test_peer_rows_carry_counts_and_say_what_is_left_out(panel):
     assert "fedFill(t('fedPeerMore'), { count: more, site })" in view
 
 
+def test_a_failed_read_of_the_leases_or_the_view_is_said(panel):
+    """A failed leases read showed 'no clusters enrolled' and offered every enrolled cluster
+    for enrolling; one after a good read kept showing the old lease as held. A failed
+    linked view left 'Working...' for good. Each says the error now, and the old answer
+    goes."""
+    leases = panel[panel.index('async function refreshLeases()'):panel.index('async function refreshFedClusters()')]
+    assert "else if (r.code !== 'AUTH') { setLeases(null); setLeasesError(r.error); }" in leases
+    assert "setLeasesError('')" in leases
+    view = panel[panel.index('async function refreshFedClusters()'):panel.index('async function refreshIdMap()')]
+    assert "fedSend('GET', 'clusters', null, t('fedLoadFailed'))" in view
+    assert 'setFedClustersError(r.error)' in view
+    assert 'data-fed-leases-error' in panel and 'data-fed-clusters-error' in panel
+    assert "{own.length === 0 && !leasesError && <p" in panel
+    # nobody knows what is enrolled without a leases answer: nothing is offered to enroll
+    assert 'const unenrolled = leases ? (clusters || [])' in panel
+
+
+def test_the_filter_stays_while_it_filters(panel):
+    """Enrolling one of 13 clusters left 12: the field went away while its text still
+    filtered the list to nothing."""
+    assert '{(unenrolled.length > FED_FILTER_FROM || needle) && (' in panel
+
+
 # -- accounts of other sites ----------------------------------------------------------------
 
 def test_the_mapping_is_read_only_while_on(panel):
@@ -590,7 +613,9 @@ def test_runtime_switching_off_goes_at_once(open_fed):
     page.locator('[data-fed-panel="off"]').wait_for(timeout=5000)
     assert app.server.bodies['/api/federation/switch'] == [{'enabled': False}]
     assert page.locator('[data-fed-switch-confirm]').count() == 0
-    assert any(t['text'] == 'Federation switched off.' for t in app.toasts())
+    # the spy looks every 50 ms: the toast may come a moment after the panel changed
+    page.wait_for_function("() => (window.__toasts || []).some(t => t.text === 'Federation switched off.')",
+                           timeout=3000)
 
 
 def test_runtime_a_refused_switch_off_shows_the_servers_reason(open_fed):
@@ -754,8 +779,10 @@ def test_runtime_peer_rows_show_nodes_guests_and_what_is_left_out(open_fed):
     view = {'self': [{'id': 'pve1', 'name': 'prod', 'type': 'proxmox', 'enabled': True, 'enrolled': True,
                       'connected': True, 'nodes': 3, 'vms': 40}],
             'peers': {pid: {'site': 'hamburg', 'total': 150, 'clusters': [
-                {'id': f'hh{n}', 'name': f'hh {n}', 'type': 'proxmox', 'enabled': True, 'enrolled': n == 0,
-                 'connected': n != 1, 'nodes': 4 if n != 1 else 0, **({'vms': 77} if n != 1 else {})}
+                # a site names the id of an enrolled cluster only
+                {**({'id': f'hh{n}'} if n == 0 else {}), 'name': f'hh {n}', 'type': 'proxmox',
+                 'enabled': True, 'enrolled': n == 0, 'connected': n != 1,
+                 'nodes': 4 if n != 1 else 0, **({'vms': 77} if n != 1 else {})}
                 for n in range(100)]}}}
     app = open_fed(fed={'enabled': True, 'members': [_member(2, 'hamburg')], 'view': view})
     page = app.page
@@ -764,7 +791,9 @@ def test_runtime_peer_rows_show_nodes_guests_and_what_is_left_out(open_fed):
     row.wait_for(timeout=5000)
     cells = row.locator('td').all_inner_texts()
     assert cells[2] == '4' and cells[3] == '77' and 'led at hamburg' in cells[4], cells
-    assert page.locator('[data-fed-peer-cluster="hh1"] td').all_inner_texts()[2] == 'Disconnected'
+    second = page.locator('[data-fed-peer-cluster]').nth(1)
+    assert second.locator('td').all_inner_texts()[2] == 'Disconnected'
+    assert second.locator('code').count() == 0 and 'hh 1' in second.inner_text()
     assert page.locator('[data-fed-peer-cluster]').count() == 100
     assert page.locator(f'[data-fed-peer-more="{pid[:8]}"]').inner_text() == '50 more clusters of hamburg are not listed.'
 
@@ -934,3 +963,48 @@ def test_runtime_a_mirrored_user_is_marked_in_the_users_list(open_fed):
     # counterproof: the local user keeps its badge-free row and its buttons
     assert page.locator('[data-fed-mirror="alice"]').count() == 0
     assert page.locator('[data-fed-mirror-actions="alice"]').count() == 0
+
+
+def test_runtime_a_failed_leases_read_is_said_and_offers_nothing_to_enroll(open_fed):
+    """The leases route fails: the card says so instead of 'no clusters enrolled', and no
+    cluster is offered for enrolling while it is unknown which ones are. The linked view
+    that fails says so instead of working for good. Counterproof: the reads come back and
+    the cards fill again."""
+    failing = {('GET', '/api/federation/leases'): (500, {'error': 'The lease file cannot be read'}),
+               ('GET', '/api/federation/clusters'): (500, {'error': 'The members cannot be asked'})}
+    clusters = [{'id': 'pve1', 'name': 'one', 'cluster_type': 'proxmox'}]
+    app = open_fed(fed={'enabled': True, 'members': [_member(2, 'hamburg'), _member(3, 'munich')],
+                        'replies': dict(failing)}, clusters=clusters)
+    page = app.page
+    assert app.open_tab()
+    err = page.locator('[data-fed-leases-error]')
+    err.wait_for(timeout=5000)
+    assert err.inner_text() == 'The lease file cannot be read'
+    assert page.locator('[data-fed-own-leases]').inner_text().count('No clusters') == 0
+    assert page.locator('[data-fed-enrollable]').count() == 0
+    assert page.locator('[data-fed-clusters-error]').inner_text() == 'The members cannot be asked'
+    # the next poll (20 s) reads both again
+    app.server.fed['replies'] = {}
+    page.locator('[data-fed-enrollable="pve1"]').wait_for(timeout=45000)
+    assert page.locator('[data-fed-leases-error]').count() == 0
+    assert not app.errors, app.errors
+
+
+def test_runtime_the_filter_stays_while_it_filters(open_fed):
+    """13 clusters, a filter typed, one of them enrolled: 12 are left and the field with
+    its text stays, so the list can be cleared again."""
+    clusters = [{'id': f'pve{n:02d}', 'name': f'cluster {n}', 'cluster_type': 'proxmox'} for n in range(1, 14)]
+    app = open_fed(fed={'enabled': True, 'members': [_member(2, 'hamburg'), _member(3, 'munich')]},
+                   clusters=clusters)
+    page = app.page
+    assert app.open_tab()
+    page.locator('[data-fed-filter]').wait_for(timeout=5000)
+    page.locator('[data-fed-filter]').fill('pve13')
+    assert page.locator('[data-fed-enrollable]').count() == 1
+    # enrolled meanwhile: the next poll (20 s) of the leases takes it out of the list
+    app.server.fed['enrolled'] = {'pve13': {'owner': ME, 'name': 'cluster 13'}}
+    page.locator('[data-fed-lease="pve13"]').wait_for(timeout=45000)
+    assert page.locator('[data-fed-enrollable]').count() == 0
+    assert page.locator('[data-fed-filter]').count() == 1
+    page.locator('[data-fed-filter]').fill('')
+    assert page.locator('[data-fed-enrollable]').count() == 12

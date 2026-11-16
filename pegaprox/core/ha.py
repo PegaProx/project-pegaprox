@@ -2606,6 +2606,12 @@ def accept_pairing(code_secret, standby_id, standby_url, standby_fp, standby_pub
     The standby sends its public key. Up to MAX_MEMBERS - 1 standbys; an instance
     that is a member already takes its old place again (it unpaired while we could
     not be told), and one we removed comes back with the new key it pairs with."""
+    st = _load()
+    if st['role'] != ROLE_STANDBY and not int(st.get('epoch') or 0):
+        # a standalone forms its group at epoch 1 and stays the acting host: no promotion
+        # for the federation's leases. Said before the lock, which the lease clock takes
+        # under the federation's own
+        _federation_epoch_kept(0, 1)
     with _lock:
         st = _load()
         if not pairing_code_ok(code_secret):
@@ -2865,6 +2871,11 @@ def unpair(said=(), leader_agreed=False):
     and the note about the broken file goes with it. Raises AutoMode where the group
     fails over automatically (unpair_refusal).
     """
+    st = _load()
+    if st['role'] == ROLE_ACTIVE and int(st.get('epoch') or 0):
+        # the active stays the acting host, standalone at epoch 0: no promotion for the
+        # federation's leases either (said before the lock, as in accept_pairing)
+        _federation_epoch_kept(int(st['epoch']), 0)
     with _lock:
         st = _load()
         why = unpair_refusal(st, said=said, leader_agreed=leader_agreed)
@@ -2888,6 +2899,8 @@ def unpair(said=(), leader_agreed=False):
     # now, not at the next boot: the route restarts only a former standby
     _note_member_in_db('')
     _drop_recovery_locks(st['instance_id'])
+    if was == ROLE_STANDBY:
+        _federation_left_group()
     return was
 
 
@@ -7417,6 +7430,9 @@ AUTO_REPAIR_ERROR = ('This instance holds a vote in a group that fails over auto
                      'pairing it again would take that vote and leave too few. Switch '
                      'automatic failover off on the leader first')
 AUTO_PENDING_ERROR = 'A switch to automatic failover is under way - try again once it is through'
+FED_UNPAIR_ERROR = ('This group is a member of a federation, and its standbys keep the federation '
+                    'identity: unpaired, this instance and the group would both act as that one '
+                    'member. Remove or unpair the standbys first')
 NO_LEASE_ERROR = ('No leader at the moment - changes and automation are paused until the '
                   'group has one again')
 # for a caller nobody has checked: nothing about who leads, or for how long not
@@ -7629,20 +7645,38 @@ def unpair_refusal(st=None, said=(), leader_agreed=False):
     which takes it out of the voter config first (unpair_needs_leader,
     leave_through_leader; then `leader_agreed`); the leader itself hands its lead on
     first. Nor does a member whose way out is Force leader (way_out_refusal, `said` as
-    there)."""
+    there).
+
+    MK Nov 2026 - nor an active that still has standbys while the federation runs
+    (FED_UNPAIR_ERROR, after the reasons above): they keep the group's federation
+    identity, which only a standby that leaves drops. Removing a standby from the active
+    stays open."""
     st = st or _load()
-    if (not ha_vote.AUTO_MODE_SHIPPED or st.get('broken') or st.get('removed')
-            or st['role'] == ROLE_STANDALONE):
+    if st.get('broken') or st.get('removed') or st['role'] == ROLE_STANDALONE:
         return ''
-    rec = st.get('lease')
-    held = rec.get('mode') if isinstance(rec, dict) else None
-    if held == ha_vote.MODE_AUTO or _lease_mode(st):
-        if st['role'] == ROLE_STANDBY and (st.get('group_mode') == ha_vote.MODE_MANUAL or leader_agreed):
-            return ''
-        return AUTO_LEAVE_LEADER_ERROR if st.get('leader') else AUTO_UNPAIR_ERROR
-    if held == ha_vote.MODE_PENDING and st['role'] == ROLE_ACTIVE:
-        return AUTO_PENDING_ERROR
-    return way_out_refusal(st, said)
+    if ha_vote.AUTO_MODE_SHIPPED:
+        rec = st.get('lease')
+        held = rec.get('mode') if isinstance(rec, dict) else None
+        if held == ha_vote.MODE_AUTO or _lease_mode(st):
+            if st['role'] == ROLE_STANDBY and (st.get('group_mode') == ha_vote.MODE_MANUAL
+                                               or leader_agreed):
+                return ''
+            return AUTO_LEAVE_LEADER_ERROR if st.get('leader') else AUTO_UNPAIR_ERROR
+        if held == ha_vote.MODE_PENDING and st['role'] == ROLE_ACTIVE:
+            return AUTO_PENDING_ERROR
+        why = way_out_refusal(st, said)
+        if why:
+            return why
+    return FED_UNPAIR_ERROR if _federation_keeps_group(st) else ''
+
+
+def _federation_keeps_group(st):
+    """An active with standbys while the federation is switched on: unpaired, it would act
+    as the federation member its standbys still are."""
+    if st['role'] != ROLE_ACTIVE or not st.get('members'):
+        return False
+    from pegaprox.core import federation
+    return federation.enabled()
 
 
 def unpair_needs_leader(st=None):
@@ -13025,6 +13059,38 @@ def _federation_refusals():
 def _bind_federation_refusals(said):
     from pegaprox.core import federation
     return federation.bind_refusals(said)
+
+
+def _federation_epoch_kept(old, new):
+    """MK Nov 2026 - the epoch of this host is about to move while it stays the acting one
+    (it takes its first standby, or leaves its group as the active). The federation's
+    lease clock takes an epoch change for a promotion and holds every vote for 35 s unless
+    it hears this first. Called outside _lock: the lease clock reads the epoch under the
+    federation's lock. A notice for a move that then does not happen counts for nothing,
+    it matches that one move only. Never raises: without it the federation only holds
+    once more."""
+    try:
+        from pegaprox.core import federation
+        if not federation.enabled():
+            return
+        from pegaprox.core import federation_lease
+        federation_lease.note_epoch_kept(old, new)
+    except Exception as e:
+        logging.warning(f"[HA] could not tell the federation that this host stays acting: {e}")
+
+
+def _federation_left_group():
+    """MK Nov 2026 - a standby held its active's federation identity through the sync.
+    Standalone it would act as that same member next to the active, so what it inherited
+    goes (federation.forget_inherited). With the switch off as well: switched on later,
+    the identity would make it that member all the same. Never raises; a failure is
+    logged loudly."""
+    try:
+        from pegaprox.core import federation
+        federation.forget_inherited('this host left its HA group as a standby')
+    except Exception as e:
+        logging.error(f"[HA] the federation identity this former standby holds could not be "
+                      f"dropped - switch the federation off on it before it acts: {e}")
 
 
 def as_job(fn, what):

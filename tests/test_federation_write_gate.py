@@ -132,6 +132,28 @@ def test_reads_consoles_and_logins_pass(led):
         federation.guard_exit('c-led', 'SSH n1 rm', 'ssh')
 
 
+class _Popen:
+    """A node command that never leaves: records its argv (without the `timeout` wrapper)
+    and ends at once. Its pid is past any pid_max, so no kill can reach a real process."""
+    ran = None
+
+    def __init__(self, argv, **kw):
+        self.pid, self.returncode = 4194304 + 777, 0
+        argv = list(argv)
+        if argv and os.path.basename(argv[0]) == 'timeout':
+            argv = argv[4:]
+        _Popen.ran.append(argv)
+
+    def communicate(self, data=None, timeout=None):
+        return '', ''
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
 def test_an_ssh_exit_and_a_node_command_ask_the_lease(led, monkeypatch):
     from pegaprox.core import ha_transport
     ran = []
@@ -141,6 +163,9 @@ def test_an_ssh_exit_and_a_node_command_ask_the_lease(led, monkeypatch):
     with pytest.raises(federation.LeaseRefused):
         client.exec_command('qm start 100')
     monkeypatch.setattr(ha_transport.subprocess, 'run', lambda argv, **kw: ran.append(argv))
+    # a command on an enrolled cluster runs in a process group of its own
+    _Popen.ran = ran
+    monkeypatch.setattr(ha_transport.subprocess, 'Popen', _Popen)
     with pytest.raises(federation.LeaseRefused):
         ha_transport.node_cmd(['ssh', 'root@n1', 'reboot'], timeout=5, host='n1',
                               cluster_id='c-led')
@@ -290,7 +315,7 @@ def test_a_route_outside_the_cluster_prefix_is_refused(api, seed, led):
 
 # the exit hooks and the SSH factories that hand a cluster id on to one
 EXIT_CALLS = {'guard_session', 'guard_client', 'node_cmd', 'guard_ssh', 'secure_ssh_client',
-              '_ssh_exec', '_connect_ssh'}
+              '_ssh_exec', '_connect_ssh', 'guard_write'}
 _PBS = 'a Proxmox Backup Server: no cluster of the federation'
 _ESXI = 'the ESXi source host of a migration'
 REVIEWED_NO_CLUSTER = {
@@ -320,8 +345,8 @@ def _exit_calls():
         for n in names:
             if not n.endswith('.py') or n.startswith('.'):
                 continue
-            rel = os.path.relpath(os.path.join(d, n), ROOT)
-            if rel == os.path.join('pegaprox', 'core', 'ha_transport.py'):
+            rel = os.path.relpath(os.path.join(d, n), ROOT).replace(os.sep, '/')
+            if rel == 'pegaprox/core/ha_transport.py':
                 continue
             with open(os.path.join(d, n), encoding='utf-8') as fh:
                 tree = ast.parse(fh.read())
@@ -369,6 +394,10 @@ def test_every_cluster_exit_names_its_cluster():
 _FED_BODY_CLUSTER_WRITES = {
     ('POST', '/api/xhm/migrate'),
     ('POST', '/api/site-recovery/plans/<plan_id>/failover'),
+    ('POST', '/api/site-recovery/plans/<plan_id>/emergency'),
+    ('POST', '/api/site-recovery/plans/<plan_id>/test'),
+    ('POST', '/api/site-recovery/plans/<plan_id>/test/cleanup'),
+    ('POST', '/api/site-recovery/plans/<plan_id>/failback'),
     ('POST', '/api/multi-sdn/vnets/<vid>/apply'),
     ('POST', '/api/qnetd/hosts/<host_id>/bulk-setup'),
     ('POST', '/api/cross-cluster-migrate'),
@@ -413,7 +442,7 @@ def test_every_body_named_cluster_write_is_checked_early(api):
     routes = _body_named_writes(api.app)
     for key in sorted(_FED_BODY_CLUSTER_WRITES):
         assert key in routes, f'{key} is gone - take it out of _FED_BODY_CLUSTER_WRITES'
-        assert 'refuse_unleased(' in routes[key], \
+        assert 'refuse_unleased(' in routes[key] or '_refuse_unleased(' in routes[key], \
             f'{key} acts on clusters named in its body without checking the lease first'
     suspicious = []
     for key, src in routes.items():
@@ -433,3 +462,552 @@ def test_every_body_named_cluster_write_is_checked_early(api):
         '_FED_BODY_CLUSTER_WRITES, or list it in _REVIEWED_BODY_WRITES with the reason.')
     gone = sorted(k for k in _REVIEWED_BODY_WRITES if k not in routes)
     assert not gone, f'reviewed routes that are gone - take them out: {gone}'
+
+
+# --- a connection that comes up after the lease ran out ---------------------------------------
+
+def _lapse(cid):
+    def go(st):
+        st['my_leases'][cid]['expires'] = fl._lease_now() - 1
+        return True
+    federation._mutate_leases(go)
+
+
+@pytest.mark.parametrize('scheme', ['http', 'https'])
+def test_a_lease_that_runs_out_while_the_connection_comes_up_stops_the_write(led, monkeypatch,
+                                                                             scheme):
+    """The check before send() saw a live lease; the connect then stalls (a dark host, a
+    slow handshake) and the lease runs out meanwhile. The write is checked again once the
+    connection is up and does not go out. Counterproof: with the lease still live after
+    the connect, it does."""
+    import requests
+    import urllib3
+    from pegaprox.core import ha_transport
+    _grant('c-led')
+    sent, lapse = [], {'on': True}
+
+    def stalled_connect(conn):
+        if lapse['on']:
+            _lapse('c-led')
+        conn.sock = MagicMock()
+
+    def request(self, method, url, *a, **k):
+        sent.append(f'{method} {url}')
+        raise requests.exceptions.ConnectionError('stub: nothing listens')
+    monkeypatch.setattr(urllib3.connection.HTTPConnection, 'connect',
+                        lambda self: stalled_connect(self))
+    monkeypatch.setattr(urllib3.connectionpool.HTTPSConnectionPool, '_validate_conn',
+                        lambda self, conn: stalled_connect(conn))
+    monkeypatch.setattr(urllib3.connection.HTTPConnection, 'request', request)
+    s = ha_transport.guard_session(requests.Session(), cluster_id='c-led')
+    url = f'{scheme}://10.0.0.8:8006/api2/json/nodes/n1/qemu/100/status/start'
+    with pytest.raises(federation.LeaseRefused):
+        s.post(url, timeout=5, verify=False)
+    assert sent == []
+    _grant('c-led')
+    lapse['on'] = False
+    with pytest.raises(requests.exceptions.ConnectionError):
+        s.post(url, timeout=5, verify=False)
+    assert sent == ['POST /api2/json/nodes/n1/qemu/100/status/start']
+
+
+# --- a thaw undoes a freeze ---------------------------------------------------------------------
+
+def test_a_thaw_passes_the_fence(led):
+    """The lease ran out between the freeze and the thaw of a snapshot: the thaw still goes
+    out, refused it would leave the guest's file systems frozen. The freeze does not."""
+    from pegaprox.core import ha_transport
+    sent = []
+    s = ha_transport.guard_session(_stub_session(sent), cluster_id='c-led')
+    base = 'https://10.0.0.8:8006/api2/json/nodes/n1/qemu/100/agent'
+    with pytest.raises(federation.LeaseRefused):
+        s.post(f'{base}/fsfreeze-freeze')
+    s.post(f'{base}/fsfreeze-thaw')
+    assert sent == [('POST', f'{base}/fsfreeze-thaw')]
+
+
+# --- what is under way when the lease goes --------------------------------------------------------
+
+def _sleeping(ha_transport, cid, out):
+    import time as _time
+    started = _time.monotonic()
+    try:
+        out['rc'] = ha_transport.node_cmd(['sleep', '30'], timeout=60, host='n1',
+                                          cluster_id=cid).returncode
+    finally:
+        out['took'] = _time.monotonic() - started
+
+
+def _wait_tracked(ha_transport, cid):
+    import time as _time
+    for _ in range(200):
+        if ha_transport._groups.get(cid):
+            return True
+        _time.sleep(0.02)
+    return False
+
+
+def _no_watch(monkeypatch, ha_transport):
+    """The watch stops nothing (a watch thread of an earlier test may still be running):
+    what stops a call here is the hand-over itself."""
+    monkeypatch.setattr(ha_transport, '_tracked', lambda: set())
+
+
+@pytest.mark.parametrize('how', ['hand over', 'lease runs out'])
+def test_a_node_command_under_way_stops_when_the_lease_goes(led, monkeypatch, how):
+    """A long node command (a dist-upgrade, a copy) on an enrolled cluster was let out with
+    a live lease. A hand-over stops it before the voters hear of it, with no watch; a lease
+    that runs out stops it within a watch tick. Without that it would go on writing while
+    another site adopts the cluster."""
+    import threading
+    from pegaprox.core import ha_transport
+    if how == 'hand over':
+        _no_watch(monkeypatch, ha_transport)
+    else:
+        monkeypatch.setattr(ha_transport, 'WATCH_EVERY', 0.05)
+    _grant('c-led', seconds=60)
+    out = {}
+    t = threading.Thread(target=_sleeping, args=(ha_transport, 'c-led', out))
+    t.start()
+    try:
+        assert _wait_tracked(ha_transport, 'c-led')
+        if how == 'hand over':
+            fl.release('c-led')
+        else:
+            _lapse('c-led')
+        t.join(10)
+        assert not t.is_alive() and out['took'] < 10, out
+        assert out['rc'] != 0
+    finally:
+        ha_transport.cut_cluster('c-led')
+        t.join(5)
+
+
+def test_a_command_on_an_unenrolled_cluster_is_left_alone(led, monkeypatch):
+    """Counterproof: the same command on a cluster no federation owns is not kept, and a
+    lease that goes elsewhere stops nothing of it."""
+    import threading
+    from pegaprox.core import ha_transport
+    monkeypatch.setattr(ha_transport, 'WATCH_EVERY', 0.05)
+    ran = []
+    _Popen.ran = ran
+    monkeypatch.setattr(ha_transport.subprocess, 'run', lambda argv, **kw: ran.append(argv))
+    ha_transport.node_cmd(['ssh', 'root@n1', 'true'], timeout=5, host='n1', cluster_id='c-local')
+    assert ran == [['ssh', 'root@n1', 'true']] and 'c-local' not in ha_transport._groups
+
+
+def test_a_node_command_that_went_out_as_a_read_is_left_alone(led, monkeypatch):
+    """A command ha.reading() let out without the lease runs as it did before, kept
+    nowhere: the watch would kill it the moment no lease is held. Counterproof: as a
+    write under a live lease it runs in a process group of its own, which is kept."""
+    from pegaprox.core import ha, ha_transport
+    ran, grouped = [], []
+    monkeypatch.setattr(ha_transport.subprocess, 'run', lambda argv, **kw: ran.append(argv))
+    _Popen.ran = grouped
+    monkeypatch.setattr(ha_transport.subprocess, 'Popen', _Popen)
+    with ha.reading():
+        ha_transport.node_cmd(['ssh', 'root@n1', 'pvecm status'], timeout=5, host='n1',
+                              cluster_id='c-led')
+    assert ran == [['ssh', 'root@n1', 'pvecm status']] and grouped == []
+    _grant('c-led')
+    ha_transport.node_cmd(['ssh', 'root@n1', 'pvecm status'], timeout=5, host='n1',
+                          cluster_id='c-led')
+    assert grouped == [['ssh', 'root@n1', 'pvecm status']]
+
+
+def test_an_ssh_client_of_the_cluster_is_closed_when_the_lease_goes(led, monkeypatch):
+    """A client a write went out through is closed by the hand-over, its channels with it.
+    One of a cluster no federation owns is left alone."""
+    from pegaprox.core import ha_transport
+    _no_watch(monkeypatch, ha_transport)
+    _grant('c-led', seconds=60)
+    client, other = MagicMock(), MagicMock()
+    ha_transport.guard_client(client, 'n1', cluster_id='c-led')
+    ha_transport.guard_client(other, 'n1', cluster_id='c-local')
+    client.exec_command('qm start 100')
+    other.exec_command('qm start 100')
+    try:
+        fl.release('c-led')
+        assert client.close.called
+        assert not other.close.called
+    finally:
+        ha_transport.cut_cluster('c-led')
+
+
+@pytest.mark.parametrize('how', ['reading', 'GET'])
+def test_a_client_that_only_read_stays_open_when_the_lease_runs_out(led, monkeypatch, how):
+    """guard_exit lets an SSH read out without the lease: inside ha.reading(), and in a GET
+    this instance answers. A client that carried nothing else is not kept, or the watch
+    would cut the read the moment no lease is held. Counterproof: the client next to it
+    that carried a write is closed within a tick."""
+    import time as _time
+    from flask import Flask
+    from pegaprox.core import ha, ha_transport
+    monkeypatch.setattr(ha_transport, 'WATCH_EVERY', 0.05)
+    reader, writer = MagicMock(), MagicMock()
+    ha_transport.guard_client(reader, 'n1', cluster_id='c-led')
+    ha_transport.guard_client(writer, 'n1', cluster_id='c-led')
+    _grant('c-led', seconds=60)
+    reads = ha.reading() if how == 'reading' else \
+        Flask('reads').test_request_context('/api/clusters/c-led/nodes', method='GET')
+    try:
+        with reads:
+            reader.exec_command('cat /etc/pve/.members')
+        writer.exec_command('qm start 100')
+        _lapse('c-led')
+        for _ in range(100):
+            if writer.close.called:
+                break
+            _time.sleep(0.02)
+        _time.sleep(0.2)
+        assert writer.close.called
+        assert not reader.close.called
+    finally:
+        ha_transport.cut_cluster('c-led')
+
+
+@pytest.mark.parametrize('cmd', ['write', 'read'])
+def test_a_client_of_ssh_exec_is_closed_when_the_lease_goes(led, monkeypatch, cmd):
+    """_ssh_exec logs in with a client of its own (no guard_client) and keeps it, once the
+    command it sends is a write, for the hand-over to close: a command under way stops
+    with it instead of running on while another site adopts the cluster. A read (inside
+    ha.reading()) passed without the lease and is left to finish."""
+    import socket
+    import threading
+    import paramiko
+    from pegaprox.core import ha, ha_transport
+    from pegaprox.utils import ssh as ssh_mod
+    _no_watch(monkeypatch, ha_transport)
+    started, made = threading.Event(), []
+
+    class _Hanging:
+        def __init__(self):
+            self.closed = threading.Event()
+            made.append(self)
+
+        def load_host_keys(self, *a):
+            pass
+
+        def set_missing_host_key_policy(self, *a):
+            pass
+
+        def connect(self, hostname, **kw):
+            pass
+
+        def exec_command(self, cmd, timeout=None):
+            started.set()
+            closed = self.closed
+
+            class _Out:
+                channel = MagicMock()
+
+                def read(self, n=-1):
+                    closed.wait(10)
+                    return b''
+            return None, _Out(), _Out()
+
+        def close(self):
+            self.closed.set()
+
+    def no_tcp(addr, timeout=None, **kw):
+        raise OSError('no network in a test')
+    monkeypatch.setattr(socket, 'create_connection', no_tcp)
+    monkeypatch.setattr(paramiko, 'SSHClient', _Hanging)
+    monkeypatch.setattr(ssh_mod, 'persist_host_keys', lambda client: None)
+    _grant('c-led', seconds=60)
+
+    def run():
+        if cmd == 'read':
+            with ha.reading():
+                ssh_mod._ssh_exec('10.0.0.7', 'root', 'pw', 'cat /etc/pve/.members',
+                                  cluster_id='c-led')
+        else:
+            ssh_mod._ssh_exec('10.0.0.7', 'root', 'pw', 'qm migrate 100 n2', cluster_id='c-led')
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    try:
+        assert started.wait(10)
+        fl.release('c-led')
+        assert made[-1].closed.is_set() is (cmd == 'write')
+        made[-1].closed.set()
+        t.join(5)
+        assert not t.is_alive()
+    finally:
+        for client in made:
+            client.closed.set()
+        t.join(5)
+
+
+def test_a_cluster_that_becomes_a_mirror_closes_its_clients(led, monkeypatch):
+    """The cluster led here became another member's mirror (it was adopted while this
+    instance was cut off): note_lost stops what is under way on it at once, not at the
+    next watch tick."""
+    from pegaprox.core import ha_transport
+    _no_watch(monkeypatch, ha_transport)
+    _grant('c-led', seconds=60)
+    client = MagicMock()
+    ha_transport.guard_client(client, 'n1', cluster_id='c-led')
+    client.exec_command('qm start 100')
+    try:
+        fl.note_lost('c-led', 'f' * 32)
+        assert client.close.called
+    finally:
+        ha_transport.cut_cluster('c-led')
+
+
+def _handed_over_after(monkeypatch, ha_transport, name, nth=1):
+    """ha_transport.<name> answers as before, and the cluster is handed over right after
+    its nth answer: the window between asking for a write and the write going out."""
+    real, asks = getattr(ha_transport, name), []
+
+    def answer(*a, **kw):
+        out = real(*a, **kw)
+        asks.append(out)
+        if len(asks) == nth:
+            fl.release('c-led')
+        return out
+    monkeypatch.setattr(ha_transport, name, answer)
+    return asks
+
+
+def test_a_hand_over_after_the_ask_stops_the_write_of_a_client(led, monkeypatch):
+    """The lease was asked for a write and the cluster is handed over before the client is
+    kept: the hand-over finds nothing to close, so the client asks once more after it is
+    kept and the write never goes out."""
+    from pegaprox.core import ha_transport
+    _no_watch(monkeypatch, ha_transport)
+    _grant('c-led', seconds=60)
+    _handed_over_after(monkeypatch, ha_transport, '_fed_guard')
+    client = MagicMock()
+    sent = client.exec_command
+    ha_transport.guard_client(client, 'n1', cluster_id='c-led')
+    try:
+        with pytest.raises(federation.LeaseRefused):
+            client.exec_command('qm start 100')
+        assert not sent.called
+    finally:
+        ha_transport.cut_cluster('c-led')
+
+
+def test_a_hand_over_after_the_last_ask_of_ssh_exec_closes_its_client(led, monkeypatch):
+    """_ssh_exec keeps its client before it asks the second time, so a hand-over right
+    after that ask closes the client the command then goes out on."""
+    import socket
+    import paramiko
+    from pegaprox.core import ha_transport
+    from pegaprox.utils import ssh as ssh_mod
+    _no_watch(monkeypatch, ha_transport)
+    order, made = [], []
+
+    class _Client:
+        def __init__(self):
+            self.closed = False
+            made.append(self)
+
+        def load_host_keys(self, *a):
+            pass
+
+        def set_missing_host_key_policy(self, *a):
+            pass
+
+        def connect(self, hostname, **kw):
+            pass
+
+        def exec_command(self, cmd, timeout=None):
+            order.append('sent on a closed client' if self.closed else 'sent on an open client')
+            raise OSError('closed')
+
+        def close(self):
+            self.closed = True
+
+    def no_tcp(addr, timeout=None, **kw):
+        raise OSError('no network in a test')
+    monkeypatch.setattr(socket, 'create_connection', no_tcp)
+    monkeypatch.setattr(paramiko, 'SSHClient', _Client)
+    monkeypatch.setattr(ssh_mod, 'persist_host_keys', lambda client: None)
+    _grant('c-led', seconds=60)
+    _handed_over_after(monkeypatch, ha_transport, 'guard_ssh', nth=2)
+    try:
+        try:
+            ssh_mod._ssh_exec('10.0.0.7', 'root', 'pw', 'qm migrate 100 n2', cluster_id='c-led')
+        except Exception:
+            pass
+        assert order == ['sent on a closed client'], order
+    finally:
+        ha_transport.cut_cluster('c-led')
+
+
+def test_a_hand_over_after_the_ask_kills_the_node_command(led, monkeypatch):
+    """node_cmd keeps the process group of a write once it started and asks again: a
+    hand-over since the first ask is refused there and the group is killed before the
+    command got far."""
+    from pegaprox.core import ha_transport
+    _no_watch(monkeypatch, ha_transport)
+    killed = []
+
+    class _Running(_Popen):
+        def poll(self):
+            return None
+    _Popen.ran = ran = []
+    monkeypatch.setattr(ha_transport.subprocess, 'Popen', _Running)
+    monkeypatch.setattr(ha_transport, '_kill_group', killed.append)
+    _grant('c-led', seconds=60)
+    _handed_over_after(monkeypatch, ha_transport, '_fed_guard')
+    with pytest.raises(federation.LeaseRefused):
+        ha_transport.node_cmd(['ssh', 'root@n1', 'qm start 100'], timeout=5, host='n1',
+                              cluster_id='c-led')
+    assert ran == [['ssh', 'root@n1', 'qm start 100']]
+    assert killed == [4194304 + 777] and not ha_transport._groups.get('c-led')
+
+
+# --- the poison pill and a recovery that waited past the lease ----------------------------------
+
+def test_the_poison_pill_needs_the_lease(led, tmp_path):
+    """A file on shared storage that makes the node's agent stop every guest: an exit like
+    any other, refused without the federation's lease on the cluster."""
+    from pegaprox.core.manager import PegaProxManager
+    (tmp_path / '.pegaprox').mkdir()
+    fake = MagicMock()
+    fake.id = 'c-led'
+    fake.ha_config = {'poison_pill_enabled': True, 'storage_heartbeat_path': str(tmp_path)}
+    pill = tmp_path / '.pegaprox' / 'poison_n1'
+    assert PegaProxManager._ha_write_poison_pill(fake, 'n1', 'test') is False
+    assert not pill.exists()
+    _grant('c-led')
+    assert PegaProxManager._ha_write_poison_pill(fake, 'n1', 'test') is True
+    assert pill.exists()
+
+
+def test_a_recovery_that_waited_past_the_lease_does_nothing(led, monkeypatch):
+    import threading
+    from pegaprox.core import ha
+    from pegaprox.core import manager as mgr_mod
+    monkeypatch.setattr(mgr_mod.time, 'sleep', lambda s: None)
+    monkeypatch.setattr(ha, 'is_active', lambda: True)
+    monkeypatch.setattr(ha, 'recovery_begin', lambda *a, **k: 'run')
+    monkeypatch.setattr(ha, 'recovery_end', lambda *a, **k: [])
+
+    def run():
+        fake = MagicMock()
+        fake.id = 'c-led'
+        fake.ha_config = {}
+        fake.ha_lock = threading.Lock()
+        fake.ha_node_status = {'n1': {'status': 'offline', 'last_seen': 5}}
+        fake.ha_recovery_in_progress = {'n1': True}
+        fake._ha_fence_timing.return_value = {'wait': 0}
+        fake._ha_recovery_allowed.return_value = None
+        mgr_mod.PegaProxManager._ha_recovery_worker(fake, 'n1')
+        return fake
+    assert run()._ha_recovery_allowed.call_count == 0
+    _grant('c-led')
+    assert run()._ha_recovery_allowed.call_count == 1
+
+
+# --- the routes that start a run of a plan ----------------------------------------------------------
+
+def _plan(api, seed):
+    db = seed.db
+    _row(db, 'c-src', '')
+    db.execute("INSERT INTO site_recovery_plans (id, group_id, name, source_cluster, "
+               "target_cluster, status) VALUES ('p1', 'g1', 'plan', 'c-src', 'c-led', 'ready')")
+    src = api.set_manager('c-src', api.make_fake_manager('c-src'))
+    tgt = api.set_manager('c-led', api.make_fake_manager('c-led'))
+    return db, src, tgt
+
+
+@pytest.mark.parametrize('path', ['emergency', 'test', 'test/cleanup', 'failback'])
+def test_every_run_of_a_plan_checks_the_lease_first(api, seed, led, path, monkeypatch):
+    """Emergency failover, test failover, its cleanup and the failback write on the target
+    (the failback on the source as well): without the lease the route answers 409 before
+    it marks the plan running and reports a start."""
+    import pegaprox.api.site_recovery as sr_api
+    started = []
+    monkeypatch.setattr(sr_api, '_safe_spawn_failover', lambda *a, **k: started.append(a) or True)
+    db, src, tgt = _plan(api, seed)
+    admin = api.as_user(seed.user('root', role='admin'))
+    r = admin.post(f'/api/site-recovery/plans/p1/{path}', json={})
+    assert r.status_code == 409, r.data
+    assert r.get_json()['code'] == 'FED_NO_LEASE' and r.get_json()['cluster'] == 'c-led'
+    status = db.conn.execute("SELECT status FROM site_recovery_plans WHERE id = 'p1'").fetchone()[0]
+    assert status == 'ready' and started == []
+    _grant('c-led')
+    r = admin.post(f'/api/site-recovery/plans/p1/{path}', json={})
+    assert (r.get_json(silent=True) or {}).get('code') != 'FED_NO_LEASE', r.data
+
+
+# --- a multi-cluster vnet retried on one member ---------------------------------------------------
+
+def test_a_vnet_retry_asks_only_the_members_it_writes(api, seed, led, monkeypatch):
+    """c-led applied the vnet before and has no lease now; c-local failed. The retry writes
+    c-local alone and is not refused for c-led. Counterproof: with c-led to write again,
+    the retry is refused."""
+    import json as _json
+    import pegaprox.api.multi_sdn as msdn
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    seed.db.execute(
+        'INSERT INTO multi_cluster_vnets (id,name,alias,zone,vni,asn,vrf_vxlan,controller,'
+        'peers,member_clusters,subnets,desired_state,per_cluster_status,status,enabled,'
+        'created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)',
+        ('v1', 'evx', '', 'z', 100, 65001, None, 'ctl', '', _json.dumps(['c-led', 'c-local']),
+         '[]', _json.dumps({'name': 'evx'}),
+         _json.dumps({'c-led': {'status': 'applied'}, 'c-local': {'status': 'failed'}}),
+         'partial', 'tester', now, now))
+    for cid in ('c-led', 'c-local'):
+        api.set_manager(cid, api.make_fake_manager(cid))
+    written = []
+    monkeypatch.setattr(msdn, '_apply_on_cluster',
+                        lambda cid, defn: written.append(cid) or {'cluster_id': cid,
+                                                                  'status': 'applied',
+                                                                  'steps': []})
+    admin = api.as_user(seed.user('root', role='admin'))
+    r = admin.post('/api/multi-sdn/vnets/v1/apply', json={})
+    assert r.status_code == 200, r.data
+    assert written == ['c-local']
+    seed.db.execute("UPDATE multi_cluster_vnets SET per_cluster_status = ? WHERE id = 'v1'",
+                    (_json.dumps({'c-led': {'status': 'failed'}, 'c-local': {'status': 'applied'}}),))
+    r = admin.post('/api/multi-sdn/vnets/v1/apply', json={})
+    assert r.status_code == 409 and r.get_json()['cluster'] == 'c-led', r.data
+    assert written == ['c-local']
+
+
+# --- a dry run of a cross-cluster migration -----------------------------------------------------------
+
+def test_a_dry_run_cross_cluster_migration_needs_no_lease(api, seed, led, monkeypatch):
+    """A dry run only reads: it answers with the preflight's plan, lease or not. The real
+    migration is refused."""
+    import pegaprox.api.vms as vms_api
+    for cid in ('c-local', 'c-led'):
+        api.set_manager(cid, api.make_fake_manager(cid))
+    planned = []
+
+    def preflight(data, *a, **k):
+        planned.append(bool(data.get('dry_run')))
+        return {'steps': []}, (vms_api.jsonify({'dry_run': True, 'steps': []}), 200)
+    monkeypatch.setattr(vms_api, '_cross_preflight_for', preflight)
+    monkeypatch.setattr(vms_api, '_require_vm_access', lambda *a, **k: None)
+    admin = api.as_user(seed.user('root', role='admin'))
+    body = {'source_cluster': 'c-local', 'target_cluster': 'c-led', 'vmid': 100,
+            'source_node': 'n1', 'target_node': 'n2', 'dry_run': True}
+    r = admin.post('/api/cross-cluster-migrate', json=body)
+    assert r.status_code == 200 and r.get_json()['dry_run'] is True, r.data
+    assert planned == [True]
+    r = admin.post('/api/cross-cluster-migrate', json=dict(body, dry_run=False))
+    assert r.status_code == 409 and r.get_json()['code'] == 'FED_NO_LEASE', r.data
+    assert planned == [True]
+
+
+# --- a deleted enrolled cluster ----------------------------------------------------------------------
+
+def test_deleting_an_enrolled_cluster_keeps_it_on_record(api, seed, led, monkeypatch):
+    """The cluster route deletes c-led, which this instance leads: the id stays on record
+    as this instance's, so its vote backs no stale former owner's ask for it."""
+    import pegaprox.api.clusters as clusters_api
+    fake = api.make_fake_manager('c-led')
+    fake.config.api_token_user = ''
+    api.set_manager('c-led', fake)
+    monkeypatch.setattr(clusters_api, '_retire_cluster_claim', lambda mgr: None)
+    admin = api.as_user(seed.user('root', role='admin'))
+    r = admin.delete('/api/clusters/c-led')
+    assert r.status_code == 200, r.data
+    assert federation.dropped_records().get('c-led') == led

@@ -574,6 +574,66 @@ def test_the_guard_says_no_before_the_key_logs_in(db, monkeypatch):
     assert m._node_failures == {}
 
 
+def test_a_federation_refusal_counts_nothing_against_the_node(db, monkeypatch):
+    """The cluster's federation lease is gone: the key leg is refused before it logs in,
+    and the refusal is no failure of the node. Three of them would otherwise put the node
+    into the circuit breaker's backoff, reads included, long after the lease is back."""
+    from pegaprox.core import federation, ha_transport
+
+    def refuse(host, cmd='', again=False, cluster_id=None):
+        raise federation.LeaseRefused(cluster_id, f'SSH {host}')
+    monkeypatch.setattr(ha_transport, 'guard_ssh', refuse)
+    _no_password_leg(monkeypatch)
+    seen = []
+    _fake_paramiko(monkeypatch, seen)
+    m = _real_manager()
+    for _ in range(3):
+        rc, _out, err = ssh_mod._pve_node_exec(m, 'pve1', 'qm set 101 --delete args', timeout=5)
+        assert rc == 1 and 'federation lease' in err
+    assert seen == [] and m._node_failures == {} and not m._is_node_blocked('pve1')[0]
+
+
+def test_a_federation_refusal_after_the_login_is_raised_not_retried(monkeypatch):
+    """The lease runs out while _ssh_exec logs in: the check before the exec refuses. That
+    is raised as the HA guard's refusal is - not turned into 'Paramiko exec failed' and
+    tried once more by sshpass, whose answer the node-down patterns would count."""
+    import socket
+    import paramiko
+    from pegaprox.core import federation, ha_transport
+    asked, fallback = [], []
+
+    def guard(host, cmd='', again=False, cluster_id=None):
+        asked.append(again)
+        if again:
+            raise federation.LeaseRefused(cluster_id, f'SSH {host}')
+
+    class _Ssh:
+        def load_host_keys(self, *a):
+            pass
+
+        def set_missing_host_key_policy(self, *a):
+            pass
+
+        def connect(self, hostname, **kw):
+            pass
+
+        def close(self):
+            pass
+
+    def no_tcp(addr, timeout=None, **kw):
+        raise OSError('no network in a test')
+    monkeypatch.setattr(socket, 'create_connection', no_tcp)
+    monkeypatch.setattr(paramiko, 'SSHClient', _Ssh)
+    monkeypatch.setattr(ssh_mod, 'persist_host_keys', lambda client: None)
+    monkeypatch.setattr(ha_transport, 'guard_ssh', guard)
+    monkeypatch.setattr(ha_transport, 'node_cmd',
+                        lambda argv, **kw: fallback.append(argv) or
+                        types.SimpleNamespace(returncode=0, stdout='ok', stderr=''))
+    with pytest.raises(federation.LeaseRefused):
+        ssh_mod._ssh_exec('10.0.0.7', 'root', 'pw', 'qm start 100', cluster_id='c-real')
+    assert asked == [False, True] and fallback == []
+
+
 def test_the_command_is_asked_for_once_and_its_exec_as_the_same_call(db, monkeypatch):
     """Asked before the login, and the client's own ask at the exec is 'again': a second
     plain ask would need a lease round of its own for one command."""
@@ -582,14 +642,16 @@ def test_the_command_is_asked_for_once_and_its_exec_as_the_same_call(db, monkeyp
     monkeypatch.setattr(ha, 'guard_on', lambda: True)
     monkeypatch.setattr(ha_transport, 'guard_ssh',
                         lambda host, cmd='', again=False, cluster_id=None:
-                        events.append(('ask', host, cmd, again)))
+                        events.append(('ask', host, cmd, again, cluster_id)))
     _no_password_leg(monkeypatch)
     _fake_paramiko(monkeypatch, events)
     m = _real_manager()
     assert ssh_mod._pve_node_exec(m, 'pve1', 'qm set 101 --delete args', timeout=5)[0] == 0
     kinds = ['login' if isinstance(e, dict) else e for e in events]
-    assert kinds == [('ask', '10.0.0.7', 'qm set 101 --delete args', False), 'login',
-                     ('ask', '10.0.0.7', 'qm set 101 --delete args', True)], kinds
+    # the first ask names the cluster (its federation lease); the client's own ask at the
+    # exec checks the federation through guard_client, with the cluster it was handed
+    assert kinds == [('ask', '10.0.0.7', 'qm set 101 --delete args', False, 'c-real'), 'login',
+                     ('ask', '10.0.0.7', 'qm set 101 --delete args', True, None)], kinds
 
 
 # --- a node the cluster does not list ---------------------------------------------------------

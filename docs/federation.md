@@ -60,7 +60,9 @@ where the service is started (a systemd drop-in with
 the service.
 
 While the federation is off, every route under `/api/federation/` answers
-`404 FED_DISABLED`, except the status and the switch itself, and nothing of it runs.
+`404 FED_DISABLED`, except the status and the switch itself, and nothing of it runs, with
+one exception: an HA standby that unpairs drops the federation identity it holds (see
+[HA groups](#ha-groups)).
 
 ## Pair two sites
 
@@ -75,6 +77,10 @@ networks are fine; plain HTTP, redirects and cloud metadata addresses are refuse
    the code, this instance's own address and its site label, and your password.
 3. For the next site, use **Add a site** on any instance that is already a member and
    join with that code. Joining takes the agreement of a majority of the members.
+
+If the joining instance gets no answer (the network broke off right after the others had
+taken it in), join again with the same code: until it runs out, the code answers that
+same instance once more, and no other.
 
 Pairing, joining, removing, leaving, enrolling, releasing, unenrolling and adopting all ask
 for the account password again, as the HA pairing does. An account that signs in through
@@ -104,7 +110,8 @@ With every other member, an instance shares:
   open the credentials of every enrolled cluster: that is what lets a member adopt the
   cluster when the owner is gone;
 - on request, the names, types, node and guest counts of all its clusters (the linked
-  view). Nothing else of a cluster that is not enrolled ever leaves the instance.
+  view). The id of a cluster goes with it only once the cluster is enrolled. Nothing else
+  of a cluster that is not enrolled ever leaves the instance.
 
 It never shares:
 
@@ -120,7 +127,10 @@ federation protects against honest faults (network splits, restarts, failovers, 
 backups); it does not protect against a member whose admins act against the others.
 Removing such a member by majority is the remedy, see below: no single member can change
 the member list on its own, its own removal included, because every change carries the
-signed agreement of a majority. Pair only instances whose admins you trust as your own.
+signed agreement of a majority and the signature of the member that made it. A member
+that hands a change on to a site that is behind cannot alter it, and it cannot change
+the address or the certificate another member has at that site. Pair only instances
+whose admins you trust as your own.
 
 ## Accounts of other sites
 
@@ -162,11 +172,34 @@ at another site only with a passkey; without one it is sent to its home
 registered at the home works only at sites that serve the same domain. Password changes,
 password resets and enrolling a second factor happen at the home; the other sites refuse
 them (`409 FED_FOREIGN`), and a mirrored account whose home asks for a new password is
-sent there to set it (`409 FED_PASSWORD_HOME`). A site that forces two-factor
-authentication for everybody cannot be used by a mirrored account without one.
+sent there to set it (`409 FED_PASSWORD_HOME`). Where a site forces two-factor
+authentication for everybody, a mirrored account counts as enrolled once it has a passkey
+from its home; without one it cannot use that site, and it enrolls at its home.
 
 **Admins of this instance.** Only this instance's own admins count for the protection of
 the last admin: a mirrored admin does not, because removing its site drops the account.
+A mirrored admin cannot change the federation of this instance (pair, remove, leave,
+enroll, adopt, map), and it does not administer this instance's accounts, tenants and
+roles either: creating, changing or deleting a user, setting its password, resetting its
+second factor or its OIDC sign-in binding, restoring a configuration backup, and the
+tenant and role pages answer `403 FED_MIRROR_ADMIN`. Otherwise it could create a local
+admin and make those changes under that account.
+
+For the same reason it does not change who signs in here through LDAP or OIDC, or with
+which role:
+- the role: the group mappings, the admin, user and viewer groups, the default role and
+  the automatic creation of accounts of both, and for LDAP the group search base and
+  filter (which decide the groups a user is found in);
+- the source: whether LDAP and OIDC are on, the LDAP server, port, TLS settings, CA,
+  bind DN and password, base DN, user filter and username attribute, and the OIDC
+  provider, cloud, authority, tenant, client id and secret, audiences, username claim and
+  its verification switches. A directory or provider it runs would hand the groups above
+  to any account it makes up there.
+
+A save of the server settings that changes any of them is refused as a whole with
+`403 FED_MIRROR_ADMIN`, before anything of it is stored. The settings page sends the
+whole form, so a mirrored admin that saves other settings with these as they are stored
+(the passwords as the mask) is not refused. The sign-ins themselves are unchanged.
 
 ## Enrolled clusters and leases
 
@@ -180,27 +213,52 @@ are more than twelve. Enrolling needs:
 
 The enrolling site holds a lease of 30 seconds on the cluster, renewed every 10 seconds
 by a majority vote of the sites. A cluster id can be enrolled by one site only: an enroll
-of an id another site leads is refused, and the local cluster stays as it was. Every write PegaProx sends to that cluster (API calls,
-SSH commands, background jobs such as balancing and rolling updates) is checked against
-the lease first. Without a live lease the write is not sent: the API answers
-`409 FED_NO_LEASE` and the UI says so. A plain restart of the service keeps the leases
-and the votes a site gave. A site whose host rebooted, that took over in its HA group, or
-that lost its lease file closes its leases and votes for nobody for 35 seconds, so no
-promise it gave before can be broken.
+of an id another site leads is refused, and the local cluster stays as it was. Every
+write PegaProx sends to that cluster (API calls, SSH commands, background jobs such as
+balancing and rolling updates) is checked against the lease first. Without a live lease
+the write is not sent: the API answers `409 FED_NO_LEASE` and the UI says so. The check
+is made again once the connection of a request is up, so a connect that stalls past the
+end of the lease sends nothing. What is still under way on the cluster when the lease is
+handed over or runs out (a node command such as an upgrade or a copy, an open SSH or SFTP
+connection) is stopped, at once for a hand-over or when another site turns out to lead
+the cluster, and within a second for a lease that ran out. That holds for what a write
+went out through: a command or a connection that only reads (a page that lists, a status
+read over SSH) needs no lease and is left to finish. One write passes without the lease:
+the thaw of a guest's file systems after a snapshot froze them, which only undoes that
+freeze. Runs that start in several steps (a failover, a test failover and its cleanup, a
+failback, a cross-cluster migration, a multi-cluster vnet) check the lease of the
+clusters they write before they start; a dry run only reads and needs none. A plain
+restart of the service keeps the leases and the votes a site gave. A site whose host
+rebooted, that took over in its HA group, or that lost its lease file closes its leases
+and votes for nobody for 35 seconds, so no promise it gave before can be broken. An
+active that takes its first standby, or leaves its HA group, stays the same host and
+keeps its leases and votes.
+
+**After a change of the member list** (a join, a removal, a leave) every site backs no
+lease for 35 seconds, renewals included: a lease counted before two such changes could
+otherwise still run while a majority of the new list backs another site. So writes to
+enrolled clusters pause after each change, for up to about half a minute, and the leases
+come back by themselves. An enroll right after a pairing is refused with the same reason;
+try again a little later.
 
 - **Renew** runs one round now. If the majority does not back the lease, the tab says so
   as an error: writes stay closed until it does.
 - **Hand over** releases the lease so another site can adopt the cluster. The cluster
-  stays enrolled here and is not written from here until you enroll it again.
+  stays enrolled here and is not written from here until you enroll it again. The hand-over
+  is kept with the federation identity, so it also holds after a failover of an HA group or
+  a lease file that was removed.
 - **Unenroll** makes the cluster this instance's alone again. It needs the live lease and
   a majority of the sites confirming that they dropped their copy. When the other sites
   are gone for good and none of them adopted it, unenroll with force (offered after the
   refusal); if a site did adopt it meanwhile, two sites then write to it.
 
 Every site remembers which enrolled clusters it dropped its copy of, and which site led
-them (up to 512). A site that was cut off while its cluster was adopted, and maybe
-unenrolled by its new owner later, finds a majority naming the new leader when it comes
-back: its row becomes a copy of that site's cluster and it stops writing to it.
+them, where it saw that site lead the cluster itself (up to 512). A site that deletes a
+cluster it leads keeps such a record of it too. Past that, the site
+named most often loses its oldest records first. A site that was cut off while its cluster
+was adopted, and maybe unenrolled by its new owner later, finds a majority naming the new
+leader when it comes back: its row becomes a copy of that site's cluster and it stops
+writing to it.
 
 ## Adopting a cluster
 
@@ -211,39 +269,52 @@ It works only when:
 - the owner is still a member: adopt the clusters of a lost site **before** you remove it,
   because removing it deletes its copies;
 - a majority of the sites grants this instance the lease, past the old owner's lease;
-- the member list has not changed in the last 35 seconds at the sites that vote. A lease
-  counted before two changes of the member list could otherwise still run while a
-  majority of the new list backs the adoption; the tab then says to try again shortly;
+- the member list has not changed in the last 35 seconds at the sites that vote (see
+  [Enrolled clusters and leases](#enrolled-clusters-and-leases)); the tab then says to try
+  again shortly;
 - this instance holds the owner's federation key. Without it, adopt with force: the
   cluster comes over without its credentials, and you enter them again.
 
 The credentials are opened with the owner's federation key and stored under this
-instance's database key. The root passwords stored per node and the old site's HA claim on the
-cluster do not come along. If the cluster cannot be reached right after the adoption, the
-adoption stands and the connection is tried again at the next start.
+instance's database key. The adoption is kept with the federation identity until the other
+sites hold the new owner, so a standby of this instance that takes over right after it
+carries on with the adopted cluster. The root passwords stored per node and the old
+site's HA claim on the cluster do not come along. If the cluster cannot be reached right
+after the adoption, the adoption stands and the connection is tried again at the next
+start.
 
 ## Removing a site, leaving
 
 **Remove** takes a member out, with a majority of the federation behind it. This
 instance, and every member that hears of it, deletes the removed member's mirrored
-accounts (their sessions end), its cluster copies and its federation key. The answer
-names the members that did not confirm; they take the new member list from the first
-member they reach that has it, replaying the changes since their own list, each signed by
-a majority. The tab warns before a removal that deletes copies of the member's clusters.
+accounts (their sessions end), its cluster copies and its federation key. A member that
+hears of it disables those accounts at once and deletes them, with the mappings of their
+tenants and roles, once it sees that a majority took the removal: a removal that too few
+took is rolled back, and the mappings would not come back with the accounts. A member
+that the removal leaves alone in the member list (the other site of a federation of two
+left, or was removed) has nobody left who could roll it back: it deletes them at once,
+and they no longer keep its switch on. The answer names the members that did not confirm;
+they take the new member list from the first member they reach that has it, replaying the
+changes since their own list, each signed by a majority. The tab warns before a removal
+that deletes copies of the member's clusters.
 
 A change of the member list (a join, a removal, a leave) counts only once a majority of
 the members took it. When fewer confirm, the change is refused with `FED_NO_QUORUM` and
 nothing changes on the instance that made it; a member that took it anyway goes back to
-the list the others hold at its next sync. One change runs at a time: a member that keeps
-the lock on the member list for more than 30 seconds is made to wait, so it cannot block
-its own removal.
+the list the others hold at a later sync, once the members of the list before the change
+that answer with another list are a majority of it. A confirmation that got lost does not
+undo a change a majority took: the instance that made it takes it over from the others.
+One change runs at a time: on one instance a second change is refused with `FED_BUSY`
+while the first is under way, and a member that keeps the lock on the member list for
+more than 30 seconds is made to wait, so it cannot block its own removal.
 
-**Leave** takes this instance out. Its enrolled clusters are unenrolled first; one without
-a live lease blocks the leave, and the tab then offers to leave with force (that cluster
-stays enrolled here and closed, unenroll it with force afterwards). The leave itself
-needs a majority like any other change; forced, it goes ahead here alone. This instance
-then deletes every membership, every mirrored account and cluster copy and every key of
-the others; the others delete what they held of it as they hear of it.
+**Leave** takes this instance out. Its enrolled clusters are unenrolled first, all of them
+in one step with each member; one without a live lease blocks the leave, and the tab then
+offers to leave with force (that cluster stays enrolled here and closed, unenroll it with
+force afterwards). The leave itself needs a majority like any other change; forced, it
+goes ahead here alone. This instance then deletes every membership, every mirrored account
+and cluster copy and every key of the others; the others delete what they held of it as
+they hear of it.
 
 **Clusters enrolled here, after a removal or a leave.** A site that was removed, or left
 with force, keeps the clusters it had enrolled, closed and released: the federation may
@@ -268,8 +339,23 @@ federation:
 
 - its federation identity (instance id, keys, member list) lives in the database and
   travels to the standbys with the HA sync, so a standby that is promoted carries on as
-  the same member; at the promotion its leases close and it waits the 35 seconds
-  described under [Enrolled clusters and leases](#enrolled-clusters-and-leases);
+  the same member. Its own votes wait the 35 seconds described under
+  [Enrolled clusters and leases](#enrolled-clusters-and-leases), while the other sites
+  keep renewing its leases;
+- a standby that leaves its group (**Unpair** on the standby, also after the active
+  removed it) is a new standalone instance, not a second copy of the member: it drops the
+  federation identity it held, the federation's cluster rows and mirrored accounts, and
+  switches the federation off on itself. The active stays the member. This happens
+  whenever the standby holds the identity, also when the federation is switched off on
+  it (`PEGAPROX_FEDERATION=0` there, or the setting off): switched on later, it would
+  otherwise act as the member next to the active. It is the one thing of the federation
+  that runs while the switch is off;
+- the active does not unpair while the federation is on and its group still has
+  standbys (`409 HA_FEDERATION`): the standbys keep the identity, so the active and the
+  group would both act as the same member. Remove the standbys on the active first (a
+  standby that is gone for good is removed as before), or unpair them. Switching the
+  federation off is no way around it: a standby promoted later would still hold the
+  identity. An active without standbys unpairs as before and stays the member;
 - pair and manage it on the active. A standby answers the other sites with
   `503 FED_STANDBY` and does not pair;
 - use the group's service address as the address of the site; the fingerprints of all
@@ -310,7 +396,9 @@ emergency only. On a site that still takes part:
 - mirrored accounts count as disabled: they cannot sign in, and their sessions, API
   tokens, consoles and live streams are refused;
 - the other sites see it as unreachable and keep counting it in their majorities. After
-  35 seconds they may adopt its clusters.
+  35 seconds they may adopt its clusters;
+- a standby of its HA group that unpairs still drops the federation identity it holds
+  (see [HA groups](#ha-groups)).
 
 To take a site out for good, leave the federation first. A database of a federation
 member restored onto a plain install behaves the same while the federation is off there.
@@ -347,7 +435,9 @@ each call is signed with the calling member's key and every answer is signed bac
 | `FED_IN_USE` | switching off while still taking part: leave first |
 | `FED_REAUTH`, `FED_REAUTH_RECENT` | the password is missing or wrong; an OIDC account without a password signs in again first |
 | `FED_FULL` | eight sites already |
-| `FED_NO_QUORUM` | no majority answered or agreed; check the network between the sites. Right after a change of the member list, an adoption waits 35 seconds |
+| `FED_NO_QUORUM` | no majority answered or agreed; check the network between the sites. Right after a change of the member list, every lease waits 35 seconds |
+| `FED_BUSY` | another change of the member list is under way on this instance; try again in a moment |
+| `FED_MIRROR_ADMIN` | a mirrored admin changes neither the federation nor the accounts, tenants and roles of this instance, nor who signs in through LDAP or OIDC and with which role, nor restores a backup; use an account of this instance |
 | `FED_TOO_FEW_SITES` | enrolling needs three sites |
 | `FED_NO_LEASE` | this instance holds no live lease on the cluster; another site may lead it, or the lease ran out in a split |
 | `FED_LEAVE_BLOCKED` | an enrolled cluster has no live lease; leave with force, then unenroll it with force |
@@ -357,6 +447,7 @@ each call is signed with the calling member's key and every answer is signed bac
 | `FED_ENROLLED` | this instance left (or was removed from) a federation with clusters still enrolled; unenroll them with force before it pairs again |
 | `FED_STANDBY` | a standby of an HA group; use its active |
 | `FED_MEMBER` | an instance in a federation cannot become an HA standby; leave first |
+| `HA_FEDERATION` | the active of an HA group does not unpair while the federation is on and it has standbys; remove or unpair the standbys first |
 | `FED_CLOCK` | the clocks of two sites are more than two minutes apart |
 
 The log lines of the federation start with `[FED]`.

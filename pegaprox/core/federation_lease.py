@@ -20,23 +20,40 @@ that member's lease on it. The rules, and why they make two writers impossible:
     another, while the holder sits behind the gap), and a majority of the newer view
     may then share no voter with it. Every change of the view therefore starts a settle
     span of LEASE_SECONDS + LEASE_SKEW at each voter that takes it, in which the voter
-    backs no new adoption. A view two steps on needs a majority of the step between to
-    have left the older view, which the older lease's voters had not done when it was
-    counted, so every voter of the newer view took its last change after that lease
-    began - and its settle span outlasts it.
+    grants no cluster ask at all: no adoption, no renewal, no ask of the owner itself (a
+    live promise says nothing about the view its lease was counted under, and an old
+    owner's ask is no adoption). A view two steps on needs a majority of the step
+    between to have left the older view, which the older lease's voters had not done
+    when it was counted, so every voter of the newer view took its last change after
+    that lease began - and its settle span outlasts it. The cost: after every change of
+    the view the leases pause until the settle span is over (writes to enrolled clusters
+    wait up to about half a minute). The members lock is not a cluster and goes on.
   * a promise carries an id of its own (pid) that the grant answers with. A release
     names the pid it gives back, so a release that arrives late never ends a newer
     promise of the same holder, and a round that a release overtook writes no lease.
+    Each round carries a mark that grows from round to round (the wall clock, taken
+    with the snapshot of the leases under the lock a release takes too). A voter keeps
+    the mark with the promise and refuses a renewal from an older round ('stale'): a
+    round that a release overtook, delayed on its way, would otherwise swap the pid of
+    the newer round's promise for one it then gives back.
   * a voter keeps a bounded record of the cluster ids whose rows it dropped (an
-    unenroll, a removed member, an orphan sweep) and the member that led them. With no
-    row left it refuses another candidate's ask for such an id with 'owner': an old
+    unenroll, a removed member, an orphan sweep) and the member that led them, and only
+    where its own state shows that member led the id (its row, or its last promise). With
+    no row left it refuses another candidate's ask for such an id with 'owner': an old
     owner that was cut off while its cluster moved on finds a majority naming the new
     leader and turns its row into a mirror, instead of leasing the id again from voters
     that forgot it.
+  * a hand-over (release) and an adoption are marked in the identity row, which the HA
+    sync carries: a promoted standby, or a host whose lease file was removed, neither
+    leases a cluster that was handed over nor asks for an adopted one as a plain renewal
+    (which voters that still name the old owner would refuse, and the round would hand
+    the row back).
   * promises survive a service restart (CLOCK_BOOTTIME keeps running and the file keeps
     them). After a reboot, or when this host becomes the acting host of its HA group (the
     HA epoch moved), the voter refuses every ask for LEASE_SECONDS + LEASE_SKEW, so every
-    promise it might have forgotten has run out first.
+    promise it might have forgotten has run out first. An epoch that moves while the
+    same host stays acting (it takes its first standby, or leaves its group) is no
+    promotion: ha.py says so beforehand (note_epoch_kept), and there is no hold.
   * the cluster rows and the 'adopt' flag decide only WHO may ask (liveness, squatting);
     they never let a voter hold two live promises, so a wrong or stale row can delay an
     owner but never create a second writer.
@@ -75,7 +92,8 @@ OWNER_CACHE_SECONDS = 5
 # member wait out a cool-down before it gets the lock again
 MEMBERS_LOCK_MAX = LEASE_SECONDS
 MEMBERS_LOCK_COOL = LEASE_SECONDS
-# after a voter took a change of the view it backs no new adoption for this long
+# after a voter took a change of the view it grants no cluster ask for this long (a new
+# lease, a renewal and an adoption alike); the members lock goes on
 SETTLE_SECONDS = LEASE_SECONDS + LEASE_SKEW
 PID_RE = re.compile(r'[0-9a-f]{16}')
 # dead promises go only when the table runs over its bound, and only once they are this
@@ -143,6 +161,15 @@ def check_clock(st, missing=False):
     held = st.get('clock') or {}
     if held == mark and not missing:
         return False
+    kept = st.get('epoch_kept')
+    st['epoch_kept'] = None
+    if (not missing and held and isinstance(kept, dict)
+            and held.get('ha_epoch') == kept.get('from') and mark['ha_epoch'] == kept.get('to')
+            and dict(held, ha_epoch=mark['ha_epoch']) == mark):
+        # the HA epoch moved while this host stayed the acting one (note_epoch_kept): its
+        # file holds every promise it gave and every lease it holds
+        st['clock'] = mark
+        return True
     if missing and not fed.members():
         st['clock'] = mark
         return True
@@ -161,6 +188,20 @@ def check_clock(st, missing=False):
                     f'closed and this instance votes for nobody for '
                     f'{LEASE_SECONDS + LEASE_SKEW} s')
     return True
+
+
+def note_epoch_kept(old, new):
+    """The HA epoch of this host moves from `old` to `new` while the host stays the acting
+    one of its group: an active takes its first standby (0 to 1), or leaves its group (to
+    0). Its lease file holds everything it promised and holds, so the next clock check
+    takes the new epoch without the hold a promotion needs. core/ha.py calls this before
+    it writes the new epoch; a promotion never does."""
+    def go(st):
+        if (st.get('clock') or {}).get('ha_epoch') != int(old):
+            return False
+        st['epoch_kept'] = {'from': int(old), 'to': int(new)}
+        return True
+    fed._mutate_leases(go)
 
 
 def hold_left(st=None):
@@ -268,6 +309,31 @@ def _promise_live(rec, now):
     return until > 0 and now <= until + LEASE_SKEW
 
 
+def _valid_mark(value):
+    """The round mark of a batch of asks, None for none or anything else."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) and 0 < value < 1e11 else None
+
+
+def _mark_of(rec):
+    value = (rec or {}).get('round')
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
+def _round_mark():
+    """The mark of the next round of this instance: the wall clock, and never less than
+    the last one plus a little. Taken under fed._lock with the snapshot of the leases, so
+    a round that started before a release carries a smaller mark than any round after
+    it. The wall clock lets the next host of the HA group go on from about where this one
+    left off."""
+    last = float(fed._runtime.get('round_mark') or 0.0)
+    mark = max(time.time(), last + 1e-6)
+    fed._runtime['round_mark'] = mark
+    return mark
+
+
 # --- the vote ------------------------------------------------------------------------------
 
 def _valid_ask(ask):
@@ -334,10 +400,11 @@ def cast_votes(sender, body):
     live promise names another candidate, 'owner' when this voter's row of the cluster
     names another owner and the ask is no adoption (or, with the row gone, the member its
     record of the dropped row names), 'cluster' for an adoption of a cluster it holds no
-    row of, 'settling' for a new adoption in the settle span after a view change, 'busy'
-    for a members lock held or asked past its bound, 'full' at the bounds; granted
-    otherwise, with the promise's pid (and for the members lock a signed grant). Batch
-    refusals: 400 'body', 409 'candidate', 'member' or 'view'."""
+    row of, 'settling' for any cluster ask in the settle span after a view change, 'stale'
+    for a renewal from a round older than the one the promise answered, 'busy' for a
+    members lock held or asked past its bound, 'full' at the bounds; granted
+    otherwise, with the promise's pid, the owner this voter's row names (for the members
+    lock a signed grant). Batch refusals: 400 'body', 409 'candidate', 'member' or 'view'."""
     if not isinstance(body, dict):
         return 400, {'reason': 'body'}
     if body.get('candidate') != sender:
@@ -354,6 +421,7 @@ def cast_votes(sender, body):
     if any(a is None for a in asks) or any(r is None for r in rels) or not all(
             isinstance(c, str) and CLUSTER_ID_RE.fullmatch(c) for c in raw_unen):
         return 400, {'reason': 'body'}
+    mark = _valid_mark(body.get('round'))
     me = fed.instance_id()
     if not me or (sender != me and sender not in fed.members()):
         return 409, {'reason': 'member'}
@@ -363,21 +431,26 @@ def cast_votes(sender, body):
         answer = {'reason': 'view', 'view': digest, 'epoch': epoch,
                   'released': _release_promises(sender, rels)}
         return 409, answer
-    owners = {}
-    if asks or raw_unen:
+    votes, pids, cert = {}, {}, None
+    # the rows, the dropped records, an unenroll and the votes under one lock: an
+    # unenroll confirmed here and an adoption granted here never pass each other
+    with fed._lock:
         try:
-            owners = _owner_map()
+            owners = _owner_map() if (asks or raw_unen) else {}
+            dropped = fed.dropped_records() if asks else {}
+            st = fed._lease_state()
+            changed = check_clock(st)
+            now = _lease_now()
+            promises = st['promises']
+            unenrolled = []
+            if raw_unen:
+                unenrolled = _take_unenroll(sender, raw_unen, owners, promises, now,
+                                            holding=float(st.get('hold_until') or 0) > now)
+                if asks and unenrolled:
+                    owners = _owner_map()
         except FederationError as e:
             logging.warning(f'[FED] a lease vote could not read the cluster owners: {e}')
             return 503, {'reason': 'unavailable'}
-    dropped = fed.dropped_records() if asks else {}
-    unenrolled = _take_unenroll(sender, raw_unen, owners) if raw_unen else []
-    votes, pids, cert = {}, {}, None
-    with fed._lock:
-        st = fed._lease_state()
-        changed = check_clock(st)
-        now = _lease_now()
-        promises = st['promises']
         released = _end_promises(promises, sender, rels)
         changed = changed or bool(released)
         hold_until = float(st.get('hold_until') or 0)
@@ -400,6 +473,11 @@ def cast_votes(sender, body):
                               'owner': owners.get(cid) or '',
                               'retry_after': int(math.ceil(rec['until'] + LEASE_SKEW - now))}
                 continue
+            if renewal and mark is not None and mark < _mark_of(rec):
+                # an older round of the sender, delayed on its way: the promise answers a
+                # newer one, whose pid backs a lease, and stays as it is
+                votes[cid] = {'granted': False, 'reason': 'stale'}
+                continue
             owner = owners.get(cid)
             if not (owner in (None, sender) or ask['adopt']):
                 votes[cid] = {'granted': False, 'reason': 'owner', 'owner': owner}
@@ -415,7 +493,10 @@ def cast_votes(sender, body):
                 # unenrolled the cluster had the rows dropped for exactly that)
                 votes[cid] = {'granted': False, 'reason': 'cluster', 'owner': ''}
                 continue
-            if ask['adopt'] and cid != MEMBERS_LOCK and not renewal and settling > 0:
+            if cid != MEMBERS_LOCK and settling > 0:
+                # every cluster ask, a renewal and the owner's own included: a lease
+                # counted under the view two changes back may still run, and a majority
+                # of this view need not share a voter with it
                 votes[cid] = {'granted': False, 'reason': 'settling',
                               'retry_after': int(math.ceil(settling))}
                 continue
@@ -438,12 +519,13 @@ def cast_votes(sender, body):
                 total += 1
                 per[sender] += 1
             new = {'candidate': sender, 'until': now + LEASE_SECONDS, 'released': False,
-                   'pid': secrets.token_hex(8)}
+                   'pid': secrets.token_hex(8),
+                   'round': mark if mark is not None else (_mark_of(rec) if renewal else 0.0)}
             if cid == MEMBERS_LOCK:
                 new['first'] = float(rec.get('first') or now) if renewal else now
                 cert = fed.lock_cert(sender, digest, epoch)
             promises[cid] = new
-            votes[cid] = {'granted': True}
+            votes[cid] = {'granted': True, 'owner': owners.get(cid) or ''}
             pids[cid] = new['pid']
             changed = True
         if len(promises) > MAX_PROMISES:
@@ -460,27 +542,45 @@ def cast_votes(sender, body):
     return 200, out
 
 
-def _take_unenroll(sender, cids, owners):
+def _take_unenroll(sender, cids, owners, promises, now, holding=False):
     """The owner of a cluster takes it out of the federation: this voter drops its mirror
     of it (only where its row follows that owner) and keeps a record that the id was the
     sender's, so neither an adoption from here nor another candidate's ask gets backed once
-    the owner treats it as its own again. Returns the ids this voter no longer holds a
-    mirror of. The promise behind the owner's lease ends with its release, by pid."""
-    out = []
+    the owner treats it as its own again. The record is written only where this voter's
+    own state shows the sender led the id - its row named the sender, or the last promise
+    it gave for the id did. An id it knows nothing of is acknowledged without one: a
+    member's word alone never makes the voters refuse another member's ask. Returns the
+    ids this voter holds no mirror of. The promise behind the owner's lease ends with its
+    release, by pid.
+
+    Called under fed._lock with the promise table (cast_votes). An id this voter backs
+    another member for right now (a live promise, an adoption under way) is neither
+    dropped nor confirmed: the sender would treat the cluster as its own beside the
+    lease that promise counts for. Nothing is confirmed while the voter holds after a
+    clock change either: it may have forgotten such a promise."""
+    out, noted = [], []
+    if holding:
+        return out
     conn = fed._db().conn
     dropped = False
     for cid in cids:
         owner = owners.get(cid)
         if owner not in (None, sender):
             continue
+        p = promises.get(cid)
+        if p and p.get('candidate') != sender and _promise_live(p, now):
+            continue
         if owner == sender:
             conn.execute('DELETE FROM clusters WHERE id = ? AND fed_owner = ?', (cid, sender))
             dropped = True
+            noted.append(cid)
+        elif (p or {}).get('candidate') == sender:
+            noted.append(cid)
         out.append(cid)
     if dropped:
         conn.commit()
         drop_owner_cache()
-    fed.note_dropped((cid, sender) for cid in out)
+    fed.note_dropped((cid, sender) for cid in noted)
     return out
 
 
@@ -498,7 +598,10 @@ def _release_promises(sender, rels):
 
 # --- the round -------------------------------------------------------------------------------
 
-def _wanted(owners, mine, me, only, adopt):
+def _wanted(owners, mine, me, only, adopt, handed=frozenset()):
+    """The ids a round asks for. A cluster handed over is not asked for, whether the lease
+    file says so or the identity row does (`handed`); only an explicit `only` (an enroll)
+    takes it back."""
     if owners is not None:
         wanted = {cid for cid, owner in owners.items() if owner == me}
         wanted |= {cid for cid, rec in mine.items()
@@ -507,6 +610,7 @@ def _wanted(owners, mine, me, only, adopt):
         wanted = {cid for cid, rec in mine.items()
                   if not rec.get('released') and cid != MEMBERS_LOCK}
     wanted -= {cid for cid, rec in mine.items() if rec.get('released')}
+    wanted -= set(handed)
     wanted |= set(adopt)
     if only is not None:
         only = set(only)
@@ -521,7 +625,7 @@ def _rseq(rec):
     return int((rec or {}).get('rseq') or 0)
 
 
-def lease_round(only=None, adopt=frozenset(), no_convert=frozenset()):
+def lease_round(only=None, adopt=frozenset(), no_convert=frozenset(), tick=False):
     """One round of asks for every lease this instance wants, every member asked side by
     side, one call each. Returns {cluster id: {'held', 'votes', 'needed', 'lost_to',
     'refusals', 'holders'}}. Never raises for one broken cluster: an owner table that
@@ -530,7 +634,14 @@ def lease_round(only=None, adopt=frozenset(), no_convert=frozenset()):
     A lease is written only when its entry is still the one the round started from: a
     release (or a forget) that came in while the asks were out wins, and the promises the
     round got are given back. `no_convert`: ids whose 'lost_to' evidence must not turn the
-    row into a mirror (a fresh enroll of an id another member leads is only refused)."""
+    row into a mirror (a fresh enroll of an id another member leads is only refused).
+    `tick`: the background round, which the voters count apart from the rounds an admin
+    starts, so a burst of those never starves the renewals.
+
+    A cluster adopted here is asked for with the adoption flag (adopted_from in the
+    identity row) until a majority of the grants come from voters whose rows name this
+    instance. With the flag no voter refuses for its row naming the old owner, so only
+    live promises of another member (a real leader) count as 'lost_to' evidence."""
     me = fed.instance_id()
     if not me:
         return {}
@@ -541,13 +652,15 @@ def lease_round(only=None, adopt=frozenset(), no_convert=frozenset()):
         if check_clock(st):
             fed._save_leases(st)
         mine = {cid: dict(rec) for cid, rec in st['my_leases'].items()}
+        mark = _round_mark()
     try:
         owners = _owner_map()
     except FederationError as e:
         fed._say_once('round-owners', f'[FED] a lease round could not read the cluster '
                                       f'owners and renews only what it holds: {e}')
         owners = None
-    wanted = _wanted(owners, mine, me, only, adopt)
+    marked = fed.adopted_from()
+    wanted = _wanted(owners, mine, me, only, adopt, fed.handed_over_ids())
     ids = fed.view_ids()
     if len(ids) < 2:
         # a view of one holds no cluster lease: a removed or departed instance must not
@@ -557,14 +670,18 @@ def lease_round(only=None, adopt=frozenset(), no_convert=frozenset()):
         return {}
     order = sorted(wanted)
     asks = [{'cluster_id': cid,
-             'adopt': cid in adopt or bool((mine.get(cid) or {}).get('adopted'))}
+             'adopt': cid in adopt or cid in marked
+             or bool((mine.get(cid) or {}).get('adopted'))}
             for cid in order]
     chunks = [asks[i:i + MAX_ASKS_PER_CALL] for i in range(0, len(asks), MAX_ASKS_PER_CALL)]
     digest, epoch = fed.view_digest(), fed.view_epoch()
 
     def body(chunk):
-        return {'candidate': me, 'view': digest, 'epoch': epoch, 'asks': chunk,
-                'releases': []}
+        out = {'candidate': me, 'view': digest, 'epoch': epoch, 'asks': chunk,
+               'releases': [], 'round': mark}
+        if tick:
+            out['tick'] = True
+        return out
     round_start = _lease_now()
     peers = sorted(fed.members())
     voters = [me] + peers
@@ -574,6 +691,8 @@ def lease_round(only=None, adopt=frozenset(), no_convert=frozenset()):
                                      for c in chunks], peers, max_workers=len(peers) or 1)
     answers += [a or [] for a in got]
     grants, refusals, owner_says, holders = Counter(), {}, {}, {}
+    # grants from voters whose own row names this instance as the owner
+    rows_mine = Counter()
     new_pids, certs = {}, {}
     behind = False
     for voter_id, voter in zip(voters, answers):
@@ -585,6 +704,8 @@ def lease_round(only=None, adopt=frozenset(), no_convert=frozenset()):
                         continue
                     if v.get('granted') is True:
                         grants[cid] += 1
+                        if v.get('owner') == me:
+                            rows_mine[cid] += 1
                         pid = pids_in.get(cid)
                         if isinstance(pid, str) and PID_RE.fullmatch(pid):
                             new_pids.setdefault(cid, {})[voter_id] = pid
@@ -612,6 +733,7 @@ def lease_round(only=None, adopt=frozenset(), no_convert=frozenset()):
     need = fed.needed(len(ids))
     view = set(fed.members())
     results, lost, stale = {}, [], []
+    settled = [cid for cid in order if cid in marked and rows_mine[cid] >= need]
     with fed._lock:
         st = fed._lease_state()
         held = st['my_leases']
@@ -670,6 +792,9 @@ def lease_round(only=None, adopt=frozenset(), no_convert=frozenset()):
                             'refusals': reasons,
                             'holders': dict(holders.get(cid) or {})}
         fed._save_leases(st)
+    if settled:
+        # the voters' rows name this instance now: the asks go without the flag again
+        fed._mark_clusters('adopted', drop=settled)
     for cid, pids in stale:
         _send_releases(cid, pids)
     for cid, owner in lost:
@@ -685,62 +810,107 @@ def lease_round(only=None, adopt=frozenset(), no_convert=frozenset()):
 def _send_releases(cluster_id, pids, to=None, old=None):
     """Give back the promises `pids` ({voter: pid}) names, each voter told in parallel
     about its own. This instance's own promise ends here, by its pid."""
+    _send_releases_many({cluster_id: dict(pids or {})}, to=to, old=old)
+
+
+def _send_releases_many(items, to=None, old=None):
+    """_send_releases for several clusters at once ({cluster id: {voter: pid}}): each
+    voter hears of all of its own in one call (up to MAX_ASKS_PER_CALL per call)."""
     me = fed.instance_id()
-    pids = dict(pids or {})
-    own = pids.pop(me, None)
+    items = {cid: dict(pids or {}) for cid, pids in items.items()}
+    own = [(cid, pids.pop(me)) for cid, pids in items.items() if pids.get(me)]
     if own:
         def go(st):
-            return bool(_end_promises(st['promises'], me, [(cluster_id, own)]))
+            return bool(_end_promises(st['promises'], me, own))
         fed._mutate_leases(go)
     old = old if old is not None else fed.members()
     targets = sorted(old) if to is None else [t for t in to if t != me]
-    targets = [t for t in targets if pids.get(t)]
-    if not targets:
+    per = {}
+    for t in targets:
+        rels = [{'cluster_id': cid, 'pid': pids[t]} for cid, pids in sorted(items.items())
+                if pids.get(t)]
+        if rels:
+            per[t] = rels
+    if not per:
         return
     view, epoch = fed.view_digest(), fed.view_epoch()
 
     def tell(iid):
-        body = {'candidate': me, 'view': view, 'epoch': epoch, 'asks': [],
-                'releases': [{'cluster_id': cluster_id, 'pid': pids[iid]}]}
         rec = old.get(iid)
-        if rec is None:
-            return fed.call_peer(iid, 'POST', LEASE_PATH, body, read_timeout=VOTE_TIMEOUT)[0]
-        return fed._call(iid, rec, 'POST', LEASE_PATH, body, read_timeout=VOTE_TIMEOUT)[0]
-    fed._parallel(tell, targets)
+        rels = per[iid]
+        for i in range(0, len(rels), MAX_ASKS_PER_CALL):
+            body = {'candidate': me, 'view': view, 'epoch': epoch, 'asks': [],
+                    'releases': rels[i:i + MAX_ASKS_PER_CALL]}
+            if rec is None:
+                fed.call_peer(iid, 'POST', LEASE_PATH, body, read_timeout=VOTE_TIMEOUT)
+            else:
+                fed._call(iid, rec, 'POST', LEASE_PATH, body, read_timeout=VOTE_TIMEOUT)
+    fed._parallel(tell, sorted(per))
 
 
-def release(cluster_id, to=None):
+def release(cluster_id, to=None, hand_over=True):
     """Give the lease on `cluster_id` up: the entry here closes and stays released (a round
     in flight writes no lease over it), this voter's own promise ends, and every member
     that granted one hears it in one parallel batch, by the pid it gave. The row keeps
-    this instance as its owner of record; taking it back is an enroll."""
+    this instance as its owner of record; taking it back is an enroll.
+
+    `hand_over` (the admin's Hand over, and every caller that leaves the row led here)
+    also marks the cluster in the identity row, which the HA sync carries: no host of
+    this HA group leases it again until it is enrolled again.
+
+    What is still under way on the cluster from here (node commands, SSH clients) is
+    stopped before the voters hear of it: once they do, another site may adopt it at
+    once."""
+    _release_many([cluster_id], to=to, hand_over=hand_over, cut=True)
+    return True
+
+
+def _cut(cluster_ids):
+    """Stop what this instance still has under way on `cluster_ids` (ha_transport)."""
+    from pegaprox.core import ha_transport
+    for cid in cluster_ids:
+        if cid != MEMBERS_LOCK:
+            ha_transport.cut_cluster(cid)
+
+
+def _release_many(cluster_ids, to=None, hand_over=False, cut=False):
     me = fed.instance_id()
+    ours = set()
+    for cid in cluster_ids:
+        if cid == MEMBERS_LOCK:
+            continue
+        try:
+            # a row led here with no entry yet (an enroll whose first round is still out)
+            # gets a released one, which that round finds; a row that is gone gets none
+            if cluster_owner(cid) == me:
+                ours.add(cid)
+        except FederationError:
+            pass
+    if hand_over and ours:
+        # before the lease file: a host that dies in between still knows
+        fed._mark_clusters('handed_over', add={cid: {} for cid in ours})
     taken = {}
-    try:
-        # a row led here with no entry yet (an enroll whose first round is still out)
-        # gets a released one, which that round finds; a row that is gone gets none
-        ours = cluster_id != MEMBERS_LOCK and cluster_owner(cluster_id) == me
-    except FederationError:
-        ours = False
 
     def go(st):
-        rec = st['my_leases'].get(cluster_id)
-        if rec is None and ours:
-            rec = st['my_leases'][cluster_id] = {'expires': 0}
-        if rec is not None:
-            taken.update(rec.get('pids') or {})
-            rec['released'] = True
-            rec['expires'] = 0
-            rec['rseq'] = _rseq(rec) + 1
-        p = st['promises'].get(cluster_id)
-        if p and p.get('candidate') == me:
-            p['until'] = 0
-            p['released'] = True
+        for cid in cluster_ids:
+            rec = st['my_leases'].get(cid)
+            if rec is None and cid in ours:
+                rec = st['my_leases'][cid] = {'expires': 0}
+            if rec is not None:
+                taken[cid] = dict(rec.get('pids') or {})
+                taken[cid].pop(me, None)
+                rec['released'] = True
+                rec['expires'] = 0
+                rec['rseq'] = _rseq(rec) + 1
+            p = st['promises'].get(cid)
+            if p and p.get('candidate') == me:
+                p['until'] = 0
+                p['released'] = True
         return True
     fed._mutate_leases(go)
-    taken.pop(me, None)
-    _send_releases(cluster_id, taken, to=to)
-    return True
+    if cut:
+        _cut(cluster_ids)
+    _send_releases_many(taken, to=to)
 
 
 def lock_certs():
@@ -752,7 +922,7 @@ def lock_certs():
 def release_lock(to=None):
     """The members lock after a view change, or after a lock round that failed: given
     back, and its entry here forgotten."""
-    release(MEMBERS_LOCK, to=to)
+    release(MEMBERS_LOCK, to=to, hand_over=False)
 
     def go(st):
         return st['my_leases'].pop(MEMBERS_LOCK, None) is not None
@@ -761,12 +931,20 @@ def release_lock(to=None):
 
 def forget_cluster(cluster_id):
     """A cluster row that was deleted here: its lease is given back and forgotten."""
-    release(cluster_id)
+    release(cluster_id, hand_over=False)
 
     def go(st):
         return st['my_leases'].pop(cluster_id, None) is not None
     fed._mutate_leases(go)
+    _unmark(cluster_id)
     drop_owner_cache()
+
+
+def _unmark(*cluster_ids):
+    """The row is no longer led here (or led here again by an enroll): neither the hand-over
+    nor the adoption mark stands for it."""
+    for key in ('handed_over', 'adopted'):
+        fed._mark_clusters(key, drop=cluster_ids)
 
 
 # --- ownership: enroll, unenroll, adopt, and losing a cluster ---------------------------------
@@ -804,8 +982,8 @@ def _refusal_sentence(r):
     elif reasons.get('hold'):
         text += ' - a site just restarted its host and votes again in a few seconds'
     elif reasons.get('settling'):
-        text += (' - the sites changed members a moment ago, and an adoption waits until '
-                 'every lease counted before that change has run out; try again in '
+        text += (' - the sites changed members a moment ago, and every lease waits until '
+                 'each lease counted before that change has run out; try again in '
                  f'{SETTLE_SECONDS} s')
     elif reasons.get('busy'):
         text += ' - another change of the federation is under way; try again in a minute'
@@ -859,6 +1037,8 @@ def enroll_cluster(cluster_id):
     fresh = {cluster_id} if not owner else set()
     r = lease_round(only={cluster_id}, no_convert=fresh).get(cluster_id) or {}
     if r.get('held'):
+        # enrolled again: a hand-over is taken back
+        fed._mark_clusters('handed_over', drop=[cluster_id])
         return _lease_summary(cluster_id)
     try:
         # only where the row is still this instance's: a row that became a mirror stays one
@@ -867,7 +1047,7 @@ def enroll_cluster(cluster_id):
         # the row left owned holds the gate shut: an owner without a lease writes nothing
         logging.warning(f'[FED] enroll of {cluster_id} could not roll the owner back: {e}')
     if not owner:
-        release(cluster_id)
+        release(cluster_id, hand_over=False)
 
         def go(st):
             return st['my_leases'].pop(cluster_id, None) is not None
@@ -912,35 +1092,80 @@ def unenroll_cluster(cluster_id, force=False):
     if not force:
         # a majority drops its mirror first: until then another site could still adopt
         # the cluster, and two would write it once this instance treats it as its own
-        acks, need = _tell_unenroll(cluster_id)
-        if acks < need:
+        acks, need = _tell_unenroll([cluster_id])
+        if acks.get(cluster_id, 0) < need:
             raise FederationError(f'Unenroll needs a majority of the sites to drop their '
-                                  f'copy of the cluster: {acks} of {need} needed confirmed. '
-                                  f'It stays enrolled; try again when the sites answer',
-                                  code='FED_NO_QUORUM', votes=acks, needed=need)
-    release(cluster_id)
-    _set_owner(cluster_id, '', expect=me)
-    # the id was this instance's: its own vote backs no other candidate for it either
-    fed.note_dropped([(cluster_id, me)])
-
-    def go(st):
-        return st['my_leases'].pop(cluster_id, None) is not None
-    fed._mutate_leases(go)
+                                  f'copy of the cluster: {acks.get(cluster_id, 0)} of {need} '
+                                  f'needed confirmed. It stays enrolled; try again when the '
+                                  f'sites answer', code='FED_NO_QUORUM',
+                                  votes=acks.get(cluster_id, 0), needed=need)
+    _finish_unenroll([cluster_id])
     return True
 
 
-def _tell_unenroll(cluster_id):
-    """Every member hears that this instance takes `cluster_id` out of the federation.
-    Returns (confirmations, needed), this instance counted."""
+def unenroll_clusters(cluster_ids):
+    """Unenroll every cluster of `cluster_ids` this instance holds a live lease on, with
+    one unenroll notice and one release per member for all of them (a leave). Returns
+    (done, blocked): the ids unenrolled, and the ids that are not (no live lease here, or
+    no majority dropped its copy)."""
     me = fed.instance_id()
-    body = {'candidate': me, 'view': fed.view_digest(), 'epoch': fed.view_epoch(),
-            'asks': [], 'releases': [], 'unenroll': [cluster_id]}
+    ready, blocked = [], []
+    for cid in cluster_ids:
+        (ready if cluster_owner(cid) == me and holds(cid) else blocked).append(cid)
+    if not ready:
+        return [], blocked
+    acks, need = _tell_unenroll(ready)
+    done = [cid for cid in ready if acks.get(cid, 0) >= need]
+    blocked += [cid for cid in ready if cid not in done]
+    _finish_unenroll(done)
+    return done, blocked
+
+
+def _finish_unenroll(cluster_ids):
+    """The rows are this instance's alone again: leases given back in one batch, owners
+    cleared, the ids on record as this instance's (its own vote backs no other candidate
+    for them either)."""
+    if not cluster_ids:
+        return
+    me = fed.instance_id()
+    _release_many(cluster_ids, hand_over=False)
+    for cid in cluster_ids:
+        _set_owner(cid, '', expect=me)
+    fed.note_dropped([(cid, me) for cid in cluster_ids])
+
+    def go(st):
+        gone = [cid for cid in cluster_ids if st['my_leases'].pop(cid, None) is not None]
+        return bool(gone)
+    fed._mutate_leases(go)
+    _unmark(*cluster_ids)
+
+
+def _tell_unenroll(cluster_ids):
+    """Every member hears that this instance takes `cluster_ids` out of the federation, in
+    one call per member (per MAX_ASKS_PER_CALL ids). Returns ({cluster id: confirmations},
+    needed), this instance counted."""
+    me = fed.instance_id()
+    cluster_ids = list(cluster_ids)
+    chunks = [cluster_ids[i:i + MAX_ASKS_PER_CALL]
+              for i in range(0, len(cluster_ids), MAX_ASKS_PER_CALL)]
+    view, epoch = fed.view_digest(), fed.view_epoch()
+
+    def tell(iid):
+        out = set()
+        for chunk in chunks:
+            body = {'candidate': me, 'view': view, 'epoch': epoch, 'asks': [],
+                    'releases': [], 'unenroll': chunk}
+            status, data = fed.call_peer(iid, 'POST', LEASE_PATH, body,
+                                         read_timeout=VOTE_TIMEOUT)[:2]
+            if status == 200 and isinstance(data, dict):
+                out |= {c for c in (data.get('unenrolled') or []) if c in chunk}
+        return out
     peers = sorted(fed.members())
-    got = fed._parallel(lambda iid: fed.call_peer(iid, 'POST', LEASE_PATH, body,
-                                                  read_timeout=VOTE_TIMEOUT)[:2], peers)
-    acks = 1 + sum(1 for ans in got if ans and ans[0] == 200 and isinstance(ans[1], dict)
-                   and cluster_id in (ans[1].get('unenrolled') or []))
-    return acks, fed.needed(len(fed.view_ids()))
+    acks = Counter({cid: 1 for cid in cluster_ids})
+    for got in fed._parallel(tell, peers):
+        for cid in got or ():
+            acks[cid] += 1
+    return dict(acks), fed.needed(len(fed.view_ids()))
 
 
 def adopt_cluster(cluster_id, force=False):
@@ -1006,13 +1231,17 @@ def adopt_cluster(cluster_id, force=False):
         raise FederationError(f'The adoption did not go through and changed nothing: {e}')
     finally:
         drop_owner_cache()
+    # in the identity row: whichever host of this HA group asks next, it asks with the
+    # adoption flag while the voters' rows still name the old owner
+    fed._mark_clusters('adopted', add={cluster_id: {'from': owner}})
+    fed._mark_clusters('handed_over', drop=[cluster_id])
     out = _lease_summary(cluster_id)
     out['notes'] = ['node_credentials', 'ha_claim']
     return out
 
 
 def _give_back(cluster_id):
-    release(cluster_id)
+    release(cluster_id, hand_over=False)
 
     def go(st):
         return st['my_leases'].pop(cluster_id, None) is not None
@@ -1058,13 +1287,15 @@ def _reseat_credentials(conn, cluster_id, owner, force):
 
 def may_convert(cluster_id, home):
     """Whether a row led here may become `home`'s mirror from `home`'s snapshot: this
-    instance holds no live lease on it, it released the cluster or a majority said `home`
-    leads it, and its own promise for the cluster names `home`."""
+    instance holds no live lease on it, it released the cluster (its lease file or the
+    hand-over mark of the identity row says so) or a majority said `home` leads it, and
+    its own promise for the cluster names `home`."""
     st = fed._lease_state()
     rec = (st.get('my_leases') or {}).get(cluster_id) or {}
     if not rec.get('released') and _lease_now() < (rec.get('expires') or 0):
         return False
-    if not (rec.get('released') or rec.get('lost_to') == home):
+    released = rec.get('released') or cluster_id in fed.handed_over_ids()
+    if not (released or rec.get('lost_to') == home):
         return False
     return ((st.get('promises') or {}).get(cluster_id) or {}).get('candidate') == home
 
@@ -1097,7 +1328,12 @@ def note_lost(cluster_id, owner):
     def go(st):
         return st['my_leases'].pop(cluster_id, None) is not None
     fed._mutate_leases(go)
+    try:
+        _unmark(cluster_id)
+    except Exception as e:
+        logging.warning(f'[FED] the marks of {cluster_id} could not be cleared: {e}')
     drop_owner_cache()
+    _cut([cluster_id])
     _stop_manager(cluster_id)
     try:
         from pegaprox.utils.audit import log_audit
@@ -1125,6 +1361,7 @@ def lease_status():
     """The leases this instance holds and the promises it gave, without clock values."""
     st = fed._lease_state()
     now = _lease_now()
+    handed, marked = fed.handed_over_ids(), fed.adopted_from()
     out = {'leases': {}, 'promises': {}, 'hold_s': int(math.ceil(hold_left(st)))}
     for cid, rec in (st.get('my_leases') or {}).items():
         if cid == MEMBERS_LOCK:
@@ -1133,7 +1370,8 @@ def lease_status():
             'held': bool(not rec.get('released') and now < (rec.get('expires') or 0)),
             'remaining_s': max(0, int((rec.get('expires') or 0) - now)),
             'votes': int(rec.get('votes') or 0), 'needed': int(rec.get('needed') or 0),
-            'released': bool(rec.get('released')), 'adopted': bool(rec.get('adopted')),
+            'released': bool(rec.get('released')) or cid in handed,
+            'adopted': bool(rec.get('adopted')) or cid in marked,
             'lost_to': rec.get('lost_to') or ''}
     for cid, rec in (st.get('promises') or {}).items():
         out['promises'][cid] = {
@@ -1148,7 +1386,7 @@ def renew(cluster_id):
     """One round for one cluster now: {'cluster', 'renewed', 'votes', 'needed', 'lost_to'}.
     A released cluster is not taken back by a renewal (that is an enroll)."""
     rec = (fed._lease_state().get('my_leases') or {}).get(cluster_id) or {}
-    if rec.get('released'):
+    if rec.get('released') or cluster_id in fed.handed_over_ids():
         return {'cluster': cluster_id, 'renewed': False, 'votes': 0, 'needed': 0,
                 'lost_to': rec.get('lost_to') or '', 'released': True}
     r = lease_round(only={cluster_id}).get(cluster_id) or {}

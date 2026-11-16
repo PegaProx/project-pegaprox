@@ -805,14 +805,20 @@ MFA_HELD_ENVIRON = 'pegaprox.mfa_enrolment_due'
 _MFA_RECHECK_S = 30
 
 
-def mfa_enrolment_state(user: dict, settings: dict) -> str:
+def mfa_enrolment_state(user: dict, settings: dict, username: str = '') -> str:
     """Whether force_2fa still holds `user` back. MFA_SKIPPED_ON_STANDBY is an admin let
     past it on a standby that cannot hand the enrolment to the active (#625); the
-    sign-in puts that on the record."""
+    sign-in puts that on the record. `username`: the account's name, which the row
+    itself does not carry."""
     if not settings.get('force_2fa') or not TOTP_AVAILABLE:
         return MFA_NOT_DUE
     # enrolled = a code can be asked for, which is what auth_login asks
     if user.get('totp_enabled') and user.get('totp_secret'):
+        return MFA_NOT_DUE
+    # MK Nov 2026 - a mirror of a federation member enrols at its home: its TOTP secret
+    # never travels and the setup routes refuse it here. A passkey it has is what
+    # auth_login asks for instead, so a mirror with one is enrolled
+    if user.get('fed_home') and username and _has_passkey(username):
         return MFA_NOT_DUE
     # OIDC/Entra accounts use their IdP's MFA
     if user.get('auth_source', 'local') in ('oidc', 'entra'):
@@ -828,6 +834,18 @@ def mfa_enrolment_state(user: dict, settings: dict) -> str:
         if ha.is_standby() and not ha.forwarding():
             return MFA_SKIPPED_ON_STANDBY
     return MFA_DUE
+
+
+def _has_passkey(username: str) -> bool:
+    """Whether `username` has a WebAuthn credential. False when it cannot be told: the
+    account then stays held, as without one."""
+    try:
+        row = get_db().query_one(
+            'SELECT COUNT(*) AS n FROM webauthn_credentials WHERE username = ?', (username,))
+        return bool(row and row['n'] > 0)
+    except Exception as e:
+        logging.warning(f"[2FA] cannot read the passkeys of {username!r}: {e}")
+        return False
 
 
 def _mfa_enrolment_lets_through(session: dict) -> bool:
@@ -849,7 +867,8 @@ def _mfa_enrolment_lets_through(session: dict) -> bool:
         try:
             user = get_db().get_user(session.get('user', ''))
             from pegaprox.api.helpers import load_server_settings
-            fresh = bool(user) and mfa_enrolment_state(user, load_server_settings()) == MFA_DUE
+            fresh = bool(user) and mfa_enrolment_state(user, load_server_settings(),
+                                                       session.get('user', '')) == MFA_DUE
         except Exception as e:
             # keep the last answer; a session never judged stays held until it can be
             logging.warning(f"[2FA] cannot tell whether force_2fa holds "

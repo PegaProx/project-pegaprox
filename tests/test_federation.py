@@ -201,17 +201,17 @@ def clock(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_budgets():
+def _fresh_budgets(monkeypatch):
     """The pairing, peer and vote budgets are per process and every test here calls from
-    the one address of the test client."""
+    the one address of the test client. The windows of the process come back afterwards."""
     from pegaprox.utils.ratelimit import SlidingWindow
     from pegaprox.api import federation as api_fed
-    api_fed._pair_attempts = SlidingWindow(limit=5, window=300, max_keys=2048,
-                                           name='fed-pair-test')
-    api_fed._peer_failures = SlidingWindow(limit=10, window=300, max_keys=2048,
-                                           name='fed-peer-test')
-    api_fed._lease_votes = SlidingWindow(limit=10000, window=30, max_keys=256,
-                                         name='fed-vote-test')
+    for name, limit, window in (('_pair_attempts', 5, 300), ('_peer_failures', 10, 300),
+                                ('_lease_votes', 10000, 30), ('_lease_ticks', 10000, 30),
+                                ('_lease_returns', 10000, 30)):
+        monkeypatch.setattr(api_fed, name, SlidingWindow(
+            limit=limit, window=window, max_keys=2048 if window == 300 else 256,
+            name=f'fed{name}-test'))
     yield
 
 
@@ -264,12 +264,26 @@ def _join(joiner, code):
 
 
 def _sides(tmp, names='ab', calls=None):
-    """Sides that paired one after another through the first."""
+    """Sides that paired one after another through the first, a while ago: the settle
+    span of those joins is over everywhere (_settled)."""
     out = [Side(tmp, n) for n in names]
     _wire(out, calls)
     for s in out[1:]:
         _join(s, _code(out[0]))
+    for s in out:
+        _settled(s)
     return out
+
+
+def _settled(side):
+    """The settle span of the last view change `side` took is over, as it is a while
+    after a pairing: a voter grants no cluster ask for SETTLE_SECONDS after a change of
+    the view. A test that changes the view itself waits that out with the clock."""
+    def go(st):
+        st['view_changed'] = 0.0
+        return True
+    with at(side):
+        federation._mutate_leases(go)
 
 
 @pytest.fixture
@@ -695,8 +709,10 @@ def test_a_member_cannot_add_members_on_its_own(tmp_path):
         entries = federation._view_entries(federation.identity())
     entries['d' * 32] = rec['public_key']
     commit = {'epoch': epoch + 1, 'base': base, 'digest': federation._digest(entries),
-              'change': {'op': 'add', 'instance_id': 'd' * 32, **rec}}
+              'change': {'op': 'add', 'instance_id': 'd' * 32, **rec}, 'by': iid(c)}
     with at(c):
+        commit['sig'] = federation._sign_commit(commit['epoch'], base, commit['digest'],
+                                                federation._wire_change(commit['change']))
         status, body, _h = federation.call_peer(iid(b), 'POST', federation.MEMBERSHIP_PATH,
                                                 commit)
     assert status == 409 and body['code'] == 'FED_NO_LOCK'
@@ -745,6 +761,7 @@ def test_a_commit_may_change_one_member_only(tmp_path):
                    {'epoch': epoch + 1, 'base': 'f' * 32, 'digest': federation._digest(good)},
                    {'epoch': epoch + 1, 'base': base, 'digest': federation._digest(two)}):
         commit['change'] = {'op': 'add', 'instance_id': 'd' * 32, **rec}
+        commit['by'] = iid(c)
         with at(c):
             status, body, _h = federation.call_peer(iid(b), 'POST',
                                                     federation.MEMBERSHIP_PATH, commit)
@@ -752,7 +769,7 @@ def test_a_commit_may_change_one_member_only(tmp_path):
     assert 'd' * 32 not in _view(b)[2]
 
 
-def test_a_removal_reaches_every_member_and_the_remover_keeps_its_leases(tmp_path):
+def test_a_removal_reaches_every_member_and_the_remover_keeps_its_leases(tmp_path, clock):
     a, b, c, d = _sides(tmp_path, 'abcd')
     _enroll(a, 'pve-1')
     with at(a):
@@ -768,7 +785,13 @@ def test_a_removal_reaches_every_member_and_the_remover_keeps_its_leases(tmp_pat
     with at(d):
         assert federation.members() == {}
         assert federation.identity()['removed']['by'] == iid(a)
-    # a renews with two of the three that are left
+    # the lease a held before the removal still runs; the voters back no cluster ask for
+    # the settle span of the change, then a renews with two of the three that are left
+    assert _writes(a, 'pve-1') is True
+    with at(a):
+        r = fl.lease_round()
+    assert r['pve-1']['held'] is False and r['pve-1']['refusals'] == {'settling': 3}
+    clock.advance(fl.SETTLE_SECONDS + 1)
     with at(a):
         r = fl.lease_round()
     assert r['pve-1']['held'] is True and r['pve-1']['needed'] == 2
@@ -781,7 +804,14 @@ def test_a_removal_lowers_the_majority(tmp_path, clock):
         federation.remove_member(iid(d), by='admin:test')
         federation.remove_member(iid(e), by='admin:test')
     _cut([a, b, c, d, e], c)
+    # inside the settle span of the two removals even a renewal waits: a lease counted
+    # two changes back may still run, and a majority of {a, b, c} need not share a voter
+    # with it
     clock.advance(20)
+    with at(a):
+        r = fl.lease_round()
+    assert r['pve-5']['held'] is False and r['pve-5']['refusals'] == {'settling': 2, 'down': 1}
+    clock.advance(fl.SETTLE_SECONDS - 20 + 1)
     with at(a):
         r = fl.lease_round()
     assert r['pve-5']['held'] is True and r['pve-5']['votes'] == 2
@@ -973,7 +1003,8 @@ def _ask(side, sender_side, cids, adopt=False, view=None):
 def test_a_vote_is_on_disk_before_the_answer(tmp_path):
     a, b, c = _three(tmp_path)
     status, answer = _ask(b, a, ['c7'])
-    assert status == 200 and answer['votes']['c7'] == {'granted': True}
+    # the grant names the owner b's row gives, none for an id b holds no row of
+    assert status == 200 and answer['votes']['c7'] == {'granted': True, 'owner': ''}
     with open(b.lease_file) as fh:
         on_disk = json.load(fh)
     assert on_disk['promises']['c7']['candidate'] == iid(a)
@@ -1057,7 +1088,7 @@ def test_enroll_gives_the_lease_and_the_gate(tmp_path):
     assert _owner_at(a, 'c1') == iid(a)
 
 
-def test_enroll_needs_three_sites_and_a_proxmox_cluster(tmp_path):
+def test_enroll_needs_three_sites_and_a_proxmox_cluster(tmp_path, clock):
     a, b = _sides(tmp_path, 'ab')
     _add_cluster(a, 'c2')
     with at(a):
@@ -1072,6 +1103,13 @@ def test_enroll_needs_three_sites_and_a_proxmox_cluster(tmp_path):
         with pytest.raises(federation.FederationError) as err:
             fl.enroll_cluster('xp')
         assert err.value.code == 'FED_TYPE'
+        # right after the join the voters are in its settle span
+        with pytest.raises(federation.FederationError) as err:
+            fl.enroll_cluster('c2')
+        assert err.value.code == 'FED_NO_QUORUM' and 'changed members' in str(err.value)
+    assert _owner_at(a, 'c2') == ''
+    clock.advance(fl.SETTLE_SECONDS + 1)
+    with at(a):
         assert fl.enroll_cluster('c2')['held'] is True
 
 
@@ -1611,7 +1649,6 @@ def _standby_of(tmp, active, name='a2'):
 
 
 def test_a_promoted_standby_is_the_same_member(tmp_path, clock, monkeypatch):
-    from pegaprox.core import ha
     a, b, c = _three(tmp_path)
     _enroll(a, 'pve-a')
     _enroll(b, 'pve-b')
@@ -1621,21 +1658,166 @@ def test_a_promoted_standby_is_the_same_member(tmp_path, clock, monkeypatch):
     URL['a2'] = URL['a']
     try:
         _wire([a2, b, c])
-        monkeypatch.setattr(ha, 'epoch', lambda: 5)
+        # the HA epoch moves on the promoted host alone, as it does between hosts
+        monkeypatch.setattr(fl, '_ha_epoch',
+                            lambda: 5 if federation._runtime['lease_file'] == a2.lease_file
+                            else 0)
         with at(a2):
             assert federation.instance_id() == iid(a)
             assert set(_db_of(a2).get_all_clusters()) == {'pve-a'}
         assert _owner_at(a2, 'pve-b') == iid(b)
-        # the new acting host holds its votes for one lease span, then renews
+        # the new acting host's own votes wait for one lease span, its own ask included;
+        # b and c go on renewing the member's lease meanwhile
         with at(a2):
-            assert fl.lease_round()['pve-a']['held'] is False
+            r = fl.lease_round()['pve-a']
+        assert r['held'] is True and r['votes'] == 2 and r['refusals'] == {'hold': 1}
+        v = _ask(a2, b, ['pve-b'])[1]['votes']['pve-b']
+        assert v['granted'] is False and v['reason'] == 'hold'
         clock.advance(fl.LEASE_SECONDS + fl.LEASE_SKEW + 1)
         with at(a2):
             r = fl.lease_round()
-        assert r['pve-a']['held'] is True and _writes(a2, 'pve-a') is True
+        assert r['pve-a']['held'] is True and r['pve-a']['votes'] == 3
+        assert _writes(a2, 'pve-a') is True
+        assert _ask(a2, b, ['pve-b'])[1]['votes']['pve-b']['granted'] is True
         assert _owner_at(a2, 'pve-b') == iid(b)
     finally:
         URL.pop('a2', None)
+
+
+@pytest.fixture
+def ha_state(tmp_path, monkeypatch):
+    """The HA module on a state file of this test (a standalone until a test writes
+    another), no restart."""
+    from pegaprox.core import ha
+    monkeypatch.setattr(ha, 'STATE_FILE', str(tmp_path / 'ha_state.json'))
+    monkeypatch.setattr(ha, 'AES_KEY_FILE', str(tmp_path / 'aes256.key'))
+    monkeypatch.setattr(ha, 'restart_process', lambda *a, **k: None)
+    ha.reset_for_tests()
+    yield ha
+    ha.reset_for_tests()
+
+
+def test_a_standby_that_leaves_its_group_is_no_member_any_more(tmp_path, ha_state):
+    """A standby holds its active's federation identity through the sync. ha.unpair()
+    makes it a standalone that acts; were the identity still there, it would lease the
+    member's clusters next to the active, push its own certificate as the member's and
+    could leave in its name. So what it inherited goes; the active keeps all of it."""
+    ha = ha_state
+    a, b, c = _three(tmp_path)
+    _enroll(a, 'pve-a')
+    _add_local_user(b, 'bea')
+    _sync(a)
+    a2 = _standby_of(tmp_path, a)
+    with open(ha.STATE_FILE, 'w', encoding='utf-8') as fh:
+        json.dump({'role': 'standby', 'instance_id': 'b' * 32, 'epoch': 3,
+                   'members': {'a' * 32: {'url': URL['a']}}}, fh)
+    ha.reset_for_tests()
+    with at(a2):
+        federation._lease_state()
+        # counterproof: as a standby it holds the member's identity, passive
+        assert federation.instance_id() == iid(a) and not federation._ha_active()
+        assert os.path.exists(a2.lease_file)
+        assert ha.unpair() == 'standby'
+        assert federation._ha_active() is True
+        assert federation.identity() is None and federation.instance_id() == ''
+    assert _db_of(a2).get_server_setting(federation.SETTING_KEY, None) is False
+    assert not os.path.exists(a2.lease_file)
+    conn = _db_of(a2).conn
+    assert conn.execute("SELECT COUNT(*) FROM clusters WHERE fed_owner != ''").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM users WHERE fed_home != ''").fetchone()[0] == 0
+    assert conn.execute('SELECT COUNT(*) FROM federation_identity_map').fetchone()[0] == 0
+    # the member itself is untouched
+    with at(a):
+        assert federation.instance_id() == iid(a)
+    for s in (b, c):
+        assert iid(a) in _view(s)[2]
+    assert _writes(a, 'pve-a') is True and 'bea' in _users(a)
+
+
+@pytest.mark.parametrize('off', ['env', 'setting'])
+def test_a_standby_that_leaves_with_the_switch_off_drops_the_identity_too(
+        tmp_path, ha_state, monkeypatch, off):
+    """The switch is off on the standby (PEGAPROX_FEDERATION=0 on that host, or the
+    setting), but the sync carried the identity row all the same: switched on later, the
+    standalone host would be that member next to the active. So the row goes with the
+    unpairing whatever the switch says - the one thing of the federation that runs while
+    it is off. Counterproof: the row is there up to the unpairing."""
+    ha = ha_state
+    a, b, c = _three(tmp_path)
+    _enroll(a, 'pve-a')
+    a2 = _standby_of(tmp_path, a)
+    with open(ha.STATE_FILE, 'w', encoding='utf-8') as fh:
+        json.dump({'role': 'standby', 'instance_id': 'b' * 32, 'epoch': 3,
+                   'members': {'a' * 32: {'url': URL['a']}}}, fh)
+    ha.reset_for_tests()
+    if off == 'env':
+        monkeypatch.setenv(federation.ENV_SWITCH, '0')
+    else:
+        monkeypatch.delenv(federation.ENV_SWITCH)
+        _db_of(a2).save_server_setting(federation.SETTING_KEY, False)
+    conn = _db_of(a2).conn
+
+    def held():
+        return (conn.execute('SELECT COUNT(*) FROM pegaprox_kv WHERE k = ?',
+                             (federation.IDENTITY_KEY,)).fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM clusters WHERE fed_owner != ''").fetchone()[0])
+    assert held() == (1, 1)
+    with at(a2):
+        assert federation.enabled() is False
+        assert ha.unpair() == 'standby'
+        assert federation.enabled() is False
+    assert held() == (0, 0)
+    assert not os.path.exists(a2.lease_file)
+    with at(a):
+        assert federation.instance_id() == iid(a)
+
+
+@pytest.mark.parametrize('told', [True, False])
+def test_an_active_that_takes_a_standby_or_leaves_its_group_keeps_its_votes(
+        tmp_path, clock, monkeypatch, ha_state, told):
+    """The HA epoch of a member moves from 0 to 1 when it takes its first standby, and back
+    to 0 when it leaves its group as the active. The same host acts throughout, with its
+    whole lease file: ha.py says so to the federation, and nobody holds. With c down that
+    is the difference between keeping every lease and losing them for 35 seconds, which
+    is what happens without the notice (the counterproof)."""
+    ha = ha_state
+    a, b, c = _three(tmp_path)
+    _enroll(a, 'pve-a')
+    _enroll(b, 'pve-b')
+    # the lease clock of a reads its own HA epoch; b and c have none
+    monkeypatch.setattr(fl, '_ha_epoch',
+                        lambda: ha.epoch() if federation._runtime['lease_file'] == a.lease_file
+                        else 0)
+    if not told:
+        monkeypatch.setattr(ha, '_federation_epoch_kept', lambda old, new: None)
+    _cut([a, b, c], c)
+    standby_key = ha._public_of(ha._private_key(base64.b64encode(bytes(range(1, 33))).decode()))
+    with at(a):
+        code, _exp = ha.create_pairing_code(URL['a'], '')
+        ha.accept_pairing(ha.decode_code(code)['secret'], 'b' * 32,
+                          'https://a2.example:5000', '', standby_key)
+        assert ha.epoch() == 1 and ha.role() == 'active'
+
+    def rounds():
+        clock.advance(fl.LEASE_RENEW_AFTER)
+        with at(a):
+            ra = fl.lease_round()['pve-a']
+        with at(b):
+            rb = fl.lease_round()['pve-b']
+        return ra['held'], rb['held']
+    assert rounds() == (told, told)
+    if told:
+        with at(a):
+            # its standby keeps the member's identity: no unpairing while it is there
+            with pytest.raises(ha.AutoMode, match='federation'):
+                ha.unpair()
+            assert ha.role() == 'active' and ha.epoch() == 1
+            # the standby gone (an active whose members left before it was promoted is
+            # the same), the active leaves its group and stays the member
+            with ha._lock:
+                ha._commit_locked(dict(ha._load(), members={}))
+            assert ha.unpair() == 'active' and ha.epoch() == 0
+        assert rounds() == (True, True)
 
 
 def test_mirrors_keep_syncing_after_a_promotion(tmp_path):

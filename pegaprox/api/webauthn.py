@@ -152,7 +152,16 @@ def _require_session():
 def _refuse_mirror(username, what):
     # MK Nov 2026 - a mirror's passkeys are its home's: deleting the mirrored one here would
     # let a key-only account in on the password alone until the next sync, and a key
-    # registered here would stay behind as a local credential of that name
+    # registered here would stay behind as a local credential of that name.
+    # These routes check the session, not the account: a mirror that counts as disabled
+    # (the federation switched off here) is refused as require_auth refuses it
+    from pegaprox.utils.auth import mirror_switched_off
+    try:
+        row = get_db().get_user(username)
+    except Exception:
+        row = None
+    if row and mirror_switched_off(row):
+        return jsonify({'error': 'Account is disabled', 'code': 'ACCOUNT_DISABLED'}), 401
     from pegaprox.api.federation import refuse_own_mirror
     return refuse_own_mirror(what, username=username)
 

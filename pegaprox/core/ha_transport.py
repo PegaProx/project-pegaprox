@@ -14,6 +14,7 @@ holds the hooks for the kinds of exit there are:
   guard_soap(si)           a pyvmomi service instance (ESXi over SOAP)
   guard_client(client)     a paramiko SSH client: exec_command, invoke_shell, open_sftp
   guard_ssh(host, cmd)     an SSH command that leaves some other way
+  guard_write(action)      a write that is no request and no command (the poison pill)
   node_cmd(argv, ...)      ssh, sshpass and ipmitool as subprocesses (design 5.4)
 
 Anywhere but in an automatic group each of them is one look at the state and nothing
@@ -25,7 +26,10 @@ it went out on (again=True): no new round while that still fits (ha.guard).
 The exits to a Proxmox VE cluster also name it (cluster_id=): with the federation
 switched on, a write there goes out only while federation.guard_exit() lets it, which
 asks whether this instance holds the cluster's lease. That check comes before the HA
-guard and does not depend on it.
+guard and does not depend on it, and it is made again once the connection of a request
+is up. What is still under way on an enrolled cluster when its lease is given up or runs
+out (a node command, a paramiko client and its channels) is stopped (cut_cluster), once a
+write went out through it; a read that passed without the lease is left alone.
 
 MK Oct 2026 (#625)
 """
@@ -34,7 +38,9 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import time
+import weakref
 from urllib.parse import urlsplit
 
 import requests
@@ -51,6 +57,8 @@ _CONSOLE_RE = re.compile(r'/(vncproxy|termproxy|spiceproxy|vncwebsocket|vncshell
                          r'|/console/tickets/?$')
 _LOGIN_RE = re.compile(r'/access/ticket/?$|/api/session/?$|/rest/com/vmware/cis/session/?$')
 _TOKEN_RE = re.compile(r'/access/users/[^/]+/token/[^/]+/?$')
+# the guest agent's thaw undoes a freeze this instance sent a moment before
+_THAW_RE = re.compile(r'/agent/fsfreeze-thaw/?$')
 _NUMBER_RE = re.compile(r'(?<=/)\d+(?=/|$)')
 # XAPI calls that only read; everything else changes the pool
 _XAPI_READ_RE = re.compile(r'(get_|query_|compute_|assert_|retrieve_|check_)|get$|get_all')
@@ -82,6 +90,8 @@ def http_action(method, url):
         kind = 'login'
     elif m == 'POST' and _TOKEN_RE.search(path):
         kind = 'cheap'
+    elif m == 'POST' and _THAW_RE.search(path):
+        kind = 'thaw'
     else:
         kind = None
     return f'{m} {_shape(path)}', kind
@@ -96,16 +106,34 @@ def guard_http(method, url, again=False):
     ha.guard(action, kind, again=again)
 
 
+# the cluster a guarded session is sending to right now, for the check once the
+# connection of its request is up (_asked_up); per thread, so per greenlet under gevent
+_sending = threading.local()
+
+
 def _asked_up(conn, method, url):
     """The request is about to go out on `conn`: asked again, and once more after the
     connection came up where it was not up yet (plain HTTP connects inside request()). A
-    lease that ran out while it connected stops the request here."""
-    if (method or 'GET').upper() not in WRITE_METHODS or not ha.guard_on():
+    lease that ran out while it connected stops the request here, the HA lease and the
+    federation's lease of the cluster the session sends to alike."""
+    if (method or 'GET').upper() not in WRITE_METHODS:
         return
-    guard_http(method, url, again=True)
+    cluster_id = getattr(_sending, 'cluster_id', None)
+    fed, guard = _fed_on(cluster_id), ha.guard_on()
+    if not fed and not guard:
+        return
+    if guard:
+        guard_http(method, url, again=True)
     if getattr(conn, 'sock', None) is None:
         conn.connect()
-        guard_http(method, url, again=True)
+        if guard:
+            guard_http(method, url, again=True)
+    if fed:
+        # MK Nov 2026 - a connect that stalled (a dark host, a slow TLS handshake) can
+        # outlast the lease the check before send() saw: asked once more, after the
+        # connection is up and before a byte of the request goes out
+        action, kind = http_action(method, url)
+        _fed_guard(cluster_id, action, kind)
 
 
 class _GuardedHTTPConnection(HTTPConnection):
@@ -173,9 +201,11 @@ def guard_adapter(adapter):
 
 def _fed_guard(cluster_id, action, kind):
     """`action` may be a callable that builds the text: with the federation off, nothing
-    of it is worked out (no URL parsed, no peer address asked)."""
+    of it is worked out (no URL parsed, no peer address asked). True when the call goes
+    out as a write the lease was asked for (guard_exit)."""
     if cluster_id and federation.enabled():
-        federation.guard_exit(cluster_id, action() if callable(action) else action, kind)
+        return federation.guard_exit(cluster_id, action() if callable(action) else action, kind)
+    return False
 
 
 def _fed_on(cluster_id):
@@ -198,7 +228,12 @@ def guard_session(session, again=False, cluster_id=None):
             if action:
                 _fed_guard(cluster_id, action, kind)
         guard_http(request.method, request.url, again=again)
-        return send(request, **kwargs)
+        prev = getattr(_sending, 'cluster_id', None)
+        _sending.cluster_id = cluster_id
+        try:
+            return send(request, **kwargs)
+        finally:
+            _sending.cluster_id = prev
     session.send = guarded_send
     for adapter in list(getattr(session, 'adapters', {}).values()):
         guard_adapter(adapter)
@@ -299,18 +334,28 @@ def guard_ssh(host, cmd='', again=False, cluster_id=None):
     """Ask the guard for one SSH command to `host`; `again` for the same command once
     more. Every SSH command counts as a change (5.3) except in a GET; a caller that only
     reads says so with ha.reading(). `cluster_id`: the Proxmox VE cluster the host is a
-    node of."""
-    _fed_guard(cluster_id, lambda: f'SSH {host} {_first_word(cmd)}'.strip(), 'ssh')
-    if not ha.guard_on():
-        return
-    ha.guard(f'SSH {host} {_first_word(cmd)}'.strip(), kind='ssh', again=again)
+    node of. True when the command goes out as a write past the federation's lease."""
+    wrote = _fed_guard(cluster_id, lambda: f'SSH {host} {_first_word(cmd)}'.strip(), 'ssh')
+    if ha.guard_on():
+        ha.guard(f'SSH {host} {_first_word(cmd)}'.strip(), kind='ssh', again=again)
+    return wrote
+
+
+def guard_write(action, cluster_id=None):
+    """Ask for one write that leaves neither as a request nor over SSH: a file on shared
+    storage that a node's agent acts on (the poison pill). `cluster_id`: the Proxmox VE
+    cluster the write is for."""
+    _fed_guard(cluster_id, action, None)
+    if ha.guard_on():
+        ha.guard(action)
 
 
 def guard_client(client, host='', again=False, cluster_id=None):
     """exec_command, invoke_shell and open_sftp of a paramiko client ask the guard first.
     Returns the client. `again`: the caller asked guard_ssh for its command before it
     connected, so the ask here is that same command once more. `cluster_id`: the Proxmox
-    VE cluster the host is a node of."""
+    VE cluster the host is a node of; once a write went out through the client it is kept
+    for cut_cluster (a client that only reads is not)."""
     for name in ('exec_command', 'invoke_shell', 'open_sftp'):
         real = getattr(client, name, None)
         if real is None:
@@ -320,12 +365,18 @@ def guard_client(client, host='', again=False, cluster_id=None):
             fed_on, guard_on = _fed_on(cluster_id), ha.guard_on()
             if fed_on or guard_on:
                 cmd = (args[0] if args else kwargs.get('command', '')) if _name == 'exec_command' else _name
-                if fed_on:
-                    _fed_guard(cluster_id,
-                               lambda: f'SSH {host or _peer(client)} {_first_word(cmd)}'.strip(),
-                               'ssh')
+
+                def action():
+                    return f'SSH {host or _peer(client)} {_first_word(cmd)}'.strip()
+                wrote = fed_on and _fed_guard(cluster_id, action, 'ssh')
                 if guard_on:
                     guard_ssh(host or _peer(client), cmd, again=again)
+                if wrote:
+                    # a write goes out through it: closed once the lease goes. Asked once
+                    # more after it is kept, so a hand-over in between either refuses here
+                    # or finds it to close
+                    track_client(client, cluster_id)
+                    _fed_guard(cluster_id, action, 'ssh')
             return _real(*args, **kwargs)
         setattr(client, name, guarded)
     return client
@@ -369,12 +420,18 @@ def node_cmd(argv, *, timeout, host='', read=False, need=None, again=False, clus
     even while this process is frozen, and its process group is registered: losing the
     lease kills it (ha.kill_children). A timeout raises subprocess.TimeoutExpired, as
     subprocess.run does. `cluster_id`: the Proxmox VE cluster the node belongs to, whose
-    federation lease a command that is no read needs."""
-    if cluster_id and not read:
-        _fed_guard(cluster_id, lambda: f'{os.path.basename(str(argv[0]))} {host}'.strip(), 'ssh')
-    if not ha.guard_on():
+    federation lease a command that is no read needs. On an enrolled cluster a command
+    that went out as a write runs the same way (own session, bounded, registered) with the
+    HA guard off as well, so a lease that is given up or runs out kills it (cut_cluster)."""
+    wrote = bool(cluster_id) and not read and _fed_guard(
+        cluster_id, lambda: f'{os.path.basename(str(argv[0]))} {host}'.strip(), 'ssh')
+    # a write on an enrolled cluster runs in a process group of its own, which a lease
+    # given up or run out kills (cut_cluster); a command that went out as a read does not
+    fenced = wrote and federation.enabled() and federation.is_enrolled(cluster_id)
+    guard_on = ha.guard_on()
+    if not guard_on and not fenced:
         return subprocess.run(argv, timeout=timeout, **kwargs)
-    if not read:
+    if guard_on and not read:
         ha.guard(f'{os.path.basename(str(argv[0]))} {host} {_first_word(argv[-1]) if len(argv) > 1 else ""}'.strip(),
                  kind='ssh', need=need, again=again)
     full, wrapped = _bounded(argv, timeout)
@@ -386,7 +443,13 @@ def node_cmd(argv, *, timeout, host='', read=False, need=None, again=False, clus
     started = time.monotonic()
     proc = subprocess.Popen(full, start_new_session=True, **kwargs)
     ha.register_child_group(proc.pid)
+    if fenced:
+        _track_group(cluster_id, proc.pid)
     try:
+        if fenced:
+            # once more now that the group is kept: a hand-over since the first ask found
+            # nothing to kill, and a refusal here kills it below before it got far
+            _fed_guard(cluster_id, lambda: f'{os.path.basename(str(argv[0]))} {host}'.strip(), 'ssh')
         try:
             out, err = proc.communicate(data, timeout=float(timeout) + KILL_AFTER + 1)
         except subprocess.TimeoutExpired:
@@ -398,7 +461,121 @@ def node_cmd(argv, *, timeout, host='', read=False, need=None, again=False, clus
             _kill_group(proc.pid)
             proc.wait()
         ha.forget_child_group(proc.pid)
+        if fenced:
+            _untrack_group(cluster_id, proc.pid)
     if wrapped and proc.returncode in (124, 128 + signal.SIGKILL) \
             and time.monotonic() - started >= float(timeout):
         raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+# --- what is under way on an enrolled cluster ---------------------------------------------
+#
+# MK Nov 2026 - the exits ask for the lease when a call starts. A node command (a
+# dist-upgrade, a copy) or an SFTP or shell channel can run for an hour after that, and
+# a lease given up or run out must not leave it writing while another site adopts the
+# cluster. So the process groups and clients of an enrolled cluster that a write went out
+# through are kept here while the federation runs (a read passes without the lease and
+# would be cut for nothing): a hand-over stops them before the voters hear of it, and a
+# watch stops them within WATCH_EVERY of the lease running out (another site gets the
+# lease no sooner than LEASE_SKEW + 2 s after that).
+
+WATCH_EVERY = 1.0
+_track_lock = threading.Lock()
+_groups = {}        # cluster id -> {process group id}
+_clients = {}       # cluster id -> WeakSet of clients
+_watching = {'on': False}
+
+
+def _track_group(cluster_id, pgid):
+    with _track_lock:
+        _groups.setdefault(cluster_id, set()).add(int(pgid))
+    _watch_start()
+
+
+def _untrack_group(cluster_id, pgid):
+    with _track_lock:
+        held = _groups.get(cluster_id)
+        if held is not None:
+            held.discard(int(pgid))
+            if not held:
+                _groups.pop(cluster_id, None)
+
+
+def track_client(client, cluster_id):
+    """Keep a paramiko client of an enrolled cluster that a write went out through: it is
+    closed, its channels with it, once this instance may no longer write there. Nothing is
+    kept while the federation is off or for a cluster no federation owns. Returns the
+    client."""
+    if not cluster_id or client is None:
+        return client
+    if not (federation.enabled() and federation.is_enrolled(cluster_id)):
+        return client
+    try:
+        with _track_lock:
+            _clients.setdefault(cluster_id, weakref.WeakSet()).add(client)
+    except TypeError:
+        return client
+    _watch_start()
+    return client
+
+
+def cut_cluster(cluster_id):
+    """Stop what is under way on `cluster_id`: kill its node commands' process groups and
+    close its clients. Returns how many were stopped. Never raises."""
+    with _track_lock:
+        groups = _groups.pop(cluster_id, set())
+        clients = list(_clients.pop(cluster_id, ()))
+    for pgid in groups:
+        _kill_group(pgid)
+    for client in clients:
+        try:
+            client.close()
+        except Exception:
+            pass
+    if groups or clients:
+        import logging
+        logging.warning(f'[FED] stopped {len(groups)} node command(s) and {len(clients)} '
+                        f'connection(s) to cluster {cluster_id}: this instance may no longer '
+                        'write there')
+    return len(groups) + len(clients)
+
+
+def forget_tracked():
+    """Drop what is kept, stopping nothing (federation.reset_for_tests): the watch ends at
+    its next tick."""
+    with _track_lock:
+        _groups.clear()
+        _clients.clear()
+
+
+def _tracked():
+    with _track_lock:
+        for cid in [c for c, s in _clients.items() if not len(s)]:
+            _clients.pop(cid, None)
+        return set(_groups) | set(_clients)
+
+
+def _watch_start():
+    with _track_lock:
+        if _watching['on']:
+            return
+        _watching['on'] = True
+    threading.Thread(target=_watch, name='fed-exit-watch', daemon=True).start()
+
+
+def _watch():
+    while True:
+        time.sleep(WATCH_EVERY)
+        with _track_lock:
+            if not _groups and not any(len(s) for s in _clients.values()):
+                _clients.clear()
+                _watching['on'] = False
+                return
+        for cid in _tracked():
+            try:
+                ok = federation.enabled() and federation.worker_takes_writes_for(cid)
+            except Exception:
+                ok = False
+            if not ok:
+                cut_cluster(cid)
