@@ -2357,14 +2357,18 @@ def rescan_storage(cluster_id, storage_id):
                                         'ssh': True
                                     })
                                 
-                                ssh.close()
-                                
                             except Exception as ssh_err:
                                 node_result['actions'].append({
                                     'action': 'ssh_connect',
                                     'status': 'failed',
                                     'error': str(ssh_err)[:100]
                                 })
+                            finally:
+                                # a command that raised (refused, timed out) left it connected
+                                try:
+                                    ssh.close()
+                                except Exception:
+                                    pass
                     except Exception as e:
                         node_result['actions'].append({
                             'action': 'deep_scan',

@@ -576,10 +576,17 @@ def sweep(managers):
     'leftover'). Each removal is a step of its own (#625); a guest Proxmox still holds
     locked is tried again next time. Returns how many rows it settled. Never raises."""
     from pegaprox.core import ha
+    # only the rows of clusters it can reach: fifty older ones of a cluster that is gone or
+    # long offline kept every later row from being looked at
+    ids = [cid for cid, m in managers.items() if getattr(m, 'is_connected', False)]
+    if not ids:
+        return 0
     try:
+        marks = ','.join('?' * len(ids))
         rows = [dict(r) for r in get_db().query(
             "SELECT * FROM backup_verifications WHERE test_vmid IS NOT NULL "
-            "AND (status = 'running' OR phase = 'leftover') ORDER BY started_at LIMIT 50") or []]
+            f"AND (status = 'running' OR phase = 'leftover') AND cluster_id IN ({marks}) "
+            "ORDER BY started_at LIMIT 50", tuple(ids)) or []]
     except Exception as e:
         logging.debug(f"[VERIFY] leftovers unreadable: {e}")
         return 0
