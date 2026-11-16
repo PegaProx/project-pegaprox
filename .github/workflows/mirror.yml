@@ -1,0 +1,143 @@
+name: Update mirror
+
+# NS Nov 2026 - updates.pegaprox.com is a Bunny storage zone behind a pull zone. The
+# updater falls back to it when GitHub does not answer (version.json, archive/main.tar.gz,
+# single files), so it carries main. An hourly lftp cron on an outside box used to fill it;
+# this takes over. .github/scripts/mirror_to_bunny.py does the work, docs/update-mirror.md
+# says what is in the zone and how to check it.
+#
+# One privilege per job, like apt-repo.yml:
+#   build  no secret. Builds the tree and archive/main.tar.gz from the commit and signs
+#          build provenance for the archive. The same commit gives the same bytes, so an
+#          archive that already carries an attestation from this workflow on main is not
+#          signed again by every hourly run.
+#   sync   BUNNY_STORAGE_PASSWORD lives in the mirror environment, which only deploys from
+#          main. Builds the tree again, stops unless the archive is the one build attested,
+#          then syncs. A run whose commit is no longer the head of main (a re-run of an old
+#          one) leaves the zone alone.
+# A push to main syncs right away, the hourly run heals whatever a failed one left behind.
+# A manual run with dry_run lists what would change and writes nothing. A manual run from
+# any other branch only builds, which is how a change here is tried on Testing.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 * * * *'   # hourly, away from the :00 and :30 rush
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Only list what would change, write nothing'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# syncs queue behind each other and never cancel one that is uploading; a run from another
+# branch only waits for runs of its own branch
+concurrency:
+  group: mirror-${{ github.ref == 'refs/heads/main' && 'sync' || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'PegaProx/project-pegaprox'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write       # the signing certificate of the attestation
+      attestations: write   # store it with the repository, and look up an earlier one
+    outputs:
+      digest: ${{ steps.tree.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build the tree
+        id: tree
+        run: |
+          set -euo pipefail
+          python3 -I .github/scripts/mirror_to_bunny.py --tree-only --out "$RUNNER_TEMP/mirror"
+          digest=$(sha256sum "$RUNNER_TEMP/mirror/archive/main.tar.gz" | cut -d' ' -f1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attested already?
+        id: seen
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh attestation verify "$RUNNER_TEMP/mirror/archive/main.tar.gz" -R "$GITHUB_REPOSITORY" \
+               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/mirror.yml" \
+               --source-ref refs/heads/main --deny-self-hosted-runners > /dev/null 2>&1; then
+            echo 'attested=true' >> "$GITHUB_OUTPUT"
+            echo 'this archive already has its attestation'
+          else
+            echo 'attested=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      # A downloaded archive checks with
+      #   gh attestation verify main.tar.gz -R PegaProx/project-pegaprox
+      - name: Sign build provenance for the archive
+        if: github.ref == 'refs/heads/main' && steps.seen.outputs.attested != 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/mirror/archive/main.tar.gz
+
+  sync:
+    needs: build
+    if: github.repository == 'PegaProx/project-pegaprox' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Only as safe as the environment's setup, done by hand (docs/update-mirror.md):
+    # BUNNY_STORAGE_PASSWORD must be a secret of this environment and never of the repo,
+    # and the environment must deploy from main only. Then a workflow file pushed to any
+    # other branch cannot read it, whatever its own if: says. The watchdog baseline lists
+    # the environment, so a missing or loosened rule raises an alarm.
+    environment:
+      name: mirror
+      url: https://updates.pegaprox.com
+    permissions:
+      contents: read
+    steps:
+      # a re-run of an old run would roll the mirror back to that run's commit
+      - name: Still the head of main?
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          head=$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)
+          if [ "$head" = "$GITHUB_SHA" ]; then
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+            echo "::notice::main is at ${head:0:12} now, not ${GITHUB_SHA:0:12}; the run of that commit syncs the mirror"
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: steps.head.outputs.current == 'true'
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # the checkout leaves refs/remotes/origin/main at this commit, and the script syncs
+      # nothing else
+      - name: Sync the storage zone
+        if: steps.head.outputs.current == 'true'
+        env:
+          BUNNY_STORAGE_PASSWORD: ${{ secrets.BUNNY_STORAGE_PASSWORD }}
+          ATTESTED_SHA256: ${{ needs.build.outputs.digest }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          : "${ATTESTED_SHA256:?the build job handed over no archive digest}"
+          args=(--expect-archive-sha256 "$ATTESTED_SHA256")
+          if [ "$DRY_RUN" = true ]; then
+            args+=(--dry-run)
+          fi
+          python3 -I .github/scripts/mirror_to_bunny.py "${args[@]}"

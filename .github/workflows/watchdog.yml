@@ -68,7 +68,7 @@ jobs:
         run: |
           if sha256sum --strict --quiet -c - <<'PINS'
           d8878610622cdfc0ad1bad91378e4d1fbbaf2da3ef14aba3a85b21d89220fa22  .github/scripts/watchdog.py
-          923460073469d8adef17dfc5204f709642667433a0738d45dbd1cdcdfce4421f  .github/watchdog/baseline.json
+          b30075bd9dc35ca81af59db22f92c9752fc2184a712930d9bf21854dbe837bc0  .github/watchdog/baseline.json
           PINS
           then
             echo 'tampered=false' >> "$GITHUB_OUTPUT"
@@ -116,7 +116,7 @@ jobs:
         run: |
           if sha256sum --strict --quiet -c - <<'PINS'
           d8878610622cdfc0ad1bad91378e4d1fbbaf2da3ef14aba3a85b21d89220fa22  .github/scripts/watchdog.py
-          923460073469d8adef17dfc5204f709642667433a0738d45dbd1cdcdfce4421f  .github/watchdog/baseline.json
+          b30075bd9dc35ca81af59db22f92c9752fc2184a712930d9bf21854dbe837bc0  .github/watchdog/baseline.json
           PINS
           then
             echo 'tampered=false' >> "$GITHUB_OUTPUT"
@@ -144,7 +144,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          publishers='apt-repo.yml docker-testing.yml docker.yml release-images.yml sbom.yml'
+          publishers='apt-repo.yml docker-testing.yml docker.yml mirror.yml release-images.yml sbom.yml'
           rc=0
           for wf in $publishers; do
             gh api --method PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$wf/disable" || rc=1

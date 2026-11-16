@@ -131,8 +131,9 @@ def test_triggers_and_inputs():
 
 
 # what makes a workflow a publisher: it can write releases, packages or Pages, or it holds a
-# key that pushes somewhere else
-_PUBLISHING = re.compile(r'\b(contents|packages|pages): write\b|DOCKERHUB_TOKEN|APT_GPG_PRIVATE_KEY')
+# key that pushes somewhere else (the update mirror's zone password, for one)
+_PUBLISHING = re.compile(r'\b(contents|packages|pages): write\b|DOCKERHUB_TOKEN|APT_GPG_PRIVATE_KEY'
+                         r'|BUNNY_STORAGE_PASSWORD')
 
 
 def test_every_workflow_is_sorted_and_the_sorting_matches_the_file():

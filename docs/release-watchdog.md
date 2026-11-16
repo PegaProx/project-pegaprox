@@ -31,7 +31,7 @@ between runs.
 | rulesets | one of the three rulesets is gone, not active, or its rules, conditions or bypass actors differ, or it was edited after the baseline was taken |
 | workflow-runs | a run of a workflow the baseline does not know; a publisher run started by someone outside the team, from another repository, or on a commit that is on neither `main` nor `Testing`; a run of a known workflow from a side branch that changed that workflow file |
 | update-manifest | `version.json` on `main`, on `Testing`, on updates.pegaprox.com or at any head `main` or `Testing` had in the window sends the updater to an archive or a mirror that is not ours, carries an unknown URL, or lists an odd path in `update_files` |
-| environments | `apt-signing` or `github-pages` deploys from anything but `main` and `v*`, or Pages no longer serves apt.pegaprox.com |
+| environments | `apt-signing` or `github-pages` deploys from anything but `main` and `v*`, `mirror` (the update mirror's zone password) from anything but `main`, one of them is gone, or Pages no longer serves apt.pegaprox.com |
 
 Runs of a fork's pull request are only noted: GitHub gives them a read-only token and no
 secrets, and anyone can open one, so they must not be able to freeze publishing.
@@ -51,7 +51,7 @@ data shaped to break a check does not switch it off.
 `watchdog.yml` pins the sha256 of `watchdog.py` and `baseline.json`. Any token that can push
 can change those two files; changing `watchdog.yml` needs the workflow scope. If the files
 on `main` do not match, the run does not start the script at all: the act job disables the
-five publishers from a list in `watchdog.yml` itself, cancels their runs and fails. On
+six publishers from a list in `watchdog.yml` itself, cancels their runs and fails. On
 `Testing` the pins check reports the mismatch.
 
 After changing either file, put the new sums into both "Pinned files" steps of
@@ -73,6 +73,8 @@ scheduled run.
    - `apt-repo.yml` signs and deploys apt.pegaprox.com and attaches the .deb
    - `docker-testing.yml` pushes ghcr.io/pegaprox/pegaprox-testing on every Testing push
    - `docker.yml` pushes the release images to ghcr.io and Docker Hub
+   - `mirror.yml` syncs `main` to the storage zone behind updates.pegaprox.com
+     (docs/update-mirror.md)
    - `release-images.yml` attaches the VM and LXC images to the release
    - `sbom.yml` attaches the SBOM to the release
 
@@ -109,7 +111,7 @@ green and the window is back to 40 minutes. When no scheduled run happened at al
 than three days, the first run afterwards fails once for that gap.
 
 If the watchdog itself is broken: disable "Release watchdog" in the Actions tab and enable
-the five workflows above by hand.
+the six workflows above by hand.
 
 ## Releasing
 
@@ -156,8 +158,9 @@ Locally, report-only: `GITHUB_TOKEN=$(gh auth token) python3 .github/scripts/wat
 - A leaked token of a team member looks like that team member. The watchdog sees who
   pushed, not whether it was really them, and the author of a commit is whatever the pusher
   wrote into it.
-- It comes after the fact. `apt-repo.yml` (about 2 minutes), `sbom.yml` (1) and
-  `docker-testing.yml` (5 to 10) finish before the next run can freeze them. Scheduled runs
+- It comes after the fact. `apt-repo.yml` (about 2 minutes), `sbom.yml` (1),
+  `mirror.yml` (a few minutes after a push to `main`) and `docker-testing.yml` (5 to 10)
+  finish before the next run can freeze them. Scheduled runs
   start late when GitHub is busy (a weekly cron of this repository started up to 8 hours
   late in October), and GitHub switches off schedules in a public repository after 60
   days without activity. The next run covers the time back to the last successful one, so
@@ -175,8 +178,11 @@ Locally, report-only: `GITHUB_TOKEN=$(gh auth token) python3 .github/scripts/wat
 - Deleting the run history of the watchdog makes the next run look like the first one, with
   the standard window.
 - A freeze stops the next publication. Images, packages and release files already out stay
-  out. The update mirror updates.pegaprox.com follows `main` by itself and is not frozen;
-  the watchdog only checks that its `version.json` points at our archive.
+  out, the files on updates.pegaprox.com too: a freeze stops `mirror.yml` from syncing
+  again, it does not take back what it synced. Of the mirror the watchdog checks that its
+  `version.json` points at our archive and that the `mirror` environment deploys from
+  `main` only. A repository secret named `BUNNY_STORAGE_PASSWORD` it cannot see
+  (docs/update-mirror.md).
 
 What would close most of these, outside this repository's files: a ruleset on `main` that
 restricts updates to the admin, a `creation` rule on the tag ruleset with only the admin
