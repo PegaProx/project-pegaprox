@@ -10409,6 +10409,10 @@
             const [joinSite, setJoinSite] = useState('');
             const [passwords, setPasswords] = useState({ code: '', join: '', confirm: '' });
             const [fedClusters, setFedClusters] = useState(null);
+            // LW Nov 2026 - a failed read of the leases or the linked view says so: an old
+            // answer is not shown as if it were current
+            const [leasesError, setLeasesError] = useState('');
+            const [fedClustersError, setFedClustersError] = useState('');
             const [confirmBox, setConfirmBox] = useState(null); // {kind, id, name, mirrored}
             const [typed, setTyped] = useState('');
             const [force, setForce] = useState(false);
@@ -10450,11 +10454,13 @@
             }
             async function refreshLeases() {
                 const r = await fedSend('GET', 'leases', null, t('fedLoadFailed'));
-                if (r.ok) setLeases(r.data);
+                if (r.ok) { setLeases(r.data); setLeasesError(''); }
+                else if (r.code !== 'AUTH') { setLeases(null); setLeasesError(r.error); }
             }
             async function refreshFedClusters() {
-                const r = await fedSend('GET', 'clusters', null, '');
-                if (r.ok) setFedClusters(r.data);
+                const r = await fedSend('GET', 'clusters', null, t('fedLoadFailed'));
+                if (r.ok) { setFedClusters(r.data); setFedClustersError(''); }
+                else if (r.code !== 'AUTH') { setFedClusters(null); setFedClustersError(r.error); }
             }
             // the tenants and roles the accounts of the other sites name, and what they map
             // onto here; a server without the route keeps the card away
@@ -10535,9 +10541,10 @@
             const own = Object.entries(enrolled).filter(([, v]) => v.owner === me);
             const shadows = Object.entries(enrolled).filter(([, v]) => v.owner && v.owner !== me);
             const enrolledIds = new Set(Object.keys(enrolled));
-            // only a Proxmox VE cluster can be enrolled: its writes are the ones a lease fences
-            const unenrolled = (clusters || []).filter(c => c && c.id && !enrolledIds.has(c.id)
-                && (c.cluster_type || 'proxmox') === 'proxmox');
+            // only a Proxmox VE cluster can be enrolled: its writes are the ones a lease fences.
+            // Without a leases answer nobody knows which ones are enrolled already
+            const unenrolled = leases ? (clusters || []).filter(c => c && c.id && !enrolledIds.has(c.id)
+                && (c.cluster_type || 'proxmox') === 'proxmox') : [];
             const needle = filter.trim().toLowerCase();
             const listed = needle
                 ? unenrolled.filter(c => `${c.id} ${c.name || ''} ${c.display_name || ''}`.toLowerCase().includes(needle))
@@ -10560,7 +10567,7 @@
                     setAskOn(false);
                     addToast(value ? t('fedSwitchedOn') : t('fedSwitchedOff'), 'success');
                     setStatus(s => ({ ...(s || {}), ...r.data }));
-                    if (!value) { setLeases(null); setFedClusters(null); setIdMap(null); setCode(null); }
+                    if (!value) { setLeases(null); setFedClusters(null); setIdMap(null); setCode(null); setLeasesError(''); setFedClustersError(''); }
                     const s = await refreshStatus();
                     if (s && s.enabled === true) refreshRunning();
                     return;
@@ -10844,7 +10851,8 @@
                 <div className={HA_GROUP_CARD} data-fed-own-leases>
                     <h4 className="font-medium text-white flex items-center gap-2"><Icons.Shield className="w-4 h-4 text-proxmox-orange" />{t('fedLeasesTitle')}</h4>
                     <p className="text-sm text-gray-400">{t('fedLeasesDesc')}</p>
-                    {own.length === 0 && <p className="text-sm text-gray-500">{t('fedNoLeases')}</p>}
+                    {leasesError && <p className="text-sm text-red-400" data-fed-leases-error>{leasesError}</p>}
+                    {own.length === 0 && !leasesError && <p className="text-sm text-gray-500">{t('fedNoLeases')}</p>}
                     {own.length > 0 && (
                         <div className="overflow-x-auto">
                             <table className="w-full text-sm">
@@ -11109,7 +11117,9 @@
                             <div className={HA_GROUP_CARD} data-fed-clusters>
                                 <h4 className="font-medium text-white flex items-center gap-2"><Icons.Globe className="w-4 h-4 text-proxmox-orange" />{t('fedAllClustersTitle')}</h4>
                                 <p className="text-sm text-gray-400">{t('fedAllClustersDesc')}</p>
-                                {!fedClusters && <p className="text-sm text-gray-500">{t('fedWorking')}</p>}
+                                {!fedClusters && (fedClustersError
+                                    ? <p className="text-sm text-red-400" data-fed-clusters-error>{fedClustersError}</p>
+                                    : <p className="text-sm text-gray-500">{t('fedWorking')}</p>)}
                                 {fedClusters && (
                                     <div className="overflow-x-auto">
                                         <table className="w-full text-sm">
@@ -11146,9 +11156,10 @@
                                                     const more = Number.isInteger(p.total) ? p.total - rows.length : 0;
                                                     return (
                                                         <React.Fragment key={pid}>
-                                                            {rows.map(c => (
-                                                                <tr key={pid + '-' + c.id} className="border-b border-proxmox-border/50" data-fed-peer-cluster={c.id}>
-                                                                    <td className="py-2 pr-3"><code className="text-xs">{c.id}</code> <span className="text-gray-400">{c.name}</span></td>
+                                                            {/* LW Nov 2026 - a site names the id of a cluster once it is enrolled, so the others cannot claim it first */}
+                                                            {rows.map((c, i) => (
+                                                                <tr key={pid + '-' + (c.id || 'n' + i)} className="border-b border-proxmox-border/50" data-fed-peer-cluster={c.id || ''}>
+                                                                    <td className="py-2 pr-3">{c.id && <code className="text-xs">{c.id}</code>} <span className="text-gray-400">{c.name}</span></td>
                                                                     <td className="py-2 pr-3">{site}</td>
                                                                     <td className="py-2 pr-3 text-gray-400">{count(c, 'nodes')}</td>
                                                                     <td className="py-2 pr-3 text-gray-400">{count(c, 'vms')}</td>
@@ -11204,7 +11215,8 @@
                                     <h4 className="font-medium text-white flex items-center gap-2"><Icons.Server className="w-4 h-4 text-proxmox-orange" />{t('fedUnenrolledTitle')} <span className="text-xs text-gray-500">({unenrolled.length})</span></h4>
                                     <p className="text-sm text-gray-400">{t('fedUnenrolledDesc')}</p>
                                     {!enoughSites && <p className="text-sm text-yellow-300" data-fed-enroll-sites>{t('fedEnrollNeedsSites')}</p>}
-                                    {unenrolled.length > FED_FILTER_FROM && (
+                                    {/* kept while a filter is typed: it applies after a refresh as well */}
+                                    {(unenrolled.length > FED_FILTER_FROM || needle) && (
                                         <div className="relative">
                                             <Icons.Search className="w-3.5 h-3.5 text-gray-500 absolute left-3 top-1/2 -translate-y-1/2" />
                                             <input value={filter} onChange={e => setFilter(e.target.value)} placeholder={t('fedFilter')} aria-label={t('fedFilter')}
