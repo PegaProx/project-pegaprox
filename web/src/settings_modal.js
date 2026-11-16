@@ -10385,7 +10385,7 @@
         // only while the federation runs, because an off server answers every other
         // federation route with 404. The panel polls the status (switch, who is here,
         // who answers) and, while on, the leases.
-        const FED_MIN_SITES_TO_ENROLL = 3;   // federation_lease.MIN_SITES_TO_ENROLL
+        const FED_MIN_SITES_TO_ENROLL = 2;   // federation_lease.MIN_SITES_TO_ENROLL
         const FED_FILTER_FROM = 12;          // more local clusters than this get a filter
 
         function fedFill(text, vars) {
@@ -10417,13 +10417,20 @@
             const [typed, setTyped] = useState('');
             const [force, setForce] = useState(false);
             const [forceOffered, setForceOffered] = useState(false); // the server named force as the way out
+            const [ownerDown, setOwnerDown] = useState(false);       // the tick of a manual takeover
+            const [gone, setGone] = useState(false);                 // remove the other site of two as gone for good
+            const [dropOk, setDropOk] = useState(false);             // ... and drop the copies not taken over
             const [askOn, setAskOn] = useState(false);               // the confirm step before switching on
+            const [askOff, setAskOff] = useState(false);             // switching off once more after a removal as gone
             const [switchError, setSwitchError] = useState('');      // why the server refused the switch
             const [rotate, setRotate] = useState(null);              // {kind, site, clusters} after a remove or leave
             const [filter, setFilter] = useState('');
             const [idMap, setIdMap] = useState(null);                // the identity-map answer, null until read
             const [mapPick, setMapPick] = useState({});              // what each unmapped row is about to map onto
             const prefilled = useRef(false);
+            // a newer read of the leases or the linked view wins: an older answer that lands
+            // after it would bring back the list it replaced, or take away its error
+            const reads = useRef({ leases: 0, view: 0 });
 
             async function fedSend(method, path, body, fallback) {
                 let r;
@@ -10441,7 +10448,7 @@
                 const data = await r.json().catch(() => null);
                 if (!r.ok) {
                     if (r.status === 401) { logout(); return { ok: false, error: fallback, code: 'AUTH' }; }
-                    return { ok: false, status: r.status, error: (data && data.error) || fallback, code: (data && data.code) || '' };
+                    return { ok: false, status: r.status, error: (data && data.error) || fallback, code: (data && data.code) || '', data: data || {} };
                 }
                 return { ok: true, data: data || {} };
             }
@@ -10453,12 +10460,16 @@
                 return null;
             }
             async function refreshLeases() {
+                const seq = ++reads.current.leases;
                 const r = await fedSend('GET', 'leases', null, t('fedLoadFailed'));
+                if (seq !== reads.current.leases) return;
                 if (r.ok) { setLeases(r.data); setLeasesError(''); }
                 else if (r.code !== 'AUTH') { setLeases(null); setLeasesError(r.error); }
             }
             async function refreshFedClusters() {
+                const seq = ++reads.current.view;
                 const r = await fedSend('GET', 'clusters', null, t('fedLoadFailed'));
+                if (seq !== reads.current.view) return;
                 if (r.ok) { setFedClusters(r.data); setFedClustersError(''); }
                 else if (r.code !== 'AUTH') { setFedClusters(null); setFedClustersError(r.error); }
             }
@@ -10504,12 +10515,13 @@
                 poll();
                 return () => { alive = false; clearTimeout(timer); };
             }, []);
-            // the second tick drives the pairing-code countdown alone
+            // the second tick drives the pairing-code countdown and the wait of a manual takeover
+            const waitUntil = (confirmBox && confirmBox.waitUntil) || 0;
             useEffect(() => {
-                if (!code) return;
+                if (!code && !waitUntil) return;
                 const tick = setInterval(() => setNow(Date.now()), 1000);
                 return () => clearInterval(tick);
-            }, [code]);
+            }, [code, waitUntil]);
             // a running instance knows its own address and label once it has paired or
             // made a code: the forms start from them instead of empty
             useEffect(() => {
@@ -10535,9 +10547,17 @@
             const maxSites = (status && Number.isInteger(status.max_sites) && status.max_sites > 1) ? status.max_sites : 8;
             const canPairMore = members.length + 1 < maxSites;
             const enoughSites = members.length + 1 >= FED_MIN_SITES_TO_ENROLL;
+            // LW Nov 2026 - one of two is no majority: the owner writes alone while the other
+            // site is silent, and that site takes a cluster over only by hand. Three or more
+            // sites see none of it
+            const twoSites = joined && members.length === 1;
+            const otherSite = twoSites ? (members[0].site || String(members[0].instance_id || '').slice(0, 8)) : '';
+            const silent = (m) => !!m && m.reachable === false && !m.removed_us;
+            const untoldWarn = on && Array.isArray(status.disable_warnings) && status.disable_warnings.includes('ended_untold');
             const enrolled = (leases && leases.enrolled) || {};
             const myLeases = (leases && leases.leases) || {};
             const holdLeft = (leases && Number.isInteger(leases.hold_s)) ? leases.hold_s : 0;
+            const steppedDown = (leases && leases.stepped_down) || {};
             const own = Object.entries(enrolled).filter(([, v]) => v.owner === me);
             const shadows = Object.entries(enrolled).filter(([, v]) => v.owner && v.owner !== me);
             const enrolledIds = new Set(Object.keys(enrolled));
@@ -10556,23 +10576,27 @@
             };
             const openCode = (!code && status && status.pairing_open && Number.isFinite(status.pairing_open.expires_at))
                 ? status.pairing_open : null;
+            const clock = (sec) => new Date(sec * 1000).toLocaleString();
 
             // ---- the switch: on after a confirm step, off at once unless the server
             // refuses it (still a member, a lease, mirrors - leave the federation first)
-            async function flip(value) {
+            // after a removal as gone for good the server asks once more while that site was
+            // never told: switched off, this instance can no longer tell it
+            async function flip(value, untoldOk) {
                 setBusy('switch'); setSwitchError('');
-                const r = await fedSend('POST', 'switch', { enabled: value }, t('fedActionFailed'));
+                const r = await fedSend('POST', 'switch', { enabled: value, ...(untoldOk ? { untold_ok: true } : {}) }, t('fedActionFailed'));
                 setBusy('');
                 if (r.ok) {
-                    setAskOn(false);
+                    setAskOn(false); setAskOff(false);
                     addToast(value ? t('fedSwitchedOn') : t('fedSwitchedOff'), 'success');
                     setStatus(s => ({ ...(s || {}), ...r.data }));
-                    if (!value) { setLeases(null); setFedClusters(null); setIdMap(null); setCode(null); setLeasesError(''); setFedClustersError(''); }
+                    if (!value) { reads.current.leases++; reads.current.view++; setLeases(null); setFedClusters(null); setIdMap(null); setCode(null); setLeasesError(''); setFedClustersError(''); }
                     const s = await refreshStatus();
                     if (s && s.enabled === true) refreshRunning();
                     return;
                 }
-                if (r.code !== 'AUTH') { setSwitchError(r.error); addToast(r.error, 'error'); }
+                if (r.code === 'FED_ENDED_UNTOLD') setAskOff(true);
+                else if (r.code !== 'AUTH') { setSwitchError(r.error); addToast(r.error, 'error'); }
                 refreshStatus();
             }
 
@@ -10599,22 +10623,38 @@
 
             function askConfirm(kind, id, name, extra) {
                 setTyped(''); setForce(false); setForceOffered(false);
+                setOwnerDown(false); setGone(false); setDropOk(false);
                 setPasswords(p => ({ ...p, confirm: '' }));
                 setConfirmBox({ kind, id, name, ...(extra || {}) });
+            }
+
+            // the takeover box reads when the owner was last heard and how long the server
+            // still refuses, from the status the panel has
+            function askTakeover(kind, id, name, owner) {
+                const m = members.find(x => x.instance_id === owner) || {};
+                const wait = Number.isInteger(m.takeover_in_s) ? m.takeover_in_s : 0;
+                const at = Date.now();
+                setNow(at);
+                askConfirm(kind, id, name, { owner, site: siteOf(owner), lastHeard: m.last_heard || 0,
+                    waitUntil: wait > 0 ? at + wait * 1000 : 0 });
             }
 
             const confirmTitles = {
                 remove: t('fedRemoveTitle'), leave: t('fedLeaveTitle'),
                 release: t('fedReleaseTitle'), unenroll: t('fedUnenrollTitle'),
                 adopt: t('fedAdoptTitle'), enroll: t('fedEnrollTitle'),
+                takeover: t('fedTakeoverTitle'), takeoverAll: t('fedTakeoverAllTitle'),
             };
             // a mapping asks for the password alone, no word: it is undone with one click
-            const confirmWords = { remove: 'REMOVE', leave: 'LEAVE', release: 'RELEASE', unenroll: 'UNENROLL', adopt: 'ADOPT', enroll: 'ENROLL', map: null };
+            const confirmWords = { remove: 'REMOVE', leave: 'LEAVE', release: 'RELEASE', unenroll: 'UNENROLL', adopt: 'ADOPT', enroll: 'ENROLL', takeover: 'TAKEOVER', takeoverAll: 'TAKEOVER', map: null };
             const confirmNotes = {
                 remove: t('fedRemoveNote'), leave: t('fedLeaveNote'),
                 release: t('fedReleaseNote'), unenroll: t('fedUnenrollNote'),
                 adopt: t('fedAdoptNote'), enroll: t('fedEnrollNote'),
+                takeover: t('fedTakeoverNote'), takeoverAll: t('fedTakeoverNote'),
             };
+            const takeoverBox = !!confirmBox && (confirmBox.kind === 'takeover' || confirmBox.kind === 'takeoverAll');
+            const waitLeft = waitUntil ? Math.max(0, Math.ceil((waitUntil - now) / 1000)) : 0;
             const forceNotes = { leave: t('fedForceLeave'), unenroll: t('fedForceUnenroll') };
 
             function notTold(d) {
@@ -10627,13 +10667,44 @@
                 if (askPw && !passwords.confirm) return;
                 const pw = askPw ? { user_password: passwords.confirm } : {};
                 if (c.kind === 'remove') {
-                    await act('remove', `members/${c.id}/remove`, { confirm: 'REMOVE', ...pw }, t('fedRemoved'), (d) => {
+                    // gone for good: the other site of two is out without its word
+                    const goneFor = c.goneOffered && gone ? { gone: true, ...(dropOk ? { drop_clusters: true } : {}) } : {};
+                    const r = await act('remove', `members/${c.id}/remove`, { confirm: 'REMOVE', ...goneFor, ...pw }, goneFor.gone ? t('fedRemovedAlone') : t('fedRemoved'), (d) => {
+                        if (d.gone) { setRotate(null); return null; }
                         // the copies of our enrolled clusters it already holds stay readable there
                         const held = (d.remedy && Array.isArray(d.remedy.enrolled_here)) ? d.remedy.enrolled_here : [];
                         setRotate(held.length ? { kind: 'remove', site: c.name, clusters: held } : null);
                         const missed = notTold(d);
                         return missed ? { kind: 'warning', text: fedFill(t('fedRemovedLocalOnly'), { count: missed }) } : null;
                     });
+                    if (!r.ok && r.code === 'FED_GONE_CLUSTERS') {
+                        const ids = Array.isArray(r.data.clusters) ? r.data.clusters : [];
+                        setConfirmBox(b => b && ({ ...b, goneClusters: ids.map(id => (enrolled[id] && enrolled[id].name) || id) }));
+                    }
+                    return;
+                }
+                if (takeoverBox) {
+                    if (!ownerDown || waitLeft > 0) return;
+                    const all = c.kind === 'takeoverAll';
+                    const body = { confirm: 'TAKEOVER', owner_down: true, force: forceOffered && force, ...pw };
+                    const r = await act(c.kind, all ? `members/${c.owner}/takeover` : `clusters/${c.id}/takeover`, body, fedFill(t('fedTakenOver'), { site: c.site }), (d) => {
+                        const failed = Object.entries(d.failed || {});
+                        if (failed.length) {
+                            return { kind: 'warning', text: fedFill(t('fedTakenOverSome'), { taken: (d.taken || []).length, failed: failed.length,
+                                reasons: failed.map(([cid, f]) => `${cid}: ${(f && f.error) || (f && f.code) || ''}`).join('; ') }) };
+                        }
+                        const pending = all ? (d.taken || []).some(x => x.manager === false) : d.manager === false;
+                        return pending ? { kind: 'warning', text: t('fedAdoptedPending') } : null;
+                    });
+                    if (r.ok || r.code === 'AUTH') return;
+                    // the box stays with the server's sentence: the owner answers, was heard a
+                    // moment ago, or its field key is missing here
+                    const retry = Number.isInteger(r.data.retry_after) ? r.data.retry_after : 0;
+                    const at = Date.now();
+                    if (r.code === 'FED_NO_KEY') setForceOffered(true);
+                    setNow(at);
+                    setConfirmBox(b => b && ({ ...b, refused: r.error, ...(r.code === 'FED_OWNER_RECENT' && retry > 0 ? { waitUntil: at + retry * 1000 } : {}) }));
+                    if (r.code === 'FED_OWNER_ALIVE' || r.code === 'FED_OWNER_RECENT') refreshStatus();
                     return;
                 }
                 if (c.kind === 'leave') {
@@ -10644,6 +10715,12 @@
                         return missed ? { kind: 'warning', text: fedFill(t('fedLeftLocalOnly'), { count: missed }) } : null;
                     });
                     if (!r.ok && r.code === 'FED_LEAVE_BLOCKED') setForceOffered(true);
+                    // with two sites the other one did not answer: removing it as gone for
+                    // good keeps the clusters led here, leaving with force closes them
+                    if (!r.ok && r.code === 'FED_NO_QUORUM' && twoSites) {
+                        setForceOffered(true);
+                        setConfirmBox(b => b && ({ ...b, twoDown: true }));
+                    }
                     return;
                 }
                 if (c.kind === 'unenroll') {
@@ -10654,8 +10731,10 @@
                 }
                 if (c.kind === 'release') return void await act('release', `clusters/${c.id}/release`, { confirm: 'RELEASE', ...pw }, t('fedReleased'));
                 if (c.kind === 'adopt') {
-                    await act('adopt', `clusters/${c.id}/adopt`, { confirm: 'ADOPT', force: force, ...pw }, t('fedAdopted'),
+                    const r = await act('adopt', `clusters/${c.id}/adopt`, { confirm: 'ADOPT', force: force, ...pw }, t('fedAdopted'),
                         (d) => (d.manager === false ? { kind: 'warning', text: t('fedAdoptedPending') } : null));
+                    // the server found the owner silent: with two sites that is the takeover box
+                    if (!r.ok && r.code === 'FED_USE_TAKEOVER') askTakeover('takeover', c.id, c.name, r.data.owner || c.owner);
                     return;
                 }
                 if (c.kind === 'enroll') return void await act('enroll', `clusters/${c.id}/enroll`, { ...pw }, t('fedEnrolled'));
@@ -10690,8 +10769,8 @@
                             <p className="text-sm text-gray-400 mt-1">{t('fedSwitchDesc')}</p>
                         </div>
                         <button id="fed-switch" type="button" role="switch" aria-checked={on}
-                            onClick={() => { setSwitchError(''); if (on) flip(false); else setAskOn(true); }}
-                            disabled={flipDisabled || askOn}
+                            onClick={() => { setSwitchError(''); if (on && untoldWarn) setAskOff(true); else if (on) flip(false); else setAskOn(true); }}
+                            disabled={flipDisabled || askOn || askOff}
                             className={`toggle-switch flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${on ? 'active' : ''}`} />
                     </div>
                     <div className="flex items-start gap-2 text-xs text-yellow-300">
@@ -10704,6 +10783,20 @@
                         </p>
                     )}
                     {switchError && <p className="text-sm text-red-300" role="alert" data-fed-switch-error>{switchError}</p>}
+                    {(untoldWarn || askOff) && (
+                        <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl p-3 space-y-2" data-fed-switch-untold={askOff ? 'ask' : 'note'}>
+                            <p className="text-xs text-yellow-200 flex items-start gap-2"><Icons.AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" /><span>{t('fedSwitchEndedUntold')}</span></p>
+                            {askOff && (
+                                <div className="flex justify-end gap-2">
+                                    <button className={HA_GROUP_GHOST} disabled={!!busy} onClick={() => setAskOff(false)}>{t('cancel')}</button>
+                                    <button className={`${HA_GROUP_BTN} bg-red-600 hover:bg-red-700 text-white`} data-fed-switch-off-anyway
+                                        disabled={!!busy} onClick={() => flip(false, true)}>
+                                        <Icons.Power className="w-3.5 h-3.5" />{busy === 'switch' ? t('fedWorking') : t('fedSwitchOffAnyway')}
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    )}
                     {askOn && (
                         <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl p-3 space-y-2" data-fed-switch-confirm>
                             <div className="text-sm font-medium text-white">{t('fedSwitchConfirmTitle')}</div>
@@ -10781,21 +10874,53 @@
             // ---- the confirm box: one for every word-and-password action
             const box = confirmBox && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" data-fed-confirm={confirmBox.kind}>
-                    <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-5 w-full max-w-md space-y-4">
+                    {/* the takeover note is long: on a phone the box scrolls instead of leaving the screen */}
+                    <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-5 w-full max-w-md space-y-4 max-h-[90vh] overflow-y-auto">
                         <h4 className="font-medium text-white flex items-center gap-2">
-                            {confirmBox.kind === 'adopt' ? <Icons.LifeBuoy className="w-4 h-4 text-proxmox-orange" /> : <Icons.AlertTriangle className="w-4 h-4 text-yellow-400" />}
+                            {confirmBox.kind === 'adopt' || takeoverBox ? <Icons.LifeBuoy className="w-4 h-4 text-proxmox-orange" /> : <Icons.AlertTriangle className="w-4 h-4 text-yellow-400" />}
                             {confirmBox.kind === 'map'
                                 ? fedFill(t('fedMapConfirmTitle'), { site: confirmBox.site })
-                                : fedFill(confirmTitles[confirmBox.kind] || '', { name: confirmBox.name })}
+                                : fedFill(confirmTitles[confirmBox.kind] || '', { name: confirmBox.name, site: confirmBox.site || '' })}
                         </h4>
-                        <p className="text-sm text-gray-400">{confirmBox.kind === 'map'
+                        <p className={`text-sm ${takeoverBox ? 'text-yellow-200' : 'text-gray-400'}`}>{confirmBox.kind === 'map'
                             ? fedFill(t('fedMapConfirmNote'), { site: confirmBox.site, value: confirmBox.value, local: confirmBox.local })
-                            : (confirmNotes[confirmBox.kind] || '')}</p>
+                            : fedFill(confirmNotes[confirmBox.kind] || '', { site: confirmBox.site || '' })}</p>
                         {confirmBox.kind === 'remove' && confirmBox.mirrored > 0 && (
                             <p className="text-sm text-yellow-300" data-fed-remove-clusters>{fedFill(t('fedRemoveClusters'), { count: confirmBox.mirrored })}</p>
                         )}
-                        {confirmBox.kind === 'adopt' && (
-                            <label className="flex items-start gap-2 text-sm text-gray-400">
+                        {/* the other site of two does not answer: removed as gone for good, this site carries on alone */}
+                        {confirmBox.kind === 'remove' && confirmBox.goneOffered && (
+                            <label className="flex items-start gap-2 text-sm text-gray-300">
+                                <input type="checkbox" checked={gone} onChange={e => setGone(e.target.checked)} className="mt-1" data-fed-remove-gone />
+                                <span>{fedFill(t('fedRemoveGone'), { site: confirmBox.name })}</span>
+                            </label>
+                        )}
+                        {confirmBox.kind === 'remove' && gone && Array.isArray(confirmBox.goneClusters) && confirmBox.goneClusters.length > 0 && (
+                            <div className="space-y-2" data-fed-remove-gone-drop>
+                                <p className="text-sm text-yellow-300">{fedFill(t('fedRemoveGoneDrop'), { site: confirmBox.name, clusters: confirmBox.goneClusters.join(', ') })}</p>
+                                <label className="flex items-start gap-2 text-sm text-red-300">
+                                    <input type="checkbox" checked={dropOk} onChange={e => setDropOk(e.target.checked)} className="mt-1" data-fed-remove-drop />
+                                    <span>{t('fedRemoveGoneDropOk')}</span>
+                                </label>
+                            </div>
+                        )}
+                        {takeoverBox && (
+                            <>
+                                <p className="flex items-center gap-2 text-xs text-gray-400" data-fed-last-heard>
+                                    <Icons.Clock className="w-3.5 h-3.5 flex-shrink-0" />{confirmBox.lastHeard > 0
+                                        ? fedFill(t('fedTakeoverLastHeard'), { site: confirmBox.site, time: clock(confirmBox.lastHeard) })
+                                        : fedFill(t('fedTakeoverNeverHeard'), { site: confirmBox.site })}
+                                </p>
+                                {waitLeft > 0 && <p className="text-sm text-yellow-300" data-fed-takeover-wait>{fedFill(t('fedTakeoverWait'), { site: confirmBox.site, seconds: waitLeft })}</p>}
+                                <label className="flex items-start gap-2 text-sm text-white">
+                                    <input type="checkbox" checked={ownerDown} onChange={e => setOwnerDown(e.target.checked)} className="mt-1" data-fed-owner-down />
+                                    <span>{fedFill(t('fedTakeoverDown'), { site: confirmBox.site })}</span>
+                                </label>
+                            </>
+                        )}
+                        {/* a takeover by hand offers force only once the owner's field key turned out missing */}
+                        {(confirmBox.kind === 'adopt' || (takeoverBox && forceOffered)) && (
+                            <label className="flex items-start gap-2 text-sm text-gray-400" data-fed-force={takeoverBox ? confirmBox.kind : undefined}>
                                 <input type="checkbox" checked={force} onChange={e => setForce(e.target.checked)} className="mt-1" />
                                 <span>{t('fedAdoptForce')} <span className="text-red-400">{t('fedAdoptForceWarn')}</span></span>
                             </label>
@@ -10806,6 +10931,10 @@
                                 <span className="text-red-300">{forceNotes[confirmBox.kind]}</span>
                             </label>
                         )}
+                        {confirmBox.kind === 'leave' && confirmBox.twoDown && (
+                            <p className="text-sm text-yellow-300" data-fed-leave-two-down>{fedFill(t('fedLeaveTwoSitesHint'), { site: otherSite })}</p>
+                        )}
+                        {takeoverBox && confirmBox.refused && <p className="text-sm text-red-300" role="alert" data-fed-confirm-error>{confirmBox.refused}</p>}
                         {confirmWords[confirmBox.kind] && (
                             <div>
                                 <label className="block text-xs text-gray-400 mb-1" htmlFor="fed-confirm-word">{t('fedConfirmType')} <code className="text-yellow-300">{confirmWords[confirmBox.kind]}</code></label>
@@ -10823,24 +10952,42 @@
                         <div className="flex justify-end gap-2 pt-1">
                             <button className={HA_GROUP_GHOST} onClick={() => { setConfirmBox(null); setTyped(''); setForce(false); setForceOffered(false); setPasswords(p => ({ ...p, confirm: '' })); }} disabled={!!busy}>{t('cancel')}</button>
                             <button className={`${HA_GROUP_BTN} bg-proxmox-orange hover:bg-proxmox-orange/90 text-white`} data-fed-confirm-go
-                                onClick={runConfirm} disabled={!!busy || (!!confirmWords[confirmBox.kind] && typed !== confirmWords[confirmBox.kind]) || (askPw && !passwords.confirm)}>
-                                {busy ? t('fedWorking') : (confirmBox.kind === 'adopt' ? t('fedAdoptGo') : t('confirm'))}
+                                onClick={runConfirm} disabled={!!busy || (!!confirmWords[confirmBox.kind] && typed !== confirmWords[confirmBox.kind]) || (askPw && !passwords.confirm)
+                                    || (takeoverBox && (!ownerDown || waitLeft > 0))}>
+                                {busy ? t('fedWorking') : (confirmBox.kind === 'adopt' ? t('fedAdoptGo') : takeoverBox ? t('fedTakeoverGo') : t('confirm'))}
                             </button>
                         </div>
                     </div>
                 </div>
             );
 
+            // a cluster taken over here by hand says when, and whether its old owner stopped
+            // writing to it yet
+            const takenLine = (l) => {
+                const tk = l.takeover;
+                if (!tk || !tk.at) return null;
+                const site = siteOf(tk.from);
+                return tk.confirmed_at
+                    ? <div className="text-xs text-gray-400 mt-1" data-fed-takeover-state="done">{fedFill(t('fedTakeoverDone'), { site, time: clock(tk.at), stopped: clock(tk.confirmed_at) })}</div>
+                    : <div className="text-xs text-yellow-300 mt-1" data-fed-takeover-state="pending">{fedFill(t('fedTakeoverPending'), { site, time: clock(tk.at) })}</div>;
+            };
             const leaseCell = (cid) => {
                 const l = myLeases[cid] || {};
-                if (l.held) {
-                    return <span className="inline-flex items-center gap-1.5 text-green-400"><span className="w-2 h-2 rounded-full bg-green-500"></span>
+                let state;
+                if (l.held && l.alone) {
+                    // one of two: the other site gives no answer, the owner holds on its own vote
+                    state = <span className="inline-flex items-center gap-1.5 text-yellow-300" data-fed-lease-alone={cid}><span className="w-2 h-2 rounded-full bg-yellow-500"></span>
+                        {fedFill(t('fedLeaseAlone'), { site: otherSite || '-', seconds: l.remaining_s || 0 })}</span>;
+                } else if (l.held) {
+                    state = <span className="inline-flex items-center gap-1.5 text-green-400"><span className="w-2 h-2 rounded-full bg-green-500"></span>
                         {fedFill(t('fedLeaseHeld'), { votes: l.votes || 0, needed: l.needed || 0, seconds: l.remaining_s || 0 })}</span>;
+                } else {
+                    const text = l.released ? t('fedLeaseReleased')
+                        : l.lost_to ? fedFill(t('fedLeaseLost'), { site: siteOf(l.lost_to) })
+                        : t('fedLeaseNone');
+                    state = <span className="inline-flex items-center gap-1.5 text-red-400"><span className="w-2 h-2 rounded-full bg-red-500"></span>{text}</span>;
                 }
-                const text = l.released ? t('fedLeaseReleased')
-                    : l.lost_to ? fedFill(t('fedLeaseLost'), { site: siteOf(l.lost_to) })
-                    : t('fedLeaseNone');
-                return <span className="inline-flex items-center gap-1.5 text-red-400"><span className="w-2 h-2 rounded-full bg-red-500"></span>{text}</span>;
+                return <>{state}{takenLine(l)}</>;
             };
             const count = (c, field) => (c.connected === false ? <span className="text-gray-500">{t('disconnected')}</span> : (c[field] ?? '-'));
 
@@ -10866,9 +11013,10 @@
                                             <td className="py-2 pr-3">{leaseCell(cid)}</td>
                                             <td className="py-2 text-right">
                                                 <div className="flex gap-3 justify-end">
-                                                    <button className="text-xs text-gray-400 hover:text-white" disabled={!!busy} data-fed-renew={cid}
+                                                    <button className="text-xs text-gray-400 hover:text-white disabled:opacity-50" disabled={!!busy || !localOk} data-fed-renew={cid}
                                                         onClick={() => act('renew-' + cid, `clusters/${cid}/renew`, {}, t('fedRenewed'), (d) => {
                                                             // a 200 is no renewal by itself: renewed false means the gate is shut
+                                                            if (d.renewed === true && d.alone) return { kind: 'info', text: fedFill(t('fedRenewedAlone'), { site: otherSite || '-' }) };
                                                             if (d.renewed === true) return null;
                                                             if (d.released) return { kind: 'info', text: t('fedRenewReleased') };
                                                             if (d.lost_to) return { kind: 'error', text: fedFill(t('fedRenewLost'), { site: siteOf(d.lost_to) }) };
@@ -10971,9 +11119,12 @@
                             <Icons.Lock className="w-4 h-4 mt-0.5 flex-shrink-0" /><span>{t('fedLocalAccountOnly')}</span>
                         </div>
                     )}
-                    {on && status.removed && Number.isFinite(status.removed.at) && (
-                        <div className="text-sm text-yellow-300" data-fed-was-removed>{fedFill(t('fedWasRemoved'), { time: new Date(status.removed.at * 1000).toLocaleString() })}</div>
-                    )}
+                    {on && status.removed && Number.isFinite(status.removed.at) && (status.removed.ended
+                        // the other site of two carried on alone and told this one so
+                        ? <div className="text-sm text-yellow-300" data-fed-ended-by-other>{fedFill(t('fedEndedByOther'), {
+                            site: status.removed.site || String(status.removed.by || '').slice(0, 8), time: clock(status.removed.at),
+                            clusters: (Array.isArray(status.removed.clusters) && status.removed.clusters.join(', ')) || '-' })}</div>
+                        : <div className="text-sm text-yellow-300" data-fed-was-removed>{fedFill(t('fedWasRemoved'), { time: new Date(status.removed.at * 1000).toLocaleString() })}</div>)}
                     {on && status.view_conflict === true && (
                         <div className="text-sm text-yellow-300" data-fed-view-conflict>{t('fedViewConflict')}</div>
                     )}
@@ -11020,7 +11171,7 @@
                         </div>
                     )}
 
-                    {on && !joined && own.length > 0 && ownCard}
+                    {on && !joined && (own.length > 0 || !!leasesError) && ownCard}
 
                     {on && joined && (
                         <>
@@ -11032,7 +11183,7 @@
                                     <code className="text-xs text-gray-400">ID {String(status.instance_id || '').slice(0, 8)}…</code>
                                     <span className="text-xs text-gray-500" data-fed-max-sites>{fedFill(t('fedMaxMembers'), { max: maxSites })}</span>
                                     <span className="flex-1"></span>
-                                    <button className={HA_GROUP_GHOST} data-fed-sync disabled={!!busy} onClick={() => act('sync', 'sync', {}, t('fedSynced'), (d) => {
+                                    <button className={HA_GROUP_GHOST} data-fed-sync disabled={!!busy || !localOk} onClick={() => act('sync', 'sync', {}, t('fedSynced'), (d) => {
                                         // the answer says per member what the pull found:
                                         // one that stayed away, or a round with nothing new
                                         const rows = Object.values(d.members || {}).map(x => x || {});
@@ -11049,6 +11200,16 @@
                                 </div>
                                 {holdLeft > 0 && <p className="text-xs text-yellow-300" data-fed-hold>{fedFill(t('fedHold'), { seconds: holdLeft })}</p>}
                             </div>
+
+                            {/* two sites: what a federation of two does, and the risk of a takeover by hand */}
+                            {twoSites && (
+                                <div className={HA_GROUP_CARD} data-fed-two-sites>
+                                    <h4 className="font-medium text-white flex items-center gap-2"><Icons.AlertTriangle className="w-4 h-4 text-yellow-400" />{t('fedTwoTitle')}</h4>
+                                    <p className="text-sm text-gray-400">{t('fedTwoDesc')}</p>
+                                    <p className="text-sm text-yellow-300">{t('fedTwoRisk')}</p>
+                                    <p className="text-xs text-gray-400">{t('fedTwoLocalAdmin')}</p>
+                                </div>
+                            )}
 
                             {/* members */}
                             <div className={HA_GROUP_CARD} data-fed-members>
@@ -11075,7 +11236,10 @@
                                                         ? <span className="inline-flex items-center gap-1.5 text-red-400" data-fed-removed-us><Icons.AlertTriangle className="w-3 h-3" />{t('fedRemovedUs')}</span>
                                                         : m.reachable
                                                             ? <span className="inline-flex items-center gap-1.5 text-green-400"><span className="w-2 h-2 rounded-full bg-green-500"></span>{t('fedOnline')}</span>
-                                                            : <span className="inline-flex items-center gap-1.5 text-red-400"><Icons.WifiOff className="w-3 h-3" />{t('fedOffline')}</span>}</td>
+                                                            : <span className="inline-flex items-center gap-1.5 text-red-400"><Icons.WifiOff className="w-3 h-3" />{t('fedOffline')}</span>}
+                                                        {silent(m) && m.last_heard > 0 && (
+                                                            <div className="text-xs text-gray-500" data-fed-offline-since={m.instance_id.slice(0, 8)}>{fedFill(t('fedOfflineSince'), { time: clock(m.last_heard) })}</div>
+                                                        )}</td>
                                                     <td className="py-2 pr-3 text-gray-400">
                                                         {m.identity_sync ? fedFill(t('fedIdSyncAt'), { rows: m.identity_sync.rows || 0 }) : '-'}
                                                         {Number.isInteger(m.unmapped) && m.unmapped > 0 && (
@@ -11086,8 +11250,15 @@
                                                         )}
                                                     </td>
                                                     <td className="py-2 text-right">
-                                                        <button className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50" data-fed-remove={m.instance_id.slice(0, 8)}
-                                                            disabled={!!busy || !localOk} onClick={() => askConfirm('remove', m.instance_id, m.site || m.instance_id.slice(0, 8), { mirrored: Number.isInteger(m.mirrored_clusters) ? m.mirrored_clusters : 0 })}>{t('fedRemove')}</button>
+                                                        <div className="flex gap-3 justify-end">
+                                                            {twoSites && silent(m) && m.mirrored_clusters > 0 && (
+                                                                <button className="text-xs text-proxmox-orange hover:text-orange-300 disabled:opacity-50 whitespace-nowrap" data-fed-takeover-all={m.instance_id.slice(0, 8)}
+                                                                    disabled={!!busy || !localOk} onClick={() => askTakeover('takeoverAll', m.instance_id, m.site || m.instance_id.slice(0, 8), m.instance_id)}>
+                                                                    {fedFill(t('fedTakeoverAll'), { count: m.mirrored_clusters })}</button>
+                                                            )}
+                                                            <button className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50" data-fed-remove={m.instance_id.slice(0, 8)}
+                                                                disabled={!!busy || !localOk} onClick={() => askConfirm('remove', m.instance_id, m.site || m.instance_id.slice(0, 8), { mirrored: Number.isInteger(m.mirrored_clusters) ? m.mirrored_clusters : 0, goneOffered: twoSites && silent(m) })}>{t('fedRemove')}</button>
+                                                        </div>
                                                     </td>
                                                 </tr>
                                             ))}
@@ -11193,19 +11364,32 @@
                                                 <th className="py-2 pr-3">{t('fedCluster')}</th><th className="py-2 pr-3">{t('fedShadowOf')}</th><th className="py-2 text-right">{t('actions')}</th>
                                             </tr></thead>
                                             <tbody>
-                                                {shadows.map(([cid, info]) => (
-                                                    <tr key={cid} className="border-b border-proxmox-border/50" data-fed-shadow={cid}>
-                                                        <td className="py-2 pr-3"><code className="text-xs">{cid}</code> <span className="text-gray-400">{info.name}</span></td>
-                                                        <td className="py-2 pr-3 text-gray-400">{siteOf(info.owner)}</td>
-                                                        <td className="py-2 text-right">
-                                                            <button className="text-xs text-proxmox-orange hover:text-orange-300 disabled:opacity-50" disabled={!!busy || !localOk} data-fed-adopt={cid}
-                                                                onClick={() => askConfirm('adopt', cid, info.name || cid)}>{t('fedAdopt')}</button>
-                                                        </td>
-                                                    </tr>
-                                                ))}
+                                                {shadows.map(([cid, info]) => {
+                                                    // with two sites a silent owner's cluster moves only by hand
+                                                    const byHand = twoSites && silent(members.find(m => m.instance_id === info.owner));
+                                                    const down = steppedDown[cid] && steppedDown[cid].kind === 'takeover' ? steppedDown[cid] : null;
+                                                    return (
+                                                        <tr key={cid} className="border-b border-proxmox-border/50" data-fed-shadow={cid}>
+                                                            <td className="py-2 pr-3"><code className="text-xs">{cid}</code> <span className="text-gray-400">{info.name}</span>
+                                                                {down && (
+                                                                    <div className="text-xs text-yellow-300 mt-1" data-fed-stepped-down={cid}>{fedFill(t('fedSteppedDown'), {
+                                                                        site: siteOf(down.owner), time: clock(down.at), stopped: clock(down.stopped_at) })}</div>
+                                                                )}</td>
+                                                            <td className="py-2 pr-3 text-gray-400">{siteOf(info.owner)}</td>
+                                                            <td className="py-2 text-right">
+                                                                {byHand
+                                                                    ? <button className="text-xs text-proxmox-orange hover:text-orange-300 disabled:opacity-50 whitespace-nowrap" disabled={!!busy || !localOk} data-fed-takeover={cid}
+                                                                        onClick={() => askTakeover('takeover', cid, info.name || cid, info.owner)}>{t('fedTakeover')}</button>
+                                                                    : <button className="text-xs text-proxmox-orange hover:text-orange-300 disabled:opacity-50" disabled={!!busy || !localOk} data-fed-adopt={cid}
+                                                                        onClick={() => askConfirm('adopt', cid, info.name || cid, { owner: info.owner })}>{t('fedAdopt')}</button>}
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
                                             </tbody>
                                         </table>
                                     </div>
+                                    {twoSites && <p className="text-xs text-gray-400" data-fed-shadows-two>{t('fedShadowsTwoSites')}</p>}
                                 </div>
                             )}
 
