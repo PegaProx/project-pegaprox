@@ -150,6 +150,7 @@ FIELD_KEY_PATH = '/api/federation/peer/field-key'
 LEASE_PATH = '/api/federation/peer/lease-vote'
 IDENTITIES_PATH = '/api/federation/peer/identities'
 CLUSTERS_PATH = '/api/federation/peer/clusters'
+END_TAKEN_PATH = '/api/federation/peer/end-taken'
 
 SWITCH_CACHE_SECONDS = 5
 IDENTITY_CACHE_SECONDS = 5
@@ -405,8 +406,8 @@ def disable_blockers():
 
 
 def untold_ends():
-    """The sites this instance removed as gone for good that have not heard of it yet:
-    switched off, this instance could no longer tell them."""
+    """The sites this instance removed as gone for good that have not confirmed they were
+    told: switched off, this instance could no longer tell them."""
     return sorted(iid for iid, rec in ((identity() or {}).get('ended') or {}).items()
                   if not rec.get('told_at'))
 
@@ -414,7 +415,8 @@ def untold_ends():
 def switch_status():
     """{'enabled', 'forced', 'can_disable', 'disable_blockers'}: what the settings card of
     the switch reads, with 'disable_warnings' ['ended_untold'] while a site this instance
-    removed as gone for good was never told. Off, nothing of the identity is read for it."""
+    removed as gone for good has not confirmed that it was told. Off, nothing of the
+    identity is read for it."""
     on = enabled()
     f = forced()
     blockers, warnings = [], []
@@ -442,8 +444,8 @@ def set_enabled(value, untold_ok=False):
     """Switch the federation on or off for the whole deployment. Raises FederationError
     FED_FORCED while the environment decides, FED_IN_USE (with blockers) for a switch off
     while this instance still takes part, FED_ENDED_UNTOLD (with sites) for a switch off
-    while a site removed as gone for good was never told, unless `untold_ok`. Returns
-    switch_status()."""
+    while a site removed as gone for good has not confirmed that it was told, unless
+    `untold_ok`. Returns switch_status()."""
     if not isinstance(value, bool):
         raise FederationError('Say true or false', code='FED_BAD_VALUE')
     f = forced()
@@ -460,10 +462,11 @@ def set_enabled(value, untold_ok=False):
         if untold and not untold_ok:
             site = (((identity() or {}).get('ended') or {}).get(untold[0]) or {}).get('site') \
                 or untold[0][:8]
-            raise FederationError(f'{site} was never told that this instance carried on alone. '
-                                  'If it still runs, it keeps writing the clusters this '
-                                  'instance kept. Switch off anyway only when it is shut down '
-                                  'for good', code='FED_ENDED_UNTOLD', sites=untold)
+            raise FederationError(f'{site} has not confirmed that it was told this instance '
+                                  'carried on alone. If it still runs and was never told, it '
+                                  'keeps writing the clusters this instance kept. Switch off '
+                                  'anyway only when it is shut down for good',
+                                  code='FED_ENDED_UNTOLD', sites=untold)
     _db().save_server_setting(SETTING_KEY, value)
     _runtime['switch'] = (value, time.monotonic())
     _runtime['switch_held'] = value
@@ -1328,7 +1331,7 @@ def peer_verdict(headers, method, path, body):
     lock, on the 'ok' verdict alone, once: a replayed call is nobody's, however good its
     signature. 'ended' is the other site of a federation of two that this instance removed
     as gone for good, whatever became of the tombstones since (a new pairing replaces
-    them)."""
+    them), until that site is paired again."""
     raw = headers.get(ha_wire.PEER_HEADER) if headers is not None else None
     if not isinstance(raw, str) or not raw:
         return None, None
@@ -1906,6 +1909,8 @@ def join(code, own_url_, site='', fingerprints=None):
     def go(ident):
         ident['view'] = {'epoch': epoch, 'members': kept}
         ident['tombstones'] = tombs
+        for iid in kept:
+            (ident.get('ended') or {}).pop(iid, None)
         ident['peer_keys'] = {}
         ident['removed'] = None
         ident['commits'] = []
@@ -1970,6 +1975,9 @@ def _change_view(ident, wire, by, base):
         rec['added_by'] = str(by)[:80]
         view[iid] = rec
         ident.setdefault('tombstones', {}).pop(iid, None)
+        # paired again: its old end record could pass for one of the new view, which the
+        # same two sites give the same digest
+        (ident.get('ended') or {}).pop(iid, None)
         entries[iid] = rec['public_key']
     elif wire.get('op') == 'remove':
         if iid not in entries:
@@ -2617,7 +2625,10 @@ def valid_end(end, iid):
         return False
     if not isinstance(sig, str) or len(sig) > 200:
         return False
-    if iid not in members() or len(view_ids()) != 2 or end.get('base') != view_digest():
+    if iid not in members() or len(view_ids()) != 2 or end.get('base') != view_digest() \
+            or epoch != view_epoch():
+        # the same two sites paired again hold the same digest. The survivor drops the
+        # record at the new pairing, and the epoch tells most of the views apart as well
         return False
     key = ha_wire.public_key((member_record(iid) or {}).get('public_key'))
     if key is None:
@@ -2635,7 +2646,9 @@ def end_for(iid):
 
 
 def note_end_told(iid):
-    """The removed site was answered with its end record: noted once."""
+    """The removed site said it took its end record and stopped the clusters it names
+    (END_TAKEN_PATH): noted once. Being answered with the record is not enough - the
+    answer can be lost, or the record refused there."""
     rec = ((identity() or {}).get('ended') or {}).get(iid)
     if not rec or rec.get('told_at'):
         return
@@ -2752,20 +2765,27 @@ def _remove_gone(iid, by, drop_clusters):
     return {'removed': iid, 'gone': True, 'kept': led, 'dropped': theirs, 'site': site}
 
 
+# the sync tick and the lease round both take it, and its call to the other site lets the
+# other one in: a second run would find the clusters dropped already and say none were kept
+_end_lock = threading.Lock()
+
+
 def take_end():
     """The removed side of a removal as gone for good: an end record a member answered
     with (_call notes it) is taken once valid_end says it holds. True when this instance
-    took one and is out of the federation now."""
-    noted = _runtime.get('ended_by') or {}
-    while noted:
-        iid, end = noted.popitem()
-        if valid_end(end, iid):
-            noted.clear()
-            _take_end(iid, end)
-            return True
-        logging.warning(f'[FED] {iid} answered with an end record that does not hold here - '
-                        'ignored')
-    return False
+    took one and is out of the federation now. One at a time: a record noted while one is
+    taken no longer holds once it is through."""
+    with _end_lock:
+        noted = _runtime.get('ended_by') or {}
+        while noted:
+            iid, end = noted.popitem()
+            if valid_end(end, iid):
+                noted.clear()
+                _take_end(iid, end)
+                return True
+            logging.warning(f'[FED] {iid} answered with an end record that does not hold '
+                            'here - ignored')
+        return False
 
 
 def _take_end(iid, end):
@@ -2784,6 +2804,12 @@ def _take_end(iid, end):
         return False
     dropped = [cid for cid in led if cid in kept]
     fl.drop_kept(dropped, iid)
+    # while it is still a member here: until this arrives the other site warns before it
+    # is switched off, as it could tell this instance nothing more then
+    status = call_peer(iid, 'POST', END_TAKEN_PATH, {'sig': end.get('sig')}, read_timeout=5)[0]
+    if status != 200:
+        logging.warning(f'[FED] {site} was not told that this instance took its end record '
+                        f'({status or "no answer"})')
     _wipe_membership('ended')
     fl._finish_unenroll([cid for cid in led if cid not in kept])
 
@@ -2912,6 +2938,7 @@ def _drop_member_data(iid):
     _runtime['fkeys'].pop(iid, None)
     _runtime['seen'].pop(iid, None)
     _runtime['removed_by'].pop(iid, None)
+    _runtime.setdefault('ended_by', {}).pop(iid, None)
     _runtime['self_pushed'].pop(iid, None)
     _runtime.setdefault('peer_views', {}).pop(iid, None)
     from pegaprox.core import federation_lease as fl

@@ -243,7 +243,10 @@ def test_a_refused_takeover_keeps_its_box_and_adopt_hands_over_to_it(panel):
     assert 'data-fed-confirm-error>{confirmBox.refused}</p>' in panel
     adopt = panel[panel.index("if (c.kind === 'adopt') {"):panel.index("if (c.kind === 'enroll')")]
     assert "if (!r.ok && r.code === 'FED_USE_TAKEOVER') askTakeover('takeover', c.id, c.name, r.data.owner || c.owner);" in adopt
-    assert "data: data || {} };" in panel[panel.index('async function fedSend('):panel.index('async function refreshStatus()')]
+    send = panel[panel.index('async function fedSend('):panel.index('async function refreshStatus()')]
+    assert "data: data || {} };" in send
+    # with no answer at all as well: the box reads r.data after a failed request
+    assert "return { ok: false, error: fallback, code: '', data: {} };" in send
 
 
 def test_the_lease_cell_shows_a_lease_held_alone_and_a_takeover(panel):
@@ -279,8 +282,9 @@ def test_a_site_gone_for_good_needs_its_own_tick_and_the_drop_its_own(panel):
 
 def test_the_end_banner_and_the_untold_switch(panel):
     """A site the other one removed as gone for good says so instead of "removed"; the
-    survivor's switch asks once more while that site was never told, and only then sends
-    untold_ok. Counterproof: flipping off at once posts without the confirm (runtime)."""
+    survivor's switch asks once more while that site has not confirmed it was told, and
+    only then sends untold_ok. Counterproof: flipping off at once posts without the confirm
+    (runtime)."""
     assert "status.removed.ended" in panel and "t('fedEndedByOther')" in panel
     assert "status.disable_warnings.includes('ended_untold')" in panel
     assert 'if (on && untoldWarn) setAskOff(true); else if (on) flip(false); else setAskOn(true);' in panel
@@ -313,8 +317,11 @@ def test_the_panel_speaks_the_two_site_contract_of_the_server():
 
 
 def test_the_two_site_strings_say_what_the_code_does():
-    """Two sites enroll now, the risk of a takeover is said in plain words, and the German
-    of the risk-bearing keys is the agreed one."""
+    """Two sites enroll now, the risk of a takeover is said in plain words (in the switch
+    card too, which is all a reader sees before switching on), what the old owner did
+    meanwhile is said to stay, a removed site that did not confirm its end is not said to
+    be untold (the confirmation can be lost), and the German of the risk-bearing keys is
+    the agreed one."""
     blocks = _blocks()
     en, de = blocks['en'], blocks['de']
     for lang in LANGS:
@@ -324,6 +331,19 @@ def test_the_two_site_strings_say_what_the_code_does():
     assert 'both sites write to the cluster until they reach each other again' in _value(en, 'fedTakeoverNote')
     assert 'With two sites' in _value(en, 'fedLeasesDesc') and 'With two sites' in _value(en, 'fedAdoptNote')
     assert 'only while a majority' not in _value(en, 'fedSwitchDesc')
+    assert 'both sites write to the cluster until they reach each other again' in _value(en, 'fedSwitchDesc')
+    assert 'with two by a takeover' not in _value(en, 'fedSwitchDesc')
+    assert 'stays in effect and is not undone' in _value(en, 'fedTakeoverNote')
+    assert _value(en, 'fedSwitchEndedUntold').startswith('A site this instance removed as gone for good has '
+                                                         'not confirmed that it was told')
+    assert _value(de, 'fedSwitchDesc') == (
+        'Verbindet diese Instanz mit bis zu sieben weiteren PegaProx-Instanzen: Konten werden zwischen den '
+        'Standorten gespiegelt, und die Cluster eines endgültig ausgefallenen Standorts lassen sich übernehmen. '
+        'Ab drei Standorten schützt die Mehrheit einen aufgenommenen Cluster vor zwei Schreibern. Bei zwei '
+        'Standorten übernimmt ein Admin einen Cluster von Hand, wenn der andere Standort nicht antwortet; läuft '
+        'dieser noch, schreiben beide Standorte auf den Cluster, bis sie einander wieder erreichen.')
+    assert ('Dann hört {site} sofort auf. Was er inzwischen auf dem Cluster getan hat, bleibt bestehen und wird '
+            'nicht rückgängig gemacht; was er in PegaProx geändert hat, wird nicht übernommen.') in _value(de, 'fedTakeoverNote')
     assert _value(de, 'fedTakeover') == 'Manuelle Übernahme'
     assert _value(de, 'fedTwoRisk').startswith('Eine Übernahme kann einen ausgefallenen Standort nicht von einer '
                                                'ausgefallenen Verbindung unterscheiden.')
@@ -622,7 +642,7 @@ class _FedServer(_FakeServer):
                 return answer({'code': 'FED_IN_USE', 'error': LEAVE_FIRST, 'blockers': ['member', 'mirrors']}, 409)
             if not value and f['enabled'] and f['warnings'] and body.get('untold_ok') is not True:
                 return answer({'code': 'FED_ENDED_UNTOLD', 'blockers': [], 'sites': ['2' * 32],
-                               'error': 'hamburg was never told that this instance carried on alone'}, 409)
+                               'error': 'hamburg has not confirmed that it was told this instance carried on alone'}, 409)
             if not value:
                 f['warnings'] = []
             f['enabled'] = value
@@ -632,6 +652,9 @@ class _FedServer(_FakeServer):
             return answer(FED_DISABLED, 404)
         if (req.method, path) in f['replies']:
             status, data = f['replies'][(req.method, path)]
+            if status is None:
+                # no answer at all: the request fails in the browser
+                return route.abort('failed')
             return answer(data, status)
         if path == '/api/federation/leases':
             return answer({'leases': f['leases'], 'promises': {}, 'enrolled': f['enrolled'], 'hold_s': f['hold_s'],
@@ -801,6 +824,9 @@ def test_runtime_off_shows_the_switch_alone_and_switching_on_asks_first(open_fed
     assert page.locator('[data-fed-panel="off"]').count() == 1
     assert page.locator('[data-fed-switch="off"]').count() == 1
     assert 'Federation (experimental)' in page.locator('[data-fed-switch]').inner_text()
+    # the risk of two sites is read before the switch, not only once paired
+    assert 'both sites write to the cluster until they reach each other again' in \
+        page.locator('[data-fed-switch]').inner_text()
     assert page.locator('[data-fed-pairing]').count() == 0
     # off, nothing but the status was asked
     assert app.fed_calls('leases') == 0 and app.fed_calls('clusters') == 0
@@ -1078,6 +1104,12 @@ def test_the_guide_keeps_the_house_rules(guide):
         assert chr(0x2014) not in text and chr(0x2013) not in text
         # the hypervisor is ESXi, never its vendor or its managers
         assert not re.search('vm' + 'ware|v' + 'center|v' + 'sphere', text, re.I)
+    # with two sites nothing fences the owner: the takeover is the admin's risk, said where
+    # the feature is first named
+    intro = guide[:guide.index('## Switch it on')]
+    for text in (intro, readme_line):
+        assert 'until they reach each other again' in text
+    assert 'with two by a takeover an admin confirms' not in readme_line
 
 
 def test_the_numbers_of_the_guide_are_the_codes():
@@ -1297,6 +1329,7 @@ def test_runtime_two_sites_the_owner_alone_and_a_takeover_by_hand(open_fed):
     box.wait_for(timeout=3000)
     assert 'Take over hh one by hand from hamburg?' in box.inner_text()
     assert 'If it still runs, both sites write to the cluster until they reach each other again' in box.inner_text()
+    assert 'What it did on the cluster meanwhile stays in effect and is not undone' in box.inner_text()
     assert page.locator('[data-fed-last-heard]').inner_text().startswith('Last heard from hamburg: ')
     go = page.locator('[data-fed-confirm-go]')
     assert go.inner_text() == 'Take over by hand'
@@ -1325,6 +1358,29 @@ def test_runtime_two_sites_the_owner_alone_and_a_takeover_by_hand(open_fed):
     page.wait_for_function("() => (window.__toasts || []).some(t => t.text === "
                            "'Taken over. hamburg stops writing as soon as it answers again.' && t.kind === 'success')",
                            timeout=3000)
+    assert not app.errors, app.errors
+
+
+def test_runtime_a_takeover_that_gets_no_answer_keeps_its_box(open_fed):
+    """The takeover request gets no answer at all, the network fails: the box stays open
+    with the fallback sentence, and the page throws nothing. Counterproof: a result without
+    data threw on reading retry_after and left no sentence in the box."""
+    route = ('POST', '/api/federation/clusters/hh1/takeover')
+    app = open_fed(fed=_two_sites(replies={route: (None, None)}))
+    page = app.page
+    assert app.open_tab()
+    page.locator('[data-fed-takeover="hh1"]').wait_for(timeout=5000)
+    page.locator('[data-fed-takeover="hh1"]').click()
+    box = page.locator('[data-fed-confirm="takeover"]')
+    box.wait_for(timeout=3000)
+    page.locator('[data-fed-owner-down]').check()
+    page.locator('#fed-confirm-word').fill('TAKEOVER')
+    page.locator('#fed-confirm-pw').fill(PASSWORD)
+    page.locator('[data-fed-confirm-go]').click()
+    err = page.locator('[data-fed-confirm-error]')
+    err.wait_for(timeout=5000)
+    assert err.inner_text() == 'The action failed.' and box.count() == 1
+    assert ('POST', route[1]) in app.server.calls
     assert not app.errors, app.errors
 
 
@@ -1499,7 +1555,7 @@ def test_runtime_the_survivor_asks_once_more_before_it_switches_off(open_fed):
     app = open_fed(fed={'enabled': True, 'warnings': ['ended_untold']})
     page = app.page
     assert app.open_tab()
-    assert 'was never told that this site carried on alone' in page.locator('[data-fed-switch-untold="note"]').inner_text()
+    assert 'has not confirmed that it was told this site carried on alone' in page.locator('[data-fed-switch-untold="note"]').inner_text()
     _switch(page).click()
     page.locator('[data-fed-switch-untold="ask"]').wait_for(timeout=3000)
     page.wait_for_timeout(300)

@@ -1124,6 +1124,167 @@ def test_a_cluster_handed_on_is_never_resumed(tmp_path, clock, monkeypatch):
     assert [s.name for s in (a, b) if _writes(s, 'pve-x')] == ['a']
 
 
+def _fail_the_move_once(monkeypatch):
+    """The transaction that moves a row by a record (_step_down, _resume) fails once, as
+    with a locked database."""
+    real = federation._ownership_in_tx
+    left = {'n': 1}
+
+    def flaky(conn, fn):
+        if fn.__name__ == 'keep' and left['n']:
+            left['n'] -= 1
+            raise RuntimeError('database is locked')
+        return real(conn, fn)
+    monkeypatch.setattr(federation, '_ownership_in_tx', flaky)
+    return left
+
+
+@pytest.mark.parametrize('contact', ['the takers push', 'its own round', 'the snapshot'])
+def test_a_step_down_that_fails_is_done_at_the_next_contact(tmp_path, clock, monkeypatch,
+                                                            fed_audits, contact):
+    """a's row cannot be turned into b's copy at the first contact. a stops writing all the
+    same and keeps b's record, but no echo of it: b's takeover stays unconfirmed and the
+    snapshot waits. The next contact gives the cluster up, audited once, and b sees it
+    confirmed once. Counterproofs: the record echoed, b sees it confirmed while a's row is
+    still a's; the record held taken as done, a never gives it up."""
+    a, b, _ = _split_and_take(tmp_path, clock)
+    _round(a)
+    failing = _fail_the_move_once(monkeypatch)
+    _heal([a, b])
+    if contact == 'the takers push':
+        with at(b):
+            assert fl.push_records() == []
+    elif contact == 'its own round':
+        _round(a)
+    else:
+        _sync(a)
+    assert failing['n'] == 0
+    assert _owner_at(a, 'pve-x') == iid(a) and _writes(a, 'pve-x') is False
+    held = _records(a)['pve-x']
+    assert held['owner'] == iid(b) and held['gen'] == 2 and held['stopped_at'] == 0
+    assert _records(b)['pve-x']['confirmed_at'] == 0
+    moves = ('federation.cluster_stepped_down', 'federation.takeover_confirmed')
+    assert [act for _i, act, _t in fed_audits if act in moves] == []
+    if contact == 'the takers push':
+        with at(b):
+            assert fl.push_records() == [iid(a)]
+    elif contact == 'its own round':
+        _round(b)
+    else:
+        _sync(a)
+    row = _db_of(a).conn.execute("SELECT * FROM clusters WHERE id = 'pve-x'").fetchone()
+    assert row['fed_owner'] == iid(b)
+    for col in federation.CLUSTER_ENCRYPTED_COLUMNS:
+        assert row[col] == '' or (contact == 'the snapshot' and row[col].startswith('fedk1:'))
+    assert _records(a)['pve-x']['gen'] == 2 and _records(a)['pve-x']['stopped_at'] > 0
+    with at(b):
+        fl.push_records()
+    assert [act for _i, act, _t in fed_audits if act in moves] == list(moves)
+    assert [s.name for s in (a, b) if _writes(s, 'pve-x')] == ['b']
+
+
+def test_a_step_down_that_fails_keeps_the_standby_of_the_old_owner_closed(tmp_path, clock,
+                                                                           monkeypatch):
+    """a's row cannot be turned into b's copy at the first contact, and then a's HA group
+    fails over to a standby that has a's database but not its lease file, while b is cut
+    off from it. The standby finds b's record and holds nothing alone; only b writes. At
+    the next contact the standby gives the cluster up. Counterproof: the record kept only
+    by the step-down, the standby writes after its hold, as b does."""
+    a, b, _ = _split_and_take(tmp_path, clock)
+    _round(a)
+    failing = _fail_the_move_once(monkeypatch)
+    _heal([a, b])
+    with at(b):
+        assert fl.push_records() == []
+    assert failing['n'] == 0 and _owner_at(a, 'pve-x') == iid(a)
+    a2 = _standby_of(tmp_path, a, name='a2')
+    URL['a2'] = URL['a']
+    try:
+        _wire([a2, b])
+        monkeypatch.setattr(fl, '_ha_epoch',
+                            lambda: 5 if federation._runtime['lease_file'] == a2.lease_file
+                            else 0)
+        _cut([a2, b], b)
+        _quiet(clock, a2, b, seconds=120)
+        assert [s.name for s in (a2, b) if _writes(s, 'pve-x')] == ['b']
+        _heal([a2, b])
+        _round(a2)
+        assert _owner_at(a2, 'pve-x') == iid(b) and _records(a2)['pve-x']['stopped_at'] > 0
+    finally:
+        URL.pop('a2', None)
+
+
+def test_a_resume_that_fails_is_done_at_the_next_sync(tmp_path, clock, monkeypatch):
+    """The HA standby of b that lost the takeover cannot lead the cluster again at its
+    first sync: it keeps a's copy and leaves a's snapshot for the next sync, which leads
+    it there. The cluster stays at both sites throughout. Counterproof: the record kept
+    and the snapshot taken, the standby drops the copy and then a drops its own."""
+    a, b = _sides(tmp_path, 'ab')
+    _enroll(a, 'pve-x', password='x-secret')
+    _sync(b)
+    b2 = _standby_of(tmp_path, b, name='b2')
+    _cut([a, b], a)
+    _quiet(clock, a)
+    _takeover(b, 'pve-x')
+    _heal([a, b])
+    _round(a)
+    assert _owner_at(a, 'pve-x') == iid(b)
+    URL['b2'] = URL['b']
+    try:
+        _wire([a, b2])
+        monkeypatch.setattr(fl, '_ha_epoch',
+                            lambda: 5 if federation._runtime['lease_file'] == b2.lease_file
+                            else 0)
+        failing = _fail_the_move_once(monkeypatch)
+        _sync(b2)
+        assert failing['n'] == 0
+        assert _owner_at(b2, 'pve-x') == iid(a) and _owner_at(a, 'pve-x') == iid(b)
+        _sync(b2)
+        assert _owner_at(b2, 'pve-x') == iid(b)
+        _sync(a)
+        assert _owner_at(a, 'pve-x') == iid(b)
+        row = _db_of(b2).conn.execute(
+            "SELECT pass_encrypted FROM clusters WHERE id = 'pve-x'").fetchone()
+        assert _db_of(b2)._decrypt(row[0]) == 'x-secret'
+    finally:
+        URL.pop('b2', None)
+
+
+@pytest.mark.parametrize('step', ['step down', 'resume'])
+def test_a_move_by_a_record_keeps_a_newer_one_that_came_in_meanwhile(tmp_path, clock, step):
+    """A newer record of the cluster was stored between the look at the records and the
+    move: the move stops, the newer record stays and the row stays where it was.
+    Counterproof: without the second look the older record replaces the newer one and
+    the row moves."""
+    a, b, _ = _split_and_take(tmp_path, clock)
+    theirs = federation.wire_record(_records(b)['pve-x'])
+    if step == 'step down':
+        newer = _signed(a, {'cluster_id': 'pve-x', 'gen': 3, 'kind': 'takeover',
+                            'owner': iid(a), 'from': iid(b), 'at': int(time.time()),
+                            'by': 'admin:test'})
+        older, row = theirs, iid(a)
+    else:
+        _heal([a, b])
+        _round(a)
+        newer = _signed(b, {'cluster_id': 'pve-x', 'gen': 4, 'kind': 'takeover',
+                            'owner': iid(b), 'from': iid(a), 'at': int(time.time()),
+                            'by': 'admin:test'})
+        older = _signed(a, {'cluster_id': 'pve-x', 'gen': 3, 'kind': 'takeover',
+                            'owner': iid(a), 'from': iid(b), 'at': int(time.time()),
+                            'by': 'admin:test'})
+        row = iid(b)
+    assert _owner_at(a, 'pve-x') == row
+
+    def stored(own):
+        federation.store_record(own, newer)
+        return True
+    with at(a):
+        federation._mutate_ownership(stored)
+        moved = (fl._step_down if step == 'step down' else fl._resume)('pve-x', older)
+    assert moved is False
+    assert _records(a)['pve-x']['sig'] == newer['sig'] and _owner_at(a, 'pve-x') == row
+
+
 def test_a_switched_off_owner_is_taken_over_and_gives_it_up_when_on(tmp_path, clock,
                                                                    monkeypatch):
     """a is switched off: it answers every call unsigned, which is silence to b, and b's
@@ -1471,19 +1632,62 @@ def test_a_site_gone_for_good_is_removed_by_the_survivor(tmp_path, clock, monkey
     assert _writes(a, 'c2') is True
 
 
-@pytest.mark.parametrize('tamper', ['base', 'sig', 'member'])
+def test_an_end_record_is_taken_once_while_its_confirmation_is_on_the_way(tmp_path, clock,
+                                                                          monkeypatch,
+                                                                          fed_audits):
+    """b takes the end record, and while its confirmation to a is on the way, another loop
+    of b notes the record again from a 410 and takes it too. That run waits for the first
+    and finds nothing left to take: b names c2 as stopped, once. Counterproof: the two
+    side by side, the second one says none of the clusters led here were kept."""
+    import threading
+    a, b = _gone_setup(tmp_path, clock)
+    with at(a):
+        federation.remove_member(iid(b), by='admin:test', gone=True, drop_clusters=True)
+        end = dict(federation.end_for(iid(b)))
+    _heal([a, b])
+    real = federation.call_peer
+    other = []
+
+    def call(peer, method, path, body=None, **kw):
+        out = real(peer, method, path, body, **kw)
+        if path == federation.END_TAKEN_PATH and not other:
+            federation._runtime['ended_by'][peer] = end
+            other.append(threading.Thread(target=lambda: other.append(federation.take_end())))
+            other[0].start()
+            time.sleep(0.05)
+        return out
+    monkeypatch.setattr(federation, 'call_peer', call)
+    with at(b):
+        assert real(iid(a), 'GET', federation.STATUS_PATH)[0] == 410
+        assert federation.take_end() is True
+        other[0].join(5)
+        removed = federation.identity()['removed']
+    assert other[1:] == [False] and removed['clusters'] == ['c2']
+    said = [t for _i, act, t in fed_audits if act == 'federation.ended_by_other_site']
+    assert len(said) == 1 and 'keeps c2:' in said[0]
+
+
+@pytest.mark.parametrize('tamper', ['base', 'epoch', 'sig', 'member', 'clusters', 'at'])
 def test_an_end_record_that_does_not_hold_changes_nothing(tmp_path, clock, tamper):
     """The removed site takes an end record only when it is the other member's signed word
-    about this very view of two and names this instance. Counterproofs: each of the three
-    checks left out takes the record."""
+    about this very view of two (its digest and its epoch), names this instance and is
+    what was signed. Counterproofs: each check left out, or a signed field left out of the
+    signature, takes the record."""
     a, b = _gone_setup(tmp_path, clock)
     with at(a):
         federation.remove_member(iid(b), by='admin:test', gone=True, drop_clusters=True)
         end = dict(federation.end_for(iid(b)))
     if tamper == 'sig':
         end['sig'] = base64.b64encode(b'\0' * 64).decode()
+    elif tamper == 'clusters':
+        end['clusters'] = sorted(set(end['clusters']) | {'c3'})
+    elif tamper == 'at':
+        end['at'] += 1
     else:
-        end['base' if tamper == 'base' else 'member'] = '0' * 32
+        if tamper == 'epoch':
+            end['epoch'] += 1
+        else:
+            end['base' if tamper == 'base' else 'member'] = '0' * 32
         with at(a):
             end['sig'] = base64.b64encode(
                 federation.signing_key().sign(federation._end_message(end))).decode()
@@ -1492,6 +1696,76 @@ def test_an_end_record_that_does_not_hold_changes_nothing(tmp_path, clock, tampe
         assert federation.take_end() is False
         assert iid(a) in federation.members()
     assert _owner_at(b, 'c2') == iid(b) and _owner_at(b, 'c3') == iid(b)
+
+
+def test_an_end_record_from_before_a_new_pairing_is_not_taken(tmp_path, clock, monkeypatch):
+    """a removed b as gone for good, b left and was paired with a again: the same two sites
+    hold the same digest as before. An end record of the old federation that is still
+    about at b is not taken, and one noted right before the leave goes with it.
+    Counterproofs: without the epoch in the check b leaves the new federation at once;
+    with the noted records kept across the leave, one is still there."""
+    a, b = _sides(tmp_path, 'ab')
+    _cut([a, b], b)
+    _quiet(clock)
+    with at(a):
+        federation.remove_member(iid(b), by='admin:test', gone=True)
+        end = dict(federation.end_for(iid(b)))
+    real_wipe = federation._wipe_membership
+
+    def noted_meanwhile(reason):
+        federation._runtime['ended_by'][iid(a)] = end
+        return real_wipe(reason)
+    with monkeypatch.context() as m:
+        m.setattr(federation, '_wipe_membership', noted_meanwhile)
+        with at(b):
+            assert federation.leave(force=True)['left'] is True
+            assert federation._runtime['ended_by'] == {}
+    _heal([a, b])
+    _join(b, _code(a))
+    with at(b):
+        assert federation.view_digest() == end['base']
+        federation._runtime['ended_by'][iid(a)] = end
+        assert federation.take_end() is False
+        assert list(federation.members()) == [iid(a)]
+        assert federation.identity()['removed'] is None
+
+
+@pytest.mark.parametrize('joiner', ['b', 'a'])
+def test_an_end_record_is_over_once_the_two_sites_pair_again(tmp_path, clock, joiner):
+    """a removed b as gone for good, then both left what was left of the federation and
+    paired again, either one joining the other: the same two sites at the same epoch, so
+    b's view looks like the one the end record was made at. When a leaves with force while
+    b is cut off, b's next call gets no end record, and b stays in its federation. a keeps
+    no record for b from the new pairing on, and its switch does not warn. Counterproof:
+    the record kept across the new pairing, b takes it and leaves."""
+    a, b = _sides(tmp_path, 'ab')
+    _cut([a, b], b)
+    _quiet(clock)
+    with at(a):
+        federation.remove_member(iid(b), by='admin:test', gone=True)
+        end = dict(federation.end_for(iid(b)))
+    for side in (b, a):
+        with at(side):
+            federation.leave(force=True)
+    _heal([a, b])
+    if joiner == 'b':
+        _join(b, _code(a))
+    else:
+        _join(a, _code(b))
+    with at(b):
+        assert (federation.view_digest(), federation.view_epoch()) == (end['base'],
+                                                                       end['epoch'])
+    _cut([a, b], b)
+    with at(a):
+        federation.leave(force=True)
+    _heal([a, b])
+    with at(b):
+        assert federation.call_peer(iid(a), 'GET', federation.STATUS_PATH)[0] != 410
+        assert federation.take_end() is False
+        assert list(federation.members()) == [iid(a)]
+    with at(a):
+        assert federation.end_for(iid(b)) is None
+        assert 'disable_warnings' not in federation.switch_status()
 
 
 def test_remove_gone_refuses_an_answering_or_recent_site(tmp_path, clock):
@@ -1543,8 +1817,8 @@ def test_the_end_record_is_answered_after_the_survivor_paired_again(tmp_path, cl
 
 def test_switching_off_with_an_untold_end_asks_once_more(tmp_path, clock, monkeypatch):
     """Switched off, the survivor could no longer tell the removed site: asked once more
-    while that site was never told, and switched off on untold_ok. Once it got its 410 the
-    warning is gone."""
+    while that site has not confirmed that it was told, and switched off on untold_ok. Once
+    it took the end record its 410 brought, the warning is gone."""
     a, b = _sides(tmp_path, 'ab')
     _cut([a, b], b)
     _quiet(clock)
@@ -1559,13 +1833,79 @@ def test_switching_off_with_an_untold_end_asks_once_more(tmp_path, clock, monkey
             with pytest.raises(FedError) as err:
                 federation.set_enabled(False)
             assert err.value.code == 'FED_ENDED_UNTOLD' and err.value.extra['sites'] == [iid(b)]
-            assert 'site-b was never told' in str(err.value)
+            assert str(err.value).startswith('site-b has not confirmed that it was told')
             assert federation.enabled() is True
             assert federation.set_enabled(False, untold_ok=True)['enabled'] is False
     _heal([a, b])
     with at(b):
         assert federation.call_peer(iid(a), 'GET', federation.STATUS_PATH)[0] == 410
     with at(a):
+        assert federation.switch_status()['disable_warnings'] == ['ended_untold']
+    with at(b):
+        assert federation.take_end() is True
+    with at(a):
+        assert 'disable_warnings' not in federation.switch_status()
+
+
+@pytest.mark.parametrize('how', ['answer lost', 'record refused', 'forged ack'])
+def test_the_removed_site_counts_as_told_only_once_it_took_the_end(tmp_path, clock,
+                                                                   monkeypatch, how):
+    """The survivor counts the removed site as told only once that site says it took the
+    end record and stopped: not when the 410 that carries it is lost on the way back, not
+    when the record is refused there, and not for a word about another record, from
+    nobody or from a member. Until then the switch warns. The next contact where the
+    removed site takes the record counts. Counterproofs: told when the 410 is sent, the
+    first two go red; the word taken without its record, the third."""
+    a, b = _sides(tmp_path, 'ab')
+    sides = [a, b]
+    _cut(sides, b)
+    _quiet(clock)
+    with at(a):
+        federation.remove_member(iid(b), by='admin:test', gone=True)
+        end = federation.end_for(iid(b))
+    _heal(sides)
+    if how == 'answer lost':
+        inner = b.wire
+
+        def lost(url, method, path, body, headers):
+            got = inner(url, method, path, body, headers)
+            return (0, b'', {}) if url == URL['a'] else got
+        b.runtime['transport'] = lost
+        with at(b):
+            assert federation.call_peer(iid(a), 'GET', federation.STATUS_PATH)[0] == 0
+            assert federation.take_end() is False
+    elif how == 'record refused':
+        with monkeypatch.context() as m:
+            m.setattr(federation, 'valid_end', lambda rec, sender: False)
+            with at(b):
+                assert federation.call_peer(iid(a), 'GET', federation.STATUS_PATH)[0] == 410
+                assert federation.take_end() is False
+                assert iid(a) in federation.members()
+    else:
+        with at(b):
+            status, data, _h = federation.call_peer(
+                iid(a), 'POST', federation.END_TAKEN_PATH,
+                {'sig': base64.b64encode(b'\0' * 64).decode()})
+        assert status == 409 and data['code'] == 'FED_END_MISMATCH'
+        r = a.client.post(federation.END_TAKEN_PATH, json={'sig': end['sig']})
+        assert r.status_code == 403 and r.get_json()['code'] == 'FED_NOT_MEMBER'
+        d = Side(tmp_path, 'd')
+        sides = [a, b, d]
+        _wire(sides)
+        _join(a, _code(d))
+        with at(d):
+            status, data, _h = federation.call_peer(iid(a), 'POST', federation.END_TAKEN_PATH,
+                                                    {'sig': end['sig']})
+        assert status == 403 and data['code'] == 'FED_NOT_ENDED'
+    with at(a):
+        assert federation.identity()['ended'][iid(b)]['told_at'] == 0
+        assert federation.switch_status()['disable_warnings'] == ['ended_untold']
+    _heal(sides)
+    with at(b):
+        assert federation.call_peer(iid(a), 'GET', federation.STATUS_PATH)[0] == 410
+        assert federation.take_end() is True
+    with at(a):
+        assert federation.identity()['ended'][iid(b)]['told_at'] > 0
         assert 'disable_warnings' not in federation.switch_status()
 
 

@@ -203,7 +203,8 @@ def _peer_or_refuse(acting=False):
     on a standby, 410 FED_REMOVED for a member the federation took out, 403 FED_CLOCK for
     one whose signature is good but whose time is not, 403 FED_NOT_MEMBER for anybody
     else. Never a 401: no browser session is involved. The other site of a federation of
-    two that this instance removed as gone for good gets its end record with the 410."""
+    two that this instance removed as gone for good gets its end record with the 410; it
+    counts as told once it says it took it (peer_end_taken)."""
     refused = _standby_refusal(acting)
     if refused:
         return None, refused
@@ -219,7 +220,6 @@ def _peer_or_refuse(acting=False):
             body['end'] = end
             body['error'] = ('The other site carried on alone and removed this instance from '
                              'the federation')
-            federation.note_end_told(who.get('instance_id') or '')
         return None, (jsonify(body), 410)
     if kind == 'skewed':
         return None, (jsonify(federation.clock_refusal(
@@ -305,6 +305,28 @@ def peer_status():
     if refused:
         return refused
     return jsonify(federation.peer_status_body())
+
+
+@bp.route('/api/federation/peer/end-taken', methods=['POST'])
+def peer_end_taken():
+    """The site this instance removed as gone for good took its end record and stopped the
+    clusters it names: from now on it counts as told. 409 FED_END_MISMATCH for a record
+    that is not the one held here, 403 FED_NOT_ENDED for a member."""
+    refused = _standby_refusal()
+    if refused:
+        return refused
+    kind, who = request_fed_peer()
+    iid = (who or {}).get('instance_id') or ''
+    end = federation.end_for(iid) if kind in ('removed', 'ended') else None
+    if not end:
+        peer, refused = _peer_or_refuse()
+        return refused or (jsonify({'error': 'This instance did not carry on without you',
+                                    'code': 'FED_NOT_ENDED'}), 403)
+    if _body(_MAX_BODY).get('sig') != end.get('sig'):
+        return jsonify({'error': 'That is not the end record held here',
+                        'code': 'FED_END_MISMATCH'}), 409
+    federation.note_end_told(iid)
+    return jsonify({'told': True})
 
 
 @bp.route('/api/federation/peer/view', methods=['GET'])
@@ -620,9 +642,9 @@ def federation_switch():
     standby with the settings). Body {"enabled": bool}. Switching on starts the workers;
     switching off stops them and is refused with 409 FED_IN_USE while this instance is a
     member, holds a lease or holds mirrors (leave the federation first), with 409
-    FED_ENDED_UNTOLD while a site this instance removed as gone for good was never told
-    (untold_ok switches off anyway), and with 409 FED_FORCED while PEGAPROX_FEDERATION
-    decides."""
+    FED_ENDED_UNTOLD while a site this instance removed as gone for good has not
+    confirmed that it was told (untold_ok switches off anyway), and with 409 FED_FORCED
+    while PEGAPROX_FEDERATION decides."""
     denied = _guards()
     if denied:
         return denied
@@ -641,8 +663,8 @@ def federation_switch():
     sites = ', '.join(_end_site(iid) for iid in untold)
     log_audit(_user(), 'federation.switched_on' if value else 'federation.switched_off',
               f'the federation was switched {"on" if value else "off"}'
-              + (f', although {sites} was never told that this instance carried on alone'
-                 if untold else ''), ip_address=get_client_ip())
+              + (f', although {sites} has not confirmed that it was told this instance '
+                 'carried on alone' if untold else ''), ip_address=get_client_ip())
     return jsonify(out)
 
 

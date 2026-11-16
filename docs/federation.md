@@ -16,7 +16,8 @@ its own clusters; the federation adds four things on top:
   enroll is written by its site only while a majority of the sites backs that site's lease
   on it; when the network splits, the side without the majority stops writing to it. With
   two sites the owner writes on its own, and the other site takes a cluster over only when
-  an admin there confirms that the owner is down (see [Two sites](#two-sites)).
+  an admin there confirms that the owner is down; if the owner was only cut off, both sites
+  write to it until they reach each other again (see [Two sites](#two-sites)).
 - **Clusters of a lost site can be taken over.** Every site holds a copy of every enrolled
   cluster's row. When a site is gone, another one takes its clusters over: by majority
   with three or more sites, by hand with two.
@@ -244,7 +245,10 @@ snapshot, which is then only crash-consistent; refused, the guest would hang on 
 write until somebody thaws it by hand. Runs that start in several steps (a failover, a
 test failover and its cleanup, a failback, a cross-cluster migration, a multi-cluster
 vnet) check the lease of the clusters they write before they start; a dry run only reads
-and needs none. On Linux a
+and needs none. The recovery of a failed node that loses the lease half way stops there
+and is tried again once the lease is back; a guest whose config it had moved already and
+not started yet is named in the audit log: start it on its new node from the site that
+leads the cluster now. On Linux a
 plain restart of the service keeps the leases and the votes a site gave (a lease a site of
 two held alone waits for the first renewal after the start, about 10 seconds): the leases run
 on the boot clock, which goes on through the restart, and the boot id tells a restart from a
@@ -318,10 +322,14 @@ it still runs on the cluster (as at a hand-over), turns its row into a copy of t
 and drops its copy of the credentials; the new owner's copy follows with the next sync. Nothing
 it changed in PegaProx after the takeover is taken over. What it sent to the cluster in the
 meantime cannot be undone: the tab of both sites shows when the takeover happened and when the
-old owner stopped, so you can check the cluster's task log for that span. If the site that took
-over is down too when the old owner starts again, the old owner writes again until it reaches
-the other site. The same holds for a site whose database was restored from a backup taken
-before a takeover, or before it handed over a cluster that the other site then took over.
+old owner stopped, so you can check the cluster's task log for that span. If the old owner
+cannot turn its row into the copy at that contact (its database refuses the write), it stops
+writing all the same and keeps the record of the takeover, so a standby of its HA group that
+takes over does not write either. It does not confirm the takeover, and gives the cluster up at
+the next contact. If the site that took over is down too when the old owner starts again, the
+old owner writes again until it reaches the other site. The same holds for a site whose database
+was restored from a backup taken before a takeover, or before it handed over a cluster that the
+other site then took over.
 
 **Restarts and HA groups.** On Linux a plain restart keeps the leases both sites backed; a
 lease held alone waits for the first renewal after the start, about 10 seconds, so a site that
@@ -402,9 +410,9 @@ then carries on alone: the federation ends here, the clusters it leads become it
 do not close), and the accounts, mappings and cluster copies of the other site are deleted here.
 This site keeps what it needs to tell the other site: if that site comes back after all and
 calls here, it is told at once, stops writing every cluster this site kept, drops its copies of
-them, and its other clusters become its own. That works only while this site keeps the
-federation switched on and keeps its address. Afterwards this site can pair with a new site as a
-new federation.
+them, and its other clusters become its own. It counts as told once it confirms that it took
+this. That works only while this site keeps the federation switched on and keeps its address.
+Afterwards this site can pair with a new site as a new federation.
 
 A change of the member list (a join, a removal, a leave) counts only once a majority of
 the members took it. When fewer confirm, the change is refused with `FED_NO_QUORUM` and
@@ -521,8 +529,8 @@ emergency only. On a site that still takes part:
   and the active does not unpair while it has standbys (see [HA groups](#ha-groups)).
 
 After this instance removed a site as gone for good, switching off asks once more while that
-site has not been told (`409 FED_ENDED_UNTOLD`): switched off, this instance can no longer
-tell it.
+site has not confirmed that it was told (`409 FED_ENDED_UNTOLD`): switched off, this instance
+can no longer tell it.
 
 To take a site out for good, leave the federation first. A database of a federation
 member restored onto a plain install behaves the same while the federation is off there.
@@ -573,7 +581,7 @@ each call is signed with the calling member's key and every answer is signed bac
 | `FED_NOTHING_TO_TAKE` | the site leads no cluster this instance holds a copy of |
 | `FED_PEER_ANSWERS`, `FED_PEER_RECENT` | the site to remove as gone for good answers, or was in contact less than 35 seconds ago: remove it with its agreement, or wait |
 | `FED_GONE_CLUSTERS` | the site to remove still leads clusters here that were not taken over: take them over, or confirm that their copies are dropped |
-| `FED_ENDED_UNTOLD` | switching off while a site removed as gone for good was never told; switch off anyway only when it is shut down for good |
+| `FED_ENDED_UNTOLD` | switching off while a site removed as gone for good has not confirmed that it was told; switch off anyway only when it is shut down for good |
 | `FED_NO_LEASE` | this instance holds no live lease on the cluster; another site may lead it, or the lease ran out in a split |
 | `FED_LEAVE_BLOCKED` | an enrolled cluster has no live lease; leave with force, then unenroll it with force |
 | `FED_FOREIGN` | the account or cluster belongs to another site; change it there |
