@@ -290,6 +290,18 @@ def _reset_api_rate_window():
         pass
 
 
+def _reset_verify_password_window():
+    """Forget the re-auth attempts (/api/auth/verify-password allows five per client IP in
+    five minutes). They sit in the login attempt store for the life of the process, and two
+    test files that each ask a few times in one worker ran into the 429 of the other."""
+    try:
+        import pegaprox.globals as ppglobals
+        for key in [k for k in ppglobals.login_attempts_by_ip if str(k).startswith('verify_pw_')]:
+            ppglobals.login_attempts_by_ip.pop(key, None)
+    except Exception:
+        pass
+
+
 def _reset_guest_index():
     """The guest search index keeps what every config read handed it, by cluster id, and
     the next test's cluster_1 is another cluster."""
@@ -513,6 +525,7 @@ def api(_integration_app, db):
     # (run 35697303667) while the same tree was green on a slower machine here. reset() is
     # already the method the unlock endpoints use.
     _reset_api_rate_window()
+    _reset_verify_password_window()
     _reset_guest_index()
 
     client = _integration_app.test_client()
@@ -545,6 +558,7 @@ def api(_integration_app, db):
         for _registry in ('pbs_managers', 'vmware_managers'):
             getattr(ppglobals, _registry, {}).clear()
         _reset_api_rate_window()
+        _reset_verify_password_window()
         _reset_guest_index()
 
 
