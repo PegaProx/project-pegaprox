@@ -140,6 +140,9 @@ def register_blueprints(app):
     # switched on (off by default). A switch later on starts them without a restart
     try:
         from pegaprox.core import federation as _fed_core
+        # an inherited identity whose drop failed earlier goes first; until it is gone the
+        # federation stays off here
+        _fed_core.retry_forget()
         if _fed_core.enabled():
             _fed_core.start_workers()
     except Exception as e:

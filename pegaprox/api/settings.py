@@ -1712,6 +1712,9 @@ EXTERNAL_ROLE_SETTINGS = {
     # which groups a user is found in, and so which of the above match
     'ldap_group_base_dn': lambda v: str(v or '').strip(),
     'ldap_group_filter': lambda v: str(v or '(&(objectClass=group)(member={user_dn}))').strip(),
+    # what the provider is asked for: without the group scope (Graph group read with Entra)
+    # no group arrives, and a new account gets the default role in the default tenant
+    'oidc_scopes': lambda v: str(v).strip(),
     'oidc_group_mappings': _oidc_group_mappings,
     'oidc_admin_group_id': lambda v: str(v).strip(),
     'oidc_user_group_id': lambda v: str(v).strip(),
@@ -1771,6 +1774,11 @@ def _external_role_changes(data, settings):
                 value = data[key]       # the save fails on it too; counted as a change
             if value is not None:
                 after[key] = value
+    # no scopes is stored as the provider's default, as the save does
+    if after.get('oidc_scopes') == '':
+        after['oidc_scopes'] = ('openid profile email User.Read GroupMember.Read.All'
+                                if after.get('oidc_provider', settings.get('oidc_provider')) == 'entra'
+                                else 'openid profile email')
     changed = [k for k in EXTERNAL_SOURCE_SECRETS
                if k in data and str(data[k] or '') not in ('', '********')]
     # mappings that are saved clear the built-in groups, as the save does

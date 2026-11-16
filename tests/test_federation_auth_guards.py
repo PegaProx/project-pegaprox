@@ -146,6 +146,8 @@ def test_a_tenant_capped_admin_reaches_no_federation_admin_route(fed, seed):
                          ('post', '/api/federation/clusters/c1/release'),
                          ('post', '/api/federation/clusters/c1/unenroll'),
                          ('post', '/api/federation/clusters/c1/adopt'),
+                         ('post', '/api/federation/clusters/c1/takeover'),
+                         ('post', f'/api/federation/members/{"0" * 32}/takeover'),
                          ('post', '/api/federation/clusters/c1/renew'),
                          ('get', '/api/federation/identity-map'),
                          ('post', '/api/federation/identity-map')):
@@ -784,6 +786,9 @@ GUARDED_ROUTES = (
     ('/api/federation/clusters/c1/release', {'confirm': 'RELEASE'}),
     ('/api/federation/clusters/c1/unenroll', {'confirm': 'UNENROLL'}),
     ('/api/federation/clusters/c1/adopt', {'confirm': 'ADOPT'}),
+    ('/api/federation/clusters/c1/takeover', {'confirm': 'TAKEOVER', 'owner_down': True}),
+    (f'/api/federation/members/{FOREIGN}/takeover', {'confirm': 'TAKEOVER', 'owner_down': True}),
+    (f'/api/federation/members/{FOREIGN}/remove', {'confirm': 'REMOVE', 'gone': True}),
 )
 
 
@@ -797,6 +802,49 @@ def test_every_reauth_route_wants_the_password(fed, seed, path, body):
     r = fed.anon().post(path, json=dict(body, user_password=PASSWORD),
                         headers={'Authorization': f"Bearer {res['token']}"})
     assert r.status_code == 403 and r.get_json()['code'] == 'FED_REAUTH', (path, r.data)
+
+
+@pytest.mark.parametrize('path', ('/api/federation/clusters/c1/takeover',
+                                  f'/api/federation/members/{FOREIGN}/takeover'))
+def test_a_takeover_wants_the_word_and_the_owning_site_down(fed, seed, path):
+    """A takeover by hand is the admin's word that the owning site is down: TAKEOVER typed
+    and owner_down true, or 400 before anything is looked at."""
+    root = fed.as_user(_admin_with_password(seed))
+    for body, needle in (({'confirm': 'ADOPT', 'owner_down': True}, 'Type TAKEOVER'),
+                         ({'confirm': 'TAKEOVER'}, 'owner_down'),
+                         ({'confirm': 'TAKEOVER', 'owner_down': 'yes'}, 'owner_down')):
+        r = root.post(path, json=dict(body, user_password=PASSWORD))
+        assert r.status_code == 400 and needle in r.get_json()['error'], (body, r.data)
+    # counterproof: both given, the route answers for itself (no such cluster, no second site)
+    r = root.post(path, json={'confirm': 'TAKEOVER', 'owner_down': True,
+                              'user_password': PASSWORD})
+    assert r.get_json()['code'] in ('FED_NOT_FOUND', 'FED_TOO_FEW_SITES'), r.data
+
+
+def test_taking_over_every_cluster_of_a_site_asks_the_password_once(fed, seed, monkeypatch):
+    """Take over all is one password check however many clusters it takes: one by one, the
+    re-check budget of five per five minutes would stop it at the sixth."""
+    import pegaprox.api.federation as api_fed
+    from pegaprox.core import federation_lease as fed_lease
+    asked, checks = [], []
+
+    def take(owner, clusters, by='', force=False):
+        asked.append((owner, clusters, by, force))
+        return {'owner': owner, 'site': 'berlin', 'failed': {},
+                'taken': [{'cluster_id': f'c{i}', 'generation': 2} for i in range(1, 8)]}
+    monkeypatch.setattr(fed_lease, 'take_over_clusters', take)
+    monkeypatch.setattr(fed_lease, 'start_manager', lambda cid: True)
+    real = api_fed._refuse_without_reauth
+    monkeypatch.setattr(api_fed, '_refuse_without_reauth',
+                        lambda what: checks.append(what) or real(what))
+    root = fed.as_user(_admin_with_password(seed))
+    r = root.post(f'/api/federation/members/{FOREIGN}/takeover',
+                  json={'confirm': 'TAKEOVER', 'owner_down': True, 'user_password': PASSWORD})
+    assert r.status_code == 200, r.data
+    assert [t['cluster_id'] for t in r.get_json()['taken']] == [f'c{i}' for i in range(1, 8)]
+    assert all(t['manager'] is True for t in r.get_json()['taken'])
+    assert checks == ['taking over the clusters of a site']
+    assert asked == [(FOREIGN, None, 'admin:root', False)]
 
 
 def test_taking_a_mapping_away_asks_no_password(fed, seed, db):
@@ -813,9 +861,16 @@ def test_taking_a_mapping_away_asks_no_password(fed, seed, db):
 
 
 SWITCH = ('/api/federation/switch', {'enabled': True})
+# no password asked, but a catch-up takes a newer view, a pull rewrites the mirrors and a
+# lease round can step this site down: the federation's state all the same
+NO_REAUTH = (
+    ('/api/federation/reconcile', {}),
+    ('/api/federation/sync', {}),
+    ('/api/federation/clusters/c1/renew', {}),
+)
 
 
-@pytest.mark.parametrize('path,body', (SWITCH,) + GUARDED_ROUTES)
+@pytest.mark.parametrize('path,body', (SWITCH,) + GUARDED_ROUTES + NO_REAUTH)
 def test_a_mirrored_admin_changes_no_federation_state(fed, seed, path, body):
     miriam = fed.as_user(_mirror(seed, 'miriam', role='admin'))
     r = miriam.post(path, json=dict(body, user_password=PASSWORD))
@@ -887,7 +942,8 @@ def _changed(key):
             'oidc_group_mappings': [{'group_id': 'g-ops', 'role': 'admin'}],
             'ldap_auto_create_users': False, 'oidc_auto_create_users': False,
             'ldap_default_role': 'admin', 'oidc_default_role': 'admin',
-            'ldap_group_filter': '(objectClass=group)'}.get(key, 'CN=ops,DC=example,DC=org')
+            'ldap_group_filter': '(objectClass=group)',
+            'oidc_scopes': 'openid profile email api://other/.default'}.get(key, 'CN=ops,DC=example,DC=org')
 
 
 def _settings():
@@ -912,6 +968,48 @@ def test_a_mirrored_admin_changes_no_role_an_external_sign_in_gets(fed, seed, ke
     r = root.post('/api/settings/server', json={key: _changed(key), 'domain': 'pp.example.org'})
     assert r.status_code == 200, (key, r.data)
     assert _settings()[key] == _changed(key) and _settings()['domain'] == 'pp.example.org'
+
+
+def test_no_scopes_is_the_default_they_are_stored_as(fed, seed):
+    """No scopes sent are stored as the provider's default: over a scope list that asks for
+    the groups, that drops them, and a new account gets the default role in the default
+    tenant. So '' counts as that change. Counterproof: with the default stored, '' changes
+    nothing and the rest of the form is saved."""
+    root = fed.as_user(seed.user('root', role='admin'))
+    assert root.post('/api/settings/server', json={
+        'oidc_provider': 'generic', 'oidc_scopes': 'openid profile email groups'}).status_code == 200
+    miriam = fed.as_user(_mirror(seed, 'miriam', role='admin'))
+    r = miriam.post('/api/settings/server', json={'oidc_scopes': ''})
+    assert r.status_code == 403 and r.get_json()['code'] == 'FED_MIRROR_ADMIN', r.data
+    assert _settings()['oidc_scopes'] == 'openid profile email groups'
+    assert root.post('/api/settings/server', json={'oidc_scopes': ''}).status_code == 200
+    assert _settings()['oidc_scopes'] == 'openid profile email'
+    r = miriam.post('/api/settings/server', json={'oidc_scopes': '', 'domain': 'pp.example.org'})
+    assert r.status_code == 200, r.data
+    assert _settings()['domain'] == 'pp.example.org'
+    # Entra's default asks for the groups through Graph: '' over it is no change either
+    assert root.post('/api/settings/server', json={'oidc_provider': 'entra',
+                                                   'oidc_scopes': ''}).status_code == 200
+    assert 'GroupMember.Read.All' in _settings()['oidc_scopes']
+    r = miriam.post('/api/settings/server', json={'oidc_scopes': '', 'domain': 'pp2.example.org'})
+    assert r.status_code == 200, r.data
+
+
+# the LDAP and OIDC settings a mirrored admin may still change, each with why that is safe
+SIGN_IN_FREE = {
+    'oidc_button_text': 'the label of the button',
+    'oidc_redirect_uri': 'this host only, and the provider takes only an address registered with it',
+    'ldap_email_attribute': 'fills the mail address of the account, which no sign-in or role reads',
+    'ldap_display_name_attribute': 'fills the name shown',
+}
+
+
+def test_every_sign_in_setting_is_guarded_or_named_free(db):
+    """A new ldap_ or oidc_ setting has to go on one of the guard lists, or here with the
+    reason a mirrored admin may change it. This is how oidc_scopes was found missing."""
+    keys = {k for k in _settings() if k.startswith(('ldap_', 'oidc_'))}
+    guarded = set(EXTERNAL_ROLE_SETTINGS) | set(EXTERNAL_SOURCE_SETTINGS) | set(EXTERNAL_SOURCE_SECRETS)
+    assert keys - guarded == set(SIGN_IN_FREE), sorted(keys - guarded)
 
 
 def _ca_pem():

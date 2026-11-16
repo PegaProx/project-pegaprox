@@ -6481,6 +6481,8 @@ class PegaProxManager:
             if _fed.enabled() and not _fed.worker_takes_writes_for(self.id):
                 self.logger.warning(f"[HA] Recovery of {failed_node} dropped - this instance holds "
                                     "no live federation lease on the cluster any more")
+                # the node stays down: tried again once the lease is back here
+                self._ha_retry_recovery(failed_node)
                 return
 
             # before anything is done to the node: only from the quorate side of the
@@ -6860,6 +6862,9 @@ class PegaProxManager:
             
         except Exception as e:
             self.logger.error(f"[HA] Error in recovery worker: {e}")
+            if isinstance(e, LeaseRefused):
+                # the lease went in the middle of it: the node is tried again once it is back
+                self._ha_retry_recovery(failed_node)
         finally:
             # only a lock this worker took: after a failed acquire the lock is the
             # other instance's, and deleting it let both recover (#625)

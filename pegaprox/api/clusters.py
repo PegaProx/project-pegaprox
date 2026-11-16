@@ -1272,7 +1272,9 @@ def delete_cluster(cluster_id):
             from pegaprox.core import federation as _fed_core
             if _fed_core.enabled():
                 _fed_owner = _fed_core.cluster_owner(cluster_id)
-        except Exception:
+        except Exception as e:
+            logging.warning(f"[FED] the owner of cluster {cluster_id} could not be read before "
+                            f"its delete, no record of it is kept: {e}")
             _fed_owner = None
         # #779 (zobsg) — db.delete_cluster now sweeps EVERY cluster_id-keyed table (vm_acls,
         # affinity_rules, cluster_alerts, pool_permissions, node_maintenance, … ~20 of them), so the
@@ -1288,8 +1290,9 @@ def delete_cluster(cluster_id):
             if _fed_core.enabled():
                 _fed_core.forget_deleted_cluster(cluster_id, _fed_owner)
                 _fed_core.drop_owner_cache()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"[FED] the lease of deleted cluster {cluster_id} could not be given "
+                            f"back, the voters let it run out: {e}")
         # the node passwords went with it (cluster_node_credentials), and so does what this
         # process remembers of them (#1136)
         from pegaprox.core import node_creds

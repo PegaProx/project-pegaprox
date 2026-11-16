@@ -2228,15 +2228,20 @@ def _run_esxi_to_pve(task):
                 if not chk_out.read().decode().strip():
                     # sshfs might not work, try NFS or direct copy fallback
                     task.log(f"  SSHFS mount failed, trying scp fallback")
-                    # cleanup failed mount
-                    ssh_pve.exec_command(
+                    # cleanup failed mount, waited for, so the fallback's copy does not
+                    # race it; the line's status is the last check's: is the mount gone
+                    _, c_out, _ = ssh_pve.exec_command(
                         f"fusermount -u {_q_local(mount_dir)} 2>/dev/null; "
                         f"rmdir {_q_local(mount_dir)} 2>/dev/null; "
                         # and the scratch root once its last child is gone - rmdir
                         # refuses a non-empty directory, which is exactly right here
-                        f"rmdir {_q_local(task.scratch)} 2>/dev/null",
+                        f"rmdir {_q_local(task.scratch)} 2>/dev/null; "
+                        f"! mountpoint -q {_q_local(mount_dir)}",
                         timeout=10,
                     )
+                    if c_out.channel.recv_exit_status() != 0:
+                        task.log(f"  The ESXi datastore stays mounted at {mount_dir} on node "
+                                 f"{pve_host}: run 'fusermount -u {mount_dir}' there")
                     mount_dir = ''
 
                     # fallback: scp the flat vmdk to temp, then import
@@ -2391,13 +2396,17 @@ def _run_esxi_to_pve(task):
                             undo += [f"fusermount -u {shlex.quote(mount_dir)} 2>/dev/null",
                                      f"rmdir {shlex.quote(mount_dir)} 2>/dev/null"]
                         undo.append(f"rmdir {shlex.quote(task.scratch)} 2>/dev/null")
+                        if mount_dir:
+                            # last, so the status of the line says whether the mount is gone
+                            undo.append(f"! mountpoint -q {shlex.quote(mount_dir)}")
                         try:
                             _, u_out, _ = ssh_pve.exec_command('; '.join(undo), timeout=10)
-                            u_out.channel.recv_exit_status()
+                            stays = bool(mount_dir) and u_out.channel.recv_exit_status() != 0
                         except Exception:
-                            if mount_dir:
-                                left += (f" - the ESXi datastore stays mounted at {mount_dir} on node "
-                                         f"{pve_host}: run 'fusermount -u {mount_dir}' there")
+                            stays = bool(mount_dir)
+                        if stays:
+                            left += (f" - the ESXi datastore stays mounted at {mount_dir} on node "
+                                     f"{pve_host}: run 'fusermount -u {mount_dir}' there")
                     try: ssh_pve.close()
                     except Exception: pass
                 task.set_phase('failed', f'Transfer error: {e}{left}')

@@ -440,16 +440,37 @@ def node_cmd(argv, *, timeout, host='', read=False, need=None, again=False, clus
     data = kwargs.pop('input', None)
     if data is not None:
         kwargs['stdin'] = subprocess.PIPE
+    gate = None
+    if fenced:
+        # the group waits at a gate until the second ask: a shell that execs the command once
+        # a line comes through the pipe and exits on EOF, so a refusal there means it never ran
+        gate = os.pipe()
+        full = ['/bin/sh', '-c', f'read -r go </dev/fd/{gate[0]} && exec "$@"', 'sh'] + full
+        kwargs['pass_fds'] = tuple(kwargs.get('pass_fds', ())) + (gate[0],)
     started = time.monotonic()
-    proc = subprocess.Popen(full, start_new_session=True, **kwargs)
+    try:
+        proc = subprocess.Popen(full, start_new_session=True, **kwargs)
+    except BaseException:
+        if gate:
+            os.close(gate[1])
+        raise
+    finally:
+        if gate:
+            os.close(gate[0])
     ha.register_child_group(proc.pid)
     if fenced:
         _track_group(cluster_id, proc.pid)
     try:
         if fenced:
             # once more now that the group is kept: a hand-over since the first ask found
-            # nothing to kill, and a refusal here kills it below before it got far
+            # nothing to kill, and a refusal here leaves the gate shut
             _fed_guard(cluster_id, lambda: f'{os.path.basename(str(argv[0]))} {host}'.strip(), 'ssh')
+            try:
+                os.write(gate[1], b'go\n')
+            except OSError:
+                pass  # cut meanwhile, the shell is gone
+            os.close(gate[1])
+            gate = None
         try:
             out, err = proc.communicate(data, timeout=float(timeout) + KILL_AFTER + 1)
         except subprocess.TimeoutExpired:
@@ -457,6 +478,8 @@ def node_cmd(argv, *, timeout, host='', read=False, need=None, again=False, clus
             out, err = proc.communicate()
             raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
     finally:
+        if gate:
+            os.close(gate[1])
         if proc.poll() is None:
             _kill_group(proc.pid)
             proc.wait()

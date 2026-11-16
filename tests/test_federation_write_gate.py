@@ -23,6 +23,7 @@ import ast
 import inspect
 import os
 import re
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -133,16 +134,36 @@ def test_reads_consoles_and_logins_pass(led):
 
 
 class _Popen:
-    """A node command that never leaves: records its argv (without the `timeout` wrapper)
-    and ends at once. Its pid is past any pid_max, so no kill can reach a real process."""
+    """A node command that never leaves: records its argv (without the start gate and the
+    `timeout` wrapper) and ends at once. Its pid is past any pid_max, so no kill can reach a
+    real process. `gate` keeps a copy of the gate's read end: what came through it."""
     ran = None
+    gates = None
 
     def __init__(self, argv, **kw):
         self.pid, self.returncode = 4194304 + 777, 0
         argv = list(argv)
+        if argv[:2] == ['/bin/sh', '-c'] and kw.get('pass_fds'):
+            if _Popen.gates is not None:
+                self.gate = os.dup(kw['pass_fds'][-1])
+                _Popen.gates.append(self)
+            argv = argv[4:]
         if argv and os.path.basename(argv[0]) == 'timeout':
             argv = argv[4:]
         _Popen.ran.append(argv)
+
+    def came_through(self):
+        """What the command was let through with; None while the gate is still held open.
+        gevent's os.close lets the hub close the fd, so the hub runs once first."""
+        import gevent
+        gevent.sleep(0.05)
+        os.set_blocking(self.gate, False)
+        try:
+            return os.read(self.gate, 64)
+        except BlockingIOError:
+            return None
+        finally:
+            os.close(self.gate)
 
     def communicate(self, data=None, timeout=None):
         return '', ''
@@ -900,6 +921,39 @@ def test_a_cluster_that_becomes_a_mirror_closes_its_clients(led, monkeypatch):
         ha_transport.cut_cluster('c-led')
 
 
+def test_a_step_down_stops_what_runs_before_the_row_moves(led, monkeypatch):
+    """The other site of a federation of two took the cluster over by hand, and this
+    instance hears of it: a node command under way and a client a write went out through
+    are stopped while the row still says this instance, and only then does the row become
+    the new owner's copy. Nothing goes out beside the new owner once the row names it."""
+    import threading
+    import time as _time
+    from pegaprox.core import ha_transport
+    _no_watch(monkeypatch, ha_transport)
+    _grant('c-led', seconds=60)
+    seen = []
+    client = MagicMock()
+    client.close.side_effect = lambda: seen.append(federation.cluster_owner('c-led'))
+    ha_transport.guard_client(client, 'n1', cluster_id='c-led')
+    client.exec_command('qm start 100')
+    out = {}
+    t = threading.Thread(target=_sleeping, args=(ha_transport, 'c-led', out))
+    t.start()
+    rec = {'cluster_id': 'c-led', 'gen': 2, 'kind': 'takeover', 'owner': 'f' * 32,
+           'from': led, 'at': int(_time.time()), 'by': 'admin:root', 'sig': 'x'}
+    try:
+        assert _wait_tracked(ha_transport, 'c-led')
+        assert fl._step_down('c-led', rec) is True
+        t.join(10)
+        assert not t.is_alive() and out['rc'] != 0, out
+        assert seen and seen[0] == led
+        assert federation.cluster_owner('c-led') == 'f' * 32
+        assert fl.takes_writes_for('c-led') is False
+    finally:
+        ha_transport.cut_cluster('c-led')
+        t.join(5)
+
+
 def _handed_over_after(monkeypatch, ha_transport, name, nth=1):
     """ha_transport.<name> answers as before, and the cluster is handed over right after
     its nth answer: the window between asking for a write and the write going out."""
@@ -994,6 +1048,8 @@ def test_a_hand_over_after_the_ask_kills_the_node_command(led, monkeypatch):
         def poll(self):
             return None
     _Popen.ran = ran = []
+    monkeypatch.setattr(_Popen, 'gates', [])
+    gates = _Popen.gates
     monkeypatch.setattr(ha_transport.subprocess, 'Popen', _Running)
     monkeypatch.setattr(ha_transport, '_kill_group', killed.append)
     _grant('c-led', seconds=60)
@@ -1002,7 +1058,51 @@ def test_a_hand_over_after_the_ask_kills_the_node_command(led, monkeypatch):
         ha_transport.node_cmd(['ssh', 'root@n1', 'qm start 100'], timeout=5, host='n1',
                               cluster_id='c-led')
     assert ran == [['ssh', 'root@n1', 'qm start 100']]
+    # the group waited at its gate, and the refusal shut it: the command itself never ran
+    assert [g.came_through() for g in gates] == [b'']
     assert killed == [4194304 + 777] and not ha_transport._groups.get('c-led')
+
+
+def _late_track(monkeypatch, ha_transport):
+    """_track_group answers 0.2 s late, as under gevent where Popen yields to the hub: the
+    child is exec'd long before the second ask."""
+    real = ha_transport._track_group
+
+    def late(cid, pgid):
+        time.sleep(0.2)
+        return real(cid, pgid)
+    monkeypatch.setattr(ha_transport, '_track_group', late)
+
+
+def test_a_command_refused_at_the_second_ask_never_runs(led, monkeypatch, tmp_path):
+    """A real process: handed over between the first ask and the second, the command
+    writes nothing, however late the second ask comes. Killing the group after the refusal
+    would be too late for an ssh whose exec request already went out."""
+    from pegaprox.core import ha_transport
+    _no_watch(monkeypatch, ha_transport)
+    _late_track(monkeypatch, ha_transport)
+    _grant('c-led', seconds=60)
+    _handed_over_after(monkeypatch, ha_transport, '_fed_guard')
+    wrote = tmp_path / 'wrote'
+    with pytest.raises(federation.LeaseRefused):
+        ha_transport.node_cmd(['sh', '-c', f'echo x > {wrote}'], timeout=5, host='n1',
+                              cluster_id='c-led')
+    time.sleep(0.2)
+    assert not wrote.exists()
+
+
+def test_a_command_with_the_lease_runs_through_the_gate(led, monkeypatch, tmp_path):
+    """Counterproof: with the lease kept the gate opens, the command runs and its input
+    and output pass as with subprocess.run."""
+    from pegaprox.core import ha_transport
+    _no_watch(monkeypatch, ha_transport)
+    _late_track(monkeypatch, ha_transport)
+    _grant('c-led', seconds=60)
+    wrote = tmp_path / 'wrote'
+    r = ha_transport.node_cmd(['sh', '-c', f'echo x > {wrote}; cat'], timeout=5, host='n1',
+                              cluster_id='c-led', input='in\n', capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout == 'in\n' and wrote.exists()
+    assert not ha_transport._groups.get('c-led')
 
 
 # --- the poison pill and a recovery that waited past the lease ----------------------------------
@@ -1043,9 +1143,42 @@ def test_a_recovery_that_waited_past_the_lease_does_nothing(led, monkeypatch):
         fake._ha_recovery_allowed.return_value = None
         mgr_mod.PegaProxManager._ha_recovery_worker(fake, 'n1')
         return fake
-    assert run()._ha_recovery_allowed.call_count == 0
+    dropped = run()
+    assert dropped._ha_recovery_allowed.call_count == 0
+    # the node stays down: marked, so a pass tries it again once the lease is back here
+    assert [c.args for c in dropped._ha_retry_recovery.call_args_list] == [('n1',)]
     _grant('c-led')
-    assert run()._ha_recovery_allowed.call_count == 1
+    went = run()
+    assert went._ha_recovery_allowed.call_count == 1
+    assert went._ha_retry_recovery.call_args_list == []
+
+
+def test_a_recovery_that_lost_the_lease_half_way_is_tried_again(led, monkeypatch):
+    """An exit refuses in the middle of a recovery, the lease went meanwhile: the worker
+    gives up on it, and the node is marked so a pass tries again once the lease is back.
+    Counterproof: another error marks nothing."""
+    import threading
+    from pegaprox.core import ha
+    from pegaprox.core import manager as mgr_mod
+    monkeypatch.setattr(mgr_mod.time, 'sleep', lambda s: None)
+    monkeypatch.setattr(ha, 'is_active', lambda: True)
+    monkeypatch.setattr(ha, 'recovery_begin', lambda *a, **k: 'run')
+    monkeypatch.setattr(ha, 'recovery_end', lambda *a, **k: [])
+    _grant('c-led', seconds=60)
+
+    def run(error):
+        fake = MagicMock()
+        fake.id = 'c-led'
+        fake.ha_config = {}
+        fake.ha_lock = threading.Lock()
+        fake.ha_node_status = {'n1': {'status': 'offline', 'last_seen': 5}}
+        fake.ha_recovery_in_progress = {'n1': True}
+        fake._ha_fence_timing.return_value = {'wait': 0}
+        fake._ha_recovery_allowed.side_effect = error
+        mgr_mod.PegaProxManager._ha_recovery_worker(fake, 'n1')
+        return [c.args for c in fake._ha_retry_recovery.call_args_list]
+    assert run(federation.LeaseRefused('c-led', 'SSH n2 qm start')) == [('n1',)]
+    assert run(RuntimeError('the node said no')) == []
 
 
 # --- the routes that start a run of a plan ----------------------------------------------------------
@@ -1156,3 +1289,27 @@ def test_deleting_an_enrolled_cluster_keeps_it_on_record(api, seed, led, monkeyp
     r = admin.delete('/api/clusters/c-led')
     assert r.status_code == 200, r.data
     assert federation.dropped_records().get('c-led') == led
+
+
+@pytest.mark.parametrize('fails', ['cluster_owner', 'forget_deleted_cluster'])
+def test_a_federation_step_of_a_delete_that_fails_says_so(api, seed, led, monkeypatch, caplog,
+                                                         fails):
+    """The delete goes through whatever the federation's part of it does, but a part that
+    fails is logged: without the owner no record is kept, and a lease not given back is
+    left to run out at the voters."""
+    import logging
+    import pegaprox.api.clusters as clusters_api
+    fake = api.make_fake_manager('c-led')
+    fake.config.api_token_user = ''
+    api.set_manager('c-led', fake)
+    monkeypatch.setattr(clusters_api, '_retire_cluster_claim', lambda mgr: None)
+
+    def broken(*a, **kw):
+        raise RuntimeError('database is locked')
+    monkeypatch.setattr(federation, fails, broken)
+    admin = api.as_user(seed.user('root', role='admin'))
+    with caplog.at_level(logging.WARNING):
+        r = admin.delete('/api/clusters/c-led')
+    assert r.status_code == 200, r.data
+    said = [m for m in caplog.messages if m.startswith('[FED]') and 'c-led' in m]
+    assert said and 'database is locked' in said[0], caplog.messages

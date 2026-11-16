@@ -7673,12 +7673,13 @@ def unpair_refusal(st=None, said=(), leader_agreed=False):
 
 
 def _federation_keeps_group(st):
-    """An active with standbys while the federation is switched on: unpaired, it would act
-    as the federation member its standbys still are."""
+    """An active with standbys while the federation is switched on, or while its view
+    still lists other members with the switch forced off (PEGAPROX_FEDERATION=0 on a
+    member): unpaired, it would act as the federation member its standbys still are."""
     if st['role'] != ROLE_ACTIVE or not st.get('members'):
         return False
     from pegaprox.core import federation
-    return federation.enabled()
+    return federation.enabled() or federation.view_has_members()
 
 
 def unpair_needs_leader(st=None):

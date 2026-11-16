@@ -1089,16 +1089,16 @@ def test_enroll_gives_the_lease_and_the_gate(tmp_path):
     assert _owner_at(a, 'c1') == iid(a)
 
 
-def test_enroll_needs_three_sites_and_a_proxmox_cluster(tmp_path, clock):
-    a, b = _sides(tmp_path, 'ab')
+def test_enroll_needs_a_second_site_and_a_proxmox_cluster(tmp_path, clock):
+    a, b = Side(tmp_path, 'a'), Side(tmp_path, 'b')
+    _wire([a, b])
+    iid(a)
     _add_cluster(a, 'c2')
     with at(a):
         with pytest.raises(federation.FederationError) as err:
             fl.enroll_cluster('c2')
     assert err.value.code == 'FED_TOO_FEW_SITES' and _owner_at(a, 'c2') == ''
-    c = Side(tmp_path, 'c')
-    _wire([a, b, c])
-    _join(c, _code(a))
+    _join(b, _code(a))
     _add_cluster(a, 'xp', ctype='xcpng')
     with at(a):
         with pytest.raises(federation.FederationError) as err:
@@ -1111,7 +1111,10 @@ def test_enroll_needs_three_sites_and_a_proxmox_cluster(tmp_path, clock):
     assert _owner_at(a, 'c2') == ''
     clock.advance(fl.SETTLE_SECONDS + 1)
     with at(a):
-        assert fl.enroll_cluster('c2')['held'] is True
+        lease = fl.enroll_cluster('c2')
+    # two sites: both granted it, nothing alone
+    assert lease['held'] is True and lease['votes'] == 2 and lease['needed'] == 2
+    assert lease['alone'] is False
 
 
 def test_a_failed_enroll_leaves_the_row_as_it_was(tmp_path):
@@ -1320,6 +1323,25 @@ def test_a_rebooted_voter_holds_for_a_lease(tmp_path, clock, monkeypatch):
     assert _writes(b, 'pve-rb') is False
     clock.advance(fl.LEASE_SECONDS + fl.LEASE_SKEW + 1)
     assert _ask(b, c, ['fresh'])[1]['votes']['fresh']['granted'] is True
+
+
+@pytest.mark.parametrize('kind,boot,holds', [('boottime', 'boot-1', False),
+                                             ('monotonic', 'boot-1', True),
+                                             ('boottime', '', True)],
+                         ids=['linux', 'no-boot-clock', 'no-boot-id'])
+def test_a_restart_keeps_the_leases_only_with_the_boot_clock(monkeypatch, kind, boot, holds):
+    """What the guide says about a restart of the service: on Linux (the boot clock and a
+    boot id) the leases survive it; without either a restart cannot be told from a reboot,
+    so the leases close and the host holds."""
+    from pegaprox.core import ha_vote
+    monkeypatch.setattr(fl, '_clock_kind', lambda: kind)
+    monkeypatch.setattr(ha_vote, 'read_boot_id', lambda: boot)
+    federation._runtime['boot_id'] = None
+    st = {'clock': fl._clock_mark(), 'my_leases': {'pve1': {'expires': 1e12}}, 'promises': {}}
+    # a new process on the same boot
+    monkeypatch.setattr(federation, '_PROCESS_STARTED', federation._PROCESS_STARTED + 100)
+    assert fl.check_clock(st) is holds
+    assert (st['my_leases']['pve1']['expires'] == 0) is holds
 
 
 def test_a_host_that_became_active_holds(tmp_path, clock, monkeypatch):
@@ -1771,6 +1793,103 @@ def test_a_standby_that_leaves_with_the_switch_off_drops_the_identity_too(
     assert not os.path.exists(a2.lease_file)
     with at(a):
         assert federation.instance_id() == iid(a)
+
+
+def test_a_failed_drop_of_the_inherited_identity_keeps_the_federation_off(
+        tmp_path, ha_state, monkeypatch):
+    """The unpairing has made the former standby a standalone before the identity goes. A
+    drop that fails half way (a write the database refuses) must not leave it acting as
+    the member, PEGAPROX_FEDERATION=1 included: a host-local mark keeps the federation off
+    until a drop goes through, which the next start tries again."""
+    import sqlite3
+    ha = ha_state
+    a, b, c = _three(tmp_path)
+    _enroll(a, 'pve-a')
+    _add_local_user(b, 'bea')
+    _sync(a)
+    a2 = _standby_of(tmp_path, a)
+    with open(ha.STATE_FILE, 'w', encoding='utf-8') as fh:
+        json.dump({'role': 'standby', 'instance_id': 'b' * 32, 'epoch': 3,
+                   'members': {'a' * 32: {'url': URL['a']}}}, fh)
+    ha.reset_for_tests()
+    monkeypatch.setenv(federation.ENV_SWITCH, '1')
+
+    def refused(home):
+        raise sqlite3.OperationalError('database is locked')
+    monkeypatch.setattr(federation, 'drop_mirror_rows', refused)
+    with at(a2):
+        assert ha.unpair() == 'standby' and federation._ha_active() is True
+        # the identity is still there, the switch says on, and still nothing runs
+        assert federation.instance_id() == iid(a)
+        assert federation.enabled() is False
+        monkeypatch.undo()
+        monkeypatch.setenv(federation.ENV_SWITCH, '1')
+        assert federation.retry_forget() is True
+        assert federation.identity() is None and not federation._forget_pending()
+        # counterproof: once the drop went through, the switch decides again
+        assert federation.enabled() is True
+        assert federation.retry_forget() is False
+
+
+def test_an_active_forced_off_while_still_a_member_keeps_its_standbys(tmp_path, ha_state,
+                                                                      monkeypatch):
+    """PEGAPROX_FEDERATION=0 on an active that is still a member: the view is all there,
+    so unpaired, the active and its standbys would both be that member once the override
+    goes. Refused like with the switch on. Counterproof: forced off without another member
+    in the view, it unpairs."""
+    ha = ha_state
+    a, b, c = _three(tmp_path)
+    _enroll(a, 'pve-a')
+    lonely, = _sides(tmp_path, 'd')
+    for side, refused in ((a, True), (lonely, False)):
+        with open(ha.STATE_FILE, 'w', encoding='utf-8') as fh:
+            json.dump({'role': 'active', 'instance_id': 'a' * 32, 'epoch': 3,
+                       'members': {'b' * 32: {'url': 'https://a2.example:5000'}}}, fh)
+        ha.reset_for_tests()
+        monkeypatch.setenv(federation.ENV_SWITCH, '0')
+        with at(side):
+            assert federation.enabled() is False
+            if refused:
+                with pytest.raises(Exception, match='federation'):
+                    ha.unpair()
+                assert ha.role() == 'active'
+            else:
+                assert ha.unpair() == 'active' and ha.role() == 'standalone'
+
+
+def test_a_join_answer_is_the_view_its_change_made(tmp_path, monkeypatch):
+    """The members lock is free again once the join's change is in, before its answer is
+    sealed: a removal that lands in between must not reach the joiner under the join's
+    epoch, or the joiner holds a view nobody else has and no later commit replays onto it.
+    It gets the view the join made, and then catches up like any member behind."""
+    a, b, c = _sides(tmp_path, 'abc')
+    d = Side(tmp_path, 'd')
+    _wire([a, b, c, d])
+    c_id = iid(c)
+    orig, fired = federation._mutate_leases, {}
+
+    def spend_then_remove(fn):
+        out = orig(fn)
+        if getattr(fn, '__name__', '') == 'spend' and not fired:
+            fired['done'] = True
+            keep = federation._runtime['transport']
+            federation._runtime['transport'] = _without(a.wire, URL['d'])
+            try:
+                fired['out'] = federation.remove_member(c_id, by='admin:root')
+            finally:
+                federation._runtime['transport'] = keep
+        return out
+    monkeypatch.setattr(federation, '_mutate_leases', spend_then_remove)
+    _join(d, _code(a))
+    monkeypatch.setattr(federation, '_mutate_leases', orig)
+    assert fired.get('out')
+    ea, da, _members = _view(a)
+    ed, dd, md = _view(d)
+    # the epoch and the members of one view: the one before the removal
+    assert ed == ea - 1 and c_id in md and dd != da
+    with at(d):
+        assert federation.catch_up()['adopted'] is True
+    assert _view(d)[:2] == (ea, da)
 
 
 @pytest.mark.parametrize('told', [True, False])

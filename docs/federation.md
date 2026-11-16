@@ -12,18 +12,20 @@ its own clusters; the federation adds four things on top:
   (its home), and the other sites refuse the change. A mirrored account signs in at
   another site only after an admin there has mapped its tenant (and a custom role) onto
   one of that site.
-- **Enrolled clusters are written only with a majority.** A Proxmox VE cluster you enroll
-  is written by its site only while a majority of the sites backs that site's lease on
-  it. When the network splits, the side without the majority stops writing to it instead
-  of two sites writing at once.
-- **Clusters of a lost site can be adopted.** Every site holds a copy of every enrolled
-  cluster's row. When a site is gone for good, another one takes its clusters over.
+- **Enrolled clusters are fenced.** With three or more sites, a Proxmox VE cluster you
+  enroll is written by its site only while a majority of the sites backs that site's lease
+  on it; when the network splits, the side without the majority stops writing to it. With
+  two sites the owner writes on its own, and the other site takes a cluster over only when
+  an admin there confirms that the owner is down (see [Two sites](#two-sites)).
+- **Clusters of a lost site can be taken over.** Every site holds a copy of every enrolled
+  cluster's row. When a site is gone, another one takes its clusters over: by majority
+  with three or more sites, by hand with two.
 - **One view of everything.** The Federation tab lists the clusters of every site, asked
   live at the site that leads them.
 
 Contents: [Switch it on](#switch-it-on) - [Pair two sites](#pair-two-sites) -
 [What pairing shares](#what-pairing-shares) - [Accounts of other sites](#accounts-of-other-sites) -
-[Enrolled clusters and leases](#enrolled-clusters-and-leases) -
+[Enrolled clusters and leases](#enrolled-clusters-and-leases) - [Two sites](#two-sites) -
 [Adopting a cluster](#adopting-a-cluster) - [Removing a site, leaving](#removing-a-site-leaving) -
 [HA groups](#ha-groups) - [Limits](#limits) - [Switch it off](#switch-it-off) -
 [API](#api) - [Troubleshooting](#troubleshooting)
@@ -82,10 +84,10 @@ If the joining instance gets no answer (the network broke off right after the ot
 taken it in), join again with the same code: until it runs out, the code answers that
 same instance once more, and no other.
 
-Pairing, joining, removing, leaving, enrolling, releasing, unenrolling and adopting all ask
-for the account password again, as the HA pairing does. An account that signs in through
-OIDC and has no password must have signed in within the last 10 minutes instead. API
-tokens cannot do these steps.
+Pairing, joining, removing, leaving, enrolling, releasing, unenrolling, adopting and taking
+over by hand all ask for the account password again, as the HA pairing does. An account
+that signs in through OIDC and has no password must have signed in within the last 10
+minutes instead. API tokens cannot do these steps.
 
 **Certificates.** With PegaProx's own self-signed certificate, the code carries its
 fingerprint and the other instances pin it. Behind a reverse proxy, or with a certificate
@@ -94,7 +96,9 @@ from a CA, they check it against the CA as any HTTPS client does.
 **Clocks.** Every call between members is signed with the sender's key and is valid for
 two minutes. Keep the clocks of all sites within that (NTP); a member whose clock is
 further off is refused with `FED_CLOCK`. A clock that NTP steps back a little does not
-interrupt the leases, even across a restart of the service.
+interrupt the leases. On Linux that holds across a restart of the service too; where the
+system gives no boot clock or boot id (PegaProx on Windows or macOS), every start of the
+service counts as a reboot (see [Enrolled clusters and leases](#enrolled-clusters-and-leases)).
 
 ## What pairing shares
 
@@ -184,12 +188,12 @@ from its home; without one it cannot use that site, and it enrolls at its home.
 **Admins of this instance.** Only this instance's own admins count for the protection of
 the last admin: a mirrored admin does not, because removing its site drops the account.
 A mirrored admin cannot change the federation of this instance (pair, remove, leave,
-enroll, adopt, map), and it does not administer this instance's accounts, tenants and
-roles either: creating, changing or deleting a user, setting its password, resetting its
-second factor or its OIDC sign-in binding, resetting the password age of every account,
-restoring a configuration backup, and the tenant and role pages answer
-`403 FED_MIRROR_ADMIN`. Otherwise it could create a local admin and make those changes
-under that account.
+enroll, adopt, take over, map) or start a catch-up, an account pull or a lease round, and
+it does not administer this instance's accounts, tenants and roles either: creating,
+changing or deleting a user, setting its password, resetting its second factor or its
+OIDC sign-in binding, resetting the password age of every account, restoring a
+configuration backup, and the tenant and role pages answer `403 FED_MIRROR_ADMIN`.
+Otherwise it could create a local admin and make those changes under that account.
 
 For the same reason it does not change who signs in here through LDAP or OIDC, or with
 which role:
@@ -213,13 +217,15 @@ whole form, so a mirrored admin that saves other settings with these as they are
 enrolled yet** lists its local Proxmox VE clusters, all of them, with a filter once there
 are more than twelve. Enrolling needs:
 
-- three or more sites. With two, any outage of one would stop the other from writing;
+- two or more sites. With two, both must answer when you enroll, see
+  [Two sites](#two-sites);
 - a Proxmox VE cluster. PBS servers, QNetd hosts, XCP-ng pools and ESXi hosts are not
   enrolled and not fenced.
 
 The enrolling site holds a lease of 30 seconds on the cluster, renewed every 10 seconds
-by a majority vote of the sites. A cluster id can be enrolled by one site only: an enroll
-of an id another site leads is refused, and the local cluster stays as it was. Every
+by a majority vote of the sites (with two sites, see [Two sites](#two-sites)). A cluster
+id can be enrolled by one site only: an enroll of an id another site leads is refused,
+and the local cluster stays as it was. Every
 write PegaProx sends to that cluster (API calls, SSH commands, background jobs such as
 balancing and rolling updates) is checked against the lease first. Without a live lease
 the write is not sent: the API answers `409 FED_NO_LEASE` and the UI says so. The check
@@ -238,10 +244,14 @@ snapshot, which is then only crash-consistent; refused, the guest would hang on 
 write until somebody thaws it by hand. Runs that start in several steps (a failover, a
 test failover and its cleanup, a failback, a cross-cluster migration, a multi-cluster
 vnet) check the lease of the clusters they write before they start; a dry run only reads
-and needs none. A plain
-restart of the service keeps the leases and the votes a site gave. A site whose host
-rebooted, that took over in its HA group, or that lost its lease file closes its leases
-and votes for nobody for 35 seconds, so no promise it gave before can be broken. An
+and needs none. On Linux a
+plain restart of the service keeps the leases and the votes a site gave (a lease a site of
+two held alone waits for the first renewal after the start, about 10 seconds): the leases run
+on the boot clock, which goes on through the restart, and the boot id tells a restart from a
+reboot. Where either is missing (PegaProx on Windows or macOS), a restart counts as a reboot.
+A site whose host rebooted, that took over in its HA group, that lost its lease file, or that
+restarted without that clock closes its leases and votes for nobody for 35 seconds, so no
+promise it gave before can be broken. An
 active that takes its first standby, or leaves its HA group, stays the same host and
 keeps its leases and votes.
 
@@ -249,8 +259,8 @@ keeps its leases and votes.
 lease for 35 seconds, renewals included: a lease counted before two such changes could
 otherwise still run while a majority of the new list backs another site. So writes to
 enrolled clusters pause after each change, for up to about half a minute, and the leases
-come back by themselves. An enroll right after a pairing is refused with the same reason;
-try again a little later.
+come back by themselves. With two sites the owner's own lease pauses the same way. An
+enroll right after a pairing is refused with the same reason; try again a little later.
 
 - **Renew** runs one round now. If the majority does not back the lease, the tab says so
   as an error: writes stay closed until it does.
@@ -273,10 +283,78 @@ was adopted, and maybe unenrolled by its new owner later, finds a majority namin
 leader when it comes back: its row becomes a copy of that site's cluster and it stops
 writing to it.
 
+## Two sites
+
+A federation of two sites enrolls clusters too. One of two is no majority, so it works
+differently from three or more sites:
+
+- **The owner keeps writing.** Enrolling needs both sites to answer. After that the site that
+  enrolled a cluster renews its lease every 10 seconds with the other site, and while the other
+  site gives no answer at all (it is down, its PegaProx is stopped or switched off, the link
+  between the sites is cut) it renews the lease alone and keeps writing. The tab shows the lease
+  as **held alone**. A site that answers but does not agree (another member list, a clock more
+  than two minutes off) stops the renewal instead: the writes wait until the two agree again. To
+  let a site write alone in that case, stop PegaProx at the other one.
+- **Nothing moves on its own.** The other site never takes a cluster over by itself, however
+  long the owner stays silent. **Take over** works only when the owner answers and handed the
+  cluster over.
+- **Manual takeover, when the owner is down.** An admin of the other site takes the cluster
+  over with **Manual takeover** on the cluster, or **Take over all by hand** on the site, the
+  counterpart of `pvecm expected 1` on a Proxmox VE cluster. It asks for the password, the word
+  `TAKEOVER` and a tick that the owning site is down. It is refused while the owner answers
+  (`FED_OWNER_ALIVE`: use **Hand over** there) and for 35 seconds after this site last heard
+  from it (`FED_OWNER_RECENT`).
+
+**The risk is the admin's.** A takeover cannot tell a site that is down from a link that is
+down. If the owning site still runs, both sites write to the cluster from the takeover on,
+until they reach each other again. Take over only when you know that the owning site is down:
+its PegaProx stopped, its hosts are off, or the site is offline.
+
+**When the old owner comes back.** A takeover is signed and carries a number that grows with
+every change of the cluster's owner. The site that took over sends it with its calls to the old
+owner until the old owner confirms it, puts it in its answers to the old owner, and both sites
+compare all such records once a minute. At the first contact the old owner stops at once what
+it still runs on the cluster (as at a hand-over), turns its row into a copy of the new owner's
+and drops its copy of the credentials; the new owner's copy follows with the next sync. Nothing
+it changed in PegaProx after the takeover is taken over. What it sent to the cluster in the
+meantime cannot be undone: the tab of both sites shows when the takeover happened and when the
+old owner stopped, so you can check the cluster's task log for that span. If the site that took
+over is down too when the old owner starts again, the old owner writes again until it reaches
+the other site. The same holds for a site whose database was restored from a backup taken
+before a takeover, or before it handed over a cluster that the other site then took over.
+
+**Restarts and HA groups.** On Linux a plain restart keeps the leases both sites backed; a
+lease held alone waits for the first renewal after the start, about 10 seconds, so a site that
+was taken over hears of it before it writes. A site whose host rebooted, whose HA group failed
+over, or whose service restarted without a boot clock (see
+[Enrolled clusters and leases](#enrolled-clusters-and-leases)) writes nothing for 35 seconds,
+then alone again if the other site is silent. A standby never
+takes a cluster over. A standby that the HA sync last reached before a cluster moved to the
+other site (a takeover, or a hand-over the other site took over) still has the cluster as its
+own: if the group fails over to it while the other site cannot reach it, it writes the cluster
+alone after those 35 seconds, beside the site that leads it now, until the two reach each other.
+Then it stops at once.
+
+**Moving a cluster back.** Hand it over at the site that has it, then **Take over** at the other
+one while both answer.
+
+**A third site** makes the federation decide by majority again. The join needs both sites, and a
+takeover the other site has not confirmed yet holds the join off for a few seconds. After the
+join every site holds every lease for 35 seconds, so there is no moment with two writers; writes
+to enrolled clusters pause for up to about half a minute.
+
+**Back to two sites.** After the member list shrinks to two, a site writes a cluster alone only
+once the other site has answered for that cluster once. If the other site is down at that moment,
+the cluster waits until it answers.
+
+**Keep a local admin account at each site.** In a disaster the accounts of the lost site are
+copies at the other one, and a copied account does not take clusters over
+(`FED_MIRROR_ADMIN`).
+
 ## Adopting a cluster
 
-**Shadows** lists the copies of clusters other sites enrolled. **Take over** adopts one.
-It works only when:
+**Shadows** lists the copies of clusters other sites enrolled. With three or more sites,
+**Take over** adopts one. It works only when:
 
 - the owner does not answer, or it handed the cluster over;
 - the owner is still a member: adopt the clusters of a lost site **before** you remove it,
@@ -296,6 +374,9 @@ site's HA claim on the cluster do not come along. If the cluster cannot be reach
 after the adoption, the adoption stands and the connection is tried again at the next
 start.
 
+With two sites, adopting needs the owner to answer and to have handed the cluster over; a
+cluster whose site does not answer is taken over by hand (see [Two sites](#two-sites)).
+
 ## Removing a site, leaving
 
 **Remove** takes a member out, with a majority of the federation behind it. This
@@ -313,6 +394,18 @@ they take the new member list from the first member they reach that has it, repl
 changes since their own list, each signed by a majority. The tab warns before a removal
 that deletes copies of the member's clusters.
 
+**With two sites** a removal needs both. When the other site is gone for good, take over the
+clusters of it you want to keep, then **Remove** it with *gone for good*. This is refused while
+it answers, and for 35 seconds after this site last heard from it. Clusters of it you did not
+take over are named once more, and their copies are dropped only after you confirm. This site
+then carries on alone: the federation ends here, the clusters it leads become its own again (they
+do not close), and the accounts, mappings and cluster copies of the other site are deleted here.
+This site keeps what it needs to tell the other site: if that site comes back after all and
+calls here, it is told at once, stops writing every cluster this site kept, drops its copies of
+them, and its other clusters become its own. That works only while this site keeps the
+federation switched on and keeps its address. Afterwards this site can pair with a new site as a
+new federation.
+
 A change of the member list (a join, a removal, a leave) counts only once a majority of
 the members took it. When fewer confirm, the change is refused with `FED_NO_QUORUM` and
 nothing changes on the instance that made it; a member that took it anyway goes back to
@@ -329,7 +422,9 @@ offers to leave with force (that cluster stays enrolled here and closed, unenrol
 force afterwards). The leave itself needs a majority like any other change; forced, it
 goes ahead here alone. This instance then deletes every membership, every mirrored account
 and cluster copy and every key of the others; the others delete what they held of it as
-they hear of it.
+they hear of it. With two sites, when the other site leaves or you remove it with its
+agreement, the clusters this instance enrolled become its own again at once: no site is left
+that could hold them.
 
 **Clusters enrolled here, after a removal or a leave.** A site that was removed, or left
 with force, keeps the clusters it had enrolled, closed and released: the federation may
@@ -364,13 +459,16 @@ federation:
   whenever the standby holds the identity, also when the federation is switched off on
   it (`PEGAPROX_FEDERATION=0` there, or the setting off): switched on later, it would
   otherwise act as the member next to the active. It is the one thing of the federation
-  that runs while the switch is off;
+  that runs while the switch is off. Should that drop fail (a database write refused), the
+  federation stays off on that host, `PEGAPROX_FEDERATION=1` included, and the next start
+  of the service tries the drop again;
 - the active does not unpair while the federation is on and its group still has
   standbys (`409 HA_FEDERATION`): the standbys keep the identity, so the active and the
   group would both act as the same member. Remove the standbys on the active first (a
   standby that is gone for good is removed as before), or unpair them. Switching the
   federation off is no way around it: a standby promoted later would still hold the
-  identity. An active without standbys unpairs as before and stays the member;
+  identity. The same holds while it is forced off with `PEGAPROX_FEDERATION=0` and still
+  a member. An active without standbys unpairs as before and stays the member;
 - pair and manage it on the active. A standby answers the other sites with
   `503 FED_STANDBY` and does not pair;
 - use the group's service address as the address of the site; the fingerprints of all
@@ -378,13 +476,19 @@ federation:
   failover;
 - an instance that is a member of a federation cannot join another HA group as a standby
   (`409 FED_MEMBER`): it would take over the identity of that group's active. Leave the
-  federation first.
+  federation first;
+- a manual takeover and a removal of a site that is gone for good run on the active only; a
+  standby never takes over. The takeover is kept with the federation identity, so a standby
+  promoted right after it carries on with the cluster; if the HA sync had not carried it yet,
+  it comes back from the other site with the next sync. A standby that answers instead of its
+  active counts as no answer for the other site of a federation of two.
 
 ## Limits
 
 - **Eight sites** at most, this instance included. The tab offers a pairing code while
   one more site fits.
-- **Three sites** before a cluster can be enrolled.
+- **Two sites** before a cluster can be enrolled. With two, a cluster of a site that is down
+  is taken over by hand.
 - **Proxmox VE clusters only** under leases.
 - **100 clusters per site** in the linked view; for a site with more, the tab says how
   many are not listed.
@@ -411,9 +515,14 @@ emergency only. On a site that still takes part:
 - mirrored accounts count as disabled: they cannot sign in, and their sessions, API
   tokens, consoles and live streams are refused;
 - the other sites see it as unreachable and keep counting it in their majorities. After
-  35 seconds they may adopt its clusters;
-- a standby of its HA group that unpairs still drops the federation identity it holds
-  (see [HA groups](#ha-groups)).
+  35 seconds they may adopt its clusters; with two sites, an admin there may take them over
+  by hand, and switched on again this site gives them up at its first contact;
+- a standby of its HA group that unpairs still drops the federation identity it holds,
+  and the active does not unpair while it has standbys (see [HA groups](#ha-groups)).
+
+After this instance removed a site as gone for good, switching off asks once more while that
+site has not been told (`409 FED_ENDED_UNTOLD`): switched off, this instance can no longer
+tell it.
 
 To take a site out for good, leave the federation first. A database of a federation
 member restored onto a plain install behaves the same while the federation is off there.
@@ -430,13 +539,15 @@ need the password, as listed above, refuse API tokens. All of them are in `docs/
 | `POST /api/federation/switch` | `{"enabled": true}` or `false` |
 | `POST /api/federation/pairing-code` | a one-time code for the next site |
 | `POST /api/federation/join` | join with a code |
-| `POST /api/federation/members/<id>/remove` | remove a member (`{"confirm": "REMOVE"}`) |
+| `POST /api/federation/members/<id>/remove` | remove a member (`{"confirm": "REMOVE"}`; with two sites and the other one gone for good, `"gone": true`) |
+| `POST /api/federation/members/<id>/takeover` | take over by hand every cluster of that site, or the ones in `clusters`, two sites only (`{"confirm": "TAKEOVER", "owner_down": true, "force": false}`) |
 | `POST /api/federation/leave` | leave (`{"confirm": "LEAVE", "force": false}`) |
 | `POST /api/federation/sync` | pull the accounts of every member now |
 | `GET`, `POST /api/federation/identity-map` | the tenants and roles of the other sites and their mappings; map one (`{"home", "kind", "home_value", "local_value"}`, `""` takes a mapping away) |
 | `GET /api/federation/leases` | the leases this instance holds, and the enrolled clusters it knows with their owners |
 | `GET /api/federation/clusters` | the linked view |
 | `POST /api/federation/clusters/<id>/enroll`, `release`, `unenroll`, `adopt`, `renew` | the cluster steps above |
+| `POST /api/federation/clusters/<id>/takeover` | take over by hand, two sites only (`{"confirm": "TAKEOVER", "owner_down": true, "force": false}`) |
 
 The routes under `/api/federation/peer/` are for the members only. They take no session:
 each call is signed with the calling member's key and every answer is signed back.
@@ -450,10 +561,19 @@ each call is signed with the calling member's key and every answer is signed bac
 | `FED_IN_USE` | switching off while still taking part: leave first |
 | `FED_REAUTH`, `FED_REAUTH_RECENT` | the password is missing or wrong; an OIDC account without a password signs in again first |
 | `FED_FULL` | eight sites already |
-| `FED_NO_QUORUM` | no majority answered or agreed; check the network between the sites. Right after a change of the member list, every lease waits 35 seconds |
+| `FED_NO_QUORUM` | no majority answered or agreed, or a takeover is not known at every site yet; check the network between the sites. Right after a change of the member list, every lease waits 35 seconds |
 | `FED_BUSY` | another change of the member list is under way on this instance; try again in a moment |
 | `FED_MIRROR_ADMIN` | a mirrored admin changes neither the federation nor the accounts, tenants and roles of this instance, nor who signs in through LDAP or OIDC and with which role, nor restores a backup; use an account of this instance |
-| `FED_TOO_FEW_SITES` | enrolling needs three sites |
+| `FED_TOO_FEW_SITES` | enrolling needs a second site |
+| `FED_OWNER_ALIVE` | the owner of the cluster answers: hand the cluster over there, then take it over here |
+| `FED_OWNER_RECENT` | the owner was in contact less than 35 seconds ago; try again after the time the answer names |
+| `FED_USE_TAKEOVER` | two sites, and the owner does not answer: its cluster is taken over by hand |
+| `FED_NOT_TWO_SITES` | a takeover by hand and a removal as gone for good are for a federation of two sites |
+| `FED_HOLD`, `FED_SETTLING` | this host restarted or took over in its HA group, or the member list changed a moment ago; try again after the time the answer names |
+| `FED_NOTHING_TO_TAKE` | the site leads no cluster this instance holds a copy of |
+| `FED_PEER_ANSWERS`, `FED_PEER_RECENT` | the site to remove as gone for good answers, or was in contact less than 35 seconds ago: remove it with its agreement, or wait |
+| `FED_GONE_CLUSTERS` | the site to remove still leads clusters here that were not taken over: take them over, or confirm that their copies are dropped |
+| `FED_ENDED_UNTOLD` | switching off while a site removed as gone for good was never told; switch off anyway only when it is shut down for good |
 | `FED_NO_LEASE` | this instance holds no live lease on the cluster; another site may lead it, or the lease ran out in a split |
 | `FED_LEAVE_BLOCKED` | an enrolled cluster has no live lease; leave with force, then unenroll it with force |
 | `FED_FOREIGN` | the account or cluster belongs to another site; change it there |

@@ -163,9 +163,9 @@ def _refuse_while_switched_off():
 
 def request_fed_peer():
     """Who sent this federation peer call, as federation.peer_verdict says: ('member',
-    record), ('removed', tombstone), ('skewed', record) or (None, None). Worked out once
-    per request - a nonce counts once. No peer call carries a query string: the signature
-    covers the path alone, so one that does is nobody's."""
+    record), ('removed', tombstone), ('ended', end entry), ('skewed', record) or (None,
+    None). Worked out once per request - a nonce counts once. No peer call carries a query
+    string: the signature covers the path alone, so one that does is nobody's."""
     env = request.environ
     if _PEER_VERDICT in env:
         return env[_PEER_VERDICT]
@@ -202,17 +202,25 @@ def _peer_or_refuse(acting=False):
     """(peer, None) when the call is from a member, else (None, response): 503 FED_STANDBY
     on a standby, 410 FED_REMOVED for a member the federation took out, 403 FED_CLOCK for
     one whose signature is good but whose time is not, 403 FED_NOT_MEMBER for anybody
-    else. Never a 401: no browser session is involved."""
+    else. Never a 401: no browser session is involved. The other site of a federation of
+    two that this instance removed as gone for good gets its end record with the 410."""
     refused = _standby_refusal(acting)
     if refused:
         return None, refused
     kind, who = request_fed_peer()
     if kind == 'member':
         return who, None
-    if kind == 'removed':
-        return None, (jsonify({'code': 'FED_REMOVED',
-                               'error': 'This instance was removed from the federation - '
-                                        'leave it and pair again'}), 410)
+    if kind in ('removed', 'ended'):
+        body = {'code': 'FED_REMOVED',
+                'error': 'This instance was removed from the federation - leave it and pair '
+                         'again'}
+        end = federation.end_for(who.get('instance_id') or '')
+        if end:
+            body['end'] = end
+            body['error'] = ('The other site carried on alone and removed this instance from '
+                             'the federation')
+            federation.note_end_told(who.get('instance_id') or '')
+        return None, (jsonify(body), 410)
     if kind == 'skewed':
         return None, (jsonify(federation.clock_refusal(
             who.get('skew') or 'window', time.time(), federation._started(),
@@ -237,7 +245,7 @@ def _sign_peer_answer(resp):
                 request.path == federation.JOIN_PATH:
             return resp
         kind, who = request.environ.get(_PEER_VERDICT) or (None, None)
-        if kind not in ('member', 'removed', 'skewed') or resp.direct_passthrough:
+        if kind not in ('member', 'removed', 'ended', 'skewed') or resp.direct_passthrough:
             return resp
         raw = b'' if resp.status_code in (204, 304) else resp.get_data()
         resp.headers[federation.ANSWER_HEADER] = federation.answer_signature(
@@ -541,7 +549,9 @@ def federation_status():
     reauth. With the federation on and an admin who sees every cluster (manage), also
     the identity of this instance, the view (epoch, max_sites, removed, removed_by_some,
     view_conflict), the open pairing code and every member with whether it answered just
-    now. Off, nothing of the identity is read or made for this."""
+    now, when it was last heard (last_heard) and in how many seconds a site of two could
+    take its clusters over by hand (takeover_in_s). Off, nothing of the identity is read
+    or made for this."""
     out = federation.switch_status()
     out.update(_session_fields())
     if not out['enabled'] or not out['manage']:
@@ -577,11 +587,14 @@ def federation_status():
         iid, rec = item
         status, body, _h = federation.call_peer(iid, 'GET', federation.STATUS_PATH,
                                                 read_timeout=3)
+        answered = (federation._runtime.get('answered') or {}).get(iid) or 0
         return {'instance_id': iid, 'url': rec.get('url') or '',
                 'site': rec.get('site') or '',
                 'fingerprints': list(rec.get('fingerprints') or []),
                 'added_at': rec.get('added_at') or 0,
                 'last_seen': seen.get(iid) or 0,
+                'last_heard': max(seen.get(iid) or 0, answered),
+                'takeover_in_s': fed_lease.takeover_wait(iid),
                 'reachable': status == 200 and isinstance(body, dict)
                 and body.get('instance_id') == iid,
                 'removed_us': status == 410,
@@ -606,23 +619,36 @@ def federation_switch():
     """Switch the federation on or off for the whole deployment (it travels to an HA
     standby with the settings). Body {"enabled": bool}. Switching on starts the workers;
     switching off stops them and is refused with 409 FED_IN_USE while this instance is a
-    member, holds a lease or holds mirrors (leave the federation first), and with 409
-    FED_FORCED while PEGAPROX_FEDERATION decides."""
+    member, holds a lease or holds mirrors (leave the federation first), with 409
+    FED_ENDED_UNTOLD while a site this instance removed as gone for good was never told
+    (untold_ok switches off anyway), and with 409 FED_FORCED while PEGAPROX_FEDERATION
+    decides."""
     denied = _guards()
     if denied:
         return denied
-    value = _body().get('enabled')
+    data = _body()
+    value = data.get('enabled')
     if not isinstance(value, bool):
         return jsonify({'error': 'Send {"enabled": true} or {"enabled": false}',
                         'code': 'FED_BAD_VALUE'}), 400
+    untold = federation.untold_ends() if not value and federation.enabled() else []
     try:
-        out = federation.set_enabled(value)
+        out = federation.set_enabled(value, untold_ok=data.get('untold_ok') is True)
     except federation.FederationError as e:
-        return jsonify({'code': e.code, 'error': str(e), 'blockers': e.blockers}), 409
+        body = {'code': e.code, 'error': str(e), 'blockers': e.blockers}
+        body.update({k: v for k, v in e.extra.items() if k not in body})
+        return jsonify(body), 409
+    sites = ', '.join(_end_site(iid) for iid in untold)
     log_audit(_user(), 'federation.switched_on' if value else 'federation.switched_off',
-              f'the federation was switched {"on" if value else "off"}',
-              ip_address=get_client_ip())
+              f'the federation was switched {"on" if value else "off"}'
+              + (f', although {sites} was never told that this instance carried on alone'
+                 if untold else ''), ip_address=get_client_ip())
     return jsonify(out)
+
+
+def _end_site(iid):
+    rec = ((federation.identity() or {}).get('ended') or {}).get(iid) or {}
+    return rec.get('site') or iid[:8]
 
 
 @bp.route('/api/federation/members', methods=['GET'])
@@ -689,16 +715,32 @@ def join_federation():
 def remove_member(instance_id):
     """Take a member out, with a majority of the federation behind it (409 FED_NO_QUORUM
     without). The answer names the members that did not confirm (not_told) and the
-    clusters enrolled here whose credentials the removed member may still hold."""
+    clusters enrolled here whose credentials the removed member may still hold.
+
+    With two sites and the other one gone for good, "gone": true removes it alone, behind
+    the live checks of a manual takeover (FED_PEER_ANSWERS, FED_PEER_RECENT): this
+    instance carries on alone and keeps an end record that tells the removed site, should
+    it ever call again. The copies of its clusters that were not taken over are dropped
+    only with "drop_clusters": true (FED_GONE_CLUSTERS names them)."""
     denied = _guards('removing a federation member')
     if denied:
         return denied
-    if _body().get('confirm') != 'REMOVE':
+    data = _body()
+    if data.get('confirm') != 'REMOVE':
         return jsonify({'error': 'Type REMOVE to take the member out'}), 400
+    gone = data.get('gone') is True
     try:
-        out = federation.remove_member(instance_id, by=f'admin:{_user()}')
+        out = federation.remove_member(instance_id, by=f'admin:{_user()}', gone=gone,
+                                       drop_clusters=data.get('drop_clusters') is True)
     except federation.FederationError as e:
-        return _fed_error(e, 404 if e.code == 'FED_NOT_MEMBER' else 409)
+        status = {'FED_NOT_MEMBER': 404, 'FED_STANDBY': 503}.get(e.code, 409)
+        return _fed_error(e, status)
+    if gone:
+        log_audit(_user(), 'federation.member_removed_gone',
+                  f'member {out["site"]} removed as gone for good: this instance carries on '
+                  f'alone; kept {", ".join(out["kept"]) or "no cluster"}; dropped the copies '
+                  f'of {", ".join(out["dropped"]) or "no cluster"}', ip_address=get_client_ip())
+        return jsonify(out)
     log_audit(_user(), 'federation.member_removed',
               f'member {instance_id} removed from the federation'
               + (f', not confirmed by {len(out["not_told"])}' if out['not_told'] else ''),
@@ -733,7 +775,7 @@ def leave_federation():
 def reconcile():
     """Catch up with the federation now: ask every member where its view stands and take
     a newer one."""
-    denied = _refuse_confined_admin()
+    denied = _guards()
     if denied:
         return denied
     out = federation.catch_up()
@@ -749,7 +791,7 @@ def reconcile():
 def sync_identities():
     """Pull the identities of every member now. One member's failure to answer never
     stops the others - its report says 'failed' instead."""
-    denied = _refuse_confined_admin()
+    denied = _guards()
     if denied:
         return denied
     report = federation.sync_identities()
@@ -932,12 +974,13 @@ def federation_leases():
 @require_auth(roles=[ROLE_ADMIN])
 def enroll_cluster(cluster_id):
     """Put a local Proxmox VE cluster under the federation's rule: this instance becomes
-    its writer with a majority of the sites behind it. Needs three or more sites."""
+    its writer with a majority of the sites behind it. Needs a second site; with two, both
+    must answer."""
     denied = _guards('enrolling a cluster')
     if denied:
         return denied
     try:
-        lease = fed_lease.enroll_cluster(cluster_id)
+        lease = fed_lease.enroll_cluster(cluster_id, by=f'admin:{_user()}')
     except federation.FederationError as e:
         return _fed_error(e, 409)
     log_audit(_user(), 'federation.cluster_enrolled',
@@ -1007,7 +1050,9 @@ def adopt_cluster(cluster_id):
     hand the lease only past the old owner's promise, and the mirrored credentials cross
     over under the owner's federation field key. ADOPT is the word; force adopts without
     the owner's key, without the credentials. Per-node root passwords and an HA cluster
-    claim of the old owner do not come along."""
+    claim of the old owner do not come along. With two sites it needs the owner to answer
+    and to have handed the cluster over; a silent owner's cluster is taken over by hand
+    (takeover, 409 FED_USE_TAKEOVER here)."""
     denied = _guards('adopting a cluster')
     if denied:
         return denied
@@ -1015,24 +1060,13 @@ def adopt_cluster(cluster_id):
     if data.get('confirm') != 'ADOPT':
         return jsonify({'error': 'Type ADOPT to take the cluster over'}), 400
     try:
-        lease = fed_lease.adopt_cluster(cluster_id, force=data.get('force') is True)
+        lease = fed_lease.adopt_cluster(cluster_id, force=data.get('force') is True,
+                                        by=f'admin:{_user()}')
     except federation.FederationError as e:
         return _fed_error(e, 404 if e.code == 'FED_NOT_FOUND' else 409)
-    # the adopted cluster is this instance's now: its manager starts the way a standby's
-    # rebuild starts one; if the cluster is unreachable, the adoption stands and the
-    # manager is tried again at the next start
-    started = False
-    try:
-        from pegaprox.core.db import get_db
-        cluster = get_db().get_cluster(cluster_id)
-        if cluster:
-            from pegaprox import globals as g
-            from pegaprox.app import _start_managers
-            _start_managers({cluster_id: cluster}, only=())
-            started = cluster_id in getattr(g, 'cluster_managers', {})
-    except Exception as e:
-        logging.warning(f"[FED] the adopted cluster {cluster_id} did not start its manager "
-                        f"yet: {e}")
+    # the adopted cluster is this instance's now: if it is unreachable, the adoption stands
+    # and the manager is tried again at the next start
+    started = fed_lease.start_manager(cluster_id)
     log_audit(_user(), 'federation.cluster_adopted',
               f'cluster {cluster_id} adopted ({lease.get("votes")}/{lease.get("needed")} '
               f'votes, manager {"started" if started else "pending"})',
@@ -1040,12 +1074,103 @@ def adopt_cluster(cluster_id):
     return jsonify({'adopted': cluster_id, 'lease': lease, 'manager': started})
 
 
+_TAKEOVER_STATUS = {'FED_NOT_FOUND': 404, 'FED_NOT_MEMBER': 404, 'FED_STANDBY': 503,
+                    'FED_UNAVAILABLE': 503}
+
+
+def _takeover_confirmed(data):
+    """400 unless the body types the word and states that the owning site is down."""
+    if data.get('confirm') != 'TAKEOVER':
+        return jsonify({'error': 'Type TAKEOVER to take the cluster over'}), 400
+    if data.get('owner_down') is not True:
+        return jsonify({'error': 'Confirm that the owning site is down (owner_down)'}), 400
+    return None
+
+
+def _audit_taken(cluster_id, owner, generation, forced, started):
+    site = (federation.member_record(owner) or {}).get('site') or owner[:8]
+    log_audit(_user(), 'federation.cluster_taken_over',
+              f'cluster {cluster_id} taken over by hand from {site} (generation {generation}): '
+              f'the admin confirmed that {site} is down; if it still runs, it writes to the '
+              f'cluster until the two sites reach each other'
+              + (', WITHOUT its credentials' if forced else '')
+              + (', manager started' if started else ', manager pending'),
+              ip_address=get_client_ip())
+
+
+@bp.route('/api/federation/clusters/<cluster_id>/takeover', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN])
+def take_over_cluster(cluster_id):
+    """Take over by hand, in a federation of two sites, a cluster whose owner is down.
+    TAKEOVER is the word and owner_down must be true: the admin confirms the owning site is
+    down, not only cut off - nothing can tell the two apart, and if it still runs both
+    sites write to the cluster until they reach each other. Refused while the owner answers
+    (FED_OWNER_ALIVE: hand it over there) and for 35 s after it was last heard
+    (FED_OWNER_RECENT). The old owner stops writing at the first contact between the two
+    sites. force takes it without the owner's key, and without its credentials."""
+    denied = _guards('taking over a cluster')
+    if denied:
+        return denied
+    data = _body()
+    refused = _takeover_confirmed(data)
+    if refused:
+        return refused
+    force = data.get('force') is True
+    try:
+        out = fed_lease.take_over_cluster(cluster_id, by=f'admin:{_user()}', force=force)
+    except federation.FederationError as e:
+        return _fed_error(e, _TAKEOVER_STATUS.get(e.code, 409))
+    started = fed_lease.start_manager(cluster_id)
+    _audit_taken(cluster_id, out['owner'], out['generation'], force, started)
+    return jsonify({'taken_over': cluster_id, 'generation': out['generation'],
+                    'lease': fed_lease._lease_summary(cluster_id), 'manager': started})
+
+
+@bp.route('/api/federation/members/<instance_id>/takeover', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN])
+def take_over_member(instance_id):
+    """The same for every cluster of that site this instance holds a copy of, or the ones
+    named in clusters, with one password check: one status probe and one round for all of
+    them. 200 when at least one was taken over (failed names the others with their code),
+    409 with the first failure's code when none was."""
+    denied = _guards('taking over the clusters of a site')
+    if denied:
+        return denied
+    data = _body()
+    refused = _takeover_confirmed(data)
+    if refused:
+        return refused
+    clusters = data.get('clusters')
+    if clusters is not None and not (isinstance(clusters, list)
+                                     and len(clusters) <= fed_lease.MAX_ASKS_PER_CALL
+                                     and all(isinstance(c, str) for c in clusters)):
+        return jsonify({'error': f'clusters is a list of at most '
+                                 f'{fed_lease.MAX_ASKS_PER_CALL} cluster ids'}), 400
+    force = data.get('force') is True
+    try:
+        out = fed_lease.take_over_clusters(instance_id, clusters, by=f'admin:{_user()}',
+                                           force=force)
+    except federation.FederationError as e:
+        return _fed_error(e, _TAKEOVER_STATUS.get(e.code, 409))
+    taken = []
+    for item in out['taken']:
+        started = fed_lease.start_manager(item['cluster_id'])
+        _audit_taken(item['cluster_id'], instance_id, item['generation'], force, started)
+        taken.append(dict(item, manager=started))
+    body = {'taken': taken, 'failed': out['failed']}
+    if taken:
+        return jsonify(body)
+    first = next(iter(out['failed'].values()), {})
+    body.update(code=first.get('code'), error=first.get('error') or 'Nothing was taken over')
+    return jsonify(body), 409
+
+
 @bp.route('/api/federation/clusters/<cluster_id>/renew', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN])
 def renew_cluster_lease(cluster_id):
     """One round for this cluster now, out of the worker's cadence. renewed false means
     the gate is closed."""
-    denied = _refuse_confined_admin()
+    denied = _guards()
     if denied:
         return denied
     out = fed_lease.renew(cluster_id)
