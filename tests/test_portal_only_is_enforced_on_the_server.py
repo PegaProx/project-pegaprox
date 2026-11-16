@@ -200,6 +200,7 @@ def test_every_other_api_route_refuses_a_portal_account(world, db, credential, m
 
     from pegaprox.api.federation import _OPEN_WHILE_OFF
     from pegaprox.core import federation
+    monkeypatch.delenv(federation.ENV_SWITCH, raising=False)
     assert federation.enabled() is False
     probes = _probes(world.app)
     asked = [p for p in probes if not _allowed(p[0], p[2])]

@@ -1489,24 +1489,28 @@ def test_a_late_renewal_of_an_older_round_keeps_the_newer_promise(tmp_path, cloc
     """a's round R1 for pve-r is in flight when the admin hands the cluster over and
     enrolls it again: R2 is granted with a new pid. R1's ask then reaches b late. It is
     refused and b's promise keeps R2's pid, so R1, stale at a, gives back nothing that
-    backs R2's lease."""
+    backs R2's lease, and neither does a release of the promise b gave before R2."""
     a, b, c = _three(tmp_path)
+    st, ans = _renewal(b, a, 'pve-r', 500.0)
+    p0 = ans['pids']['pve-r']
     st, ans = _renewal(b, a, 'pve-r', 2000.0)
     assert st == 200 and ans['votes']['pve-r']['granted'] is True
     p2 = ans['pids']['pve-r']
+    assert p2 != p0
     st, ans = _renewal(b, a, 'pve-r', 1000.0)
     assert st == 200
     assert ans['votes']['pve-r'] == {'granted': False, 'reason': 'stale'}
     assert 'pids' not in ans
     assert _promise_at(b, 'pve-r')['pid'] == p2
-    # the release R1 sends for what it got ends nothing; the newer promise still counts
+    # the release of the promise before the newer one, late on its way, ends nothing
     with at(a):
-        fl._send_releases('pve-r', {iid(b): 'ab' * 8})
+        fl._send_releases('pve-r', {iid(b): p0})
     held = _promise_at(b, 'pve-r')
     assert held['pid'] == p2 and held['released'] is False
-    # counterproof: a renewal of a later round is granted and takes a new pid
-    st, ans = _renewal(b, a, 'pve-r', 3000.0)
-    assert ans['votes']['pve-r']['granted'] is True and ans['pids']['pve-r'] != p2
+    # counterproof: the same release by the pid that backs the lease ends it
+    with at(a):
+        fl._send_releases('pve-r', {iid(b): p2})
+    assert _promise_at(b, 'pve-r')['released'] is True
 
 
 def test_the_round_marks_of_one_instance_grow(tmp_path, clock, monkeypatch):
@@ -1527,6 +1531,39 @@ def test_the_round_marks_of_one_instance_grow(tmp_path, clock, monkeypatch):
         fl.lease_round()
         fl.lease_round()
     assert len(seen) == 2 and seen[1] > seen[0]
+
+
+@pytest.mark.parametrize('kept', [True, False], ids=['kept', 'lost'])
+def test_a_restart_after_the_wall_clock_stepped_back_keeps_the_lease(tmp_path, clock,
+                                                                     monkeypatch, kept):
+    """NTP steps a's wall clock back by five seconds, then a restarts. The last mark of its
+    rounds is in the lease file, so the next round goes on from it and every voter grants
+    it. Counterproof: without the mark in the file (the 'lost' case) the voters, its own
+    included, refuse the round as stale."""
+    import time
+    from tests.test_federation import _restart
+    a, b, c = _three(tmp_path)
+    wall = {'t': time.time() + 60}
+    monkeypatch.setattr(fl.time, 'time', lambda: wall['t'])
+    _enroll(a, 'pve-w')
+    clock.advance(fl.LEASE_RENEW_AFTER)
+    with at(a):
+        assert fl.lease_round()['pve-w']['held']
+    wall['t'] -= 5
+    if not kept:
+        with open(a.lease_file, encoding='utf-8') as fh:
+            st = json.load(fh)
+        st.pop('round_mark', None)
+        with open(a.lease_file, 'w', encoding='utf-8') as fh:
+            json.dump(st, fh)
+    _restart(a)
+    clock.advance(fl.LEASE_RENEW_AFTER)
+    with at(a):
+        r = fl.lease_round()['pve-w']
+    if kept:
+        assert r['held'] and 'stale' not in r['refusals'], r
+    else:
+        assert not r['held'] and r['refusals'].get('stale') == 3, r
 
 
 # --- an unenroll notice and an adoption under way ---------------------------------------------
@@ -1619,6 +1656,36 @@ def test_a_removal_rolled_back_keeps_the_members_mappings(tmp_path, clock):
     assert _mapping_of(b, iid(e)) == []
     assert _db_of(b).conn.execute(
         "SELECT 1 FROM users WHERE username = 'erin'").fetchone() is None
+
+
+def test_a_rolled_back_removal_brings_the_accounts_back_with_the_next_pull(tmp_path, clock):
+    """The same removal that reaches only b, with an account of e that b holds and an
+    admin there mapped. b disables it at once; the rollback leaves it disabled, and the
+    next pull from e brings it back."""
+    from tests.test_federation import _add_local_user, _map, _row
+    a, b, c, d, e = _sides(tmp_path, 'abcde')
+    _add_local_user(e, 'erin', role='user', tenant='default')
+    _sync(b)
+    _map(b, e, 'tenant', 'default', 'default')
+    _sync(b)
+    assert _row(b, 'erin')['enabled'] == 1
+
+    def to_b_only(url, method, path, body, headers):
+        if path == federation.MEMBERSHIP_PATH and url != URL['b']:
+            return 0, b'', {}
+        return a.wire(url, method, path, body, headers)
+    a.runtime['transport'] = to_b_only
+    with at(a):
+        with pytest.raises(federation.FederationError):
+            federation.remove_member(iid(e), by='admin:a')
+    a.runtime['transport'] = a.wire
+    assert _row(b, 'erin')['enabled'] == 0
+    with at(b):
+        assert federation.catch_up().get('rolled_back') is True
+    # the rollback itself enables nothing: the pull does
+    assert _row(b, 'erin')['enabled'] == 0
+    _sync(b)
+    assert _row(b, 'erin')['enabled'] == 1
 
 
 def test_a_later_change_settles_a_removal_taken_before(tmp_path, clock):

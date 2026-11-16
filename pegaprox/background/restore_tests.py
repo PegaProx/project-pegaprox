@@ -126,7 +126,14 @@ def _run_slot(slot, policy):
         # MK Oct 2026 - a backup over the size cap, or of unknown size, is not restored: the
         # first run put a 300 GB copy on a production node. The run says which it left out
         skipped = []
-        picks = recovery.pick(policy, cluster_managers, busy=backup_verify.running_guests(), skipped=skipped)
+        # a cluster this instance holds no federation lease on is left out of the pick, or
+        # its guests, never tested, would win it every week and be skipped every week
+        from pegaprox.core import federation as _fed
+        managers, held = cluster_managers, []
+        if _fed.enabled():
+            managers = {cid: m for cid, m in cluster_managers.items() if _fed.worker_takes_writes_for(cid)}
+            held = sorted(set(cluster_managers) - set(managers))
+        picks = recovery.pick(policy, managers, busy=backup_verify.running_guests(), skipped=skipped)
         report['picked'] = [{k: p[k] for k in ('cluster_id', 'vmid', 'name', 'type', 'node', 'volid', 'backup_ts',
                                                'size')}
                             for p in picks]
@@ -135,6 +142,9 @@ def _run_slot(slot, policy):
         if not picks:
             report['reason'] = ('no backup in the window to test' if not skipped
                                 else 'every backup due was over the size cap or of unknown size')
+            if held:
+                report['reason'] += (f"; left out, as this instance holds no live federation lease on "
+                                     f"them: {', '.join(held[:10])}" + (' ...' if len(held) > 10 else ''))
         _write(report)
         for p in picks:
             cid, vmid = p['cluster_id'], p['vmid']
@@ -146,9 +156,9 @@ def _run_slot(slot, policy):
                 break
             # the worker lease check: a cluster enrolled in the federation takes a
             # restore test only while this instance holds a live lease on it - a
-            # restore writes a guest on the cluster it copies from. Not asked while
-            # the federation is off
-            from pegaprox.core import federation as _fed
+            # restore writes a guest on the cluster it copies from. Asked again here
+            # since the lease can go during a long run. Not asked while the federation
+            # is off
             if _fed.enabled() and not _fed.worker_takes_writes_for(cid):
                 entry['cause'] = ('the cluster is enrolled in the federation and this '
                                   'instance holds no live lease on it')

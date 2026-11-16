@@ -93,7 +93,8 @@ from a CA, they check it against the CA as any HTTPS client does.
 
 **Clocks.** Every call between members is signed with the sender's key and is valid for
 two minutes. Keep the clocks of all sites within that (NTP); a member whose clock is
-further off is refused with `FED_CLOCK`.
+further off is refused with `FED_CLOCK`. A clock that NTP steps back a little does not
+interrupt the leases, even across a restart of the service.
 
 ## What pairing shares
 
@@ -159,6 +160,10 @@ can fill at most 256 mapping entries here; values beyond that stay unmapped and 
 accounts quarantined.
 
 The users list marks mirrored accounts as **Mirrored** and offers no changes for them.
+An account that its home deletes goes at the next sync, with what was granted to it here,
+and its sessions end. One that its home still lists but whose row does not read is kept
+with its grants, disabled and signed out, until a row that reads arrives; the audit log
+says so.
 
 **Directory and single sign-on accounts.** An account that comes from LDAP or OIDC at its
 home signs in at its home only. Mirrors carry no LDAP or OIDC link (no `oidc_sub`, no
@@ -181,9 +186,10 @@ the last admin: a mirrored admin does not, because removing its site drops the a
 A mirrored admin cannot change the federation of this instance (pair, remove, leave,
 enroll, adopt, map), and it does not administer this instance's accounts, tenants and
 roles either: creating, changing or deleting a user, setting its password, resetting its
-second factor or its OIDC sign-in binding, restoring a configuration backup, and the
-tenant and role pages answer `403 FED_MIRROR_ADMIN`. Otherwise it could create a local
-admin and make those changes under that account.
+second factor or its OIDC sign-in binding, resetting the password age of every account,
+restoring a configuration backup, and the tenant and role pages answer
+`403 FED_MIRROR_ADMIN`. Otherwise it could create a local admin and make those changes
+under that account.
 
 For the same reason it does not change who signs in here through LDAP or OIDC, or with
 which role:
@@ -221,13 +227,18 @@ is made again once the connection of a request is up, so a connect that stalls p
 end of the lease sends nothing. What is still under way on the cluster when the lease is
 handed over or runs out (a node command such as an upgrade or a copy, an open SSH or SFTP
 connection) is stopped, at once for a hand-over or when another site turns out to lead
-the cluster, and within a second for a lease that ran out. That holds for what a write
-went out through: a command or a connection that only reads (a page that lists, a status
-read over SSH) needs no lease and is left to finish. One write passes without the lease:
-the thaw of a guest's file systems after a snapshot froze them, which only undoes that
-freeze. Runs that start in several steps (a failover, a test failover and its cleanup, a
-failback, a cross-cluster migration, a multi-cluster vnet) check the lease of the
-clusters they write before they start; a dry run only reads and needs none. A plain
+the cluster, and within a second for a lease that ran out. An upgrade cut off this way
+stops half way: finish it on the node (`dpkg --configure -a`, then the upgrade again).
+That holds for what a write went out through: a command or a connection that only reads
+(a page that lists, a status read over SSH) needs no lease and is left to finish. One
+write passes without the lease: the thaw of a guest's file systems after a snapshot froze
+them. Each thaw follows a freeze of the same run, and that freeze needed the lease. Sent
+after the lease went, the worst a thaw does is end a freeze another site made for its own
+snapshot, which is then only crash-consistent; refused, the guest would hang on every
+write until somebody thaws it by hand. Runs that start in several steps (a failover, a
+test failover and its cleanup, a failback, a cross-cluster migration, a multi-cluster
+vnet) check the lease of the clusters they write before they start; a dry run only reads
+and needs none. A plain
 restart of the service keeps the leases and the votes a site gave. A site whose host
 rebooted, that took over in its HA group, or that lost its lease file closes its leases
 and votes for nobody for 35 seconds, so no promise it gave before can be broken. An
@@ -243,14 +254,16 @@ try again a little later.
 
 - **Renew** runs one round now. If the majority does not back the lease, the tab says so
   as an error: writes stay closed until it does.
-- **Hand over** releases the lease so another site can adopt the cluster. The cluster
-  stays enrolled here and is not written from here until you enroll it again. The hand-over
-  is kept with the federation identity, so it also holds after a failover of an HA group or
-  a lease file that was removed.
+- **Hand over** releases the lease so another site can adopt the cluster. It stops at
+  once what this instance still runs on the cluster (a node upgrade, a copy, an open SSH
+  connection). The cluster stays enrolled here and is not written from here until you
+  enroll it again. The hand-over is kept with the federation identity, so it also holds
+  after a failover of an HA group or a lease file that was removed.
 - **Unenroll** makes the cluster this instance's alone again. It needs the live lease and
-  a majority of the sites confirming that they dropped their copy. When the other sites
-  are gone for good and none of them adopted it, unenroll with force (offered after the
-  refusal); if a site did adopt it meanwhile, two sites then write to it.
+  a majority of the sites confirming that they dropped their copy, and it stops nothing
+  that runs on the cluster. When the other sites are gone for good and none of them
+  adopted it, unenroll with force (offered after the refusal); if a site did adopt it
+  meanwhile, two sites then write to it.
 
 Every site remembers which enrolled clusters it dropped its copy of, and which site led
 them, where it saw that site lead the cluster itself (up to 512). A site that deletes a
@@ -290,7 +303,9 @@ instance, and every member that hears of it, deletes the removed member's mirror
 accounts (their sessions end), its cluster copies and its federation key. A member that
 hears of it disables those accounts at once and deletes them, with the mappings of their
 tenants and roles, once it sees that a majority took the removal: a removal that too few
-took is rolled back, and the mappings would not come back with the accounts. A member
+took is rolled back, and the mappings would not come back with the accounts. If it is
+rolled back, those accounts sign in again after the next sync with their site (every 60
+seconds, or **Sync now**); the sessions that ended do not come back. A member
 that the removal leaves alone in the member list (the other site of a federation of two
 left, or was removed) has nobody left who could roll it back: it deletes them at once,
 and they no longer keep its switch on. The answer names the members that did not confirm;
@@ -449,5 +464,9 @@ each call is signed with the calling member's key and every answer is signed bac
 | `FED_MEMBER` | an instance in a federation cannot become an HA standby; leave first |
 | `HA_FEDERATION` | the active of an HA group does not unpair while the federation is on and it has standbys; remove or unpair the standbys first |
 | `FED_CLOCK` | the clocks of two sites are more than two minutes apart |
+| `FED_UNAVAILABLE` | `503`: this instance cannot read right now where an account, an API token or another row is homed (a busy or unreadable database), so it refuses the change, a token revoke included, rather than guess; try again in a moment |
+
+Registering or removing a passkey answers `503` without a code while the account cannot be
+read, with the federation switched off as well: it may be a mirror. Try again in a moment.
 
 The log lines of the federation start with `[FED]`.

@@ -2872,9 +2872,11 @@ def unpair(said=(), leader_agreed=False):
     fails over automatically (unpair_refusal).
     """
     st = _load()
-    if st['role'] == ROLE_ACTIVE and int(st.get('epoch') or 0):
+    if (st['role'] == ROLE_ACTIVE and int(st.get('epoch') or 0)
+            and not unpair_refusal(st, said=said, leader_agreed=leader_agreed)):
         # the active stays the acting host, standalone at epoch 0: no promotion for the
-        # federation's leases either (said before the lock, as in accept_pairing)
+        # federation's leases either (said before the lock, as in accept_pairing; not for
+        # an unpair that is refused)
         _federation_epoch_kept(int(st['epoch']), 0)
     with _lock:
         st = _load()

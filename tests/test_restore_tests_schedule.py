@@ -562,3 +562,60 @@ def test_the_run_reads_the_room_of_the_clusters_test_storage(clusters, monkeypat
     assert calls == [100]
     assert '/nodes/pve1/storage/scratch/status' in clusters['c1'].calls
     assert not [c for c in clusters['c1'].calls if 'local-lvm' in c or 'extractconfig' in c]
+
+
+# --- a cluster enrolled in the federation ----------------------------------------------------
+
+def _leases(monkeypatch, held):
+    from pegaprox.core import federation
+    monkeypatch.setattr(federation, 'enabled', lambda: True)
+    monkeypatch.setattr(federation, 'worker_takes_writes_for', held)
+
+
+def test_a_cluster_held_for_its_lease_takes_no_pick(clusters, monkeypatch, db):
+    """c-held is enrolled and this instance holds no lease on it. Its guests, never tested,
+    would rank first every week and each be skipped; left out of the pick, c-own's guest
+    gets its test. Counterproof: with the lease the same guests do come first."""
+    clusters['c-held'] = _Mgr([_g(100), _g(101), _g(102)], {'pbs': [_bk(100, 2), _bk(101, 2), _bk(102, 2)]})
+    clusters['c-own'] = _Mgr([_g(200)], {'pbs': [_bk(200, 2)]})
+    _mark('c-own', 200, NOW - 86400)
+    calls = []
+    monkeypatch.setattr(bv, 'run_verification',
+                        lambda m, p: calls.append((p['cluster_id'], p['vmid'])) or {'id': 'x', 'status': 'passed'})
+    _leases(monkeypatch, lambda cid: cid != 'c-held')
+    RT._run_slot(SUNDAY, POLICY)
+    assert calls == [('c-own', 200)]
+    assert [p['cluster_id'] for p in recovery.load_state()['last_run']['picked']] == ['c-own']
+    calls.clear()
+    _leases(monkeypatch, lambda cid: True)
+    RT._run_slot(SUNDAY, POLICY)
+    assert calls == [('c-held', 100), ('c-held', 101), ('c-held', 102)]
+
+
+def test_a_lease_lost_during_the_run_skips_that_test(clusters, monkeypatch, db):
+    clusters['c1'] = _Mgr([_g(100)], {'pbs': [_bk(100, 2)]})
+    answers = iter([True, False])
+    _leases(monkeypatch, lambda cid: next(answers))
+    calls = _recorder(monkeypatch, bv, 'run_verification')
+    RT._run_slot(SUNDAY, POLICY)
+    assert calls == []
+    r = recovery.load_state()['last_run']['results'][0]
+    assert r['status'] == 'skipped' and 'no live lease' in r['cause']
+
+
+def test_a_run_with_every_cluster_held_says_why_it_picked_nothing(clusters, monkeypatch, db):
+    """The pick leaves c-held out, so the run tests nothing: its reason names the lease,
+    not an empty window. Counterproof: with the lease the same backup is picked."""
+    clusters['c-held'] = _Mgr([_g(100)], {'pbs': [_bk(100, 2)]})
+    calls = []
+    monkeypatch.setattr(bv, 'run_verification',
+                        lambda m, p: calls.append(p['vmid']) or {'id': 'x', 'status': 'passed'})
+    _leases(monkeypatch, lambda cid: False)
+    RT._run_slot(SUNDAY, POLICY)
+    last = recovery.load_state()['last_run']
+    assert last['picked'] == [] and calls == []
+    assert 'no live federation lease' in last['reason'] and 'c-held' in last['reason'], last['reason']
+    _leases(monkeypatch, lambda cid: True)
+    RT._run_slot(SUNDAY, POLICY)
+    last = recovery.load_state()['last_run']
+    assert calls == [100] and last['reason'] == ''

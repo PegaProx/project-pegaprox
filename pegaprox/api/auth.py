@@ -1674,7 +1674,7 @@ def auth_validate():
     # tolerant of a transient lookup miss (only reject a record that EXISTS and is disabled) — a
     # deleted/disabled account already had its sessions invalidated, so a None here is a transient
     # read, not a live disabled user, and must not false-401 a valid console handshake.
-    if _u is not None and not _u.get('enabled', True):
+    if _u is not None and (not _u.get('enabled', True) or mirror_switched_off(_u)):
         return jsonify({'valid': False, 'error': 'Account disabled'}), 401
 
     from pegaprox.core import ha
@@ -1760,7 +1760,7 @@ def get_cluster_creds_internal(cluster_id):
         _acct = get_db().get_user(session['user'])
     except Exception:
         _acct = user_data or None
-    if _acct is not None and not _acct.get('enabled', True):
+    if _acct is not None and (not _acct.get('enabled', True) or mirror_switched_off(_acct)):
         logging.warning(f"[CLUSTER-CREDS] User {session['user']} is disabled")
         return jsonify({'error': 'Account disabled'}), 403
     # MK 2026-06-10 (RBAC): gate on node.shell only — admin holds it via all-perms, so the
@@ -2498,8 +2498,12 @@ def revoke_api_token_endpoint(token_id):
                 if _fed_core.enabled():
                     _fed = get_db().conn.execute(
                         'SELECT token_hash FROM api_tokens WHERE id = ?', (token_id,)).fetchone()
-                    _fed_owner = _fed_core.foreign_home(
-                        'api_tokens', (_fed['token_hash'],)) if _fed is not None else ''
+                    try:
+                        _fed_owner = _fed_core.foreign_home(
+                            'api_tokens', (_fed['token_hash'],)) if _fed is not None else ''
+                    except _fed_core.FederationError as e:
+                        return jsonify({'code': 'FED_UNAVAILABLE',
+                                        'error': f'Cannot tell where this token is homed - {e}'}), 503
                     if _fed_owner:
                         return jsonify({'code': 'FED_FOREIGN', 'home': _fed_owner,
                                         'error': 'This token belongs to another instance '
@@ -2520,8 +2524,12 @@ def revoke_api_token_endpoint(token_id):
         _fed_row = get_db().conn.execute(
             'SELECT token_hash FROM api_tokens WHERE id = ? AND username = ?',
             (token_id, username)).fetchone()
-        _fed_owner = _fed_core.foreign_home(
-            'api_tokens', (_fed_row['token_hash'],)) if _fed_row is not None else ''
+        try:
+            _fed_owner = _fed_core.foreign_home(
+                'api_tokens', (_fed_row['token_hash'],)) if _fed_row is not None else ''
+        except _fed_core.FederationError as e:
+            return jsonify({'code': 'FED_UNAVAILABLE',
+                            'error': f'Cannot tell where this token is homed - {e}'}), 503
         if _fed_owner:
             return jsonify({'code': 'FED_FOREIGN', 'home': _fed_owner,
                             'error': 'This token belongs to another instance of the '

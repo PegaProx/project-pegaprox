@@ -852,8 +852,9 @@ def test_a_member_behind_catches_up(tmp_path):
     with at(c):
         out = federation.catch_up()
     assert out['adopted'] is True
-    assert _view(c) == _view(c)[:1] + _view(c)[1:] and iid(d) in _view(c)[2]
-    assert _view(c)[1] == _view(a)[1]
+    assert iid(d) in _view(c)[2]
+    # the epoch as well as the members: the digest leaves the epoch out
+    assert _view(c)[:2] == _view(a)[:2]
 
 
 def test_a_removed_member_that_missed_it_lets_go(tmp_path):
@@ -1812,6 +1813,8 @@ def test_an_active_that_takes_a_standby_or_leaves_its_group_keeps_its_votes(
             with pytest.raises(ha.AutoMode, match='federation'):
                 ha.unpair()
             assert ha.role() == 'active' and ha.epoch() == 1
+            # and the refused unpair leaves no notice of an epoch move behind
+            assert federation._lease_state().get('epoch_kept') is None
             # the standby gone (an active whose members left before it was promoted is
             # the same), the active leaves its group and stays the member
             with ha._lock:
@@ -2798,6 +2801,28 @@ def test_a_user_deleted_at_the_home_is_signed_out_at_the_mirror(identity_sides, 
     _db_of(a).conn.commit()
     assert _pull(b, a)['deleted'] == 1
     assert _row(b, 'dora') is None and _live_sessions(sessions, 'dora') == []
+
+
+def test_an_unreadable_row_at_the_home_keeps_the_mirror_and_its_grants(identity_sides,
+                                                                       sessions):
+    """The home still lists the user, its row just does not read (what json.dumps(None)
+    writes into a JSON column). The mirror is not deleted with the grants it holds here: it
+    stays, signed out, until a row that reads brings it back."""
+    a, b = identity_sides
+    _paired_and_mapped(a, b, 'mia')
+    b.db.save_vm_acl('c1', '100', {'users': ['mia'], 'inherit_role': True, 'permissions': []})
+    _session_of(b, 'mia', sessions)
+
+    def granted():
+        return any('mia' in acl['users'] for acl in b.db.get_all_vm_acls().get('c1', {}).values())
+    _set(a, 'mia', permissions='null')
+    report = _pull(b, a)
+    assert report['deleted'] == 0 and any('mia' in c for c in report['conflicts']), report
+    assert _row(b, 'mia')['enabled'] == 0 and granted()
+    assert _live_sessions(sessions, 'mia') == []
+    _set(a, 'mia', permissions='[]')
+    _pull(b, a)
+    assert _row(b, 'mia')['enabled'] == 1 and granted()
 
 
 def test_a_user_disabled_at_the_home_is_signed_out_at_the_mirror(identity_sides, sessions):

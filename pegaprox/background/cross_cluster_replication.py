@@ -28,6 +28,9 @@ _xcrepl_running = False
 _xcrepl_inflight = set()
 _xcrepl_inflight_lock = threading.Lock()
 
+# jobs held for a federation lease, so the loop says so once and not every tick
+_held_logged = set()
+
 
 def is_job_inflight(job_id):
     """True if the given replication job is currently executing."""
@@ -132,9 +135,12 @@ def _xcrepl_loop():
                     if _fed.enabled() and not (
                             _fed.worker_takes_writes_for(job.get('source_cluster') or '')
                             and _fed.worker_takes_writes_for(job.get('target_cluster') or '')):
-                        logger.info(f"[XCREPL] Job {job['id']} (VM {job['vmid']}) held: its "
-                                    "cluster(s) are enrolled without a live lease here")
+                        if job['id'] not in _held_logged:
+                            _held_logged.add(job['id'])
+                            logger.info(f"[XCREPL] Job {job['id']} (VM {job['vmid']}) held: its "
+                                        "cluster(s) are enrolled without a live lease here")
                         continue
+                    _held_logged.discard(job['id'])
                     # a NULL in the column raised here and ended the tick for every job after it
                     interval = _parse_interval_seconds(str(job.get('schedule') or '0 */6 * * *'))
                     last_run = job.get('last_run', '')
