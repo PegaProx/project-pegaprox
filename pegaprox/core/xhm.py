@@ -16,7 +16,7 @@ from datetime import datetime
 
 from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.core import ha_transport
-from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec, ssh_password_for, ssh_password_to, bare_host, is_ipv6_literal, node_login
+from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec, ssh_password_for, ssh_password_to, ssh_blocked_for, bare_host, is_ipv6_literal, node_login
 from pegaprox.utils.sanitization import validate_ssh_user, scrub_session_id
 from pegaprox.utils.realtime import broadcast_sse
 from pegaprox.utils.audit import log_audit
@@ -621,6 +621,12 @@ def _get_xcpng_targets(xcpng_mgr):
 # Migration engines
 # ============================================================
 
+# the disk goes over SSH to or from a node of the Proxmox cluster, with its stored key
+# where it has one: the cluster's SSH switch stops that as it stops every other way in (#941)
+_SSH_OFF = ('SSH is switched off for the {which} Proxmox cluster in its settings, and the '
+            'disk transfer needs SSH to its node')
+
+
 def _run_xcpng_to_pve(task):
     """XCP-ng -> Proxmox: export raw VDI, stream via PegaProx, qm importdisk on target.
 
@@ -638,6 +644,9 @@ def _run_xcpng_to_pve(task):
             return
         if not tgt_mgr or not tgt_mgr.is_connected:
             task.set_phase('failed', 'Target Proxmox cluster not connected')
+            return
+        if ssh_blocked_for(tgt_mgr) == 'SSH_DISABLED':
+            task.set_phase('failed', _SSH_OFF.format(which='target'))
             return
 
         # === PLANNING ===
@@ -855,10 +864,9 @@ def _run_xcpng_to_pve(task):
                                 if task.cancel_event.is_set():
                                     try: dd_in.close()
                                     except Exception: pass
-                                    try: ssh.exec_command(f"pvesm free {vol_id}", timeout=15)
-                                    except Exception: pass
+                                    left = _free_partial(ssh, vol_id)
                                     ssh.close()
-                                    task.set_phase('failed', 'Cancelled')
+                                    task.set_phase('failed', 'Cancelled' + _left_behind(task, vol_id, left))
                                     return
                                 dd_in.write(chunk)
                                 copied += len(chunk)
@@ -903,10 +911,10 @@ def _run_xcpng_to_pve(task):
 
                 if not transfer_ok:
                     # free the partial volume so failed attempts don't leave orphans (#546)
-                    try: ssh.exec_command(f"pvesm free {vol_id}", timeout=15)
-                    except Exception: pass
+                    left = _free_partial(ssh, vol_id)
                     ssh.close()
-                    task.set_phase('failed', f'Transfer failed after {attempts} attempt(s): {last_err}')
+                    task.set_phase('failed', f'Transfer failed after {attempts} attempt(s): {last_err}'
+                                   + _left_behind(task, vol_id, left))
                     return
 
                 task.log(f"  Written {copied/(1024**3):.1f} GB to {vol_id}")
@@ -923,15 +931,17 @@ def _run_xcpng_to_pve(task):
                 except Exception:
                     pass
                 # #546: don't leave the partial target volume behind on an unexpected error
+                left = ''
                 if vol_id and pve_host:
                     try:
                         _s = _connect_ssh(pve_host, pve_user, pve_pass, key_path=pve_key, port=pve_port,
                                           cluster_id=getattr(tgt_mgr, 'id', None))
-                        _s.exec_command(f"pvesm free {vol_id}", timeout=15)
-                        _s.close()
-                    except Exception:
-                        pass
-                task.set_phase('failed', f'Transfer error: {e}')
+                        left = _free_partial(_s, vol_id)
+                        try: _s.close()
+                        except Exception: pass
+                    except Exception as e2:
+                        left = str(e2)[:160] or type(e2).__name__
+                task.set_phase('failed', f'Transfer error: {e}' + _left_behind(task, vol_id, left))
                 return
 
         if not imported_volumes:
@@ -1091,6 +1101,9 @@ def _run_pve_to_xcpng(task):
             return
         if not tgt_mgr or not tgt_mgr.is_connected:
             task.set_phase('failed', 'Target XCP-ng not connected')
+            return
+        if ssh_blocked_for(src_mgr) == 'SSH_DISABLED':
+            task.set_phase('failed', _SSH_OFF.format(which='source'))
             return
 
         # === PLANNING ===
@@ -1705,6 +1718,20 @@ def _resolve_pve_node_ip(pve_mgr, node_name):
     return None
 
 
+def _pkey_from_text(paramiko, text):
+    """A private key given as its text, or None when it reads as none of the kinds."""
+    import io
+    for name in ('RSAKey', 'Ed25519Key', 'ECDSAKey', 'DSSKey'):
+        klass = getattr(paramiko, name, None)
+        if klass is None:
+            continue
+        try:
+            return klass.from_private_key(io.StringIO(text))
+        except Exception:
+            continue
+    return None
+
+
 def _connect_ssh(host, user, password, key_path=None, port=22, cluster_id=None):
     """Connect to SSH with multiple auth methods (matches _ssh_exec behavior).
     Returns connected paramiko.SSHClient or raises Exception. `cluster_id`: the Proxmox
@@ -1717,11 +1744,18 @@ def _connect_ssh(host, user, password, key_path=None, port=22, cluster_id=None):
     client = paramiko.SSHClient()
     apply_host_key_policy(client, paramiko)
 
-    # try key-based first
-    if key_path and os.path.exists(key_path):
+    # try key-based first: a key file, or the key text a cluster stores (config.ssh_key)
+    key = None
+    if key_path:
+        if os.path.exists(key_path):
+            key = {'key_filename': key_path}
+        else:
+            pkey = _pkey_from_text(paramiko, key_path)
+            if pkey is not None:
+                key = {'pkey': pkey, 'allow_agent': False, 'look_for_keys': False}
+    if key:
         try:
-            client.connect(host, port=port, username=user,
-                           key_filename=key_path, timeout=30)
+            client.connect(host, port=port, username=user, timeout=30, **key)
             persist_host_keys(client)
             try: client.get_transport().set_keepalive(30)  # #546: keep the channel alive through long disk transfers
             except Exception: pass
@@ -1772,6 +1806,27 @@ def _scp_host(host):
     brackets there, or its colons read as the path separator (#1158)."""
     h = bare_host(host)
     return f'[{h}]' if is_ipv6_literal(h) else h
+
+
+def _free_partial(ssh, vol_id):
+    """Free the partial target volume of a failed transfer. '' when it went, else why not:
+    pvesm's error, or what the call raised (a refused lease too)."""
+    try:
+        _, out, err = ssh.exec_command(f"pvesm free {shlex.quote(vol_id)}", timeout=15)
+        why = err.read().decode('utf-8', errors='replace').strip()[:160]
+        rc = out.channel.recv_exit_status()
+        return '' if rc == 0 else (why or f'exit {rc}')
+    except Exception as e:
+        return str(e)[:160] or type(e).__name__
+
+
+def _left_behind(task, vol_id, why):
+    """What the failed phase adds when the partial volume could not be freed."""
+    if not why:
+        return ''
+    logger.warning(f"[XHM:{task.id}] partial volume {vol_id} not freed: {why}")
+    return (f" - the partial volume {vol_id} stays on {task.target_storage}: remove it with "
+            f"'pvesm free {vol_id}'")
 
 
 def _ssh_cleanup(ssh, path):
@@ -2007,6 +2062,9 @@ def _run_esxi_to_pve(task):
         if not tgt_mgr or not tgt_mgr.is_connected:
             task.set_phase('failed', 'Target Proxmox not connected')
             return
+        if ssh_blocked_for(tgt_mgr) == 'SSH_DISABLED':
+            task.set_phase('failed', _SSH_OFF.format(which='target'))
+            return
 
         # === PLANNING ===
         task.set_phase('planning')
@@ -2106,6 +2164,7 @@ def _run_esxi_to_pve(task):
             if flat_path.endswith('.vmdk') and '-flat.vmdk' not in flat_path:
                 flat_path = flat_path.replace('.vmdk', '-flat.vmdk')
 
+            ssh_pve, mount_dir, tmp_path, vol_id = None, '', '', ''
             try:
                 ssh_pve = _connect_ssh(pve_host, pve_user, pve_pass,
                                        key_path=pve_key, port=pve_port,
@@ -2178,6 +2237,7 @@ def _run_esxi_to_pve(task):
                         f"rmdir {_q_local(task.scratch)} 2>/dev/null",
                         timeout=10,
                     )
+                    mount_dir = ''
 
                     # fallback: scp the flat vmdk to temp, then import
                     # remote source path needs single-quoting on top of local
@@ -2251,7 +2311,9 @@ def _run_esxi_to_pve(task):
                     if conv_exit != 0:
                         err_msg = conv_err.read().decode()[:200]
                         ssh_pve.exec_command(f"rm -f {tmp_path}", timeout=10)
-                        task.set_phase('failed', f'qemu-img convert failed: {err_msg}')
+                        left = _free_partial(ssh_pve, vol_id)
+                        task.set_phase('failed', f'qemu-img convert failed: {err_msg}'
+                                       + _left_behind(task, vol_id, left))
                         ssh_pve.close()
                         return
 
@@ -2302,7 +2364,9 @@ def _run_esxi_to_pve(task):
 
                 if conv_exit != 0:
                     err_msg = conv_err.read().decode()[:200]
-                    task.set_phase('failed', f'qemu-img convert failed: {err_msg}')
+                    left = _free_partial(ssh_pve, vol_id) if vol_id else ''
+                    task.set_phase('failed', f'qemu-img convert failed: {err_msg}'
+                                   + _left_behind(task, vol_id, left))
                     ssh_pve.close()
                     return
 
@@ -2313,7 +2377,30 @@ def _run_esxi_to_pve(task):
 
             except Exception as e:
                 logger.error(f"[XHM:{task.id}] ESXi disk transfer error: {e}")
-                task.set_phase('failed', f'Transfer error: {e}')
+                # undo what this disk left on the node: the volume it allocated, the datastore
+                # mount (made with the ESXi login), the scp copy, and the client
+                left = ''
+                if ssh_pve is not None:
+                    if vol_id and all(v['vol_id'] != vol_id for v in imported_volumes):
+                        left = _left_behind(task, vol_id, _free_partial(ssh_pve, vol_id))
+                    if mount_dir or tmp_path:
+                        undo = []
+                        if tmp_path:
+                            undo.append(f"rm -f {shlex.quote(tmp_path)}")
+                        if mount_dir:
+                            undo += [f"fusermount -u {shlex.quote(mount_dir)} 2>/dev/null",
+                                     f"rmdir {shlex.quote(mount_dir)} 2>/dev/null"]
+                        undo.append(f"rmdir {shlex.quote(task.scratch)} 2>/dev/null")
+                        try:
+                            _, u_out, _ = ssh_pve.exec_command('; '.join(undo), timeout=10)
+                            u_out.channel.recv_exit_status()
+                        except Exception:
+                            if mount_dir:
+                                left += (f" - the ESXi datastore stays mounted at {mount_dir} on node "
+                                         f"{pve_host}: run 'fusermount -u {mount_dir}' there")
+                    try: ssh_pve.close()
+                    except Exception: pass
+                task.set_phase('failed', f'Transfer error: {e}{left}')
                 return
 
         if not imported_volumes:
