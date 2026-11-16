@@ -182,6 +182,22 @@ def test_an_error_after_the_mount_unmounts_it_and_closes_the_client(esxi_to_pve)
     assert 'stays mounted' not in task.error
 
 
+@pytest.mark.parametrize('listing', [b'web01-flat.vmdk\n', b''], ids=['after-error', 'failed-mount'])
+def test_a_mount_that_stays_is_named(esxi_to_pve, listing):
+    """fusermount refuses (the mount is busy) without the channel raising. Each cleanup ends
+    with a check that the mount is gone, and a mount that stays is named with the command
+    that takes it away: in the failed phase after an error, in the task log when the mount
+    gave nothing and the copy falls back to scp. Counterproof: with fusermount fine nothing
+    is said (test_an_error_after_the_mount_unmounts_it_and_closes_the_client)."""
+    node = _Node(listing, raises='pvesm alloc', answers=(('fusermount -u', 1, b''),))
+    task = esxi_to_pve(node)
+    assert task.phase == 'failed'
+    undo = [c for c in node.calls if c.startswith('fusermount -u')]
+    assert undo and all('! mountpoint -q' in c for c in undo), undo
+    said = task.error if listing else ' '.join(str(line) for line in task.log_lines)
+    assert "stays mounted at" in said and "run 'fusermount -u" in said, said
+
+
 def test_an_error_after_the_scp_copy_removes_it(esxi_to_pve):
     node = _Node(b'', raises='pvesm alloc')
     task = esxi_to_pve(node)

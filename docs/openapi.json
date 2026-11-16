@@ -50719,7 +50719,7 @@
           }
         },
         "summary": "The switch, and with the federation on this instance and its members.",
-        "description": "Any admin: enabled, forced, can_disable, disable_blockers, manage, local_account,\nreauth. With the federation on and an admin who sees every cluster (manage), also\nthe identity of this instance, the view (epoch, max_sites, removed, removed_by_some,\nview_conflict), the open pairing code and every member with whether it answered just\nnow. Off, nothing of the identity is read or made for this.",
+        "description": "Any admin: enabled, forced, can_disable, disable_blockers, manage, local_account,\nreauth. With the federation on and an admin who sees every cluster (manage), also\nthe identity of this instance, the view (epoch, max_sites, removed, removed_by_some,\nview_conflict), the open pairing code and every member with whether it answered just\nnow, when it was last heard (last_heard) and in how many seconds a site of two could\ntake its clusters over by hand (takeover_in_s). Off, nothing of the identity is read\nor made for this.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -50754,7 +50754,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Switch the federation on or off for the whole deployment (it travels to an HA standby with the settings). Body {\"enabled\": bool}. Switching on starts the workers; switching off stops them and is refused with 409 FED_IN_USE while this instance is a member, holds a lease or holds mirrors (leave the federation first), and with 409 FED_FORCED while PEGAPROX_FEDERATION decides.",
+        "summary": "Switch the federation on or off for the whole deployment (it travels to an HA standby with the settings). Body {\"enabled\": bool}. Switching on starts the workers; switching off stops them and is refused with 409 FED_IN_USE while this instance is a member, holds a lease or holds mirrors (leave the federation first), with 409 FED_ENDED_UNTOLD while a site this instance removed as gone for good was never told (untold_ok switches off anyway), and with 409 FED_FORCED while PEGAPROX_FEDERATION decides.",
         "requestBody": {
           "required": false,
           "content": {
@@ -50937,6 +50937,7 @@
           }
         },
         "summary": "Take a member out, with a majority of the federation behind it (409 FED_NO_QUORUM without). The answer names the members that did not confirm (not_told) and the clusters enrolled here whose credentials the removed member may still hold.",
+        "description": "With two sites and the other one gone for good, \"gone\": true removes it alone, behind\nthe live checks of a manual takeover (FED_PEER_ANSWERS, FED_PEER_RECENT): this\ninstance carries on alone and keeps an end record that tells the removed site, should\nit ever call again. The copies of its clusters that were not taken over are dropped\nonly with \"drop_clusters\": true (FED_GONE_CLUSTERS names them).",
         "parameters": [
           {
             "name": "instance_id",
@@ -51298,7 +51299,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Put a local Proxmox VE cluster under the federation's rule: this instance becomes its writer with a majority of the sites behind it. Needs three or more sites.",
+        "summary": "Put a local Proxmox VE cluster under the federation's rule: this instance becomes its writer with a majority of the sites behind it. Needs a second site; with two, both must answer.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -51472,10 +51473,126 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Take over the cluster of a member that is gone for good or released it. The voters hand the lease only past the old owner's promise, and the mirrored credentials cross over under the owner's federation field key. ADOPT is the word; force adopts without the owner's key, without the credentials. Per-node root passwords and an HA cluster claim of the old owner do not come along.",
+        "summary": "Take over the cluster of a member that is gone for good or released it. The voters hand the lease only past the old owner's promise, and the mirrored credentials cross over under the owner's federation field key. ADOPT is the word; force adopts without the owner's key, without the credentials. Per-node root passwords and an HA cluster claim of the old owner do not come along. With two sites it needs the owner to answer and to have handed the cluster over; a silent owner's cluster is taken over by hand (takeover, 409 FED_USE_TAKEOVER here).",
         "parameters": [
           {
             "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/clusters/{cluster_id}/takeover": {
+      "post": {
+        "operationId": "federation.take_over_cluster_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Take over by hand, in a federation of two sites, a cluster whose owner is down. TAKEOVER is the word and owner_down must be true: the admin confirms the owning site is down, not only cut off - nothing can tell the two apart, and if it still runs both sites write to the cluster until they reach each other. Refused while the owner answers (FED_OWNER_ALIVE: hand it over there) and for 35 s after it was last heard (FED_OWNER_RECENT). The old owner stops writing at the first contact between the two sites. force takes it without the owner's key, and without its credentials.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/federation/members/{instance_id}/takeover": {
+      "post": {
+        "operationId": "federation.take_over_member_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The same for every cluster of that site this instance holds a copy of, or the ones named in clusters, with one password check: one status probe and one round for all of them. 200 when at least one was taken over (failed names the others with their code), 409 with the first failure's code when none was.",
+        "parameters": [
+          {
+            "name": "instance_id",
             "in": "path",
             "required": true,
             "schema": {

@@ -326,7 +326,11 @@ _GUARDED_ELSEWHERE = {
 }
 # the one call that runs while the switch is off, on purpose: a standby that leaves its HA
 # group drops the inherited identity whenever its row is there (forget_inherited)
-_RUNS_WHILE_OFF = {('pegaprox/core/ha.py', 'forget_inherited')}
+_RUNS_WHILE_OFF = {('pegaprox/core/ha.py', 'forget_inherited'),
+                   # an HA group asks before it splits, as forget_inherited runs after
+                   ('pegaprox/core/ha.py', 'view_has_members'),
+                   # a stat of one host-local file at the start, no query
+                   ('pegaprox/api/__init__.py', 'retry_forget')}
 _FEDERATION_MODULES = {'pegaprox/core/federation.py', 'pegaprox/core/federation_lease.py',
                        'pegaprox/api/federation.py'}
 # names taken from the core by name that read no state of it: an exception and two constants
@@ -435,6 +439,37 @@ def _guarded(call, parents, aliases, flags):
     return False
 
 
+def _scope_of(node, parents):
+    """The function (or the module) `node` runs in. A lambda is part of the function around
+    it, as _guarded reads it."""
+    import ast
+    node = parents.get(node)
+    while node is not None and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                                     ast.Module)):
+        node = parents.get(node)
+    return node
+
+
+def _switch_flags(tree, parents, aliases):
+    """{function: names}: the names that, in that function, are set from a switch test and
+    from nothing else. A flag of another function, or one set again to another value or
+    taken as an argument, guards nothing."""
+    import ast
+    told, other = {}, {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            parent = parents.get(node)
+            # a flag that, when true, says the switch is on - `off = not ...` is none
+            if (isinstance(parent, ast.Assign) and len(parent.targets) == 1
+                    and parent.targets[0] is node and _asks_switch(parent.value, aliases, set())):
+                told.setdefault(_scope_of(node, parents), set()).add(node.id)
+            else:
+                other.setdefault(_scope_of(node, parents), set()).add(node.id)
+        elif isinstance(node, ast.arg):
+            other.setdefault(_scope_of(node, parents), set()).add(node.arg)
+    return {scope: names - other.get(scope, set()) for scope, names in told.items()}
+
+
 def _hooks_of(rel, src):
     """The hooks of one module: (how many, the bare ones, the _RUNS_WHILE_OFF calls met,
     the imports the walk cannot follow)."""
@@ -442,14 +477,8 @@ def _hooks_of(rel, src):
     tree = ast.parse(src)
     aliases, lease, odd = _federation_aliases(tree)
     found, bare, allowed = 0, [], set()
-    flags = set()
     parents = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
-    for node in ast.walk(tree):
-        # a flag that, when true, says the switch is on - `off = not ...` is none
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and _asks_switch(node.value, aliases, set())):
-            flags.add(node.targets[0].id)
+    flags = _switch_flags(tree, parents, aliases)
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
@@ -462,7 +491,7 @@ def _hooks_of(rel, src):
             allowed.add((rel, what))
             continue
         found += 1
-        if not _guarded(node, parents, aliases, flags):
+        if not _guarded(node, parents, aliases, flags.get(_scope_of(node, parents), set())):
             bare.append(f'{rel}:{node.lineno} {what}()')
     return found, bare, allowed, [f'{rel}:{line} {what}' for line, what in odd]
 
@@ -472,8 +501,8 @@ def test_every_hook_outside_the_federation_asks_the_switch_first():
     federation core from a module outside it - the manager, the background jobs, the
     routes, the HA module, the exits - sits behind federation.enabled(): in the same
     condition, in an enclosing if, behind an early return of the off path, or behind a
-    flag set from the switch. A new hook that forgets it turns this red. _RUNS_WHILE_OFF is
-    the one call allowed past it, and it has to be there."""
+    flag set from the switch. A new hook that forgets it turns this red. _RUNS_WHILE_OFF
+    lists the calls allowed past it, and each has to be there."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     found, bare, allowed, unread = 0, [], set(), []
     for folder, _dirs, files in os.walk(os.path.join(root, 'pegaprox')):
@@ -544,6 +573,35 @@ def test_the_inventory_flags_a_bare_call_of_the_lease_module():
     """)
     found, bare, _allowed, unread = _hooks_of('pegaprox/x.py', src)
     assert (found, bare, unread) == (2, ['pegaprox/x.py:4 lease_round()'], [])
+
+
+def test_a_flag_guards_only_the_function_that_set_it_from_the_switch():
+    """Counterproof for the flags: a name set from the switch in one function guards
+    nothing in another, nor once it is set again to something else or taken as an
+    argument. The first function keeps its flag."""
+    src = textwrap.dedent("""
+        from pegaprox.core import federation
+        def told():
+            on = federation.enabled()
+            if on:
+                federation.ensure_identity()
+        def other_function():
+            on = True
+            if on:
+                federation.ensure_identity()
+        def set_again():
+            on = federation.enabled()
+            on = True
+            if on:
+                federation.ensure_identity()
+        def argument(on):
+            if on:
+                federation.ensure_identity()
+    """)
+    found, bare, _allowed, unread = _hooks_of('pegaprox/x.py', src)
+    assert (found, unread) == (4, [])
+    assert bare == ['pegaprox/x.py:10 ensure_identity()', 'pegaprox/x.py:15 ensure_identity()',
+                    'pegaprox/x.py:18 ensure_identity()']
 
 
 def test_the_inventory_flags_a_bare_hook():

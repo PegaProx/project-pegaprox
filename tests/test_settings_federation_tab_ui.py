@@ -94,7 +94,8 @@ def test_off_the_panel_asks_for_nothing_but_the_status(panel):
     assert 'refreshLeases' not in before and 'refreshFedClusters' not in before and 'refreshClusters' not in before
     # everything but the switch card sits behind `on`
     body = panel[panel.index('data-fed-panel='):]
-    for card in ('{on && !joined && (', '{on && joined && (', '{on && !joined && own.length > 0 && ownCard}'):
+    for card in ('{on && !joined && (', '{on && joined && (',
+                 '{on && !joined && (own.length > 0 || !!leasesError) && ownCard}'):
         assert card in body, card
 
 
@@ -103,8 +104,8 @@ def test_the_switch_asks_before_it_goes_on_and_not_before_it_goes_off(panel):
     assert 'role="switch"' in card and 'aria-checked={on}' in card
     assert 'if (on) flip(false); else setAskOn(true);' in card
     assert 'data-fed-switch-confirm' in card and 'onClick={() => flip(true)}' in card
-    flip = panel[panel.index('async function flip(value)'):panel.index('// `judge` reads')]
-    assert "fedSend('POST', 'switch', { enabled: value }" in flip
+    flip = panel[panel.index('async function flip(value, untoldOk)'):panel.index('// `judge` reads')]
+    assert "fedSend('POST', 'switch', { enabled: value, ...(untoldOk ? { untold_ok: true } : {}) }" in flip
     # a refusal keeps the server's own sentence where the switch is
     assert 'setSwitchError(r.error)' in flip
 
@@ -125,9 +126,10 @@ def test_the_password_field_follows_the_reauth_the_server_names(panel):
 
 def test_a_mirrored_admin_gets_no_state_changing_control(panel):
     assert "const localOk = !status || status.local_account !== false;" in panel
-    for marker in ('data-fed-make-code', 'data-fed-join', 'data-fed-remove=', 'data-fed-leave',
+    for marker in ('data-fed-make-code', 'data-fed-join', 'data-fed-remove=', 'data-fed-leave disabled',
                    'data-fed-release=', 'data-fed-unenroll=', 'data-fed-adopt=', 'data-fed-enroll=',
-                   'data-fed-unmap=', 'data-fed-map-go='):
+                   'data-fed-unmap=', 'data-fed-map-go=', 'data-fed-takeover-all=', 'data-fed-takeover=',
+                   'data-fed-renew=', 'data-fed-sync'):
         at = panel.index(marker)
         near = panel[max(0, at - 60):at + 300]
         assert '!localOk' in near, marker
@@ -193,6 +195,143 @@ def test_the_lease_cell_reads_the_shape_the_server_sends(panel):
     assert 'l.valid' not in panel and 'l.term' not in panel
 
 
+# -- two sites: the owner writes alone, the other site takes over by hand -------------------
+
+def test_two_sites_are_told_by_the_member_count_and_gate_every_new_control(panel):
+    """No status field says "two sites": one member besides this instance is it. The card,
+    the takeover buttons, the gone-for-good tick and the leave hint all hang on it, so
+    three or more sites see the tab as before. Counterproof: twoSites on members.length
+    >= 1 shows the card and the takeover to three sites (runtime test below)."""
+    assert 'const twoSites = joined && members.length === 1;' in panel
+    assert "const silent = (m) => !!m && m.reachable === false && !m.removed_us;" in panel
+    assert '{twoSites && (\n                                <div className={HA_GROUP_CARD} data-fed-two-sites>' in panel
+    assert '{twoSites && silent(m) && m.mirrored_clusters > 0 && (' in panel
+    assert 'goneOffered: twoSites && silent(m) })' in panel
+    assert 'const byHand = twoSites && silent(members.find(m => m.instance_id === info.owner));' in panel
+    assert "if (!r.ok && r.code === 'FED_NO_QUORUM' && twoSites) {" in panel
+    assert '{twoSites && <p className="text-xs text-gray-400" data-fed-shadows-two>' in panel
+
+
+def test_the_takeover_box_wants_the_tick_the_word_and_the_password(panel):
+    """Go stays off until the owner-down tick, TAKEOVER and the password are there and the
+    server's wait is over; the body states owner_down itself. Counterproof: the Go button
+    without !ownerDown lets a takeover go out unticked (runtime test below)."""
+    assert "takeover: 'TAKEOVER', takeoverAll: 'TAKEOVER', map: null };" in panel
+    assert "setOwnerDown(false); setGone(false); setDropOk(false);" in panel[panel.index('function askConfirm('):]
+    run = panel[panel.index('if (takeoverBox) {'):panel.index("if (c.kind === 'leave') {")]
+    assert 'if (!ownerDown || waitLeft > 0) return;' in run
+    assert "const body = { confirm: 'TAKEOVER', owner_down: true, force: forceOffered && force, ...pw };" in run
+    assert "all ? `members/${c.owner}/takeover` : `clusters/${c.id}/takeover`" in run
+    assert "|| (takeoverBox && (!ownerDown || waitLeft > 0))}>" in panel
+    assert 'checked={ownerDown} onChange={e => setOwnerDown(e.target.checked)}' in panel
+    # force only after the server said the owner's field key is missing
+    assert "(confirmBox.kind === 'adopt' || (takeoverBox && forceOffered))" in panel
+    assert "if (r.code === 'FED_NO_KEY') setForceOffered(true);" in run
+    # the wait counts down from what the status said, and from the server's retry_after
+    assert 'const wait = Number.isInteger(m.takeover_in_s) ? m.takeover_in_s : 0;' in panel
+    assert 'const waitLeft = waitUntil ? Math.max(0, Math.ceil((waitUntil - now) / 1000)) : 0;' in panel
+    assert "r.code === 'FED_OWNER_RECENT' && retry > 0 ? { waitUntil: at + retry * 1000 } : {}" in run
+
+
+def test_a_refused_takeover_keeps_its_box_and_adopt_hands_over_to_it(panel):
+    """FED_OWNER_ALIVE and FED_OWNER_RECENT leave the box open with the server's sentence;
+    an adoption the server answers FED_USE_TAKEOVER opens the takeover box. Counterproof:
+    without the refused field the sentence shows as a toast only."""
+    run = panel[panel.index('if (takeoverBox) {'):panel.index("if (c.kind === 'leave') {")]
+    assert "if (r.ok || r.code === 'AUTH') return;" in run
+    assert 'refused: r.error' in run
+    assert 'data-fed-confirm-error>{confirmBox.refused}</p>' in panel
+    adopt = panel[panel.index("if (c.kind === 'adopt') {"):panel.index("if (c.kind === 'enroll')")]
+    assert "if (!r.ok && r.code === 'FED_USE_TAKEOVER') askTakeover('takeover', c.id, c.name, r.data.owner || c.owner);" in adopt
+    assert "data: data || {} };" in panel[panel.index('async function fedSend('):panel.index('async function refreshStatus()')]
+
+
+def test_the_lease_cell_shows_a_lease_held_alone_and_a_takeover(panel):
+    """lease_status adds alone and takeover {from, at, by, confirmed_at}. Counterproof: a
+    cell that reads l.held first shows a lease held alone as 2 of 2 in green."""
+    cell = panel[panel.index('const takenLine = (l) => {'):panel.index('const count = (c, field)')]
+    assert cell.index('if (l.held && l.alone) {') < cell.index('} else if (l.held) {')
+    assert "fedFill(t('fedLeaseAlone'), { site: otherSite || '-', seconds: l.remaining_s || 0 })" in cell
+    assert 'data-fed-lease-alone={cid}' in cell
+    assert 'return tk.confirmed_at' in cell and "t('fedTakeoverDone')" in cell and "t('fedTakeoverPending')" in cell
+    renew = panel[panel.index("act('renew-' + cid"):]
+    renew = renew[:renew.index("{t('fedRenew')}")]
+    assert renew.index('if (d.renewed === true && d.alone)') < renew.index('if (d.renewed === true) return null;')
+
+
+def test_the_stepped_down_note_is_for_a_takeover_only(panel):
+    """stepped_down also lists clusters handed on by adoption; the note says "while this
+    site did not answer", which is true for a takeover by hand only. Counterproof: without
+    the kind check a plain hand-over gets the note."""
+    assert "const steppedDown = (leases && leases.stepped_down) || {};" in panel
+    assert "const down = steppedDown[cid] && steppedDown[cid].kind === 'takeover' ? steppedDown[cid] : null;" in panel
+    assert 'data-fed-stepped-down={cid}' in panel
+
+
+def test_a_site_gone_for_good_needs_its_own_tick_and_the_drop_its_own(panel):
+    run = panel[panel.index("if (c.kind === 'remove') {"):panel.index('if (takeoverBox) {')]
+    assert "const goneFor = c.goneOffered && gone ? { gone: true, ...(dropOk ? { drop_clusters: true } : {}) } : {};" in run
+    assert "{ confirm: 'REMOVE', ...goneFor, ...pw }" in run
+    assert "goneFor.gone ? t('fedRemovedAlone') : t('fedRemoved')" in run
+    assert "if (!r.ok && r.code === 'FED_GONE_CLUSTERS') {" in run
+    assert "{confirmBox.kind === 'remove' && gone && Array.isArray(confirmBox.goneClusters)" in panel
+
+
+def test_the_end_banner_and_the_untold_switch(panel):
+    """A site the other one removed as gone for good says so instead of "removed"; the
+    survivor's switch asks once more while that site was never told, and only then sends
+    untold_ok. Counterproof: flipping off at once posts without the confirm (runtime)."""
+    assert "status.removed.ended" in panel and "t('fedEndedByOther')" in panel
+    assert "status.disable_warnings.includes('ended_untold')" in panel
+    assert 'if (on && untoldWarn) setAskOff(true); else if (on) flip(false); else setAskOn(true);' in panel
+    assert 'onClick={() => flip(false, true)}' in panel
+    assert "if (r.code === 'FED_ENDED_UNTOLD') setAskOff(true);" in panel
+
+
+def test_the_panel_speaks_the_two_site_contract_of_the_server():
+    """Each route, word, field and code the panel reads for two sites, next to where the
+    server makes it. Counterproof: a field renamed on either side turns this red."""
+    panel_src = _read('web', 'src', 'settings_modal.js')
+    api = _read('pegaprox', 'api', 'federation.py')
+    core = _read('pegaprox', 'core', 'federation.py') + _read('pegaprox', 'core', 'federation_lease.py')
+    assert "'/api/federation/clusters/<cluster_id>/takeover'" in api and '`clusters/${c.id}/takeover`' in panel_src
+    assert "'/api/federation/members/<instance_id>/takeover'" in api and '`members/${c.owner}/takeover`' in panel_src
+    assert "data.get('confirm') != 'TAKEOVER'" in api and "data.get('owner_down') is not True" in api
+    assert "data.get('gone') is True" in api and "data.get('drop_clusters') is True" in api
+    assert "data.get('untold_ok') is True" in api
+    for field in ("'last_heard'", "'takeover_in_s'"):
+        assert field in api, field
+    assert 'm.last_heard' in panel_src and 'm.takeover_in_s' in panel_src
+    for field in ("'alone': bool(rec.get('alone'))", "'confirmed_at'", "out['stepped_down'][cid]", "'stopped_at'"):
+        assert field in core, field
+    for code in ('FED_USE_TAKEOVER', 'FED_OWNER_ALIVE', 'FED_OWNER_RECENT', 'FED_NO_KEY', 'FED_GONE_CLUSTERS',
+                 'FED_ENDED_UNTOLD', 'FED_NO_QUORUM'):
+        assert f"code='{code}'" in core, code
+        assert f"'{code}'" in panel_src, code
+    assert "warnings.append('ended_untold')" in core
+    assert "'ended': True" in core and "'clusters': dropped" in core
+
+
+def test_the_two_site_strings_say_what_the_code_does():
+    """Two sites enroll now, the risk of a takeover is said in plain words, and the German
+    of the risk-bearing keys is the agreed one."""
+    blocks = _blocks()
+    en, de = blocks['en'], blocks['de']
+    for lang in LANGS:
+        assert 'three' not in (_value(blocks[lang], 'fedEnrollNeedsSites') or '').lower(), lang
+    assert _value(en, 'fedEnrollNeedsSites') == 'Enrolling needs a second site: pair one first.'
+    assert 'both sites write to the same cluster' in _value(en, 'fedTwoRisk')
+    assert 'both sites write to the cluster until they reach each other again' in _value(en, 'fedTakeoverNote')
+    assert 'With two sites' in _value(en, 'fedLeasesDesc') and 'With two sites' in _value(en, 'fedAdoptNote')
+    assert 'only while a majority' not in _value(en, 'fedSwitchDesc')
+    assert _value(de, 'fedTakeover') == 'Manuelle Übernahme'
+    assert _value(de, 'fedTwoRisk').startswith('Eine Übernahme kann einen ausgefallenen Standort nicht von einer '
+                                               'ausgefallenen Verbindung unterscheiden.')
+    assert _value(de, 'fedTakeoverDown') == ('Ich habe es geprüft: {site} ist ausgefallen, nicht nur von diesem '
+                                             'Standort abgeschnitten.')
+    assert _value(de, 'fedRemoveGone').startswith('{site} ist endgültig weg. Dieser Standort macht allein weiter')
+
+
 # -- enrolling and the linked view --------------------------------------------------------
 
 def test_every_local_cluster_can_be_enrolled(panel):
@@ -226,6 +365,12 @@ def test_a_failed_read_of_the_leases_or_the_view_is_said(panel):
     assert "{own.length === 0 && !leasesError && <p" in panel
     # nobody knows what is enrolled without a leases answer: nothing is offered to enroll
     assert 'const unenrolled = leases ? (clusters || [])' in panel
+    # a newer read wins: an older answer landing after it neither brings back the list nor
+    # takes the error away, and a switch-off drops the reads still on their way
+    for name, part in (('leases', leases), ('view', view)):
+        assert f'const seq = ++reads.current.{name};' in part
+        assert f'if (seq !== reads.current.{name}) return;' in part
+    assert 'if (!value) { reads.current.leases++; reads.current.view++;' in panel
 
 
 def test_the_filter_stays_while_it_filters(panel):
@@ -378,16 +523,20 @@ def test_every_icon_exists(panel):
 def test_the_bundle_was_rebuilt(modal):
     bundle = _read('web', 'index.html')
     for needle in ('function FederationPanel(', 'function fedFill(', 'data-fed-switch', 'd.manage===true',
-                   "case'federationPeer'", 'fedSwitchTitle', 'apiRefSchemeFedPeer'):
+                   "case'federationPeer'", 'fedSwitchTitle', 'apiRefSchemeFedPeer', 'data-fed-two-sites',
+                   'data-fed-owner-down', 'fedTakeoverNote', 'data-fed-remove-gone'):
         assert needle in bundle, needle
     assert 'fedLeaseTerm' not in bundle
+    # the bundle carries the server's minimum, not the old three
+    assert re.search(r'FED_MIN_SITES_TO_ENROLL\s*=\s*2\b', bundle)
     for lang in LANGS:
         if lang == 'en':
             continue
         data = json.loads(_read('web', 'i18n', f'{lang}.json'))
         data = data.get(lang, data) if isinstance(data, dict) else data
         flat = json.dumps(data, ensure_ascii=False)
-        for key in ('fedSwitchTitle', 'fedSwitchForced', 'fedAddSiteTitle', 'fedPeerMore', 'apiRefSchemeFedPeer'):
+        for key in ('fedSwitchTitle', 'fedSwitchForced', 'fedAddSiteTitle', 'fedPeerMore', 'apiRefSchemeFedPeer',
+                    'fedTwoRisk', 'fedTakeoverNote', 'fedRemoveGone', 'fedSwitchEndedUntold'):
             assert f'"{key}"' in flat, (lang, key)
         assert '"fedLeaseTerm"' not in flat, lang
 
@@ -419,7 +568,8 @@ class _FedServer(_FakeServer):
         self.fed = {'enabled': False, 'forced': False, 'blockers': [], 'manage': True, 'local': True,
                     'reauth': 'password', 'members': [], 'refuse_off': False, 'leases': {},
                     'enrolled': {}, 'hold_s': 0, 'view': {'self': [], 'peers': {}}, 'replies': {},
-                    'url': '', 'site': '', 'idmap': None, 'pull_ok': True}
+                    'url': '', 'site': '', 'idmap': None, 'pull_ok': True, 'removed': None, 'warnings': [],
+                    'stepped_down': {}}
         self.fed.update(fed or {})
 
     def fed_status(self):
@@ -429,9 +579,11 @@ class _FedServer(_FakeServer):
                'can_disable': bool(f['enabled'] and not f['forced'] and not blockers),
                'disable_blockers': blockers, 'manage': f['manage'], 'local_account': f['local'],
                'reauth': f['reauth']}
+        if f['enabled'] and f['warnings']:
+            out['disable_warnings'] = list(f['warnings'])
         if f['enabled'] and f['manage']:
             out.update({'instance_id': ME, 'public_key': 'x', 'site': f['site'], 'url': f['url'],
-                        'fingerprints': [], 'max_sites': 8, 'view_epoch': 3, 'removed': None,
+                        'fingerprints': [], 'max_sites': 8, 'view_epoch': 3, 'removed': f['removed'],
                         'removed_by_some': [], 'view_conflict': False, 'field_key_id': 'abcd1234',
                         'pairing_open': None, 'members': [dict(m) for m in f['members']]})
         return out
@@ -468,6 +620,11 @@ class _FedServer(_FakeServer):
                                         '- change it there'}, 409)
             if not value and f['enabled'] and (f['refuse_off'] or f['blockers']):
                 return answer({'code': 'FED_IN_USE', 'error': LEAVE_FIRST, 'blockers': ['member', 'mirrors']}, 409)
+            if not value and f['enabled'] and f['warnings'] and body.get('untold_ok') is not True:
+                return answer({'code': 'FED_ENDED_UNTOLD', 'blockers': [], 'sites': ['2' * 32],
+                               'error': 'hamburg was never told that this instance carried on alone'}, 409)
+            if not value:
+                f['warnings'] = []
             f['enabled'] = value
             st = self.fed_status()
             return answer({k: st[k] for k in ('enabled', 'forced', 'can_disable', 'disable_blockers')})
@@ -477,7 +634,8 @@ class _FedServer(_FakeServer):
             status, data = f['replies'][(req.method, path)]
             return answer(data, status)
         if path == '/api/federation/leases':
-            return answer({'leases': f['leases'], 'promises': {}, 'enrolled': f['enrolled'], 'hold_s': f['hold_s']})
+            return answer({'leases': f['leases'], 'promises': {}, 'enrolled': f['enrolled'], 'hold_s': f['hold_s'],
+                           'stepped_down': f['stepped_down']})
         if path == '/api/federation/clusters':
             return answer(f['view'])
         if path == '/api/federation/identity-map' and req.method == 'GET':
@@ -490,7 +648,7 @@ class _FedServer(_FakeServer):
                     e['local_value'] = body.get('local_value') or ''
             return answer({'saved': True, 'pulled': f['pull_ok'], 'report': None})
         if req.method == 'POST' and f['reauth'] == 'password' and body.get('user_password') != PASSWORD \
-                and re.search(r'/(pairing-code|join|remove|leave|enroll|release|unenroll|adopt)$', path):
+                and re.search(r'/(pairing-code|join|remove|leave|enroll|release|unenroll|adopt|takeover)$', path):
             return answer({'error': 'The password is not correct', 'code': 'FED_REAUTH'}, 403)
         return answer({'error': 'not mocked'}, 404)
 
@@ -514,7 +672,7 @@ TAB_LABEL = {'en': 'Federation', 'de': 'Föderation', 'zh': '联邦'}
 class _FedApp(_App):
     """_App with a spy on the toasts: they live three seconds, a test reads them later."""
 
-    def __init__(self, browser, server):
+    def __init__(self, browser, server, script=None):
         self.server = server
         self.ctx = browser.new_context(viewport={'width': 1600, 'height': 1000})
         self.ctx.add_init_script("""try {
@@ -522,6 +680,8 @@ class _FedApp(_App):
             localStorage.setItem('pegaprox-shortcuts-hint-shown', '1');
         } catch (e) {}""")
         self.ctx.add_init_script(TOAST_SPY)
+        if script:
+            self.ctx.add_init_script(script)
         self.page = self.ctx.new_page()
         self.errors = []
         self.loads = []
@@ -563,8 +723,8 @@ class _FedApp(_App):
 def open_fed(browser):
     apps = []
 
-    def _open(fed=None, **kw):
-        app = _FedApp(browser, _FedServer(fed=fed, **kw))
+    def _open(fed=None, script=None, **kw):
+        app = _FedApp(browser, _FedServer(fed=fed, **kw), script=script)
         apps.append(app)
         return app
     yield _open
@@ -574,6 +734,64 @@ def open_fed(browser):
 
 def _switch(page):
     return page.locator('#fed-switch')
+
+
+_OWN = {'pve1': {'name': 'prod', 'owner': ME}}
+_HELD = {'pve1': {'held': True, 'remaining_s': 22, 'votes': 2, 'needed': 2, 'released': False,
+                  'adopted': False, 'lost_to': ''}}
+_LEASES_FAIL = (500, {'error': 'The lease file cannot be read'})
+# the first answer of the leases route reaches the panel late, every later one at once
+_FIRST_LEASES_LATE = """(() => {
+    const orig = window.fetch.bind(window);
+    let n = 0;
+    window.fetch = async (...a) => {
+        const u = String((a[0] && a[0].url) || a[0]);
+        const r = await orig(...a);
+        if (u.includes('/api/federation/leases') && n++ === 0) await new Promise(res => setTimeout(res, 4000));
+        return r;
+    };
+})();"""
+
+
+def test_runtime_a_failed_lease_read_is_said_on_a_site_without_peers(open_fed):
+    """A site that was removed or left keeps its own enrolled clusters: a failed read of
+    their leases says so instead of dropping the card. Counterproof: a good read shows it."""
+    ok = open_fed(fed={'enabled': True, 'members': [], 'enrolled': dict(_OWN), 'leases': dict(_HELD)})
+    assert ok.open_tab()
+    ok.page.locator('[data-fed-lease="pve1"]').wait_for(timeout=5000)
+    app = open_fed(fed={'enabled': True, 'members': [], 'enrolled': dict(_OWN), 'leases': dict(_HELD),
+                        'replies': {('GET', '/api/federation/leases'): _LEASES_FAIL}})
+    assert app.open_tab()
+    app.page.locator('[data-fed-leases-error]').wait_for(timeout=5000)
+    assert not app.errors, app.errors
+
+
+def test_runtime_an_older_lease_answer_does_not_undo_a_newer_failed_read(open_fed):
+    """The first read of the leases is still on its way when a join starts a second one,
+    which fails: the old answer that lands afterwards brings back neither its lease row nor
+    an empty error."""
+    app = open_fed(fed={'enabled': True, 'members': [], 'enrolled': dict(_OWN), 'leases': dict(_HELD)},
+                   script=_FIRST_LEASES_LATE)
+    page = app.page
+    assert app.open_tab()
+    for _ in range(40):
+        if app.fed_calls('leases') >= 1:
+            break
+        page.wait_for_timeout(100)
+    assert app.fed_calls('leases') == 1
+    fed = app.server.fed
+    fed['replies'][('GET', '/api/federation/leases')] = _LEASES_FAIL
+    fed['replies'][('POST', '/api/federation/join')] = (200, {'joined': True})
+    fed['members'] = [_member(2, 'hamburg')]
+    page.locator('#fed-join-code').fill('pgxfd1_x')
+    page.locator('#fed-join-url').fill('https://b.example:5000')
+    page.locator('#fed-join-pw').fill(PASSWORD)
+    page.locator('[data-fed-join]').click()
+    page.locator('[data-fed-self]').wait_for(timeout=3000)
+    page.wait_for_timeout(5000)
+    assert page.locator('[data-fed-leases-error]').count() == 1
+    assert page.locator('[data-fed-lease="pve1"]').count() == 0
+    assert not app.errors, app.errors
 
 
 def test_runtime_off_shows_the_switch_alone_and_switching_on_asks_first(open_fed):
@@ -727,6 +945,8 @@ def test_runtime_toasts_say_success_only_on_success(open_fed):
     page.locator('#fed-confirm-pw').fill(PASSWORD)
     page.locator('[data-fed-confirm-go]').click()
     page.locator('[data-fed-rotate="remove"]').wait_for(timeout=5000)
+    # the spy looks every 50 ms: the toast may come a moment after the panel changed
+    page.wait_for_function("() => (window.__toasts || []).some(t => t.text.startsWith('Removed here.'))", timeout=3000)
     toasts = app.toasts()
     assert any(t['kind'] == 'other' and t['text'].startswith('Removed here. 1 sites did not confirm') for t in toasts), toasts
     assert not any(t['text'] == 'Member removed.' for t in toasts)
@@ -765,13 +985,16 @@ def test_runtime_every_local_cluster_can_be_enrolled_and_filtered(open_fed):
     assert page.locator('[data-fed-enrollable]').count() == 6   # pve10 to pve15
 
 
-def test_runtime_two_sites_cannot_enroll(open_fed):
+def test_runtime_two_sites_enroll(open_fed):
+    """Counterproof: FED_MIN_SITES_TO_ENROLL back at 3 disables the button and says three."""
     app = open_fed(fed={'enabled': True, 'members': [_member(2, 'hamburg')]},
                    clusters=[{'id': 'pve1', 'name': 'one', 'cluster_type': 'proxmox'}])
     assert app.open_tab()
     app.page.locator('[data-fed-enrollable="pve1"]').wait_for(timeout=5000)
-    assert app.page.locator('[data-fed-enroll="pve1"]').is_disabled()
-    assert app.page.locator('[data-fed-enroll-sites]').count() == 1
+    assert app.page.locator('[data-fed-enroll="pve1"]').is_enabled()
+    assert app.page.locator('[data-fed-enroll-sites]').count() == 0
+    text = app.page.locator('[data-fed-panel]').inner_text()
+    assert 'three or more sites:' not in text and 'Enrolling takes' not in text
 
 
 def test_runtime_peer_rows_show_nodes_guests_and_what_is_left_out(open_fed):
@@ -862,7 +1085,7 @@ def test_the_numbers_of_the_guide_are_the_codes():
     from pegaprox.core import federation, federation_lease, ha_wire
     guide = _read('docs', 'federation.md')
     assert federation.MAX_SITES == 8 and 'up to eight PegaProx instances' in guide and '**Eight sites**' in guide
-    assert federation_lease.MIN_SITES_TO_ENROLL == 3 and '**Three sites**' in guide
+    assert federation_lease.MIN_SITES_TO_ENROLL == 2 and '**Two sites**' in guide
     assert federation.PAIRING_TTL == 15 * 60 and 'valid for 15\n   minutes and one join' in guide
     assert federation.SYNC_INTERVAL == 60 and 'the identity sync, every 60\nseconds' in guide
     assert federation.LEASE_RENEW_AFTER == 10 and federation_lease.LEASE_SECONDS == 30
@@ -1008,3 +1231,308 @@ def test_runtime_the_filter_stays_while_it_filters(open_fed):
     assert page.locator('[data-fed-filter]').count() == 1
     page.locator('[data-fed-filter]').fill('')
     assert page.locator('[data-fed-enrollable]').count() == 12
+
+
+# -- runtime: two sites ----------------------------------------------------------------------
+
+HH = '2' * 32
+HEARD = 1763290000
+ALIVE = ('hamburg answers right now, so it is not down. Hand the cluster over there (Hand over), then '
+         'take it over here with Take over')
+
+
+def _lease(**kw):
+    rec = {'held': True, 'remaining_s': 25, 'votes': 1, 'needed': 2, 'released': False, 'adopted': False,
+           'lost_to': '', 'alone': True, 'gen': 1, 'takeover': None}
+    rec.update(kw)
+    return rec
+
+
+def _two_sites(**kw):
+    """A federation of two: this instance leads pve1 and holds it alone, hamburg has not
+    answered for a while and leads hh1 and hh2, of which this instance holds copies."""
+    fed = {'enabled': True,
+           'members': [_member(2, 'hamburg', reachable=False, last_heard=HEARD, takeover_in_s=0,
+                               mirrored_clusters=2)],
+           'enrolled': {'pve1': {'name': 'prod', 'owner': ME}, 'hh1': {'name': 'hh one', 'owner': HH},
+                        'hh2': {'name': 'hh two', 'owner': HH}},
+           'leases': {'pve1': _lease()}}
+    fed.update(kw)
+    return fed
+
+
+def test_runtime_two_sites_the_owner_alone_and_a_takeover_by_hand(open_fed):
+    """Corporate Redesigned, two sites, hamburg silent: the card says what two sites do and
+    what a takeover risks, the lease reads held alone, a cluster taken over here says
+    whether hamburg stepped down, the member says since when it is offline and offers Take
+    over all, and hamburg's clusters offer Manual takeover in place of adopt. The box keeps
+    Go off until tick, word and password; an owner that answers after all keeps it open
+    with the server's sentence. Counterproof: Go without !ownerDown goes out unticked."""
+    pending = {'from': HH, 'at': HEARD - 600, 'by': 'admin:admin', 'confirmed_at': 0}
+    done = dict(pending, confirmed_at=HEARD - 300)
+    fed = _two_sites()
+    fed['enrolled'].update({'hh0': {'name': 'taken', 'owner': ME}, 'hh8': {'name': 'back', 'owner': ME}})
+    fed['leases'].update({'hh0': _lease(gen=3, takeover=pending), 'hh8': _lease(gen=2, takeover=done)})
+    app = open_fed(fed=fed, layout='corporate-redesigned')
+    page = app.page
+    assert app.open_tab()
+    card = page.locator('[data-fed-two-sites]')
+    card.wait_for(timeout=5000)
+    assert 'Two sites: takeover by hand' in card.inner_text()
+    assert 'both sites write to the same cluster until they reach each other again' in card.inner_text()
+    page.locator('[data-fed-lease-alone="pve1"]').wait_for(timeout=5000)
+    assert page.locator('[data-fed-lease-alone="pve1"]').inner_text() == 'held alone, hamburg does not answer, 25 s left'
+    assert page.locator('[data-fed-lease="hh0"] [data-fed-takeover-state="pending"]').inner_text().endswith(
+        'hamburg has not stepped down yet')
+    assert 'hamburg stopped writing by' in page.locator('[data-fed-lease="hh8"] [data-fed-takeover-state="done"]').inner_text()
+    assert page.locator('[data-fed-offline-since="22222222"]').inner_text().startswith('offline since ')
+    assert page.locator('[data-fed-takeover-all="22222222"]').inner_text() == 'Take over all by hand (2)'
+    assert page.locator('[data-fed-adopt="hh1"]').count() == 0
+    assert page.locator('[data-fed-shadows-two]').count() == 1
+
+    route = ('POST', '/api/federation/clusters/hh1/takeover')
+    app.server.fed['replies'][route] = (409, {'code': 'FED_OWNER_ALIVE', 'owner': HH, 'error': ALIVE})
+    page.locator('[data-fed-takeover="hh1"]').click()
+    box = page.locator('[data-fed-confirm="takeover"]')
+    box.wait_for(timeout=3000)
+    assert 'Take over hh one by hand from hamburg?' in box.inner_text()
+    assert 'If it still runs, both sites write to the cluster until they reach each other again' in box.inner_text()
+    assert page.locator('[data-fed-last-heard]').inner_text().startswith('Last heard from hamburg: ')
+    go = page.locator('[data-fed-confirm-go]')
+    assert go.inner_text() == 'Take over by hand'
+    page.locator('#fed-confirm-word').fill('TAKEOVER')
+    page.locator('#fed-confirm-pw').fill(PASSWORD)
+    assert go.is_disabled(), 'Go before the owner-down tick'
+    page.locator('[data-fed-owner-down]').check()
+    assert go.is_enabled()
+    page.locator('#fed-confirm-word').fill('TAKEOVE')
+    assert go.is_disabled()
+    page.locator('#fed-confirm-word').fill('TAKEOVER')
+    go.click()
+    err = page.locator('[data-fed-confirm-error]')
+    err.wait_for(timeout=5000)
+    assert err.inner_text() == ALIVE and box.count() == 1
+    assert app.server.bodies['/api/federation/clusters/hh1/takeover'][-1] == {
+        'confirm': 'TAKEOVER', 'owner_down': True, 'force': False, 'user_password': PASSWORD}
+
+    # silent again: the password was for that one request, the tick and the word stay
+    app.server.fed['replies'][route] = (200, {'taken_over': 'hh1', 'generation': 4, 'manager': True,
+                                              'lease': _lease(gen=4)})
+    assert go.is_disabled()
+    page.locator('#fed-confirm-pw').fill(PASSWORD)
+    go.click()
+    box.wait_for(state='detached', timeout=5000)
+    page.wait_for_function("() => (window.__toasts || []).some(t => t.text === "
+                           "'Taken over. hamburg stops writing as soon as it answers again.' && t.kind === 'success')",
+                           timeout=3000)
+    assert not app.errors, app.errors
+
+
+def test_runtime_adopt_hands_over_to_the_takeover_and_the_wait_holds_go(open_fed):
+    """hamburg looked reachable, so its cluster offers Take over (adopt); the server finds
+    it silent and answers FED_USE_TAKEOVER, and the takeover box opens in its place. hamburg
+    was heard three seconds ago: Go stays off with everything filled in until the wait ran
+    out. Counterproof: Go without the waitLeft check is on at once."""
+    member = _member(2, 'hamburg', reachable=True, last_heard=HEARD, takeover_in_s=3, mirrored_clusters=2)
+    use = {'code': 'FED_USE_TAKEOVER', 'owner': HH,
+           'error': 'hamburg does not answer. With two sites a cluster whose owner does not answer is taken over by '
+                    'hand: use Manual takeover'}
+    app = open_fed(fed=_two_sites(members=[member], replies={('POST', '/api/federation/clusters/hh1/adopt'): (409, use)}))
+    page = app.page
+    assert app.open_tab()
+    page.locator('[data-fed-adopt="hh1"]').wait_for(timeout=5000)
+    assert page.locator('[data-fed-takeover="hh1"]').count() == 0 and page.locator('[data-fed-takeover-all]').count() == 0
+    page.locator('[data-fed-adopt="hh1"]').click()
+    page.locator('[data-fed-confirm="adopt"]').wait_for(timeout=3000)
+    page.locator('#fed-confirm-word').fill('ADOPT')
+    page.locator('#fed-confirm-pw').fill(PASSWORD)
+    page.locator('[data-fed-confirm-go]').click()
+    page.locator('[data-fed-confirm="takeover"]').wait_for(timeout=5000)
+    wait = page.locator('[data-fed-takeover-wait]')
+    assert re.fullmatch(r'hamburg was in contact a moment ago\. Manual takeover is possible in [123] s\.', wait.inner_text())
+    page.locator('#fed-confirm-word').fill('TAKEOVER')
+    page.locator('#fed-confirm-pw').fill(PASSWORD)
+    page.locator('[data-fed-owner-down]').check()
+    go = page.locator('[data-fed-confirm-go]')
+    assert go.is_disabled(), 'Go during the wait'
+    wait.wait_for(state='detached', timeout=6000)
+    assert go.is_enabled()
+    assert '/api/federation/clusters/hh1/takeover' not in app.server.bodies
+    assert not app.errors, app.errors
+
+
+def test_runtime_take_over_all_then_remove_the_site_as_gone_for_good(open_fed):
+    """Take over all posts once for the site and reports what did not move; Remove offers
+    gone for good, names the clusters not taken over and drops them only with their own
+    tick. Counterproof: a remove that ignores the gone tick posts a plain removal."""
+    fed = _two_sites()
+    fed['enrolled']['hh3'] = {'name': 'hh three', 'owner': HH}
+    app = open_fed(fed=fed)
+    page = app.page
+    assert app.open_tab()
+    all_route = ('POST', f'/api/federation/members/{HH}/takeover')
+    app.server.fed['replies'][all_route] = (200, {
+        'taken': [{'cluster_id': 'hh1', 'generation': 2, 'manager': True}],
+        'failed': {'hh2': {'code': 'FED_NO_KEY', 'error': 'The field key of the owner is not held here'}}})
+    page.locator('[data-fed-takeover-all="22222222"]').click()
+    box = page.locator('[data-fed-confirm="takeoverAll"]')
+    box.wait_for(timeout=3000)
+    assert 'Take over every cluster of hamburg by hand?' in box.inner_text()
+    page.locator('#fed-confirm-word').fill('TAKEOVER')
+    page.locator('#fed-confirm-pw').fill(PASSWORD)
+    page.locator('[data-fed-owner-down]').check()
+    page.locator('[data-fed-confirm-go]').click()
+    box.wait_for(state='detached', timeout=5000)
+    assert app.server.bodies[all_route[1]][-1] == {'confirm': 'TAKEOVER', 'owner_down': True, 'force': False,
+                                                   'user_password': PASSWORD}
+    page.wait_for_function("() => (window.__toasts || []).some(t => t.text === "
+                           "'1 taken over, 1 not: hh2: The field key of the owner is not held here')", timeout=3000)
+
+    remove = f'/api/federation/members/{HH}/remove'
+    app.server.fed['replies'][('POST', remove)] = (409, {
+        'code': 'FED_GONE_CLUSTERS', 'clusters': ['hh3'],
+        'error': 'hamburg still leads clusters here that were not taken over: hh3'})
+    page.locator('[data-fed-remove="22222222"]').click()
+    page.locator('[data-fed-confirm="remove"]').wait_for(timeout=3000)
+    page.locator('[data-fed-remove-gone]').check()
+    page.locator('#fed-confirm-word').fill('REMOVE')
+    page.locator('#fed-confirm-pw').fill(PASSWORD)
+    page.locator('[data-fed-confirm-go]').click()
+    drop = page.locator('[data-fed-remove-gone-drop]')
+    drop.wait_for(timeout=5000)
+    assert 'were not taken over and are dropped here: hh three.' in drop.inner_text()
+    assert app.server.bodies[remove][-1] == {'confirm': 'REMOVE', 'gone': True, 'user_password': PASSWORD}
+    app.server.fed['replies'][('POST', remove)] = (200, {'removed': HH, 'gone': True, 'kept': ['pve1'],
+                                                         'dropped': ['hh3'], 'site': 'hamburg'})
+    page.locator('[data-fed-remove-drop]').check()
+    page.locator('#fed-confirm-pw').fill(PASSWORD)
+    page.locator('[data-fed-confirm-go]').click()
+    page.locator('[data-fed-confirm="remove"]').wait_for(state='detached', timeout=5000)
+    assert app.server.bodies[remove][-1] == {'confirm': 'REMOVE', 'gone': True, 'drop_clusters': True,
+                                             'user_password': PASSWORD}
+    page.wait_for_function("() => (window.__toasts || []).some(t => t.text === "
+                           "'Removed. This site carries on alone.' && t.kind === 'success')", timeout=3000)
+    assert page.locator('[data-fed-rotate]').count() == 0
+    assert not app.errors, app.errors
+
+
+def test_runtime_a_leave_the_other_site_cannot_confirm_points_at_gone_for_good(open_fed):
+    no_quorum = {'code': 'FED_NO_QUORUM', 'votes': 1, 'needed': 2,
+                 'error': 'A change of the federation needs a majority of its members'}
+    app = open_fed(fed=_two_sites(replies={('POST', '/api/federation/leave'): (409, no_quorum)}))
+    page = app.page
+    assert app.open_tab()
+    page.locator('[data-fed-leave]').click()
+    page.locator('#fed-confirm-word').fill('LEAVE')
+    page.locator('#fed-confirm-pw').fill(PASSWORD)
+    page.locator('[data-fed-confirm-go]').click()
+    hint = page.locator('[data-fed-leave-two-down]')
+    hint.wait_for(timeout=5000)
+    assert 'remove hamburg as gone for good instead' in hint.inner_text()
+    assert page.locator('[data-fed-force="leave"]').count() == 1
+    assert app.server.bodies['/api/federation/leave'][-1]['force'] is False
+
+
+def test_runtime_three_sites_show_none_of_it(open_fed):
+    """A silent member of three is adopted by majority as before: no card, no takeover by
+    hand, no gone for good, the lease reads its votes. Counterproof: twoSites on
+    members.length >= 1 shows all of it here."""
+    members = [_member(2, 'hamburg', reachable=False, last_heard=HEARD, takeover_in_s=0, mirrored_clusters=2),
+               _member(3, 'munich')]
+    no_quorum = {'code': 'FED_NO_QUORUM', 'votes': 1, 'needed': 2,
+                 'error': 'A change of the federation needs a majority of its members'}
+    app = open_fed(fed=_two_sites(members=members, leases={'pve1': _lease(votes=2, alone=False)},
+                                  replies={('POST', '/api/federation/leave'): (409, no_quorum)}))
+    page = app.page
+    assert app.open_tab()
+    page.locator('[data-fed-shadow="hh1"]').wait_for(timeout=5000)
+    assert page.locator('[data-fed-two-sites]').count() == 0
+    assert page.locator('[data-fed-takeover], [data-fed-takeover-all], [data-fed-shadows-two], '
+                        '[data-fed-lease-alone]').count() == 0
+    assert page.locator('[data-fed-adopt="hh1"]').count() == 1
+    assert '2 of 2 votes, 25 s left' in page.locator('[data-fed-lease="pve1"]').inner_text()
+    assert page.locator('[data-fed-offline-since="22222222"]').count() == 1
+    page.locator('[data-fed-remove="22222222"]').click()
+    page.locator('[data-fed-confirm="remove"]').wait_for(timeout=3000)
+    assert page.locator('[data-fed-remove-gone]').count() == 0
+    page.locator('[data-fed-confirm="remove"] button', has_text='Cancel').click()
+    page.locator('[data-fed-leave]').click()
+    page.locator('#fed-confirm-word').fill('LEAVE')
+    page.locator('#fed-confirm-pw').fill(PASSWORD)
+    page.locator('[data-fed-confirm-go]').click()
+    page.wait_for_function("() => (window.__toasts || []).some(t => t.text.startsWith('A change of the federation'))",
+                           timeout=3000)
+    assert page.locator('[data-fed-leave-two-down], [data-fed-force="leave"]').count() == 0
+    assert not app.errors, app.errors
+
+
+def test_runtime_the_old_owner_sees_the_takeover_and_the_end(open_fed):
+    """The site that was taken over shows, on the cluster it now follows, when that
+    happened and when it stopped; a plain hand-over gets no such note. A site the other
+    one removed as gone for good says so instead of "removed". Counterproof: without the
+    kind check hh2 gets the note."""
+    stepped = {'hh1': {'owner': HH, 'kind': 'takeover', 'at': HEARD - 3600, 'by': 'admin:root',
+                       'stopped_at': HEARD - 60},
+               'hh2': {'owner': HH, 'kind': 'adopt', 'at': HEARD - 3600, 'by': 'admin:root',
+                       'stopped_at': HEARD - 3500}}
+    app = open_fed(fed=_two_sites(members=[_member(2, 'hamburg')], stepped_down=stepped))
+    page = app.page
+    assert app.open_tab()
+    note = page.locator('[data-fed-stepped-down="hh1"]')
+    note.wait_for(timeout=5000)
+    assert note.inner_text().startswith('Taken over by hand at hamburg on ')
+    assert "follows hamburg now. Check the cluster's task log" in note.inner_text()
+    assert page.locator('[data-fed-stepped-down="hh2"]').count() == 0
+    assert page.locator('[data-fed-adopt="hh1"]').count() == 1
+
+    ended = open_fed(fed={'enabled': True, 'removed': {'by': HH, 'at': HEARD, 'ended': True, 'site': 'hamburg',
+                                                       'clusters': ['hh1', 'pve1']}})
+    assert ended.open_tab()
+    banner = ended.page.locator('[data-fed-ended-by-other]')
+    assert banner.inner_text().startswith('hamburg carried on alone and keeps these clusters: hh1, pve1.')
+    assert ended.page.locator('[data-fed-was-removed]').count() == 0
+    assert not app.errors and not ended.errors, app.errors + ended.errors
+
+
+def test_runtime_the_survivor_asks_once_more_before_it_switches_off(open_fed):
+    """Counterproof: a switch that flips off at once posts before the second ask."""
+    app = open_fed(fed={'enabled': True, 'warnings': ['ended_untold']})
+    page = app.page
+    assert app.open_tab()
+    assert 'was never told that this site carried on alone' in page.locator('[data-fed-switch-untold="note"]').inner_text()
+    _switch(page).click()
+    page.locator('[data-fed-switch-untold="ask"]').wait_for(timeout=3000)
+    page.wait_for_timeout(300)
+    assert '/api/federation/switch' not in app.server.bodies, 'switched off before the second ask'
+    page.locator('[data-fed-switch-off-anyway]').click()
+    page.locator('[data-fed-panel="off"]').wait_for(timeout=5000)
+    assert app.server.bodies['/api/federation/switch'] == [{'enabled': False, 'untold_ok': True}]
+
+
+@pytest.mark.parametrize('lang,word', [('de', 'Manuelle Übernahme'), ('zh', '手动接管')])
+def test_runtime_two_sites_speak_the_language(open_fed, lang, word):
+    """Counterproof: a key missing in the language shows the English text."""
+    app = open_fed(fed=_two_sites(), language=lang)
+    assert app.open_tab(lang), lang
+    page = app.page
+    page.locator('[data-fed-two-sites]').wait_for(timeout=5000)
+    page.locator('[data-fed-takeover="hh1"]').click()
+    page.locator('[data-fed-confirm="takeover"]').wait_for(timeout=3000)
+    text = page.locator('[data-fed-panel]').inner_text()
+    assert not sorted(set(re.findall(r'\bfed[A-Z]\w+', text))), lang
+    assert word in text
+    for english in ('Two sites: takeover by hand', 'does not answer', 'Take over by hand', 'offline since'):
+        assert english not in text, (lang, english)
+    assert not app.errors, app.errors
+
+
+def test_runtime_a_mirrored_admin_cannot_take_over(open_fed):
+    """The server refuses a mirrored admin with FED_MIRROR_ADMIN; the buttons say so first.
+    Counterproof: a takeover button without !localOk is on for a mirrored admin."""
+    app = open_fed(fed=_two_sites(local=False))
+    page = app.page
+    assert app.open_tab()
+    page.locator('[data-fed-takeover="hh1"]').wait_for(timeout=5000)
+    assert page.locator('[data-fed-takeover="hh1"]').is_disabled()
+    assert page.locator('[data-fed-takeover-all="22222222"]').is_disabled()
+    assert page.locator('[data-fed-remove="22222222"]').is_disabled()

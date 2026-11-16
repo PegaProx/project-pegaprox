@@ -196,7 +196,7 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
 - 📦 **Backup SLA Tracking** - SLA dashboard per cluster + datastore: last-backup age vs configured RPO, integrated with the Alert pipeline.
 - 🔁 **ZFS / Cross-Cluster Replication** - Native PVE replication monitor + cross-cluster replication for clusters without shared storage.
 - 🪽 **PegaProx High Availability** - Pair up to 4 PegaProx instances: standbys keep a copy of the configuration, show a live view and pass changes on to the leader; failover is a confirmed, manual promote, or (beta, switched on per group) automatic by majority vote, with an optional witness as the third vote
-- 🛰️ **Federation (experimental, off by default)** - Pair up to 8 PegaProx instances at different sites: accounts are mirrored between the sites, an enrolled Proxmox VE cluster is written only while a majority of the sites backs its site, and the clusters of a lost site can be adopted ([docs](docs/federation.md))
+- 🛰️ **Federation (experimental, off by default)** - Pair up to 8 PegaProx instances at different sites: accounts are mirrored between the sites, an enrolled Proxmox VE cluster is fenced against two writers (by majority with three or more sites, with two by a takeover an admin confirms), and the clusters of a lost site can be taken over ([docs](docs/federation.md))
 - 🧩 **Automated PVE Installations** - Serve answer files for the Proxmox VE auto-installer from profiles (guided setup or editor) and follow every installation run
 - 🛠️ **V2P / ESXi Migration** - Pyvmomi + SSHFS-based, with VirtIO driver pre-staging via MSI bulk-install (Windows guests).
 
