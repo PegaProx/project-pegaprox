@@ -773,6 +773,9 @@ AUTOMATIONS = {
     # A cluster this instance lost to another member has its manager stopped in the
     # same thread, nothing new is started for it
     ('pegaprox/core/federation.py', 'start_workers'): (2, 'peer'),
+    # the watch over what is under way on an enrolled cluster: it only stops node commands
+    # and closes SSH clients of a cluster whose federation lease is gone, nothing goes out
+    ('pegaprox/core/ha_transport.py', '_watch_start'): (1, 'local'),
     # the lease loop, the etag tick and when_active (the deferred boot gates)
     ('pegaprox/core/ha.py', '_lease_spawn'): (1, 'lease'),
     ('pegaprox/api/vms.py', 'cross_cluster_migrate_api'): (1, 'job'),

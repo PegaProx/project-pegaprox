@@ -35,6 +35,7 @@ from pegaprox.api.helpers import (
     rolling_moved_templates, rolling_rules_give_way, rolling_rules_back_on, rolling_in_maintenance,
     rolling_moved_guests, rolling_wind_down, rolling_guests_left_moved, UI_LANGUAGE_LOCKS,
 )
+from pegaprox.api.federation import refuse_mirror_caller
 from pegaprox.app import get_allowed_origins, add_allowed_origin
 from pegaprox.globals import _cors_origins_env, _auto_allowed_origins
 
@@ -1679,6 +1680,107 @@ def _ldap_endpoint(server, port):
     return host.lower().rstrip('.'), url_port or _port_of(port, 389)
 
 
+def _ldap_group_mappings(value):
+    """ldap_group_mappings as the save stores them (group_dn and role); None for a value
+    that is no list, which the save leaves alone."""
+    if not isinstance(value, list):
+        return None
+    return [{'group_dn': str(m.get('group_dn', '')).strip(), 'role': str(m.get('role', 'viewer')).strip()}
+            for m in value if isinstance(m, dict) and m.get('group_dn')]
+
+
+def _oidc_group_mappings(value):
+    if not isinstance(value, list):
+        return None
+    return [{'group_id': str(m.get('group_id') or m.get('group_dn', '')).strip(),
+             'role': str(m.get('role', 'viewer')).strip()}
+            for m in value if isinstance(m, dict) and (m.get('group_id') or m.get('group_dn'))]
+
+
+# MK Nov 2026 - what decides the role, the tenant or the admin status an LDAP or OIDC
+# sign-in gives an account here (utils/ldap.py, utils/oidc.py), each as the save below
+# stores it. While the federation runs, a caller mirrored from another site changes none of
+# it: mapping a directory group it is in to admin would make it a local admin. The settings
+# page sends the whole form, so only a value that differs from the stored one counts
+EXTERNAL_ROLE_SETTINGS = {
+    'ldap_group_mappings': _ldap_group_mappings,
+    'ldap_admin_group': lambda v: str(v or '').strip(),
+    'ldap_user_group': lambda v: str(v or '').strip(),
+    'ldap_viewer_group': lambda v: str(v or '').strip(),
+    'ldap_default_role': lambda v: str(v).strip() if v else 'viewer',
+    'ldap_auto_create_users': bool,
+    # which groups a user is found in, and so which of the above match
+    'ldap_group_base_dn': lambda v: str(v or '').strip(),
+    'ldap_group_filter': lambda v: str(v or '(&(objectClass=group)(member={user_dn}))').strip(),
+    'oidc_group_mappings': _oidc_group_mappings,
+    'oidc_admin_group_id': lambda v: str(v).strip(),
+    'oidc_user_group_id': lambda v: str(v).strip(),
+    'oidc_viewer_group_id': lambda v: str(v).strip(),
+    'oidc_default_role': lambda v: str(v).strip() if v else ROLE_VIEWER,
+    'oidc_auto_create_users': bool,
+}
+
+
+def _oidc_claim(v):
+    from pegaprox.utils.oidc import OIDC_USERNAME_CLAIMS
+    v = str(v or '').strip()
+    return v if v in OIDC_USERNAME_CLAIMS else ''
+
+
+# and who signs in at all: a mirrored admin that points LDAP or OIDC at a directory or
+# provider it runs (or turns off what checks it) gets the groups above for any account it
+# makes up there. Compared after the save below has taken the server field apart and
+# cleaned the CA, as it stores them
+EXTERNAL_SOURCE_SETTINGS = {
+    'ldap_enabled': bool,
+    'ldap_server': lambda v: str(v or '').strip(),
+    'ldap_port': lambda v: max(1, min(65535, int(v or 389))),
+    'ldap_use_ssl': bool,
+    'ldap_use_starttls': bool,
+    'ldap_bind_dn': lambda v: str(v or '').strip(),
+    'ldap_base_dn': lambda v: str(v or '').strip(),
+    'ldap_user_filter': lambda v: str(v or '(&(objectClass=person)(sAMAccountName={username}))').strip(),
+    'ldap_username_attribute': lambda v: str(v or 'sAMAccountName').strip(),
+    'ldap_verify_tls': bool,
+    'ldap_ca_cert': lambda v: str(v or ''),
+    'oidc_enabled': bool,
+    'oidc_provider': lambda v: str(v) if v in ('entra', 'okta', 'generic') else 'entra',
+    'oidc_cloud_environment': lambda v: str(v) if v in ('commercial', 'gcc', 'gcc_high', 'dod') else 'commercial',
+    'oidc_client_id': lambda v: str(v).strip(),
+    'oidc_tenant_id': lambda v: str(v).strip(),
+    'oidc_authority': lambda v: str(v).strip(),
+    'oidc_audiences': lambda v: str(v or '').strip(),
+    'oidc_username_claim': _oidc_claim,
+    'oidc_skip_jwt_verification': bool,
+    'oidc_skip_ssl_verify': bool,
+    'oidc_allow_private_ip': bool,
+}
+# stored encrypted and sent back as the mask: any other value is a new one
+EXTERNAL_SOURCE_SECRETS = ('ldap_bind_password', 'oidc_client_secret')
+
+
+def _external_role_changes(data, settings):
+    """The keys of EXTERNAL_ROLE_SETTINGS, EXTERNAL_SOURCE_SETTINGS and
+    EXTERNAL_SOURCE_SECRETS this save would change."""
+    after = {}
+    for key, stored_as in (*EXTERNAL_ROLE_SETTINGS.items(), *EXTERNAL_SOURCE_SETTINGS.items()):
+        if key in data:
+            try:
+                value = stored_as(data[key])
+            except (TypeError, ValueError):
+                value = data[key]       # the save fails on it too; counted as a change
+            if value is not None:
+                after[key] = value
+    changed = [k for k in EXTERNAL_SOURCE_SECRETS
+               if k in data and str(data[k] or '') not in ('', '********')]
+    # mappings that are saved clear the built-in groups, as the save does
+    if after.get('ldap_group_mappings'):
+        after.update(ldap_admin_group='', ldap_user_group='', ldap_viewer_group='')
+    if after.get('oidc_group_mappings'):
+        after.update(oidc_admin_group_id='', oidc_user_group_id='', oidc_viewer_group_id='')
+    return sorted(changed + [k for k, v in after.items() if v != settings.get(k)])
+
+
 @bp.route('/api/settings/server', methods=['POST'])
 @require_auth(perms=['admin.settings'])
 def update_server_settings():
@@ -1753,6 +1855,13 @@ def update_server_settings():
                 if _ca_error:
                     return jsonify({'error': _ca_error, 'code': 'LDAP_CA_CERT_INVALID'}), 400
                 data['ldap_ca_cert'] = _ca
+            # refused as a whole, before anything of it is saved
+            if _external_role_changes(data, settings):
+                denied = refuse_mirror_caller('Your account is mirrored from another site. Who '
+                                              'signs in here through LDAP or OIDC, and with which '
+                                              "role, is set by this instance's own accounts")
+                if denied:
+                    return denied
             
             # server config
             if 'domain' in data:
@@ -2033,16 +2142,8 @@ def update_server_settings():
             # NS: Feb 2026 - Simplified: just group_dn + role (including custom roles)
             # tenant/tenant_role kept for backwards compat but no longer in UI
             if 'ldap_group_mappings' in data:
-                mappings = data['ldap_group_mappings']
-                if isinstance(mappings, list):
-                    # Validate each mapping
-                    clean_mappings = []
-                    for m in mappings:
-                        if isinstance(m, dict) and m.get('group_dn'):
-                            clean_mappings.append({
-                                'group_dn': str(m.get('group_dn', '')).strip(),
-                                'role': str(m.get('role', 'viewer')).strip(),
-                            })
+                clean_mappings = _ldap_group_mappings(data['ldap_group_mappings'])
+                if clean_mappings is not None:
                     settings['ldap_group_mappings'] = clean_mappings
                     # NS: Feb 2026 - Clear old built-in group fields when unified mappings are saved
                     # Prevents priority conflicts (built-in checked before custom in auth)
@@ -2116,15 +2217,8 @@ def update_server_settings():
             # LW: OIDC custom group mappings
             # NS: Feb 2026 - Simplified: just group_id + role (including custom roles)
             if 'oidc_group_mappings' in data:
-                mappings = data['oidc_group_mappings']
-                if isinstance(mappings, list):
-                    clean = []
-                    for m in mappings:
-                        if isinstance(m, dict) and (m.get('group_id') or m.get('group_dn')):
-                            clean.append({
-                                'group_id': str(m.get('group_id') or m.get('group_dn', '')).strip(),
-                                'role': str(m.get('role', 'viewer')).strip(),
-                            })
+                clean = _oidc_group_mappings(data['oidc_group_mappings'])
+                if clean is not None:
                     settings['oidc_group_mappings'] = clean
                     # NS: Feb 2026 - Clear old built-in group fields when unified mappings are saved
                     if clean:
@@ -3209,6 +3303,11 @@ def restore_config():
     - restore_users: Restore user accounts (default: false for safety)
     - dry_run: Validate only, don't apply (default: false)
     """
+    # a backup carries the server settings and, with restore_users, accounts of any role:
+    # not a mirrored admin's to bring in (none while the federation is off)
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     try:
         logging.info("[Restore] Starting config restore...")
         # NS: these help when debugging upload issues

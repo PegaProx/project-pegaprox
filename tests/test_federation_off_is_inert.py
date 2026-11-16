@@ -19,6 +19,11 @@ No federation lease file and no federation identity may appear either, and every
 /api/federation/ route answers 404 FED_DISABLED - except the switch and its status,
 which the settings page needs to offer the switch.
 
+One call runs with the switch off on purpose, and the inventory below names it as the
+only one: an HA standby that leaves its group drops the federation identity the HA sync
+carried whenever the row is there (federation.forget_inherited). Switched on later, the
+host would otherwise act as that member next to its old active.
+
 MK Nov 2026
 """
 import json
@@ -316,27 +321,49 @@ _GUARDED_ELSEWHERE = {
     # ha.carry binds the list _federation_refusals handed it, which is None while off
     ('pegaprox/core/ha.py', 'bind_refusals'),
 }
+# the one call that runs while the switch is off, on purpose: a standby that leaves its HA
+# group drops the inherited identity whenever its row is there (forget_inherited)
+_RUNS_WHILE_OFF = {('pegaprox/core/ha.py', 'forget_inherited')}
 _FEDERATION_MODULES = {'pegaprox/core/federation.py', 'pegaprox/core/federation_lease.py',
                        'pegaprox/api/federation.py'}
 
 
 def _asks_switch(node, aliases, flags):
+    """Whether `node`, when true, says the switch is on: `<federation>.enabled()`, a flag
+    set from such a test, and the `and`/`or`/`not` around them read the right way round.
+    `not <federation>.enabled() and x` says nothing of the kind."""
     import ast
-    for sub in ast.walk(node):
-        if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
-                and sub.func.attr == 'enabled' and isinstance(sub.func.value, ast.Name)
-                and sub.func.value.id in aliases):
-            return True
-        if isinstance(sub, ast.Name) and sub.id in flags:
-            return True
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'enabled' and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in aliases):
+        return True
+    if isinstance(node, ast.Name):
+        return node.id in flags
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        # not X true says on <=> X false says on <=> X is true whenever off
+        return _off_covered(node.operand, aliases, flags)
+    if isinstance(node, ast.BoolOp):
+        parts = [_asks_switch(v, aliases, flags) for v in node.values]
+        return any(parts) if isinstance(node.op, ast.And) else all(parts)
+    return False
+
+
+def _off_covered(node, aliases, flags):
+    """Whether `node` is true whenever the switch is off, so its false branch only runs
+    with the switch on."""
+    import ast
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return _asks_switch(node.operand, aliases, flags)
+    if isinstance(node, ast.BoolOp):
+        parts = [_off_covered(v, aliases, flags) for v in node.values]
+        return any(parts) if isinstance(node.op, ast.Or) else all(parts)
     return False
 
 
 def _is_off_exit(stmt, aliases, flags):
     """`if not <federation>.enabled(): return/raise/continue` - the off path leaves."""
     import ast
-    return (isinstance(stmt, ast.If) and isinstance(stmt.test, ast.UnaryOp)
-            and isinstance(stmt.test.op, ast.Not) and _asks_switch(stmt.test, aliases, flags)
+    return (isinstance(stmt, ast.If) and _off_covered(stmt.test, aliases, flags)
             and stmt.body and isinstance(stmt.body[-1], (ast.Return, ast.Raise, ast.Continue)))
 
 
@@ -351,9 +378,11 @@ def _guarded(call, parents, aliases, flags):
                 return True
         if isinstance(node, (ast.If, ast.While, ast.IfExp)) and child is not node.test:
             in_body = child in (node.body if isinstance(node.body, list) else [node.body])
-            negated = isinstance(node.test, ast.UnaryOp) and isinstance(node.test.op, ast.Not)
-            if _asks_switch(node.test, aliases, flags) and in_body != negated:
-                # the body of `if <switch>`, or the else of `if not <switch>`
+            if in_body and _asks_switch(node.test, aliases, flags):
+                # the body of `if <switch>`
+                return True
+            if not in_body and _off_covered(node.test, aliases, flags):
+                # the else of `if not <switch>`
                 return True
         for field in ('body', 'orelse', 'finalbody'):
             seq = getattr(node, field, None)
@@ -371,10 +400,11 @@ def test_every_hook_outside_the_federation_asks_the_switch_first():
     federation core from a module outside it - the manager, the background jobs, the
     routes, the HA module, the exits - sits behind federation.enabled(): in the same
     condition, in an enclosing if, behind an early return of the off path, or behind a
-    flag set from the switch. A new hook that forgets it turns this red."""
+    flag set from the switch. A new hook that forgets it turns this red. _RUNS_WHILE_OFF is
+    the one call allowed past it, and it has to be there."""
     import ast
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    found, bare = 0, []
+    found, bare, allowed = 0, [], set()
     for folder, _dirs, files in os.walk(os.path.join(root, 'pegaprox')):
         for name in files:
             if not name.endswith('.py'):
@@ -395,6 +425,7 @@ def test_every_hook_outside_the_federation_asks_the_switch_first():
                 if isinstance(node, ast.ImportFrom) and node.module == 'pegaprox.core':
                     aliases |= {a.asname or a.name for a in node.names if a.name == 'federation'}
             for node in ast.walk(tree):
+                # a flag that, when true, says the switch is on - `off = not ...` is none
                 if (isinstance(node, ast.Assign) and len(node.targets) == 1
                         and isinstance(node.targets[0], ast.Name)
                         and _asks_switch(node.value, aliases, set())):
@@ -407,12 +438,16 @@ def test_every_hook_outside_the_federation_asks_the_switch_first():
                 what = node.func.attr
                 if what in _OFF_SAFE or (rel, what) in _GUARDED_ELSEWHERE:
                     continue
+                if (rel, what) in _RUNS_WHILE_OFF:
+                    allowed.add((rel, what))
+                    continue
                 found += 1
                 if not _guarded(node, parents, aliases, flags):
                     bare.append(f'{rel}:{node.lineno} {what}()')
     # counterproof that the walk sees the hooks: the manager, the jobs, the routes, the exits
     assert found >= 15, found
     assert not bare, bare
+    assert allowed == _RUNS_WHILE_OFF, allowed
 
 
 def test_the_inventory_flags_a_bare_hook():
@@ -438,18 +473,47 @@ def test_the_inventory_flags_a_bare_hook():
                 return True
             else:
                 return _fed.worker_takes_writes_for(cid)
+        def inverted_inline(cid):
+            return not _fed.enabled() and _fed.worker_takes_writes_for(cid)
+        def inverted_or(cid, x):
+            if not _fed.enabled() or x:
+                return _fed.worker_takes_writes_for(cid)
+        def inverted_flag(cid):
+            off = not _fed.enabled()
+            if off:
+                return _fed.worker_takes_writes_for(cid)
+        def exit_with_and(cid, x):
+            if not _fed.enabled() and x:
+                return True
+            return _fed.worker_takes_writes_for(cid)
+        def exit_with_or(cid, x):
+            if not _fed.enabled() or x:
+                return True
+            return _fed.worker_takes_writes_for(cid)
+        def both_and(cid, x):
+            if x and _fed.enabled():
+                return _fed.worker_takes_writes_for(cid)
     """)
     tree = ast.parse(src)
     parents = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+    flags = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                and _asks_switch(node.value, {'_fed'}, set())):
+            flags.add(node.targets[0].id)
     verdict = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and getattr(node.func, 'attr', '') == 'worker_takes_writes_for':
             fn = node
             while not isinstance(fn, ast.FunctionDef):
                 fn = parents[fn]
-            verdict[fn.name] = _guarded(node, parents, {'_fed'}, set())
+            verdict[fn.name] = _guarded(node, parents, {'_fed'}, flags)
+    assert flags == set()
     assert verdict == {'bare': False, 'guarded': True, 'inline': True,
-                       'wrong_branch': False, 'other_branch': True}
+                       'wrong_branch': False, 'other_branch': True,
+                       # the switch asked the wrong way round guards nothing
+                       'inverted_inline': False, 'inverted_or': False, 'inverted_flag': False,
+                       'exit_with_and': False, 'exit_with_or': True, 'both_and': True}
 
 
 # --- a leftover mirror is a disabled account everywhere --------------------------------
@@ -727,6 +791,25 @@ def _standby_state(ha):
     with open(ha.STATE_FILE, 'w', encoding='utf-8') as fh:
         json.dump(st, fh)
     ha.reset_for_tests()
+
+
+def test_a_standby_that_leaves_its_group_drops_the_identity_while_off(db, calls):
+    """The one call that runs with the switch off (_RUNS_WHILE_OFF). Without an identity
+    row the unpairing of a standby changes nothing of the federation, the setting
+    included; with the row the HA sync carried, the row goes, so the host is no member when
+    the switch goes on later. Neither asks any state of the federation."""
+    from pegaprox.core import ha
+    _standby_state(ha)
+    assert ha.unpair() == 'standby'
+    assert db.get_server_setting(federation.SETTING_KEY, 'unset') == 'unset'
+    db.conn.execute('CREATE TABLE IF NOT EXISTS pegaprox_kv (k TEXT PRIMARY KEY, v TEXT)')
+    db.conn.execute("INSERT INTO pegaprox_kv (k, v) VALUES ('federation_identity', '{}')")
+    db.conn.commit()
+    _standby_state(ha)
+    assert _identity_row() is not None
+    assert ha.unpair() == 'standby'
+    assert _identity_row() is None
+    assert federation.enabled() is False and calls == []
 
 
 def test_a_promotion_asks_the_federation_nothing(db, calls, monkeypatch):

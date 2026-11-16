@@ -50,12 +50,20 @@ _reauth_attempts = SlidingWindow(limit=5, window=300, max_keys=2048, name='fed-r
 _REAUTH_MAX_AGE = 600
 _MAX_BODY = federation.MAX_PEER_BODY
 _PEER_VERDICT = 'pegaprox.federation_peer'
-# lease votes per member and 30 s: one call carries a whole round (every cluster), so
-# this holds three rounds plus the enroll, adopt, renew and members-lock rounds in the
-# window, with room to spare
+# lease votes per member and 30 s, in three windows. The rounds an admin starts (enroll,
+# adopt, renew, a change of the members) share the first; the background rounds, one
+# call per 256 clusters every 10 s, have their own, so a burst of admin rounds never
+# stops the renewals; calls that only give promises back or drop copies (releases,
+# unenroll notices) have the third, and a leave sends those for every cluster at once
 LEASE_VOTE_BUDGET = 60
 _lease_votes = SlidingWindow(limit=LEASE_VOTE_BUDGET, window=30, max_keys=256,
                              name='fed-lease-vote')
+LEASE_TICK_BUDGET = 30
+_lease_ticks = SlidingWindow(limit=LEASE_TICK_BUDGET, window=30, max_keys=256,
+                             name='fed-lease-tick')
+LEASE_RETURN_BUDGET = 60
+_lease_returns = SlidingWindow(limit=LEASE_RETURN_BUDGET, window=30, max_keys=256,
+                               name='fed-lease-return')
 
 
 def _body(limit=None):
@@ -95,7 +103,11 @@ def _caller_record():
     return get_db().get_user(session.get('user', ''))
 
 
-def _refuse_mirror_admin():
+_MIRROR_ADMIN_ERROR = ('Your account is mirrored from another site. The federation of '
+                       'this instance is changed by its own accounts')
+
+
+def _refuse_mirror_admin(error=_MIRROR_ADMIN_ERROR):
     """403 FED_MIRROR_ADMIN for a session whose account is mirrored from another site: the
     federation of this instance is changed by its own accounts. Fails closed."""
     session = getattr(request, 'session', None) or {}
@@ -110,10 +122,7 @@ def _refuse_mirror_admin():
         return jsonify({'code': 'FED_UNAVAILABLE',
                         'error': 'Cannot tell where your account is homed'}), 503
     if home:
-        return jsonify({'code': 'FED_MIRROR_ADMIN', 'home': home,
-                        'error': 'Your account is mirrored from another site. The '
-                                 'federation of this instance is changed by its own '
-                                 'accounts'}), 403
+        return jsonify({'code': 'FED_MIRROR_ADMIN', 'home': home, 'error': error}), 403
     return None
 
 
@@ -346,11 +355,16 @@ def peer_lease_vote():
     peer, refused = _peer_or_refuse(acting=True)
     if refused:
         return refused
-    if not _lease_votes.allow(peer['instance_id']):
+    body = _body()
+    if body.get('asks'):
+        window = _lease_ticks if body.get('tick') is True else _lease_votes
+    else:
+        window = _lease_returns
+    if not window.allow(peer['instance_id']):
         resp = jsonify({'reason': 'budget', 'error': 'Too many lease votes'})
         resp.headers['Retry-After'] = '30'
         return resp, 429
-    status, answer = federation.cast_votes(peer['instance_id'], _body())
+    status, answer = federation.cast_votes(peer['instance_id'], body)
     return jsonify(answer), status
 
 
@@ -723,6 +737,10 @@ def reconcile():
     if denied:
         return denied
     out = federation.catch_up()
+    log_audit(_user(), 'federation.reconciled',
+              f'caught up with the federation: view {federation.view_epoch()}'
+              + (' taken from the others' if out.get('adopted') else ''),
+              ip_address=get_client_ip())
     return jsonify({'adopted': bool(out.get('adopted')), 'epoch': federation.view_epoch()})
 
 
@@ -768,8 +786,9 @@ def lease_refusal(cluster_id):
 def refuse_foreign(table, key_vals, what):
     """409 for a write to a row of the identity federation that another member homed: the
     home decides, this instance only mirrors it. None when the row is ours to write (or
-    nobody's). A table that cannot be read refuses the write outright. Always None while
-    the federation is switched off."""
+    nobody's). A table that cannot be read refuses the write outright. A write to a row
+    of this instance by a caller whose own account is a mirror is refused as well
+    (refuse_mirror_caller). Always None while the federation is switched off."""
     if not federation.enabled():
         return None
     try:
@@ -778,10 +797,26 @@ def refuse_foreign(table, key_vals, what):
         return jsonify({'code': 'FED_UNAVAILABLE',
                         'error': f'Cannot tell where {what} is homed - {e}'}), 503
     if not home:
-        return None
+        return refuse_mirror_caller()
     return jsonify({'code': 'FED_FOREIGN', 'home': home,
                     'error': f'{what} belongs to another instance of the federation - make '
                              f'the change there, then sync'}), 409
+
+
+def refuse_mirror_caller(error=None):
+    """403 FED_MIRROR_ADMIN for a caller whose account is mirrored from another site, on
+    the routes that administer this instance's accounts, tenants and roles, and on what
+    decides the role an LDAP or OIDC sign-in gets here: a mirrored admin that could create
+    a local admin account (or give one a password, or raise one's role, or map a directory
+    group of its choosing to admin) would make every change _refuse_mirror_admin keeps
+    from it under that account. `error`: the sentence of the answer. Fails closed (503).
+    Always None while the federation is switched off: a mirror then counts as disabled
+    and is not signed in at all."""
+    if not federation.enabled():
+        return None
+    return _refuse_mirror_admin(error or 'Your account is mirrored from another site. The '
+                                         'accounts, tenants and roles of this instance are '
+                                         'administered by its own accounts')
 
 
 def refuse_own_mirror(what, username=None):
@@ -1013,7 +1048,13 @@ def renew_cluster_lease(cluster_id):
     denied = _refuse_confined_admin()
     if denied:
         return denied
-    return jsonify(fed_lease.renew(cluster_id))
+    out = fed_lease.renew(cluster_id)
+    log_audit(_user(), 'federation.lease_renewed',
+              f'lease round for cluster {cluster_id[:64]}: '
+              + ('renewed' if out.get('renewed') else f'not renewed ({out.get("votes", 0)} of '
+                                                       f'{out.get("needed", 0)} votes)'),
+              ip_address=get_client_ip())
+    return jsonify(out)
 
 
 # --- this instance's certificate, for the pins of the others ---------------------------------

@@ -5,9 +5,10 @@ Instances pair by a one-time code. From then on they form a federation:
   * the member view: who belongs, as one agreed list {epoch, members}. Every change (a
     join, a removal, a member leaving) takes a majority lock first and moves the epoch by
     one, so two halves of a split network can neither shrink nor grow the federation on
-    their own. A change carries the voters' signed grants of the lock and counts once a
-    majority of the old view took it; a member behind replays the signed changes, and a
-    view no majority took is rolled back (catch_up).
+    their own. A change carries the voters' signed grants of the lock and its committer's
+    signature over the change, and counts once a majority of the old view took it; a
+    member behind replays the signed changes, and a view no majority took is rolled back
+    (catch_up). One change at a time per process (_one_change).
   * identities: users, API tokens and passkeys homed at one member are mirrored to the
     others, which never write them. Tenants and roles are not copied: an admin of the
     receiving member maps them onto its own, and until then a mirror cannot sign in.
@@ -30,8 +31,9 @@ config/federation_leases.json. Everything a hot path reads is cached in _runtime
 The switch. Off by default: the server setting federation_enabled, which an admin turns
 on in the settings and which travels to an HA standby with the settings. The environment
 variable PEGAPROX_FEDERATION forces it ('1' on, '0' off). Off, every hook outside this
-module, federation_lease.py and api/federation.py asks enabled() and goes no further, and
-the routes answer 404 FED_DISABLED except the switch and its status.
+module, federation_lease.py and api/federation.py asks enabled() and goes no further (one
+exception, forget_inherited, below), and the routes answer 404 FED_DISABLED except the
+switch and its status.
 
 Trust model: a member's administrators are trusted administrators of the federation (its
 admins are admins at every member once mapped). The protocol defends against honest
@@ -39,12 +41,23 @@ faults - partitions, restarts, reboots, failovers, stale backups, delayed messag
 bounds what a misbehaving member can grow (promises, view size, bodies, answers, the call
 budget). It does not claim to tolerate a malicious member; removal by a majority is the
 remedy, and it reaches every member: no single member can change a view on its own (a
-commit and a caught-up view both need a majority's signed grants) or hold the members
-lock for longer than one change.
+commit and a caught-up view both need a majority's signed grants and the committer's
+signature over the change, so a member relaying another's commit cannot swap it, and a
+caught-up view takes no member record from the relaying member's word) or hold the
+members lock for longer than one change.
+
+An HA standby that leaves its group drops the identity it held (forget_inherited): a
+standalone host acting as the same member next to the active would be a second writer.
+It does so with the switch off as well, the one deliberate exception to the switch: the
+identity row is all it looks for, and switched on later the host would be that member
+again. An active that still has standbys does not unpair while the switch is on
+(ha.unpair_refusal): its standbys keep the identity, and the two would be one member
+twice.
 
 MK Nov 2026
 """
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -100,6 +113,9 @@ MAX_DROPPED = 512
 # what a voter signs when it grants the members lock: its own domain, so no other
 # signature of a member reads as one
 LOCK_DOMAIN = 'pegaprox-fed-lock-1'
+# and of what a committer signs over the whole change it made with that lock: a grant
+# names the committer and the base view, never the change
+COMMIT_DOMAIN = 'pegaprox-fed-commit-1'
 MAX_FINGERPRINTS = 4
 # the rows of one member the linked view shows
 MAX_VIEW_ROWS = 100
@@ -164,7 +180,7 @@ def _fresh_runtime(lease_file):
         'owners': None, 'leases': None, 'boot_id': None,
         'seen': {}, 'clusters_body': None, 'sessions': {}, 'url_ok': {},
         'removed_by': {}, 'view_conflict': False, 'statuses': {}, 'self_pushed': {},
-        'pairing_busy': None, 'workers': None, 'dead_views': [],
+        'pairing_busy': None, 'workers': None, 'dead_views': [], 'peer_views': {},
     }
 
 
@@ -184,10 +200,13 @@ def _say_once(key, msg, level=logging.WARNING):
 
 def reset_for_tests(lease_file=None):
     """Forget every cache and stop the workers: the next call reads the identity and the
-    lease file afresh. The process start stays what it was."""
+    lease file afresh. The process start stays what it was. What the exits keep of the
+    clusters' commands and clients goes too (ha_transport)."""
     stop_workers()
     _runtime.clear()
     _runtime.update(_fresh_runtime(lease_file or LEASE_FILE))
+    from pegaprox.core import ha_transport
+    ha_transport.forget_tracked()
 
 
 def _db():
@@ -370,7 +389,8 @@ def _blank_identity():
     return {'v': 1, 'instance_id': '', 'self': {'url': '', 'site': '', 'fingerprints': []},
             'signing_key': '', 'field_key': '', 'field_key_id': '',
             'view': {'epoch': 0, 'members': {}}, 'tombstones': {}, 'peer_keys': {},
-            'removed': None, 'dropped': {}, 'commits': [], 'view_prev': None}
+            'removed': None, 'dropped': {}, 'commits': [], 'view_prev': None,
+            'handed_over': {}, 'adopted': {}, 'drop_pending': {}}
 
 
 def _normalized(raw):
@@ -392,7 +412,8 @@ def _normalized(raw):
                      'members': {k: v for k, v in (view.get('members') or {}).items()
                                  if isinstance(v, dict) and ha_wire.ID_RE.fullmatch(k or '')}
                      if isinstance(view.get('members'), dict) else {}}
-    for key in ('tombstones', 'peer_keys', 'dropped'):
+    for key in ('tombstones', 'peer_keys', 'dropped', 'handed_over', 'adopted',
+                'drop_pending'):
         if isinstance(raw.get(key), dict):
             ident[key] = {k: v for k, v in raw[key].items() if isinstance(v, dict)}
     if isinstance(raw.get('removed'), dict):
@@ -588,26 +609,90 @@ def dropped_records():
             if isinstance(rec.get('owner'), str) and rec.get('owner')}
 
 
+def _age(rec, key):
+    """How old a kept record is, for the bounds: its time, then the order it was noted
+    in. The identity row is stored with sorted keys, so the order of a dict read back
+    says nothing about age."""
+    at, n = rec.get(key), rec.get('n')
+    return (at if isinstance(at, (int, float)) and not isinstance(at, bool) else 0,
+            n if isinstance(n, int) and not isinstance(n, bool) else 0)
+
+
+def _next_n(held):
+    return 1 + max((r['n'] for r in held.values()
+                    if isinstance(r.get('n'), int) and not isinstance(r.get('n'), bool)),
+                   default=0)
+
+
 def note_dropped(rows):
     """Remember cluster rows this instance dropped, [(cluster id, the member that led
-    it)], bounded, oldest out. Never inside another transaction of the connection: this
+    it)], bounded. Past MAX_DROPPED the oldest record of the member named most often
+    goes: a member that piles up records loses its own first, and nobody's records are
+    pushed below an even share. Never inside another transaction of the connection: this
     commits."""
     rows = [(cid, owner) for cid, owner in rows if cid and owner]
     if not rows:
         return
+    from collections import Counter
 
     def go(ident):
         held = ident.setdefault('dropped', {})
+        n, now = _next_n(held), int(time.time())
         for cid, owner in rows:
-            held.pop(cid, None)
-            held[cid] = {'owner': owner, 'at': int(time.time())}
+            held[cid] = {'owner': owner, 'at': now, 'n': n}
+            n += 1
         while len(held) > MAX_DROPPED:
-            held.pop(next(iter(held)))
+            per = Counter(r.get('owner') for r in held.values())
+            top = max(per.values())
+            held.pop(min((k for k, r in held.items() if per[r.get('owner')] == top),
+                         key=lambda k: _age(held[k], 'at')))
         return True
     try:
         _mutate_identity(go)
     except Exception as e:
         logging.warning(f'[FED] could not note {len(rows)} dropped cluster row(s): {e}')
+
+
+def handed_over_ids():
+    """The clusters led here that an admin handed over (released). Kept in the identity
+    row, so a promoted standby, or a host whose lease file was removed, still knows."""
+    return set(((identity() or {}).get('handed_over') or {}))
+
+
+def adopted_from():
+    """{cluster id: the member it was adopted from} of the clusters this instance adopted
+    while the voters' rows may still name the old owner: its asks for them carry the
+    adoption flag, from whichever host of its HA group asks."""
+    return {cid: rec.get('from') or '' for cid, rec in
+            ((identity() or {}).get('adopted') or {}).items()}
+
+
+def _mark_clusters(key, add=None, drop=()):
+    """Add ids to, or drop them from, one of the per-cluster marks of the identity row
+    ('handed_over', 'adopted'). `add` is {cluster id: extra fields}. Bounded like the
+    dropped records. Never inside another transaction of the connection: this commits."""
+    add = {c: dict(v or {}) for c, v in (add or {}).items() if c}
+    drop = set(c for c in drop if c)
+    if not add and not drop:
+        return
+
+    def go(ident):
+        held = ident.setdefault(key, {})
+        changed = False
+        for cid in drop:
+            changed = held.pop(cid, None) is not None or changed
+        n, now = _next_n(held), int(time.time())
+        for cid, extra in add.items():
+            rec = dict(extra, at=now, n=n)
+            if {k: v for k, v in (held.get(cid) or {}).items() if k not in ('at', 'n')} \
+                    != extra or cid not in held:
+                held[cid] = rec
+                n += 1
+                changed = True
+        while len(held) > MAX_DROPPED:
+            held.pop(min(held, key=lambda k: _age(held[k], 'at')))
+        return changed
+    _mutate_identity(go)
 
 
 def _lock_message(voter, candidate, digest, epoch):
@@ -639,6 +724,35 @@ def _certified(certs, candidate, digest, epoch, entries):
             continue
         n += 1
     return n
+
+
+def _commit_message(by, epoch, base, digest, wire):
+    return '\n'.join((COMMIT_DOMAIN, by, str(epoch), base, digest,
+                      json.dumps(wire, sort_keys=True, separators=(',', ':')))).encode()
+
+
+def _sign_commit(epoch, base, digest, wire):
+    """This instance's signature over a view change it commits."""
+    msg = _commit_message(instance_id(), epoch, base, digest, wire)
+    return base64.b64encode(signing_key().sign(msg)).decode()
+
+
+def _commit_signed(c, entries):
+    """Whether commit `c` carries the signature of its committer (c['by']) over epoch,
+    base, digest and the change, under the key `entries` ({id: public key}, the view the
+    commit starts from) holds for it. The lock grants say who held the lock at that view;
+    this says what that member changed with it, so a member that hands on another
+    member's commit cannot swap the change and keep the grants."""
+    by, sig = c.get('by'), c.get('sig')
+    key = ha_wire.public_key(entries.get(by)) if isinstance(by, str) else None
+    if key is None or not isinstance(sig, str) or len(sig) > 200:
+        return False
+    try:
+        key.verify(base64.b64decode(sig, validate=True),
+                   _commit_message(by, c['epoch'], c['base'], c['digest'], c['change']))
+    except Exception:
+        return False
+    return True
 
 
 def _public_of_ct(ct):
@@ -745,7 +859,7 @@ def _started():
 
 def _blank_leases():
     return {'v': 1, 'clock': {}, 'hold_until': 0.0, 'view_changed': 0.0, 'my_leases': {},
-            'promises': {}, 'pairing': None}
+            'promises': {}, 'pairing': None, 'pairing_spent': None, 'epoch_kept': None}
 
 
 def _load_lease_file(path):
@@ -1114,7 +1228,8 @@ def _wire_call(url, fingerprints, method, path, data, headers, read_timeout, cap
             logging.warning(f'[FED] call to {url}{path} failed: {type(e).__name__}')
             return 0, None, {}
         try:
-            if 300 <= resp.status_code < 400:
+            # 304 is the conditional identity pull's "nothing changed", no redirect
+            if 300 <= resp.status_code < 400 and resp.status_code != 304:
                 logging.warning(f'[FED] {url}{path} answered a redirect - not followed')
                 return 0, None, {}
             raw = _read_capped(resp, cap)
@@ -1246,17 +1361,23 @@ def create_pairing_code(url, fingerprint=''):
     expires = int(time.time()) + PAIRING_TTL
 
     def go(st):
-        st['pairing'] = {'secret': secret, 'url': url, 'fingerprint': fingerprint,
-                         'expires': expires}
+        # only a hash of the secret is kept, as the HA pairing keeps its code: the answer
+        # to a join is sealed under the secret the joiner presents
+        st['pairing'] = {'secret_hash': _code_hash(secret), 'url': url,
+                         'fingerprint': fingerprint, 'expires': expires}
         return True
     _mutate_leases(go)
     return ha_wire.encode_code(CODE_PREFIX, url, fingerprint, secret, me), expires
 
 
+def _code_hash(secret):
+    return hashlib.sha256(('pegaprox-fed-code-1\n' + str(secret)).encode()).hexdigest()
+
+
 def pairing_open():
     """The open code's address and end, None when there is none."""
     pairing = _lease_state().get('pairing') or {}
-    if pairing.get('secret') and int(pairing.get('expires') or 0) > time.time():
+    if pairing.get('secret_hash') and int(pairing.get('expires') or 0) > time.time():
         return {'url': pairing.get('url') or '', 'expires_at': pairing.get('expires')}
     return None
 
@@ -1287,15 +1408,25 @@ def accept_join(code, url, joiner_id, joiner_key, site, fingerprints=None):
         raise FederationError('This instance cannot pair with itself', code='FED_CODE')
     secret = parts['secret']
     with _lock:
-        pairing = _lease_state().get('pairing') or {}
-        held = pairing.get('secret') or ''
-        if (not held or pairing.get('expires', 0) < time.time()
-                or not secrets.compare_digest(held, secret)):
-            raise FederationError(PAIRING_CODE_ERROR, code='FED_CODE')
-        if _runtime.get('pairing_busy') == held:
+        st = _lease_state()
+        pairing = st.get('pairing') or {}
+        held = pairing.get('secret_hash') or ''
+        fresh = bool(held and pairing.get('expires', 0) >= time.time()
+                     and secrets.compare_digest(held, _code_hash(secret)))
+        if not fresh:
+            # the joiner this code was spent on asks again: its answer got lost on the
+            # way, and the change that added it is made already
+            rec = members().get(joiner_id) or {}
+            if not (_spent_on(st, secret, joiner_id, joiner_key)
+                    and rec.get('public_key') == joiner_key):
+                raise FederationError(PAIRING_CODE_ERROR, code='FED_CODE')
+        elif _runtime.get('pairing_busy') == held:
             raise FederationError('That pairing code is being used right now',
                                   code='FED_CODE')
-        _runtime['pairing_busy'] = held
+        else:
+            _runtime['pairing_busy'] = held
+    if not fresh:
+        return _join_answer(secret, parts, joiner_id, view_epoch(), [])
     try:
         if joiner_id in members():
             raise FederationError('That instance is a member already - remove it first, '
@@ -1306,29 +1437,51 @@ def accept_join(code, url, joiner_id, joiner_key, site, fingerprints=None):
         _refuse_pairing_with_old_rows()
         rec = {'url': url, 'public_key': joiner_key, 'site': _clean_site(site),
                'fingerprints': _clean_fps(fingerprints or [])}
-        out = _view_change({'op': 'add', 'instance_id': joiner_id, 'member': rec},
-                           by=f'pairing:{joiner_id}')
+        with _one_change():
+            out = _view_change({'op': 'add', 'instance_id': joiner_id, 'member': rec},
+                               by=f'pairing:{joiner_id}')
 
         def spend(st):
-            if (st.get('pairing') or {}).get('secret') != held:
+            if (st.get('pairing') or {}).get('secret_hash') != held:
                 return False
             st['pairing'] = None
+            # kept until the code would have run out, for this joiner alone
+            st['pairing_spent'] = {'secret_hash': held, 'joiner': joiner_id,
+                                   'key': joiner_key,
+                                   'expires': int(pairing.get('expires') or 0)}
             return True
         _mutate_leases(spend)
     finally:
         _runtime['pairing_busy'] = None
+    return _join_answer(secret, parts, joiner_id, out['epoch'], out['not_told'])
+
+
+def _spent_on(st, secret, joiner_id, joiner_key):
+    """Whether `secret` is the code this instance spent on the joiner `joiner_id` with
+    the key `joiner_key`, and would still be valid."""
+    spent = st.get('pairing_spent')
+    if not isinstance(spent, dict) or not isinstance(spent.get('secret_hash'), str):
+        return False
+    return (int(spent.get('expires') or 0) >= time.time()
+            and secrets.compare_digest(spent['secret_hash'], _code_hash(secret))
+            and spent.get('joiner') == joiner_id and spent.get('key') == joiner_key)
+
+
+def _join_answer(secret, parts, joiner_id, epoch, not_told):
+    """The view a joiner takes, sealed under the code's secret."""
+    me = instance_id()
     ident = identity() or {}
     view = {iid: _wire_record(r) for iid, r in members().items() if iid != joiner_id}
     view[me] = {'url': own_url() or parts['url'], 'public_key': public_key(),
                 'site': own_site(),
                 'fingerprints': ident.get('self', {}).get('fingerprints')
                 or _clean_fps([parts['fingerprint']] if parts['fingerprint'] else [])}
-    body = {'view': {'epoch': out['epoch'], 'members': view},
+    body = {'view': {'epoch': epoch, 'members': view},
             'tombstones': {iid: {'public_key': t.get('public_key') or ''}
                            for iid, t in tombstones().items() if iid != joiner_id}}
     sealed = ha_wire.seal(secret, body, f'federation-join:{me}:{joiner_id}')
     return {'sealed': sealed, 'members': sorted(set(view) | {joiner_id}),
-            'not_told': out['not_told']}
+            'not_told': not_told}
 
 
 def _wire_record(rec):
@@ -1409,7 +1562,9 @@ def join(code, own_url_, site='', fingerprints=None):
     for iid, t in list((opened.get('tombstones') or {}).items())[:MAX_TOMBSTONES]:
         if (isinstance(t, dict) and ha_wire.ID_RE.fullmatch(iid or '') and iid != me
                 and iid not in kept and ha_wire.public_key(t.get('public_key')) is not None):
-            tombs[iid] = {'public_key': t['public_key'], 'removed_at': 0, 'removed_by': ''}
+            # older than any removal this instance makes itself, in the order received
+            tombs[iid] = {'public_key': t['public_key'], 'removed_at': 0, 'removed_by': '',
+                          'n': len(tombs) + 1}
 
     def go(ident):
         ident['view'] = {'epoch': epoch, 'members': kept}
@@ -1418,6 +1573,9 @@ def join(code, own_url_, site='', fingerprints=None):
         ident['removed'] = None
         ident['commits'] = []
         ident['view_prev'] = None
+        ident['handed_over'] = {}
+        ident['adopted'] = {}
+        ident['drop_pending'] = {}
         return True
     _mutate_identity(go)
     from pegaprox.core import federation_lease as fl
@@ -1439,9 +1597,12 @@ def _tombstone(ident, iid, rec, by):
     tombs = ident.setdefault('tombstones', {})
     tombs.pop(iid, None)
     tombs[iid] = {'public_key': (rec or {}).get('public_key') or '',
-                  'removed_at': int(time.time()), 'removed_by': str(by)[:80]}
+                  'removed_at': int(time.time()), 'removed_by': str(by)[:80],
+                  'n': _next_n(tombs)}
     while len(tombs) > MAX_TOMBSTONES:
-        tombs.pop(next(iter(tombs)))
+        # the oldest removal goes, by its time: the dict's order is the ids' order once
+        # the row was read back
+        tombs.pop(min(tombs, key=lambda k: _age(tombs[k], 'removed_at')))
 
 
 def _wire_change(change):
@@ -1503,6 +1664,25 @@ def _kept_certs(certs):
             and isinstance(v, str) and len(v) <= 200}
 
 
+# One change of the member view at a time in this process. A second change started while
+# the first is under way (two admins, a removal and a pairing) would get the members lock
+# as a renewal of the first one's and commit from the same base view.
+_change_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _one_change():
+    """Hold the change lock for a join, a removal or a leave; FED_BUSY when another one
+    is under way here, in this thread or another."""
+    if not _change_lock.acquire(blocking=False):
+        raise FederationError('Another change of the federation is under way on this '
+                              'instance - try again in a moment', code='FED_BUSY')
+    try:
+        yield
+    finally:
+        _change_lock.release()
+
+
 def _view_change(change, by):
     """One change of the view - {'op': 'add', 'instance_id', 'member': record} or
     {'op': 'remove', 'instance_id'} - made under a majority lock and committed to every
@@ -1514,7 +1694,10 @@ def _view_change(change, by):
     change that reached fewer stays a change of nobody here (the members that took it go
     back to the view the others hold, see catch_up), so a lost commit followed by another
     member's change from the same view cannot leave two views of one epoch, and a removed
-    member's data is not dropped for a removal that did not happen."""
+    member's data is not dropped for a removal that did not happen.
+
+    The commit carries this instance's signature over the change (_commit_signed), and
+    the callers hold _one_change() around it."""
     import copy
     from pegaprox.core import federation_lease as fl
     me = instance_id()
@@ -1541,7 +1724,8 @@ def _view_change(change, by):
             raise FederationError('The federation changed meanwhile - try again',
                                   code='FED_VIEW')
         commit = {'epoch': res[0], 'base': base, 'digest': res[1], 'change': wire,
-                  'certs': _kept_certs(fl.lock_certs())}
+                  'certs': _kept_certs(fl.lock_certs()), 'by': me,
+                  'sig': _sign_commit(res[0], base, res[1], wire)}
         targets = sorted(old)
         told = _parallel(lambda t: _call(t, old[t], 'POST', MEMBERSHIP_PATH, commit,
                                          read_timeout=VOTE_TIMEOUT)[0], targets)
@@ -1563,7 +1747,7 @@ def _view_change(change, by):
                 if _change_view(ident, wire, by, base) != res:
                     out['moved'] = True
                     return False
-                _record_change(ident, prev, dict(commit, by=me))
+                _record_change(ident, prev, dict(commit))
                 return True
             _mutate_identity(go)
             if out.get('moved'):
@@ -1572,6 +1756,8 @@ def _view_change(change, by):
             fl.note_view_change()
             if change['op'] == 'remove':
                 _drop_member_data(iid)
+            # a majority held the view this change was made from
+            _settle_drops(res[0] - 1)
     finally:
         # the members that voted for the lock give it back; a new member never held it
         fl.release_lock(to=sorted(old))
@@ -1581,9 +1767,15 @@ def _view_change(change, by):
 def apply_membership(sender, body):
     """A committed view change from `sender`: applied when this instance's live promise
     for the members lock names the sender, the commit is derived from this instance's
-    view (base digest), moves the epoch by exactly one, and carries the signed lock grants
-    of a majority of that view. Returns {'epoch': n}; raises FederationError FED_NO_LOCK,
-    FED_VIEW or FED_BAD_CHANGE."""
+    view (base digest), moves the epoch by exactly one, carries the signed lock grants of
+    a majority of that view and the sender's own signature over the change. Returns
+    {'epoch': n}; raises FederationError FED_NO_LOCK, FED_VIEW or FED_BAD_CHANGE.
+
+    A removal takes the member out of the view at once and ends its accounts' sessions;
+    what this instance holds of it goes only once a majority shows it took the change
+    (_defer_drop): the change may be one too few took, and then it is rolled back. A
+    removal that leaves this instance alone in the view settles at once: no member is
+    left that could roll it back."""
     import copy
     from pegaprox.core import federation_lease as fl
     if not isinstance(body, dict):
@@ -1593,7 +1785,8 @@ def apply_membership(sender, body):
     if (not isinstance(epoch, int) or isinstance(epoch, bool) or not isinstance(base, str)
             or not isinstance(digest, str) or not isinstance(change, dict)
             or change.get('op') not in ('add', 'remove')
-            or not ha_wire.ID_RE.fullmatch(change.get('instance_id') or '')):
+            or not ha_wire.ID_RE.fullmatch(change.get('instance_id') or '')
+            or body.get('by') != sender):
         raise FederationError('That is no view change', code='FED_BAD_CHANGE')
     if not fl.promised_to(MEMBERS_LOCK, sender):
         raise FederationError('This instance did not grant the sender the lock on the '
@@ -1602,6 +1795,9 @@ def apply_membership(sender, body):
     iid = change['instance_id']
     wire = _wire_change(change)
     certs = _kept_certs(body.get('certs'))
+    sig = body.get('sig') if isinstance(body.get('sig'), str) else ''
+    signed = {'epoch': epoch, 'base': base, 'digest': digest, 'change': wire, 'by': sender,
+              'sig': sig}
     out = {}
 
     def go(ident):
@@ -1631,13 +1827,17 @@ def apply_membership(sender, body):
         if _certified(certs, sender, base, epoch - 1, entries) < needed(len(entries)):
             out['nolock'] = True
             return False
+        # kept and handed on to members that catch up: they check it, so it is checked
+        # here before it is kept
+        if not _commit_signed(signed, entries):
+            out['bad'] = 'it carries no signature of the member that made it'
+            return False
         if change['op'] == 'remove' and iid == me:
             out['self'] = True
             return False
         prev = copy.deepcopy(ident['view'])
         _change_view(ident, wire, f'peer:{sender}', base)
-        _record_change(ident, prev, {'epoch': epoch, 'base': base, 'digest': digest,
-                                     'change': wire, 'certs': certs, 'by': sender})
+        _record_change(ident, prev, dict(signed, certs=certs))
         return True
     _mutate_identity(go)
     if out.get('view'):
@@ -1655,8 +1855,13 @@ def apply_membership(sender, body):
         _become_removed(by=sender)
         return {'epoch': epoch, 'removed': True}
     fl.note_view_change()
+    # the grants of this change show that a majority held the view it was made from: a
+    # removal taken here before is one a majority took
+    _settle_drops(epoch - 1)
     if change['op'] == 'remove':
-        _drop_member_data(iid)
+        _defer_drop(iid, epoch)
+        if not members():
+            _settle_drops(epoch)
         log_audit('system', 'federation.member_removed',
                   f'member {iid} removed from the federation, told by {site}',
                   ip_address='federation')
@@ -1706,16 +1911,24 @@ def catch_up():
     A view a majority of the members (this one counted) holds is where the federation is:
     nothing to do. Otherwise a newer view is taken by replaying the changes a member that
     holds it kept, each checked against the signed lock grants of a majority of the view
-    it was made from (_adopt_view): no single member can make a view up.
+    it was made from and its committer's signature over the change (_adopt_view): no
+    single member can make a view up, nor swap the change of another member's commit.
 
-    A view no majority holds came from a change that did not reach a majority (its
-    committer then never took it, see _view_change). With nobody ahead and nobody
-    answering that holds it, that shows when the members that answered are a majority,
-    or when the member that made the change answers with another view no newer than it.
-    Such a view is rolled back to the view before it (and taken again only from a
-    majority), and the newer view of the others is replayed from there."""
+    A view no majority holds may come from a change that did not reach a majority: its
+    committer then never took it (see _view_change). The committer takes a change only
+    once a majority of the view before it took it, so when the members of that earlier
+    view that answer with another view, none of them ahead of the one held here, are a
+    majority of it, no majority took the change (_no_majority_took). Such a view is
+    rolled back to the view before it (and taken again only from a majority), and the
+    newer view of the others is replayed from there. Who else holds it, and what its
+    committer answers, decide nothing: replies get lost after a change was applied.
+
+    Alone in the view, there is nobody to ask: a removal still pending (_defer_drop)
+    settles, as no member is left that could roll it back."""
     me = instance_id()
     roster = members()
+    if me and not roster:
+        _settle_drops(view_epoch())
     if not me or not roster:
         return {'adopted': False}
     own = (view_epoch(), view_digest())
@@ -1729,30 +1942,24 @@ def catch_up():
         _runtime['removed_by'].pop(iid, None)
         if isinstance(body.get('field_key_id'), str):
             statuses[iid] = body['field_key_id']
-        view = body.get('view') if isinstance(body.get('view'), dict) else {}
-        e, d = view.get('epoch'), view.get('digest')
-        if isinstance(e, int) and not isinstance(e, bool) and isinstance(d, str):
-            reports[iid] = (e, d)
+        got = _reported_view(body)
+        if got is not None:
+            reports[iid] = got
     _runtime['statuses'] = statuses
+    _note_peer_views(reports)
     need = needed(len(view_ids()))
     if 1 + sum(1 for r in reports.values() if r == own) >= need:
         _runtime['view_conflict'] = False
+        _settle_drops(own[0])
         return {'adopted': False}
     if _take_newer(reports, own):
         _runtime['view_conflict'] = False
         return {'adopted': True}
-    others = [r for r in reports.values() if r != own]
-    nobody_ahead = not [r for r in others if r[0] > own[0]]
-    held_elsewhere = len(others) < len(reports)
-    maker = _maker_of(own)
-    maker_gave_up = (maker in reports and reports[maker] != own
-                     and reports[maker][0] <= own[0])
-    if (nobody_ahead and not held_elsewhere and (len(others) >= need or maker_gave_up)
-            and _roll_back(own)):
+    if _no_majority_took(own, reports) and _roll_back(own):
         _take_newer(reports, (view_epoch(), view_digest()))
         _runtime['view_conflict'] = False
         return {'adopted': True, 'rolled_back': True}
-    conflict = any(e == own[0] and d != own[1] for e, d in others)
+    conflict = any(e == own[0] and d != own[1] for e, d in reports.values())
     if conflict:
         _say_once(('view-conflict', own),
                   f'[FED] a member holds view {own[0]} with another member list than this '
@@ -1762,14 +1969,50 @@ def catch_up():
     return {'adopted': False}
 
 
-def _maker_of(own):
-    """The member whose change gave the view held here, '' for this instance's own change
-    or a view a pairing handed over."""
-    for c in reversed((identity() or {}).get('commits') or []):
-        if c.get('epoch') == own[0] and c.get('digest') == own[1]:
-            by = c.get('by') or ''
-            return '' if by == instance_id() else by
-    return ''
+def _reported_view(body):
+    view = body.get('view') if isinstance(body.get('view'), dict) else {}
+    e, d = view.get('epoch'), view.get('digest')
+    if isinstance(e, int) and not isinstance(e, bool) and isinstance(d, str):
+        return e, d
+    return None
+
+
+def _note_peer_views(reports):
+    """A member whose view moved since the last sync (it caught up, or rolled back) may
+    hold an older record of this instance than the one it was told: the next push of the
+    own record goes to it again."""
+    seen = _runtime.setdefault('peer_views', {})
+    for iid, r in reports.items():
+        if seen.get(iid) not in (None, r):
+            _runtime['self_pushed'].pop(iid, None)
+        seen[iid] = r
+
+
+def _no_majority_took(own, reports):
+    """Whether the answers show that no majority of the view before `own` (view_prev)
+    took the change that gave `own`: members of that earlier view answering with another
+    view, none of them ahead of `own`, are a majority of it. Members of view_prev that the
+    view held here no longer lists (the member a removal took out) are asked as well. A
+    member ahead of `own` may have passed through it and is not counted; this instance
+    holds `own` and is not counted either."""
+    ident = identity() or {}
+    prev = ident.get('view_prev')
+    if not prev or prev.get('epoch') != own[0] - 1:
+        return False
+    me = ident.get('instance_id') or ''
+    earlier = {k: v for k, v in (prev.get('members') or {}).items() if k != me}
+    held = members()
+    extra = sorted(i for i in earlier if i not in reports and i not in held)
+    asked = {iid: r for iid, r in reports.items() if iid in earlier}
+    got = _parallel(lambda i: _call(i, earlier[i], 'GET', STATUS_PATH, read_timeout=5), extra)
+    for iid, ans in zip(extra, got):
+        status, body, _h = ans or (0, None, {})
+        if status == 200 and isinstance(body, dict) and body.get('instance_id') == iid:
+            r = _reported_view(body)
+            if r is not None:
+                asked[iid] = r
+    others = sum(1 for r in asked.values() if r != own and r[0] <= own[0])
+    return others >= needed(len(earlier) + 1)
 
 
 def _take_newer(reports, own):
@@ -1805,16 +2048,18 @@ def _valid_commit(c):
             or not ha_wire.ID_RE.fullmatch(change.get('instance_id') or '')
             or not ha_wire.ID_RE.fullmatch(c.get('by') or '')):
         return None
+    sig = c.get('sig')
     return {'epoch': epoch, 'base': c['base'][:64], 'digest': c['digest'][:64],
             'change': _wire_change(change), 'certs': _kept_certs(c.get('certs')),
-            'by': c['by']}
+            'by': c['by'], 'sig': sig if isinstance(sig, str) and len(sig) <= 200 else ''}
 
 
 def _replay(ident, commits):
     """Walk `commits` forward from the view in `ident` (a copy this function may change).
-    Each one must follow the view before it, come from a member of that view and carry
-    signed lock grants of a majority of it. Returns (ident at the end, the view before the
-    last step, the member that removed this instance or None, the commits taken)."""
+    Each one must follow the view before it, come from a member of that view, carry
+    signed lock grants of a majority of it, and carry that member's own signature over
+    the change. Returns (ident at the end, the view before the last step, the member that
+    removed this instance or None, the commits taken)."""
     import copy
     by_epoch = {}
     for raw in commits:
@@ -1834,6 +2079,8 @@ def _replay(ident, commits):
             break
         if _certified(c['certs'], c['by'], base, epoch, entries) < needed(len(entries)):
             break
+        if not _commit_signed(c, entries):
+            break
         wire = c['change']
         if wire['op'] == 'remove' and wire['instance_id'] == me:
             entries.pop(me, None)
@@ -1852,9 +2099,14 @@ def _replay(ident, commits):
 
 def _adopt_view(body, from_iid):
     """Take the view of member `from_iid` by replaying the changes it kept from the view
-    held here (_replay). The member records (address, site label, fingerprints) come from
-    its listing where id and key match the replayed view. A view no chain of signed
-    changes leads to is not taken, whatever epoch it claims."""
+    held here (_replay). A view no chain of signed changes leads to is not taken, whatever
+    epoch it claims.
+
+    The member records come from the replay alone: a member the chain adds with the
+    record in its commit, which its committer signed, and every other member with the
+    record held here. The listing of `from_iid` signs nothing of another member's address
+    or fingerprints, so nothing of it is taken: a member changes its own record itself,
+    with a member update."""
     import copy
     if from_iid not in members() or not isinstance(body, dict):
         return False
@@ -1869,13 +2121,6 @@ def _adopt_view(body, from_iid):
     if removed_by:
         _become_removed(by=removed_by)
         return True
-    listed = (body.get('view') or {}).get('members') if isinstance(body.get('view'), dict) else {}
-    listed = listed if isinstance(listed, dict) else {}
-    for iid, rec in end['view']['members'].items():
-        fresh = _member_record(iid, listed.get(iid)) if iid in listed else None
-        if fresh is not None and fresh['public_key'] == rec.get('public_key'):
-            rec.update(url=fresh['url'], site=fresh['site'] or rec.get('site') or '',
-                       fingerprints=fresh['fingerprints'])
     before = set(members())
 
     def go(ident):
@@ -1893,8 +2138,18 @@ def _adopt_view(body, from_iid):
     from pegaprox.core import federation_lease as fl
     fl.note_view_change()
     gone = sorted(before - set(end['view']['members']))
+    # a removal with a later change of the chain on top of it was taken by a majority (that
+    # change carries the grants of a majority of the view after it); the last change of
+    # the chain may be one too few took, so a removal there waits like one told directly
+    last = int(end['view'].get('epoch') or 0)
+    removed_at = {c['change']['instance_id']: c['epoch'] for c in applied
+                  if c['change'].get('op') == 'remove'}
     for iid in gone:
-        _drop_member_data(iid)
+        if removed_at.get(iid, 0) >= last:
+            _defer_drop(iid, last)
+        else:
+            _drop_member_data(iid)
+    _settle_drops(last - 1)
     added = sorted(set(end['view']['members']) - before)
     site = (member_record(from_iid) or {}).get('site') or from_iid[:8]
     logging.info(f'[FED] took view {end["view"]["epoch"]} from {from_iid}')
@@ -1940,6 +2195,8 @@ def _roll_back(own):
     fl.note_view_change()
     for iid in sorted(before - set(members())):
         _drop_member_data(iid)
+    # a removal that was rolled back: the member is in the view again and keeps its data
+    _settle_drops(-1)
     logging.warning(f'[FED] view {own[0]} was held by no majority of the members: back to '
                     f'view {own[0] - 1}')
     try:
@@ -1967,9 +2224,72 @@ def remove_member(iid, by):
             'SELECT id FROM clusters WHERE fed_owner = ? ORDER BY id', (me,)).fetchall()]
     except Exception:
         enrolled_here = []
-    out = _view_change({'op': 'remove', 'instance_id': iid}, by)
+    with _one_change():
+        out = _view_change({'op': 'remove', 'instance_id': iid}, by)
     return {'removed': iid, 'not_told': out['not_told'],
             'remedy': {'enrolled_here': enrolled_here, 'note': 'key'}}
+
+
+def _defer_drop(iid, epoch):
+    """A removal this instance took from another member (view `epoch`): the member is out
+    of the view, its mirrored accounts are disabled here and their sessions end now. The
+    accounts, mappings, grants, cluster rows and key stay until a majority shows it took
+    the change (_settle_drops): dropped for a change that is rolled back, the mappings,
+    grants and favorites would not come back with the next pull. Its sync state goes, so
+    after a rollback that next pull is a whole one and brings the accounts back as the
+    home has them."""
+    def go(ident):
+        ident.setdefault('drop_pending', {})[iid] = {'epoch': int(epoch),
+                                                    'at': int(time.time())}
+        return True
+    _mutate_identity(go)
+    names = []
+    try:
+        conn = _identities_conn()
+        names = [r['username'] for r in conn.execute(
+            'SELECT username FROM users WHERE fed_home = ?', (iid,)).fetchall()]
+        conn.execute('UPDATE users SET enabled = 0 WHERE fed_home = ?', (iid,))
+        conn.execute('DELETE FROM federation_sync_state WHERE peer = ?', (iid,))
+        conn.commit()
+    except Exception as e:
+        logging.warning(f'[FED] could not disable the accounts of {iid}: {e}')
+    for name in names:
+        _end_sessions_of(name)
+    _runtime['seen'].pop(iid, None)
+    _runtime['self_pushed'].pop(iid, None)
+
+
+def _drops_pending():
+    """Members whose removal waits for a majority (_defer_drop). Their data stays until
+    _settle_drops, so the orphan sweeps leave it as well."""
+    return set((identity() or {}).get('drop_pending') or {})
+
+
+def _settle_drops(upto):
+    """Pending removals (_defer_drop) whose change a majority took - made at view `upto`
+    or before - drop what this instance holds of the member. A member that is in the view
+    again (its removal was rolled back) keeps everything. Never raises."""
+    try:
+        pending = (identity() or {}).get('drop_pending') or {}
+        if not pending:
+            return
+        view = members()
+        back = [iid for iid in pending if iid in view]
+        done = [iid for iid, rec in pending.items() if iid not in view
+                and int((rec or {}).get('epoch') or 0) <= int(upto)]
+        if not back and not done:
+            return
+        for iid in done:
+            _drop_member_data(iid)
+
+        def go(ident):
+            held = ident.setdefault('drop_pending', {})
+            for iid in back + done:
+                held.pop(iid, None)
+            return True
+        _mutate_identity(go)
+    except Exception as e:
+        logging.warning(f'[FED] the data of removed members could not be settled: {e}')
 
 
 def _drop_member_data(iid):
@@ -2004,6 +2324,7 @@ def _drop_member_data(iid):
     _runtime['seen'].pop(iid, None)
     _runtime['removed_by'].pop(iid, None)
     _runtime['self_pushed'].pop(iid, None)
+    _runtime.setdefault('peer_views', {}).pop(iid, None)
     from pegaprox.core import federation_lease as fl
     fl.drop_owner_cache()
 
@@ -2014,7 +2335,8 @@ def _wipe_membership(reason):
     later round reopens them on its own - the federation may have adopted them meanwhile.
     Only an unenroll with force (or an enroll, once paired again) does; pairing is refused
     while they are there (_refuse_pairing_with_old_rows)."""
-    for iid in sorted(members()):
+    pending = set(((identity() or {}).get('drop_pending') or {}))
+    for iid in sorted(set(members()) | pending):
         _drop_member_data(iid)
 
     def go(ident):
@@ -2023,6 +2345,9 @@ def _wipe_membership(reason):
         ident['peer_keys'] = {}
         ident['commits'] = []
         ident['view_prev'] = None
+        ident['handed_over'] = {}
+        ident['adopted'] = {}
+        ident['drop_pending'] = {}
         return True
     _mutate_identity(go)
     me = instance_id()
@@ -2039,6 +2364,7 @@ def _wipe_membership(reason):
                                      rseq=int((held.get(cid) or {}).get('rseq') or 0) + 1)
                            for cid in enrolled}
         st['pairing'] = None
+        st['pairing_spent'] = None
         return True
     _mutate_leases(leases)
     from pegaprox.core import federation_lease as fl
@@ -2080,10 +2406,16 @@ def _check_removed_by():
 
 
 def leave(force=False):
-    """Leave the federation. Every enrolled row with a live lease is unenrolled first; a
-    row without one blocks the leave unless forced (it stays enrolled and closed). The
-    removal of this instance takes a majority like any other; forced, a leave without
-    one goes ahead locally. Returns {'left': True, 'not_told': [ids]}."""
+    """Leave the federation. Every enrolled row with a live lease is unenrolled first, all
+    of them in one notice and one release per member; a row without one blocks the leave
+    unless forced (it stays enrolled and closed). The removal of this instance takes a
+    majority like any other; forced, a leave without one goes ahead locally. Returns
+    {'left': True, 'not_told': [ids]}."""
+    with _one_change():
+        return _leave(force)
+
+
+def _leave(force):
     from pegaprox.core import federation_lease as fl
     me = instance_id()
     try:
@@ -2091,14 +2423,14 @@ def leave(force=False):
             'SELECT id FROM clusters WHERE fed_owner = ? ORDER BY id', (me,)).fetchall()] if me else []
     except Exception as e:
         raise FederationError(f'The clusters table cannot be read: {e}')
-    blocked = []
-    for cid in own:
+    try:
+        _done, blocked = fl.unenroll_clusters(own)
+    except FederationError as e:
+        logging.warning(f'[FED] unenrolling before the leave failed: {e}')
         try:
-            if not fl.holds(cid):
-                raise FederationError('no live lease')
-            fl.unenroll_cluster(cid)
+            blocked = own_enrolled_ids()
         except FederationError:
-            blocked.append(cid)
+            blocked = list(own)
     if blocked and not force:
         raise FederationError('These clusters are enrolled without a live lease here, so '
                               'they cannot be unenrolled cleanly: '
@@ -2170,6 +2502,80 @@ def _push_self_update():
             lambda i: call_peer(i, 'POST', MEMBER_UPDATE_PATH, me_rec, read_timeout=5), due)):
         if ans and ans[0] == 200:
             _runtime['self_pushed'][iid] = mark
+
+
+def forget_inherited(reason):
+    """This host held its HA group's federation identity as a standby (the sync carried
+    it) and has left the group. Standalone it would act as that same member next to the
+    active: lease the member's clusters as well, push its own certificate as the member's,
+    leave in the member's name. So what it inherited goes: the switch goes off here, the
+    identity row, the cluster rows the federation owns or mirrors, the mirrored accounts,
+    the mappings, the sync state and the lease file. The member itself, the active, keeps
+    all of it.
+
+    It runs whenever the identity row is there, with the switch off as well (the one thing
+    of the federation that does): switched on later, the host would be that member again.
+    Without the row it touches nothing. Returns True when there was an identity to forget.
+    Never raises; a failure is logged."""
+    try:
+        conn = _db().conn
+        try:
+            had = conn.execute('SELECT 1 FROM pegaprox_kv WHERE k = ?',
+                               (IDENTITY_KEY,)).fetchone() is not None
+        except Exception as e:
+            # a row that cannot be looked for may be there: dropping is the safe side
+            had = 'no such table' not in str(e)
+        if not had:
+            return False
+        _drop_inherited(conn)
+    except Exception as e:
+        logging.error(f'[FED] the federation identity this host held could not be dropped '
+                      f'({reason}) - set PEGAPROX_FEDERATION=0 here before it acts: {e}')
+        return False
+    logging.warning(f'[FED] the federation identity this host held is gone ({reason}); '
+                    'the federation is switched off here')
+    try:
+        from pegaprox.utils.audit import log_audit
+        log_audit('system', 'federation.identity_dropped',
+                  f'the federation identity this host held as an HA standby was dropped '
+                  f'({reason})', ip_address='federation')
+    except Exception as e:
+        logging.warning(f'[FED] dropping the inherited identity could not be audited: {e}')
+    return True
+
+
+def _drop_inherited(conn):
+    stop_workers()
+    db = _db()
+    db.save_server_setting(SETTING_KEY, False)
+    _runtime['switch'] = (False, time.monotonic())
+    _runtime['switch_held'] = False
+    homes = set()
+    for table in IDENTITY_TABLES:
+        try:
+            homes |= {r[0] for r in conn.execute(
+                f'SELECT DISTINCT fed_home FROM "{table}" WHERE fed_home != \'\'').fetchall()}
+        except Exception as e:
+            if 'no such table' not in str(e):
+                raise
+    for home in sorted(h for h in homes if h):
+        drop_mirror_rows(home)
+    conn.execute("DELETE FROM clusters WHERE fed_owner != ''")
+    for table in ('federation_identity_map', 'federation_sync_state'):
+        try:
+            conn.execute(f'DELETE FROM {table}')
+        except Exception as e:
+            if 'no such table' not in str(e):
+                raise
+    conn.execute('DELETE FROM pegaprox_kv WHERE k = ?', (IDENTITY_KEY,))
+    conn.commit()
+    try:
+        os.unlink(_runtime['lease_file'])
+    except FileNotFoundError:
+        pass
+    for key in ('identity', 'leases', 'owners', 'signer', 'clusters_body'):
+        _runtime[key] = None
+    _runtime['fkeys'] = {}
 
 
 # --- federation field keys -----------------------------------------------------------------
@@ -2654,8 +3060,21 @@ def _note_unmapped(conn, home, held, seen):
     account count where it moved, and the unmapped rows nobody names any more deleted. A
     mapped row is never deleted here - the admin's decision survives a home that drops a
     tenant for a while. Nothing is written when nothing moved: the table rides the HA sync,
-    and a needless write would count as a change there."""
+    and a needless write would count as a change there.
+
+    The rows nobody names any more go first, so they do not count against MAX_MAP_ROWS:
+    a value that replaces one at the cap gets its row in the same apply."""
     rows = len(held)
+    for (kind, value), (local, n) in held.items():
+        if (kind, value) in seen:
+            continue
+        if not local:
+            conn.execute('DELETE FROM federation_identity_map WHERE home = ? AND kind = ? '
+                         'AND home_value = ?', (home, kind, value))
+            rows -= 1
+        elif n:
+            conn.execute('UPDATE federation_identity_map SET users = 0 WHERE home = ? AND '
+                         'kind = ? AND home_value = ?', (home, kind, value))
     for (kind, value), n in sorted(seen.items()):
         have = held.get((kind, value))
         if have is None:
@@ -2672,15 +3091,6 @@ def _note_unmapped(conn, home, held, seen):
         elif have[1] != n:
             conn.execute('UPDATE federation_identity_map SET users = ? WHERE home = ? AND '
                          'kind = ? AND home_value = ?', (n, home, kind, value))
-    for (kind, value), (local, n) in held.items():
-        if (kind, value) in seen:
-            continue
-        if not local:
-            conn.execute('DELETE FROM federation_identity_map WHERE home = ? AND kind = ? '
-                         'AND home_value = ?', (home, kind, value))
-        elif n:
-            conn.execute('UPDATE federation_identity_map SET users = 0 WHERE home = ? AND '
-                         'kind = ? AND home_value = ?', (home, kind, value))
 
 
 def _quarantine_mapped(conn, home, kind, old_local):
@@ -3231,10 +3641,35 @@ def sync_state():
         return {}
 
 
+# one pull per member at a time: the worker, the admin's sync, a mapping and a join all
+# pull, and a snapshot fetched first but applied last would put an older state back (an
+# account the home disabled meanwhile enabled again) and keep the older etag
+_pull_locks = {}
+_pull_locks_guard = threading.Lock()
+
+
+def _pull_lock(sender):
+    with _pull_locks_guard:
+        lock = _pull_locks.get(sender)
+        if lock is None:
+            if len(_pull_locks) >= 4 * MAX_SITES:
+                for k in [k for k, v in _pull_locks.items() if not v.locked()]:
+                    _pull_locks.pop(k, None)
+            lock = _pull_locks[sender] = threading.Lock()
+        return lock
+
+
 def pull_identities(sender, extra_headers=None):
     """Pull the identities of member `sender`: 304 when nothing changed since the last pull,
     else the snapshot applied. The answer carries the member's signature over this request's
-    nonce (checked in _send). Returns a report or None for nothing to do; raises nothing."""
+    nonce (checked in _send). Returns a report or None for nothing to do; raises nothing.
+    The fetch and the apply of one member hold its pull lock: a second pull waits and then
+    fetches afresh."""
+    with _pull_lock(sender):
+        return _pull_identities(sender, extra_headers)
+
+
+def _pull_identities(sender, extra_headers=None):
     rec = member_record(sender)
     if rec is None or not rec.get('url'):
         return None
@@ -3271,9 +3706,9 @@ def drop_orphan_mirrors():
     if _ha_standby():
         return []
     try:
-        keep = set(members())
+        keep = set(members()) | _drops_pending()
         me = instance_id()
-    except FederationError as e:
+    except Exception as e:
         logging.warning(f'[FED] the orphan sweep of mirrored accounts is skipped: {e}')
         return []
     homes = set()
@@ -3368,7 +3803,11 @@ def enrolled_cluster_rows():
     """The cluster rows this instance leads, as the snapshot carries them: the credential
     columns opened with the database key and wrapped under the federation field key. A
     table that cannot be read raises: an empty list would read as "nothing led", and the
-    puller's diff would delete every mirror of this instance's clusters."""
+    puller's diff would delete every mirror of this instance's clusters.
+
+    A credential that does not open here travels as null, not as '': an empty value is a
+    credential that was taken away, and the mirrors would drop the last copy they can open
+    after this site is gone (_apply_cluster_mirrors keeps what it holds for a null)."""
     try:
         cur = _identities_conn().execute(
             'SELECT %s FROM clusters WHERE fed_owner = ? ORDER BY id'
@@ -3387,9 +3826,9 @@ def enrolled_cluster_rows():
                 row[col] = wrap_credential(db._decrypt(value), row['id'], col)
             except Exception as e:
                 _say_once(('wrap', row['id'], col),
-                          f"[FED] {col} of cluster {row['id']} does not open here and "
-                          f"travels empty: {e}")
-                row[col] = ''
+                          f"[FED] {col} of cluster {row['id']} does not open here; the "
+                          f"other sites keep the copy they hold: {e}")
+                row[col] = None
     return rows
 
 
@@ -3406,8 +3845,10 @@ def _apply_cluster_mirrors(home, rows_in, report, changes=None):
     only when this instance's own promise for the cluster names `home`, and a row led here
     becomes `home`'s mirror only on the evidence federation_lease.may_convert() asks for.
     A local row is never touched. Credential columns must be empty or wrapped ('fedk1:'),
-    so no foreign database ciphertext ever lands here. Each changed row is one entry in
-    `changes`, which the identity half audits with its own (_audit_applied)."""
+    so no foreign database ciphertext ever lands here; a null one did not open at the home
+    (enrolled_cluster_rows), and a mirror of that home keeps the value it holds. Each
+    changed row is one entry in `changes`, which the identity half audits with its own
+    (_audit_applied)."""
     if not isinstance(rows_in, list):
         return
     if changes is None:
@@ -3454,6 +3895,9 @@ def _apply_cluster_mirrors(home, rows_in, report, changes=None):
             continue
         owner = held['fed_owner'] or ''
         if owner == home:
+            # a credential the home could not open comes as null: the copy held stays
+            values = [held[c] if c in CLUSTER_ENCRYPTED_COLUMNS and row.get(c) is None else v
+                      for c, v in zip(rest, values)]
             if all(held[c] == v for c, v in zip(rest, values)):
                 report['unchanged'] += 1
                 continue
@@ -3557,8 +4001,13 @@ def own_clusters_body():
 
 
 def peer_clusters_body():
+    """What /peer/clusters answers. A cluster that is not enrolled goes without its id:
+    the others know an id once the cluster is enrolled, and an id known before would let
+    a member claim it first (enroll a row of its own under it)."""
     own = own_clusters_body()
-    return {'instance_id': instance_id(), 'clusters': own[:MAX_VIEW_ROWS], 'total': len(own)}
+    rows = [r if r.get('enrolled') else {k: v for k, v in r.items() if k != 'id'}
+            for r in own[:MAX_VIEW_ROWS]]
+    return {'instance_id': instance_id(), 'clusters': rows, 'total': len(own)}
 
 
 def _count(value):
@@ -3567,12 +4016,19 @@ def _count(value):
 
 
 def _view_row(r):
-    if not isinstance(r, dict) or not isinstance(r.get('id'), str) \
-            or not CLUSTER_ID_RE.fullmatch(r['id']):
+    """One row of a member's linked view as the tab shows it. An enrolled row carries its
+    id; a row that is not enrolled comes without one (peer_clusters_body)."""
+    if not isinstance(r, dict):
         return None
-    out = {'id': r['id'], 'name': str(r.get('name') or '')[:80],
+    enrolled = r.get('enrolled') is True
+    cid = r.get('id')
+    if enrolled and not (isinstance(cid, str) and CLUSTER_ID_RE.fullmatch(cid)):
+        return None
+    out = {'name': str(r.get('name') or '')[:80],
            'type': r.get('type') if r.get('type') in CLUSTER_TYPES else 'other',
-           'enabled': r.get('enabled') is True, 'enrolled': r.get('enrolled') is True}
+           'enabled': r.get('enabled') is True, 'enrolled': enrolled}
+    if enrolled:
+        out['id'] = cid
     for field in ('nodes', 'vms'):
         n = _count(r.get(field))
         if n is not None:
@@ -3680,7 +4136,7 @@ def _sync_tick():
 
 def _lease_tick():
     from pegaprox.core import federation_lease as fl
-    fl.lease_round()
+    fl.lease_round(tick=True)
 
 
 def _sweep_cluster_orphans():
@@ -3689,7 +4145,11 @@ def _sweep_cluster_orphans():
     me = instance_id()
     if not me:
         return 0
-    keep = ['', me] + sorted(members())
+    try:
+        keep = ['', me] + sorted(set(members()) | _drops_pending())
+    except Exception as e:
+        logging.warning(f'[FED] the sweep of orphaned cluster mirrors is skipped: {e}')
+        return 0
     try:
         conn = _db().conn
         marks = ", ".join("?" * len(keep))
@@ -3749,18 +4209,26 @@ def guard_exit(cluster_id, action, kind=None):
     this instance may write there (an unenrolled cluster, or an enrolled one this
     instance holds a live lease on).
 
+    A thaw of the guest agent (kind 'thaw') passes: it only undoes a freeze this instance
+    sent a moment before, and refused it would leave the guest's file systems frozen
+    until somebody notices.
+
     With the federation off the exits do not ask (ha_transport checks the switch first),
     and the cluster reads leave every row a federation owns out, so no manager writes one.
-    A caller that asks anyway is refused for such a row: nothing fences it while off."""
-    if not cluster_id or kind in ('console', 'login'):
-        return
+    A caller that asks anyway is refused for such a row: nothing fences it while off.
+
+    Returns True when the call went out as a write past the lease check (a cluster that
+    is not enrolled counts as well), False when it passed as a read, a console, a login or
+    a thaw: what is under way is kept for cut_cluster only after a write."""
+    if not cluster_id or kind in ('console', 'login', 'thaw'):
+        return False
     if not enabled():
         try:
             owner = cluster_owner(cluster_id)
         except FederationError:
             owner = 'unknown'
         if not owner:
-            return
+            return True
         _say_once(('refused-off', cluster_id), f'[FED] {action} to cluster {cluster_id} '
                                                'refused: it is enrolled in a federation that '
                                                'is switched off here')
@@ -3768,15 +4236,15 @@ def guard_exit(cluster_id, action, kind=None):
     from pegaprox.core import ha
     if kind == 'ssh' and ha.in_read_request():
         # a GET answered here: the command is how the read gets to the node
-        return
+        return False
     if ha.reading_now():
-        return
+        return False
     try:
         ok = takes_writes_for(cluster_id)
     except FederationError:
         ok = False
     if ok:
-        return
+        return True
     said = _refusal_list()
     if said is not None:
         said.append(cluster_id)
@@ -3794,6 +4262,16 @@ def takes_writes_for(cluster_id):
     owner table cannot be read."""
     from pegaprox.core import federation_lease as fl
     return fl.takes_writes_for(cluster_id)
+
+
+def is_enrolled(cluster_id):
+    """Whether a federation owns the row of `cluster_id` (enrolled here, or a mirror).
+    True when the owner table cannot be read: the caller then treats it as fenced."""
+    from pegaprox.core import federation_lease as fl
+    try:
+        return bool(fl._owner_map().get(cluster_id))
+    except FederationError:
+        return True
 
 
 def worker_takes_writes_for(cluster_id):
@@ -3822,6 +4300,19 @@ def lease_round(only=None, adopt=frozenset()):
 def release(cluster_id):
     from pegaprox.core import federation_lease as fl
     return fl.release(cluster_id)
+
+
+def forget_deleted_cluster(cluster_id, owner):
+    """A cluster row this instance deleted (the cluster route). Its lease is given back
+    and forgotten; a row it led (`owner`, the row's fed_owner before the delete) stays on
+    record as its own, as an unenroll leaves one. With no row and no record its vote
+    would back a stale former owner's plain ask for the id, which a majority could then
+    lease again - beside a cluster re-added here from the same hosts."""
+    from pegaprox.core import federation_lease as fl
+    me = instance_id()
+    if owner and owner == me:
+        note_dropped([(cluster_id, me)])
+    fl.forget_cluster(cluster_id)
 
 
 def drop_owner_cache():

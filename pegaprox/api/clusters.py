@@ -1266,18 +1266,27 @@ def delete_cluster(cluster_id):
     # MK: Delete cluster and all related data from database
     try:
         db = get_db()
+        # who led the row, read before it goes (only while the federation is switched on)
+        _fed_owner = None
+        try:
+            from pegaprox.core import federation as _fed_core
+            if _fed_core.enabled():
+                _fed_owner = _fed_core.cluster_owner(cluster_id)
+        except Exception:
+            _fed_owner = None
         # #779 (zobsg) — db.delete_cluster now sweeps EVERY cluster_id-keyed table (vm_acls,
         # affinity_rules, cluster_alerts, pool_permissions, node_maintenance, … ~20 of them), so the
         # per-table DELETEs that used to live here are gone — they only ever covered three of them.
         db.delete_cluster(cluster_id)
 
         # the federation lease goes with the cluster - the voters hear it, so the next one
-        # to hold this id starts without waiting out an old promise. Only while the
-        # federation is switched on
+        # to hold this id starts without waiting out an old promise - and an enrolled row
+        # stays on record as this instance's, so its vote backs no stale owner for the id.
+        # Only while the federation is switched on
         try:
             from pegaprox.core import federation as _fed_core
             if _fed_core.enabled():
-                _fed_core.release(cluster_id)
+                _fed_core.forget_deleted_cluster(cluster_id, _fed_owner)
                 _fed_core.drop_owner_cache()
         except Exception:
             pass

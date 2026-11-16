@@ -849,11 +849,9 @@ def execute_planned_failover(plan_id):
         return busy
     # MK Nov 2026 - a planned failover stops guests at the source and starts them at the
     # target: both need this instance's federation lease before anything starts
-    from pegaprox.api.federation import refuse_unleased
-    for _cid in (plan['source_cluster'], plan['target_cluster']):
-        refused = refuse_unleased(_cid, f'cluster {_cid}')
-        if refused:
-            return refused
+    refused = _refuse_unleased(plan['source_cluster'], plan['target_cluster'])
+    if refused:
+        return refused
 
     src_mgr = cluster_managers.get(plan['source_cluster'])
     tgt_mgr = cluster_managers.get(plan['target_cluster'])
@@ -899,6 +897,19 @@ def execute_planned_failover(plan_id):
     return jsonify({'message': 'Planned failover started', 'status': 'running'})
 
 
+def _refuse_unleased(*cluster_ids):
+    """409 FED_NO_LEASE for the first of `cluster_ids` this instance holds no federation
+    lease on, before a run marks the plan and starts: the worker would only fail at its
+    first write and report the run as failed. None otherwise, and while the federation is
+    off."""
+    from pegaprox.api.federation import refuse_unleased
+    for cid in cluster_ids:
+        refused = refuse_unleased(cid, f'cluster {cid}')
+        if refused:
+            return refused
+    return None
+
+
 @bp.route('/api/site-recovery/plans/<plan_id>/emergency', methods=['POST'])
 @require_auth(perms=['site_recovery.failover'])
 def execute_emergency_failover(plan_id):
@@ -931,6 +942,11 @@ def execute_emergency_failover(plan_id):
     busy = _run_under_way(plan_id)
     if busy:
         return busy
+    # the replicas start on the target: its lease before the plan is marked running. The
+    # source is not asked - it may be the site that is gone
+    refused = _refuse_unleased(plan['target_cluster'])
+    if refused:
+        return refused
 
     tgt_mgr = cluster_managers.get(plan['target_cluster'])
     if not tgt_mgr or not tgt_mgr.is_connected:
@@ -999,6 +1015,10 @@ def execute_test_failover(plan_id):
     busy = _run_under_way(plan_id)
     if busy:
         return busy
+    # the test clones are made and started on the target
+    refused = _refuse_unleased(plan['target_cluster'])
+    if refused:
+        return refused
 
     tgt_mgr = cluster_managers.get(plan['target_cluster'])
     if not tgt_mgr or not tgt_mgr.is_connected:
@@ -1048,6 +1068,10 @@ def cleanup_test_failover(plan_id):
     busy = _run_under_way(plan_id)
     if busy:
         return busy
+    # the test clones are stopped and deleted on the target
+    refused = _refuse_unleased(plan['target_cluster'])
+    if refused:
+        return refused
 
     from pegaprox.background.site_recovery import cleanup_test
     if _safe_spawn_failover(cleanup_test, plan_id) is False:
@@ -1091,6 +1115,10 @@ def execute_failback(plan_id):
     busy = _run_under_way(plan_id)
     if busy:
         return busy
+    # the guests go back from the target to the source: a write on both
+    refused = _refuse_unleased(plan['source_cluster'], plan['target_cluster'])
+    if refused:
+        return refused
 
     # MK Oct 2026 - per guest: a guest still at the source has no copy to bring home, and
     # migrating its replica over it is what the worker refuses anyway

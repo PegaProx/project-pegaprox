@@ -23,7 +23,7 @@ from pegaprox.utils.auth import (
 )
 from pegaprox.utils.audit import log_audit, is_audit_pseudo_actor
 from pegaprox.utils.oidc import OIDC_AUTH_SOURCES, oidc_key_names_a_subject
-from pegaprox.api.federation import refuse_foreign
+from pegaprox.api.federation import refuse_foreign, refuse_mirror_caller
 from pegaprox.utils.rbac import (
     invalidate_tenants_cache,
     load_custom_roles, save_custom_roles, get_custom_roles, invalidate_roles_cache,
@@ -476,11 +476,19 @@ def reset_oidc_binding(username):
     An account keyed on the part before the @ of an address (releases that cut the name
     there) is found by its sub too, and cannot be told from a provider username without
     an @: the admin is told in the confirmation to delete such an account instead.
+
+    With the federation on, a caller whose account is mirrored from another site resets
+    no binding here (403 FED_MIRROR_ADMIN), and a mirrored account is reset at its home
+    (409 FED_FOREIGN).
     """
     users_db = load_users()
     username = find_user_key(users_db, username)
     if username is None:
         return jsonify({'error': 'User not found'}), 404
+    # whoever signs in next under this name gets the account: not a mirrored admin's call
+    denied = refuse_foreign('users', (username,), f'User {username}')
+    if denied:
+        return denied
 
     user = users_db[username]
     _ct = _caller_tenant_or_none()
@@ -1573,6 +1581,11 @@ def create_tenant():
     MK: Improved to handle duplicate names by adding suffix
     """
     global tenants_db
+    # MK Nov 2026 - accounts, tenants and roles here are administered by this instance's
+    # own accounts, never by one mirrored from another federation member
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
 
     # NS Oct 2026 (#1060) - admin.tenants inside a tenant edits that tenant (update_tenant).
     # A new tenant names its clusters, which only a global admin assigns.
@@ -1638,6 +1651,9 @@ def create_tenant():
 def update_tenant(tenant_id):
     """Update tenant"""
     global tenants_db
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     
     tenants_db = load_tenants()
     
@@ -1732,6 +1748,9 @@ def get_tenant_quota(tenant_id):
 def delete_tenant(tenant_id):
     """Delete tenant"""
     global tenants_db
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
 
     # same as create_tenant: a tenant-scoped admin.tenants holder deleted any tenant that had
     # no accounts yet, another one's included (#1060)
@@ -1876,6 +1895,9 @@ def list_all_roles():
 @require_auth(perms=['admin.roles'])
 def create_custom_role():
     """Create a new custom role"""
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     data = request.json or {}
     
     role_id = data.get('id', '').lower().strip()
@@ -1971,6 +1993,9 @@ def create_custom_role():
 @require_auth(perms=['admin.roles'])
 def update_custom_role(role_id):
     """Update a custom role"""
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     if role_id in BUILTIN_ROLES:
         return jsonify({'error': 'Cannot modify builtin roles'}), 400
 
@@ -2031,6 +2056,9 @@ def update_custom_role(role_id):
 @require_auth(perms=['admin.roles'])
 def delete_custom_role(role_id):
     """Delete a custom role"""
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     if role_id in BUILTIN_ROLES:
         return jsonify({'error': 'Cannot delete builtin roles'}), 400
     
@@ -2132,6 +2160,9 @@ def get_role_templates():
 @require_auth(perms=['admin.roles'])
 def apply_role_template(template_id):
     """Create a new role from a template"""
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     if template_id not in ROLE_TEMPLATES:
         return jsonify({'error': 'Template not found'}), 404
     

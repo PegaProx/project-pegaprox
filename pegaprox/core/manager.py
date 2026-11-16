@@ -108,6 +108,7 @@ from pegaprox.utils.concurrent import GEVENT_PATCHED
 from pegaprox.core.db import get_db
 from pegaprox.core import ha  # PegaProx's own warm standby (#625), not PVE HA
 from pegaprox.core import ha_transport, ha_vote
+from pegaprox.core.federation import LeaseRefused
 from pegaprox.core import rolling_runs
 from pegaprox.core import node_creds
 from pegaprox.core import node_history
@@ -6474,6 +6475,13 @@ class PegaProxManager:
             if not ha.is_active():
                 self.logger.warning(f"[HA] Recovery of {failed_node} dropped - this PegaProx instance stepped down")
                 return
+            # MK Nov 2026 - the wait above outlasts a federation lease: an enrolled cluster
+            # whose lease ran out meanwhile is the leading site's to recover
+            from pegaprox.core import federation as _fed
+            if _fed.enabled() and not _fed.worker_takes_writes_for(self.id):
+                self.logger.warning(f"[HA] Recovery of {failed_node} dropped - this instance holds "
+                                    "no live federation lease on the cluster any more")
+                return
 
             # before anything is done to the node: only from the quorate side of the
             # cluster, see _ha_recovery_allowed (#625)
@@ -11363,8 +11371,10 @@ echo "AGENT_INSTALLED_OK"
             target_real = os.path.realpath(poison_file)
             if os.path.commonpath([base_real, target_real]) != base_real:
                 raise Exception('poison pill path escaped base directory')
-            # a file on shared storage the node's agent acts on: an exit like any other (#625)
-            ha.guard(f'poison pill for {target_node}')
+            # a file on shared storage the node's agent acts on: an exit like any other
+            # (#625), and one that needs the federation's lease on this cluster as well
+            ha_transport.guard_write(f'poison pill for {target_node}',
+                                     cluster_id=getattr(self, 'id', None))
             with open(target_real, 'w') as f:
                 import json
                 json.dump(poison_data, f)
@@ -14138,8 +14148,8 @@ echo "AGENT_INSTALLED_OK"
                             task.add_output(f"Skipping reboot for node: {node_name}")
                             task.reboot_issued = False   # #715 — no reboot: RU must NOT wait for offline
 
-                    except ha.GuardRefused:
-                        # nothing was sent: no reboot to wait for (#625)
+                    except (ha.GuardRefused, LeaseRefused):
+                        # nothing was sent: no reboot to wait for (#625), and no reboot alert
                         raise
                     except Exception as e:
                         self.logger.info(f"Reboot command sent (connection closed as expected): {e}")
@@ -16013,10 +16023,13 @@ echo "AGENT_INSTALLED_OK"
                 try:
                     host = self.host
                     thaw_url = f"https://{host}:{self.api_port}/api2/json/nodes/{node}/qemu/{vmid}/agent/fsfreeze-thaw"
+                    # the thaw passes the federation's fence even when the lease ran out
+                    # meanwhile (federation.guard_exit, kind 'thaw')
                     self._create_session().post(thaw_url, timeout=30)
                     self.logger.info(f"FS thawed for {vm_type}/{vmid}")
                 except Exception as e:
-                    self.logger.error(f"FS thaw failed for {vm_type}/{vmid}: {e}")
+                    self.logger.error(f"FS thaw failed for {vm_type}/{vmid} - its file systems may "
+                                      f"stay frozen until 'qm guest cmd {vmid} fsfreeze-thaw' runs: {e}")
 
         # Save to DB
         snap_id = str(uuid.uuid4())
