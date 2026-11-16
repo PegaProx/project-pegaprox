@@ -10443,11 +10443,12 @@
                         ...(method !== 'GET' ? { body: JSON.stringify(body || {}) } : {})
                     });
                 } catch (_) {
-                    return { ok: false, error: fallback, code: '' };
+                    // every result carries data, an answer or not: a caller reads its fields
+                    return { ok: false, error: fallback, code: '', data: {} };
                 }
                 const data = await r.json().catch(() => null);
                 if (!r.ok) {
-                    if (r.status === 401) { logout(); return { ok: false, error: fallback, code: 'AUTH' }; }
+                    if (r.status === 401) { logout(); return { ok: false, error: fallback, code: 'AUTH', data: {} }; }
                     return { ok: false, status: r.status, error: (data && data.error) || fallback, code: (data && data.code) || '', data: data || {} };
                 }
                 return { ok: true, data: data || {} };
@@ -10580,8 +10581,8 @@
 
             // ---- the switch: on after a confirm step, off at once unless the server
             // refuses it (still a member, a lease, mirrors - leave the federation first)
-            // after a removal as gone for good the server asks once more while that site was
-            // never told: switched off, this instance can no longer tell it
+            // after a removal as gone for good the server asks once more while that site has
+            // not confirmed it was told: switched off, this instance can no longer tell it
             async function flip(value, untoldOk) {
                 setBusy('switch'); setSwitchError('');
                 const r = await fedSend('POST', 'switch', { enabled: value, ...(untoldOk ? { untold_ok: true } : {}) }, t('fedActionFailed'));
