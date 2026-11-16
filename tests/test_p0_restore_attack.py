@@ -660,6 +660,22 @@ def test_the_sweep_leaves_a_guest_that_is_not_the_runs_own(clock, db):
     assert row['status'] == 'error' and 'left alone' in row['error']
 
 
+def test_the_sweep_is_not_stuck_behind_rows_it_cannot_reach(clock, db):
+    """Fifty older leftovers of a cluster that has no manager here (deleted, or not this
+    instance's to write) filled the sweep's fifty rows: c1's copy was never looked at."""
+    pve = _RefusesDestroy()
+    pve.is_connected = True
+    st = bv.run_verification(pve, _params())
+    assert st['cleanup_ok'] is False and TEST_VMID in pve.guests
+    for i in range(50):
+        db.conn.execute("INSERT INTO backup_verifications (id, cluster_id, vmid, node, test_vmid, "
+                        "started_at, status, phase, details) VALUES (?, 'c-gone', 100, 'pve1', "
+                        "9000, ?, 'error', 'leftover', '{}')", (f'gone-{i}', f'2000-01-01T00:{i:02d}:00'))
+    db.conn.commit()
+    pve.refuse = False
+    assert bv.sweep({'c1': pve}) == 1 and TEST_VMID not in pve.guests
+
+
 def test_the_active_route_masks_the_command_too(report, db, monkeypatch):
     checks = [{'check': 'command', 'target': SECRET, 'ok': False, 'detail': 'exit code 1'}]
     run = {'id': 't9', 'cluster_id': 'c1', 'vmid': 100, 'status': 'running', 'checks': checks,
