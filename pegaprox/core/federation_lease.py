@@ -31,8 +31,9 @@ that member's lease on it. The rules, and why they make two writers impossible:
   * a promise carries an id of its own (pid) that the grant answers with. A release
     names the pid it gives back, so a release that arrives late never ends a newer
     promise of the same holder, and a round that a release overtook writes no lease.
-    Each round carries a mark that grows from round to round (the wall clock, taken
-    with the snapshot of the leases under the lock a release takes too). A voter keeps
+    Each round carries a mark that grows from round to round (the wall clock, never
+    below the last mark, which the lease file keeps across a restart, taken with the
+    snapshot of the leases under the lock a release takes too). A voter keeps
     the mark with the promise and refuses a renewal from an older round ('stale'): a
     round that a release overtook, delayed on its way, would otherwise swap the pid of
     the newer round's promise for one it then gives back.
@@ -322,15 +323,17 @@ def _mark_of(rec):
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
 
 
-def _round_mark():
+def _round_mark(st):
     """The mark of the next round of this instance: the wall clock, and never less than
     the last one plus a little. Taken under fed._lock with the snapshot of the leases, so
     a round that started before a release carries a smaller mark than any round after
-    it. The wall clock lets the next host of the HA group go on from about where this one
-    left off."""
-    last = float(fed._runtime.get('round_mark') or 0.0)
+    it. The last mark is kept in the lease state `st` and saved with it, so a restart
+    after the wall clock stepped back goes on from it, and the voters do not refuse its
+    rounds as stale. The wall clock lets the next host of the HA group go on from about
+    where this one left off."""
+    last = max(float(fed._runtime.get('round_mark') or 0.0), float(st.get('round_mark') or 0.0))
     mark = max(time.time(), last + 1e-6)
-    fed._runtime['round_mark'] = mark
+    fed._runtime['round_mark'] = st['round_mark'] = mark
     return mark
 
 
@@ -652,7 +655,7 @@ def lease_round(only=None, adopt=frozenset(), no_convert=frozenset(), tick=False
         if check_clock(st):
             fed._save_leases(st)
         mine = {cid: dict(rec) for cid, rec in st['my_leases'].items()}
-        mark = _round_mark()
+        mark = _round_mark(st)
     try:
         owners = _owner_map()
     except FederationError as e:
@@ -1122,15 +1125,17 @@ def unenroll_clusters(cluster_ids):
 
 
 def _finish_unenroll(cluster_ids):
-    """The rows are this instance's alone again: leases given back in one batch, owners
-    cleared, the ids on record as this instance's (its own vote backs no other candidate
-    for them either)."""
+    """The rows are this instance's alone again: owners cleared, leases given back in one
+    batch, the ids on record as this instance's (its own vote backs no other candidate
+    for them either). The owners go first, so the clusters count as this instance's own
+    while the releases are out, and the watch of ha_transport stops nothing under way on
+    them."""
     if not cluster_ids:
         return
     me = fed.instance_id()
-    _release_many(cluster_ids, hand_over=False)
     for cid in cluster_ids:
         _set_owner(cid, '', expect=me)
+    _release_many(cluster_ids, hand_over=False)
     fed.note_dropped([(cid, me) for cid in cluster_ids])
 
     def go(st):

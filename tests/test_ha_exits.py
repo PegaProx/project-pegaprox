@@ -363,10 +363,11 @@ EXITS = {
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_ping_host', 'socket'): (1, 'read'),
     ('pegaprox/utils/ssh.py', '_ssh_exec._make_sock', 'socket'): (1, 'guard'),
     ('pegaprox/core/xhm.py', '_connect_ssh', 'ssh-paramiko'): (3, 'guard'),
-    ('pegaprox/core/xhm.py', '_run_xcpng_to_pve', 'ssh-exec'): (6, 'client'),
+    ('pegaprox/core/xhm.py', '_run_xcpng_to_pve', 'ssh-exec'): (3, 'client'),
     ('pegaprox/core/xhm.py', '_run_pve_to_xcpng', 'ssh-exec'): (2, 'client'),
-    ('pegaprox/core/xhm.py', '_run_esxi_to_pve', 'ssh-exec'): (14, 'client'),
+    ('pegaprox/core/xhm.py', '_run_esxi_to_pve', 'ssh-exec'): (15, 'client'),
     ('pegaprox/core/xhm.py', '_ssh_cleanup', 'ssh-exec'): (1, 'client'),
+    ('pegaprox/core/xhm.py', '_free_partial', 'ssh-exec'): (1, 'client'),
     ('pegaprox/core/xhm.py', '_run_esxi_to_xcpng', 'subprocess'): (2, 'local'),
     ('pegaprox/core/incremental_repl.py', '_relay_pipe', 'ssh-exec'): (2, 'client'),
     ('pegaprox/core/incremental_repl.py', '_relay_pipe._slurp', 'ssh-exec'): (1, 'client'),
@@ -522,13 +523,15 @@ def test_the_inventory_counts_what_the_report_says():
     # asking systemctl in one helper, the join fingerprint read through tls_fingerprint,
     # and the QDevice setup with its QNetd hosts, and the stored key's leg of _pve_node_exec,
     # less the ESXi guest config over REST (the API has no such call), and the session of
-    # the federation's member calls (kept per member address since the batched rounds):
-    # 260 calls out of this process, 155 (function, kind) pairs in 141 functions; 45 of
-    # them guarded at the exit and 88 execs on a client from a guarded factory. No route
+    # the federation's member calls (kept per member address since the batched rounds),
+    # the three frees of a partial volume of the XCP-ng transfer in one helper and the
+    # cleanup of a failed ESXi disk:
+    # 259 calls out of this process, 156 (function, kind) pairs in 142 functions; 45 of
+    # them guarded at the exit and 87 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 260 and len(EXITS) == 155
-    assert len({(f, q) for f, q, _k in EXITS}) == 141
-    assert by['guard'] == 45 and by['client'] == 88
+    assert sum(n for n, _v in EXITS.values()) == 259 and len(EXITS) == 156
+    assert len({(f, q) for f, q, _k in EXITS}) == 142
+    assert by['guard'] == 45 and by['client'] == 87
 
 
 @pytest.mark.parametrize('key', sorted(k for k, v in EXITS.items() if v[1] == 'guard'),

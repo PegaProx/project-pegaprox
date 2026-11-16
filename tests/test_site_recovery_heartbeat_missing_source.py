@@ -121,3 +121,29 @@ def test_the_cluster_coming_back_re_arms_normally(db, plan, heartbeat):
     sr._heartbeat_check()
 
     assert heartbeat, 'the plan stayed held after its cluster came back'
+
+
+def test_a_plan_held_for_its_lease_says_so_once(db, plan, heartbeat, monkeypatch, caplog):
+    """A plan whose target cluster is enrolled in the federation without a live lease here
+    is held at every heartbeat, and says so once until the lease comes back."""
+    import logging
+    from pegaprox.core import federation
+    plan()
+    _connected(PROD, connected=False)
+    _connected(DR)
+    monkeypatch.setattr(sr, '_held_logged', set(), raising=False)
+    monkeypatch.setattr(federation, 'enabled', lambda: True)
+    lease = {'held': False}
+    monkeypatch.setattr(federation, 'worker_takes_writes_for', lambda cid: lease['held'])
+    caplog.set_level(logging.INFO, logger='pegaprox.site_recovery')
+
+    def said():
+        return len([r for r in caplog.records if 'held: this instance' in r.getMessage()])
+    for _ in range(3):
+        sr._heartbeat_check()
+    assert said() == 1 and heartbeat == []
+    lease['held'] = True
+    sr._heartbeat_check()
+    lease['held'] = False
+    sr._heartbeat_check()
+    assert said() == 2

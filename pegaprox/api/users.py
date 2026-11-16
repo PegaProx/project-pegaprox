@@ -810,6 +810,9 @@ def reset_all_password_expiry():
     MK: This is useful after a security incident or when rotating passwords company-wide
     Can include admins too if the admin explicitly asks for it
     """
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     data = request.json or {}
     include_admins = data.get('include_admins', False)  # opt-in for admins
     

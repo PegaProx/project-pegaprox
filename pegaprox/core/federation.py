@@ -858,8 +858,9 @@ def _started():
 # --- the lease file: what belongs to this host alone ----------------------------------
 
 def _blank_leases():
-    return {'v': 1, 'clock': {}, 'hold_until': 0.0, 'view_changed': 0.0, 'my_leases': {},
-            'promises': {}, 'pairing': None, 'pairing_spent': None, 'epoch_kept': None}
+    return {'v': 1, 'clock': {}, 'hold_until': 0.0, 'view_changed': 0.0, 'round_mark': 0.0,
+            'my_leases': {}, 'promises': {}, 'pairing': None, 'pairing_spent': None,
+            'epoch_kept': None}
 
 
 def _load_lease_file(path):
@@ -877,7 +878,7 @@ def _load_lease_file(path):
         for key in st:
             if key in raw and isinstance(raw[key], type(st[key]) if st[key] is not None else object):
                 st[key] = raw[key]
-        for key in ('hold_until', 'view_changed'):
+        for key in ('hold_until', 'view_changed', 'round_mark'):
             if isinstance(raw.get(key), (int, float)) and not isinstance(raw.get(key), bool):
                 st[key] = float(raw[key])
     for key in ('my_leases', 'promises'):
@@ -3361,6 +3362,17 @@ def _apply_users(conn, home, incoming, maps, scope, seen, report, changes, raise
         if bad or values is None:
             _conflict(report, f'user "{name[:64]}" carries no readable '
                               f'{bad[0] if bad else "row"} - skipped')
+            # the home still lists it: the mirror stays with its grants here, signed out
+            # until a row that reads comes, since this one may disable it or change its
+            # password
+            keep.add(kv)
+            held = held_rows.get(kv)
+            if held is not None and held['fed_home'] == home and held.get('enabled'):
+                conn.execute('UPDATE users SET enabled = 0 WHERE username = ? AND fed_home = ?',
+                             (name, home))
+                ended.add(name)
+                changes.append(('user', _label(table, row), '~',
+                                'unreadable at the home, signed out here'))
             continue
         held = held_rows.get(kv)
         if held is not None and held['fed_home'] != home:
@@ -4209,9 +4221,12 @@ def guard_exit(cluster_id, action, kind=None):
     this instance may write there (an unenrolled cluster, or an enrolled one this
     instance holds a live lease on).
 
-    A thaw of the guest agent (kind 'thaw') passes: it only undoes a freeze this instance
-    sent a moment before, and refused it would leave the guest's file systems frozen
-    until somebody notices.
+    A thaw of the guest agent (kind 'thaw') passes: it only resumes the guest's file system
+    I/O. Every thaw in pegaprox/ follows a freeze of its own, which needed the lease
+    (test_federation_write_gate pins that). Sent after the lease went, the worst it does is
+    end a freeze another site made for its own snapshot, which is then only
+    crash-consistent. Refused, it would leave the guest frozen, every write in it hanging,
+    until somebody thaws it by hand.
 
     With the federation off the exits do not ask (ha_transport checks the switch first),
     and the cluster reads leave every row a federation owns out, so no manager writes one.

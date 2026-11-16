@@ -270,6 +270,49 @@ def test_a_user_without_access_gets_the_routes_403(api, seed, led):
     assert 'FED_' not in str(r.get_json(silent=True)) and sent == []
 
 
+def test_a_refused_deep_scan_closes_its_client(api, seed, led, monkeypatch):
+    """A storage rescan with deep_scan on c-led: the first command of its client is
+    refused at the exit, and the client it connected is closed all the same, not left to
+    the node to drop. Counterproof: with the lease the command goes out."""
+    import threading
+    import types
+    import paramiko
+    import pegaprox.utils.ssh_security as sec
+    from pegaprox import globals as _g
+    from test_ha_guard_rounds import pve
+    sent, closed = [], []
+
+    def exec_command(self, cmd, *a, **k):
+        sent.append(cmd)
+        raise RuntimeError('stopped by the test')
+    monkeypatch.setattr(paramiko.SSHClient, 'connect', lambda self, *a, **k: None)
+    monkeypatch.setattr(paramiko.SSHClient, 'exec_command', exec_command)
+    monkeypatch.setattr(paramiko.SSHClient, 'close', lambda self: closed.append(self))
+    monkeypatch.setattr(sec, 'persist_host_keys', lambda c: None)
+    monkeypatch.setattr(_g, '_ssh_semaphore', threading.BoundedSemaphore(4))
+    m = pve()
+    m.id = 'c-led'
+    m._get_node_ip = lambda n: '10.0.0.11'
+
+    class _Sess:
+        def get(self, url, **k):
+            if url.endswith('/storage/lvm1'):
+                return types.SimpleNamespace(status_code=200, json=lambda: {'data': {
+                    'type': 'lvm', 'vgname': 'vg1', 'nodes': 'pve1'}})
+            return types.SimpleNamespace(status_code=200, json=lambda: {'data': [
+                {'node': 'pve1', 'status': 'online'}]})
+    m._create_session = lambda: _Sess()
+    api.set_manager('c-led', m)
+    admin = api.as_user(seed.user('root', role='admin'))
+    for lease in (False, True):
+        if lease:
+            _grant('c-led')
+        closed.clear()
+        admin.post('/api/clusters/c-led/datacenter/storage/lvm1/rescan',
+                   json={'deep_scan': True, 'pvresize': True, 'nodes': ['pve1']})
+        assert len(sent) == int(lease) and len(closed) == 1, (lease, sent, closed)
+
+
 def test_the_ha_monitor_does_not_fence_without_a_lease(led, monkeypatch):
     from pegaprox.core import manager as mgr_mod
     monkeypatch.setattr(mgr_mod.time, 'sleep', lambda s: None)
@@ -526,6 +569,68 @@ def test_a_thaw_passes_the_fence(led):
     assert sent == [('POST', f'{base}/fsfreeze-thaw')]
 
 
+def _thaws_without_freeze(src):
+    """(function, line) of each thaw of the guest agent in `src` that no freeze earlier in
+    the same function goes before."""
+    tree = ast.parse(src)
+    out = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        own = {n for child in fn.body for n in ast.walk(child)}
+        for inner in [n for n in own if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            own -= set(ast.walk(inner)) - {inner}
+        said = [(n.lineno, n.value) for n in own
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+        freezes = [line for line, text in said if 'fsfreeze-freeze' in text]
+        for line, text in said:
+            if text.endswith('/agent/fsfreeze-thaw') and not any(f < line for f in freezes):
+                out.append((fn.name, line))
+    return out
+
+
+def test_every_thaw_follows_a_freeze_of_its_own():
+    """The thaw passes the fence (above) because every one in pegaprox/ follows a freeze in
+    the same function, and that freeze needed the lease: what is thawed is a guest this
+    instance froze. A new thaw sender turns this red until it is looked at."""
+    found, bare = 0, []
+    for folder, _dirs, files in os.walk(os.path.join(ROOT, 'pegaprox')):
+        for name in files:
+            if not name.endswith('.py'):
+                continue
+            path = os.path.join(folder, name)
+            with open(path, encoding='utf-8') as fh:
+                src = fh.read()
+            if 'fsfreeze-thaw' not in src:
+                continue
+            rel = os.path.relpath(path, ROOT).replace(os.sep, '/')
+            found += src.count('/agent/fsfreeze-thaw')
+            bare += [f'{rel}:{line} {fn}' for fn, line in _thaws_without_freeze(src)]
+    assert found >= 3, found
+    assert not bare, bare
+
+
+def test_the_thaw_inventory_flags_a_lone_thaw():
+    src = '''
+def lone(mgr, url):
+    mgr._api_post(f"{url}/agent/fsfreeze-thaw")
+
+def paired(mgr, url):
+    mgr._api_post(f"{url}/agent/fsfreeze-freeze")
+    mgr._api_post(f"{url}/agent/fsfreeze-thaw")
+
+def backwards(mgr, url):
+    mgr._api_post(f"{url}/agent/fsfreeze-thaw")
+    mgr._api_post(f"{url}/agent/fsfreeze-freeze")
+
+def outer(mgr, url):
+    mgr._api_post(f"{url}/agent/fsfreeze-freeze")
+    def inner():
+        mgr._api_post(f"{url}/agent/fsfreeze-thaw")
+'''
+    assert sorted(fn for fn, _line in _thaws_without_freeze(src)) == ['backwards', 'inner', 'lone']
+
+
 # --- what is under way when the lease goes --------------------------------------------------------
 
 def _sleeping(ha_transport, cid, out):
@@ -578,6 +683,46 @@ def test_a_node_command_under_way_stops_when_the_lease_goes(led, monkeypatch, ho
         t.join(10)
         assert not t.is_alive() and out['took'] < 10, out
         assert out['rc'] != 0
+    finally:
+        ha_transport.cut_cluster('c-led')
+        t.join(5)
+
+
+def test_an_unenroll_stops_nothing_under_way(led, monkeypatch):
+    """An unenroll makes the cluster this instance's alone: a node command under way on it
+    goes on while the releases are out (one slow voter) and the watch looks every tick,
+    and a switch-off after it stops nothing of it either. It stays kept all the same:
+    enrolled again and handed over, the cluster may be adopted elsewhere, and then the
+    command stops."""
+    import threading
+    import time
+    from pegaprox.core import ha_transport
+    monkeypatch.setattr(ha_transport, 'WATCH_EVERY', 0.05)
+    real_send = fl._send_releases_many
+
+    def slow(taken, to=None):
+        time.sleep(0.5)
+        return real_send(taken, to=to)
+    monkeypatch.setattr(fl, '_send_releases_many', slow)
+    _grant('c-led', seconds=60)
+    out = {}
+    t = threading.Thread(target=_sleeping, args=(ha_transport, 'c-led', out))
+    t.start()
+    try:
+        assert _wait_tracked(ha_transport, 'c-led')
+        fl._finish_unenroll(['c-led'])
+        assert fl.cluster_owner('c-led') == ''
+        t.join(1.5)
+        assert t.is_alive(), out
+        monkeypatch.setenv(federation.ENV_SWITCH, '0')
+        t.join(0.5)
+        assert t.is_alive(), out
+        monkeypatch.setenv(federation.ENV_SWITCH, '1')
+        _grant('c-led', seconds=60)
+        fl._set_owner('c-led', led)
+        fl.release('c-led')
+        t.join(10)
+        assert not t.is_alive() and out['took'] < 10 and out['rc'] != 0, out
     finally:
         ha_transport.cut_cluster('c-led')
         t.join(5)

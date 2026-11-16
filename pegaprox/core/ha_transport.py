@@ -57,7 +57,7 @@ _CONSOLE_RE = re.compile(r'/(vncproxy|termproxy|spiceproxy|vncwebsocket|vncshell
                          r'|/console/tickets/?$')
 _LOGIN_RE = re.compile(r'/access/ticket/?$|/api/session/?$|/rest/com/vmware/cis/session/?$')
 _TOKEN_RE = re.compile(r'/access/users/[^/]+/token/[^/]+/?$')
-# the guest agent's thaw undoes a freeze this instance sent a moment before
+# the guest agent's thaw only resumes the guest's I/O; it follows a freeze that needed the lease
 _THAW_RE = re.compile(r'/agent/fsfreeze-thaw/?$')
 _NUMBER_RE = re.compile(r'(?<=/)\d+(?=/|$)')
 # XAPI calls that only read; everything else changes the pool
@@ -574,6 +574,10 @@ def _watch():
                 return
         for cid in _tracked():
             try:
+                # unenrolled since: this instance's alone, so what runs there goes on, and
+                # stays kept for a hand-over once it is enrolled again
+                if not federation.is_enrolled(cid):
+                    continue
                 ok = federation.enabled() and federation.worker_takes_writes_for(cid)
             except Exception:
                 ok = False

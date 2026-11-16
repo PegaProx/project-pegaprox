@@ -35,6 +35,8 @@ import pytest
 from pegaprox.api.settings import (EXTERNAL_ROLE_SETTINGS, EXTERNAL_SOURCE_SECRETS,
                                    EXTERNAL_SOURCE_SETTINGS)
 from pegaprox.core import federation, ha_wire
+from test_cluster_creds_console_server_only import TICKET, _creds, _proof
+from test_node_shell_ssh_switch import _cluster
 
 # a member id this instance is not: what fed_home names on a mirrored row
 FOREIGN = 'f' * 32
@@ -518,9 +520,14 @@ def _member(home=FOREIGN, site='berlin'):
     return priv
 
 
+_HASHED = {}
+
+
 def _account(username, password=PASSWORD, **cols):
     from pegaprox.utils.auth import hash_password
-    salt, pw_hash = hash_password(password)
+    if password not in _HASHED:
+        _HASHED[password] = hash_password(password)  # argon2 is slow, once per password
+    salt, pw_hash = _HASHED[password]
     row = {'username': username, 'password_salt': salt, 'password_hash': pw_hash,
            'role': 'user', 'permissions': '[]', 'tenant': 'default', 'created_at': '2026',
            'password_expiry': None, 'totp_enabled': 0, 'enabled': 1, 'auth_source': 'local',
@@ -834,6 +841,9 @@ def test_a_mirrored_admin_administers_no_account_tenant_or_role_here(fed, seed):
     accounts, tenants and roles refuse it as well."""
     miriam = fed.as_user(_mirror(seed, 'miriam', role='admin'))
     seed.user('lotte', role='viewer')
+    seed.db.conn.execute("UPDATE users SET password_changed_at = '2026-11-01T00:00:00' "
+                         "WHERE username = 'lotte'")
+    seed.db.conn.commit()
     pw = 'Sup3r-Secret-Pass!word9'
     for method, path, body in (
             ('post', '/api/users', {'username': 'shadow', 'password': pw, 'role': 'admin'}),
@@ -842,6 +852,7 @@ def test_a_mirrored_admin_administers_no_account_tenant_or_role_here(fed, seed):
             ('delete', '/api/users/lotte/2fa', None),
             ('put', '/api/users/lotte/permissions', {'permissions': ['vm.view']}),
             ('delete', '/api/users/lotte', None),
+            ('post', '/api/security/password-expiry/reset-all', {'include_admins': True}),
             ('post', '/api/tenants', {'name': 'shadow-tenant'}),
             ('put', '/api/tenants/default', {'name': 'x'}),
             ('delete', '/api/tenants/no-such-tenant', None),
@@ -859,6 +870,8 @@ def test_a_mirrored_admin_administers_no_account_tenant_or_role_here(fed, seed):
         assert r.get_json()['code'] == 'FED_MIRROR_ADMIN' and r.get_json()['home'] == FOREIGN
     assert seed.db.get_user('shadow') is None
     assert seed.db.get_user('lotte')['role'] == 'viewer'
+    assert seed.db.conn.execute("SELECT password_changed_at FROM users WHERE username = 'lotte'"
+                                ).fetchone()[0] == '2026-11-01T00:00:00'
     # counterproof: a local admin creates the same account
     root = fed.as_user(seed.user('root', role='admin'))
     r = root.post('/api/users', json={'username': 'shadow', 'password': pw, 'role': 'admin'})
@@ -1209,6 +1222,35 @@ def test_a_delegate_learns_nothing_of_another_tenants_mirrored_token(fed, seed):
     assert r.status_code == 409 and r.get_json()['home'] == FOREIGN, r.data
 
 
+def test_a_token_whose_home_cannot_be_told_stays_as_it_is(fed, seed, monkeypatch):
+    """The table that says where a token is homed does not read: neither its owner nor a
+    global admin revokes it, both hear 503 FED_UNAVAILABLE as from every other guard."""
+    import pegaprox.api.auth as authapi
+    bert = seed.user('bert', role='user')
+    root = seed.user('root', role='admin')
+    authapi.ensure_api_tokens_table()
+    seed.db.conn.execute(
+        "INSERT INTO api_tokens (token_hash, token_prefix, username, name, role, created_at) "
+        "VALUES ('th-bert', 'pgx_b', 'bert', 'ci', 'viewer', '2026')")
+    seed.db.conn.commit()
+    tid = seed.db.conn.execute("SELECT id FROM api_tokens").fetchone()[0]
+
+    real, asked = federation.foreign_home, []
+
+    def unreadable(*args):
+        raise federation.FederationError('the api_tokens table cannot be read: locked')
+    monkeypatch.setattr(federation, 'foreign_home', unreadable)
+    for who in (bert, root):
+        r = fed.as_user(who).delete(f'/api/auth/tokens/{tid}')
+        assert r.status_code == 503 and r.get_json()['code'] == 'FED_UNAVAILABLE', r.data
+    assert seed.db.conn.execute("SELECT revoked FROM api_tokens").fetchone()[0] == 0
+    # counterproof: once the table reads, the owner revokes it, the switch still on and the
+    # home asked
+    monkeypatch.setattr(federation, 'foreign_home', lambda *a: asked.append(a) or real(*a))
+    assert federation.enabled()
+    assert fed.as_user(bert).delete(f'/api/auth/tokens/{tid}').status_code == 200 and asked
+
+
 # --- the passkey routes with the switch off ----------------------------------------------------
 
 def test_a_leftover_mirror_session_registers_and_removes_no_passkey(switchable, seed):
@@ -1237,6 +1279,56 @@ def test_a_leftover_mirror_session_registers_and_removes_no_passkey(switchable, 
     seed.db.conn.commit()
     r = c.delete(f'/api/webauthn/credentials/{cred}', json={})
     assert r.status_code != 401, r.data
+
+
+def test_an_account_that_does_not_read_registers_no_passkey(switchable, seed, monkeypatch):
+    """Whether the account is such a mirror cannot be told while its row does not read,
+    so the passkey route refuses a mirror and a local account alike (503) and stashes no
+    challenge. Counterproof: once the row reads, the local account gets its challenge."""
+    from pegaprox.api import webauthn as wa
+    if not wa.FIDO2_AVAILABLE:
+        pytest.skip('fido2 is not installed')
+    real = wa.get_db
+
+    class _Locked:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def get_user(self, name):
+            raise RuntimeError('database is locked')
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    users = {'mira': _mirror(seed, 'mira'), 'lotte': seed.user('lotte', role='viewer')}
+    monkeypatch.setattr(wa, 'get_db', lambda: _Locked(real()))
+    for name, user in users.items():
+        r = switchable.as_user(user).post('/api/webauthn/register/begin', json={})
+        assert r.status_code == 503, (name, r.data)
+        assert (name, 'register') not in wa._challenges
+    monkeypatch.setattr(wa, 'get_db', real)
+    r = switchable.as_user(users['lotte']).post('/api/webauthn/register/begin', json={})
+    assert r.status_code == 200, r.data
+
+
+def test_a_leftover_mirror_session_opens_no_console(switchable, seed):
+    """The SSH console server signs its legacy ?session= login in through
+    /api/auth/validate and takes the node addresses and a PVE ticket from cluster-creds.
+    Neither runs under require_auth, so each refuses a mirror with the switch off itself:
+    no node shell and no guest terminal on the cluster account's ticket. Counterproof: the
+    same session of a local account gets both."""
+    mgr = _cluster(switchable, ssh_off=False)
+    mira = _mirror(seed, 'mira', role='admin')
+    assert switchable.as_user(mira).get('/api/auth/validate').status_code == 401
+    for query in ('', '?console=term'):
+        r = _creds(switchable, mira, query, headers=_proof())
+        assert r.status_code == 403 and 'pve_auth_ticket' not in r.get_json(), (query, r.data)
+    mgr.mint_console_auth_ticket.assert_not_called()
+    seed.db.conn.execute("UPDATE users SET fed_home = '' WHERE username = 'mira'")
+    seed.db.conn.commit()
+    assert switchable.as_user(mira).get('/api/auth/validate').status_code == 200
+    r = _creds(switchable, mira, '?console=term', headers=_proof())
+    assert r.status_code == 200 and r.get_json()['pve_auth_ticket'] == TICKET, r.data
 
 
 # --- forced second factor and a mirror -----------------------------------------------------------

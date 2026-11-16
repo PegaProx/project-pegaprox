@@ -320,12 +320,52 @@ _OFF_SAFE = {'enabled', 'forced'}
 _GUARDED_ELSEWHERE = {
     # ha.carry binds the list _federation_refusals handed it, which is None while off
     ('pegaprox/core/ha.py', 'bind_refusals'),
+    # the exit watch runs only for what a write kept with the switch on; switched off since,
+    # it still tells an enrolled cluster (stopped) from one unenrolled meanwhile (left alone)
+    ('pegaprox/core/ha_transport.py', 'is_enrolled'),
 }
 # the one call that runs while the switch is off, on purpose: a standby that leaves its HA
 # group drops the inherited identity whenever its row is there (forget_inherited)
 _RUNS_WHILE_OFF = {('pegaprox/core/ha.py', 'forget_inherited')}
 _FEDERATION_MODULES = {'pegaprox/core/federation.py', 'pegaprox/core/federation_lease.py',
                        'pegaprox/api/federation.py'}
+# names taken from the core by name that read no state of it: an exception and two constants
+_TAKEN_BY_NAME = {'SETTING_KEY', 'FED_REFUSED_ENVIRON', 'LeaseRefused'}
+
+
+_CORE = ('federation', 'federation_lease')
+
+
+def _federation_aliases(tree):
+    """The names a module binds the federation core to, the names it binds the lease
+    module to (its calls are hooks too, but it has no switch to ask), and the imports of
+    either the inventory cannot follow, as (line, what): a name other than _TAKEN_BY_NAME
+    taken from one of them, a relative import, `import pegaprox.core.<module>` without a
+    name of its own."""
+    import ast
+    aliases, lease, odd = set(), set(), []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names = [a.name for a in node.names]
+            if node.level:
+                if set(_CORE) & set(names + (node.module or '').split('.')):
+                    odd.append((node.lineno, f"from {'.' * node.level}{node.module or ''}"))
+            elif node.module == 'pegaprox.core':
+                aliases |= {a.asname or a.name for a in node.names if a.name == 'federation'}
+                lease |= {a.asname or a.name for a in node.names if a.name == 'federation_lease'}
+            elif node.module in [f'pegaprox.core.{m}' for m in _CORE]:
+                odd += [(node.lineno, n) for n in names if n not in _TAKEN_BY_NAME]
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name not in [f'pegaprox.core.{m}' for m in _CORE]:
+                    continue
+                if not a.asname:
+                    odd.append((node.lineno, a.name))
+                elif a.name.endswith('_lease'):
+                    lease.add(a.asname)
+                else:
+                    aliases.add(a.asname)
+    return aliases, lease, odd
 
 
 def _asks_switch(node, aliases, flags):
@@ -395,6 +435,38 @@ def _guarded(call, parents, aliases, flags):
     return False
 
 
+def _hooks_of(rel, src):
+    """The hooks of one module: (how many, the bare ones, the _RUNS_WHILE_OFF calls met,
+    the imports the walk cannot follow)."""
+    import ast
+    tree = ast.parse(src)
+    aliases, lease, odd = _federation_aliases(tree)
+    found, bare, allowed = 0, [], set()
+    flags = set()
+    parents = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+    for node in ast.walk(tree):
+        # a flag that, when true, says the switch is on - `off = not ...` is none
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and _asks_switch(node.value, aliases, set())):
+            flags.add(node.targets[0].id)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in aliases | lease):
+            continue
+        what = node.func.attr
+        if what in _OFF_SAFE or (rel, what) in _GUARDED_ELSEWHERE:
+            continue
+        if (rel, what) in _RUNS_WHILE_OFF:
+            allowed.add((rel, what))
+            continue
+        found += 1
+        if not _guarded(node, parents, aliases, flags):
+            bare.append(f'{rel}:{node.lineno} {what}()')
+    return found, bare, allowed, [f'{rel}:{line} {what}' for line, what in odd]
+
+
 def test_every_hook_outside_the_federation_asks_the_switch_first():
     """An inventory, as test_ha_exits keeps one for the HA guard: every call into the
     federation core from a module outside it - the manager, the background jobs, the
@@ -402,9 +474,8 @@ def test_every_hook_outside_the_federation_asks_the_switch_first():
     condition, in an enclosing if, behind an early return of the off path, or behind a
     flag set from the switch. A new hook that forgets it turns this red. _RUNS_WHILE_OFF is
     the one call allowed past it, and it has to be there."""
-    import ast
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    found, bare, allowed = 0, [], set()
+    found, bare, allowed, unread = 0, [], set(), []
     for folder, _dirs, files in os.walk(os.path.join(root, 'pegaprox')):
         for name in files:
             if not name.endswith('.py'):
@@ -415,39 +486,64 @@ def test_every_hook_outside_the_federation_asks_the_switch_first():
                 continue
             with open(path, encoding='utf-8') as fh:
                 src = fh.read()
-            if 'pegaprox.core import federation' not in src:
+            # every form of the import names the module
+            if 'federation' not in src:
                 continue
-            tree = ast.parse(src)
-            aliases, flags, parents = set(), set(), {}
-            for node in ast.walk(tree):
-                for child in ast.iter_child_nodes(node):
-                    parents[child] = node
-                if isinstance(node, ast.ImportFrom) and node.module == 'pegaprox.core':
-                    aliases |= {a.asname or a.name for a in node.names if a.name == 'federation'}
-            for node in ast.walk(tree):
-                # a flag that, when true, says the switch is on - `off = not ...` is none
-                if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                        and isinstance(node.targets[0], ast.Name)
-                        and _asks_switch(node.value, aliases, set())):
-                    flags.add(node.targets[0].id)
-            for node in ast.walk(tree):
-                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                        and isinstance(node.func.value, ast.Name)
-                        and node.func.value.id in aliases):
-                    continue
-                what = node.func.attr
-                if what in _OFF_SAFE or (rel, what) in _GUARDED_ELSEWHERE:
-                    continue
-                if (rel, what) in _RUNS_WHILE_OFF:
-                    allowed.add((rel, what))
-                    continue
-                found += 1
-                if not _guarded(node, parents, aliases, flags):
-                    bare.append(f'{rel}:{node.lineno} {what}()')
+            n, b, a, u = _hooks_of(rel, src)
+            found, bare, allowed, unread = found + n, bare + b, allowed | a, unread + u
     # counterproof that the walk sees the hooks: the manager, the jobs, the routes, the exits
     assert found >= 15, found
     assert not bare, bare
     assert allowed == _RUNS_WHILE_OFF, allowed
+    # a hook behind an import the walk does not follow would pass unseen: the core is
+    # imported as `from pegaprox.core import federation [as x]`, the lease module alike
+    assert not unread, unread
+
+
+def test_the_inventory_reads_every_import_of_the_core():
+    """Counterproof for the import half of the inventory: each way of importing the core
+    either names an alias the walk follows or is flagged."""
+    import ast
+    src = textwrap.dedent("""
+        from pegaprox.core import ha, federation as _a
+        from pegaprox.core import (federation as _b)
+        import pegaprox.core.federation as _c
+        from pegaprox.core.federation import worker_takes_writes_for
+        from pegaprox.core.federation import LeaseRefused
+        import pegaprox.core.federation
+        from . import federation
+        from .federation import guard_exit
+        from pegaprox.core import federation_lease
+        from pegaprox.core import federation_lease as _fl
+        import pegaprox.core.federation_lease as _fl2
+        from pegaprox.core.federation_lease import lease_round
+        import pegaprox.core.federation_lease
+        from .federation_lease import note_epoch_kept
+        from . import federation_lease
+    """)
+    aliases, lease, odd = _federation_aliases(ast.parse(src))
+    assert aliases == {'_a', '_b', '_c'}
+    assert lease == {'federation_lease', '_fl', '_fl2'}
+    assert odd == [(5, 'worker_takes_writes_for'), (7, 'pegaprox.core.federation'),
+                   (8, 'from .'), (9, 'from .federation'), (13, 'lease_round'),
+                   (14, 'pegaprox.core.federation_lease'), (15, 'from .federation_lease'),
+                   (16, 'from .')]
+
+
+def test_the_inventory_flags_a_bare_call_of_the_lease_module():
+    """Counterproof: the lease module has no switch of its own, and a call of it outside
+    the federation needs the core's switch first like any other hook."""
+    src = textwrap.dedent("""
+        from pegaprox.core import federation, federation_lease as fl
+        def bare():
+            fl.lease_round()
+        def guarded():
+            if not federation.enabled():
+                return
+            fl.lease_round()
+    """)
+    found, bare, _allowed, unread = _hooks_of('pegaprox/x.py', src)
+    assert (found, bare, unread) == (2, ['pegaprox/x.py:4 lease_round()'], [])
 
 
 def test_the_inventory_flags_a_bare_hook():

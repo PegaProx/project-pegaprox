@@ -1366,6 +1366,7 @@ def replay_failover_state():
 _last_fail_times = {}  # plan_id -> first_fail_timestamp
 _cooldowns = {}  # plan_id -> cooldown_until_timestamp
 _missing_source_logged = set()  # plan_ids we've already warned about, so the loop doesn't spam
+_held_logged = set()  # plan_ids held for a federation lease, said once as well
 
 
 def _heartbeat_check():
@@ -1394,9 +1395,12 @@ def _heartbeat_check():
         from pegaprox.core import federation as _fed
         if _fed.enabled() and not _fed.worker_takes_writes_for(plan.get('target_cluster') or ''):
             _last_fail_times.pop(plan_id, None)
-            logger.info(f"[SR] Auto-failover for '{_sl(plan['name'])}' held: this instance "
-                        f"holds no live lease on its target cluster")
+            if plan_id not in _held_logged:
+                _held_logged.add(plan_id)
+                logger.info(f"[SR] Auto-failover for '{_sl(plan['name'])}' held: this instance "
+                            f"holds no live lease on its target cluster")
             continue
+        _held_logged.discard(plan_id)
 
         src_mgr = cluster_managers.get(plan['source_cluster'])
         if src_mgr is None:
