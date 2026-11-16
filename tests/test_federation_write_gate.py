@@ -1116,7 +1116,9 @@ def test_the_poison_pill_needs_the_lease(led, tmp_path):
     fake.id = 'c-led'
     fake.ha_config = {'poison_pill_enabled': True, 'storage_heartbeat_path': str(tmp_path)}
     pill = tmp_path / '.pegaprox' / 'poison_n1'
-    assert PegaProxManager._ha_write_poison_pill(fake, 'n1', 'test') is False
+    # a refusal, not a pill that failed: the recovery worker marks the node for later
+    with pytest.raises(federation.LeaseRefused):
+        PegaProxManager._ha_write_poison_pill(fake, 'n1', 'test')
     assert not pill.exists()
     _grant('c-led')
     assert PegaProxManager._ha_write_poison_pill(fake, 'n1', 'test') is True
@@ -1153,32 +1155,207 @@ def test_a_recovery_that_waited_past_the_lease_does_nothing(led, monkeypatch):
     assert went._ha_retry_recovery.call_args_list == []
 
 
-def test_a_recovery_that_lost_the_lease_half_way_is_tried_again(led, monkeypatch):
-    """An exit refuses in the middle of a recovery, the lease went meanwhile: the worker
-    gives up on it, and the node is marked so a pass tries again once the lease is back.
-    Counterproof: another error marks nothing."""
+def _lose(cid):
+    def go(st):
+        st['my_leases'].pop(cid, None)
+        return True
+    federation._mutate_leases(go)
+
+
+@pytest.fixture
+def recovery(led, monkeypatch):
+    """The real recovery worker, guest start, config move, SSH stop and poison pill, bound
+    to a stand-in manager of c-led whose node n1 is offline with guests 100 to 102 on shared
+    storage, n2 the target. Every exit is the real one: the starts go through a guarded
+    session (what went out lands in `sent`), the SSH commands through guard_ssh. The lease
+    is live when the recovery starts; `lose` says what takes it away: the look right after
+    the wait (once the worker checked it), the first config move once it went through, or
+    nothing. `auto`: this site is in an automatic HA group, which starts no guest whose
+    config did not move. `journal`, a list: the run is written down, its steps land there
+    as (step, vmid, done)."""
     import threading
-    from pegaprox.core import ha
+    from pegaprox.core import ha, ha_transport
     from pegaprox.core import manager as mgr_mod
+    M = mgr_mod.PegaProxManager
     monkeypatch.setattr(mgr_mod.time, 'sleep', lambda s: None)
     monkeypatch.setattr(ha, 'is_active', lambda: True)
-    monkeypatch.setattr(ha, 'recovery_begin', lambda *a, **k: 'run')
+    monkeypatch.setattr(ha, 'confirm_step', lambda *a, **k: True)
+    for name in ('recovery_step', 'recovery_clear'):
+        monkeypatch.setattr(ha, name, lambda *a, **k: None)
+    monkeypatch.setattr(ha, 'recovery_begin', lambda *a, **k: None)
     monkeypatch.setattr(ha, 'recovery_end', lambda *a, **k: [])
-    _grant('c-led', seconds=60)
 
-    def run(error):
+    def run(sent, ha_config=None, lose='after the wait', allowed=None, auto=False,
+            journal=None):
+        _grant('c-led', seconds=60)
+        monkeypatch.setattr(ha, 'lease_in_force', lambda: auto)
+        if journal is not None:
+            monkeypatch.setattr(ha, 'recovery_begin', lambda *a, **k: 'run-1')
+            monkeypatch.setattr(ha, 'recovery_step', lambda run, cid, node, step, vmid=None,
+                                done=False: journal.append((step, vmid, done)))
         fake = MagicMock()
-        fake.id = 'c-led'
-        fake.ha_config = {}
+        fake.id, fake.host, fake.api_port = 'c-led', '10.0.0.8', 8006
+        fake.ha_config = ha_config or {}
         fake.ha_lock = threading.Lock()
         fake.ha_node_status = {'n1': {'status': 'offline', 'last_seen': 5}}
         fake.ha_recovery_in_progress = {'n1': True}
+        fake.ha_recovery_locks = {}
+        fake.config.ssh_key = ''
+        fake.ssh_password_to_offer.return_value = None
         fake._ha_fence_timing.return_value = {'wait': 0}
-        fake._ha_recovery_allowed.side_effect = error
-        mgr_mod.PegaProxManager._ha_recovery_worker(fake, 'n1')
-        return [c.args for c in fake._ha_retry_recovery.call_args_list]
-    assert run(federation.LeaseRefused('c-led', 'SSH n2 qm start')) == [('n1',)]
-    assert run(RuntimeError('the node said no')) == []
+
+        def recovery_allowed(node):
+            if allowed is not None:
+                raise allowed
+            if lose == 'after the wait':
+                _lose('c-led')
+            return []
+        fake._ha_recovery_allowed.side_effect = recovery_allowed
+        fake._create_session.side_effect = lambda: ha_transport.guard_session(
+            _stub_session(sent), cluster_id='c-led')
+        fake._ha_fence_node.return_value = False
+        fake._ha_get_vms_on_node.return_value = [{'vmid': v, 'type': 'qemu', 'name': f'g{v}'}
+                                                 for v in (100, 101, 102)]
+        fake._ha_get_available_nodes.return_value = ['n2']
+        fake._ha_check_vm_storage.return_value = 'shared'
+        fake._ha_select_target_node.return_value = 'n2'
+        fake._ha_node_back.return_value = False
+        # a truthy stand-in here takes the split-brain or the moved branch
+        fake._ha_node_listed_online.return_value = False
+        fake._ha_check_node_via_ssh.return_value = {'reachable': False}
+        fake._ha_check_node_agent_heartbeat.return_value = {'alive': False}
+        fake._ha_clear_vm_lock.return_value = True
+        # the config sits where the move put it (an automatic group looks before the start)
+        fake._ha_vm_is_on.return_value = True
+        fake._ha_get_node_ip.return_value = '10.0.0.9'
+        fake._ha_claimed.side_effect = lambda cmd, exact=True: cmd
+        fake._ssh_run_command.side_effect = lambda host, user, cmd, **k: \
+            ha_transport.guard_ssh(host, cmd, cluster_id='c-led') or True
+        for name in ('_ha_start_vm_on_node', '_ha_write_poison_pill',
+                     '_ha_ssh_stop_vms_on_node'):
+            getattr(fake, name).side_effect = (
+                lambda real: lambda *a, **k: real(fake, *a, **k))(getattr(M, name))
+
+        def move(*a):
+            out = M._ha_move_vm_config(fake, *a)
+            if lose == 'at the move':
+                _lose('c-led')
+            return out
+        fake._ha_move_vm_config.side_effect = move
+        M._ha_recovery_worker(fake, 'n1')
+        return fake
+    return run
+
+
+def _marked(fake):
+    return [c.args for c in fake._ha_retry_recovery.call_args_list]
+
+
+def _starts(sent):
+    return [u for m, u in sent if m == 'POST']
+
+
+@pytest.mark.parametrize('group', ['manual', 'automatic'])
+def test_a_recovery_that_lost_the_lease_half_way_is_tried_again(recovery, group):
+    """The lease goes once the worker checked it: the first config move is refused at its
+    exit, the worker gives up on the node and marks it, so a pass tries again once the
+    lease is back. Nothing was started, and the next guests are not tried one by one.
+    Counterproofs: with the lease kept all three start and nothing is marked; another error
+    marks nothing."""
+    sent = []
+    fake = recovery(sent, auto=group == 'automatic')
+    assert _marked(fake) == [('n1',)]
+    assert fake._ha_start_vm_on_node.call_count == 1 and _starts(sent) == []
+    assert fake._ha_refuse.call_args_list == []
+    kept = []
+    fake = recovery(kept, lose='nothing')
+    assert len(_starts(kept)) == 3 and _marked(fake) == []
+    assert _marked(recovery([], allowed=RuntimeError('the node said no'))) == []
+
+
+def test_a_guest_moved_when_the_lease_went_is_named(recovery):
+    """The lease goes between the config move and the start: the guest sits stopped on
+    the target, where a retried run does not list it, so it is named for an admin, and the
+    node is marked. Counterproof: the lease kept, the guest starts and nobody is told."""
+    sent = []
+    fake = recovery(sent, lose='at the move')
+    assert _marked(fake) == [('n1',)] and _starts(sent) == []
+    (action, text), kw = fake._ha_refuse.call_args
+    assert action == 'ha.recovery_refused' and kw == {'node': 'n1'}
+    assert text.startswith('qemu/100 was moved to n2 and not started')
+    fake = recovery([], lose='nothing')
+    assert fake._ha_refuse.call_args_list == [] and _marked(fake) == []
+
+
+def test_a_guest_moved_when_the_lease_went_is_named_once_in_a_journal_run(recovery):
+    """The same in an automatic HA group, whose recovery is written down: the start of the
+    guest is begun and never done, which is what the end of the run names it by
+    (ha.recovery_interrupted), so the start does not name it a second time. Counterproof:
+    named here as well, the admin reads of one guest twice."""
+    journal = []
+    fake = recovery([], lose='at the move', auto=True, journal=journal)
+    assert _marked(fake) == [('n1',)]
+    assert ('start', 100, False) in journal and ('start', 100, True) not in journal
+    assert fake._ha_refuse.call_args_list == []
+
+
+def _on_storage(path, pill_dir=True):
+    """Strict fencing with the storage heartbeat and the poison pill under `path`."""
+    if pill_dir:
+        (path / '.pegaprox').mkdir(parents=True, exist_ok=True)
+    return {'strict_fencing': True, 'storage_heartbeat_enabled': True,
+            'poison_pill_enabled': True, 'storage_heartbeat_path': str(path)}
+
+
+@pytest.mark.parametrize('reach', ['ssh', 'storage heartbeat'])
+def test_a_strict_recovery_whose_lease_went_before_the_stop_is_tried_again(recovery, tmp_path,
+                                                                           monkeypatch, reach):
+    """Strict fencing, n1 is alive behind a partition with a guest running, and the lease
+    goes before its guests are stopped: the stop over SSH, or the poison pill, is refused
+    at its exit. That is no stop that failed - the worker marks the node for a retry once
+    the lease is back, instead of the strict abort that leaves it for good. Counterproof:
+    the lease kept and the pill failing for another reason, the strict abort marks
+    nothing."""
+    from pegaprox.core.manager import PegaProxManager
+    real_worker = PegaProxManager._ha_recovery_worker
+
+    def alive(fake, node):
+        fake._ha_acquire_recovery_lock.return_value = True
+        if reach == 'ssh':
+            fake._ha_check_node_via_ssh.return_value = {
+                'reachable': True, 'running_vms': [100], 'running_cts': [],
+                'reachable_ips': ['10.0.0.9']}
+        else:
+            fake._ha_check_node_agent_heartbeat.return_value = {
+                'alive': True, 'age_seconds': 1.0, 'running_vms': [100], 'running_cts': []}
+        return real_worker(fake, node)
+    monkeypatch.setattr(PegaProxManager, '_ha_recovery_worker', alive)
+    pill = tmp_path / '.pegaprox' / 'poison_n1'
+    fake = recovery([], {'strict_fencing': True} if reach == 'ssh' else _on_storage(tmp_path))
+    assert _marked(fake) == [('n1',)]
+    assert not pill.exists() and fake._ha_start_vm_on_node.call_count == 0
+    if reach == 'storage heartbeat':
+        fake = recovery([], _on_storage(tmp_path / 'other', pill_dir=False), lose='nothing')
+        assert _marked(fake) == [] and fake._ha_start_vm_on_node.call_count == 0
+
+
+def test_the_config_move_lets_a_lease_refusal_through(led):
+    """A config move refused for the lease is no move that failed: the worker marks the
+    node, as for a refused start, also when this site is in an automatic HA group and
+    starts nothing whose config did not move."""
+    from pegaprox.core import ha_transport
+    from pegaprox.core.manager import PegaProxManager
+    fake = MagicMock()
+    fake.id = 'c-led'
+    fake._ha_get_node_ip.return_value = '10.0.0.9'
+    fake.ssh_password_to_offer.return_value = None
+    fake._ha_claimed.side_effect = lambda cmd, exact=True: cmd
+    fake._ssh_run_command.side_effect = lambda host, user, cmd, **k: \
+        ha_transport.guard_ssh(host, cmd, cluster_id='c-led') or True
+    with pytest.raises(federation.LeaseRefused):
+        PegaProxManager._ha_move_vm_config(fake, 100, 'qemu', 'n1', 'n2')
+    _grant('c-led')
+    assert PegaProxManager._ha_move_vm_config(fake, 100, 'qemu', 'n1', 'n2') is True
 
 
 # --- the routes that start a run of a plan ----------------------------------------------------------

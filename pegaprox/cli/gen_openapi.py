@@ -233,6 +233,15 @@ def build(app):
                                                              'members lock granted here, or '
                                                              'FED_VIEW: the change does not '
                                                              'follow the view held here'}
+                elif rule.endpoint == 'federation.peer_end_taken':
+                    # only the site removed as gone for good is answered; a member is not
+                    op['responses']['403'] = {'description': 'FED_NOT_ENDED: the caller is a '
+                                                             'member, FED_NOT_MEMBER: not a '
+                                                             'federation peer at all, or '
+                                                             'FED_CLOCK: the clocks are too far '
+                                                             'apart'}
+                    op['responses']['409'] = {'description': 'FED_END_MISMATCH: not the end '
+                                                             'record held here'}
                 elif rule.endpoint == 'federation.peer_lease_vote':
                     op['responses']['409'] = {'description': 'The batch is refused: reason view '
                                                              '(another member list), member or '

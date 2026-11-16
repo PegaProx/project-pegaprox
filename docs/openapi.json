@@ -50417,6 +50417,54 @@
         ]
       }
     },
+    "/api/federation/peer/end-taken": {
+      "post": {
+        "operationId": "federation.peer_end_taken_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "403": {
+            "description": "FED_NOT_ENDED: the caller is a member, FED_NOT_MEMBER: not a federation peer at all, or FED_CLOCK: the clocks are too far apart"
+          },
+          "410": {
+            "description": "FED_REMOVED: the caller was removed from the federation"
+          },
+          "503": {
+            "description": "FED_STANDBY: this host is not the acting one of its HA group"
+          },
+          "409": {
+            "description": "FED_END_MISMATCH: not the end record held here"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "The site this instance removed as gone for good took its end record and stopped the clusters it names: from now on it counts as told. 409 FED_END_MISMATCH for a record that is not the one held here, 403 FED_NOT_ENDED for a member.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "federationPeer": []
+          }
+        ]
+      }
+    },
     "/api/federation/peer/view": {
       "get": {
         "operationId": "federation.peer_view_get",
@@ -50754,7 +50802,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Switch the federation on or off for the whole deployment (it travels to an HA standby with the settings). Body {\"enabled\": bool}. Switching on starts the workers; switching off stops them and is refused with 409 FED_IN_USE while this instance is a member, holds a lease or holds mirrors (leave the federation first), with 409 FED_ENDED_UNTOLD while a site this instance removed as gone for good was never told (untold_ok switches off anyway), and with 409 FED_FORCED while PEGAPROX_FEDERATION decides.",
+        "summary": "Switch the federation on or off for the whole deployment (it travels to an HA standby with the settings). Body {\"enabled\": bool}. Switching on starts the workers; switching off stops them and is refused with 409 FED_IN_USE while this instance is a member, holds a lease or holds mirrors (leave the federation first), with 409 FED_ENDED_UNTOLD while a site this instance removed as gone for good has not confirmed that it was told (untold_ok switches off anyway), and with 409 FED_FORCED while PEGAPROX_FEDERATION decides.",
         "requestBody": {
           "required": false,
           "content": {

@@ -1731,13 +1731,17 @@ def take_records(sender, raw, owner_refusals=frozenset(), no_convert=frozenset()
     comes back newer than what is held leads the cluster here again (_resume). With no
     newer record a cluster is given up only on the other member's own evidence
     (`owner_refusals`: its answer refused the id naming itself, and showed this record),
-    and never in an enroll (`no_convert`, an enroll under way). Returns {'echo': whether
-    the records are stored, 'fenced': {cluster id: new owner}}. Called outside any lock and
-    transaction of the caller."""
+    and never in an enroll (`no_convert`, an enroll under way). Whether a record acts is
+    decided before anything is stored. A record that gives a cluster up is kept first: if
+    the row then does not move, it still holds nothing alone here or on a standby, and
+    each delivery of it tries again until the step-down is noted (stopped_at). A record
+    that leads a cluster here again is kept only by the transaction that moves the row, so
+    one that fails keeps nothing and the next delivery acts again. Returns {'echo': whether
+    the records are stored, False while a row such a record moves did not move, 'fenced':
+    {cluster id: new owner}}. Called outside any lock and transaction of the caller."""
     out = {'echo': True, 'fenced': {}}
     if not isinstance(raw, list) or not raw:
         return out
-    me = fed.instance_id()
     try:
         entries = fed._view_entries(fed.identity() or {})
         held = fed.ownership()['records']
@@ -1761,7 +1765,11 @@ def take_records(sender, raw, owner_refusals=frozenset(), no_convert=frozenset()
         if cid in best and not fed.record_beats(rec, best[cid][0]):
             continue
         best[cid] = (rec, fed.record_beats(rec, mine))
-    newer = {cid: rec for cid, (rec, beats) in best.items() if beats}
+    # three or more sites: a majority decides, the records are only kept
+    acting = _acting_records(best, held, owner_refusals, no_convert) \
+        if len(fed.view_ids()) == 2 else {}
+    newer = {cid: rec for cid, (rec, beats) in best.items()
+             if beats and acting.get(cid) != 'resume'}
     if newer:
         def go(own):
             got = [cid for cid, rec in newer.items()
@@ -1775,15 +1783,40 @@ def take_records(sender, raw, owner_refusals=frozenset(), no_convert=frozenset()
             logging.warning(f'[FED] the ownership records of {sender} could not be stored: {e}')
             out['echo'] = False
             return out
-    if len(fed.view_ids()) != 2:
-        # three or more sites: a majority decides, the records are only kept
-        return out
-    try:
-        held = fed.ownership()['records']
-    except FederationError:
-        return out
-    members = fed.members()
+    for cid, step in sorted(acting.items()):
+        rec = best[cid][0]
+        if step == 'down':
+            _step_down(cid, rec)
+            # given up or not, this round writes no lease for it
+            out['fenced'][cid] = rec['owner']
+        else:
+            _resume(cid, rec)
+    if acting:
+        try:
+            held = fed.ownership()['records']
+        except FederationError:
+            held = {}
+        for cid, step in acting.items():
+            rec, beats = best[cid]
+            got = held.get(cid)
+            if step == 'down':
+                waits = got is None or (got.get('sig') == rec['sig']
+                                        and not got.get('stopped_at'))
+            else:
+                waits = beats and not (got is not None and (got.get('sig') == rec['sig']
+                                                            or fed.record_beats(got, rec)))
+            if waits:
+                out['echo'] = False
+    return out
+
+
+def _acting_records(best, held, owner_refusals, no_convert):
+    """{cluster id: 'down' or 'resume'} for the records of `best` that move a row in a view
+    of two, judged against the records `held` before any of them is stored. A record held
+    already whose step-down was never noted gives the cluster up again."""
+    me, members = fed.instance_id(), fed.members()
     enrolling = fed._runtime.get('fresh_enrolls') or set()
+    acting = {}
     for cid, (rec, beats) in sorted(best.items()):
         try:
             row = cluster_owner(cid)
@@ -1791,17 +1824,18 @@ def take_records(sender, raw, owner_refusals=frozenset(), no_convert=frozenset()
             logging.warning(f'[FED] the ownership record of {cid} waits: {e}')
             continue
         kept = held.get(cid)
+        undone = kept is not None and kept.get('sig') == rec['sig'] \
+            and not kept.get('stopped_at')
         if (row == me and rec['owner'] != me and rec['owner'] in members
                 and rec['kind'] in ('adopt', 'takeover')
                 and not (kept is not None and fed.record_beats(kept, rec))
                 and cid not in enrolling and cid not in no_convert
-                and (beats or cid in owner_refusals)):
-            _step_down(cid, rec)
-            out['fenced'][cid] = rec['owner']
+                and (beats or undone or cid in owner_refusals)):
+            acting[cid] = 'down'
         elif (beats and rec['owner'] == me and rec['kind'] in ('adopt', 'takeover')
               and row and row == rec['from'] and rec['from'] in members):
-            _resume(cid, rec)
-    return out
+            acting[cid] = 'resume'
+    return acting
 
 
 def _step_down(cluster_id, rec):
@@ -1834,6 +1868,8 @@ def _step_down(cluster_id, rec):
                 held = own['records'].get(cluster_id)
                 if held is not None and held.get('sig') == rec['sig']:
                     held['stopped_at'] = stopped
+                elif held is not None and fed.record_beats(held, rec):
+                    raise FederationError('a newer record of the cluster came in meanwhile')
                 else:
                     fed.store_record(own, rec, conn, stopped_at=stopped)
                 own['ok'].pop(cluster_id, None)
@@ -1879,7 +1915,11 @@ def _resume(cluster_id, rec):
                     raise FederationError('the cluster row changed meanwhile')
 
                 def keep(own):
-                    if fed.record_beats(rec, own['records'].get(cluster_id)):
+                    held = own['records'].get(cluster_id)
+                    if held is None or held.get('sig') != rec['sig']:
+                        if not fed.record_beats(rec, held):
+                            raise FederationError('a newer record of the cluster came in '
+                                                  'meanwhile')
                         fed.store_record(own, rec, conn)
                     own['ok'][cluster_id] = {'view': fed.view_digest(), 'epoch': fed.view_epoch(),
                                              'gen': rec['gen'], 'at': int(time.time())}

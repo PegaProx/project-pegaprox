@@ -7486,6 +7486,7 @@ class PegaProxManager:
         def step(name, done=False):
             ha.recovery_step(run, self.id, original_node, name, vmid=vmid, done=done)
 
+        config_moved = False
         try:
             # Force quorum first (for 2-node clusters)
             # Without quorum, pmxcfs is read-only - we can't do anything!
@@ -7652,6 +7653,16 @@ class PegaProxManager:
 
             return False
                     
+        except LeaseRefused:
+            # the lease went: the recovery worker marks the node to be tried again, and a
+            # guest already moved is not listed on the node any more. A journal run names it
+            # when the worker ends; without one it is named here
+            if config_moved and run is None:
+                self._ha_refuse('ha.recovery_refused',
+                                f"{vm_type}/{vmid} was moved to {target_node} and not started: the "
+                                "federation lease went right before its start - start it there from "
+                                "the site that leads the cluster now", node=original_node)
+            raise
         except Exception as e:
             self.logger.error(f"[HA] Error starting VM {vmid} on {target_node}: {e}")
             return False
@@ -9008,6 +9019,9 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
             
             return len(failed) == 0
             
+        except LeaseRefused:
+            # the federation lease went: the recovery worker marks the node to be tried again
+            raise
         except Exception as e:
             self.logger.error(f"[HA] Error stopping VMs via SSH: {e}")
             return False
@@ -11389,6 +11403,8 @@ echo "AGENT_INSTALLED_OK"
             
             return True
             
+        except LeaseRefused:
+            raise
         except Exception as e:
             self.logger.error(f"[HA] Failed to write poison pill: {e}")
             return False
@@ -12483,6 +12499,8 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"[HA] Manual fix: mv {source_path} {target_path}")
             return False
             
+        except LeaseRefused:
+            raise
         except Exception as e:
             self.logger.error(f"[HA] Error moving VM config: {e}")
             return False
