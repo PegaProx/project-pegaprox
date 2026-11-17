@@ -479,6 +479,133 @@ def set_enabled(value, untold_ok=False):
     return switch_status()
 
 
+# --- the disaster recovery switch ----------------------------------------------------
+#
+# MK Nov 2026 - enrolled clusters, leases, adoption and takeover are the federation's
+# disaster recovery, a part an admin switches on apart from the rest (the linked mode:
+# pairing, accounts, other sites' clusters in the own UI). Off, the default, no lease
+# round runs, no cluster is enrolled, adopted or taken over, no field key is handed out
+# and no ownership record is pushed. The write gate lets a cluster no federation owns
+# pass at its first check and, as with the federation off, refuses a row a federation
+# still owns. Read through a cache like the federation switch; PEGAPROX_FEDERATION_DR
+# forces it the same way.
+DR_ENV_SWITCH = 'PEGAPROX_FEDERATION_DR'
+DR_SETTING_KEY = 'federation_dr_enabled'
+
+DR_OFF_ERROR = ('Disaster recovery is switched off on this instance - an admin switches it '
+                'on in the settings, under Federation')
+DR_IN_USE_ERROR = ('Unenroll every cluster first: disaster recovery still holds clusters here '
+                   '({reasons})')
+
+
+def dr_forced():
+    """'on' or 'off' when PEGAPROX_FEDERATION_DR says '1' or '0', None when the setting
+    decides."""
+    raw = os.environ.get(DR_ENV_SWITCH)
+    if raw is None or raw == '':
+        return None
+    if raw in ('1', '0'):
+        return 'on' if raw == '1' else 'off'
+    _say_once(('dr-env', raw), f'[FED] {DR_ENV_SWITCH}={raw!r} is neither 1 nor 0 - ignored, '
+                               'the disaster recovery setting decides')
+    return None
+
+
+def dr_enabled():
+    """True while the federation runs and its disaster recovery is switched on."""
+    if not enabled():
+        return False
+    f = dr_forced()
+    if f is not None:
+        return f == 'on'
+    held = _runtime.get('dr')
+    now = time.monotonic()
+    if held is not None and 0 <= now - held[1] < SWITCH_CACHE_SECONDS:
+        return held[0]
+    try:
+        value = _db().get_server_setting(DR_SETTING_KEY, False) is True
+    except Exception as e:
+        value = held[0] if held is not None else False
+        _say_once('dr-read', f'[FED] the disaster recovery setting could not be read, it '
+                             f'stays {"on" if value else "off"}: {e}')
+    _runtime['dr'] = (value, now)
+    return value
+
+
+def dr_blockers():
+    """What keeps disaster recovery from switching off: 'enrolled' (a cluster row a
+    federation owns, enrolled here or another site's copy) and 'lease' (a lease this
+    instance holds or a promise it gave as a voter)."""
+    from pegaprox.core import federation_lease as fl
+    out = []
+    if _db().conn.execute("SELECT 1 FROM clusters WHERE fed_owner != '' LIMIT 1").fetchone():
+        out.append('enrolled')
+    if fl.holds_any_lease() or fl.backed_candidates():
+        out.append('lease')
+    return out
+
+
+def dr_status():
+    """{'enabled', 'forced', 'can_disable', 'disable_blockers'} of disaster recovery."""
+    on = dr_enabled()
+    blockers = []
+    if on:
+        try:
+            blockers = dr_blockers()
+        except Exception as e:
+            logging.warning(f'[FED] could not tell what keeps disaster recovery on: {e}')
+            blockers = ['enrolled', 'lease']
+    return {'enabled': on, 'forced': dr_forced() is not None,
+            'can_disable': bool(on and dr_forced() is None and not blockers),
+            'disable_blockers': blockers}
+
+
+def set_dr_enabled(value):
+    """Switch disaster recovery on or off for the deployment. FED_DISABLED while the
+    federation is off, FED_FORCED while PEGAPROX_FEDERATION_DR decides, FED_DR_IN_USE
+    (with blockers) for a switch off while a cluster is still enrolled or a lease or
+    promise is held. Returns dr_status()."""
+    if not isinstance(value, bool):
+        raise FederationError('Say true or false', code='FED_BAD_VALUE')
+    if not enabled():
+        raise FederationError(FED_DISABLED_ERROR, code='FED_DISABLED')
+    f = dr_forced()
+    if f is not None:
+        raise FederationError(f'The server sets this with {DR_ENV_SWITCH}='
+                              f'{"1" if f == "on" else "0"} - change it there',
+                              code='FED_FORCED')
+    if not value and dr_enabled():
+        blockers = dr_blockers()
+        if blockers:
+            raise FederationError(DR_IN_USE_ERROR.format(reasons=', '.join(blockers)),
+                                  code='FED_DR_IN_USE', blockers=blockers)
+    was_on = dr_enabled()
+    _db().save_server_setting(DR_SETTING_KEY, value)
+    _runtime['dr'] = (value, time.monotonic())
+    if value and not was_on:
+        # the snapshots pulled while it was off left the cluster copies and the ownership
+        # records out: the etags go, so the next sync takes every snapshot whole
+        try:
+            conn = _db().conn
+            conn.execute('DELETE FROM federation_sync_state')
+            conn.commit()
+        except Exception as e:
+            logging.warning(f'[FED] the next sync may skip the cluster copies: {e}')
+    return dr_status()
+
+
+def sites_without_dr():
+    """The sites of the view that do not say, right now, that their disaster recovery is
+    on: a cluster is enrolled only while every site holds it on, so none of them refuses
+    the lease votes and copies it is asked for."""
+    def ask(item):
+        iid, rec = item
+        status, body, _h = call_peer(iid, 'GET', STATUS_PATH, read_timeout=5)
+        ok = status == 200 and isinstance(body, dict) and body.get('dr') is True
+        return None if ok else (rec.get('site') or iid[:8])
+    return sorted(s for s in _parallel(ask, sorted(members().items())) if s)
+
+
 # --- the identity: one row of the synced table pegaprox_kv ----------------------------
 
 def _blank_identity():
@@ -1719,11 +1846,15 @@ def pairing_open():
     return None
 
 
-def accept_join(code, url, joiner_id, joiner_key, site, fingerprints=None):
+def accept_join(code, url, joiner_id, joiner_key, site, fingerprints=None, joiner_dr=False):
     """The issuer's half of a join: check the code without spending it, add the member
     through a view change (a majority of the view takes the lock), spend the code, answer
     with the view sealed under the code's secret. Raises FederationError with what the
-    joining instance reads; FED_NO_QUORUM and FED_FULL leave the code open."""
+    joining instance reads; FED_NO_QUORUM, FED_FULL and FED_DR_OFF_AT leave the code open.
+
+    While a cluster is enrolled here, the joiner must have its disaster recovery on
+    (`joiner_dr`, its own word): it would count in every majority of the leases and refuse
+    each vote."""
     if not isinstance(code, str):
         raise FederationError(PAIRING_CODE_ERROR, code='FED_CODE')
     try:
@@ -1743,6 +1874,11 @@ def accept_join(code, url, joiner_id, joiner_key, site, fingerprints=None):
     me = instance_id()
     if not me or joiner_id == me:
         raise FederationError('This instance cannot pair with itself', code='FED_CODE')
+    if joiner_dr is not True and _db().conn.execute(
+            "SELECT 1 FROM clusters WHERE fed_owner != '' LIMIT 1").fetchone():
+        raise FederationError('Clusters of this federation are enrolled, and the joining '
+                              'instance has its disaster recovery off: switch it on there '
+                              'first, under Federation', code='FED_DR_OFF_AT')
     secret = parts['secret']
     with _lock:
         st = _lease_state()
@@ -1859,7 +1995,7 @@ def join(code, own_url_, site='', fingerprints=None):
     fps = _clean_fps(fingerprints) if fingerprints else own_fingerprints()
     _set_self(url=own_url_, fingerprints=fps)
     body = {'code': code, 'url': own_url_, 'instance_id': me, 'public_key': public_key(),
-            'site': site or own_site(), 'fingerprints': fps}
+            'site': site or own_site(), 'fingerprints': fps, 'dr': dr_enabled()}
     pins = [parts['fingerprint']] if parts['fingerprint'] else []
     status, answer, _h = _send(parts['url'], pins, 'POST', JOIN_PATH, body)
     if status in (403, 409):
@@ -1925,11 +2061,12 @@ def join(code, own_url_, site='', fingerprints=None):
     fl.note_view_change()
     fl.drop_owner_cache()
     # the keys and the accounts of the issuer come along at once, best effort: the sync
-    # loop covers what this misses
-    try:
-        fetch_field_keys()
-    except Exception as e:
-        logging.warning(f'[FED] fetching the field keys after the join failed: {e}')
+    # loop covers what this misses. The field keys only serve the disaster recovery
+    if dr_enabled():
+        try:
+            fetch_field_keys()
+        except Exception as e:
+            logging.warning(f'[FED] fetching the field keys after the join failed: {e}')
     pull_identities(parts['instance_id'])
     return {'joined': parts['instance_id'], 'members': sorted(kept)}
 
@@ -2234,7 +2371,8 @@ def peer_status_body():
     ident = identity() or {}
     body = {'instance_id': ident.get('instance_id') or '', 'fed': FED_MARK,
             'site': own_site(), 'view': {'epoch': view_epoch(), 'digest': view_digest()},
-            'field_key_id': ident.get('field_key_id') or '', 'summary': {}}
+            'field_key_id': ident.get('field_key_id') or '', 'dr': dr_enabled(),
+            'summary': {}}
     try:
         from pegaprox import globals as g
         body['summary'] = {'clusters': len(getattr(g, 'cluster_managers', None) or {})}
@@ -4191,7 +4329,9 @@ def apply_identity_snapshot(body, sender):
         _note_unmapped(conn, home, held_map, seen)
         # the clusters the home leads become mirrors in the same transaction - one
         # snapshot, one commit, and the etag below only says 'pulled' when both went in
-        _apply_cluster_mirrors(home, body.get('clusters'), report, changes)
+        # (with the disaster recovery off, no copy of another site's cluster is kept)
+        _apply_cluster_mirrors(home, body.get('clusters') if dr_enabled() else None,
+                               report, changes)
         conn.commit()
     except Exception:
         _rollback(conn)
@@ -4332,7 +4472,7 @@ def _pull_identities(sender, extra_headers=None):
     if body.get('etag') and state.get('etag') == body.get('etag'):
         _note_pull(sender, state['etag'], {'unchanged': state.get('rows') or 0})
         return {'unchanged': True, 'quarantined': _quarantined_count(sender)}
-    if isinstance(body.get('records'), list) and body['records']:
+    if isinstance(body.get('records'), list) and body['records'] and dr_enabled():
         # before the cluster rows: a cluster this instance took over and lost in an HA
         # failover is led here again first, and its row is not dropped as one the
         # sender no longer lists
@@ -4778,11 +4918,14 @@ def _sync_tick():
         return
     if _check_removed_by():
         return
-    # a crash between a shrink to one and the return of the clusters is repaired here
-    fl.return_alone('repair')
+    dr = dr_enabled()
+    if dr:
+        # a crash between a shrink to one and the return of the clusters is repaired here
+        fl.return_alone('repair')
     catch_up()
-    fetch_field_keys()
-    fl.push_records()
+    if dr:
+        fetch_field_keys()
+        fl.push_records()
     _push_self_update()
     # with no member left this still sweeps the mirrors of the ones that went
     sync_identities()
@@ -4790,6 +4933,8 @@ def _sync_tick():
 
 
 def _lease_tick():
+    if not dr_enabled():
+        return
     from pegaprox.core import federation_lease as fl
     fl.lease_round(tick=True)
 
@@ -4880,7 +5025,9 @@ def guard_exit(cluster_id, action, kind=None):
     a thaw: what is under way is kept for cut_cluster only after a write."""
     if not cluster_id or kind in ('console', 'login', 'thaw'):
         return False
-    if not enabled():
+    if not dr_enabled():
+        # with disaster recovery off nothing is leased: a row nobody owns is this
+        # instance's alone, a row a federation still owns is fenced as with the switch off
         try:
             owner = cluster_owner(cluster_id)
         except FederationError:
@@ -4888,8 +5035,8 @@ def guard_exit(cluster_id, action, kind=None):
         if not owner:
             return True
         _say_once(('refused-off', cluster_id), f'[FED] {action} to cluster {cluster_id} '
-                                               'refused: it is enrolled in a federation that '
-                                               'is switched off here')
+                                               'refused: it is enrolled in a federation whose '
+                                               'disaster recovery is switched off here')
         raise LeaseRefused(cluster_id, action)
     from pegaprox.core import ha
     if kind == 'ssh' and ha.in_read_request():
@@ -4933,8 +5080,11 @@ def is_enrolled(cluster_id):
 
 
 def worker_takes_writes_for(cluster_id):
-    """takes_writes_for for the background workers: False when it cannot tell."""
+    """takes_writes_for for the background workers: False when it cannot tell. With
+    disaster recovery off, a cluster no federation owns is this instance's alone."""
     try:
+        if not dr_enabled():
+            return not cluster_owner(cluster_id)
         return takes_writes_for(cluster_id)
     except FederationError:
         return False

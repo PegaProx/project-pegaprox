@@ -26,6 +26,7 @@ def _held_lines(cluster):
 @pytest.fixture
 def lease(monkeypatch):
     monkeypatch.setenv(federation.ENV_SWITCH, '1')
+    monkeypatch.setenv(federation.DR_ENV_SWITCH, '1')
     state = {'held': lambda: False}
     monkeypatch.setattr(federation, 'worker_takes_writes_for', lambda cid: state['held']())
     return state

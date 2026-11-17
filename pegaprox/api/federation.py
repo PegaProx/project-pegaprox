@@ -148,11 +148,21 @@ def _fed_error(e, status=409):
 FED_DISABLED_ERROR = federation.FED_DISABLED_ERROR
 _OPEN_WHILE_OFF = {('federation.federation_status', 'GET'),
                    ('federation.federation_switch', 'POST')}
+# the routes of the disaster recovery, which answer 409 FED_DR_OFF while it is off. The
+# lease vote is not one of them: the members lock of a pairing or a removal is voted on
+# there too, and cast_votes refuses every cluster in it while disaster recovery is off
+_DR_ENDPOINTS = frozenset({
+    'federation.peer_field_key', 'federation.federation_leases',
+    'federation.enroll_cluster', 'federation.release_cluster', 'federation.unenroll_cluster',
+    'federation.adopt_cluster', 'federation.take_over_cluster', 'federation.take_over_member',
+    'federation.renew_cluster_lease'})
 
 
 @bp.before_request
 def _refuse_while_switched_off():
     if federation.enabled():
+        if request.endpoint in _DR_ENDPOINTS and not federation.dr_enabled():
+            return jsonify({'error': federation.DR_OFF_ERROR, 'code': 'FED_DR_OFF'}), 409
         return None
     if (request.endpoint, request.method) in _OPEN_WHILE_OFF:
         return None
@@ -283,10 +293,11 @@ def peer_join():
                                      _str(data.get('instance_id'), 64),
                                      _str(data.get('public_key'), 128),
                                      _str(data.get('site'), 64),
-                                     [f for f in fps[:8] if isinstance(f, str)])
+                                     [f for f in fps[:8] if isinstance(f, str)],
+                                     joiner_dr=data.get('dr') is True)
     except federation.FederationError as e:
         logging.warning(f"[FED] pairing attempt from {ip} refused: {e}")
-        if e.code in ('FED_NO_QUORUM', 'FED_FULL', 'FED_VIEW'):
+        if e.code in ('FED_NO_QUORUM', 'FED_FULL', 'FED_VIEW', 'FED_DR_OFF_AT'):
             return _fed_error(e, 409)
         return jsonify({'error': str(e)}), 403
     except Exception as e:
@@ -325,7 +336,12 @@ def peer_end_taken():
     if _body(_MAX_BODY).get('sig') != end.get('sig'):
         return jsonify({'error': 'That is not the end record held here',
                         'code': 'FED_END_MISMATCH'}), 409
+    held = ((federation.identity() or {}).get('ended') or {}).get(iid) or {}
     federation.note_end_told(iid)
+    if not held.get('told_at'):
+        log_audit('system', 'federation.end_confirmed',
+                  f"{held.get('site') or iid[:8]} ({iid}) confirmed that it took the record of "
+                  'this instance carrying on without it', ip_address=get_client_ip())
     return jsonify({'told': True})
 
 
@@ -576,6 +592,8 @@ def federation_status():
     or made for this."""
     out = federation.switch_status()
     out.update(_session_fields())
+    if out['enabled']:
+        out['dr'] = federation.dr_status()
     if not out['enabled'] or not out['manage']:
         return jsonify(out)
     from pegaprox.core import ha
@@ -960,6 +978,30 @@ def federation_map_identity():
     return jsonify(out)
 
 
+@bp.route('/api/federation/dr', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN])
+def federation_dr_switch():
+    """Switch the disaster recovery on or off: enrolled clusters, leases, adoption and
+    takeover. Body {"enabled": bool}. Switching off is refused with 409 FED_DR_IN_USE
+    while a cluster is enrolled here (or a copy of another site's is held) or a lease or
+    promise is held, and with 409 FED_FORCED while PEGAPROX_FEDERATION_DR decides."""
+    denied = _guards()
+    if denied:
+        return denied
+    value = _body().get('enabled')
+    if not isinstance(value, bool):
+        return jsonify({'error': 'Send {"enabled": true} or {"enabled": false}',
+                        'code': 'FED_BAD_VALUE'}), 400
+    try:
+        out = federation.set_dr_enabled(value)
+    except federation.FederationError as e:
+        return _fed_error(e, 409)
+    log_audit(_user(), 'federation.dr_switched_on' if value else 'federation.dr_switched_off',
+              f'the disaster recovery of the federation was switched {"on" if value else "off"}',
+              ip_address=get_client_ip())
+    return jsonify(out)
+
+
 @bp.route('/api/federation/clusters', methods=['GET'])
 @require_auth(roles=[ROLE_ADMIN])
 def federation_clusters():
@@ -1001,6 +1043,12 @@ def enroll_cluster(cluster_id):
     denied = _guards('enrolling a cluster')
     if denied:
         return denied
+    missing = federation.sites_without_dr()
+    if missing:
+        return jsonify({'code': 'FED_DR_OFF_AT', 'sites': missing,
+                        'error': f'Disaster recovery is off at {", ".join(missing)}, or the '
+                                 'site does not answer - every site needs it on before a '
+                                 'cluster is enrolled'}), 409
     try:
         lease = fed_lease.enroll_cluster(cluster_id, by=f'admin:{_user()}')
     except federation.FederationError as e:

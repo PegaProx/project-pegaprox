@@ -47,10 +47,11 @@ def fed(api, monkeypatch):
     """The real app with the federation of a fresh instance (conftest gives every test
     its own lease file and forgets the caches), and the pairing/re-auth budgets of the
     routes reset, as the HA tests reset theirs. The federation is switched on, as
-    PEGAPROX_FEDERATION=1 does it."""
+    PEGAPROX_FEDERATION=1 does it, and its disaster recovery with it."""
     import pegaprox.api.federation as api_fed
     from pegaprox.globals import login_attempts_by_ip, login_attempts_by_user
     monkeypatch.setenv(federation.ENV_SWITCH, '1')
+    monkeypatch.setenv(federation.DR_ENV_SWITCH, '1')
     for window in (api_fed._pair_attempts, api_fed._peer_failures,
                    api_fed._reauth_attempts, api_fed._lease_votes, api_fed._lease_ticks,
                    api_fed._lease_returns):
@@ -133,6 +134,7 @@ def test_a_tenant_capped_admin_reaches_no_federation_admin_route(fed, seed):
     c = fed.as_user(seed.user('gx2', role='admin', tenant_id='globex',
                               tenant_permissions={'globex': {'role': 'user'}}))
     for method, path in (('post', '/api/federation/switch'),
+                         ('post', '/api/federation/dr'),
                          ('get', '/api/federation/members'),
                          ('get', '/api/federation/clusters'),
                          ('get', '/api/federation/leases'),

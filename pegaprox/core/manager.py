@@ -16223,13 +16223,19 @@ echo "AGENT_INSTALLED_OK"
 
         vg_name = snap['vg_name']
         errors = []
+        unchecked = []
 
         for disk in snap['disks']:
             snap_lv = disk['snap_lv']
             # Check if LV still exists before trying to remove
-            chk_code, chk_out, _ = self._node_ssh_exec(
+            chk_code, chk_out, chk_err = self._node_ssh_exec(
                 node, f"lvs /dev/{shlex.quote(vg_name)}/{shlex.quote(snap_lv)} 2>/dev/null"
             )
+            if chk_code == -1:
+                # MK Nov 2026 - no answer from the node (no SSH, or the write gate refused
+                # the session): nothing says the LV is gone, so the record stays
+                unchecked.append(f"{snap_lv}: {chk_err or 'the node could not be asked'}")
+                continue
             if chk_code != 0:
                 # LV already gone (invalidated or manually removed)
                 continue
@@ -16239,6 +16245,12 @@ echo "AGENT_INSTALLED_OK"
             )
             if exit_code != 0:
                 errors.append(f"{snap_lv}: {stderr or stdout}")
+
+        if unchecked:
+            self.logger.error(f"Efficient snapshot '{snap['snapname']}' kept: its LVs could not "
+                              f"be checked: {unchecked}")
+            return {'success': False, 'error': 'The snapshot is kept: its LVs could not be '
+                                               f"checked on the node: {'; '.join(unchecked + errors)}"}
 
         if errors:
             self.logger.error(f"Errors deleting efficient snapshot LVs: {errors}")

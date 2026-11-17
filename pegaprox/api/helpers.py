@@ -287,11 +287,12 @@ def save_server_settings(settings):
         # the ACME request saves back what it read 30 s earlier, and a banner added in
         # between would be gone again
         from pegaprox.api.banners import BANNERS_KEY
-        # MK Nov 2026 - nor the federation switch, which has its own route: a settings form
-        # that saves back what it read a while ago would undo a toggle
-        from pegaprox.core.federation import SETTING_KEY as FEDERATION_SWITCH
+        # MK Nov 2026 - nor the federation switches, which have their own routes: a settings
+        # form that saves back what it read a while ago would undo a toggle
+        from pegaprox.core.federation import SETTING_KEY as FEDERATION_SWITCH, DR_SETTING_KEY
         settings = {k: v for k, v in settings.items()
-                    if k not in (STAMPS_ZONE_SETTING, BANNERS_KEY, FEDERATION_SWITCH)}
+                    if k not in (STAMPS_ZONE_SETTING, BANNERS_KEY, FEDERATION_SWITCH,
+                                 DR_SETTING_KEY)}
         db = get_db()
         db.save_server_settings(settings)
         return True
