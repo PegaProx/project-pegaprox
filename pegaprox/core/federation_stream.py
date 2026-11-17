@@ -66,23 +66,25 @@ def bounded_lines(chunks, limit=None):
     """The lines of a byte stream, none longer than `limit` (MAX_LINE): a line that grows past
     it ends the stream with ValueError rather than being held whole in memory."""
     limit = MAX_LINE if limit is None else limit
-    buf = b''
+    buf = bytearray()
     for chunk in chunks:
         if not chunk:
             continue
+        start = len(buf)
         buf += chunk
-        while True:
-            cut = buf.find(b'\n')
-            if cut < 0:
-                break
-            line, buf = buf[:cut], buf[cut + 1:]
+        # only the new bytes are searched, and a line is cut out once
+        cut = buf.find(b'\n', start)
+        while cut >= 0:
+            line = bytes(buf[:cut])
+            del buf[:cut + 1]
             if len(line) > limit:
                 raise ValueError('a frame over the size limit')
             yield line
+            cut = buf.find(b'\n')
         if len(buf) > limit:
             raise ValueError('a frame over the size limit')
     if buf:
-        yield buf
+        yield bytes(buf)
 
 
 def reset_for_tests():
@@ -394,6 +396,17 @@ def leading_stream(sender, call, row, nonce, rid):
         }
     logging.info(f'[FED] live feed of {len(scope)} cluster(s) for {username!r} from site '
                  f'{sender[:8]} opened')
+    ended = []
+
+    def end():
+        # once, whether the answer ran or was closed before its first frame
+        if ended:
+            return
+        ended.append(True)
+        with sse_clients_lock:
+            sse_clients.pop(client_id, None)
+        _streams_in.give(sender)
+        logging.info(f'[FED] live feed for {username!r} from site {sender[:8]} closed')
 
     def lines():
         seq = 0
@@ -438,11 +451,29 @@ def leading_stream(sender, call, row, nonce, rid):
         except GeneratorExit:
             pass
         finally:
-            with sse_clients_lock:
-                sse_clients.pop(client_id, None)
-            _streams_in.give(sender)
-            logging.info(f'[FED] live feed for {username!r} from site {sender[:8]} closed')
-    return lines()
+            end()
+    return _Answer(lines(), end)
+
+
+class _Answer:
+    """The body of a stream answer: its frames, and its end when the server closes it, also
+    when that happens before the first frame (a generator that never started runs no
+    finally)."""
+
+    def __init__(self, frames, end):
+        self.frames, self.end = frames, end
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self.frames)
+
+    def close(self):
+        try:
+            self.frames.close()
+        finally:
+            self.end()
 
 
 def _recheck(sender, call, raws, now_scope):

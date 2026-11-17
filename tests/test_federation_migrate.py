@@ -165,6 +165,55 @@ def test_no_token_lands_on_a_guest_that_is_there(linked, pve):
     assert _migrate(a, b, _session(a, 'alice'), target_vmid=206).status_code == 200
 
 
+def test_two_migrations_do_not_get_tokens_for_one_vmid(linked, pve):
+    """Proxmox VE's nextid answer reserves nothing: the target site holds a VMID for the
+    token it made until the token is dropped."""
+    a, b = linked
+    assert _migrate(a, b, _session(a, 'alice'), target_vmid=300).status_code == 200
+    (target, _s, name, _u, _w), = pve['followed']
+    r = _migrate(a, b, _session(a, 'alice'), target_vmid=300)
+    assert r.status_code == 409 and r.get_json()['code'] == 'FED_MIGRATE_VMID'
+    assert len([c for c in pve['post'] if '/token/' in c[0]]) == 1
+    # another VMID is not held up
+    assert _migrate(a, b, _session(a, 'alice'), target_vmid=301).status_code == 200
+    # the token dropped, the VMID is free again
+    with at(a):
+        assert target.delete_api_token(name) == {'success': True}
+    assert _migrate(a, b, _session(a, 'alice'), target_vmid=300).status_code == 200
+
+
+def test_a_vmid_is_a_whole_number():
+    for bad in (100.9, 100.0, '100.9', '1e3', ' ', True, None, [101]):
+        with pytest.raises(fmig.MigrationRefused):
+            fmig._vmid(bad)
+    assert fmig._vmid(101) == 101 and fmig._vmid('101') == 101
+
+
+def test_the_token_is_kept_for_the_site_that_asked_not_for_the_accounts_home(linked, pve,
+                                                                           monkeypatch):
+    """An account signed in at a through its home elsewhere: a asks for the token, follows
+    the task and drops it, so the target site keeps it for a."""
+    a, b = linked
+    from pegaprox.api import federation_relay as api_relay
+    home = 'c' * 32
+    real_caller, real_resolve = api_relay._caller, relay.resolve_principal
+
+    def caller(session):
+        principal, refused = real_caller(session)
+        return (dict(principal, home=home) if principal else principal), refused
+    monkeypatch.setattr(api_relay, '_caller', caller)
+    # b takes the home's word for the account (the assertion is what the sign-in tests try)
+    monkeypatch.setattr(relay, 'resolve_principal',
+                        lambda sender, call: real_resolve(sender, dict(call, home=sender)))
+    assert _migrate(a, b, _session(a, 'alice')).status_code == 200
+    (target, _s, name, _u, _w), = pve['followed']
+    with at(b):
+        assert fmig._held()[name]['sender'] == iid(a)
+    with at(a):
+        assert target.delete_api_token(name) == {'success': True}
+    assert pve['deleted'] == [name]
+
+
 def test_a_vnet_gets_its_zone(linked, pve):
     a, b = linked
     assert _migrate(a, b, _session(a, 'alice'), target_bridge='tenant1').status_code == 200

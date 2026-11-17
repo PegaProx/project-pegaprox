@@ -212,8 +212,10 @@ def check_at_home(sender, site, data):
             return 200, {'requires_2fa': True}
         import pyotp
         from pegaprox.api.auth import _totp_replayed
-        if _totp_replayed(user, totp) or not pyotp.TOTP(row['totp_secret']).verify(
-                totp, valid_window=1):
+        # a code is spent once it was accepted: one refused is not remembered, or a code
+        # typed ahead of its time would be refused again once it is due
+        if not pyotp.TOTP(row['totp_secret']).verify(totp, valid_window=1) or \
+                _totp_replayed(user, totp):
             _sign_in_fails.allow(key)
             return _no(401, 'FED_SIGN_IN_REFUSED', 'Invalid 2FA code')
     from pegaprox.utils.audit import log_audit

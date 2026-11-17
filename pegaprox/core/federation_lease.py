@@ -458,17 +458,30 @@ def cast_votes(sender, body):
     me = fed.instance_id()
     if not me or (sender != me and sender not in fed.members()):
         return 409, {'reason': 'member'}
-    if not fed.dr_enabled() and (raw_unen or raw_recs
-                                 or any(a['cluster_id'] != MEMBERS_LOCK for a in asks)
-                                 or any(cid != MEMBERS_LOCK for cid, _pid in rels)):
-        # disaster recovery off: the members lock alone is voted on here
-        return 409, {'reason': 'dr_off'}
-    extra, taken = {}, []
+    extra, taken, left_out = {}, [], False
+    # the switch of the disaster recovery and what it governs under the lock the switch takes
+    # (set_dr_enabled): records are taken in only while it is on, and with it off the
+    # members lock alone is voted on. Records a sender still carries from before are left
+    # out then rather than refusing its members lock: they wait for the recovery to be on
+    with fed._lock:
+        if not fed.dr_enabled():
+            if any(a['cluster_id'] != MEMBERS_LOCK for a in asks) or \
+                    any(cid != MEMBERS_LOCK for cid, _pid in rels) or \
+                    ((raw_recs or raw_unen) and not asks):
+                return 409, {'reason': 'dr_off'}
+            left_out = bool(raw_recs or raw_unen)
+            raw_recs, raw_unen = [], []
+        if sender != me and raw_recs:
+            try:
+                if not take_records(sender, raw_recs)['echo']:
+                    return 503, {'reason': 'unavailable'}
+            except FederationError as e:
+                logging.warning(f'[FED] a lease vote could not read the ownership records: {e}')
+                return 503, {'reason': 'unavailable'}
     if sender != me:
         try:
-            if raw_recs and not take_records(sender, raw_recs)['echo']:
-                return 503, {'reason': 'unavailable'}
-            if upto is not None:
+            if upto is not None and not left_out:
+                # taken in up to there; records left out are not confirmed, the sender keeps them
                 extra['records_upto'] = upto
             cids = [a['cluster_id'] for a in asks]
             given = _answer_records(sender, cids)
@@ -492,6 +505,10 @@ def cast_votes(sender, body):
     # the rows, the dropped records, an unenroll and the votes under one lock: an
     # unenroll confirmed here and an adoption granted here never pass each other
     with fed._lock:
+        if not fed.dr_enabled() and (raw_unen or any(a['cluster_id'] != MEMBERS_LOCK
+                                                     for a in asks)):
+            # switched off since the look above: no promise on a cluster outlives it
+            return 409, {'reason': 'dr_off'}
         try:
             owners = _owner_map() if (asks or raw_unen) else {}
             dropped = fed.dropped_records() if asks else {}

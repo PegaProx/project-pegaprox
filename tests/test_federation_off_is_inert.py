@@ -316,18 +316,19 @@ def test_requests_read_the_switch_from_its_cache(api, seed, calls):
 # the calls into the federation that may run with the switch off: the switch itself, and
 # names that read no state of it
 _OFF_SAFE = {'enabled', 'forced'}
-# a call guarded where it is set up rather than where it runs, with the reason
+# a call guarded where it is set up rather than where it runs, with the reason, and how many
+# such calls each module makes without a switch test of its own: a new one turns it red
 _GUARDED_ELSEWHERE = {
     # ha.carry binds the list _federation_refusals handed it, which is None while off
-    ('pegaprox/core/ha.py', 'bind_refusals'),
+    ('pegaprox/core/ha.py', 'bind_refusals'): 1,
     # the exit watch runs only for what a write kept with the switch on; switched off since,
     # it still tells an enrolled cluster (stopped) from one unenrolled meanwhile (left alone)
-    ('pegaprox/core/ha_transport.py', 'is_enrolled'),
+    ('pegaprox/core/ha_transport.py', 'is_enrolled'): 1,
     # a sign-in keeps what the home answered (at_home), which it answers only with the
     # switch on, and an SSE stream drops the feeds of another site that watch() opened,
     # which it opens only with the switch on
-    ('pegaprox/api/auth.py', 'keep'),
-    ('pegaprox/api/realtime.py', 'unwatch'),
+    ('pegaprox/api/auth.py', 'keep'): 1,
+    ('pegaprox/api/realtime.py', 'unwatch'): 2,
 }
 # the one call that runs while the switch is off, on purpose: a standby that leaves its HA
 # group drops the inherited identity whenever its row is there (forget_inherited)
@@ -484,9 +485,10 @@ def _switch_flags(tree, parents, aliases):
     return {scope: names - other.get(scope, set()) for scope, names in told.items()}
 
 
-def _hooks_of(rel, src):
+def _hooks_of(rel, src, elsewhere=None):
     """The hooks of one module: (how many, the bare ones, the _RUNS_WHILE_OFF calls met,
-    the imports the walk cannot follow)."""
+    the imports the walk cannot follow). `elsewhere` counts the _GUARDED_ELSEWHERE calls
+    met without a switch test of their own."""
     import ast
     tree = ast.parse(src)
     aliases, lease, odd = _federation_aliases(tree)
@@ -499,13 +501,17 @@ def _hooks_of(rel, src):
                 and node.func.value.id in aliases | lease):
             continue
         what = node.func.attr
-        if what in _OFF_SAFE or (rel, what) in _GUARDED_ELSEWHERE:
+        if what in _OFF_SAFE:
             continue
         if (rel, what) in _RUNS_WHILE_OFF:
             allowed.add((rel, what))
             continue
         found += 1
         if not _guarded(node, parents, aliases, flags.get(_scope_of(node, parents), set())):
+            if (rel, what) in _GUARDED_ELSEWHERE:
+                if elsewhere is not None:
+                    elsewhere[(rel, what)] = elsewhere.get((rel, what), 0) + 1
+                continue
             bare.append(f'{rel}:{node.lineno} {what}()')
     return found, bare, allowed, [f'{rel}:{line} {what}' for line, what in odd]
 
@@ -518,7 +524,7 @@ def test_every_hook_outside_the_federation_asks_the_switch_first():
     flag set from the switch. A new hook that forgets it turns this red. _RUNS_WHILE_OFF
     lists the calls allowed past it, and each has to be there."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    found, bare, allowed, unread = 0, [], set(), []
+    found, bare, allowed, unread, elsewhere = 0, [], set(), [], {}
     for folder, _dirs, files in os.walk(os.path.join(root, 'pegaprox')):
         for name in files:
             if not name.endswith('.py'):
@@ -532,12 +538,15 @@ def test_every_hook_outside_the_federation_asks_the_switch_first():
             # every form of the import names the module
             if 'federation' not in src:
                 continue
-            n, b, a, u = _hooks_of(rel, src)
+            n, b, a, u = _hooks_of(rel, src, elsewhere)
             found, bare, allowed, unread = found + n, bare + b, allowed | a, unread + u
     # counterproof that the walk sees the hooks: the manager, the jobs, the routes, the exits
     assert found >= 15, found
     assert not bare, bare
     assert allowed == _RUNS_WHILE_OFF, allowed
+    # each of those exactly as often as listed: another call of the same name in the same
+    # module is no hook guarded elsewhere because its neighbour is
+    assert elsewhere == _GUARDED_ELSEWHERE, elsewhere
     # a hook behind an import the walk does not follow would pass unseen: the core is
     # imported as `from pegaprox.core import federation [as x]`, the lease module alike
     assert not unread, unread
