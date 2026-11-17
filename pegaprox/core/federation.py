@@ -1700,7 +1700,7 @@ def _wire_call(url, fingerprints, method, path, data, headers, read_timeout, cap
                 # the other host of an HA group answers under the next pin
                 continue
             logging.warning(f'[FED] call to {url}{path}: the certificate matches no pin ({e})')
-            if sent is not None:
+            if sent is not None and _tls_before_send(e):
                 sent['never'] = True
             return 0, None, {}
         except Exception as e:
@@ -1752,6 +1752,18 @@ def _wire_stream(url, fingerprints, path, headers, read_timeout):
             return resp.status_code, None
         return 200, resp
     return 0, None
+
+
+# what a TLS failure says when it stopped the connection before the request went out: the
+# pin, the certificate check or the handshake itself. A TLS error while the answer is read
+# says none of these, and the request may have been delivered
+_BEFORE_SEND_TLS = ('fingerprints did not match', 'certificate verify failed', 'handshake',
+                    'wrong version number', 'unsupported protocol', 'no protocols available')
+
+
+def _tls_before_send(e):
+    text = str(e).lower()
+    return any(marker in text for marker in _BEFORE_SEND_TLS)
 
 
 def _never_connected(e):
@@ -4361,7 +4373,7 @@ def apply_identity_snapshot(body, sender, dr=None):
     Only what really changed is written and audited: a held row equal to what it would
     become is left alone."""
     if dr is None:
-        dr = dr_enabled()
+        dr = True
     if not isinstance(body, dict) or body.get('fed') != FED_MARK \
             or not isinstance(body.get('rows'), dict):
         raise FederationError('That answer is no identity snapshot')
@@ -4385,6 +4397,27 @@ def apply_identity_snapshot(body, sender, dr=None):
     changes, raised, ended = [], [], set()
     from collections import Counter
     seen = Counter()
+    # the disaster recovery as it stands while the snapshot goes in, under the lock its switch
+    # takes: a switch-off between the pull and here keeps the copies out, and the etag says so
+    with _lock:
+        dr = dr_enabled() and bool(dr)
+        _apply_snapshot_rows(home, body, tables, dr, report, changes, raised, ended, seen)
+    if report['deleted']:
+        # the grants of a dropped user went inside the transaction
+        _db().invalidate_grant_caches()
+    _finish_cluster_mirrors(home, report)
+    # a mirror that went, was disabled, re-passworded or quarantined does not keep a
+    # sign-in at this site
+    for name in sorted(ended):
+        _end_sessions_of(name)
+    _audit_applied(home, changes, raised)
+    etag = body.get('etag') or ''
+    _note_pull(home, etag + NODR_MARK if etag and not dr else etag, report)
+    return report
+
+
+def _apply_snapshot_rows(home, body, tables, dr, report, changes, raised, ended, seen):
+    """The rows of one snapshot in one transaction (apply_identity_snapshot)."""
     conn = _identities_conn()
     _begin(conn)
     try:
@@ -4407,18 +4440,6 @@ def apply_identity_snapshot(body, sender, dr=None):
     except Exception:
         _rollback(conn)
         raise
-    if report['deleted']:
-        # the grants of a dropped user went inside the transaction
-        _db().invalidate_grant_caches()
-    _finish_cluster_mirrors(home, report)
-    # a mirror that went, was disabled, re-passworded or quarantined does not keep a
-    # sign-in at this site
-    for name in sorted(ended):
-        _end_sessions_of(name)
-    _audit_applied(home, changes, raised)
-    etag = body.get('etag') or ''
-    _note_pull(home, etag + NODR_MARK if etag and not dr else etag, report)
-    return report
 
 
 def _drop_row(conn, table, keys, sql_keys, home, dropped_users):

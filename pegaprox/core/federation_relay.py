@@ -270,6 +270,8 @@ _in = _Budget(max(4, _P // 2), max(4, _P // 8))
 _out_users = _Budget(10 ** 6, max(2, _out.each // 2))
 # how long a call waits for a slot before it is answered 429 FED_RELAY_BUSY
 SLOT_WAIT = 8
+# a slot given back wakes the calls that wait for one
+_slot_freed = threading.Condition()
 # uploads run for minutes and hold a spooled copy on the disk: a few at a time, outside
 # the budgets above
 _uploads_out = _Budget(4, 2)
@@ -291,19 +293,23 @@ def take_slot(iid, user, wait=None):
     calls of one view come in a burst, and a short wait serves them where a refusal would
     leave the view empty. True when taken; give it back with give_slot."""
     deadline = time.monotonic() + (SLOT_WAIT if wait is None else wait)
-    while True:
-        if _out_users.take((user, iid)):
-            if _out.take(iid):
-                return True
-            _out_users.give((user, iid))
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.1)
+    with _slot_freed:
+        while True:
+            if _out_users.take((user, iid)):
+                if _out.take(iid):
+                    return True
+                _out_users.give((user, iid))
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            _slot_freed.wait(left)
 
 
 def give_slot(iid, user):
     _out.give(iid)
     _out_users.give((user, iid))
+    with _slot_freed:
+        _slot_freed.notify_all()
 
 
 def _broken(iid):
@@ -671,7 +677,7 @@ def resolve_principal(sender, call):
     return row, None
 
 
-def run_relayed(app, outer, call, row, site):
+def run_relayed(app, outer, call, row, site, sender=''):
     """Run the call through this app as the mirror `row`: (status, headers, body). A call an
     API token made at its site runs as a token of that role here, floored to the mirror's
     role as every token of this instance is."""
@@ -708,7 +714,7 @@ def run_relayed(app, outer, call, row, site):
         'wsgi.multiprocess': False,
         'wsgi.run_once': False,
         RELAY_ENVIRON: {'session': sid, 'site': site, 'home': call['home'], 'rid': call['rid'],
-                        'ip': call['ip'], 'sh': call['sh']},
+                        'ip': call['ip'], 'sh': call['sh'], 'sender': sender},
     }
     if call['ctype']:
         environ['CONTENT_TYPE'] = call['ctype']

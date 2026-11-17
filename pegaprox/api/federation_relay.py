@@ -361,7 +361,7 @@ def peer_relay():
             return _signed_refusal(nonce, rid, sender, *why)
         call['body'] = body
         status, headers, out = relay.run_relayed(current_app._get_current_object(),
-                                                 request.environ, call, row, site)
+                                                 request.environ, call, row, site, sender)
     finally:
         relay._in.give(sender)
     return _signed(nonce, rid, sender, status, headers, out)
@@ -406,7 +406,7 @@ def peer_relay_upload():
         with open(spooled, 'rb') as fh:
             call.update(body=fh, size=os.path.getsize(spooled))
             status, headers, out = relay.run_relayed(current_app._get_current_object(),
-                                                     request.environ, call, row, site)
+                                                     request.environ, call, row, site, sender)
     finally:
         relay.drop_spooled(spooled)
         relay._uploads_in.give(sender)
@@ -784,9 +784,11 @@ def migration_target(cluster_id):
     if not ok:
         return err
     try:
+        # the member that sent it, which follows the task and drops the token: the account's
+        # home only when that is the same site (not for one signed in through its home)
         return jsonify(fmig.mint_target(cluster_id, request.get_json(silent=True), acting_user(),
                                         request.session.get('user') or '',
-                                        sender=mark.get('home') or ''))
+                                        sender=mark.get('sender') or ''))
     except fmig.MigrationRefused as e:
         return _fail(e.status, e.code, e.error)
 

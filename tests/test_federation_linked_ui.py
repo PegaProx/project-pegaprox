@@ -70,7 +70,10 @@ def test_runtime_a_remote_cluster_opens_from_the_keyboard(open_app):
     page = app.page
     item = page.locator(f'[data-fed-cluster="{RID}"]')
     item.wait_for(timeout=8000)
-    item.focus()
+    # the name is the control that opens it, a button of its own next to the chevron
+    name = item.locator('button[data-fed-select]')
+    assert name.inner_text() == 'Prod Hamburg'
+    name.focus()
     page.keyboard.press('Enter')
     page.wait_for_timeout(1500)
     asked = [u for u in app.server.urls if f'/api/clusters/{RID}/' in u]
@@ -162,6 +165,9 @@ def test_the_dialogs_and_the_pop_out_know_remote_clusters():
     # the config dialogs find the cluster type of a remote cluster
     assert '<ConfigModal' in main and 'allClusters={clusters}' not in main
     assert 'new Map(allClusters.map(c => [c.id, c]))' in main
+    # past the first 500 other sites' guests the list says how many more there are
+    tables = _read('web', 'src', 'tables.js')
+    assert "{rows.length > 500 && (" in tables and 'data-remote-guests-more' in tables
     # the pop-out console checks a remote id against the linked sites
     assert "remote ? `${API_URL}/federation/linked` : `${API_URL}/clusters`" in dash
 
@@ -229,6 +235,22 @@ def test_runtime_a_remote_row_has_its_own_menu(open_app):
     assert not app.errors, app.errors
 
 
+@pytest.mark.parametrize('admin_there', [False, True])
+def test_runtime_a_remote_rows_menu_asks_that_site_alone(open_app, admin_there):
+    """A viewer here who is an admin at the other site gets that site's entries on its row;
+    what this site lets the account do does not take them away."""
+    extra = _linked([dict(SITE, admin=admin_there)])
+    app = open_app(role='standalone', layout='corporate-redesigned', clusters=[CLUSTER],
+                   resources=[VM], extra=extra, admin=False, permissions=['cluster.view', 'vm.view'])
+    page = app.page
+    row = page.locator(f'[data-fed-cluster="{RID}"]')
+    row.wait_for(timeout=8000)
+    row.click(button='right')
+    page.get_by_text('Open at hamburg').first.wait_for(timeout=5000)
+    assert ('New VM' in page.inner_text('body')) is admin_there
+    assert not app.errors, app.errors
+
+
 def test_runtime_the_guest_list_has_the_other_sites_guests(open_app):
     app = _open(open_app, 'modern')
     page = app.page
@@ -250,6 +272,10 @@ def test_runtime_only_remote_clusters_still_offer_the_global_views(open_app):
     page = app.page
     page.locator(f'[data-fed-cluster="{RID}"]').wait_for(timeout=8000)
     assert page.locator('[data-sidebar-guests]').count() == 1
+    # the overview of all clusters counts the other site's, and the world map is there
+    overview = page.locator('button', has_text='All Clusters').filter(has_text='cluster(s)')
+    assert overview.count() == 1 and '1 cluster(s)' in overview.inner_text()
+    assert page.locator('button', has_text='World Map').filter(has_text='Cluster locations').count() == 1
     assert not app.errors, app.errors
 
 
@@ -265,11 +291,18 @@ def test_the_cluster_view_asks_the_site_that_leads_it():
     assert '(!haReadOnly || haReadPermission(permission))' in helper
     # a menu entry of another site's cluster, node, pool or guest asks that site's permissions
     menu = dash[dash.index('const buildContextMenuItems = (type, target) => {'):]
-    assert '.filter(siteAllows).filter(menuAllows);' in menu[:menu.index('return out;')]
+    menu = menu[:menu.index('return out;')]
+    assert 'const kept = site ? raw.filter(siteAllows) : raw.filter(menuAllows);' in menu
+    assert 'const sub = site ? item.submenu.filter(siteAllows) : item.submenu.filter(menuAllows);' in menu
 
 
 def test_a_migration_to_another_site_goes_through_the_federation():
     dash = _read('web', 'src', 'dashboard.js')
+    # the guest table's dialog offers the other sites' clusters too
+    table = dash[dash.index('<ResourceTable '):]
+    assert 'migrateTargets={allClusters}' in table[:table.index('/>')]
+    # replication stays between this site's clusters
+    assert 'allClusters.filter(c => c.id !== clusterId && c.connected && !c.fed)' in _read('web', 'src', 'vm_config.js')
     modals = _read('web', 'src', 'vm_modals.js')
     assert "`${API_URL}/${crossSite ? 'federation/migrate' : 'cross-cluster-migrate'}`" in dash
     # a remote target is a connected Proxmox VE cluster; the preflight is for one site's two

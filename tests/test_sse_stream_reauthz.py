@@ -221,3 +221,79 @@ def test_a_genuinely_deleted_account_still_closes(sse, monkeypatch):
         _drain(gen, 6)
 
     assert client_id not in ppglobals.sse_clients
+
+
+def test_other_sites_feeds_stop_once_the_account_may_no_longer_cross(api, seed, monkeypatch):
+    """Linked mode: a relayed call asks for its principal each time, a feed of another site
+    only when it connects. The re-check asks again: with none now (the home took a
+    sign-in's assertion back) the feeds stop, and a stream with nothing of this site in it
+    closes."""
+    from pegaprox.core import federation, federation_stream
+    ppglobals.sse_clients.clear()
+    monkeypatch.setattr(rt, 'SSE_REAUTHZ_INTERVAL', 0, raising=False)
+    monkeypatch.setattr(federation, 'enabled', lambda: True)
+    monkeypatch.setattr(federation_stream, 'split_wanted', lambda ids: (
+        [c for c in ids or [] if '~' not in c], [c for c in ids or [] if '~' in c]))
+    may = [True]
+    monkeypatch.setattr(federation_stream, 'principal_for',
+                        lambda *a: {'user': 'alice'} if may[0] else None)
+    watched, dropped = [], []
+    monkeypatch.setattr(federation_stream, 'watch', lambda cid, ids, p: watched.append(ids))
+    monkeypatch.setattr(federation_stream, 'unwatch', lambda cid: dropped.append(cid))
+    seed.user('alice', role='user')
+    remote = 'c1~' + 'b' * 32
+    token = rt.create_sse_token('alice', None)
+    with api.app.test_request_context(f'/api/sse/updates?token={token}&clusters={remote}'):
+        resp = rt.sse_updates()
+    gen = resp.response
+    client_id = next(iter(ppglobals.sse_clients))
+    try:
+        assert watched == [[remote]]
+        _drain(gen)
+        q = ppglobals.sse_clients[client_id]['queue']
+        for _ in range(2):
+            q.put_nowait('{"type":"heartbeat"}')
+        # a tick while the account may: the feeds stay
+        _drain(gen, 2)
+        assert dropped == [] and ppglobals.sse_clients[client_id]['remote'] == [remote]
+        may[0] = False
+        for _ in range(2):
+            q.put_nowait('{"type":"heartbeat"}')
+        with pytest.raises(StopIteration):
+            _drain(gen, 2)
+        # stopped on the tick (and once more as the stream closed)
+        assert dropped == [client_id, client_id]
+        assert client_id not in ppglobals.sse_clients
+    finally:
+        gen.close()
+        ppglobals.sse_clients.clear()
+
+
+def test_a_new_selection_keeps_the_feeds_on_the_streams_own_credential(api, seed, monkeypatch):
+    """Another credential of the same account may change what a stream shows, not what its
+    feeds of other sites run as: they stay on the credential the stream was opened with."""
+    from pegaprox.core import federation, federation_stream
+    ppglobals.sse_clients.clear()
+    monkeypatch.setattr(federation, 'enabled', lambda: True)
+    monkeypatch.setattr(federation_stream, 'split_wanted', lambda ids: (
+        [c for c in ids or [] if '~' not in c], [c for c in ids or [] if '~' in c]))
+    asked, watched = [], []
+    monkeypatch.setattr(federation_stream, 'principal_for',
+                        lambda u, sid, tid, role, ip: asked.append((sid, tid, role)) or {'user': u})
+    monkeypatch.setattr(federation_stream, 'watch', lambda cid, ids, p: watched.append(ids))
+    monkeypatch.setattr(federation_stream, 'unwatch', lambda cid: None)
+    user = seed.user('alice', role='user')
+    one, two = 'c1~' + 'b' * 32, 'c2~' + 'b' * 32
+    token = rt.create_sse_token('alice', None, sid='the-streams-session')
+    with api.app.test_request_context(f'/api/sse/updates?token={token}&clusters={one}'):
+        resp = rt.sse_updates()
+    client_id = next(iter(ppglobals.sse_clients))
+    try:
+        r = api.as_user(user).post('/api/sse/subscribe', json={'client_id': client_id,
+                                                               'clusters': [two]})
+        assert r.status_code == 200, r.data
+        assert watched == [[one], [two]]
+        assert [a[0] for a in asked] == ['the-streams-session', 'the-streams-session']
+    finally:
+        resp.response.close()
+        ppglobals.sse_clients.clear()

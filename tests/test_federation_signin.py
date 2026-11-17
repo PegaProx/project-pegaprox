@@ -82,6 +82,23 @@ def test_the_home_checks_password_and_code_and_signs_for_the_asking_site(linked)
     assert status == 401
 
 
+def test_a_refused_code_is_not_spent(linked):
+    """Only an accepted code is remembered: one typed ahead of its time, refused then, goes
+    through once it is due (and then only once)."""
+    import pyotp
+    a, b = linked
+    _password(a, 'alice', totp=True)
+    code = pyotp.TOTP(SECRET).at(int(time.time()) + 300)
+    assert _check(a, b, totp=code)[0] == 401
+    real = pyotp.TOTP.verify
+    try:
+        pyotp.TOTP.verify = lambda self, otp, **kw: otp == code
+        assert _check(a, b, totp=code)[0] == 200
+        assert _check(a, b, totp=code)[0] == 401
+    finally:
+        pyotp.TOTP.verify = real
+
+
 def test_a_site_that_guesses_locks_only_itself_out_of_the_account(linked):
     a, b = linked
     from pegaprox.globals import login_attempts_by_user

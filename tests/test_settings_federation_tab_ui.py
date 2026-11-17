@@ -345,8 +345,11 @@ def test_the_two_site_strings_say_what_the_code_does():
         'Ab drei Standorten schützt die Mehrheit einen aufgenommenen Cluster vor zwei Schreibern. Bei zwei '
         'Standorten übernimmt ein Admin einen Cluster von Hand, wenn der andere Standort nicht antwortet; läuft '
         'dieser noch, schreiben beide Standorte auf den Cluster, bis sie einander wieder erreichen.')
-    assert ('Dann hört {site} sofort auf. Was er inzwischen auf dem Cluster getan hat, bleibt bestehen und wird '
-            'nicht rückgängig gemacht; was er in PegaProx geändert hat, wird nicht übernommen.') in _value(de, 'fedTakeoverNote')
+    # the old owner stops once the takeover reached it, not when the sites merely see each other
+    assert ('{site} hört erst auf, wenn er von der Übernahme erfahren hat; die Zeile des Clusters hier zeigt, '
+            'wann er aufgehört hat zu schreiben. Was er inzwischen auf dem Cluster getan hat, bleibt bestehen '
+            'und wird nicht rückgängig gemacht; was er in PegaProx geändert hat, wird nicht übernommen.'
+            ) in _value(de, 'fedTakeoverNote')
     assert _value(de, 'fedTakeover') == 'Manuelle Übernahme'
     assert _value(de, 'fedTwoRisk').startswith('Eine Übernahme kann einen ausgefallenen Standort nicht von einer '
                                                'ausgefallenen Verbindung unterscheiden.')

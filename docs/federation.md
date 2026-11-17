@@ -134,8 +134,8 @@ It never shares:
 
 - **its database master key**, nor the key file that seals the fields of its own
   database. Every instance keeps its own;
-- TOTP secrets. A mirrored account that uses TOTP signs in at its home, or uses a passkey
-  as the second factor elsewhere;
+- TOTP secrets. Another site has the home check a mirrored account's code at the sign-in
+  (see working from any site), or takes a passkey as the second factor;
 - credentials of clusters that are not enrolled;
 - sessions, and the personal settings of a user (theme, layout, language and the like).
 
@@ -188,7 +188,8 @@ take a mirror over or sign it in. Once mapped, the account's API tokens work at 
 sites as well.
 
 **Passwords and second factors stay at the home.** A mirrored account with TOTP signs in
-at another site only with a passkey; without one it is sent to its home
+at another site with the code its home checks (working from any site, below) or with a
+passkey; while its home does not answer and it has no passkey, it is sent to its home
 (`409 FED_2FA_HOME`). A passkey belongs to the domain it was registered for, so one
 registered at the home works only at sites that serve the same domain. Password changes,
 password resets and enrolling a second factor happen at the home; the other sites refuse
@@ -322,7 +323,10 @@ up at your home, or the clocks of the two sites are more than two minutes apart.
 **Live updates.** A cluster of another site you have open or expanded streams its updates
 (tasks, metrics, guests, node states) live, as one of this site's does: that site registers
 the stream like a browser of its own, for your account there, so its filters per guest and
-node apply and it checks the account every half minute. Every frame is signed and numbered;
+node apply and it checks the account every half minute. The site you work at checks every
+half minute as well that you may still work on other sites' clusters from there (signed in,
+or the assertion of your home still good) and stops their streams once you may not. Every
+frame is signed and numbered;
 a frame that is not as signed or out of order closes the stream, which opens again after a
 pause. In between, and for a site that does not stream, the views poll.
 
@@ -727,7 +731,7 @@ control call never passes as a relayed one, nor the other way round.
 | `FED_RELAY_NO_SPACE`, `FED_RELAY_LENGTH` | an upload to another site's datastore: not enough free disk at one of the two sites, or a body without its length |
 | `FED_STREAM_SCOPE` | none of the clusters a live stream asked for streams to the account at that site |
 | `FED_MIGRATE` | a migration between two sites was refused; the answer says by which site and why |
-| `FED_MIGRATE_VMID` | the VMID the guest would get is taken on the target cluster; choose another one |
+| `FED_MIGRATE_VMID` | the VMID the guest would get is taken on the target cluster, or held by another migration's token there; choose another one |
 | `FED_RELAY_BUSY` | too many calls to or from that site at once; try again in a moment |
 | `FED_SITE_UNREACHABLE` | the site that leads the cluster cannot be reached or does not answer; nothing was sent to it when the error says so |
 | `FED_RELAY_NO_ANSWER` | a write went out and no answer came back; it may have happened there, check its tasks |

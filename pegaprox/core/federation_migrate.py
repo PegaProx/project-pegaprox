@@ -118,12 +118,11 @@ def _names(value, what):
 
 
 def _vmid(value, what='vmid'):
-    if isinstance(value, bool):
+    # a whole number or its digits: int() would make 100.9 into 100, another guest's VMID
+    if isinstance(value, bool) or not isinstance(value, (int, str)) or \
+            (isinstance(value, str) and not value.strip().isdigit()):
         raise MigrationRefused(400, f'{what} is a VMID')
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        raise MigrationRefused(400, f'{what} is a VMID')
+    n = int(value)
     if not 100 <= n <= 999999999:
         raise MigrationRefused(400, f'{what} is a VMID')
     return n
@@ -150,9 +149,8 @@ def mint_target(cluster_id, data, user, username, sender=''):
     MigrationRefused."""
     from pegaprox.globals import cluster_managers
     from pegaprox.utils.sanitization import validate_hostname
-    from pegaprox.api.helpers import caller_is_scoped, tenant_quota_gate
-    from pegaprox.utils.rbac import acts_as_admin, check_tenant_vmid, landing_adds, quota_tenant
-    from pegaprox.core import transfer_net
+    from pegaprox.api.helpers import caller_is_scoped
+    from pegaprox.utils.rbac import acts_as_admin, check_tenant_vmid
     if not isinstance(data, dict):
         raise MigrationRefused(400, 'JSON object required')
     mgr = cluster_managers.get(cluster_id)
@@ -186,6 +184,34 @@ def mint_target(cluster_id, data, user, username, sender=''):
         if not ok:
             raise MigrationRefused(403, msg)
     name = f'{TOKEN_PREFIX}{int(time.time())}-{secrets.token_hex(4)}'
+    # Proxmox VE reserves nothing for the nextid answer above: two migrations to the same
+    # VMID would both get a token for it, and the second one rights on the first one's guest.
+    # A token not dropped holds its VMID until Proxmox VE lets it run out.
+    until = _expiry()
+    with _minted_lock:
+        now = time.time()
+        if any(h.get('cluster_id') == cluster_id and h.get('vmid') == vmid
+               and (h.get('until') or 0) > now for h in _held().values()):
+            raise MigrationRefused(409, f'VMID {vmid} is taken on the target cluster by a '
+                                        'migration under way - choose another one',
+                                   'FED_MIGRATE_VMID')
+        _held()[name] = {'cluster_id': cluster_id, 'vmid': vmid, 'sender': sender,
+                         'user': username, 'at': now, 'until': until, 'making': True}
+    try:
+        return _mint(mgr, cluster_id, user, username, name, node, vm_type, vmid, storages,
+                     bridges, footprint, source)
+    except BaseException:
+        with _minted_lock:
+            if (_held().get(name) or {}).get('making'):
+                _held().pop(name, None)
+        raise
+
+
+def _mint(mgr, cluster_id, user, username, name, node, vm_type, vmid, storages, bridges,
+          footprint, source):
+    from pegaprox.api.helpers import tenant_quota_gate
+    from pegaprox.utils.rbac import landing_adds, quota_tenant
+    from pegaprox.core import transfer_net
     # the quota hold goes with the token: released when it is dropped (drop_target)
     qerr, qwarn = tenant_quota_gate(
         user, f'migration of {vm_type} {vmid} from another site',
@@ -216,8 +242,7 @@ def mint_target(cluster_id, data, user, username, sender=''):
         _release_hold(name)
         raise
     with _minted_lock:
-        _held()[name] = {'cluster_id': cluster_id, 'sender': sender, 'user': username,
-                         'at': time.time()}
+        _held()[name].pop('making', None)
         _save()
     from pegaprox.utils.audit import log_audit
     log_audit(username, 'federation.migration_target',

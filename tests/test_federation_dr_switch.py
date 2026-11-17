@@ -286,6 +286,41 @@ def test_a_cluster_ask_is_refused_while_off_and_the_members_lock_is_not(tmp_path
     assert body.get('reason') != 'dr_off', body
 
 
+def test_records_from_before_do_not_hold_up_the_members_lock(tmp_path, dr_setting, monkeypatch):
+    """A sender may still carry an ownership record from before the switch-off: with the
+    members lock asked for, the record is left out (and not confirmed), the lock is voted on."""
+    a, b, c = _sides(tmp_path, 'abc')
+    with at(b):
+        me_b = federation.instance_id()
+    taken = []
+    monkeypatch.setattr(fl, 'take_records', lambda *args, **kw: taken.append(args) or {'echo': True})
+    with at(a):
+        status, body = fl.cast_votes(me_b, {'candidate': me_b, 'view': federation.view_digest(),
+                                            'asks': [{'cluster_id': fl.MEMBERS_LOCK}],
+                                            'records': [{'cluster_id': 'c1'}], 'records_upto': 4})
+    assert body.get('reason') != 'dr_off', body
+    assert taken == [] and 'records_upto' not in body
+    # counterproof: nothing but the record, refused as before
+    with at(a):
+        status, body = fl.cast_votes(me_b, {'candidate': me_b, 'records': [{'cluster_id': 'c1'}]})
+    assert (status, body.get('reason')) == (409, 'dr_off')
+
+
+def test_a_switch_off_between_the_look_and_the_vote_grants_no_cluster(tmp_path, dr_setting,
+                                                                       monkeypatch):
+    """The vote asks the switch again under the lock the switch takes."""
+    a, b, c = _sides(tmp_path, 'abc')
+    _set_dr(a, True)
+    with at(b):
+        me_b = federation.instance_id()
+    answers = iter([True])
+    monkeypatch.setattr(federation, 'dr_enabled', lambda: next(answers, False))
+    with at(a):
+        status, body = fl.cast_votes(me_b, {'candidate': me_b, 'view': federation.view_digest(),
+                                            'asks': [{'cluster_id': 'c9'}]})
+    assert (status, body.get('reason')) == (409, 'dr_off')
+
+
 def test_a_removal_goes_through_while_off(tmp_path, dr_setting):
     a, b, c = _sides(tmp_path, 'abc')
     with at(c):

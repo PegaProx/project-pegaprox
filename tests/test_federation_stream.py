@@ -99,6 +99,22 @@ def _feed_into_browser(a, b, lines, nonce, rid, raws=(CID,)):
     return good, got
 
 
+def test_a_stream_closed_before_its_first_frame_lets_its_slot_go(linked):
+    """A generator that never started runs no finally: the answer ends the feed itself."""
+    a, b = linked
+    from pegaprox.core.db import get_db
+    from pegaprox.utils.realtime import sse_clients
+    call = {'user': 'alice', 'home': iid(a), 'sh': '', 'tok': None, 'query': f'clusters={CID}'}
+    with at(b):
+        row = dict(get_db().get_user('alice'), username='alice')
+        body = fstream.leading_stream(iid(a), call, row, 'n' * 24, 'f' * 32)
+    assert [k for k in sse_clients if k.startswith('fed-')] and fstream._streams_in._used == 1
+    # the server closes the answer without asking it for a single frame
+    body.close()
+    assert not [k for k in sse_clients if k.startswith('fed-')]
+    assert fstream._streams_in._used == 0
+
+
 def test_the_browser_gets_the_frames_under_the_remote_id(linked):
     a, b = linked
     resp, nonce, rid = _open(a, b)

@@ -813,6 +813,36 @@ def test_only_a_connection_that_never_stood_counts_as_unsent():
     assert federation._never_connected(requests.exceptions.ReadTimeout()) is False
 
 
+def test_only_a_tls_failure_before_the_send_counts_as_unsent():
+    """A pin or certificate failure stops the connection before the request goes out; a TLS
+    error while the answer is read does not, and the request may have been delivered."""
+    import requests
+    pin = requests.exceptions.SSLError('Fingerprints did not match. Expected "ab", got "cd"')
+    cert = requests.exceptions.SSLError('[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed')
+    late = requests.exceptions.SSLError('[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC] bad record mac')
+    assert federation._tls_before_send(pin) and federation._tls_before_send(cert)
+    assert not federation._tls_before_send(late)
+
+
+def test_a_tls_error_on_the_answer_is_no_unsent_call(monkeypatch):
+    import requests
+
+    class _Sess:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def request(self, *args, **kw):
+            raise self.exc
+    monkeypatch.setattr(federation, '_url_ok', lambda url: True)
+    for text, never in (('bad record mac', False), ('Fingerprints did not match', True)):
+        exc = requests.exceptions.SSLError(text)
+        monkeypatch.setattr(federation, '_session_for', lambda url, fp, e=exc: _Sess(e))
+        sent = {}
+        federation._wire_call('https://b.example:5000', ['ab'], 'POST', relay.RELAY_PATH, b'',
+                              {}, 5, 1024, sent=sent)
+        assert bool(sent.get('never')) is never, text
+
+
 def test_a_site_over_its_rate_is_told_to_wait(linked, monkeypatch):
     """The leading site counts a member's relayed calls on their own, whatever address
     they come from."""
