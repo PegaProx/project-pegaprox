@@ -1621,6 +1621,57 @@
         // LW Oct 2026 - one row of the corporate sidebar's Tools section, same height and
         // icon column as the PBS rows. The icon gets its colour through currentColor here,
         // most of our icons ignore a style prop.
+        // LW Nov 2026 - linked mode: a cluster another site of the federation leads. It opens like
+        // one of this site's and every call goes to that site; renaming, grouping, re-configuring
+        // and deleting it happen there, so none of that is offered here
+        function RemoteClusterItem({ cluster, selected, expanded, onSelect, onToggle, isCorporate, t }) {
+            const name = cluster.display_name || cluster.name;
+            const badge = <span className="text-[10px] px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 flex-shrink-0" title={cluster.fed.url}>{cluster.fed.site}</span>;
+            if (isCorporate) {
+                return (
+                    <div onClick={onSelect} tabIndex={0} data-fed-cluster={cluster.id}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); } }}
+                        className="corp-tree-item cursor-pointer flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5"
+                        style={selected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: 'var(--corp-text-secondary)'}}>
+                        <span onClick={(e) => { e.stopPropagation(); onToggle(); }} className="flex-shrink-0 p-0.5 hover:bg-white/10 rounded">
+                            {expanded ? <Icons.ChevronDown className="w-3 h-3" /> : <Icons.ChevronRight className="w-3 h-3" />}
+                        </span>
+                        <Icons.Database className="w-4 h-4 flex-shrink-0" style={{color: cluster.connected ? 'var(--corp-accent)' : 'var(--color-error)'}} />
+                        <span className="truncate flex-1 font-medium">{name}</span>
+                        {badge}
+                    </div>
+                );
+            }
+            return (
+                <div onClick={onSelect} data-fed-cluster={cluster.id}
+                    className={`p-3 rounded-xl cursor-pointer transition-all border ${selected ? 'bg-proxmox-orange/10 border-proxmox-orange/50' : 'bg-proxmox-card border-proxmox-border hover:border-proxmox-orange/30'}`}>
+                    <div className="flex items-center gap-2 min-w-0">
+                        <span onClick={(e) => { e.stopPropagation(); onToggle(); }} className="flex-shrink-0 p-0.5 hover:bg-white/10 rounded">
+                            {expanded ? <Icons.ChevronDown className="w-3 h-3" /> : <Icons.ChevronRight className="w-3 h-3" />}
+                        </span>
+                        <div className={`w-2 h-2 rounded-full flex-shrink-0 ${cluster.connected ? 'bg-green-500 status-online' : 'bg-red-500'}`} />
+                        <h3 className="font-medium text-sm truncate flex-1">{name}</h3>
+                        {badge}
+                    </div>
+                    {!cluster.connected && (
+                        <div className="flex gap-1 mt-2"><span className="text-[10px] bg-red-500/10 text-red-400 px-1.5 py-0.5 rounded">Offline</span></div>
+                    )}
+                </div>
+            );
+        }
+
+        // the line a site of the federation shows in the sidebar instead of its clusters
+        const LINKED_STATE_TEXT = {
+            unreachable: 'linkedState_unreachable', off: 'linkedState_off', unmapped: 'linkedState_unmapped',
+            syncing: 'linkedState_syncing', name_taken: 'linkedState_name_taken',
+            disabled_account: 'linkedState_disabled_account', mfa: 'linkedState_mfa', clock: 'linkedState_clock',
+            switching: 'linkedState_switching', old_release: 'linkedState_old_release',
+            refused: 'linkedState_refused', portal_only: 'linkedState_portal_only',
+        };
+        function fedSiteStateText(site, t) {
+            return String(t(LINKED_STATE_TEXT[site.state] || 'linkedState_refused')).replace('{site}', site.site);
+        }
+
         function CorpSidebarToolRow({ id, active, icon, label, onClick }) {
             return (
                 <button
@@ -14493,6 +14544,16 @@
             // LW Nov 2026 - the redesign formats numbers and dates in the language drawn here (cr.js)
             if (isCorpRedesigned) crUiLocale(language);
             const [clusters, setClusters] = useState([]);
+            // LW Nov 2026 - linked mode: the clusters of the other sites of the federation, each site
+            // asked through this one (/api/federation/linked). Kept apart from `clusters`, which the
+            // pickers that write this site's data list; a lookup by id that opens a view asks both
+            const [remoteSites, setRemoteSites] = useState([]);
+            const [remoteHome, setRemoteHome] = useState(null);
+            const remoteClusters = useMemo(() => remoteSites.flatMap(s => s.state === 'ok'
+                ? (s.clusters || []).map(c => ({ ...c, display_name: c.name, fed: { iid: s.iid, site: s.site, url: s.url, perms: s.perms || [] } }))
+                : []), [remoteSites]);
+            const allClusters = useMemo(() => remoteClusters.length ? clusters.concat(remoteClusters) : clusters,
+                [clusters, remoteClusters]);
             const [clusterGroups, setClusterGroups] = useState([]); // NS Jan 2026 - for grouping
             const [collapsedGroups, setCollapsedGroups] = useState({}); // Track which groups are collapsed
             const [showGroupManager, setShowGroupManager] = useState(false); // Group management modal
@@ -15485,7 +15546,7 @@
             const openFavorite = (kind, f) => {
                 setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null);
                 if (kind === 'cluster') {
-                    const c = clusters.find(cl => cl.id === f);
+                    const c = allClusters.find(cl => cl.id === f);
                     if (c) setSelectedCluster(c);
                     return;
                 }
@@ -15691,11 +15752,11 @@
                                     key={`node-${nodeName}`}
                                     className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
                                     tabIndex={0}
-                                    onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }}
+                                    onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }}
                                     onContextMenu={(e) => { e.preventDefault(); setCtxMenu({type: 'node', target: {nodeName, clusterId, online: nodeOnline, maintenance: isMaint}, position: {x: e.clientX, y: e.clientY}}); }}
                                     role={crTree ? 'treeitem' : undefined} aria-level={crTree ? 2 : undefined} aria-selected={crTree ? isNodeSelected : undefined}
                                     onKeyDown={(e) => {
-                                        if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }
+                                        if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }
                                         else if (e.key === 'ArrowDown') treeNavDown(e);
                                         else if (e.key === 'ArrowUp') treeNavUp(e);
                                         else if (crTree) crTreeKey(e);
@@ -15729,7 +15790,7 @@
                         {/* LW Oct 2026 (#1137) - the QDevice right after the nodes, only where the cluster has one */}
                         {showNodes && qdeviceByCluster[clusterId]?.present && (!searchLower || 'qdevice'.includes(searchLower)) && (() => {
                             const isQSelected = selectedSidebarQdevice === clusterId;
-                            const openQ = () => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode(null); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setSelectedSidebarQdevice(clusterId); setActiveTab('overview'); };
+                            const openQ = () => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarNode(null); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setSelectedSidebarQdevice(clusterId); setActiveTab('overview'); };
                             return (
                                 <div
                                     key={`qdevice-${clusterId}`}
@@ -15762,11 +15823,11 @@
                                 <div
                                     key={`vm-${clusterId}-${vm.vmid}`}
                                     tabIndex={0}
-                                    onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
+                                    onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                     onContextMenu={(e) => { e.preventDefault(); setCtxMenu({type: 'vm', target: {...vm, _clusterId: clusterId}, position: {x: e.clientX, y: e.clientY}}); }}
                                     role={crTree ? 'treeitem' : undefined} aria-level={crTree ? 2 : undefined} aria-selected={crTree ? isVmSelected : undefined}
                                     onKeyDown={(e) => {
-                                        if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }
+                                        if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }
                                         else if (e.key === 'ArrowDown') treeNavDown(e);
                                         else if (e.key === 'ArrowUp') treeNavUp(e);
                                         else if (crTree) crTreeKey(e);
@@ -15865,10 +15926,10 @@
                         <div
                             key={`pvm-${clusterId}-${vm.vmid}`}
                             tabIndex={0}
-                            onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
+                            onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                             onContextMenu={(e) => { e.preventDefault(); setCtxMenu({type: 'vm', target: {...vm, _clusterId: clusterId}, position: {x: e.clientX, y: e.clientY}}); }}
                             onKeyDown={(e) => {
-                                if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }
+                                if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }
                                 else if (e.key === 'ArrowDown') treeNavDown(e);
                                 else if (e.key === 'ArrowUp') treeNavUp(e);
                             }}
@@ -16089,7 +16150,7 @@
                     return <CrDsTree clusterId={clusterId} shared={sharedStores} local={localByNode} skip={sharedNames}
                         picked={selectedSidebarDatastore} fail={crDsFail} onRetry={() => fetchClusterDatastores(clusterId)}
                         onOpen={(store, node) => {
-                            if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId));
+                            if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId));
                             setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId });
                             setSelectedSidebarVm(null); setSelectedSidebarNode(null);
                             setActiveTab('datastore');
@@ -16106,13 +16167,13 @@
                             key={`ds-${clusterId}-${store.storage}-${node || 's'}`}
                             tabIndex={0}
                             onClick={() => {
-                                if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId));
+                                if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId));
                                 setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId });
                                 setSelectedSidebarVm(null); setSelectedSidebarNode(null);
                                 setActiveTab('datastore');
                             }}
                             onKeyDown={(e) => {
-                                if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarNode(null); setActiveTab('datastore'); }
+                                if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarNode(null); setActiveTab('datastore'); }
                             }}
                             className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
                             style={isStoreSelected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid #49afd9', color: '#e9ecef'} : {color: isActive ? '#adbbc4' : '#728b9a'}}
@@ -16240,7 +16301,7 @@
                                 tabIndex={0}
                                 onClick={() => {
                                     setExpandedSidebarNets(prev => ({ ...prev, [`${clusterId}:${net.name}`]: !prev[`${clusterId}:${net.name}`] }));
-                                    if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId));
+                                    if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId));
                                     setSelectedSidebarNetwork({ name: net.name, clusterId });
                                     setSelectedSidebarVm(null); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null);
                                 }}
@@ -16295,7 +16356,7 @@
                                                             tabIndex={0}
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
-                                                                if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId));
+                                                                if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId));
                                                                 setSelectedSidebarVm({...vm, _clusterId: clusterId});
                                                                 setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setSelectedSidebarNetwork(null);
                                                                 setActiveTab('resources');
@@ -16465,7 +16526,7 @@
             // LW: jump to VM in the right cluster when clicking a search result
             // LW: Mar 2026 - navigate directly to VM detail instead of just selecting cluster
             const navigateToResult = (result) => {
-                const cluster = clusters.find(c => c.id === result.cluster_id);
+                const cluster = allClusters.find(c => c.id === result.cluster_id);
                 if (cluster) {
                     setSelectedCluster(cluster);
                     if (result.type === 'vm' || result.type === 'ct' || result.type === 'qemu' || result.type === 'lxc') {
@@ -19786,7 +19847,7 @@
                 if (!xhmForm.source_cluster || !xhmForm.source_vmid || !xhmForm.target_cluster) return;
                 setXhmLoading(true);
                 try {
-                    const srcMgr = clusters.find(c => c.id === xhmForm.source_cluster);
+                    const srcMgr = allClusters.find(c => c.id === xhmForm.source_cluster);
                     const srcIsXcp = srcMgr && (srcMgr.type === 'xcpng' || srcMgr.cluster_type === 'xcpng');
                     const srcIsEsxi = srcMgr && (srcMgr.type === 'esxi' || srcMgr.cluster_type === 'esxi');
                     let url = `${API_URL}/xhm/plan?source_cluster=${xhmForm.source_cluster}&source_vmid=${xhmForm.source_vmid}&target_cluster=${xhmForm.target_cluster}`;
@@ -20011,6 +20072,29 @@
                 const timer = setInterval(poll, 5000);
                 return () => { gone = true; clearInterval(timer); };
             }, [selectedCluster?.id, haStandby, haReadOnly]);
+
+            // LW Nov 2026 - the other sites' clusters, every 30 s. Off (404), the next look is in five
+            // minutes and the sections go; an account of another site gets its home named instead
+            useEffect(() => {
+                if (!sessionId) return;
+                let gone = false, timer = null;
+                const poll = async () => {
+                    let wait = 30000;
+                    try {
+                        const r = await authFetch(`${API_URL}/federation/linked`, { quiet: true });
+                        if (r && r.ok) {
+                            const d = await r.json();
+                            if (!gone) { setRemoteSites(Array.isArray(d.sites) ? d.sites : []); setRemoteHome(d.home || null); }
+                        } else {
+                            if (!gone) { setRemoteSites([]); setRemoteHome(null); }
+                            if (r && r.status === 404) wait = 300000;
+                        }
+                    } catch (e) { /* the next look tries again */ }
+                    if (!gone) timer = setTimeout(poll, wait);
+                };
+                poll();
+                return () => { gone = true; if (timer) clearTimeout(timer); };
+            }, [sessionId]);
 
             const fetchClusters = async () => {
                 try {
@@ -21191,7 +21275,7 @@
                 if (!cId) return;
                 if (haConsolesElsewhere) { haRefusedRef.current?.(false, 'console'); return; }  // a forwarding standby too, unless it serves users (#625)
                 // NS: Feb 2026 - Use correct cluster's host for cross-cluster console
-                const cluster = clusters.find(c => c.id === cId) || selectedCluster;
+                const cluster = allClusters.find(c => c.id === cId) || selectedCluster;
                 const info = {
                     vmid: resource.vmid,
                     node: resource.node,
@@ -21299,11 +21383,11 @@
 
                 if (type === 'node') {
                     const { nodeName, clusterId, online, maintenance } = target;
-                    const selectCluster = () => { const c = clusters.find(cl => cl.id === clusterId); if (c && (!selectedCluster || selectedCluster.id !== clusterId)) setSelectedCluster(c); };
+                    const selectCluster = () => { const c = allClusters.find(cl => cl.id === clusterId); if (c && (!selectedCluster || selectedCluster.id !== clusterId)) setSelectedCluster(c); };
                     // NS May 2026 — open Create modal in node context; defer if cluster changes
                     const openCreateOnCluster = (vmType) => {
                         if (selectedCluster?.id === clusterId) { setShowCreateVm(vmType); return; }
-                        const c = clusters.find(cl => cl.id === clusterId);
+                        const c = allClusters.find(cl => cl.id === clusterId);
                         if (!c) return;
                         setClusterMetrics({}); setClusterResources([]); setClusterDatastores({shared:[], local:{}});
                         setSelectedCluster(c);
@@ -21319,7 +21403,7 @@
                             handleMaintenanceToggle(nodeName, !maintenance, undefined, clusterId);
                         }, disabled: !online },
                         ...(haConsolesElsewhere ? onActiveItems('node.shell', '', !online) : [
-                        { perm: 'node.shell', label: t('sshConsole') || 'SSH Console', icon: <Icons.Terminal className="w-3.5 h-3.5" />, onClick: () => { selectCluster(); const c = clusters.find(cl => cl.id === clusterId); if (c) { setConsoleInfo({ vmid: 0, node: nodeName, type: 'node', host: c.host }); setConsoleVm({ vmid: 0, node: nodeName, type: 'node', name: nodeName }); } }, disabled: !online, console: true },
+                        { perm: 'node.shell', label: t('sshConsole') || 'SSH Console', icon: <Icons.Terminal className="w-3.5 h-3.5" />, onClick: () => { selectCluster(); const c = allClusters.find(cl => cl.id === clusterId); if (c) { setConsoleInfo({ vmid: 0, node: nodeName, type: 'node', host: c.host }); setConsoleVm({ vmid: 0, node: nodeName, type: 'node', name: nodeName }); } }, disabled: !online, console: true },
                         ]),
                         { label: t('nodeGuestsMenu'), icon: <Icons.Layers />, submenu: [
                             { perm: 'vm.start', label: t('nodeGuestsStartAll'), icon: <Icons.PlayCircle />, onClick: () => setNodeGuests({ action: 'startall', clusterId, node: nodeName }), disabled: !online },
@@ -21365,7 +21449,7 @@
                     const isQemu = vm.type === 'qemu';
                     const cId = vm._clusterId;
                     const selectAndNav = () => {
-                        const c = clusters.find(cl => cl.id === cId);
+                        const c = allClusters.find(cl => cl.id === cId);
                         if (c && (!selectedCluster || selectedCluster.id !== cId)) setSelectedCluster(c);
                         setSelectedSidebarVm(vm);
                         setSelectedSidebarNode(null);
@@ -21610,7 +21694,7 @@
                 return (
                     <div style={{ height: '100vh', overflow: 'hidden' }}>
                         <CloudShell
-                            clusters={clusters}
+                            clusters={allClusters}
                             selectedCluster={selectedCluster}
                             setSelectedCluster={setSelectedCluster}
                             clusterResources={clusterResources}
@@ -22130,7 +22214,7 @@
             // the task center of the redesign: where a row leads (out of every global view into its
             // cluster) and the inventory it checks first. Lists are what the server let this user see
             const crIntoCluster = (cid) => {
-                const cl = clusters.find(c => c.id === cid);
+                const cl = allClusters.find(c => c.id === cid);
                 if (!cl) return null;
                 crLeaveServers();
                 setSidebarTopology(false); setSidebarWorldmap(false); setSidebarXHM(false);
@@ -22194,7 +22278,7 @@
                 // from the top of the page, where the tab bar and the section start
                 openBlueprints: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('templates'); window.scrollTo(0, 0); } },
                 openGuest: (cid, guest) => {
-                    const cl = clusters.find(c => c.id === cid);
+                    const cl = allClusters.find(c => c.id === cid);
                     if (!cl || !guest) return;
                     askGuestDetail(cl, guest);
                     crIntoCluster(cid);
@@ -22962,6 +23046,37 @@
                                         </div>
                                     )}
 
+                                    {/* LW Nov 2026 - linked mode: one section per other site of the federation, its
+                                        clusters below its name. Not in classic Corporate, which stays as it is */}
+                                    {(!isCorporate || isCorpRedesigned) && remoteHome && (
+                                        <div className="text-xs text-gray-500 px-2 py-2" data-fed-home>
+                                            {String(t('linkedHome')).replace('{site}', remoteHome.site)}{' '}
+                                            <a href={remoteHome.url} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline break-all">{remoteHome.url}</a>
+                                        </div>
+                                    )}
+                                    {(!isCorporate || isCorpRedesigned) && remoteSites.map(site => (
+                                        <div key={site.iid} data-fed-site={site.iid} className={isCorporate ? 'space-y-0 pt-3' : 'space-y-1.5 pt-3'}>
+                                            <div className={`flex items-center gap-2 px-2 ${isCorporate ? 'py-0.5' : 'py-1.5'} text-gray-500`} title={site.url}>
+                                                <span className="flex" style={{zoom: 0.7}}><Icons.Globe /></span>
+                                                <span className="text-xs uppercase tracking-wider truncate flex-1">{site.site}</span>
+                                                {site.state === 'ok' && <span className="text-[10px]">{(site.clusters || []).length}</span>}
+                                            </div>
+                                            {site.state !== 'ok' && (
+                                                <div className="text-[11px] text-gray-500 px-2 pb-1" data-fed-site-state={site.state}>{fedSiteStateText(site, t)}</div>
+                                            )}
+                                            {remoteClusters.filter(c => c.fed.iid === site.iid).map(cluster => (
+                                                <React.Fragment key={cluster.id}>
+                                                    <RemoteClusterItem cluster={cluster} t={t} isCorporate={isCorporate}
+                                                        selected={selectedCluster?.id === cluster.id}
+                                                        expanded={!!expandedSidebarClusters[cluster.id]}
+                                                        onSelect={() => setSelectedCluster(cluster)}
+                                                        onToggle={() => toggleSidebarCluster(cluster.id)} />
+                                                    {sidebarViewMode === 'datastores' ? renderDatastoreTree(cluster.id) : sidebarViewMode === 'pools' ? renderPoolTree(cluster.id) : sidebarViewMode === 'networks' ? renderNetworkTree(cluster.id) : renderInlineNodeTree(cluster.id)}
+                                                </React.Fragment>
+                                            ))}
+                                        </div>
+                                    ))}
+
                                     {/* LW Oct 2026 - corporate: the global views get a section of their own instead of
                                         hanging off All Clusters, under the clusters and above Backup Servers like the
                                         other sections. Same conditions as in Modern, so nothing here before the first
@@ -23249,12 +23364,12 @@
                                             <button key={item.id || i} className="corp-recent-item" onClick={() => {
                                                 if (item.type === 'node') {
                                                     const parts = item.id.split('-'); const cId = parts.slice(1, -1).join('-');
-                                                    const cl = clusters.find(c => c.id === cId);
+                                                    const cl = allClusters.find(c => c.id === cId);
                                                     if (cl) { setSelectedCluster(cl); setSelectedSidebarNode({ name: item.name, clusterId: cId }); setSelectedSidebarVm(null); setActiveTab('overview'); }
                                                 } else if (item.vmid) {
                                                     // find cluster from id
                                                     const cId = item.id.replace(`-${item.vmid}`, '');
-                                                    const cl = clusters.find(c => c.id === cId);
+                                                    const cl = allClusters.find(c => c.id === cId);
                                                     if (cl) { setSelectedCluster(cl); setActiveTab('resources'); setResourcesSubTab('management'); }
                                                 }
                                             }}>
@@ -23366,8 +23481,8 @@
                                             <CorporateNodeDetailView
                                                 node={selectedSidebarNode.name}
                                                 clusterId={selectedSidebarNode.clusterId}
-                                                clusterHost={selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster?.host : (clusters.find(c => c.id === selectedSidebarNode.clusterId)?.host || '')}
-                                                clusterName={clusterLabel(selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster : clusters.find(c => c.id === selectedSidebarNode.clusterId))}
+                                                clusterHost={selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster?.host : (allClusters.find(c => c.id === selectedSidebarNode.clusterId)?.host || '')}
+                                                clusterName={clusterLabel(selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster : allClusters.find(c => c.id === selectedSidebarNode.clusterId))}
                                                 clusterMetrics={selectedSidebarNode.clusterId === selectedCluster?.id ? clusterMetrics : (sidebarClusterData[selectedSidebarNode.clusterId]?.metrics || {})}
                                                 clusterResources={selectedSidebarNode.clusterId === selectedCluster?.id ? clusterResources : (sidebarClusterData[selectedSidebarNode.clusterId]?.resources || [])}
                                                 onBack={() => setSelectedSidebarNode(null)}
@@ -23377,14 +23492,14 @@
                                                 onStartUpdate={handleStartUpdate}
                                                 onSelectVm={(vm) => { setSelectedSidebarVm({...vm, _clusterId: selectedSidebarNode.clusterId}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                                 addToast={addToast}
-                                                crKind={isCorpRedesigned ? ((clusters.find(c => c.id === selectedSidebarNode.clusterId) || {}).cluster_type || 'proxmox') : undefined}
+                                                crKind={isCorpRedesigned ? ((allClusters.find(c => c.id === selectedSidebarNode.clusterId) || {}).cluster_type || 'proxmox') : undefined}
                                             />
                                             ) : isCorporate && selectedSidebarQdevice ? (
                                             <QdeviceDetail
                                                 corporate
                                                 q={qdeviceByCluster[selectedSidebarQdevice]}
                                                 clusterId={selectedSidebarQdevice}
-                                                clusterName={(clusters.find(c => c.id === selectedSidebarQdevice) || {}).display_name || (clusters.find(c => c.id === selectedSidebarQdevice) || {}).name || ''}
+                                                clusterName={(allClusters.find(c => c.id === selectedSidebarQdevice) || {}).display_name || (allClusters.find(c => c.id === selectedSidebarQdevice) || {}).name || ''}
                                                 onClose={() => setSelectedSidebarQdevice(null)}
                                                 onChanged={() => fetchQdevice(selectedSidebarQdevice)}
                                             />
@@ -23769,7 +23884,7 @@
                                                             <QdeviceDetail
                                                                 q={qdeviceByCluster[qdeviceOpen]}
                                                                 clusterId={qdeviceOpen}
-                                                                clusterName={(clusters.find(c => c.id === qdeviceOpen) || {}).display_name || (clusters.find(c => c.id === qdeviceOpen) || {}).name || ''}
+                                                                clusterName={(allClusters.find(c => c.id === qdeviceOpen) || {}).display_name || (allClusters.find(c => c.id === qdeviceOpen) || {}).name || ''}
                                                                 onClose={() => setQdeviceOpen(null)}
                                                                 onChanged={() => fetchQdevice(qdeviceOpen)}
                                                             />
@@ -23908,8 +24023,8 @@
                                                     <CorporateVmDetailView
                                                         vm={selectedSidebarVm}
                                                         clusterId={selectedSidebarVm._clusterId || selectedCluster.id}
-                                                        clusterType={(clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster).cluster_type || 'proxmox'}
-                                                        clusterName={clusterLabel(clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster)}
+                                                        clusterType={(allClusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster).cluster_type || 'proxmox'}
+                                                        clusterName={clusterLabel(allClusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster)}
                                                         onAction={handleVmAction}
                                                         onOpenConsole={handleOpenConsole}
                                                         onOpenSpice={handleOpenSpice}
@@ -23928,7 +24043,7 @@
                                                         authFetch={authFetch}
                                                         backupStatus={isCorpRedesigned ? vmsBackupStatus : undefined}
                                                         backupFor={isCorpRedesigned ? vmsBackupFor : undefined}
-                                                        crKind={isCorpRedesigned ? ((clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || {}).cluster_type || 'proxmox') : undefined}
+                                                        crKind={isCorpRedesigned ? ((allClusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || {}).cluster_type || 'proxmox') : undefined}
                                                         crNav={crTaskNav}
                                                         crOpen={isCorpRedesigned ? (what, cid) => {
                                                             // LW Oct 2026 - the module behind a line of the guest's health
@@ -27751,7 +27866,7 @@
                                                         <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">{t('pbsLinkedPveClusters') || 'Linked PVE Clusters'}</h2>
                                                         <div className="flex gap-2 flex-wrap">
                                                             {selectedPBS.linked_clusters.map(cid => {
-                                                                const cl = clusters.find(c => c.id === cid);
+                                                                const cl = allClusters.find(c => c.id === cid);
                                                                 return cl ? (
                                                                     <button key={cid} onClick={() => { setSelectedCluster(cl); setSelectedPBS(null); }} className="px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-sm text-gray-300 hover:text-white hover:border-proxmox-orange/30 transition-all flex items-center gap-2">
                                                                         <Icons.Server className="w-4 h-4 text-proxmox-orange" />{cl.display_name || cl.name}
@@ -28577,7 +28692,7 @@
                                                                 title: `PBS Report — ${pbsReportSubTab}`,
                                                                 subtitle: selectedPBS?.name,
                                                                 clusterName: pbsReportSubTab === 'gap' && pbsReportGapCluster
-                                                                    ? (clusters.find(c => c.id === pbsReportGapCluster)?.name || '')
+                                                                    ? (allClusters.find(c => c.id === pbsReportGapCluster)?.name || '')
                                                                     : '',
                                                                 filename: `pegaprox-pbs-${selectedPBS?.name}-${pbsReportSubTab}-${new Date().toISOString().slice(0,10)}.pdf`,
                                                                 content: blocks,
@@ -31128,7 +31243,7 @@
                                                 })}
                                                 isCorporate={true}
                                                 onVmClick={(vm) => {
-                                                    const cl = clusters.find(c => c.id === vm._clusterId);
+                                                    const cl = allClusters.find(c => c.id === vm._clusterId);
                                                     if (cl) {
                                                         setSelectedSidebarVm({...vm, _clusterId: cl.id});
                                                         setSelectedSidebarNode(null);
@@ -31139,7 +31254,7 @@
                                                     }
                                                 }}
                                                 onGuestOpen={isCorpRedesigned ? (vm) => {
-                                                    const cl = clusters.find(c => c.id === vm._clusterId);
+                                                    const cl = allClusters.find(c => c.id === vm._clusterId);
                                                     if (!cl) return;
                                                     setSelectedCluster(cl);
                                                     setSelectedSidebarVm({...vm, _clusterId: cl.id});
@@ -31151,7 +31266,7 @@
                                                     setSidebarTopology(false);
                                                 } : undefined}
                                                 onNodeClick={isCorpRedesigned ? (cid, name) => {
-                                                    const cl = clusters.find(c => c.id === cid);
+                                                    const cl = allClusters.find(c => c.id === cid);
                                                     if (!cl) return;
                                                     setSelectedCluster(cl);
                                                     setSelectedSidebarNode({ name, clusterId: cid });
@@ -31162,7 +31277,7 @@
                                                     setSidebarTopology(false);
                                                 } : undefined}
                                                 onClusterClick={isCorpRedesigned ? (cid) => {
-                                                    const cl = clusters.find(c => c.id === cid);
+                                                    const cl = allClusters.find(c => c.id === cid);
                                                     if (!cl) return;
                                                     setSelectedCluster(cl);
                                                     setActiveTab('overview');
@@ -31190,7 +31305,7 @@
                                         <WorldMapView
                                             clusters={clusters}
                                             onSelectCluster={(c) => {
-                                                const full = clusters.find(x => x.id === c.id);
+                                                const full = allClusters.find(x => x.id === c.id);
                                                 if (full) { setSelectedCluster(full); setSidebarWorldmap(false); }
                                             }}
                                             fetchClusters={fetchClusters}
@@ -31249,7 +31364,7 @@
                                                         }} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
                                                             <option value="">Select cluster...</option>
                                                             {clusters.filter(c => c.connected && c.id !== xhmForm.source_cluster).map(c => {
-                                                                const srcCluster = clusters.find(x => x.id === xhmForm.source_cluster);
+                                                                const srcCluster = allClusters.find(x => x.id === xhmForm.source_cluster);
                                                                 const getHvType = cl => cl?.type === 'xcpng' || cl?.cluster_type === 'xcpng' ? 'xcpng'
                                                                     : cl?.type === 'esxi' || cl?.cluster_type === 'esxi' ? 'esxi' : 'proxmox';
                                                                 const srcHv = getHvType(srcCluster);
@@ -31264,7 +31379,7 @@
                                                 </div>
 
                                                 {/* Source Node (only for PVE sources) */}
-                                                {xhmForm.source_cluster && (() => { const sc = clusters.find(c => c.id === xhmForm.source_cluster); return sc && sc.type !== 'xcpng' && sc.cluster_type !== 'xcpng' && sc.type !== 'esxi' && sc.cluster_type !== 'esxi'; })() && (
+                                                {xhmForm.source_cluster && (() => { const sc = allClusters.find(c => c.id === xhmForm.source_cluster); return sc && sc.type !== 'xcpng' && sc.cluster_type !== 'xcpng' && sc.type !== 'esxi' && sc.cluster_type !== 'esxi'; })() && (
                                                     <div className="mb-3">
                                                         <label className="text-xs text-gray-500 mb-1 block">Source Node</label>
                                                         <select value={xhmForm.source_node} onChange={e => setXhmForm({...xhmForm, source_node: e.target.value, source_vmid: ''})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
@@ -31310,7 +31425,7 @@
                                                 )}
 
                                                 {/* Analyze button */}
-                                                <button onClick={fetchXhmPlan} disabled={xhmLoading || !xhmForm.source_cluster || !xhmForm.source_vmid || !xhmForm.target_cluster || (!(clusters.find(c => c.id === xhmForm.source_cluster)?.type === 'xcpng' || clusters.find(c => c.id === xhmForm.source_cluster)?.cluster_type === 'xcpng') && !xhmForm.source_node)} className="w-full py-2.5 rounded-lg bg-purple-500 text-white font-medium hover:bg-purple-600 disabled:opacity-50 text-sm mb-4">
+                                                <button onClick={fetchXhmPlan} disabled={xhmLoading || !xhmForm.source_cluster || !xhmForm.source_vmid || !xhmForm.target_cluster || (!(allClusters.find(c => c.id === xhmForm.source_cluster)?.type === 'xcpng' || allClusters.find(c => c.id === xhmForm.source_cluster)?.cluster_type === 'xcpng') && !xhmForm.source_node)} className="w-full py-2.5 rounded-lg bg-purple-500 text-white font-medium hover:bg-purple-600 disabled:opacity-50 text-sm mb-4">
                                                     {xhmLoading ? 'Analyzing...' : (t('xhmAnalyze') || 'Analyze VM')}
                                                 </button>
 
@@ -33683,7 +33798,7 @@
                                 ? [['cr-blueprints', t('crBpNavDeploy'), 'Template']] : undefined}
                             onPickCluster={(c) => { setSelectedCluster(c); setActiveTab('overview'); setShowCommandPalette(false); }}
                             onPickVm={(vm) => {
-                                const c = clusters.find(cl => cl.id === vm._clusterId);
+                                const c = allClusters.find(cl => cl.id === vm._clusterId);
                                 if (c) setSelectedCluster(c);
                                 setActiveTab('resources');
                                 setResourcesSubTab('management');
@@ -33705,7 +33820,7 @@
                                 else if (id === 'cr-blueprints' && (crTaskNav || mdBpNav)) {
                                     // the open cluster, else the first Proxmox VE one (Modern too, #1220)
                                     const pve = (c) => !!c && (!c.cluster_type || c.cluster_type === 'proxmox');
-                                    const c = pve(selectedCluster) ? selectedCluster : clusters.find(pve);
+                                    const c = pve(selectedCluster) ? selectedCluster : allClusters.find(pve);
                                     if (c) (crTaskNav || mdBpNav).openBlueprints(c.id);
                                 }
                             }}
@@ -33767,7 +33882,7 @@
                                     || selectedCluster?.id
                                     || (selectedPBS?.linked_clusters || [])[0];
                         if (!cid) return null;
-                        const cluster = clusters.find(c => c.id === cid);
+                        const cluster = allClusters.find(c => c.id === cid);
                         return (
                             <BackupRestoreWizard
                                 clusterId={cid}
