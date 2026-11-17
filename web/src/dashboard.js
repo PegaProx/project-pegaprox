@@ -1635,11 +1635,18 @@
                     <Icons.ExternalLink className="w-3 h-3" />
                 </a>
             );
+            // the name is the control that opens the cluster (keyboard, screen reader); the row
+            // around it opens it on a click as well
+            const select = (cls) => (
+                <button type="button" data-fed-select onClick={(e) => { e.stopPropagation(); onSelect(); }}
+                    aria-current={selected ? 'true' : undefined} className={`${cls} text-left bg-transparent border-0 p-0 cursor-pointer`}>
+                    {name}
+                </button>
+            );
             if (isCorporate) {
                 return (
-                    <div onClick={onSelect} tabIndex={0} data-fed-cluster={cluster.id}
+                    <div onClick={onSelect} data-fed-cluster={cluster.id}
                         onContextMenu={onContextMenu ? (e) => { e.preventDefault(); onContextMenu({ x: e.clientX, y: e.clientY }); } : undefined}
-                        onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelect(); } }}
                         className="corp-tree-item cursor-pointer flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5"
                         style={selected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: 'var(--corp-text-secondary)'}}>
                         <button type="button" onClick={(e) => { e.stopPropagation(); onToggle(); }} aria-expanded={expanded} aria-label={name}
@@ -1647,15 +1654,14 @@
                             {expanded ? <Icons.ChevronDown className="w-3 h-3" /> : <Icons.ChevronRight className="w-3 h-3" />}
                         </button>
                         <Icons.Database className="w-4 h-4 flex-shrink-0" style={{color: cluster.connected ? 'var(--corp-accent)' : 'var(--color-error)'}} />
-                        <span className="truncate flex-1 font-medium">{name}</span>
+                        {select('truncate flex-1 font-medium text-inherit')}
                         {badge}
                         {openThere}
                     </div>
                 );
             }
             return (
-                <div onClick={onSelect} data-fed-cluster={cluster.id} tabIndex={0}
-                    onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelect(); } }}
+                <div onClick={onSelect} data-fed-cluster={cluster.id}
                     className={`p-3 rounded-xl cursor-pointer transition-all border ${selected ? 'bg-proxmox-orange/10 border-proxmox-orange/50' : 'bg-proxmox-card border-proxmox-border hover:border-proxmox-orange/30'}`}>
                     <div className="flex items-center gap-2 min-w-0">
                         <button type="button" onClick={(e) => { e.stopPropagation(); onToggle(); }} aria-expanded={expanded} aria-label={name}
@@ -1663,7 +1669,7 @@
                             {expanded ? <Icons.ChevronDown className="w-3 h-3" /> : <Icons.ChevronRight className="w-3 h-3" />}
                         </button>
                         <div className={`w-2 h-2 rounded-full flex-shrink-0 ${cluster.connected ? 'bg-green-500 status-online' : 'bg-red-500'}`} />
-                        <h3 className="font-medium text-sm truncate flex-1">{name}</h3>
+                        {select('font-medium text-sm truncate flex-1 text-inherit')}
                         {badge}
                         {openThere}
                     </div>
@@ -14612,6 +14618,10 @@
             const [allClusterGuests, setAllClusterGuests] = useState({}); // NS: Mar 2026 - per-cluster guests for topology
             const allClusterGuestsRef = useRef({});
             allClusterGuestsRef.current = allClusterGuests;
+            // the other sites' guests for the guest list, made again only when the overview read them
+            const remoteGuests = useMemo(() => remoteClusters.map(c => ({ cluster: c,
+                guests: (allClusterGuests[c.id] || []).filter(r => r.type === 'qemu' || r.type === 'lxc') })),
+                [remoteClusters, allClusterGuests]);
             const [knownNodes, setKnownNodes] = useState({}); // NS: Track all nodes ever seen to show offline ones
             const [clusterResources, setClusterResources] = useState([]);
             const [clusterDatastores, setClusterDatastores] = useState({ shared: [], local: {} }); // LW: Mar 2026 - sidebar datastore list
@@ -20212,7 +20222,7 @@
                         // NS #594 — this used to be a serial await-loop: one slow cluster
                         // stalled every cluster behind it and made the whole overview lag.
                         // Run the clusters concurrently (each still does its two reads in order).
-                        await Promise.allSettled(connectedClusters.map(async (cluster) => {
+                        const readOne = async (cluster) => {
                             // NS May 2026 — skip clusters that recently 503'd/timed out until cooldown
                             const failState = clusterFailureRef.current[cluster.id];
                             if (failState && failState.skip_until > Date.now()) {
@@ -20266,7 +20276,22 @@
                             } catch (e) {
                                 console.log(`Failed to fetch data for cluster ${cluster.id}:`, e);
                             }
-                        }));
+                        };
+                        // LW Nov 2026 - the other sites' clusters four at a time: each of their reads
+                        // goes through that site, whose slots this instance shares with every user
+                        const remoteTurns = { busy: 0, queue: [] };
+                        const remoteTurn = (fn) => new Promise(done => {
+                            const next = () => {
+                                if (remoteTurns.busy >= 4 || !remoteTurns.queue.length) return;
+                                remoteTurns.busy++;
+                                const [run, finish] = remoteTurns.queue.shift();
+                                run().finally(() => { remoteTurns.busy--; finish(); next(); });
+                            };
+                            remoteTurns.queue.push([fn, done]);
+                            next();
+                        });
+                        await Promise.allSettled(connectedClusters.map(cluster =>
+                            cluster.fed ? remoteTurn(() => readOne(cluster)) : readOne(cluster)));
                         
                         // sort by combined cpu+ram usage
                         const runningGuests = allGuests.filter(g => g.status === 'running');
@@ -21730,17 +21755,17 @@
                 // also asks what that site lets the account do there
                 const site = type === 'cluster' ? target?.fed
                     : allClusters.find(c => c.id === (target?.clusterId || target?._clusterId))?.fed;
-                // an entry that only leads to the site (here) is this site's to allow
-                const siteAllows = (i) => !site || !i.perm || i.here || siteCan(i.perm, { fed: site });
-                const kept = buildContextMenuItemsRaw(type, target).filter(siteAllows).filter(menuAllows);
+                // there it is that site's to allow, not this one's (the account may hold nothing
+                // here); an entry that only leads to the site (here) is this site's
+                const siteAllows = (i) => i.here ? menuAllows(i) : (!i.perm || siteCan(i.perm, { fed: site }));
+                const raw = buildContextMenuItemsRaw(type, target);
+                const kept = site ? raw.filter(siteAllows) : raw.filter(menuAllows);
                 const out = [];
                 for (const item of kept) {
                     if (item.submenu) {
-                        const sub = item.submenu.filter(menuAllows);
+                        const sub = site ? item.submenu.filter(siteAllows) : item.submenu.filter(menuAllows);
                         if (!sub.length) continue;          // no children left, drop the parent
-                        const here = sub.filter(siteAllows);
-                        if (!here.length) continue;
-                        out.push({ ...item, submenu: here });
+                        out.push({ ...item, submenu: sub });
                         continue;
                     }
                     // a dropped entry must not leave its separators stacked up or leading
@@ -24191,7 +24216,6 @@
                                                         onDelete={(vm) => setDashDeleteVm(vm)}
                                                         onCrossClusterMigrate={(vm) => setDashCrossClusterVm(vm)}
                                                         showCrossCluster={allClusters.length > 1}
-                                                        migrateTargets={allClusters}
                                                         actionLoading={actionLoading}
                                                         onShowMetrics={(vm) => setCorpMetricsVm(vm)}
                                                         addToast={addToast}
@@ -24270,6 +24294,7 @@
                                                             resources={clusterResources} 
                                                             clusterId={selectedCluster.id}
                                                             clusters={clusters}
+                                                            migrateTargets={allClusters}
                                                             sourceCluster={selectedCluster}
                                                             onVmAction={handleVmAction}
                                                             onOpenConsole={handleOpenConsole}
@@ -31831,8 +31856,7 @@
                                 ) : sidebarGuests ? (
                                     <AllGuestsView
                                         clusters={clusters}
-                                        remoteGuests={remoteClusters.map(c => ({ cluster: c,
-                                            guests: (allClusterGuests[c.id] || []).filter(r => r.type === 'qemu' || r.type === 'lxc') }))}
+                                        remoteGuests={remoteGuests}
                                         authFetch={authFetch}
                                         addToast={addToast}
                                         onBulkMigrate={handleBulkMigrate}

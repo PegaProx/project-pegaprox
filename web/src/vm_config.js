@@ -5070,7 +5070,7 @@
                                                                     className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                                 >
                                                                     <option value="">{t('selectCluster') || 'Select cluster...'}</option>
-                                                                    {allClusters.filter(c => c.id !== clusterId && c.connected).map(c => (
+                                                                    {allClusters.filter(c => c.id !== clusterId && c.connected && !c.fed).map(c => (
                                                                         <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
                                                                     ))}
                                                                 </select>

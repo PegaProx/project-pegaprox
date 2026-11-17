@@ -3147,6 +3147,15 @@
                 return { q: '', cluster: '', status: '', type: '', tag: '', by: 'name', dir: 'asc',
                     size: ALL_GUESTS_SIZES.includes(size) ? size : 100, page: 0 };
             });
+            // LW Nov 2026 - linked mode: the guests of the other sites' clusters, as the overview reads
+            // them through their sites; the search and the status filter of the page apply
+            const remoteRows = useMemo(() => {
+                const q = (view.q || '').trim().toLowerCase();
+                return (remoteGuests || []).flatMap(({ cluster, guests }) => guests.map(g => ({ g, cluster })))
+                    .filter(({ g }) => (!q || String(g.name || '').toLowerCase().includes(q) || String(g.vmid) === q)
+                        && (!view.status || (view.status === 'other' ? !['running', 'stopped'].includes(g.status) : g.status === view.status)))
+                    .sort((x, y) => String(x.g.name || '').localeCompare(String(y.g.name || '')));
+            }, [remoteGuests, view.q, view.status]);
             const [data, setData] = useState(null);
             const [loading, setLoading] = useState(false);
             // the text filter takes the expressions of the global search; one the server cannot read
@@ -3578,13 +3587,7 @@
                         <div className="p-3 border-t border-proxmox-border">{pager}</div>
                     </div>
                     {(() => {
-                        // LW Nov 2026 - linked mode: the guests of the other sites' clusters, as the overview
-                        // reads them through their sites; the search and the status filter above apply
-                        const q = (view.q || '').trim().toLowerCase();
-                        const rows = (remoteGuests || []).flatMap(({ cluster, guests }) => guests.map(g => ({ g, cluster })))
-                            .filter(({ g }) => (!q || String(g.name || '').toLowerCase().includes(q) || String(g.vmid) === q)
-                                && (!view.status || (view.status === 'other' ? !['running', 'stopped'].includes(g.status) : g.status === view.status)))
-                            .sort((x, y) => String(x.g.name || '').localeCompare(String(y.g.name || '')));
+                        const rows = remoteRows;
                         if (!rows.length) return null;
                         return (
                             <div data-all-guests-remote className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
@@ -3620,6 +3623,9 @@
                                             ))}
                                         </tbody>
                                     </table>
+                                    {rows.length > 500 && (
+                                        <p className="text-xs text-gray-500 px-3 py-2 border-t border-proxmox-border/50" data-remote-guests-more>{fillText(t('srPickMore'), { n: num(rows.length - 500) })}</p>
+                                    )}
                                 </div>
                             </div>
                         );
