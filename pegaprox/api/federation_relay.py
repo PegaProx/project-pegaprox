@@ -193,10 +193,20 @@ def _relay_upload(iid, raw, rule, path, session, site, principal):
         resp.headers['Retry-After'] = str(relay._BREAK_FOR)
         return resp
     # what the site lets the account do there (its list, kept half a minute): no upload is
-    # written to disk here for an account that may not upload there
+    # written to disk here for an account that may not upload there, nor while that is not
+    # known (the list unread, or the site refusing the account)
     there = relay.site_list(iid, fed.member_record(iid) or {}, principal)
-    if there.get('state') == 'ok' and not there.get('admin') \
-            and 'storage.upload' not in (there.get('perms') or []):
+    state = there.get('state')
+    if state != 'ok':
+        code = {v: k for k, v in relay._LIST_STATES.items()}.get(state)
+        if code:
+            return _fail(403, code, f'{site["site"]} does not take your account for this now',
+                         **site)
+        resp = _fail(503, 'FED_SITE_UNREACHABLE', f'What you may do at {site["site"]} cannot be '
+                                                  'read now - try again in a moment', **site)
+        resp.headers['Retry-After'] = '30'
+        return resp
+    if not there.get('admin') and 'storage.upload' not in (there.get('perms') or []):
         return _fail(403, 'MISSING_PERMISSION', 'Permission denied: storage.upload', **site)
     user = principal.get('user') or ''
     if not relay.take_upload(user):
