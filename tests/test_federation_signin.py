@@ -24,7 +24,8 @@ from tests.test_federation_relay import (  # noqa: F401
     CID, _fresh_relay, _get, _relay_side, _session, linked)
 
 PASSWORD = 'C0rrect!horse9'
-SECRET = 'JBSWY3DPEHPK3PXP'
+# 160 bits: pyotp 2.12 refuses a secret under 112
+SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP'
 
 
 @pytest.fixture(autouse=True)
