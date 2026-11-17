@@ -1334,6 +1334,10 @@
         // NS: Added bulk select for mass operations (migration, etc.)
         // This component does a lot... might need to split it up eventually
         // NS: filtering + sorting uses useMemo below (lines 1320+)
+        // the IP column's own reads (#127): at most this many at once, each for so long
+        const GUEST_INFO_AT_ONCE = 2;
+        const GUEST_INFO_TIMEOUT_MS = 15000;
+
         function ResourceTable({ resources, clusterId, clusters, sourceCluster, onVmAction, onOpenConsole, onOpenSpice, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, datastores, onOpenTags, highlightedVm, addToast, pendingVmAction, onPendingActionConsumed, onVmNavigate, backupStatus, authFetch, onBulkDone, favorites, onToggleFavorite, openGuest, onOpenGuestDone }) {
             const { t } = useTranslation();
             const { getAuthHeaders, user, haReadOnly, haConsolesElsewhere } = useAuth();
@@ -1662,22 +1666,29 @@
             }, [filteredResources, effectivePage, itemsPerPage]);
 
             // fetch IPs for visible running qemu VMs - #127
-            useEffect(() => {
-                if (!paginatedResources?.length) return;
-                const now = Date.now();
-                const toFetch = paginatedResources.filter(r =>
-                    r.type === 'qemu' && r.status === 'running' && !ipCache.current[r.vmid]
-                    && !(ipRetryAt.current[r.vmid] > now)
-                );
-                if (!toFetch.length) return;
-                toFetch.forEach(vm => {
-                    ipCache.current[vm.vmid] = 'loading';
+            // LW Nov 2026 - every request here holds one of the six connections a browser opens to
+            // this server (one of them is the live stream's). They all went at once: a page of a
+            // cluster far away on a lossy line held every connection for half a minute and the
+            // rest of the panel waited behind its guests. Now two at a time, 15 s each at most,
+            // and only for a guest the server's own IP sweep has no address for (r.ip) and does
+            // not know to run without an agent
+            const ipFetch = useRef({ busy: 0, queue: [], ctrls: new Set(), visible: new Set() });
+            const pumpIps = useCallback(() => {
+                const q = ipFetch.current;
+                while (q.busy < GUEST_INFO_AT_ONCE && q.queue.length) {
+                    const vm = q.queue.shift();
+                    // scrolled or filtered away while it waited
+                    if (!q.visible.has(vm.vmid)) { ipCache.current[vm.vmid] = null; continue; }
+                    q.busy++;
+                    const ctrl = new AbortController();
+                    q.ctrls.add(ctrl);
+                    const timer = setTimeout(() => ctrl.abort(), GUEST_INFO_TIMEOUT_MS);
                     const cid = vm._clusterId || clusterId;
                     // no address yet (agent still starting or not installed): again in a minute.
-                    // A refused or failed call, a 429 among them, waits five
+                    // A refused, failed or timed out call, a 429 among them, waits five
                     const retryIn = (ms) => { ipCache.current[vm.vmid] = null; ipRetryAt.current[vm.vmid] = Date.now() + ms; };
                     fetch(`/api/clusters/${cid}/vms/${vm.node}/qemu/${vm.vmid}/guest-info`, {
-                        credentials: 'include', headers: getAuthHeaders()
+                        credentials: 'include', headers: getAuthHeaders(), signal: ctrl.signal
                     })
                     .then(r => r.ok ? r.json() : Promise.reject(r.status))
                     .then(data => {
@@ -1686,9 +1697,30 @@
                         delete ipRetryAt.current[vm.vmid];
                         setIpTick(t => t + 1);
                     })
-                    .catch(() => retryIn(300000));
-                });
+                    .catch(() => { if (ctrl.left) ipCache.current[vm.vmid] = null; else retryIn(300000); })
+                    .finally(() => { clearTimeout(timer); q.ctrls.delete(ctrl); q.busy--; pumpIps(); });
+                }
+            }, [clusterId]);
+            useEffect(() => {
+                const q = ipFetch.current;
+                q.visible = new Set((paginatedResources || []).map(r => r.vmid));
+                if (!paginatedResources?.length) return;
+                const now = Date.now();
+                const toFetch = paginatedResources.filter(r =>
+                    r.type === 'qemu' && r.status === 'running' && !r.ip && r.agent_running !== false
+                    && !ipCache.current[r.vmid] && !(ipRetryAt.current[r.vmid] > now)
+                );
+                if (!toFetch.length) return;
+                toFetch.forEach(vm => { ipCache.current[vm.vmid] = 'loading'; q.queue.push(vm); });
+                pumpIps();
             }, [paginatedResources]);
+            // another cluster (or the list gone): what waits is dropped, what runs is stopped
+            useEffect(() => () => {
+                const q = ipFetch.current;
+                q.queue.forEach(vm => { ipCache.current[vm.vmid] = null; });
+                q.queue = [];
+                q.ctrls.forEach(c => { c.left = true; c.abort(); });
+            }, [clusterId]);
 
             const handleSort = (col) => {
                 let nextBy = col, nextDir = 'asc';
@@ -2512,7 +2544,7 @@
                                                     <span className="text-sm text-gray-300 truncate block" style={{maxWidth:'min(140px, 12vw)'}} title={resource.node}>{resource.node}</span>
                                                 </td>
                                                 <td className="px-4 py-3">
-                                                    <span className="text-xs font-mono text-gray-400">{ipCache.current[resource.vmid] && ipCache.current[resource.vmid] !== 'loading' ? ipCache.current[resource.vmid] : '-'}</span>
+                                                    <span className="text-xs font-mono text-gray-400">{getIp(resource) || '-'}</span>
                                                 </td>
                                                 <td className="px-4 py-3">
                                                     <div className="flex items-center gap-2">
