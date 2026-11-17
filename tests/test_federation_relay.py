@@ -675,7 +675,8 @@ def test_one_upload_at_a_time_per_account(linked):
 
 
 def test_an_account_the_leading_site_refuses_sends_no_upload_to_its_disk(linked, monkeypatch):
-    """The account is checked from the headers, before the body is read there."""
+    """Its list says so already, so nothing is written here either; the leading site checks
+    the account from the headers, before the body is read there."""
     a, b = linked
     spooled = []
     real = relay.spool
@@ -689,8 +690,32 @@ def test_an_account_the_leading_site_refuses_sends_no_upload_to_its_disk(linked,
     sid = _session(a, 'alice')
     r = _upload(a, b, sid)
     assert r.status_code == 403 and r.get_json()['code'] == 'FED_RELAY_DISABLED'
-    # spooled once, at this site; none at the leading one
+    assert spooled == [] and UPLOADED == []
+    # and should this site's list miss it, the leading site still refuses before its disk
+    real_list = relay.site_list
+    monkeypatch.setattr(relay, 'site_list', lambda *x, **kw: dict(real_list(*x, **kw), state='ok',
+                                                                   admin=True))
+    relay.reset_for_tests()
+    r = _upload(a, b, sid)
+    assert r.status_code == 403 and r.get_json()['code'] == 'FED_RELAY_DISABLED'
     assert len(spooled) == 1 and UPLOADED == []
+
+
+def test_no_upload_is_written_here_while_the_sites_list_cannot_be_read(linked, monkeypatch):
+    """Not known what the account may do there: refused before a byte is written, rather
+    than spooled on a guess."""
+    a, b = linked
+    spooled = []
+    real, real_list = relay.spool, relay.site_list
+    monkeypatch.setattr(relay, 'spool', lambda stream, size: spooled.append(size) or real(stream, size))
+    for state in ('unreachable', 'busy', 'loading', 'switching', 'off', 'refused'):
+        monkeypatch.setattr(relay, 'site_list', lambda *x, s=state, **kw: {'state': s})
+        r = _upload(a, b, _session(a, 'alice'))
+        assert r.status_code in (403, 503), (state, r.status_code)
+    assert spooled == [] and UPLOADED == []
+    # counterproof: with the list read, alice's upload goes through (spooled here and there)
+    monkeypatch.setattr(relay, 'site_list', real_list)
+    assert _upload(a, b, _session(a, 'alice')).status_code == 200 and len(spooled) == 2
 
 
 def test_a_control_signature_is_no_relay_signature(linked):

@@ -733,7 +733,7 @@ control call never passes as a relayed one, nor the other way round.
 | `FED_MIGRATE` | a migration between two sites was refused; the answer says by which site and why |
 | `FED_MIGRATE_VMID` | the VMID the guest would get is taken on the target cluster, or held by another migration's token there; choose another one |
 | `FED_RELAY_BUSY` | too many calls to or from that site at once; try again in a moment |
-| `FED_SITE_UNREACHABLE` | the site that leads the cluster cannot be reached or does not answer; nothing was sent to it when the error says so |
+| `FED_SITE_UNREACHABLE` | the site that leads the cluster cannot be reached or does not answer, or (for an upload) what you may do there cannot be read now; nothing was sent to it when the error says so |
 | `FED_RELAY_NO_ANSWER` | a write went out and no answer came back; it may have happened there, check its tasks |
 | `FED_RELAY_AUTH` | the site that leads the cluster did not take your sign-in |
 | `FED_FORCED` | `PEGAPROX_FEDERATION` decides; change it where the service starts |
