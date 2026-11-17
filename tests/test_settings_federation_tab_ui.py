@@ -161,7 +161,7 @@ def test_the_server_constants_the_panel_repeats():
     from pegaprox.core import federation, federation_lease
     src = _read('web', 'src', 'settings_modal.js')
     assert f'const FED_MIN_SITES_TO_ENROLL = {federation_lease.MIN_SITES_TO_ENROLL};' in src
-    assert federation.MAX_SITES == 8 and "status.max_sites > 1) ? status.max_sites : 8;" in src
+    assert federation.MAX_SITES == 4 and "status.max_sites > 1) ? status.max_sites : 4;" in src
 
 
 # -- toasts report success only on success ------------------------------------------------
@@ -1144,7 +1144,7 @@ def test_the_numbers_of_the_guide_are_the_codes():
     """Each number the guide states, next to the constant it comes from."""
     from pegaprox.core import federation, federation_lease, ha_wire
     guide = _read('docs', 'federation.md')
-    assert federation.MAX_SITES == 8 and 'up to eight PegaProx instances' in guide and '**Eight sites**' in guide
+    assert federation.MAX_SITES == 4 and 'up to four PegaProx instances' in guide and '**Four sites**' in guide
     assert federation_lease.MIN_SITES_TO_ENROLL == 2 and '**Two sites**' in guide
     assert federation.PAIRING_TTL == 15 * 60 and 'valid for 15\n   minutes and one join' in guide
     assert federation.SYNC_INTERVAL == 60 and 'the identity sync, every 60\nseconds' in guide

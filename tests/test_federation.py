@@ -798,7 +798,10 @@ def test_a_removal_reaches_every_member_and_the_remover_keeps_its_leases(tmp_pat
     assert r['pve-1']['held'] is True and r['pve-1']['needed'] == 2
 
 
-def test_a_removal_lowers_the_majority(tmp_path, clock):
+def test_a_removal_lowers_the_majority(tmp_path, clock, monkeypatch):
+    # the product holds four sites (MAX_SITES); the membership protocol is the same for any
+    # number, and this case needs a fifth member
+    monkeypatch.setattr(federation, 'MAX_SITES', 5)
     a, b, c, d, e = _sides(tmp_path, 'abcde')
     _enroll(a, 'pve-5')
     with at(a):
