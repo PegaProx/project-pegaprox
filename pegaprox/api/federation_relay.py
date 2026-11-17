@@ -30,8 +30,12 @@ from pegaprox.api.realtime import sock
 from pegaprox.constants import PEGAPROX_VERSION
 from pegaprox.utils.audit import get_client_ip, log_audit
 from pegaprox.utils.auth import RELAY_ENVIRON, require_auth
+from pegaprox.utils.ratelimit import SlidingWindow
 
 bp = Blueprint('federation_relay', __name__)
+
+# the relayed calls of one member per minute
+_relay_rate = SlidingWindow(limit=relay.SENDER_RATE, window=60, max_keys=64, name='fed-relay')
 
 _PREFIX = '/api/federation/relay/'
 
@@ -183,7 +187,6 @@ def _signed(nonce, rid, sender, status, headers, body):
 
 
 def _signed_refusal(nonce, rid, sender, status, code, error):
-    import json
     return _signed(nonce, rid, sender, status, {'Content-Type': 'application/json'},
                    json.dumps({'code': code, 'error': error}).encode())
 
@@ -219,6 +222,11 @@ def peer_relay():
     nonce = request.headers.get(ha_wire.PEER_NONCE_HEADER) or ''
     call = relay.valid_envelope(envelope)
     rid = (call or {}).get('rid') or str((envelope or {}).get('rid') or '')
+    # the address limit does not count a member's relays: its own rate and slots do, the
+    # well-formed and the malformed alike
+    if not _relay_rate.allow(sender):
+        return _signed_refusal(nonce, rid, sender, 429, 'FED_RELAY_BUSY',
+                               'Too many relayed requests from your site')
     if call is None:
         return _signed_refusal(nonce, rid, sender, 400, 'FED_RELAY_ENVELOPE',
                                'The relayed request is not well formed')
@@ -263,14 +271,18 @@ def linked_self():
         return _fail(404, 'FED_RELAY_ONLY', 'This answers relayed requests only')
     from pegaprox.api.helpers import acting_user, caller_is_scoped, check_cluster_access
     from pegaprox.utils.rbac import get_user_permissions
+    from pegaprox.utils.rbac import get_user_clusters
     user = acting_user()
     local = relay._local_ids()
+    # the clusters of the account's tenant in one look; check_cluster_access (VM ACLs and
+    # pools) only for the ones outside it
+    allowed = get_user_clusters(user)
+    allowed = None if allowed is None else set(allowed)
     rows = []
     for r in fed.own_clusters_body():
         if r.get('id') not in local:
             continue
-        ok, _err = check_cluster_access(r['id'])
-        if not ok:
+        if allowed is not None and r['id'] not in allowed and not check_cluster_access(r['id'])[0]:
             continue
         row = {'id': r['id'], 'name': r.get('name'), 'type': r.get('type'),
                'connected': r.get('connected') is True}
@@ -356,7 +368,10 @@ def _pump(ws, upstream):
         while running['on']:
             try:
                 data = ws.receive(timeout=0.1)
-            except Exception:
+            except Exception as e:
+                # simple-websocket raises on a read that timed out in some versions
+                if isinstance(e, TimeoutError) or 'timed out' in str(e).lower():
+                    continue
                 break
             if data is None:
                 # simple-websocket answers None for a timeout and for a closed peer alike

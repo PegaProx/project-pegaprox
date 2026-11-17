@@ -22,8 +22,8 @@ The rest is the **disaster recovery**, a part of its own that is off until an ad
 it on at every site ([Disaster recovery](#disaster-recovery)):
 
 - **Enrolled clusters are fenced.** With three or more sites, a Proxmox VE cluster you
-  enroll is written by its site only while a majority of the sites backs that site's lease
-  on it; when the network splits, the side without the majority stops writing to it. With
+  enroll is written by PegaProx at its site only while a majority of the sites backs that
+  site's lease on it (what someone changes in Proxmox VE directly is not fenced); when the network splits, the side without the majority stops writing to it. With
   two sites the owner writes on its own, and the other site takes a cluster over only when
   an admin there confirms that the owner is down; if the owner was only cut off, both sites
   write to it until they reach each other again (see [Two sites](#two-sites)).
@@ -264,10 +264,13 @@ arrived there yet, it is disabled there, the site asks for a second factor you h
 up at your home, or the clocks of the two sites are more than two minutes apart.
 
 **Limits.** Each instance relays at most half of its request pool at once, an eighth (at
-least four) per site; over that a call is answered `429 FED_RELAY_BUSY`. A request body is at
-most 10 MB, an answer at most 16 MB. A write that gets no answer is never sent again: the UI
-says it may have happened at that site, check its tasks there. A site that does not answer
-three times within 30 seconds is not called for 15 seconds. Live updates of another site's
+least four) per site, and the leading site takes at most 3000 relayed calls a minute from
+one member; over that a call is answered `429 FED_RELAY_BUSY`. A request body is at most
+10 MB, an answer at most 16 MB. A write that gets no answer is never sent again: the UI says
+it may have happened at that site, check its tasks there. A write that could not be sent at
+all (no connection to the site) is answered `503 FED_SITE_UNREACHABLE` and did not happen. A
+site that does not answer three times within 30 seconds is not called for 15 seconds; its
+section in the sidebar says so until it answers again. Live updates of another site's
 cluster come by polling, not by the live stream.
 
 ## Disaster recovery
@@ -279,8 +282,11 @@ works without it. `PEGAPROX_FEDERATION_DR=1` or `0` forces it where the service 
 - Switch it on at **every** site before a cluster is enrolled: an enroll is refused while a
   site has it off or does not answer (`409 FED_DR_OFF_AT`).
 - While it is off, nothing of it runs: no lease rounds, no copies of other sites' clusters,
-  no adoption or takeover, and every write to a cluster goes out without a lease check. The
-  routes of this section answer `409 FED_DR_OFF`.
+  no adoption or takeover, and every write to a cluster nobody enrolled goes out without a
+  lease check (a cluster still enrolled is not written to). The routes of this section
+  answer `409 FED_DR_OFF`.
+- An instance that enrolled clusters before the switch existed keeps it on after the
+  update; every other instance starts with it off.
 - It switches off only while no cluster is enrolled here, no copy of another site's
   cluster is held and no lease or promise is held (`409 FED_DR_IN_USE`).
 
@@ -650,7 +656,8 @@ control call never passes as a relayed one, nor the other way round.
 | `FED_RELAY_WRONG_HOME`, `FED_HOME_ELSEWHERE` | an account works on other sites' clusters from its home site only |
 | `FED_RELAY_TOKEN` | API tokens are not relayed; use the token at the site that leads the cluster |
 | `FED_RELAY_BUSY` | too many calls to or from that site at once; try again in a moment |
-| `FED_SITE_UNREACHABLE`, `FED_RELAY_NO_ANSWER` | the site that leads the cluster does not answer; for a write, check its tasks there |
+| `FED_SITE_UNREACHABLE` | the site that leads the cluster cannot be reached or does not answer; nothing was sent to it when the error says so |
+| `FED_RELAY_NO_ANSWER` | a write went out and no answer came back; it may have happened there, check its tasks |
 | `FED_RELAY_AUTH` | the site that leads the cluster did not take your sign-in |
 | `FED_FORCED` | `PEGAPROX_FEDERATION` decides; change it where the service starts |
 | `FED_IN_USE` | switching off while still taking part: leave first |

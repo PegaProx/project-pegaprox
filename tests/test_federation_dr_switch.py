@@ -198,18 +198,59 @@ def test_the_sync_tick_skips_the_disaster_recovery_while_off(tmp_path, dr_settin
     assert len(keys.calls) == len(records.calls) == len(alone.calls) == 1
 
 
-def test_no_epoch_note_is_kept_while_off(tmp_path, dr_setting):
+def test_the_epoch_note_is_kept_while_off_as_well(tmp_path, dr_setting):
+    """Switched on later, the clock then holds no promotion that did not happen."""
     a = Side(tmp_path, 'a')
     with at(a):
         federation.ensure_identity()
-        before = dict(federation._lease_state())
-        fl.note_epoch_kept(0, 1)
-        assert federation._lease_state() == before
-    # counterproof: switched on, the note is kept
-    _set_dr(a, True)
-    with at(a):
         fl.note_epoch_kept(0, 1)
         assert federation._lease_state().get('epoch_kept') == {'from': 0, 'to': 1}
+
+
+def test_clusters_enrolled_before_the_switch_keep_it_on(tmp_path, dr_setting):
+    """An instance that enrolled clusters before the switch existed would have its writes
+    there refused with it off: the first read finds them and saves it on. Counterproof: an
+    instance without such rows starts with it off."""
+    a, b = Side(tmp_path, 'a'), Side(tmp_path, 'b')
+    with at(a):
+        me = federation.ensure_identity()
+    _add_cluster(a, 'c1', owner=me)
+    with at(a):
+        assert federation.dr_enabled() is True
+        assert _db_of(a).get_server_setting(federation.DR_SETTING_KEY, 'unset') is True
+    with at(b):
+        federation.ensure_identity()
+        assert federation.dr_enabled() is False
+        assert _db_of(b).get_server_setting(federation.DR_SETTING_KEY, 'unset') == 'unset'
+
+
+def test_reads_pass_and_a_refused_write_is_noted_while_off(tmp_path, dr_setting):
+    """A row a federation still owns: an SSH command in a GET is a read and passes, as with
+    it on; a write is refused and noted for the route's 409."""
+    a = Side(tmp_path, 'a')
+    with at(a):
+        me = federation.ensure_identity()
+    _add_cluster(a, 'c1', owner=me)
+    _db_of(a).save_server_setting(federation.DR_SETTING_KEY, False)
+    with at(a):
+        federation._runtime.pop('dr', None)
+        with a.app.test_request_context('/api/clusters/c1/x', method='GET'):
+            assert federation.guard_exit('c1', 'SSH n1 cat', kind='ssh') is False
+        with a.app.test_request_context('/api/clusters/c1/x', method='POST'):
+            from flask import request
+            with pytest.raises(federation.LeaseRefused):
+                federation.guard_exit('c1', 'SSH n1 qm start', kind='ssh')
+            assert request.environ.get(federation.FED_REFUSED_ENVIRON) == ['c1']
+
+
+def test_an_enroll_is_refused_while_off(tmp_path, dr_setting):
+    a, b = _sides(tmp_path, 'ab')
+    _add_cluster(a, 'c1')
+    with at(a):
+        with pytest.raises(federation.FederationError) as e:
+            fl.enroll_cluster('c1')
+    assert e.value.code == 'FED_DR_OFF'
+    assert _db_of(a).conn.execute("SELECT fed_owner FROM clusters WHERE id = 'c1'").fetchone()[0] == ''
 
 
 def test_the_peer_status_says_whether_it_is_on(tmp_path, dr_setting):
@@ -341,6 +382,12 @@ def test_a_site_with_it_off_does_not_join_while_clusters_are_enrolled(tmp_path, 
         me = federation.instance_id()
     _add_cluster(a, 'c1', owner=me)
     code = _code(a)
+    # without a good code nobody learns that clusters are enrolled
+    with at(a):
+        with pytest.raises(federation.FederationError) as e:
+            federation.accept_join('pgxfd1_x', 'https://b.example:5000', 'b' * 32,
+                                   federation.public_key(), 'site-b')
+    assert e.value.code == 'FED_CODE'
     with pytest.raises(federation.FederationError) as e:
         _join(b, code)
     assert e.value.code == 'FED_DR_OFF_AT'
@@ -366,8 +413,11 @@ def test_a_site_with_it_off_keeps_no_copy_of_another_sites_cluster(tmp_path, dr_
     assert _db_of(b).conn.execute("SELECT COUNT(*) FROM clusters WHERE id = 'c1'").fetchone()[0] == 0
     with at(b):
         assert federation.dr_blockers() == []
-        # counterproof: switched on, the next pull takes the snapshot whole, copy included
-        federation.set_dr_enabled(True)
+        etag = federation.sync_state()[me]['etag']
+        assert etag.endswith(federation.NODR_MARK)
+    # counterproof: switched on - here by the setting itself, as an environment change or a
+    # read that failed for a moment would - the next pull takes the snapshot whole
+    _set_dr(b, True)
     _pull(b, a)
     assert _db_of(b).conn.execute("SELECT fed_owner FROM clusters WHERE id = 'c1'"
                                   ).fetchone()[0] == me

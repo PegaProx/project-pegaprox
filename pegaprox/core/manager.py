@@ -16223,20 +16223,25 @@ echo "AGENT_INSTALLED_OK"
 
         vg_name = snap['vg_name']
         errors = []
-        unchecked = []
+
+        # MK Nov 2026 - which snapshot LVs are still there, from one listing of the volume
+        # group: only a listing that worked says an LV is gone. No answer (no SSH, or the write
+        # gate refused the session) or a failed listing removes nothing and keeps the record,
+        # so no snapshot is left half removed for a rollback to trip over
+        lst_code, lst_out, lst_err = self._node_ssh_exec(
+            node, f"lvs --noheadings -o lv_name {shlex.quote(vg_name)}"
+        )
+        if lst_code != 0:
+            why = (lst_err or lst_out or 'the node could not be asked').strip()[:300]
+            self.logger.error(f"Efficient snapshot '{snap['snapname']}' kept: the LVs of "
+                              f"{vg_name} could not be listed: {why}")
+            return {'success': False, 'error': 'The snapshot is kept: its LVs could not be '
+                                               f'checked on the node: {why}'}
+        present = {line.strip() for line in (lst_out or '').splitlines() if line.strip()}
 
         for disk in snap['disks']:
             snap_lv = disk['snap_lv']
-            # Check if LV still exists before trying to remove
-            chk_code, chk_out, chk_err = self._node_ssh_exec(
-                node, f"lvs /dev/{shlex.quote(vg_name)}/{shlex.quote(snap_lv)} 2>/dev/null"
-            )
-            if chk_code == -1:
-                # MK Nov 2026 - no answer from the node (no SSH, or the write gate refused
-                # the session): nothing says the LV is gone, so the record stays
-                unchecked.append(f"{snap_lv}: {chk_err or 'the node could not be asked'}")
-                continue
-            if chk_code != 0:
+            if snap_lv not in present:
                 # LV already gone (invalidated or manually removed)
                 continue
 
@@ -16245,12 +16250,6 @@ echo "AGENT_INSTALLED_OK"
             )
             if exit_code != 0:
                 errors.append(f"{snap_lv}: {stderr or stdout}")
-
-        if unchecked:
-            self.logger.error(f"Efficient snapshot '{snap['snapname']}' kept: its LVs could not "
-                              f"be checked: {unchecked}")
-            return {'success': False, 'error': 'The snapshot is kept: its LVs could not be '
-                                               f"checked on the node: {'; '.join(unchecked + errors)}"}
 
         if errors:
             self.logger.error(f"Errors deleting efficient snapshot LVs: {errors}")

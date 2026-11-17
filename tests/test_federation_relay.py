@@ -390,20 +390,47 @@ def test_a_replayed_request_is_nobodys(linked):
                                   ).fetchone()[0] == 1
 
 
+def _held(a, b, n):
+    """n relayed writes a signs for b, kept back: none reaches b, so every nonce is unspent."""
+    held = []
+
+    def keep(url, method, path, body, headers):
+        if path != relay.RELAY_PATH:
+            raise AssertionError(path)
+        held.append((dict(headers), body))
+        raise OSError('kept back')
+    a.runtime['transport'] = keep
+    sid = _session(a, 'alice')
+    for i in range(n):
+        relay.reset_for_tests()
+        _post(a, _relay_path(b, '/vms/n1/qemu/101/start'), sid, {'n': i})
+    assert len(held) == n
+    return held
+
+
+def _inner_status(r):
+    """The status a signed answer carries: the peer route itself answers 200."""
+    return json.loads(relay._unb64(r.headers[relay.ANSWER_HEADER]))['status']
+
+
 def test_an_altered_body_or_envelope_is_nobodys(linked):
     a, b = linked
-    got = _capture(a)
-    sid = _session(a, 'alice')
-    _post(a, _relay_path(b, '/vms/n1/qemu/101/start'), sid, {'n': 1})
-    headers, body = got['req']
-    # another body under the claimed digest: the digest no longer matches
-    h = dict(headers, **{ha_wire.PEER_NONCE_HEADER: 'x' * 24})
-    assert _send_raw(b, h, b'{"n": 2}').status_code == 403
+    (h1, body1), (h2, body2), (h3, body3) = _held(a, b, 3)
+    started = "SELECT COUNT(*) FROM audit_log WHERE action = 'vm.start'"
+    # counterproof: delivered as signed, the request runs
+    r = _send_raw(b, h1, body1)
+    assert r.status_code == 200 and _inner_status(r) == 200
+    assert _db_of(b).conn.execute(started).fetchone()[0] == 1
+    # another body under the signed digest: refused in a signed answer the sender can check
+    r = _send_raw(b, h2, b'{"n": 99}')
+    assert _inner_status(r) == 400 and r.get_json(force=True)['code'] == 'FED_RELAY_BODY'
+    assert relay.SIG_HEADER in r.headers
     # another envelope: the signature no longer covers it
-    env = json.loads(relay._unb64(headers[relay.ENVELOPE_HEADER]))
+    env = json.loads(relay._unb64(h3[relay.ENVELOPE_HEADER]))
     env['principal']['user'] = 'vic'
-    h = dict(headers, **{relay.ENVELOPE_HEADER: relay._b64(json.dumps(env).encode())})
-    assert _send_raw(b, h, body).status_code == 403
+    h = dict(h3, **{relay.ENVELOPE_HEADER: relay._b64(json.dumps(env).encode())})
+    assert _send_raw(b, h, body3).status_code == 403
+    assert _db_of(b).conn.execute(started).fetchone()[0] == 1
 
 
 def test_a_control_signature_is_no_relay_signature(linked):
@@ -465,6 +492,53 @@ def test_over_its_budget_a_site_is_told_to_wait(linked, monkeypatch):
     assert r.status_code == 429 and r.get_json()['code'] == 'FED_RELAY_BUSY'
 
 
+def test_a_write_that_never_left_says_nothing_was_sent(linked):
+    """No connection to the site: the write did not happen there, and the answer says so.
+    Counterproof: a connection that broke off after the send may have delivered it."""
+    a, b = linked
+    sid = _session(a, 'alice')
+
+    def refused(*args, **kw):
+        raise ConnectionRefusedError('refused')
+    a.runtime['transport'] = refused
+    r = _post(a, _relay_path(b, '/vms/n1/qemu/101/start'), sid, {})
+    assert r.status_code == 503 and r.get_json()['code'] == 'FED_SITE_UNREACHABLE'
+    assert 'nothing was sent' in r.get_json()['error']
+    relay.reset_for_tests()
+
+    def broke(*args, **kw):
+        raise OSError('connection reset')
+    a.runtime['transport'] = broke
+    r = _post(a, _relay_path(b, '/vms/n1/qemu/101/start'), sid, {})
+    assert r.status_code == 504 and r.get_json()['code'] == 'FED_RELAY_NO_ANSWER'
+
+
+def test_only_a_connection_that_never_stood_counts_as_unsent():
+    import requests
+    from urllib3.exceptions import MaxRetryError, NewConnectionError, ProtocolError
+    refused = requests.exceptions.ConnectionError(
+        MaxRetryError(None, '/x', reason=NewConnectionError(None, 'refused')))
+    broke = requests.exceptions.ConnectionError(
+        MaxRetryError(None, '/x', reason=ProtocolError('reset')))
+    assert federation._never_connected(refused) is True
+    assert federation._never_connected(requests.exceptions.ConnectTimeout()) is True
+    assert federation._never_connected(broke) is False
+    assert federation._never_connected(requests.exceptions.ReadTimeout()) is False
+
+
+def test_a_site_over_its_rate_is_told_to_wait(linked, monkeypatch):
+    """The leading site counts a member's relayed calls on their own, whatever address
+    they come from."""
+    from pegaprox.api import federation_relay as api_relay
+    from pegaprox.utils.ratelimit import SlidingWindow
+    a, b = linked
+    monkeypatch.setattr(api_relay, '_relay_rate', SlidingWindow(limit=1, window=60, max_keys=8))
+    sid = _session(a, 'alice')
+    assert _get(a, _relay_path(b, '/status'), sid).status_code == 200
+    r = _get(a, _relay_path(b, '/status'), sid)
+    assert r.status_code == 429 and r.get_json()['code'] == 'FED_RELAY_BUSY'
+
+
 # --- the answer -----------------------------------------------------------------------------------------
 
 def test_no_html_reaches_this_origin(linked):
@@ -521,6 +595,57 @@ def test_the_list_says_why_a_site_shows_nothing(linked):
     assert sites[0]['state'] == 'unmapped' and sites[0]['clusters'] == []
 
 
+def test_a_site_in_trouble_says_so_and_a_busy_one_keeps_its_last_list(linked, monkeypatch):
+    """A site that does not answer shows that, never its last list as if it ran; the
+    trouble is not kept, so the next poll asks again. While only this instance is short
+    of slots for the site, its last good list stays."""
+    a, b = linked
+    monkeypatch.setattr(relay, 'LIST_SECONDS', 0)
+    sid = _session(a, 'alice')
+    assert _get(a, '/api/federation/linked', sid).get_json()['sites'][0]['state'] == 'ok'
+    inner = a.runtime['transport']
+
+    def down(*args, **kw):
+        raise OSError('unreachable')
+    a.runtime['transport'] = down
+    site = _get(a, '/api/federation/linked', sid).get_json()['sites'][0]
+    assert site['state'] == 'unreachable' and site['clusters'] == []
+    # the good list is still the one held: the trouble did not replace it
+    assert [e['state'] for e, _t in relay._list_cache.values()] == ['ok']
+    relay.reset_for_tests()
+    a.runtime['transport'] = inner
+    good = _get(a, '/api/federation/linked', sid).get_json()['sites'][0]
+    assert good['state'] == 'ok'
+    monkeypatch.setattr(relay._out, 'take', lambda key: False)
+    site = _get(a, '/api/federation/linked', sid).get_json()['sites'][0]
+    assert site == dict(good, stale=True)
+
+
+def test_a_list_waits_behind_the_relays_of_its_site(linked, monkeypatch):
+    a, b = linked
+    monkeypatch.setattr(relay._out, 'take', lambda key: False)
+    sid = _session(a, 'alice')
+    site = _get(a, '/api/federation/linked', sid).get_json()['sites'][0]
+    assert site['state'] == 'loading' and relay._list_cache == {}
+
+
+def test_the_list_cache_stays_bounded():
+    relay.reset_for_tests()
+    rec = {'site': 's', 'url': 'https://s.example'}
+    try:
+        orig = relay.relay_call
+        relay.relay_call = lambda *a, **k: ('refused', 403, {}, b'{"code": "FED_RELAY_UNMAPPED"}')
+        for i in range(relay.MAX_LISTS + 50):
+            relay.site_list('c' * 32, rec, {'user': f'u{i}'}, now=1000.0)
+        assert len(relay._list_cache) == relay.MAX_LISTS
+        # the expired go first: one more, later, leaves only the fresh one
+        relay.site_list('c' * 32, rec, {'user': 'late'}, now=1000.0 + relay.LIST_SECONDS + 1)
+        assert list(relay._list_cache) == [('c' * 32, 'late')]
+    finally:
+        relay.relay_call = orig
+        relay.reset_for_tests()
+
+
 def test_the_list_answers_relayed_requests_only(linked):
     a, b = linked
     _add_local_user(b, 'root', role='admin')
@@ -569,7 +694,10 @@ class _FakeWS:
 
     def receive(self, timeout=None):
         if self.incoming:
-            return self.incoming.pop(0)
+            got = self.incoming.pop(0)
+            if isinstance(got, Exception):
+                raise got
+            return got
         if not self._waited:
             import gevent
             gevent.sleep(0.1)
@@ -607,7 +735,8 @@ class _FakeUpstream:
         self.closed = True
 
 
-def _console(a, b, monkeypatch, user='alice', query=None, upstream=None, api_token=False):
+def _console(a, b, monkeypatch, user='alice', query=None, upstream=None, api_token=False,
+             incoming=('hello', b'\x01')):
     """Open a console of b's guest at a; returns (browser socket, what open_console got)."""
     from pegaprox.api import federation_relay as api_relay
     from pegaprox.utils.realtime import create_ws_token
@@ -624,7 +753,7 @@ def _console(a, b, monkeypatch, user='alice', query=None, upstream=None, api_tok
          'type': 'qemu', 'vmid': '101', 'pve_ticket': 'PVEVNC:T', 'pve_port': '5900'}
     q.update(query or {})
     from urllib.parse import urlencode
-    ws = _FakeWS(['hello', b'\x01'])
+    ws = _FakeWS(list(incoming))
     with at(a):
         with a.app.test_request_context(f'/api/federation/console?{urlencode(q)}'):
             api_relay.federation_console(ws)
@@ -682,17 +811,28 @@ def test_a_console_that_is_not_one_is_refused(linked, monkeypatch, query, why):
 
 
 def test_a_console_token_is_good_for_one_console(linked, monkeypatch):
+    """The very token that opened a console opens no second one."""
+    from pegaprox.utils.realtime import create_ws_token
     a, b = linked
-    ws, opened = _console(a, b, monkeypatch)
-    assert len(opened) == 1
-    from pegaprox.api import federation_relay as api_relay
-    from urllib.parse import urlencode
-    ws2 = _FakeWS()
-    token_url = f'/api/federation/console?{urlencode({"token": "used", "cluster": f"{CID}~{iid(b)}"})}'
     with at(a):
-        with a.app.test_request_context(token_url):
-            api_relay.federation_console(ws2)
-    assert 'Authentication required' in _error_of(ws2)
+        token = create_ws_token('alice', 'admin', sid=_session(a, 'alice'))
+    ws, opened = _console(a, b, monkeypatch, query={'token': token})
+    assert len(opened) == 1
+    ws2, opened2 = _console(a, b, monkeypatch, query={'token': token})
+    assert opened2 == [] and 'Authentication required' in (_error_of(ws2) or '')
+
+
+def test_a_read_that_timed_out_keeps_the_console_open(linked, monkeypatch):
+    """Some versions of the socket library raise on a read that timed out: the console goes on."""
+    import websocket
+    a, b = linked
+    upstream = _FakeUpstream()
+    ws, opened = _console(a, b, monkeypatch, upstream=upstream,
+                          incoming=(TimeoutError('timed out'), 'hello',
+                                    RuntimeError('socket timed out'), b'\x01'))
+    assert len(opened) == 1
+    assert upstream.sent == [(websocket.ABNF.OPCODE_TEXT, 'hello'),
+                             (websocket.ABNF.OPCODE_BINARY, b'\x01')]
 
 
 def test_no_console_crosses_with_the_switch_off(linked, monkeypatch):

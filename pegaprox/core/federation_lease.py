@@ -212,11 +212,8 @@ def note_epoch_kept(old, new):
     one of its group: an active takes its first standby (0 to 1), or leaves its group (to
     0). Its lease file holds everything it promised and holds, so the next clock check
     takes the new epoch without the hold a promotion needs. core/ha.py calls this before
-    it writes the new epoch; a promotion never does. Nothing is kept while disaster
-    recovery is off: no lease rests on the clock then."""
-    if not fed.dr_enabled():
-        return
-
+    it writes the new epoch; a promotion never does. Kept with the disaster recovery off as
+    well: switched on later, its clock then holds no promotion that did not happen."""
     def go(st):
         if (st.get('clock') or {}).get('ha_epoch') != int(old):
             return False
@@ -1322,7 +1319,12 @@ def enroll_cluster(cluster_id, by=''):
     fresh_enrolls = fed._runtime.setdefault('fresh_enrolls', set())
     fresh_enrolls.add(cluster_id)
     try:
-        _set_owner(cluster_id, me)
+        # under the lock a switch-off of the disaster recovery decides under: an enroll
+        # never lands on a site that just switched it off
+        with fed._lock:
+            if not fed.dr_enabled():
+                raise FederationError(fed.DR_OFF_ERROR, code='FED_DR_OFF')
+            _set_owner(cluster_id, me)
         # a local row that another member leads under the same id is refused, never handed
         # over: the 'lost_to' evidence converts only a row this instance led before
         fresh = {cluster_id} if not owner else set()
@@ -1872,9 +1874,11 @@ def _step_down(cluster_id, rec):
             p['until'] = 0
             p['released'] = True
         return True
+    cleared = ', '.join(f"{c} = ''" for c in fed.CLUSTER_ENCRYPTED_COLUMNS)
+    # one hold of the lock every record is stored under, from the look at the records to
+    # the move of the row: a newer record cannot come in between, so the lease and the
+    # work it would keep are never given up for a move that then does not happen
     with fed._lock:
-        # judged before the gate shuts, under the lock every record is stored under: a
-        # newer record that came in meanwhile keeps its lease and its work
         try:
             held = fed.ownership()['records'].get(cluster_id)
         except FederationError as e:
@@ -1885,10 +1889,8 @@ def _step_down(cluster_id, rec):
                          f'naming {rec["owner"]} came in meanwhile')
             return False
         fed._mutate_leases(shut)
-    _cut([cluster_id])
-    cleared = ', '.join(f"{c} = ''" for c in fed.CLUSTER_ENCRYPTED_COLUMNS)
-    stopped = int(time.time())
-    with fed._lock:
+        _cut([cluster_id])
+        stopped = int(time.time())
         conn = fed._db().conn
         try:
             fed._begin(conn)
@@ -1898,6 +1900,7 @@ def _step_down(cluster_id, rec):
                 if held is not None and held.get('sig') == rec['sig']:
                     held['stopped_at'] = stopped
                 elif held is not None and fed.record_beats(held, rec):
+                    # only another process writing the key could have put it there
                     raise FederationError('a newer record of the cluster came in meanwhile')
                 else:
                     fed.store_record(own, rec, conn, stopped_at=stopped)

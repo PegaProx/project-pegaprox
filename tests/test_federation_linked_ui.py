@@ -55,10 +55,26 @@ def test_runtime_expanding_a_remote_cluster_reads_through_its_id(open_app):
     page = app.page
     item = page.locator(f'[data-fed-cluster="{RID}"]')
     item.wait_for(timeout=8000)
-    item.locator('span').first.click()
+    chevron = item.locator('button[aria-expanded]').first
+    assert chevron.get_attribute('aria-expanded') == 'false'
+    chevron.click()
     page.wait_for_timeout(1500)
     asked = {u.split('?')[0] for u in app.server.urls if f'/api/clusters/{RID}/' in u}
     assert f'http://pegaprox.test/api/clusters/{RID}/resources' in asked, asked
+    assert chevron.get_attribute('aria-expanded') == 'true'
+    assert not app.errors, app.errors
+
+
+def test_runtime_a_remote_cluster_opens_from_the_keyboard(open_app):
+    app = _open(open_app, 'modern')
+    page = app.page
+    item = page.locator(f'[data-fed-cluster="{RID}"]')
+    item.wait_for(timeout=8000)
+    item.focus()
+    page.keyboard.press('Enter')
+    page.wait_for_timeout(1500)
+    asked = [u for u in app.server.urls if f'/api/clusters/{RID}/' in u]
+    assert asked, [u for u in app.server.urls if '/api/clusters/' in u][-10:]
     assert not app.errors, app.errors
 
 
@@ -132,6 +148,21 @@ def test_a_remote_console_goes_through_this_instance():
     modals = _read('web', 'src', 'node_modals.js')
     assert modals.count('fedConsoleUrl(clusterId, {') == 3
     assert '/api/federation/console?' in modals
+    # the stable VNC mode keeps a handle at this instance's console server: never for a remote id
+    assert "!String(clusterId).includes('~')" in modals
+    # and no hint to accept the certificate of a console port the tunnel does not use
+    assert "!reverseProxyEnabled && !fedRemote && (" in modals
+    assert modals.count('!fedRemote') == 2
+
+
+def test_the_dialogs_and_the_pop_out_know_remote_clusters():
+    dash = _read('web', 'src', 'dashboard.js')
+    main = dash[dash.index('function PegaProxDashboard('):dash.index('function Force2FASetupModal(')]
+    # the config dialogs find the cluster type of a remote cluster
+    assert '<ConfigModal' in main and 'allClusters={clusters}' not in main
+    assert 'new Map(allClusters.map(c => [c.id, c]))' in main
+    # the pop-out console checks a remote id against the linked sites
+    assert "remote ? `${API_URL}/federation/linked` : `${API_URL}/clusters`" in dash
 
 
 def test_the_bundle_was_rebuilt():

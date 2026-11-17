@@ -1817,7 +1817,7 @@ def test_two_pulls_of_one_member_never_apply_out_of_order(monkeypatch):
     monkeypatch.setattr(federation, 'sync_state', lambda: {})
     monkeypatch.setattr(federation, 'call_peer', call_peer)
     monkeypatch.setattr(federation, 'apply_identity_snapshot',
-                        lambda body, sender: applied.append(body['n']) or {'applied': 1})
+                        lambda body, sender, **kw: applied.append(body['n']) or {'applied': 1})
     first = threading.Thread(target=federation.pull_identities, args=('m' * 32,))
     first.start()
     assert started.wait(5)

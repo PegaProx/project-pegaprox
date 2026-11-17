@@ -241,6 +241,10 @@ class _Budget:
 
 
 _P = _pool_size()
+# the relayed calls one member may make per minute, whatever they carry
+SENDER_RATE = 3000
+# relay_call's kinds for no answer: sent with none back, or never sent
+_NO_ANSWER = ('silent', 'unsent')
 # what this instance sends out (per receiving site) and runs for others (per sender)
 _out = _Budget(max(4, _P // 2), max(4, _P // 8))
 _in = _Budget(max(4, _P // 2), max(4, _P // 8))
@@ -262,7 +266,7 @@ def note_answer(iid, kind, started):
     """What a relayed call says about the site, for the breaker: a signed or unsigned answer
     is a site that runs; no answer counts only when it came fast (a refused or unreachable
     address), so a slow request of one user does not close the site for everybody."""
-    if kind != 'silent':
+    if kind not in _NO_ANSWER:
         _note_dial(iid, True)
     elif time.monotonic() - started < fed.CONNECT_TIMEOUT + 2:
         _note_dial(iid, False)
@@ -335,7 +339,8 @@ def relay_call(iid, method, path, query='', body=b'', ctype='', principal=None,
     Returns (kind, status, headers, body): kind 'answer' for a signed answer of the site
     (status, headers and body are the inner request's, or the site's signed refusal),
     'refused' for an unsigned refusal before any check of ours went through there (its
-    JSON in body), 'silent' when no answer came at all."""
+    JSON in body), 'silent' when no answer came at all, 'unsent' when the request did not
+    leave this instance (no connection to the site)."""
     rec = fed.member_record(iid)
     if not rec or not rec.get('url'):
         return 'silent', 0, {}, b''
@@ -358,18 +363,21 @@ def relay_call(iid, method, path, query='', body=b'', ctype='', principal=None,
                'X-Requested-With': fed.PEER_XHR, 'Accept': '*/*',
                'Content-Type': ctype if ctype and body else 'application/json'}
     transport = fed._runtime.get('transport')
+    sent = {}
     if transport is not None:
         try:
             status, raw, rh = transport(rec['url'], 'POST', RELAY_PATH, body or b'', headers)
         except Exception as e:
             logging.warning(f'[FED] relay to {iid} failed: {e}')
             status, raw, rh = 0, None, {}
+            if isinstance(e, ConnectionRefusedError):
+                sent['never'] = True
     else:
         status, raw, rh = fed._wire_call(rec['url'], rec.get('fingerprints') or [], 'POST',
                                          RELAY_PATH, body or b'', headers, read_timeout,
-                                         MAX_ANSWER)
+                                         MAX_ANSWER, sent=sent)
     if not status:
-        return 'silent', 0, {}, b''
+        return ('unsent' if sent.get('never') else 'silent'), 0, {}, b''
     raw = raw or b''
     rh = {k.lower(): v for k, v in (rh or {}).items() if isinstance(k, str)}
     answer_text, answer_sig = rh.get(ANSWER_HEADER.lower()), rh.get(SIG_HEADER.lower())
@@ -653,6 +661,9 @@ def browser_answer(kind, status, headers, body, write):
     """(status, headers, body) for the browser from relay_call's result. An answer from
     another site never carries HTML or SVG, a cookie or a redirect; a file other than JSON
     or text is a download. A sign-in refusal there is no lost session here."""
+    if kind == 'unsent':
+        return _json(503, 'FED_SITE_UNREACHABLE', 'The site that leads this cluster cannot be '
+                                                  'reached - nothing was sent to it')
     if kind == 'silent':
         if write:
             return _json(504, 'FED_RELAY_NO_ANSWER', 'The site that leads this cluster did not '
@@ -725,6 +736,16 @@ def _json(status, code, error):
 
 LIST_SECONDS = 30
 MAX_LIST_ROWS = 1000
+# (site, user) lists kept: the expired go first, then the oldest
+MAX_LISTS = 2048
+# what is asked again at the next poll rather than kept
+_PASSING_STATES = ('unreachable', 'busy', 'switching', 'loading')
+# of these, the ones where the site itself runs
+_BUSY_STATES = ('busy', 'loading')
+
+
+def _good(held):
+    return held is not None and held[0].get('state') == 'ok'
 _list_cache = {}
 _list_lock = threading.Lock()
 
@@ -757,15 +778,30 @@ def site_list(iid, rec, principal, now=None):
              'state': 'ok', 'clusters': [], 'perms': []}
     if _broken(iid):
         entry['state'] = 'unreachable'
+    elif not _out.take(iid):
+        # the relays of the site come first; the last list is shown as it was
+        return dict(held[0], stale=True) if _good(held) else dict(entry, state='loading')
     else:
-        started = time.monotonic()
-        kind, status, _h, body = relay_call(iid, 'GET', LIST_RULE, principal=principal,
-                                            read_timeout=LIST_TIMEOUT)
-        note_answer(iid, kind, started)
+        try:
+            started = time.monotonic()
+            kind, status, _h, body = relay_call(iid, 'GET', LIST_RULE, principal=principal,
+                                                read_timeout=LIST_TIMEOUT)
+            note_answer(iid, kind, started)
+        finally:
+            _out.give(iid)
         entry.update(_list_state(kind, status, body, iid))
+    if entry['state'] in _PASSING_STATES:
+        # asked again at the next poll, not kept. A site that is busy runs, and its last good
+        # list stays; one that does not answer or switches over says so
+        if entry['state'] in _BUSY_STATES and _good(held):
+            return dict(held[0], stale=True)
+        return entry
     with _list_lock:
-        if len(_list_cache) > 4096:
-            _list_cache.clear()
+        if len(_list_cache) >= MAX_LISTS:
+            for k in [k for k, v in _list_cache.items() if not 0 <= now - v[1] < LIST_SECONDS]:
+                _list_cache.pop(k, None)
+            while len(_list_cache) >= MAX_LISTS:
+                _list_cache.pop(next(iter(_list_cache)))
         _list_cache[key] = (entry, now)
     return entry
 
@@ -776,7 +812,7 @@ _LIST_STATES = {'FED_RELAY_UNMAPPED': 'unmapped', 'FED_RELAY_SYNCING': 'syncing'
 
 
 def _list_state(kind, status, body, iid):
-    if kind == 'silent':
+    if kind in _NO_ANSWER:
         return {'state': 'unreachable'}
     try:
         data = json.loads(body or b'{}')
@@ -794,6 +830,8 @@ def _list_state(kind, status, body, iid):
         if status in (404, 405):
             return {'state': 'old_release'}
         return {'state': 'refused'}
+    if status == 429:
+        return {'state': 'busy'}
     if status != 200:
         return {'state': _LIST_STATES.get(data.get('code'), 'refused')}
     rows = [x for x in (_list_row(r, iid) for r in (data.get('clusters') or [])[:MAX_LIST_ROWS])
