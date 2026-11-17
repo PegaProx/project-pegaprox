@@ -212,7 +212,11 @@ def note_epoch_kept(old, new):
     one of its group: an active takes its first standby (0 to 1), or leaves its group (to
     0). Its lease file holds everything it promised and holds, so the next clock check
     takes the new epoch without the hold a promotion needs. core/ha.py calls this before
-    it writes the new epoch; a promotion never does."""
+    it writes the new epoch; a promotion never does. Nothing is kept while disaster
+    recovery is off: no lease rests on the clock then."""
+    if not fed.dr_enabled():
+        return
+
     def go(st):
         if (st.get('clock') or {}).get('ha_epoch') != int(old):
             return False
@@ -457,6 +461,11 @@ def cast_votes(sender, body):
     me = fed.instance_id()
     if not me or (sender != me and sender not in fed.members()):
         return 409, {'reason': 'member'}
+    if not fed.dr_enabled() and (raw_unen or raw_recs
+                                 or any(a['cluster_id'] != MEMBERS_LOCK for a in asks)
+                                 or any(cid != MEMBERS_LOCK for cid, _pid in rels)):
+        # disaster recovery off: the members lock alone is voted on here
+        return 409, {'reason': 'dr_off'}
     extra, taken = {}, []
     if sender != me:
         try:
@@ -817,8 +826,8 @@ def lease_round(only=None, adopt=frozenset(), no_convert=frozenset(), tick=False
                 if (status == 409 and isinstance(data, dict) and data.get('reason') == 'view'
                         and isinstance(data.get('epoch'), int) and data['epoch'] > epoch):
                     behind = True
-                reason = 'view' if (isinstance(data, dict) and data.get('reason') == 'view') \
-                    else 'down'
+                reason = data.get('reason') if (isinstance(data, dict) and data.get('reason')
+                                                in ('view', 'dr_off')) else 'down'
                 for cid in order:
                     refusals.setdefault(cid, Counter())[reason] += 1
     own = {}
@@ -1263,6 +1272,8 @@ def _refusal_sentence(r):
         text += ' - a takeover is not known at every site yet; try again in a few seconds'
     elif reasons.get('view'):
         text += ' - the sites do not agree on the member list yet; try again after a sync'
+    elif reasons.get('dr_off'):
+        text += ' - a site has its disaster recovery off; switch it on there'
     return text
 
 
@@ -1766,10 +1777,12 @@ def take_records(sender, raw, owner_refusals=frozenset(), no_convert=frozenset()
             continue
         best[cid] = (rec, fed.record_beats(rec, mine))
     # three or more sites: a majority decides, the records are only kept
-    acting = _acting_records(best, held, owner_refusals, no_convert) \
-        if len(fed.view_ids()) == 2 else {}
+    acting, waiting = _acting_records(best, held, owner_refusals, no_convert) \
+        if len(fed.view_ids()) == 2 else ({}, set())
+    # a record whose row could not be read is not stored yet: stored, the next delivery
+    # would no longer count it as newer, and its step or return would never be judged
     newer = {cid: rec for cid, (rec, beats) in best.items()
-             if beats and acting.get(cid) != 'resume'}
+             if beats and acting.get(cid) != 'resume' and cid not in waiting}
     if newer:
         def go(own):
             got = [cid for cid, rec in newer.items()
@@ -1807,21 +1820,25 @@ def take_records(sender, raw, owner_refusals=frozenset(), no_convert=frozenset()
                                                             or fed.record_beats(got, rec)))
             if waits:
                 out['echo'] = False
+    if waiting:
+        out['echo'] = False
     return out
 
 
 def _acting_records(best, held, owner_refusals, no_convert):
-    """{cluster id: 'down' or 'resume'} for the records of `best` that move a row in a view
-    of two, judged against the records `held` before any of them is stored. A record held
-    already whose step-down was never noted gives the cluster up again."""
+    """({cluster id: 'down' or 'resume'}, {cluster ids whose row could not be read}) for
+    the records of `best` that move a row in a view of two, judged against the records
+    `held` before any of them is stored. A record held already whose step-down was never
+    noted gives the cluster up again."""
     me, members = fed.instance_id(), fed.members()
     enrolling = fed._runtime.get('fresh_enrolls') or set()
-    acting = {}
+    acting, waiting = {}, set()
     for cid, (rec, beats) in sorted(best.items()):
         try:
             row = cluster_owner(cid)
         except FederationError as e:
             logging.warning(f'[FED] the ownership record of {cid} waits: {e}')
+            waiting.add(cid)
             continue
         kept = held.get(cid)
         undone = kept is not None and kept.get('sig') == rec['sig'] \
@@ -1835,7 +1852,7 @@ def _acting_records(best, held, owner_refusals, no_convert):
         elif (beats and rec['owner'] == me and rec['kind'] in ('adopt', 'takeover')
               and row and row == rec['from'] and rec['from'] in members):
             acting[cid] = 'resume'
-    return acting
+    return acting, waiting
 
 
 def _step_down(cluster_id, rec):
@@ -1855,7 +1872,19 @@ def _step_down(cluster_id, rec):
             p['until'] = 0
             p['released'] = True
         return True
-    fed._mutate_leases(shut)
+    with fed._lock:
+        # judged before the gate shuts, under the lock every record is stored under: a
+        # newer record that came in meanwhile keeps its lease and its work
+        try:
+            held = fed.ownership()['records'].get(cluster_id)
+        except FederationError as e:
+            logging.warning(f'[FED] the step-down of {cluster_id} waits: {e}')
+            return False
+        if held is not None and held.get('sig') != rec['sig'] and fed.record_beats(held, rec):
+            logging.info(f'[FED] cluster {cluster_id} stays here: a record newer than the one '
+                         f'naming {rec["owner"]} came in meanwhile')
+            return False
+        fed._mutate_leases(shut)
     _cut([cluster_id])
     cleared = ', '.join(f"{c} = ''" for c in fed.CLUSTER_ENCRYPTED_COLUMNS)
     stopped = int(time.time())

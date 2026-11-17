@@ -219,8 +219,9 @@ def _fresh_budgets(monkeypatch):
 def _defaults_out_of_the_config_dir(tmp_path, monkeypatch):
     """Nothing a test here does may reach the config directory the process started with:
     the default database moves into this test's tmp dir (a side swaps its own in on top),
-    and the federation is switched on by the environment."""
+    and the federation and its disaster recovery are switched on by the environment."""
     monkeypatch.setenv(federation.ENV_SWITCH, '1')
+    monkeypatch.setenv(federation.DR_ENV_SWITCH, '1')
     import pegaprox.constants as constants
     import pegaprox.core.db as db_mod
     import pegaprox.core.dbcrypto as dbcrypto

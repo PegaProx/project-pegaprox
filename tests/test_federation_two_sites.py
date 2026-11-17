@@ -1278,11 +1278,51 @@ def test_a_move_by_a_record_keeps_a_newer_one_that_came_in_meanwhile(tmp_path, c
     def stored(own):
         federation.store_record(own, newer)
         return True
-    with at(a):
-        federation._mutate_ownership(stored)
-        moved = (fl._step_down if step == 'step down' else fl._resume)('pve-x', older)
+    cut = []
+    real_cut = fl._cut
+    fl._cut = lambda ids: cut.extend(ids)
+    try:
+        with at(a):
+            federation._mutate_ownership(stored)
+            lease_before = dict((federation._lease_state().get('my_leases') or {}).get('pve-x')
+                                or {})
+            moved = (fl._step_down if step == 'step down' else fl._resume)('pve-x', older)
+            lease_after = dict((federation._lease_state().get('my_leases') or {}).get('pve-x')
+                               or {})
+    finally:
+        fl._cut = real_cut
     assert moved is False
     assert _records(a)['pve-x']['sig'] == newer['sig'] and _owner_at(a, 'pve-x') == row
+    # the newer record keeps the lease entry and the work on the cluster as they were
+    assert lease_after == lease_before and cut == []
+
+
+def test_a_record_whose_row_cannot_be_read_is_judged_at_the_next_delivery(tmp_path, clock,
+                                                                         monkeypatch):
+    """The row of the cluster cannot be read when b's takeover record arrives: the record
+    is not stored and the delivery is not echoed, so the next one judges it again and a
+    steps down then. Counterproof: stored at once, the next delivery would no longer count
+    it as newer, and a would keep writing."""
+    a, b, _ = _split_and_take(tmp_path, clock)
+    theirs = federation.wire_record(_records(b)['pve-x'])
+    real = fl.cluster_owner
+    calls = {'n': 0}
+
+    def flaky(cid):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            raise federation.FederationError('the clusters table cannot be read')
+        return real(cid)
+    monkeypatch.setattr(fl, 'cluster_owner', flaky)
+    with at(a):
+        out = fl.take_records(iid(b), [theirs])
+    assert out['echo'] is False
+    assert (_records(a).get('pve-x') or {}).get('sig') != theirs['sig']
+    assert _owner_at(a, 'pve-x') == iid(a)
+    with at(a):
+        out = fl.take_records(iid(b), [theirs])
+    assert out['echo'] is True
+    assert _owner_at(a, 'pve-x') == iid(b) and _writes(a, 'pve-x') is False
 
 
 def test_a_switched_off_owner_is_taken_over_and_gives_it_up_when_on(tmp_path, clock,

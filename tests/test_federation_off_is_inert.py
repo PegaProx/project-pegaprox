@@ -334,7 +334,7 @@ _RUNS_WHILE_OFF = {('pegaprox/core/ha.py', 'forget_inherited'),
 _FEDERATION_MODULES = {'pegaprox/core/federation.py', 'pegaprox/core/federation_lease.py',
                        'pegaprox/api/federation.py'}
 # names taken from the core by name that read no state of it: an exception and two constants
-_TAKEN_BY_NAME = {'SETTING_KEY', 'FED_REFUSED_ENVIRON', 'LeaseRefused'}
+_TAKEN_BY_NAME = {'SETTING_KEY', 'DR_SETTING_KEY', 'FED_REFUSED_ENVIRON', 'LeaseRefused'}
 
 
 _CORE = ('federation', 'federation_lease')

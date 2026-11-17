@@ -38,6 +38,7 @@ START = 'https://10.0.0.8:8006/api2/json/nodes/n1/qemu/100/status/start'
 @pytest.fixture
 def fed_on(monkeypatch):
     monkeypatch.setenv(federation.ENV_SWITCH, '1')
+    monkeypatch.setenv(federation.DR_ENV_SWITCH, '1')
 
 
 def _row(db, cid, owner):
