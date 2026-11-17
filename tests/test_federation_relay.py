@@ -28,6 +28,11 @@ from tests.test_federation import (  # noqa: F401 - fixtures by name
     _join, _map, _settled, _wire, at, iid)
 
 CID = 'pve1'
+# what the stand-in upload route of the leading site took
+UPLOADED = []
+# what the stand-in remote-migrate route took, and what it answers
+MIGRATIONS = []
+MIGRATE_ANSWER = [(200, {'task': 'UPID:n1:0001:0002:0003:qmigrate:101:root@pam:'})]
 
 
 def _cluster_routes():
@@ -75,6 +80,24 @@ def _cluster_routes():
                         headers={'Content-Disposition': 'inline; filename="../task.log"',
                                  'Set-Cookie': 'session_id=evil'})
 
+    @bp.route('/api/clusters/<cluster_id>/datastores/<storage_name>/upload', methods=['POST'])
+    @require_auth(perms=['storage.upload'])
+    def upload(cluster_id, storage_name):
+        f = request.files['file']
+        data = f.read()
+        UPLOADED.append((request.session['user'], storage_name, request.form.get('node'),
+                         f.filename, data))
+        return jsonify({'success': True, 'size': len(data)})
+
+    @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/remote-migrate',
+              methods=['POST'])
+    @require_auth(perms=['vm.migrate'])
+    def remote_migrate(cluster_id, node, vm_type, vmid):
+        MIGRATIONS.append((cluster_id, request.session['user'], node, vm_type, vmid,
+                           request.get_json()))
+        status, body = MIGRATE_ANSWER[0]
+        return jsonify(body), status
+
     @bp.route('/api/clusters/<cluster_id>/session-gone')
     @require_auth(perms=['cluster.view'])
     def session_gone(cluster_id):
@@ -95,6 +118,9 @@ def _relay_side(tmp, name):
 
 @pytest.fixture(autouse=True)
 def _fresh_relay():
+    UPLOADED.clear()
+    MIGRATIONS.clear()
+    MIGRATE_ANSWER[:] = [(200, {'task': 'UPID:n1:0001:0002:0003:qmigrate:101:root@pam:'})]
     relay.reset_for_tests()
     from pegaprox import globals as g
     g.cluster_managers[CID] = MagicMock(id=CID)
@@ -337,16 +363,108 @@ def test_a_disabled_mirror_is_refused(linked):
     assert (status, body['code']) == (403, 'FED_RELAY_DISABLED')
 
 
-def test_an_api_token_is_not_relayed(linked, monkeypatch):
-    a, b = linked
+def _with_token(monkeypatch, role, user='alice'):
     from pegaprox.utils import auth as authmod
     monkeypatch.setattr(authmod, 'validate_api_token',
-                        lambda token: {'user': 'alice', 'role': 'admin', 'api_token': True})
+                        lambda token: {'user': user, 'role': role, 'api_token': True,
+                                       'token_id': 7, 'token_name': 'ci'})
+
+
+def _token_call(a, path, method='GET', body=None):
     with at(a):
-        r = a.client.get(_relay_path(b, '/status'),
-                         headers={'Authorization': 'Bearer pgx_x'})
+        return a.client.open(path, method=method, json=body,
+                             headers={'Authorization': 'Bearer pgx_x'})
+
+
+def test_an_api_token_crosses_with_its_role_and_no_more(linked, monkeypatch):
+    """A viewer token of an admin reads at the leading site and starts nothing there, where
+    the admin's session would. The leading site holds it to the role as one of its own
+    tokens: the relayed session is a token's."""
+    a, b = linked
+    import pegaprox.utils.auth as authmod
+    opened = []
+    real = authmod.open_relay_session
+
+    def spy(*args, **kw):
+        opened.append((args[1], kw.get('api_token', False)))
+        return real(*args, **kw)
+    monkeypatch.setattr(authmod, 'open_relay_session', spy)
+    _with_token(monkeypatch, 'viewer')
+    r = _token_call(a, _relay_path(b, '/status'))
+    assert r.status_code == 200 and r.get_json()['user'] == 'alice', r.data
+    r = _token_call(a, _relay_path(b, '/vms/n1/qemu/101/start'), 'POST', {})
+    assert r.status_code == 403 and r.get_json()['code'] == 'MISSING_PERMISSION'
+    assert opened == [('viewer', True), ('viewer', True)]
+    # counterproof: an admin token of the same account starts it
+    _with_token(monkeypatch, 'admin')
+    r = _token_call(a, _relay_path(b, '/vms/n1/qemu/101/start'), 'POST', {})
+    assert r.status_code == 200, r.data
+
+
+def test_a_token_is_floored_at_both_sites(linked, monkeypatch):
+    """An admin token of a viewer crosses as a viewer's; an admin token of an account the
+    leading site maps lower acts there with that lower role."""
+    a, b = linked
+    _with_token(monkeypatch, 'admin', user='vic')
+    r = _token_call(a, _relay_path(b, '/vms/n1/qemu/101/start'), 'POST', {})
+    assert r.status_code == 403 and r.get_json()['code'] == 'MISSING_PERMISSION'
+    _with_token(monkeypatch, 'admin')
+    _db_of(b).conn.execute("UPDATE users SET role = 'viewer' WHERE username = 'alice'")
+    _db_of(b).conn.commit()
+    r = _token_call(a, _relay_path(b, '/vms/n1/qemu/101/start'), 'POST', {})
+    assert r.status_code == 403 and r.get_json()['code'] == 'MISSING_PERMISSION'
+
+
+def test_a_token_with_a_custom_role_stays_at_its_site(linked, monkeypatch):
+    a, b = linked
+    _with_token(monkeypatch, 'ci-operators')
+    r = _token_call(a, _relay_path(b, '/status'))
+    assert r.status_code == 403 and r.get_json()['code'] == 'FED_RELAY_TOKEN'
+    with at(a):
+        r = a.client.get('/api/federation/linked', headers={'Authorization': 'Bearer pgx_x'})
     assert r.status_code == 403 and r.get_json()['code'] == 'FED_RELAY_TOKEN'
     assert _relayed_calls(a) == []
+
+
+def test_a_token_lists_the_other_sites_with_its_own_permissions(linked, monkeypatch):
+    a, b = linked
+    _with_token(monkeypatch, 'viewer')
+    with at(a):
+        r = a.client.get('/api/federation/linked', headers={'Authorization': 'Bearer pgx_x'})
+    site = r.get_json()['sites'][0]
+    assert site['state'] == 'ok', site
+    assert 'vm.start' not in site['perms'] and 'cluster.view' in site['perms']
+
+
+def test_a_token_and_the_session_of_one_account_have_lists_of_their_own(linked, monkeypatch):
+    """The list is kept for half a minute per site and account: a viewer token's never
+    stands in for the session's, nor the session's for the token's."""
+    a, b = linked
+    _with_token(monkeypatch, 'viewer')
+    with at(a):
+        site = a.client.get('/api/federation/linked',
+                            headers={'Authorization': 'Bearer pgx_x'}).get_json()['sites'][0]
+    assert 'vm.start' not in site['perms'] and site['admin'] is False
+    sid = _session(a, 'alice')
+    site = _get(a, '/api/federation/linked', sid).get_json()['sites'][0]
+    assert 'vm.start' in site['perms'] and site['admin'] is True
+    with at(a):
+        site = a.client.get('/api/federation/linked',
+                            headers={'Authorization': 'Bearer pgx_x'}).get_json()['sites'][0]
+    assert 'vm.start' not in site['perms']
+
+
+def test_a_principal_this_site_cannot_read_whole_is_refused():
+    """An unknown key of the principal may be a restriction a newer site added: dropped,
+    the call would run wider than it was sent, so it does not run."""
+    good = {'v': relay.RELAY_VERSION, 'rid': 'a' * 32, 'method': 'GET',
+            'path': '/api/clusters/x/status', 'query': '', 'ctype': '',
+            'principal': {'user': 'u', 'home': 'b' * 32, 'sh': '', 'ip': ''}}
+    assert relay.valid_envelope(good)['tok'] is None
+    with_tok = dict(good, principal=dict(good['principal'], tok='viewer'))
+    assert relay.valid_envelope(with_tok)['tok'] == 'viewer'
+    assert relay.valid_envelope(dict(good, principal=dict(good['principal'], tok='ops'))) is None
+    assert relay.valid_envelope(dict(good, principal=dict(good['principal'], scope='x'))) is None
 
 
 def test_an_account_of_another_site_works_from_its_home(linked):
@@ -433,6 +551,148 @@ def test_an_altered_body_or_envelope_is_nobodys(linked):
     assert _db_of(b).conn.execute(started).fetchone()[0] == 1
 
 
+# --- uploads ---------------------------------------------------------------------------------------------
+
+_ISO = bytes(range(256)) * (3 * 4096 + 7)    # three MiB and a bit: more than one spool chunk
+
+
+def _upload(a, b, sid, data=_ISO, name='debian.iso'):
+    import io
+    with at(a):
+        return a.client.post(f'/api/clusters/{CID}~{iid(b)}/datastores/local/upload',
+                             data={'file': (io.BytesIO(data), name), 'node': 'n1',
+                                   'content': 'iso'},
+                             content_type='multipart/form-data',
+                             headers={'X-Session-ID': sid, 'X-Requested-With': 'XMLHttpRequest'})
+
+
+def _spool_files():
+    import os
+    return sorted(os.listdir(relay.upload_dir()))
+
+
+def test_an_upload_reaches_the_leading_site_whole(linked):
+    a, b = linked
+    before = _spool_files()
+    sid = _session(a, 'alice')
+    r = _upload(a, b, sid)
+    assert r.status_code == 200 and r.get_json()['size'] == len(_ISO), r.data
+    assert UPLOADED == [('alice', 'local', 'n1', 'debian.iso', _ISO)]
+    assert [c[2] for c in _relayed_upload_calls(a)] == [relay.RELAY_UPLOAD_PATH]
+    # the copies spooled at both sites are gone again
+    assert _spool_files() == before
+    assert _db_of(a).conn.execute("SELECT COUNT(*) FROM audit_log WHERE action = "
+                                  "'federation.relayed'").fetchone()[0] == 1
+
+
+def _relayed_upload_calls(a):
+    return [c for c in a.calls if c[2] == relay.RELAY_UPLOAD_PATH]
+
+
+def test_an_upload_the_leading_site_did_not_get_as_signed_is_refused(linked):
+    """Another body under the signed digest never reaches the upload route."""
+    a, b = linked
+    inner = a.runtime['transport']
+
+    def bend(url, method, path, body, headers):
+        if path == relay.RELAY_UPLOAD_PATH:
+            body = body.replace(b'debian.iso', b'debian.isx')
+        return inner(url, method, path, body, headers)
+    a.runtime['transport'] = bend
+    sid = _session(a, 'alice')
+    r = _upload(a, b, sid)
+    assert r.status_code == 400 and r.get_json()['code'] == 'FED_RELAY_BODY'
+    assert UPLOADED == []
+    # counterproof: delivered as sent, it lands
+    a.runtime['transport'] = inner
+    assert _upload(a, b, sid).status_code == 200 and len(UPLOADED) == 1
+
+
+def test_an_upload_comes_only_over_its_own_path(linked):
+    """The plain relay refuses the upload rule (its body limit is not an upload's), and a
+    signature made for one of the two paths does not hold on the other."""
+    a, b = linked
+    p = {'user': 'alice', 'home': iid(a), 'sh': '', 'ip': ''}
+    with at(a):
+        kind, status, _h, body = relay.relay_call(
+            iid(b), 'POST', f'/api/clusters/{CID}/datastores/local/upload', body=b'x',
+            ctype='multipart/form-data; boundary=x', principal=p)
+    assert (kind, status, json.loads(body)['code']) == ('answer', 404, 'FED_RELAY_RULE')
+    got = _capture(a)
+    sid = _session(a, 'alice')
+    _get(a, _relay_path(b, '/status'), sid)
+    headers, raw = got['req']
+    with at(b):
+        r = b.client.post(relay.RELAY_UPLOAD_PATH, data=raw, headers=headers)
+    assert r.status_code == 403 and r.get_json()['code'] == 'FED_NOT_MEMBER'
+    assert UPLOADED == []
+
+
+def test_an_upload_without_room_goes_nowhere(linked, monkeypatch):
+    a, b = linked
+    import shutil
+    from collections import namedtuple
+    usage = namedtuple('usage', 'total used free')
+    monkeypatch.setattr(shutil, 'disk_usage', lambda path: usage(10 ** 9, 10 ** 9, 1024))
+    sid = _session(a, 'alice')
+    r = _upload(a, b, sid)
+    assert r.status_code == 507 and r.get_json()['code'] == 'FED_RELAY_NO_SPACE'
+    assert _relayed_upload_calls(a) == [] and UPLOADED == []
+
+
+def test_an_account_that_may_not_upload_there_writes_nothing_to_either_disk(linked, monkeypatch):
+    """A viewer: refused here from the site's permission list, before the body is read.
+    Should this site's list be wrong, the leading site refuses before its disk too."""
+    a, b = linked
+    spooled = []
+    real = relay.spool
+
+    def spy(stream, size):
+        spooled.append(size)
+        return real(stream, size)
+    monkeypatch.setattr(relay, 'spool', spy)
+    r = _upload(a, b, _session(a, 'vic'))
+    assert r.status_code == 403 and r.get_json()['code'] == 'MISSING_PERMISSION'
+    assert spooled == [] and UPLOADED == []
+    real_list = relay.site_list
+    monkeypatch.setattr(relay, 'site_list', lambda *x, **kw: dict(real_list(*x, **kw), admin=True))
+    relay.reset_for_tests()
+    r = _upload(a, b, _session(a, 'vic'))
+    assert r.status_code == 403 and r.get_json()['code'] == 'MISSING_PERMISSION'
+    # written here once, not there
+    assert len(spooled) == 1 and UPLOADED == []
+
+
+def test_one_upload_at_a_time_per_account(linked):
+    a, b = linked
+    assert relay.take_upload('alice') is True
+    try:
+        r = _upload(a, b, _session(a, 'alice'))
+        assert r.status_code == 429 and r.get_json()['code'] == 'FED_RELAY_BUSY'
+    finally:
+        relay.give_upload('alice')
+    assert _upload(a, b, _session(a, 'alice')).status_code == 200
+
+
+def test_an_account_the_leading_site_refuses_sends_no_upload_to_its_disk(linked, monkeypatch):
+    """The account is checked from the headers, before the body is read there."""
+    a, b = linked
+    spooled = []
+    real = relay.spool
+
+    def spy(stream, size):
+        spooled.append(size)
+        return real(stream, size)
+    monkeypatch.setattr(relay, 'spool', spy)
+    _db_of(b).conn.execute("UPDATE users SET enabled = 0 WHERE username = 'alice'")
+    _db_of(b).conn.commit()
+    sid = _session(a, 'alice')
+    r = _upload(a, b, sid)
+    assert r.status_code == 403 and r.get_json()['code'] == 'FED_RELAY_DISABLED'
+    # spooled once, at this site; none at the leading one
+    assert len(spooled) == 1 and UPLOADED == []
+
+
 def test_a_control_signature_is_no_relay_signature(linked):
     from tests.test_federation import _signed_headers_of
     a, b = linked
@@ -486,10 +746,37 @@ def test_a_site_that_does_not_answer_is_not_dialled_for_a_while(linked):
 
 def test_over_its_budget_a_site_is_told_to_wait(linked, monkeypatch):
     a, b = linked
+    monkeypatch.setattr(relay, 'SLOT_WAIT', 0.3)
     monkeypatch.setattr(relay._out, 'take', lambda key: False)
     sid = _session(a, 'alice')
     r = _get(a, _relay_path(b, '/status'), sid)
     assert r.status_code == 429 and r.get_json()['code'] == 'FED_RELAY_BUSY'
+
+
+def test_a_call_waits_a_moment_for_a_slot_of_its_site(linked, monkeypatch):
+    """The reads of one view come in a burst: a call that finds the site's slots taken waits
+    for one to come free rather than leaving its panel empty."""
+    import threading
+    a, b = linked
+    monkeypatch.setattr(relay._out, 'each', 1)
+    with at(a):
+        assert relay.take_slot(iid(b), 'vic', wait=0)
+    threading.Timer(0.4, relay.give_slot, args=(iid(b), 'vic')).start()
+    sid = _session(a, 'alice')
+    r = _get(a, _relay_path(b, '/status'), sid)
+    assert r.status_code == 200, r.data
+
+
+def test_one_account_holds_half_a_sites_share_at_most():
+    relay.reset_for_tests()
+    site = 'd' * 32
+    each = relay._out_users.each
+    assert each == max(2, relay._out.each // 2) and each < relay._out.each
+    held = [relay.take_slot(site, 'alice', wait=0) for _ in range(each)]
+    assert all(held) and relay.take_slot(site, 'alice', wait=0) is False
+    # another account still gets one
+    assert relay.take_slot(site, 'vic', wait=0) is True
+    relay.reset_for_tests()
 
 
 def test_a_write_that_never_left_says_nothing_was_sent(linked):
@@ -640,7 +927,7 @@ def test_the_list_cache_stays_bounded():
         assert len(relay._list_cache) == relay.MAX_LISTS
         # the expired go first: one more, later, leaves only the fresh one
         relay.site_list('c' * 32, rec, {'user': 'late'}, now=1000.0 + relay.LIST_SECONDS + 1)
-        assert list(relay._list_cache) == [('c' * 32, 'late')]
+        assert list(relay._list_cache) == [('c' * 32, 'late', '', '')]
     finally:
         relay.relay_call = orig
         relay.reset_for_tests()
@@ -845,7 +1132,7 @@ def test_no_console_crosses_with_the_switch_off(linked, monkeypatch):
 def test_an_api_token_opens_no_console_of_another_site(linked, monkeypatch):
     a, b = linked
     ws, opened = _console(a, b, monkeypatch, api_token=True)
-    assert opened == [] and 'API tokens' in _error_of(ws)
+    assert opened == [] and 'API token' in _error_of(ws)
 
 
 def test_an_account_of_another_site_opens_no_console_from_here(linked, monkeypatch):

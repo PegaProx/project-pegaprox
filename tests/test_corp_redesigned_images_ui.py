@@ -891,7 +891,7 @@ def test_the_ways_there_of_corporate_redesigned():
             "setAutomationSubTab('templates'); } },") in dash
     # the Resources button
     btn = dash.index('data-cr-bp-nav="resources"')
-    assert "{isCorpRedesigned && can('vm.create') && (" in dash[btn - 400:btn]
+    assert "{isCorpRedesigned && siteCan('vm.create') && (" in dash[btn - 400:btn]
     # the cluster menu: the redesign and a Proxmox VE cluster, the entry asks for vm.create
     menu = dash[dash.index('const buildContextMenuItemsRaw = '):dash.index('const buildContextMenuItems = ')]
     assert ("...(isCorpRedesigned && (!cluster.cluster_type || cluster.cluster_type === 'proxmox') ? [\n"

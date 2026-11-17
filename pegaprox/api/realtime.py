@@ -35,6 +35,7 @@ from pegaprox.utils.realtime import (
     push_immediate_update,
     hold_websocket,
 )
+from pegaprox.utils.audit import get_client_ip
 from pegaprox.utils.email import send_email
 from pegaprox.api.helpers import load_server_settings, get_connected_manager
 from pegaprox.models.permissions import ROLE_ADMIN
@@ -605,6 +606,11 @@ def sse_updates():
     # Get cluster subscription from query params
     clusters_param = request.args.get('clusters')
     requested_clusters = clusters_param.split(',') if clusters_param else None
+    # MK Nov 2026 - linked mode: the clusters of another site stream from there
+    # (core/federation_stream.py), and the scope below is this instance's own
+    from pegaprox.core import federation as _fed, federation_stream
+    requested_clusters, remote_clusters = (federation_stream.split_wanted(requested_clusters)
+                                           if _fed.enabled() else (requested_clusters, []))
 
     # MK: only let users subscribe to clusters they have access to
     if requested_clusters:
@@ -617,6 +623,9 @@ def sse_updates():
             if not subscribed_clusters:
                 logging.warning(f"[SSE] User {user} tried to subscribe to unauthorized clusters")
                 subscribed_clusters = allowed_clusters
+    elif remote_clusters:
+        # only other sites' clusters: none of this instance's
+        subscribed_clusters = []
     else:
         subscribed_clusters = allowed_clusters
 
@@ -669,7 +678,13 @@ def sse_updates():
             'auth_method': auth_method,
             # what it was opened under: ending that ends this stream (end_session_channels)
             'sid': _bound.get('sid'),
+            'remote': list(remote_clusters),
         }
+    if _fed.enabled() and remote_clusters:
+        _fed_principal = federation_stream.principal_for(
+            user, _bound.get('sid'), _bound.get('token_id'), _token_role, get_client_ip())
+        if _fed_principal:
+            federation_stream.watch(client_id, remote_clusters, _fed_principal)
 
     logging.info(f"[SSE] Client connected: {client_id} (user: {user}, auth: {auth_method}) - Total: {len(sse_clients)}")
 
@@ -771,7 +786,8 @@ def sse_updates():
                                 logging.info(f"[SSE] '{_sl(user)}' lost access to "
                                              f"{len(_lost)} cluster(s) - stream narrowed")
                                 _ci['clusters'] = _now_allowed
-                            if _now_allowed is not None and not _now_allowed:
+                            if _now_allowed is not None and not _now_allowed \
+                                    and not _ci.get('remote'):
                                 logging.info(f"[SSE] closing stream for '{_sl(user)}' - "
                                              f"no cluster left in scope")
                                 return
@@ -781,6 +797,7 @@ def sse_updates():
             with sse_clients_lock:
                 if client_id in sse_clients:
                     del sse_clients[client_id]
+            federation_stream.unwatch(client_id)
             logging.info(f"[SSE] Client disconnected: {client_id} - Remaining clients: {len(sse_clients)}")
 
     response = Response(generate(), mimetype='text/event-stream')
@@ -812,6 +829,10 @@ def update_sse_subscription():
     if user_data is None:
         return jsonify({'error': 'Unauthorized', 'code': 'AUTH_REQUIRED'}), 401
     allowed = get_user_clusters(user_data)  # None = admin
+    # linked mode: another site's clusters stream from there
+    from pegaprox.core import federation as _fed, federation_stream
+    requested, remote = (federation_stream.split_wanted(requested) if _fed.enabled()
+                         else (requested, []))
 
     # filter requested against allowed
     if requested and len(requested) > 0:
@@ -820,6 +841,8 @@ def update_sse_subscription():
             new_sub = filtered if filtered else allowed
         else:
             new_sub = requested  # admin sees all
+    elif remote:
+        new_sub = []
     else:
         new_sub = allowed  # None = everything user can see
 
@@ -833,6 +856,17 @@ def update_sse_subscription():
             return jsonify({'error': 'Unauthorized'}), 403
         old_sub = client.get('clusters')
         client['clusters'] = new_sub
+        client['remote'] = list(remote)
+    _fed_principal = None
+    if _fed.enabled() and remote:
+        from pegaprox.utils.auth import request_credential
+        _sid, _tid = request_credential()
+        _fed_principal = federation_stream.principal_for(
+            username, _sid, _tid, request.session.get('effective_role'), get_client_ip())
+    if _fed.enabled() and _fed_principal:
+        federation_stream.watch(client_id, remote, _fed_principal)
+    else:
+        federation_stream.unwatch(client_id)
 
     # R2 (regression fix): the IP/disk refresh loop is gated on watched-clusters
     # and only re-runs ~every 40s, so a freshly-selected cluster would show stale

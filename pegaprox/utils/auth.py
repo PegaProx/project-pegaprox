@@ -1120,27 +1120,35 @@ def _serves_forwarded_write(session_id: str) -> bool:
 RELAY_ENVIRON = 'pegaprox.fed_relay'
 
 
-def open_relay_session(username: str, role: str, ip: str, site: str) -> str:
+def open_relay_session(username: str, role: str, ip: str, site: str,
+                       api_token: bool = False) -> str:
     """A session for one request a member site relays for `username`, a mirror of an
     account that site homes. Like open_forwarded_session it ends no session of the user's,
     saves nothing and holds only inside the request that carries it. The relaying site
     asked its own sign-in for the second factor, and the relay checked this instance's
-    force_2fa before it opened this, so the enrolment hold is not asked again."""
+    force_2fa before it opened this, so the enrolment hold is not asked again.
+
+    With api_token the request came from an API token there: `role` is that token's
+    built-in role, and every check here floors it to the mirror's own role as for a token
+    of this instance."""
     session_id = generate_session_id()
     now = time.time()
+    sess = {
+        'user': username,
+        'role': role,
+        'created_at': now,
+        'last_activity': now,
+        'ip': ip,
+        'user_agent': (f'via site {site}' + (' (API token)' if api_token else ''))[:200],
+        'remember': False,
+        'fed_relay': site,
+        'mfa_due': False,
+        'mfa_checked_at': now,
+    }
+    if api_token:
+        sess.update(api_token=True, token_name=f'via site {site}', token_id=None)
     with sessions_lock:
-        active_sessions[session_id] = {
-            'user': username,
-            'role': role,
-            'created_at': now,
-            'last_activity': now,
-            'ip': ip,
-            'user_agent': f'via site {site}'[:200],
-            'remember': False,
-            'fed_relay': site,
-            'mfa_due': False,
-            'mfa_checked_at': now,
-        }
+        active_sessions[session_id] = sess
     return session_id
 
 

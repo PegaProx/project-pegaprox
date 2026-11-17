@@ -323,6 +323,11 @@ _GUARDED_ELSEWHERE = {
     # the exit watch runs only for what a write kept with the switch on; switched off since,
     # it still tells an enrolled cluster (stopped) from one unenrolled meanwhile (left alone)
     ('pegaprox/core/ha_transport.py', 'is_enrolled'),
+    # a sign-in keeps what the home answered (at_home), which it answers only with the
+    # switch on, and an SSE stream drops the feeds of another site that watch() opened,
+    # which it opens only with the switch on
+    ('pegaprox/api/auth.py', 'keep'),
+    ('pegaprox/api/realtime.py', 'unwatch'),
 }
 # the one call that runs while the switch is off, on purpose: a standby that leaves its HA
 # group drops the inherited identity whenever its row is there (forget_inherited)
@@ -336,12 +341,16 @@ _RUNS_WHILE_OFF = {('pegaprox/core/ha.py', 'forget_inherited'),
                    ('pegaprox/app.py', 'RemotePaths')}
 _FEDERATION_MODULES = {'pegaprox/core/federation.py', 'pegaprox/core/federation_lease.py',
                        'pegaprox/core/federation_relay.py', 'pegaprox/api/federation.py',
-                       'pegaprox/api/federation_relay.py'}
+                       'pegaprox/api/federation_relay.py', 'pegaprox/core/federation_migrate.py',
+                       'pegaprox/core/federation_stream.py', 'pegaprox/core/federation_signin.py'}
 # names taken from the core by name that read no state of it: an exception and two constants
 _TAKEN_BY_NAME = {'SETTING_KEY', 'DR_SETTING_KEY', 'FED_REFUSED_ENVIRON', 'LeaseRefused'}
 
 
-_CORE = ('federation', 'federation_lease', 'federation_relay')
+_CORE = ('federation', 'federation_lease', 'federation_relay', 'federation_migrate',
+         'federation_stream', 'federation_signin')
+# the modules of the core without a switch of their own: a call of one is a hook too
+_SWITCHLESS = _CORE[1:]
 
 
 def _federation_aliases(tree):
@@ -361,8 +370,7 @@ def _federation_aliases(tree):
                     odd.append((node.lineno, f"from {'.' * node.level}{node.module or ''}"))
             elif node.module == 'pegaprox.core':
                 aliases |= {a.asname or a.name for a in node.names if a.name == 'federation'}
-                lease |= {a.asname or a.name for a in node.names
-                          if a.name in ('federation_lease', 'federation_relay')}
+                lease |= {a.asname or a.name for a in node.names if a.name in _SWITCHLESS}
             elif node.module in [f'pegaprox.core.{m}' for m in _CORE]:
                 odd += [(node.lineno, n) for n in names if n not in _TAKEN_BY_NAME]
         elif isinstance(node, ast.Import):
@@ -371,7 +379,7 @@ def _federation_aliases(tree):
                     continue
                 if not a.asname:
                     odd.append((node.lineno, a.name))
-                elif a.name.endswith(('_lease', '_relay')):
+                elif a.name.rpartition('.')[2] in _SWITCHLESS:
                     lease.add(a.asname)
                 else:
                     aliases.add(a.asname)
@@ -814,9 +822,13 @@ def test_a_totp_user_signs_in_as_before(api, db, calls, monkeypatch):
     assert calls == []
 
     # counterproof: switched on, the mirror branch is live and sends the account home,
-    # and the local account still signs in - neither asks the federation anything
+    # and the local account still signs in. The mirror's sign-in asks for its home first
+    # (core/federation_signin.py): one that is no member here gets the answer as before
     _switch_on(monkeypatch)
+    asked = []
+    monkeypatch.setattr(federation, 'member_record', lambda iid: asked.append(iid))
     r = api.anon().post('/api/auth/login', json={'username': 'mira', 'password': PASSWORD})
+    assert asked == [FOREIGN]
     assert r.status_code == 409 and r.get_json()['code'] == 'FED_2FA_HOME', r.data
     assert r.get_json()['home'] == FOREIGN
     secret = _totp_account(db, 'ops2')

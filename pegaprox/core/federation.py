@@ -1688,6 +1688,9 @@ def _wire_call(url, fingerprints, method, path, data, headers, read_timeout, cap
     pins = list(fingerprints or []) or ['']
     for i, fp in enumerate(pins):
         sess = _session_for(url, fp)
+        if hasattr(data, 'seek'):
+            # a spooled upload is sent from its start under every pin it is tried with
+            data.seek(0)
         try:
             resp = sess.request(method, url + path, data=data, headers=headers,
                                 verify=not fp, allow_redirects=False, stream=True,
@@ -1721,6 +1724,34 @@ def _wire_call(url, fingerprints, method, path, data, headers, read_timeout, cap
         finally:
             resp.close()
     return 0, None, {}
+
+
+def _wire_stream(url, fingerprints, path, headers, read_timeout):
+    """A POST to another instance whose answer is read as it comes: (status, open response
+    or None). The caller iterates the response and closes it; anything but a 200 is closed
+    here. Pinned as _wire_call is, no redirect followed."""
+    import requests
+    if not url or not _url_ok(url + path):
+        return 0, None
+    pins = list(fingerprints or []) or ['']
+    for i, fp in enumerate(pins):
+        sess = _session_for(url, fp)
+        try:
+            resp = sess.request('POST', url + path, data=b'', headers=headers, verify=not fp,
+                                allow_redirects=False, stream=True,
+                                timeout=(CONNECT_TIMEOUT, read_timeout))
+        except requests.exceptions.SSLError:
+            if i + 1 < len(pins):
+                continue
+            return 0, None
+        except Exception as e:
+            logging.warning(f'[FED] stream from {url}{path} failed: {type(e).__name__}')
+            return 0, None
+        if resp.status_code != 200:
+            resp.close()
+            return resp.status_code, None
+        return 200, resp
+    return 0, None
 
 
 def _never_connected(e):

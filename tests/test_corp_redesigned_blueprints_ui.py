@@ -1191,7 +1191,7 @@ def test_the_section_is_mounted_for_corporate_redesigned_only():
     assert len(mounts) == 1
     head = dash[dash.rindex('{automationSubTab', 0, mounts[0]):mounts[0]]
     assert "automationSubTab === 'templates' && isCorpRedesigned && selectedCluster?.id" in head
-    assert "canRead={holds('vm.create')} canWrite={can('vm.create')}" in dash
+    assert "canRead={holds('vm.create')} canWrite={siteCan('vm.create')}" in dash
     page = _read('web', 'src', 'cr_images.js')
     assert len(re.findall(r'<CrBlueprints\b', page)) == 1
     assert 'canRead={canRead} canWrite={canWrite} nav={nav}' in page

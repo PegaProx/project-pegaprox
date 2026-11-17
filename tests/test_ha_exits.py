@@ -786,6 +786,12 @@ AUTOMATIONS = {
     # only passes another member's console bytes to the browser
     ('pegaprox/core/federation_relay.py', '_pull_soon'): (1, 'peer'),
     ('pegaprox/api/federation_relay.py', '_pump'): (1, 'peer'),
+    # the end of a migration between two sites: follows its task and drops the target's
+    # token, like the cleanup of a migration between two clusters of this instance
+    ('pegaprox/core/federation_migrate.py', 'follow'): (1, 'job'),
+    # the live feed of another site's clusters: reads that site's frames into a browser's
+    # stream here, sends nothing to a cluster
+    ('pegaprox/core/federation_stream.py', 'Feed.start'): (1, 'peer'),
     # the watch over what is under way on an enrolled cluster: it only stops node commands
     # and closes SSH clients of a cluster whose federation lease is gone, nothing goes out
     ('pegaprox/core/ha_transport.py', '_watch_start'): (1, 'local'),

@@ -186,7 +186,9 @@ def create_app():
             if request.path.startswith('/api/federation/peer/'):
                 from pegaprox.core import federation as _fed_core
                 if _fed_core.enabled():
-                    if request.path == '/api/federation/peer/relay':
+                    if request.path in ('/api/federation/peer/relay',
+                                        '/api/federation/peer/relay/upload',
+                                        '/api/federation/peer/relay/stream'):
                         # a relayed request is judged by its headers, under its own domain;
                         # the budgets per sending site stand in for the address limit
                         from pegaprox.core import federation_relay as _fed_relay
