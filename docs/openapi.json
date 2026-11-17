@@ -41,6 +41,12 @@
         "name": "X-PegaProx-Peer",
         "description": "Only for members of a federation: the instance id of the caller, with X-PegaProx-Peer-Ts, -Nonce and -Sig, an Ed25519 signature over method, path, body digest, time, nonce and the instance id of the receiver, over the federation's own signature domain, checked against the key the agreed member view holds. Every answer carries X-PegaProx-Fed-Answer, the signature of the member over the request nonce, the status and the body. A member the federation removed gets 410 FED_REMOVED, an HA standby answers 503 FED_STANDBY."
       },
+      "federationRelay": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-PegaProx-Relay",
+        "description": "Only for members of a federation (linked mode): a request one member relays for an account it homes. The envelope (method, path, query, the account) in this header, the body digest in X-PegaProx-Relay-Body and the peer headers, an Ed25519 signature under the relay domain. The answer is 200 with the inner status in X-PegaProx-Relay-Answer and its signature in X-PegaProx-Relay-Sig."
+      },
       "sessionId": {
         "type": "apiKey",
         "in": "header",
@@ -15303,6 +15309,51 @@
         },
         "summary": "Get available hardware options (CPU types, SCSI controllers, etc.)",
         "description": "NS: Extended Dec 2025 with machine types\n\nMK Nov 2026 - ?cluster_id= answers from that cluster: the CPU models (and machine types) are\nread live from one of its nodes, so they follow its PVE version and its custom models. The\nfirst registered cluster used to answer for every dialog, an XCP-ng pool with its two types\nor an ESXi host with none. Without the parameter: the first Proxmox VE cluster the caller\nmay see.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.view"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/hardware-options": {
+      "get": {
+        "operationId": "vms.get_cluster_hardware_options_get",
+        "tags": [
+          "vms"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The same for one cluster, on its own cluster path: a dialog for another site's cluster asks it there through the federation's relay (core/federation_relay.py), which carries cluster paths only. MK Nov 2026",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -51248,6 +51299,54 @@
         ]
       }
     },
+    "/api/federation/dr": {
+      "post": {
+        "operationId": "federation.federation_dr_switch_post",
+        "tags": [
+          "federation"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Switch the disaster recovery on or off: enrolled clusters, leases, adoption and takeover. Body {\"enabled\": bool}. Switching off is refused with 409 FED_DR_IN_USE while a cluster is enrolled here (or a copy of another site's is held) or a lease or promise is held, and with 409 FED_FORCED while PEGAPROX_FEDERATION_DR decides.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
     "/api/federation/clusters": {
       "get": {
         "operationId": "federation.federation_clusters_get",
@@ -51727,6 +51826,757 @@
         ],
         "x-pegaprox-roles": [
           "admin"
+        ]
+      }
+    },
+    "/api/federation/relay/{iid}/clusters/{raw}": {
+      "delete": {
+        "operationId": "federation_relay.relay_entry_delete",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A request for a cluster of member `iid`, run there as the caller.",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "raw",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "federation_relay.relay_entry_get",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A request for a cluster of member `iid`, run there as the caller.",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "raw",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "federation_relay.relay_entry_patch",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A request for a cluster of member `iid`, run there as the caller.",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "raw",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "federation_relay.relay_entry_post",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A request for a cluster of member `iid`, run there as the caller.",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "raw",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "federation_relay.relay_entry_put",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A request for a cluster of member `iid`, run there as the caller.",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "raw",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
+    "/api/federation/relay/{iid}/clusters/{raw}/{rest}": {
+      "delete": {
+        "operationId": "federation_relay.relay_entry_path_delete",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A request for a cluster of member `iid`, run there as the caller.",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "raw",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rest",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "path"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "federation_relay.relay_entry_path_get",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A request for a cluster of member `iid`, run there as the caller.",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "raw",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rest",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "path"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "federation_relay.relay_entry_path_patch",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A request for a cluster of member `iid`, run there as the caller.",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "raw",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rest",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "path"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "federation_relay.relay_entry_path_post",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A request for a cluster of member `iid`, run there as the caller.",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "raw",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rest",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "path"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "federation_relay.relay_entry_path_put",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A request for a cluster of member `iid`, run there as the caller.",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "raw",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rest",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "path"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
+    "/api/federation/linked": {
+      "get": {
+        "operationId": "federation_relay.linked_sites_get",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "Every other site with the clusters the caller may see there, asked through the relay. {home, sites: [{iid, site, url, state, clusters, perms, release}]}; home names the site to work from when the caller's account belongs to another site.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
+    "/api/federation/peer/relay": {
+      "post": {
+        "operationId": "federation_relay.peer_relay_post",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "403": {
+            "description": "FED_NOT_MEMBER: not a paired federation member, or FED_CLOCK: the clocks are too far apart"
+          },
+          "410": {
+            "description": "FED_REMOVED: the caller was removed from the federation"
+          },
+          "503": {
+            "description": "FED_STANDBY: this host is not the acting one of its HA group"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A member's relayed request for one of the accounts it homes.",
+        "description": "Unsigned refusals, before anything of the request is believed: 503 FED_STANDBY on an\nHA standby, 410 FED_REMOVED, 403 FED_CLOCK, 403 FED_NOT_MEMBER. Everything after the\nsignature checked out is answered with 200 and a signed answer envelope that carries\nthe status: the inner request's, or a refusal (FED_RELAY_*) before it ran.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "federationRelay": []
+          }
+        ]
+      }
+    },
+    "/api/federation/linked/self": {
+      "get": {
+        "operationId": "federation_relay.linked_self_get",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "The clusters of this instance the caller may reach, with the caller's permissions here: what another site's list shows of this one. Inside a relayed request only.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/console-token": {
+      "post": {
+        "operationId": "federation_relay.console_token_post",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A console token of this instance for the caller, minted for a member site's tunnel (core/federation_relay.py): the site's server hands it to this instance's console server, which checks it, the cluster and the guest or node as for a browser of its own. Inside a relayed request only; the token never reaches a browser.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
         ]
       }
     },
@@ -53297,6 +54147,36 @@
             }
           }
         ],
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
+    "/api/federation/console": {
+      "get": {
+        "operationId": "__flask_sock.federation_console_get",
+        "tags": [
+          "__flask_sock"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "summary": "A console of another site's guest or node, opened through this instance.",
+        "description": "?token= this instance's own single-use console token, ?cluster= the remote cluster id,\n?kind= vnc, shell or term, ?node=, and for a guest ?type= and ?vmid=; the PVE ticket the\nrelayed ticket call gave the browser rides along (relay.CONSOLE_PARAMS).",
         "x-pegaprox-auth": "inline",
         "security": [
           {

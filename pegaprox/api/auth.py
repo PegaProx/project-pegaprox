@@ -1419,7 +1419,8 @@ def list_own_sessions():
     out = []
     with sessions_lock:
         for sid, sess in active_sessions.items():
-            if sess.get('user') != username:
+            # a relayed request's session lives for that request alone
+            if sess.get('user') != username or sess.get('fed_relay'):
                 continue
             out.append({
                 # show a short prefix for display only — full sid never leaves

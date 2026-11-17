@@ -43,7 +43,9 @@ _INLINE_AUTH = ('_require_session', 'validate_session(', 'validate_api_token(',
                 'accept_witness', 'witness_verdict', 'request_witness',
                 # MK Nov 2026 - the joining member of a federation: the pairing
                 # code in the body, spent by the call
-                'accept_join')
+                'accept_join',
+                # and a member's relayed request (linked mode)
+                'header_verdict')
 
 # ...and those two take that token only, so advertising apiToken/sessionId on them
 # sends an integrator straight into a 403.
@@ -69,6 +71,10 @@ _FED_PEER_AUTH = ('_peer_or_refuse',)
 # /api/federation/peer/join runs before any member exists: the one-time pairing
 # code in its body authenticates the call and is spent by it, like the HA pair.
 _FED_PAIRING_AUTH = ('accept_join',)
+# MK Nov 2026 - linked mode: a member's relayed request is signed under a domain of its own,
+# its envelope in a header, and runs as the mirror of an account the sending site homes; no
+# session of this instance is involved
+_FED_RELAY_AUTH = ('header_verdict',)
 
 _CONVERTER_TYPES = {
     'int': ('integer', None),
@@ -246,6 +252,16 @@ def build(app):
                     op['responses']['409'] = {'description': 'The batch is refused: reason view '
                                                              '(another member list), member or '
                                                              'candidate'}
+            elif kind == 'inline' and tag == 'federation_relay' and _uses(fn, _FED_RELAY_AUTH):
+                op['security'] = [{'federationRelay': []}]
+                op['responses'].pop('401', None)
+                op['responses']['403'] = {'description': 'FED_NOT_MEMBER: not a paired '
+                                                         'federation member, or FED_CLOCK: '
+                                                         'the clocks are too far apart'}
+                op['responses']['410'] = {'description': 'FED_REMOVED: the caller was '
+                                                         'removed from the federation'}
+                op['responses']['503'] = {'description': 'FED_STANDBY: this host is not the '
+                                                         'acting one of its HA group'}
             elif kind == 'inline' and _uses(fn, _HA_PEER_AUTH) and _uses(fn, _HA_WITNESS_CODE):
                 # MK Oct 2026 (#625): or no scheme at all, the open code in the body
                 op['security'] = [{'haPeer': []}, {}]
@@ -260,8 +276,8 @@ def build(app):
                 op['security'] = []
                 op['responses'].pop('401', None)
                 op['responses']['403'] = {'description': 'Wrong, expired or spent pairing code'}
-            if tag == 'federation' and rule.endpoint not in ('federation.federation_status',
-                                                              'federation.federation_switch'):
+            if tag in ('federation', 'federation_relay') and rule.endpoint not in (
+                    'federation.federation_status', 'federation.federation_switch'):
                 # the federation is experimental and switched off by default: off, these
                 # routes answer 404 before anything else (the switch and its status
                 # answer either way)
@@ -396,6 +412,17 @@ def spec(app, version):
                                    'member over the request nonce, the status and the body. '
                                    'A member the federation removed gets 410 FED_REMOVED, '
                                    'an HA standby answers 503 FED_STANDBY.',
+                },
+                'federationRelay': {
+                    'type': 'apiKey', 'in': 'header', 'name': 'X-PegaProx-Relay',
+                    'description': 'Only for members of a federation (linked mode): a request '
+                                   'one member relays for an account it homes. The envelope '
+                                   '(method, path, query, the account) in this header, the '
+                                   'body digest in X-PegaProx-Relay-Body and the peer '
+                                   'headers, an Ed25519 signature under the relay domain. '
+                                   'The answer is 200 with the inner status in '
+                                   'X-PegaProx-Relay-Answer and its signature in '
+                                   'X-PegaProx-Relay-Sig.',
                 },
                 'sessionId': {
                     'type': 'apiKey', 'in': 'header', 'name': 'X-Session-ID',

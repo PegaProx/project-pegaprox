@@ -685,10 +685,10 @@ def save_sessions():
             del active_sessions[sid]
         
         # Save to database - without the sessions of forwarded writes, which hold for
-        # one request in this process and nowhere else
+        # one request in this process and nowhere else, nor those of relayed requests
         db = get_db()
         db.save_all_sessions({sid: sess for sid, sess in active_sessions.items()
-                              if not sess.get('ha_forward')})
+                              if not sess.get('ha_forward') and not sess.get('fed_relay')})
         
     except Exception as e:
         logging.error(f"Failed to save sessions: {e}")
@@ -759,7 +759,8 @@ def create_session(username: str, role: str, remember: bool = False) -> str:
         # not the one-request session of a write a standby forwarded (#625), it ends
         # on its own a moment later
         user_sessions = [(sid, sess) for sid, sess in active_sessions.items()
-                         if sess.get('user') == username and not sess.get('ha_forward')]
+                         if sess.get('user') == username and not sess.get('ha_forward')
+                         and not sess.get('fed_relay')]
 
         # Sort by last_activity, remove oldest if more than 2 (new one will be 3rd)
         rotated = []
@@ -1029,6 +1030,10 @@ def validate_session(session_id: str) -> dict:
     # holds inside that one request and nowhere else (open_forwarded_session)
     if session.get('ha_forward') and not _serves_forwarded_write(session_id):
         return None
+    # MK Nov 2026 - and one another site of the federation opened for a request it relayed
+    # (open_relay_session) holds inside that request alone
+    if session.get('fed_relay') and not _serves_relayed_request(session_id):
+        return None
 
     # MK: security audit — IP binding. Default: log-only (mobile roaming friendly).
     # NS 2026-04-24: when `strict_session_ip` is enabled in server settings, invalidate
@@ -1104,6 +1109,52 @@ def _serves_forwarded_write(session_id: str) -> bool:
             return False
         from pegaprox.core.ha import FORWARD_ENVIRON
         mark = _req.environ.get(FORWARD_ENVIRON)
+        return isinstance(mark, dict) and mark.get('session') == session_id
+    except Exception:
+        return False
+
+
+# MK Nov 2026 - linked mode: a request another site of the federation relays for one of
+# its own accounts runs here under a session of its own (core/federation_relay.py). The
+# environ key that names it is set by the relay route alone; no header can.
+RELAY_ENVIRON = 'pegaprox.fed_relay'
+
+
+def open_relay_session(username: str, role: str, ip: str, site: str) -> str:
+    """A session for one request a member site relays for `username`, a mirror of an
+    account that site homes. Like open_forwarded_session it ends no session of the user's,
+    saves nothing and holds only inside the request that carries it. The relaying site
+    asked its own sign-in for the second factor, and the relay checked this instance's
+    force_2fa before it opened this, so the enrolment hold is not asked again."""
+    session_id = generate_session_id()
+    now = time.time()
+    with sessions_lock:
+        active_sessions[session_id] = {
+            'user': username,
+            'role': role,
+            'created_at': now,
+            'last_activity': now,
+            'ip': ip,
+            'user_agent': f'via site {site}'[:200],
+            'remember': False,
+            'fed_relay': site,
+            'mfa_due': False,
+            'mfa_checked_at': now,
+        }
+    return session_id
+
+
+def end_relay_session(session_id: str):
+    with sessions_lock:
+        active_sessions.pop(session_id, None)
+
+
+def _serves_relayed_request(session_id: str) -> bool:
+    try:
+        from flask import request as _req, has_request_context
+        if not has_request_context():
+            return False
+        mark = _req.environ.get(RELAY_ENVIRON)
         return isinstance(mark, dict) and mark.get('session') == session_id
     except Exception:
         return False

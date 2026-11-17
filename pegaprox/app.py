@@ -186,8 +186,14 @@ def create_app():
             if request.path.startswith('/api/federation/peer/'):
                 from pegaprox.core import federation as _fed_core
                 if _fed_core.enabled():
-                    from pegaprox.api.federation import request_fed_peer
-                    peer_call = request_fed_peer()[0] == 'member'
+                    if request.path == '/api/federation/peer/relay':
+                        # a relayed request is judged by its headers, under its own domain;
+                        # the budgets per sending site stand in for the address limit
+                        from pegaprox.core import federation_relay as _fed_relay
+                        peer_call = _fed_relay.header_verdict(request)[0] == 'member'
+                    else:
+                        from pegaprox.api.federation import request_fed_peer
+                        peer_call = request_fed_peer()[0] == 'member'
             if not peer_call and not any(request.path.startswith(p) for p in skip_paths):
                 # the portal_only hook below looks API tokens up only for a counted request
                 request.environ['pegaprox.rate_counted'] = True
@@ -438,6 +444,9 @@ def create_app():
         # background the sandbox changes nothing.
         if response.mimetype == 'image/svg+xml':
             csp += "; sandbox"
+        # MK Nov 2026 - so is an answer another site of the federation gave (linked mode)
+        elif request.environ.get('pegaprox.fed_relayed'):
+            csp += "; sandbox"
         response.headers['Content-Security-Policy'] = csp
 
         # LW: Mar 2026 - only trust X-Forwarded-Proto from trusted proxies
@@ -462,6 +471,11 @@ def create_app():
 
     # Register all API blueprints
     register_blueprints(app)
+    # MK Nov 2026 - linked mode: a cluster path with another site's cluster id goes to the
+    # relay route (core/federation_relay.py). A WSGI wrapper, not a request hook, installed
+    # inside the lease fast path below; with the federation off it moves no path
+    from pegaprox.core import federation_relay as _fed_relay
+    app.wsgi_app = _fed_relay.RemotePaths(app.wsgi_app)
 
     # MK Oct 2026 - portal_only on the routes require_auth does not guard. require_auth holds
     # the account on every route behind it, with the record it loads anyway; the rest find

@@ -330,19 +330,24 @@ _RUNS_WHILE_OFF = {('pegaprox/core/ha.py', 'forget_inherited'),
                    # an HA group asks before it splits, as forget_inherited runs after
                    ('pegaprox/core/ha.py', 'view_has_members'),
                    # a stat of one host-local file at the start, no query
-                   ('pegaprox/api/__init__.py', 'retry_forget')}
+                   ('pegaprox/api/__init__.py', 'retry_forget'),
+                   # installs the linked mode's WSGI wrapper at the start; the wrapper asks
+                   # the switch itself before it moves a path
+                   ('pegaprox/app.py', 'RemotePaths')}
 _FEDERATION_MODULES = {'pegaprox/core/federation.py', 'pegaprox/core/federation_lease.py',
-                       'pegaprox/api/federation.py'}
+                       'pegaprox/core/federation_relay.py', 'pegaprox/api/federation.py',
+                       'pegaprox/api/federation_relay.py'}
 # names taken from the core by name that read no state of it: an exception and two constants
 _TAKEN_BY_NAME = {'SETTING_KEY', 'DR_SETTING_KEY', 'FED_REFUSED_ENVIRON', 'LeaseRefused'}
 
 
-_CORE = ('federation', 'federation_lease')
+_CORE = ('federation', 'federation_lease', 'federation_relay')
 
 
 def _federation_aliases(tree):
-    """The names a module binds the federation core to, the names it binds the lease
-    module to (its calls are hooks too, but it has no switch to ask), and the imports of
+    """The names a module binds the federation core to, the names it binds the lease or
+    the relay module to (their calls are hooks too, but they have no switch to ask), and
+    the imports of
     either the inventory cannot follow, as (line, what): a name other than _TAKEN_BY_NAME
     taken from one of them, a relative import, `import pegaprox.core.<module>` without a
     name of its own."""
@@ -356,7 +361,8 @@ def _federation_aliases(tree):
                     odd.append((node.lineno, f"from {'.' * node.level}{node.module or ''}"))
             elif node.module == 'pegaprox.core':
                 aliases |= {a.asname or a.name for a in node.names if a.name == 'federation'}
-                lease |= {a.asname or a.name for a in node.names if a.name == 'federation_lease'}
+                lease |= {a.asname or a.name for a in node.names
+                          if a.name in ('federation_lease', 'federation_relay')}
             elif node.module in [f'pegaprox.core.{m}' for m in _CORE]:
                 odd += [(node.lineno, n) for n in names if n not in _TAKEN_BY_NAME]
         elif isinstance(node, ast.Import):
@@ -365,7 +371,7 @@ def _federation_aliases(tree):
                     continue
                 if not a.asname:
                     odd.append((node.lineno, a.name))
-                elif a.name.endswith('_lease'):
+                elif a.name.endswith(('_lease', '_relay')):
                     lease.add(a.asname)
                 else:
                     aliases.add(a.asname)
@@ -1036,6 +1042,11 @@ def test_every_federation_route_answers_404(api, seed, calls):
                     assert r.status_code == 200 and r.get_json() == OFF_STATUS, r.data
                 else:
                     assert r.status_code == 401
+                continue
+            if (method, path) == ('GET', '/api/federation/console'):
+                # a socket of flask-sock: a plain GET is no upgrade, and a socket that opens
+                # is closed at once while off (test_federation_relay)
+                assert r.status_code in (400, 404), (who, r.status_code)
                 continue
             if (method, path) == ('POST', '/api/federation/switch'):
                 # the switch answers either way: a body that says neither on nor off is

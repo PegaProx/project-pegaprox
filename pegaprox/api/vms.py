@@ -11363,8 +11363,20 @@ def get_hardware_options():
     or an ESXi host with none. Without the parameter: the first Proxmox VE cluster the caller
     may see.
     """
+    return _hardware_options_of(request.args.get('cluster_id'))
+
+
+@bp.route('/api/clusters/<cluster_id>/hardware-options', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_cluster_hardware_options(cluster_id):
+    """The same for one cluster, on its own cluster path: a dialog for another site's cluster
+    asks it there through the federation's relay (core/federation_relay.py), which carries
+    cluster paths only. MK Nov 2026"""
+    return _hardware_options_of(cluster_id)
+
+
+def _hardware_options_of(cluster_id):
     manager = None
-    cluster_id = request.args.get('cluster_id')
     if cluster_id:
         ok, err = check_cluster_access(cluster_id)
         if not ok:
