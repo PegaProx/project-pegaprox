@@ -10431,7 +10431,7 @@
             const prefilled = useRef(false);
             // a newer read of the leases or the linked view wins: an older answer that lands
             // after it would bring back the list it replaced, or take away its error
-            const reads = useRef({ leases: 0, view: 0 });
+            const reads = useRef({ leases: 0, view: 0, status: 0 });
 
             async function fedSend(method, path, body, fallback) {
                 let r;
@@ -10456,7 +10456,10 @@
             }
 
             async function refreshStatus() {
+                const seq = ++reads.current.status;
                 const r = await fedSend('GET', 'status', null, t('fedLoadFailed'));
+                // an answer older than a switch made meanwhile does not undo what that showed
+                if (seq !== reads.current.status) return r.ok ? r.data : null;
                 if (r.ok) { setStatus(r.data); setLoadError(''); return r.data; }
                 if (r.code !== 'AUTH') setLoadError(r.error);
                 return null;
@@ -10828,6 +10831,7 @@
                 setBusy('');
                 if (r.ok) {
                     addToast(value ? t('fedDrSwitchedOn') : t('fedDrSwitchedOff'), 'success');
+                    reads.current.status++;
                     setStatus(s => ({ ...(s || {}), dr: r.data }));
                     if (value) refreshLeases();
                     return;

@@ -6115,7 +6115,9 @@
                         // binary RFB. Default OFF — opt-in for environments that need it.
                         const stableMode = (typeof window !== 'undefined') &&
                                            window.localStorage &&
-                                           window.localStorage.getItem('pegaprox-vnc-stable-mode') === '1';
+                                           window.localStorage.getItem('pegaprox-vnc-stable-mode') === '1' &&
+                                           // not for another site's guest: its console server never sees the handle
+                                           !String(clusterId).includes('~');
                         console.log('VNC: Getting ticket...' + (stableMode ? ' (stable mode)' : ''));
                         const ticketResponse = await fetch(
                             `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/console${stableMode ? '?stable=1' : ''}`,
@@ -6539,6 +6541,9 @@
             // open PVE's own GUI (the External button below) and lose our console entirely.
             // Named window per guest, so clicking twice focuses the existing one instead of
             // stacking duplicates. The in-app tab closes: the session lives in the popup now.
+            // LW Nov 2026 - another site's console runs over this instance's main port
+            // (/api/federation/console): there is no second port whose certificate needs accepting
+            const fedRemote = String(clusterId || vm?._clusterId || '').includes('~');
             const popOutConsole = () => {
                 const cid = clusterId || vm?._clusterId;
                 if (!cid || !vm) return;
@@ -6805,7 +6810,7 @@
                                     <div className="text-center max-w-md p-6">
                                         <div className="text-red-400 text-xl mb-4">⚠️ {t('connectionError')}</div>
                                         
-                                        {window.location.protocol === 'https:' && !reverseProxyEnabled && (
+                                        {window.location.protocol === 'https:' && !reverseProxyEnabled && !fedRemote && (
                                             <div className="text-gray-400 text-sm mb-4 p-4 bg-proxmox-dark rounded-lg text-left">
                                                 <p className="mb-3 font-medium text-white">{t('certInstructions')}</p>
                                                 <p className="mb-2">{t('certStep1')}</p>
@@ -6823,7 +6828,7 @@
                                         )}
                                         
                                         <div className="flex gap-3 justify-center">
-                                            {!reverseProxyEnabled && (
+                                            {!reverseProxyEnabled && !fedRemote && (
                                                 <button
                                                     onClick={() => {
                                                         const port = vncPort || ((parseInt(window.location.port) || 443) + 1);
