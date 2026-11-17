@@ -135,13 +135,13 @@ GET /datastores/<storage_name>/content
 DELETE /datastores/<storage_name>/content/<path:volid>
 GET /datastores/<storage_name>/download-status/<task_id>
 POST /datastores/<storage_name>/download-url
+POST /datastores/<storage_name>/upload
 POST /drift/baseline
 GET /drift/events
 GET /drift/policy
 PUT /drift/policy
 POST /drift/scan
 GET /drift/status
-DELETE /esxi-hosts/<host_id>
 GET /esxi-hosts/<host_id>/vms
 GET /excluded-nodes
 PUT /excluded-nodes
@@ -173,6 +173,7 @@ GET /iso-sync/status
 GET /metrics
 POST /migration-preflight
 GET /migrations
+POST /migration-target
 GET /networks
 GET /nextid
 GET /node-progress
@@ -345,6 +346,11 @@ GET /snapshot-policies/<pid>/runs
 GET /snapshot-replications
 POST /storage-balancing/migrate
 GET /storage-balancing/stats
+GET /storage-clusters
+POST /storage-clusters
+DELETE /storage-clusters/<sc_id>
+PUT /storage-clusters/<sc_id>
+GET /storage-clusters/<sc_id>/status
 POST /storage-preflight
 POST /storage/scan
 GET /storage/starlvm/status
@@ -406,6 +412,7 @@ POST /vms/<node>/<vm_type>/<int:vmid>/networks
 DELETE /vms/<node>/<vm_type>/<int:vmid>/networks/<net_id>
 PUT /vms/<node>/<vm_type>/<int:vmid>/networks/<net_id>
 PUT /vms/<node>/<vm_type>/<int:vmid>/networks/<net_id>/link
+POST /vms/<node>/<vm_type>/<int:vmid>/remote-migrate
 PUT /vms/<node>/<vm_type>/<int:vmid>/resize
 GET /vms/<node>/<vm_type>/<int:vmid>/rrd/<timeframe>
 POST /vms/<node>/<vm_type>/<int:vmid>/sanitize-boot-order

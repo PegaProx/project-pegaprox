@@ -1213,17 +1213,41 @@ def auth_login():
             'code': 'MFA_STATE_UNAVAILABLE',
         }), 503
 
+    # MK Nov 2026 - linked mode: the home of a mirror checks the sign-in as well, its second
+    # factor included, and vouches for it to the other sites (core/federation_signin.py).
+    # A home that does not answer, or an account that signs in at its home only: the
+    # sign-in goes on as before, for this site alone
+    fed_signin = None
+    if user.get('fed_home') and not ldap_authenticated and not webauthn_proof:
+        from pegaprox.core import federation as _fed_core, federation_signin
+        if _fed_core.enabled():
+            fed_signin = federation_signin.at_home(username, password, totp_code or None, user)
+    if fed_signin:
+        if fed_signin['state'] == 'denied':
+            record_failed_attempt(username)
+            return jsonify(fed_signin['body']), 401
+        if fed_signin['state'] == 'busy':
+            return jsonify(fed_signin['body']), 429
+        if fed_signin['state'] == 'password_home':
+            return jsonify(fed_signin['body']), 409
+        if fed_signin['state'] == 'requires_2fa':
+            return jsonify({'requires_2fa': True, 'message': '2FA required',
+                            'methods': ['totp'] + (['webauthn'] if has_webauthn else [])}), 200
+    home_checked_2fa = bool(fed_signin and fed_signin['state'] == 'ok'
+                            and fed_signin['second_factor'])
+
     # Federation: a mirror's TOTP secret never travels (it is sealed at its home), only
     # totp_enabled does. Without a passkey such an account signs in at its home; falling
     # back to the password alone would drop the second factor. With one, the passkey is
     # the second factor here and has_totp stays False.
-    if user.get('fed_home') and user.get('totp_enabled') and not user.get('totp_secret'):
+    if (user.get('fed_home') and user.get('totp_enabled') and not user.get('totp_secret')
+            and not home_checked_2fa):
         if not has_webauthn:
             return jsonify({'code': 'FED_2FA_HOME', 'home': user['fed_home'],
                             'error': "This account's second factor lives at its home "
                                      'instance of the federation - sign in there'}), 409
 
-    if has_totp or has_webauthn:
+    if (has_totp or has_webauthn) and not home_checked_2fa:
         # Path A: caller submitted a WebAuthn proof (from /api/webauthn/auth/finish)
         if webauthn_proof and has_webauthn:
             from pegaprox.api.webauthn import consume_webauthn_proof
@@ -1302,6 +1326,8 @@ def auth_login():
     # Create session
     remember = data.get('remember', False)
     session_id = create_session(username, user['role'], remember=bool(remember))
+    if fed_signin and fed_signin['state'] == 'ok':
+        federation_signin.keep(session_id, fed_signin)
     
     # Update last login - not on a standby, where no login writes the synced row
     if not ldap_row_untouched and not ha.is_standby():

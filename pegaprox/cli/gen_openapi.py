@@ -44,8 +44,8 @@ _INLINE_AUTH = ('_require_session', 'validate_session(', 'validate_api_token(',
                 # MK Nov 2026 - the joining member of a federation: the pairing
                 # code in the body, spent by the call
                 'accept_join',
-                # and a member's relayed request (linked mode)
-                'header_verdict')
+                # and a member's relayed request, upload or live feed (linked mode)
+                'header_verdict', '_peer_prelude')
 
 # ...and those two take that token only, so advertising apiToken/sessionId on them
 # sends an integrator straight into a 403.
@@ -74,7 +74,7 @@ _FED_PAIRING_AUTH = ('accept_join',)
 # MK Nov 2026 - linked mode: a member's relayed request is signed under a domain of its own,
 # its envelope in a header, and runs as the mirror of an account the sending site homes; no
 # session of this instance is involved
-_FED_RELAY_AUTH = ('header_verdict',)
+_FED_RELAY_AUTH = ('header_verdict', '_peer_prelude')
 
 _CONVERTER_TYPES = {
     'int': ('integer', None),
@@ -219,7 +219,7 @@ def build(app):
                 op['responses']['409'] = {'description': 'FED_NO_QUORUM: no majority of the '
                                                          'federation took the new member in, '
                                                          'or FED_FULL; the code stays open'}
-            elif kind == 'inline' and tag == 'federation' and _uses(fn, _FED_PEER_AUTH):
+            elif kind == 'inline' and tag in ('federation', 'federation_relay') and _uses(fn, _FED_PEER_AUTH):
                 # the federation's own peer scheme, not the standby group's: same
                 # headers, different signature domain and different key material,
                 # checked against the member record. A refusal is a 403 with a code.

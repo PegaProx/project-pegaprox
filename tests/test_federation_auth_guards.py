@@ -1491,3 +1491,113 @@ def test_reconcile_and_renew_are_audited(fed, seed, db):
         "SELECT user, action, details FROM audit_log WHERE action LIKE 'federation.%'")}
     assert rows['federation.reconciled'][0] == 'root'
     assert rows['federation.lease_renewed'][0] == 'root' and 'c1' in rows['federation.lease_renewed'][1]
+
+
+# --- working from any site: the home checks the sign-in (core/federation_signin.py) ----------------
+
+def _vouching_home(monkeypatch, priv, answers):
+    """The home FOREIGN as call_peer reaches it: `answers` decides per sign-in body, and an
+    assertion it gives is signed with the member's key `priv`."""
+    import json as _json
+    from pegaprox.core import federation_signin as fsign
+    seen = []
+
+    def call_peer(iid, method, path, body=None, read_timeout=10, **kw):
+        seen.append((iid, path, dict(body or {})))
+        got = answers(body or {})
+        if got == 'assert':
+            now = int(time.time())
+            text = _json.dumps({'v': 1, 'user': body['user'], 'home': FOREIGN,
+                                'holder': federation.instance_id(), 'sh': body['sh'],
+                                'iat0': now, 'iat': now, 'exp': now + 300},
+                               separators=(',', ':'), sort_keys=True)
+            sig = priv.sign(fsign.ASSERT_DOMAIN + b'\n' + text.encode())
+            return 200, {'assertion': {'a': text, 's': base64.b64encode(sig).decode()},
+                         'second_factor': 'totp' in body}, {}
+        return got
+    monkeypatch.setattr(federation, 'call_peer', call_peer)
+    return seen
+
+
+def _session_row(r):
+    from pegaprox.utils.auth import active_sessions
+    return active_sessions.get((r.get_json(silent=True) or {}).get('session_id') or '')
+
+
+def test_a_totp_mirror_signs_in_with_the_code_its_home_checks(fed, db, monkeypatch):
+    priv = _member()
+    _from_member(db, [_account('tess', totp_enabled=1)])
+    seen = _vouching_home(monkeypatch, priv, lambda body: 'assert' if body.get('totp') == '123456'
+                          else ((200, {'requires_2fa': True}, {}) if 'totp' not in body
+                                else (401, {'error': 'Invalid 2FA code'}, {})))
+    r = _login(fed, 'tess')
+    assert r.status_code == 200 and r.get_json()['requires_2fa'] is True, r.data
+    assert r.get_json()['methods'] == ['totp'] and _no_session(r)
+    r = _login(fed, 'tess', totp_code='654321')
+    assert r.status_code == 401 and _no_session(r), r.data
+    r = _login(fed, 'tess', totp_code='123456')
+    assert r.status_code == 200 and _session_row(r).get('fed_assert'), r.data
+    assert [s[1] for s in seen] == ['/api/federation/peer/sign-in'] * 3
+    assert seen[-1][2]['password'] == PASSWORD
+
+
+def test_a_home_that_does_not_answer_leaves_the_sign_in_to_this_site(fed, db, monkeypatch):
+    priv = _member()
+    _from_member(db, [_account('tess', totp_enabled=1), _account('nils')])
+    _vouching_home(monkeypatch, priv, lambda body: (0, None, {}))
+    # the code cannot be checked: sent home as before
+    r = _login(fed, 'tess', totp_code='123456')
+    assert r.status_code == 409 and r.get_json()['code'] == 'FED_2FA_HOME' and _no_session(r)
+    # a password alone signs in, for this site's clusters only
+    r = _login(fed, 'nils')
+    assert r.status_code == 200 and 'fed_assert' not in _session_row(r), r.data
+
+
+def test_a_password_its_home_refuses_signs_in_nobody(fed, db, monkeypatch):
+    priv = _member()
+    _from_member(db, [_account('nils')])
+    _vouching_home(monkeypatch, priv, lambda body: (401, {'error': 'Invalid credentials'}, {}))
+    r = _login(fed, 'nils')
+    assert r.status_code == 401 and _no_session(r), r.data
+
+
+def test_only_a_second_factor_the_home_checked_spares_the_one_here(fed, db, monkeypatch):
+    """A code sent along that the home did not check (it says so) is no second factor: the
+    account with TOTP is sent home as without an answer."""
+    priv = _member()
+    _from_member(db, [_account('tess', totp_enabled=1)])
+    import json as _json
+    from pegaprox.core import federation_signin as fsign
+
+    def unchecked(body):
+        now = int(time.time())
+        text = _json.dumps({'v': 1, 'user': 'tess', 'home': FOREIGN,
+                            'holder': federation.instance_id(), 'sh': body['sh'], 'iat0': now,
+                            'iat': now, 'exp': now + 300}, separators=(',', ':'), sort_keys=True)
+        sig = priv.sign(fsign.ASSERT_DOMAIN + b'\n' + text.encode())
+        return 200, {'assertion': {'a': text, 's': base64.b64encode(sig).decode()}}, {}
+    _vouching_home(monkeypatch, priv, unchecked)
+    r = _login(fed, 'tess', totp_code='123456')
+    assert r.status_code == 409 and r.get_json()['code'] == 'FED_2FA_HOME' and _no_session(r)
+
+
+def test_an_assertion_for_another_site_or_session_is_not_kept(fed, db, monkeypatch):
+    priv = _member()
+    _from_member(db, [_account('nils')])
+    import json as _json
+    from pegaprox.core import federation_signin as fsign
+
+    def answers(body):
+        now = int(time.time())
+        text = _json.dumps({'v': 1, 'user': 'nils', 'home': FOREIGN, 'holder': 'e' * 32,
+                            'sh': body['sh'], 'iat0': now, 'iat': now, 'exp': now + 300},
+                           separators=(',', ':'), sort_keys=True)
+        sig = priv.sign(fsign.ASSERT_DOMAIN + b'\n' + text.encode())
+        return 200, {'assertion': {'a': text, 's': base64.b64encode(sig).decode()}}, {}
+    _vouching_home(monkeypatch, priv, answers)
+    r = _login(fed, 'nils')
+    assert r.status_code == 200 and 'fed_assert' not in _session_row(r), r.data
+    # counterproof: held by this site, it is kept
+    _vouching_home(monkeypatch, priv, lambda body: 'assert')
+    r = _login(fed, 'nils')
+    assert r.status_code == 200 and _session_row(r).get('fed_assert'), r.data

@@ -52476,8 +52476,187 @@
             "description": "FED_DISABLED: the federation is not enabled on this instance"
           }
         },
-        "summary": "A member's relayed request for one of the accounts it homes.",
-        "description": "Unsigned refusals, before anything of the request is believed: 503 FED_STANDBY on an\nHA standby, 410 FED_REMOVED, 403 FED_CLOCK, 403 FED_NOT_MEMBER. Everything after the\nsignature checked out is answered with 200 and a signed answer envelope that carries\nthe status: the inner request's, or a refusal (FED_RELAY_*) before it ran.",
+        "summary": "A member's relayed request for one of the accounts it homes, answered with 200 and a signed answer envelope that carries the status: the inner request's, or a refusal (FED_RELAY_*) before it ran (_peer_prelude for the ones before the signature).",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "federationRelay": []
+          }
+        ]
+      }
+    },
+    "/api/federation/peer/relay/upload": {
+      "post": {
+        "operationId": "federation_relay.peer_relay_upload_post",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "403": {
+            "description": "FED_NOT_MEMBER: not a paired federation member, or FED_CLOCK: the clocks are too far apart"
+          },
+          "410": {
+            "description": "FED_REMOVED: the caller was removed from the federation"
+          },
+          "503": {
+            "description": "FED_STANDBY: this host is not the acting one of its HA group"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A member's relayed upload to a datastore of one of this instance's clusters. The account is checked before a byte of the body is read; the body goes to a file, and only a file with the digest the sender signed reaches the upload route.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "federationRelay": []
+          }
+        ]
+      }
+    },
+    "/api/federation/peer/sign-in": {
+      "post": {
+        "operationId": "federation_relay.peer_sign_in_post",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "403": {
+            "description": "FED_NOT_MEMBER: not a paired federation member, or FED_CLOCK: the clocks are too far apart"
+          },
+          "410": {
+            "description": "FED_REMOVED: the caller was removed from the federation"
+          },
+          "503": {
+            "description": "FED_STANDBY: this host is not the acting one of its HA group"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A member's sign-in of an account this instance homes (core/federation_signin.py): the password and the second factor are checked here, nothing is opened here; 200 with an assertion for that member, or the refusal.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "federationPeer": []
+          }
+        ]
+      }
+    },
+    "/api/federation/peer/assert-renew": {
+      "post": {
+        "operationId": "federation_relay.peer_assert_renew_post",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "403": {
+            "description": "FED_NOT_MEMBER: not a paired federation member, or FED_CLOCK: the clocks are too far apart"
+          },
+          "410": {
+            "description": "FED_REMOVED: the caller was removed from the federation"
+          },
+          "503": {
+            "description": "FED_STANDBY: this host is not the acting one of its HA group"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A fresh assertion for one this instance gave the asking member, while the account stands as it did at the sign-in.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "federationPeer": []
+          }
+        ]
+      }
+    },
+    "/api/federation/peer/relay/stream": {
+      "post": {
+        "operationId": "federation_relay.peer_relay_stream_post",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "403": {
+            "description": "FED_NOT_MEMBER: not a paired federation member, or FED_CLOCK: the clocks are too far apart"
+          },
+          "410": {
+            "description": "FED_REMOVED: the caller was removed from the federation"
+          },
+          "503": {
+            "description": "FED_STANDBY: this host is not the acting one of its HA group"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A member's live feed of clusters of this instance, for one of the accounts it homes (core/federation_stream.py): 200 with a stream of signed frames, or a refusal before it starts.",
         "requestBody": {
           "required": false,
           "content": {
@@ -52524,6 +52703,152 @@
           },
           {
             "sessionId": []
+          }
+        ]
+      }
+    },
+    "/api/federation/migrate": {
+      "post": {
+        "operationId": "federation_relay.federation_migrate_post",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "A guest moved to a cluster of another site, or from one (core/federation_migrate.py).",
+        "description": "Body as POST /api/cross-cluster-migrate takes it: source_cluster, target_cluster (at\nleast one of them another site's, a remote id), vmid, vm_type, source_node,\ntarget_node, target_storage or target_storage_map, target_bridge or target_bridge_map,\ntarget_vmid, online, delete_source, bwlimit. Each site checks the user itself; 200\n{message, task, transfer_network} once the migration task runs at the source.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/migration-target": {
+      "post": {
+        "operationId": "federation_relay.migration_target_post",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The target half of a migration from another site into this cluster: the checks of the user and the token (core/federation_migrate.py mint_target). Inside a relayed request only; the token goes to the asking site's server, never to a browser.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.migrate"
+        ]
+      }
+    },
+    "/api/federation/peer/migration-drop": {
+      "post": {
+        "operationId": "federation_relay.peer_migration_drop_post",
+        "tags": [
+          "federation_relay"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "403": {
+            "description": "FED_NOT_MEMBER: not a paired federation member, or FED_CLOCK: the clocks are too far apart"
+          },
+          "410": {
+            "description": "FED_REMOVED: the caller was removed from the federation"
+          },
+          "503": {
+            "description": "FED_STANDBY: this host is not the acting one of its HA group"
+          },
+          "404": {
+            "description": "FED_DISABLED: the federation is not enabled on this instance"
+          }
+        },
+        "summary": "The token of a migration from another site, dropped once its task has ended: for the member that asked for it only, whoever's session it was (a drop takes rights away).",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "inline",
+        "security": [
+          {
+            "federationPeer": []
           }
         ]
       }

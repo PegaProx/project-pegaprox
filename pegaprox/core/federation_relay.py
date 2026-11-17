@@ -42,6 +42,11 @@ from pegaprox.core import federation as fed
 from pegaprox.core import ha_wire
 
 RELAY_PATH = '/api/federation/peer/relay'
+# an upload to a datastore of another site's cluster: its own path, so the size limit of
+# uploads holds for it (app.py)
+RELAY_UPLOAD_PATH = RELAY_PATH + '/upload'
+# the live updates of another site's clusters (core/federation_stream.py)
+RELAY_STREAM_PATH = RELAY_PATH + '/stream'
 RELAY_DOMAIN = 'pegaprox-fed-relay-1'
 ANSWER_DOMAIN = 'pegaprox-fed-relay-answer-1'
 ENVELOPE_HEADER = 'X-PegaProx-Relay'
@@ -65,10 +70,25 @@ LIST_TIMEOUT = 5
 
 CLUSTER_RULE = '/api/clusters/<cluster_id>'
 LIST_RULE = '/api/federation/linked/self'
+UPLOAD_RULE = CLUSTER_RULE + '/datastores/<storage_name>/upload'
+# an upload goes as large as one to a cluster of this instance (app.py), and its answer
+# comes once the leading site has handed it to Proxmox
+MAX_UPLOAD = int(os.environ.get('PEGAPROX_MAX_UPLOAD_SIZE', 100 * 1024 ** 3))
+UPLOAD_TIMEOUT = 3900
+# kept free on the disk the upload is spooled to
+UPLOAD_RESERVE = 256 * 1024 ** 2
 _SAFE_METHODS = ('GET', 'HEAD')
 _METHODS = ('GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE')
 _HEX64 = re.compile(r'[0-9a-f]{64}')
 _RID_RE = re.compile(r'[0-9a-f]{32}')
+# who a relayed request runs for: the account, its home, a handle of the session or token
+# it came in with, the browser's address, for an API token the built-in role it holds at the
+# sending site, and for an account another site homes the assertion of that home
+# (core/federation_signin.py). A key the leading site does not know refuses the request, so no
+# restriction a newer sender adds is dropped on the way
+PRINCIPAL_KEYS = frozenset({'user', 'home', 'sh', 'ip', 'tok', 'asr'})
+# the roles an API token crosses with: a custom role names nothing at another site
+TOKEN_ROLES = ('admin', 'user', 'viewer')
 
 # what an answer from another site may be: no HTML and no SVG reach this origin
 ANSWER_TYPES = ('application/json', 'text/plain', 'text/csv', 'application/octet-stream',
@@ -91,18 +111,17 @@ _EXCLUDED = {
         ('PUT', '/node-credentials/<node>'), ('DELETE', '/node-credentials/<node>'),
         ('POST', '/ssh/repin-host-keys'), ('PUT', '/rename'), ('PUT', '/group'),
         ('PUT', '/sort-order'), ('PUT', '/location'), ('POST', '/ha/claim'),
-        ('GET', '/esxi-hosts'), ('POST', '/esxi-hosts'), ('POST', '/connection-check')}),
+        ('GET', '/esxi-hosts'), ('POST', '/esxi-hosts'), ('DELETE', '/esxi-hosts/<host_id>'),
+        ('POST', '/connection-check')}),
     # installs of software on the site's nodes
     'install': frozenset({
         ('POST', '/reports/install-debsecan'), ('POST', '/ha/install-self-fence'),
         ('POST', '/ha/uninstall-self-fence')}),
     # a second cluster: this site's pickers hold this site's ids
     'second_cluster': frozenset({
-        ('POST', '/vms/<node>/<vm_type>/<int:vmid>/remote-migrate'),
         ('POST', '/transfer-network/check')}),
-    # uploads and sockets, which have their own way
+    # sockets, which have their own way
     'transport': frozenset({
-        ('POST', '/datastores/<storage_name>/upload'),
         ('POST', '/vms/<node>/<vm_type>/<int:vmid>/vnc-poll'),
         ('GET', '/vms/<node>/<vm_type>/<int:vmid>/vncwebsocket'),
         ('GET', '/nodes/<node>/shellws')}),
@@ -121,7 +140,7 @@ REASONS = {
     'admin': 'This is set by an admin of the site that leads the cluster',
     'install': 'Software on the nodes of this cluster is installed from the site that leads it',
     'second_cluster': 'This names a second cluster, which is picked at the site that leads it',
-    'transport': 'Uploads and sockets go to the site that leads the cluster directly',
+    'transport': 'This goes to the site that leads the cluster its own way',
     'ha': "PegaProx's HA of this cluster is set at the site that leads it",
     'scope': 'Only the cluster routes of another site are relayed',
 }
@@ -143,8 +162,6 @@ def rule_verdict(app, method, rule):
     for reason, pairs in _EXCLUDED.items():
         if (method, tail) in pairs:
             return reason
-    if tail.startswith('/storage-clusters'):
-        return 'second_cluster'
     auth = getattr(app.view_functions.get(rule.endpoint), '_pp_auth', None) or {}
     perms = set(auth.get('perms') or ())
     if 'admin' in (auth.get('roles') or ()) or perms & _ADMIN_PERMS:
@@ -248,12 +265,45 @@ _NO_ANSWER = ('silent', 'unsent')
 # what this instance sends out (per receiving site) and runs for others (per sender)
 _out = _Budget(max(4, _P // 2), max(4, _P // 8))
 _in = _Budget(max(4, _P // 2), max(4, _P // 8))
+# of a site's share, one account holds half at most: a view that opens with ten reads at
+# once queues them, and leaves room for the other accounts working on that site
+_out_users = _Budget(10 ** 6, max(2, _out.each // 2))
+# how long a call waits for a slot before it is answered 429 FED_RELAY_BUSY
+SLOT_WAIT = 8
+# uploads run for minutes and hold a spooled copy on the disk: a few at a time, outside
+# the budgets above
+_uploads_out = _Budget(4, 2)
+_uploads_in = _Budget(4, 2)
+# one upload at a time per account, and the bytes of the uploads being written to disk
+_upload_users = set()
+_spooling = {'bytes': 0}
+_spool_lock = threading.Lock()
 
 # a site that does not answer is not dialled for a while: 3 failed connects within 30 s
 # keep it closed for 15 s
 _BREAK_AFTER, _BREAK_WINDOW, _BREAK_FOR = 3, 30, 15
 _breaker = {}
 _breaker_lock = threading.Lock()
+
+
+def take_slot(iid, user, wait=None):
+    """A slot for a call of `user` to site `iid`, waited for up to SLOT_WAIT seconds: the
+    calls of one view come in a burst, and a short wait serves them where a refusal would
+    leave the view empty. True when taken; give it back with give_slot."""
+    deadline = time.monotonic() + (SLOT_WAIT if wait is None else wait)
+    while True:
+        if _out_users.take((user, iid)):
+            if _out.take(iid):
+                return True
+            _out_users.give((user, iid))
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def give_slot(iid, user):
+    _out.give(iid)
+    _out_users.give((user, iid))
 
 
 def _broken(iid):
@@ -289,9 +339,12 @@ def _note_dial(iid, ok):
 def reset_for_tests():
     with _breaker_lock:
         _breaker.clear()
-    for b in (_out, _in, _tunnels):
+    for b in (_out, _in, _out_users, _tunnels, _uploads_out, _uploads_in):
         with b._lock:
             b._used, b._per = 0, {}
+    with _spool_lock:
+        _upload_users.clear()
+        _spooling['bytes'] = 0
     with _user_tunnels_lock:
         _user_tunnels.clear()
     with _list_lock:
@@ -315,14 +368,36 @@ def _unb64(text):
     return base64.urlsafe_b64decode(text + '=' * (-len(text) % 4))
 
 
-def _request_message(body_sha, env_sha, ts, nonce, receiver, sender):
-    return '\n'.join((RELAY_DOMAIN, 'POST', RELAY_PATH, body_sha, env_sha, ts, nonce,
+def _request_message(body_sha, env_sha, ts, nonce, receiver, sender, path=RELAY_PATH):
+    return '\n'.join((RELAY_DOMAIN, 'POST', path, body_sha, env_sha, ts, nonce,
                       receiver, sender)).encode()
 
 
 def _answer_message(nonce, rid, answer_sha, body_sha, responder, requester):
     return '\n'.join((ANSWER_DOMAIN, nonce, rid, answer_sha, body_sha, responder,
                       requester)).encode()
+
+
+def signed_request(iid, method, path, query, body_sha, ctype, principal, wire_path):
+    """(headers, nonce, rid) of a request to member `iid` at `wire_path` that runs `method`
+    `path` there as `principal`, or None when its envelope is too long to send."""
+    rid = secrets.token_hex(16)
+    envelope = {'v': RELAY_VERSION, 'rid': rid, 'method': method, 'path': path,
+                'query': query or '', 'ctype': ctype or '', 'principal': principal or {}}
+    env_text = _b64(json.dumps(envelope, separators=(',', ':'), sort_keys=True).encode())
+    if len(env_text) > MAX_ENVELOPE:
+        return None
+    sender = fed.instance_id()
+    ts, nonce = str(int(time.time())), secrets.token_urlsafe(18)
+    sig = fed.signing_key().sign(_request_message(body_sha, _sha(env_text.encode()), ts, nonce,
+                                                  iid, sender, wire_path))
+    headers = {ha_wire.PEER_HEADER: sender, ha_wire.PEER_TS_HEADER: ts,
+               ha_wire.PEER_NONCE_HEADER: nonce,
+               ha_wire.PEER_SIG_HEADER: base64.b64encode(sig).decode(),
+               ENVELOPE_HEADER: env_text, BODY_HEADER: body_sha,
+               'X-Requested-With': fed.PEER_XHR, 'Accept': '*/*',
+               'Content-Type': ctype or 'application/json'}
+    return headers, nonce, rid
 
 
 def session_handle(session_id):
@@ -333,40 +408,41 @@ def session_handle(session_id):
 
 
 def relay_call(iid, method, path, query='', body=b'', ctype='', principal=None,
-               read_timeout=READ_TIMEOUT):
+               read_timeout=READ_TIMEOUT, upload=None):
     """Send one request to member `iid` to run there as `principal`.
 
     Returns (kind, status, headers, body): kind 'answer' for a signed answer of the site
     (status, headers and body are the inner request's, or the site's signed refusal),
     'refused' for an unsigned refusal before any check of ours went through there (its
     JSON in body), 'silent' when no answer came at all, 'unsent' when the request did not
-    leave this instance (no connection to the site)."""
+    leave this instance (no connection to the site).
+
+    `upload`, a spooled body (open file, size, sha256), goes in place of `body` to
+    RELAY_UPLOAD_PATH, read from the file as it is sent."""
     rec = fed.member_record(iid)
     if not rec or not rec.get('url'):
         return 'silent', 0, {}, b''
-    rid = secrets.token_hex(16)
-    envelope = {'v': RELAY_VERSION, 'rid': rid, 'method': method, 'path': path,
-                'query': query or '', 'ctype': ctype or '', 'principal': principal or {}}
-    env_text = _b64(json.dumps(envelope, separators=(',', ':'), sort_keys=True).encode())
-    if len(env_text) > MAX_ENVELOPE:
+    wire_path = RELAY_PATH
+    if upload is not None:
+        body, size, body_sha = upload
+        wire_path = RELAY_UPLOAD_PATH
+    else:
+        size, body_sha = len(body or b''), _sha(body)
+    signed = signed_request(iid, method, path, query, body_sha, ctype if size else '',
+                            principal, wire_path)
+    if signed is None:
         return 'refused', 414, {}, json.dumps({'code': 'FED_RELAY_TOO_LARGE', 'error':
                                               'The request is too long to relay'}).encode()
+    headers, nonce, rid = signed
     sender = fed.instance_id()
-    ts, nonce = str(int(time.time())), secrets.token_urlsafe(18)
-    body_sha = _sha(body)
-    sig = fed.signing_key().sign(_request_message(body_sha, _sha(env_text.encode()), ts, nonce,
-                                                  iid, sender))
-    headers = {ha_wire.PEER_HEADER: sender, ha_wire.PEER_TS_HEADER: ts,
-               ha_wire.PEER_NONCE_HEADER: nonce,
-               ha_wire.PEER_SIG_HEADER: base64.b64encode(sig).decode(),
-               ENVELOPE_HEADER: env_text, BODY_HEADER: body_sha,
-               'X-Requested-With': fed.PEER_XHR, 'Accept': '*/*',
-               'Content-Type': ctype if ctype and body else 'application/json'}
+    if upload is not None:
+        headers['Content-Length'] = str(size)
     transport = fed._runtime.get('transport')
     sent = {}
     if transport is not None:
         try:
-            status, raw, rh = transport(rec['url'], 'POST', RELAY_PATH, body or b'', headers)
+            data = body.read() if upload is not None else (body or b'')
+            status, raw, rh = transport(rec['url'], 'POST', wire_path, data, headers)
         except Exception as e:
             logging.warning(f'[FED] relay to {iid} failed: {e}')
             status, raw, rh = 0, None, {}
@@ -374,7 +450,7 @@ def relay_call(iid, method, path, query='', body=b'', ctype='', principal=None,
                 sent['never'] = True
     else:
         status, raw, rh = fed._wire_call(rec['url'], rec.get('fingerprints') or [], 'POST',
-                                         RELAY_PATH, body or b'', headers, read_timeout,
+                                         wire_path, body or b'', headers, read_timeout,
                                          MAX_ANSWER, sent=sent)
     if not status:
         return ('unsent' if sent.get('never') else 'silent'), 0, {}, b''
@@ -425,20 +501,21 @@ def header_verdict(request):
     """Who sent this relayed request, from its headers alone (no byte of the body is read):
     ('member', record, envelope), ('removed', tombstone, None), ('skewed', record, None) or
     (None, None, None). Worked out once per request; the nonce is spent with the 'member'
-    verdict, so the request counts once."""
+    verdict, so the request counts once. The signature holds for the path it came to."""
     env = request.environ
     if _VERDICT_ENVIRON in env:
         return env[_VERDICT_ENVIRON]
     verdict = (None, None, None)
     try:
-        verdict = _header_verdict(request.headers)
+        if request.path in (RELAY_PATH, RELAY_UPLOAD_PATH, RELAY_STREAM_PATH):
+            verdict = _header_verdict(request.headers, request.path)
     except Exception as e:
         logging.warning(f'[FED] could not check a relayed request: {e}')
     env[_VERDICT_ENVIRON] = verdict
     return verdict
 
 
-def _header_verdict(headers):
+def _header_verdict(headers, path=RELAY_PATH):
     claimed = headers.get(ha_wire.PEER_HEADER) or ''
     ts, nonce, sig = (headers.get(ha_wire.PEER_TS_HEADER), headers.get(ha_wire.PEER_NONCE_HEADER),
                       headers.get(ha_wire.PEER_SIG_HEADER))
@@ -465,7 +542,8 @@ def _header_verdict(headers):
     from cryptography.exceptions import InvalidSignature
     try:
         key.verify(base64.b64decode(sig),
-                   _request_message(body_sha, _sha(env_text.encode()), ts, nonce, me, claimed))
+                   _request_message(body_sha, _sha(env_text.encode()), ts, nonce, me, claimed,
+                                    path))
     except (InvalidSignature, ValueError):
         return None, None, None
     rec = dict(rec, instance_id=claimed)
@@ -500,19 +578,29 @@ def valid_envelope(envelope):
         return None
     if not isinstance(rid, str) or not _RID_RE.fullmatch(rid) or not isinstance(principal, dict):
         return None
+    if not set(principal) <= PRINCIPAL_KEYS:
+        return None
     user, home = principal.get('user'), principal.get('home')
     sh, ip = principal.get('sh', ''), principal.get('ip', '')
+    tok = principal.get('tok')
     if not (isinstance(user, str) and 0 < len(user) <= 128 and isinstance(home, str)
             and ha_wire.ID_RE.fullmatch(home) and isinstance(sh, str) and len(sh) <= 64
             and isinstance(ip, str) and len(ip) <= 64):
         return None
+    if tok is not None and tok not in TOKEN_ROLES:
+        return None
+    asr = principal.get('asr')
+    if asr is not None:
+        from pegaprox.core.federation_signin import well_formed
+        if not well_formed(asr) or tok is not None:
+            return None
     try:
         import ipaddress
         ip = str(ipaddress.ip_address(ip)) if ip else ''
     except ValueError:
         return None
     return {'method': method, 'path': path, 'query': query, 'ctype': ctype, 'rid': rid,
-            'user': user, 'home': home, 'sh': sh, 'ip': ip}
+            'user': user, 'home': home, 'sh': sh, 'ip': ip, 'tok': tok, 'asr': asr}
 
 
 # a mirror that has not arrived yet is pulled from its home once per half minute
@@ -536,22 +624,31 @@ def _pull_soon(home):
 
 def resolve_principal(sender, call):
     """(user row, None) when this instance runs the call as a mirror of an account the
-    sender homes, else (None, (status, code, sentence))."""
+    sender homes, or as an account signed in at the sender through its home (this instance
+    or another member: the home's assertion, core/federation_signin.py), else (None,
+    (status, code, sentence))."""
     from pegaprox.core.db import get_db
-    if call['home'] != sender:
-        return None, (403, 'FED_RELAY_WRONG_HOME', 'A site acts only for the accounts it homes')
+    home = call['home']
+    if home != sender:
+        from pegaprox.core.federation_signin import refusal
+        why = refusal(sender, call)
+        if why:
+            return None, why
+    own = home == fed.instance_id()
     try:
         row = get_db().conn.execute('SELECT * FROM users WHERE username = ?',
                                     (call['user'],)).fetchone()
     except Exception as e:
         logging.warning(f'[FED] could not read the account of a relayed request: {e}')
         return None, (503, 'FED_UNAVAILABLE', 'The accounts of this site cannot be read')
+    if row is None and own:
+        return None, (403, 'FED_RELAY_DISABLED', 'Your account is gone at its home site')
     if row is None:
-        _pull_soon(sender)
+        _pull_soon(home)
         return None, (503, 'FED_RELAY_SYNCING', 'Your account has not reached this site yet - '
                                                 'try again in a moment')
     row = dict(row)
-    if (row.get('fed_home') or '') != sender:
+    if (row.get('fed_home') or '') != ('' if own else home):
         return None, (403, 'FED_RELAY_WRONG_HOME', 'This site has an account of its own with '
                                                    'that name')
     if row.get('tenant') == fed.QUARANTINE or row.get('role') == fed.QUARANTINE:
@@ -575,10 +672,18 @@ def resolve_principal(sender, call):
 
 
 def run_relayed(app, outer, call, row, site):
-    """Run the call through this app as the mirror `row`: (status, headers, body)."""
+    """Run the call through this app as the mirror `row`: (status, headers, body). A call an
+    API token made at its site runs as a token of that role here, floored to the mirror's
+    role as every token of this instance is."""
     from pegaprox.utils.auth import open_relay_session, end_relay_session, RELAY_ENVIRON
     body = call['body']
-    sid = open_relay_session(row['username'], row.get('role') or 'viewer', call['ip'], site)
+    # a spooled upload is read from its file, everything else from memory
+    stream, length = (body, call['size']) if not isinstance(body, bytes) else \
+        (io.BytesIO(body), len(body))
+    if call.get('tok'):
+        sid = open_relay_session(row['username'], call['tok'], call['ip'], site, api_token=True)
+    else:
+        sid = open_relay_session(row['username'], row.get('role') or 'viewer', call['ip'], site)
     environ = {
         'REQUEST_METHOD': call['method'],
         'SCRIPT_NAME': '',
@@ -594,10 +699,10 @@ def run_relayed(app, outer, call, row, site):
         'HTTP_X_REQUESTED_WITH': 'XMLHttpRequest',
         'HTTP_X_SESSION_ID': sid,
         'HTTP_USER_AGENT': f'PegaProx site {site}'[:200],
-        'CONTENT_LENGTH': str(len(body)),
+        'CONTENT_LENGTH': str(length),
         'wsgi.version': (1, 0),
         'wsgi.url_scheme': outer.get('wsgi.url_scheme') or 'https',
-        'wsgi.input': io.BytesIO(body),
+        'wsgi.input': stream,
         'wsgi.errors': outer.get('wsgi.errors') or sys.stderr,
         'wsgi.multithread': bool(outer.get('wsgi.multithread')),
         'wsgi.multiprocess': False,
@@ -653,6 +758,116 @@ def sign_answer(nonce, rid, requester, status, headers, body):
     sig = fed.signing_key().sign(_answer_message(nonce, rid, _sha(answer_text.encode()),
                                                  _sha(body), fed.instance_id(), requester))
     return {ANSWER_HEADER: answer_text, SIG_HEADER: base64.b64encode(sig).decode()}
+
+
+# --- uploads ---------------------------------------------------------------------------------
+#
+# The body of an upload is written to a file first, at each of the two sites, with its
+# sha256 taken on the way: the sending site signs that digest, the leading site hands the
+# file on to its upload route only when its copy has the same one.
+
+class UploadRefused(Exception):
+    def __init__(self, status, code, error):
+        super().__init__(error)
+        self.status, self.code, self.error = status, code, error
+
+
+def upload_dir():
+    """Where uploads are spooled: the directory the upload route of this instance uses
+    (api/vms.py), not /tmp, which is often too small in a container."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tmp')
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def spool(stream, size):
+    """(path, sha256) of `size` bytes read from `stream` into a file of their own. Raises
+    UploadRefused when the size is no upload's or the disk cannot hold it, or when the
+    stream ends early; the file is gone then."""
+    import shutil
+    if not isinstance(size, int) or size <= 0:
+        raise UploadRefused(411, 'FED_RELAY_LENGTH', 'An upload has to say its length')
+    if size > MAX_UPLOAD:
+        raise UploadRefused(413, 'FED_RELAY_TOO_LARGE', 'The upload is larger than this '
+                                                         'site takes')
+    where = upload_dir()
+    with _spool_lock:
+        # the uploads being written count with what they will take
+        if size + _spooling['bytes'] + UPLOAD_RESERVE > shutil.disk_usage(where).free:
+            raise UploadRefused(507, 'FED_RELAY_NO_SPACE', 'Not enough free space to take this '
+                                                            'upload on')
+        _spooling['bytes'] += size
+    try:
+        return _spool_into(where, stream, size)
+    finally:
+        with _spool_lock:
+            _spooling['bytes'] = max(0, _spooling['bytes'] - size)
+
+
+def _spool_into(where, stream, size):
+    import tempfile
+    fd, path = tempfile.mkstemp(dir=where)
+    digest, got = hashlib.sha256(), 0
+    try:
+        with os.fdopen(fd, 'wb') as out:
+            while got < size:
+                chunk = stream.read(min(1024 * 1024, size - got))
+                if not chunk:
+                    raise UploadRefused(400, 'FED_RELAY_BODY', 'The upload ended early')
+                digest.update(chunk)
+                out.write(chunk)
+                got += len(chunk)
+    except BaseException:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    return path, digest.hexdigest()
+
+
+def take_upload(username):
+    """One upload at a time per account: False while one of its uploads runs."""
+    with _spool_lock:
+        if username in _upload_users:
+            return False
+        _upload_users.add(username)
+        return True
+
+
+def give_upload(username):
+    with _spool_lock:
+        _upload_users.discard(username)
+
+
+def upload_refusal(row, call, cluster_id):
+    """(status, code, sentence) when the upload route would refuse the mirror `row` here,
+    else None: asked before a byte of the body is read, so a refused upload is not written
+    to this site's disk first. The route asks again when it runs."""
+    from pegaprox.core.db import get_db
+    from pegaprox.api.helpers import caller_is_scoped
+    from pegaprox.utils.rbac import get_user_clusters, has_permission
+    try:
+        user = dict(get_db().get_user(row['username']) or {}, username=row['username'])
+    except Exception:
+        return 503, 'FED_UNAVAILABLE', 'The accounts of this site cannot be read'
+    if call.get('tok'):
+        from pegaprox.utils.auth import apply_token_role
+        user = apply_token_role(user, call['tok'])
+    if not has_permission(user, 'storage.upload'):
+        return 403, 'MISSING_PERMISSION', 'Permission denied: storage.upload'
+    allowed = get_user_clusters(user)
+    if (allowed is not None and cluster_id not in allowed) or caller_is_scoped(user, cluster_id):
+        return 403, 'FED_RELAY_SCOPE', 'An upload to this cluster needs access to the whole cluster'
+    return None
+
+
+def drop_spooled(path):
+    if path:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 # --- the entry side: what the browser gets back ----------------------------------------------
@@ -763,13 +978,19 @@ def _list_row(r, iid):
         n = fed._count(r.get(field))
         if n is not None:
             out[field] = n
+    lat, lon = r.get('latitude'), r.get('longitude')
+    if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (lat, lon)) \
+            and -90 <= lat <= 90 and -180 <= lon <= 180:
+        out.update(latitude=lat, longitude=lon,
+                   location_label=str(r.get('location_label') or '')[:80])
     return out
 
 
 def site_list(iid, rec, principal, now=None):
-    """The entry of one site in /api/federation/linked for one user."""
+    """The entry of one site in /api/federation/linked for one user, as it asks: a session
+    and each token role of the account have lists of their own."""
     now = time.monotonic() if now is None else now
-    key = (iid, principal['user'])
+    key = (iid, principal['user'], principal.get('home') or '', principal.get('tok') or '')
     with _list_lock:
         held = _list_cache.get(key)
     if held is not None and 0 <= now - held[1] < LIST_SECONDS:
@@ -837,7 +1058,7 @@ def _list_state(kind, status, body, iid):
     rows = [x for x in (_list_row(r, iid) for r in (data.get('clusters') or [])[:MAX_LIST_ROWS])
             if x]
     perms = [p for p in (data.get('perms') or []) if isinstance(p, str) and len(p) <= 64][:256]
-    return {'state': 'ok', 'clusters': rows, 'perms': perms,
+    return {'state': 'ok', 'clusters': rows, 'perms': perms, 'admin': data.get('admin') is True,
             'release': str(data.get('release') or '')[:32]}
 
 
@@ -859,6 +1080,11 @@ def forget_lists(iid=None):
 
 CONSOLE_PATH = '/api/federation/console'
 CONSOLE_TOKEN_RULE = CLUSTER_RULE + '/console-token'
+# the target half of a migration between two sites (core/federation_migrate.py)
+MIGRATION_TARGET_RULE = CLUSTER_RULE + '/migration-target'
+# cluster rules a site asks for itself, never for a browser: what they answer (a console
+# token, a migration token) goes to the asking site's server only
+SERVER_RULES = frozenset({CONSOLE_TOKEN_RULE, MIGRATION_TARGET_RULE})
 CONSOLE_KINDS = ('vnc', 'shell', 'term')
 # what the browser may hand on to the leading site's console server, per kind: the PVE
 # ticket the relayed ticket call gave it, nothing else

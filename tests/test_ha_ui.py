@@ -1424,7 +1424,7 @@ def test_the_corporate_detail_view_leaves_the_node_alone_on_a_standby():
 
 def test_the_sidebar_leaves_cluster_changes_to_the_active(dash):
     heading = dash[dash.index("<h2 className=\"text-sm font-semibold text-gray-400 uppercase tracking-wider\">{t('clusters')}</h2>"):]
-    heading = heading[:heading.index('{clusters.length === 0 ? (')]
+    heading = heading[:heading.index('{allClusters.length === 0 ? (')]
     assert '{isAdmin && !haReadOnly && (' in heading
     item = _block(dash, 'function ClusterSidebarItem(', 'function TopologyView(')
     assert 'const { haReadOnly } = useAuth();' in item

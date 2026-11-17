@@ -237,18 +237,74 @@ runs it as your account there: the mirror of your account, with the tenant and r
 of that site mapped it onto. Its permissions, VM permissions, pools, quotas, IP lists and
 second-factor rule apply exactly as if you had signed in there, and its audit log names you
 with `(via site <this site>)`. A site speaks only for the accounts it homes: an account of a
-third site, or that site's own `admin`, is never borrowed.
+third site, or that site's own `admin`, is never borrowed by name. An account works elsewhere
+only through its home, as described under working from any site.
 
-So the account works on other sites' clusters from its **home site**. Signed in at another
-site with a mirrored account, the sidebar names the home to work from instead. API tokens
-are not relayed: a mirrored token works at the other site directly.
+**What the UI offers** inside the view of another site's cluster follows the permissions that
+site gives you there, its admin flag included: a button or menu entry that site would refuse
+is not shown. Outside the cluster view (settings, this site's own pages) your permissions here
+count. Every row of another site, the cluster view and its context menu (Corporate
+Redesigned) have a link that opens the cluster at its site.
+
+**Working from any site.** An account signs in at any site of the federation where it is
+mirrored. That site asks the account's home to check the password and the second factor
+(TOTP), and the home signs a short assertion: this account signed in there, for that one
+session. With it the account works on every site's clusters from where it signed in, its
+home's clusters included. The site renews the assertion every few minutes while the session
+works; the home refuses a renewal after a password change since the sign-in, for a disabled
+account, and after twelve hours, so those end it within five minutes. The home counts
+refused passwords and codes per site and account: a site that guesses locks only itself out
+of that account, never the account at its home. Without an answer of the home, an account of
+a directory (LDAP, OIDC) or one that signs in with a security key, the sign-in works for that
+site's own clusters only, and the sidebar names the home to work from.
+
+**API tokens** with a built-in role (admin, user, viewer) work on other sites' clusters too.
+At the site that leads the cluster the call runs as a token of that role, floored to the role
+that site maps the account onto, so a token never does more there than the account may. A
+token with a custom role works at its own site only: the name of the role means nothing at
+another site. Consoles of other sites open from a signed-in session, not from a token.
 
 **What stays at the site that leads the cluster.** The cluster's own record and credentials
-(edit, rename, group, delete, re-configure, node credentials, host keys), who may act on it
+(edit, rename, group, delete, re-configure, node credentials, host keys, its ESXi hosts), who may act on it
 (VM permissions, pools), what only its admins do (scripts, BMC, subscriptions, QDevice,
-recovery settings, installs on its nodes), PegaProx's own HA of the cluster, uploads to its
-datastores, and steps that name a second cluster (cross-cluster migration, storage
-clusters). The UI says so and links to that site.
+recovery settings, installs on its nodes), PegaProx's own HA of the cluster, and the check of
+a transfer network against a second cluster. The cluster's settings, site recovery and
+plugins tabs are not shown for another site's cluster. The UI says so and links to that site.
+
+**Uploads** to another site's datastores work as to this site's: the file is written to this
+instance's disk first, its SHA-256 signed, and sent on; the leading site writes it to its own
+disk, compares the digest and hands it to Proxmox VE only when it matches. Both sites check
+the account's upload permission and cluster access before a byte is written. Each side needs
+the free space of the file (plus 256 MB, uploads under way counted). One upload per account
+and at most two per site run at once.
+
+**Migrations between two sites.** A guest moves to a Proxmox VE cluster of another site, or
+from one, in the cross-cluster migration dialog. Proxmox's remote migration does the copy, as
+between two clusters of one instance, but the API token the source node uses at the target is
+made by the site that leads the target, after its own checks of you (the migrate permission,
+the cluster as yours, not reached through one guest or pool, the VMID range and quota of
+your tenant there, a VMID that is free there), and it carries only what this migration needs:
+privilege separation, and ACLs for `Sys.Incoming`, the guest's new VMID, the target storages
+and the named bridges (an SDN vnet in its zone), on roles of its own (`PegaProxFedIncoming`,
+`PegaProxFedGuest`, `PegaProxFedStorage`, `PegaProxFedNet`). The account PegaProx uses at that
+cluster therefore needs `Permissions.Modify` and `Sys.Modify`. The token never reaches a
+browser; the site that asked for it has it dropped once the migration task has ended (a
+signed call of that site, which also works after your session ended), the site that made it
+keeps a list of its tokens over a restart, and Proxmox VE refuses one on its own after eight
+days should nothing else drop it. A migration whose start is refused drops its token and the
+quota it held at once. The
+preflight check of the dialog is for two clusters of one site; between sites each site
+checks its half when the migration starts.
+
+**Storage clusters** (the storage groups of the balancing) belong to one cluster and are set
+up at another site's cluster like at one of this site's.
+
+**The global pages** count the other sites' clusters as well: the all-clusters overview, the
+topology, the world map (the location is set at the cluster's site), the guest list (in a
+section of its own, filtered by the search and the status of the page) and the search in the
+header (guests by name or VMID; a query with a field such as `tag:` searches this site). The
+backup coverage, storage, Ceph and update overviews and the inventory export cover this
+site's clusters.
 
 **Consoles.** VM consoles, node shells and VM terminals of another site open here as well.
 This instance asks the leading site for a one-time console token as you, then opens that
@@ -263,15 +319,24 @@ is off there, an admin there has not mapped your tenant and role yet, your accou
 arrived there yet, it is disabled there, the site asks for a second factor you have not set
 up at your home, or the clocks of the two sites are more than two minutes apart.
 
+**Live updates.** A cluster of another site you have open or expanded streams its updates
+(tasks, metrics, guests, node states) live, as one of this site's does: that site registers
+the stream like a browser of its own, for your account there, so its filters per guest and
+node apply and it checks the account every half minute. Every frame is signed and numbered;
+a frame that is not as signed or out of order closes the stream, which opens again after a
+pause. In between, and for a site that does not stream, the views poll.
+
 **Limits.** Each instance relays at most half of its request pool at once, an eighth (at
-least four) per site, and the leading site takes at most 3000 relayed calls a minute from
-one member; over that a call is answered `429 FED_RELAY_BUSY`. A request body is at most
-10 MB, an answer at most 16 MB. A write that gets no answer is never sent again: the UI says
+least four) per site, of which one account holds half at most, and the leading site takes at
+most 3000 relayed calls a minute from one member. A call that finds its site's slots taken
+waits up to eight seconds for one, as the reads of a view come in a burst; then it is
+answered `429 FED_RELAY_BUSY`. A request body is at most
+10 MB (an upload up to the upload limit of the instance, 100 GB by default), an answer at
+most 16 MB. A write that gets no answer is never sent again: the UI says
 it may have happened at that site, check its tasks there. A write that could not be sent at
 all (no connection to the site) is answered `503 FED_SITE_UNREACHABLE` and did not happen. A
 site that does not answer three times within 30 seconds is not called for 15 seconds; its
-section in the sidebar says so until it answers again. Live updates of another site's
-cluster come by polling, not by the live stream.
+section in the sidebar says so until it answers again.
 
 ## Disaster recovery
 
@@ -626,8 +691,9 @@ need the password, as listed above, refuse API tokens. All of them are in `docs/
 | `GET /api/federation/status` | the switch (`enabled`, `forced`, `can_disable`, `disable_blockers`), and while on this instance and its members |
 | `POST /api/federation/switch` | `{"enabled": true}` or `false` |
 | `POST /api/federation/dr` | disaster recovery on or off (`{"enabled": true}`), its state in the status as `dr` |
-| `GET /api/federation/linked` | the other sites with the clusters the caller may see there, and the caller's permissions there; any signed-in account, no API token |
+| `GET /api/federation/linked` | the other sites with the clusters the caller may see there, and the caller's permissions there; any signed-in account, an API token with a built-in role |
 | `/api/clusters/<id>~<site>/...` | any cluster route that crosses, for a cluster of another site: `<id>` its id there, `<site>` that site's instance id |
+| `POST /api/federation/migrate` | move a guest to or from another site's cluster, body as `POST /api/cross-cluster-migrate` takes it |
 | `POST /api/federation/pairing-code` | a one-time code for the next site |
 | `POST /api/federation/join` | join with a code |
 | `POST /api/federation/members/<id>/remove` | remove a member (`{"confirm": "REMOVE"}`; with two sites and the other one gone for good, `"gone": true`) |
@@ -653,8 +719,15 @@ control call never passes as a relayed one, nor the other way round.
 | `FED_DR_OFF`, `FED_DR_OFF_AT`, `FED_DR_IN_USE` | disaster recovery is off here, off at another site, or still holds clusters and cannot switch off |
 | `FED_RELAY_RULE` | this step of another site's cluster is done at that site; the answer names it |
 | `FED_RELAY_UNMAPPED`, `FED_RELAY_SYNCING`, `FED_RELAY_DISABLED`, `FED_RELAY_MFA` | the site that leads the cluster has not mapped your account yet, has not received it yet, has it disabled, or asks for a second factor you set up at your home |
-| `FED_RELAY_WRONG_HOME`, `FED_HOME_ELSEWHERE` | an account works on other sites' clusters from its home site only |
-| `FED_RELAY_TOKEN` | API tokens are not relayed; use the token at the site that leads the cluster |
+| `FED_RELAY_WRONG_HOME`, `FED_HOME_ELSEWHERE` | an account of another site works on other sites' clusters only when it signed in here through its home; sign in again, or work from the home |
+| `FED_ASSERT_EXPIRED` | the sign-in through the home ran out (twelve hours, or the home did not renew it); sign in again |
+| `FED_SIGN_IN_LOCKED` | too many refused sign-ins of this account from this site at its home; wait a quarter of an hour |
+| `FED_SIGN_IN_HERE` | the account signs in at its home only (a directory account, a security key, or a second factor still to set up there) |
+| `FED_RELAY_TOKEN` | an API token with a custom role works at its own site only |
+| `FED_RELAY_NO_SPACE`, `FED_RELAY_LENGTH` | an upload to another site's datastore: not enough free disk at one of the two sites, or a body without its length |
+| `FED_STREAM_SCOPE` | none of the clusters a live stream asked for streams to the account at that site |
+| `FED_MIGRATE` | a migration between two sites was refused; the answer says by which site and why |
+| `FED_MIGRATE_VMID` | the VMID the guest would get is taken on the target cluster; choose another one |
 | `FED_RELAY_BUSY` | too many calls to or from that site at once; try again in a moment |
 | `FED_SITE_UNREACHABLE` | the site that leads the cluster cannot be reached or does not answer; nothing was sent to it when the error says so |
 | `FED_RELAY_NO_ANSWER` | a write went out and no answer came back; it may have happened there, check its tasks |
@@ -679,7 +752,7 @@ control call never passes as a relayed one, nor the other way round.
 | `FED_NO_LEASE` | this instance holds no live lease on the cluster; another site may lead it, or the lease ran out in a split |
 | `FED_LEAVE_BLOCKED` | an enrolled cluster has no live lease; leave with force, then unenroll it with force |
 | `FED_FOREIGN` | the account or cluster belongs to another site; change it there |
-| `FED_2FA_HOME` | a mirrored account with TOTP and no passkey signs in at its home |
+| `FED_2FA_HOME` | a mirrored account with TOTP and no passkey, while its home does not answer: sign in at the home, or try again when it answers |
 | `FED_PASSWORD_HOME` | the home of a mirrored account asks for a new password; set it there |
 | `FED_ENROLLED` | this instance left (or was removed from) a federation with clusters still enrolled; unenroll them with force before it pairs again |
 | `FED_STANDBY` | a standby of an HA group; use its active |

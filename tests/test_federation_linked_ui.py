@@ -134,14 +134,15 @@ def _read(*parts):
 
 def test_pickers_keep_this_sites_clusters():
     """Remote rows live in their own list: the pickers that write this site's data (groups,
-    permissions, blueprints, migrations) keep listing `clusters`, and only the lookups by id
-    that open a view ask allClusters."""
+    permissions, blueprints) keep listing `clusters`, and only the lookups by id that open a
+    view ask allClusters."""
     dash = _read('web', 'src', 'dashboard.js')
     main = dash[dash.index('function PegaProxDashboard('):dash.index('function Force2FASetupModal(')]
     assert 'const allClusters = useMemo(' in main
     import re
     assert not re.search(r'(?<![A-Za-z_])clusters\.find\(', main)
-    assert '<CrossClusterMigrateModal vm={dashCrossClusterVm} sourceCluster={selectedCluster} clusters={clusters}' in main
+    # the migration dialog lists the other sites' clusters as targets (/api/federation/migrate)
+    assert '<CrossClusterMigrateModal vm={dashCrossClusterVm} sourceCluster={selectedCluster} clusters={allClusters}' in main
 
 
 def test_a_remote_console_goes_through_this_instance():
@@ -167,5 +168,110 @@ def test_the_dialogs_and_the_pop_out_know_remote_clusters():
 
 def test_the_bundle_was_rebuilt():
     bundle = _read('web', 'index.html')
-    for needle in ('function RemoteClusterItem(', '/federation/linked', 'fedConsoleUrl', 'data-fed-dr'):
+    for needle in ('function RemoteClusterItem(', '/federation/linked', 'fedConsoleUrl', 'data-fed-dr',
+                   'function SiteAuthProvider(', 'data-all-guests-remote', 'federation/migrate'):
         assert needle in bundle, needle
+
+
+# --- what the other site lets the account do, and the way there ------------------------------------
+
+def _resources_of(page, row):
+    row.click()
+    page.wait_for_timeout(800)
+    page.locator('button', has_text='Resources').first.click()
+    page.wait_for_timeout(1200)
+
+
+@pytest.mark.parametrize('admin_there', [False, True])
+def test_runtime_a_remote_cluster_answers_with_that_sites_permissions(open_app, admin_there):
+    """An admin here who holds vm.view and vm.start at the other site gets no deploy button
+    in that site's cluster, and does in this site's; an admin there gets it there too."""
+    app = _open(open_app, 'modern', sites=[dict(SITE, admin=admin_there)])
+    page = app.page
+    page.locator(f'[data-fed-cluster="{RID}"]').wait_for(timeout=8000)
+    _resources_of(page, page.get_by_text('Testi').first)
+    assert page.locator('[data-bp-nav="resources"]').count() == 1
+    _resources_of(page, page.locator(f'[data-fed-cluster="{RID}"]'))
+    assert page.locator(f'[data-fed-view="{IID}"]').is_visible()
+    assert page.locator('[data-bp-nav="resources"]').count() == (1 if admin_there else 0)
+    assert not app.errors, app.errors
+
+
+def test_runtime_the_view_of_a_remote_cluster_leads_to_its_site(open_app):
+    app = _open(open_app, 'modern')
+    page = app.page
+    row = page.locator(f'[data-fed-cluster="{RID}"]')
+    row.wait_for(timeout=8000)
+    # the row and the view both link to the cluster at its site, never to a plain address
+    assert row.locator('[data-fed-open]').get_attribute('href') == 'https://b.example:5000/?cluster=pve-b'
+    row.click()
+    bar = page.locator(f'[data-fed-view="{IID}"]')
+    bar.wait_for(timeout=8000)
+    assert 'hamburg' in bar.inner_text()
+    assert bar.locator('a').get_attribute('href') == 'https://b.example:5000/?cluster=pve-b'
+    # site recovery and the cluster's settings are that site's
+    tabs = page.evaluate('''() => Array.from(document.querySelectorAll('button'))
+        .map(b => b.textContent.trim())''')
+    assert 'Site Recovery' not in tabs, tabs
+    assert not app.errors, app.errors
+
+
+def test_runtime_a_remote_row_has_its_own_menu(open_app):
+    app = _open(open_app, 'corporate-redesigned')
+    page = app.page
+    row = page.locator(f'[data-fed-cluster="{RID}"]')
+    row.wait_for(timeout=8000)
+    row.click(button='right')
+    page.get_by_text('Open at hamburg').first.wait_for(timeout=5000)
+    body = page.inner_text('body')
+    # renamed, re-configured and removed at its site; no guest to create without vm.create there
+    assert 'Rename' not in body and 'Remove Cluster' not in body and 'New VM' not in body
+    assert not app.errors, app.errors
+
+
+def test_runtime_the_guest_list_has_the_other_sites_guests(open_app):
+    app = _open(open_app, 'modern')
+    page = app.page
+    page.locator(f'[data-fed-cluster="{RID}"]').wait_for(timeout=8000)
+    page.locator('[data-sidebar-guests]').first.click()
+    section = page.locator('[data-all-guests-remote]')
+    section.wait_for(timeout=10000)
+    text = section.inner_text()
+    assert 'web01' in text and 'hamburg' in text and 'Prod Hamburg' in text
+    assert any(f'/api/clusters/{RID}/resources' in u for u in app.server.urls)
+    assert not app.errors, app.errors
+
+
+def test_runtime_only_remote_clusters_still_offer_the_global_views(open_app):
+    """A site without clusters of its own shows the other sites' clusters and the global
+    entries, not the card for an instance without any cluster."""
+    extra = _linked([SITE])
+    app = open_app(role='standalone', layout='modern', clusters=[], resources=[VM], extra=extra)
+    page = app.page
+    page.locator(f'[data-fed-cluster="{RID}"]').wait_for(timeout=8000)
+    assert page.locator('[data-sidebar-guests]').count() == 1
+    assert not app.errors, app.errors
+
+
+def test_the_cluster_view_asks_the_site_that_leads_it():
+    dash = _read('web', 'src', 'dashboard.js')
+    ctx = _read('web', 'src', 'contexts.js')
+    assert 'function SiteAuthProvider({ fed, children })' in ctx
+    view = dash[dash.index('<SiteAuthProvider fed={selectedCluster.fed}>'):dash.index('</SiteAuthProvider>')]
+    assert 'canSnapshot={siteCan(' in view and "siteCan('vm.create')" in view
+    # the standby rule holds for a remote cluster as well
+    helper = dash[dash.index('const siteCan = '):]
+    helper = helper[:helper.index('};')]
+    assert '(!haReadOnly || haReadPermission(permission))' in helper
+    # a menu entry of another site's cluster, node, pool or guest asks that site's permissions
+    menu = dash[dash.index('const buildContextMenuItems = (type, target) => {'):]
+    assert '.filter(siteAllows).filter(menuAllows);' in menu[:menu.index('return out;')]
+
+
+def test_a_migration_to_another_site_goes_through_the_federation():
+    dash = _read('web', 'src', 'dashboard.js')
+    modals = _read('web', 'src', 'vm_modals.js')
+    assert "`${API_URL}/${crossSite ? 'federation/migrate' : 'cross-cluster-migrate'}`" in dash
+    # a remote target is a connected Proxmox VE cluster; the preflight is for one site's two
+    assert "&& (!c.fed || (c.connected && (c.cluster_type || 'proxmox') === 'proxmox'))" in modals
+    assert 'if (!targetCluster || !targetNode || check.busy || crossSite) return;' in modals
