@@ -2,6 +2,17 @@
         // PegaProx - Node Modals
         // NodeShell terminal, NodeModal, ConsoleModal
         // ═══════════════════════════════════════════════
+
+        // LW Nov 2026 - linked mode: the console of another site's guest or node opens on this
+        // instance's main port, which tunnels it to that site (api/federation_relay.py). null for a
+        // cluster of this site, whose consoles keep their own servers
+        function fedConsoleUrl(clusterId, params) {
+            if (!String(clusterId || '').includes('~')) return null;
+            const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const q = new URLSearchParams({ cluster: clusterId, ...params }).toString();
+            return `${proto}//${window.location.host}/api/federation/console?${q}`;
+        }
+
         function getNodeProxmoxUrl(nodeIp = '', nodeName = '') {
             if (!nodeIp || !nodeName) return null;
             return `https://${nodeIp.trim()}:8006/#v1:0:=${encodeURIComponent(`node/${nodeName}`)}:4:=aptrepositories:=contentIso:::9::`;
@@ -277,7 +288,8 @@
 
                         setSshPort(sshPortNum);
                         // no ?ip= any more: the server resolves the node and would not take one (#1143)
-                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${sshPortNum}/api/clusters/${clusterId}/nodes/${node}/shellws?token=${encodeURIComponent(wsToken)}`;
+                        const wsUrl = fedConsoleUrl(clusterId, { token: wsToken, kind: 'shell', node })
+                            || `${wsProtocol}//${window.location.hostname}:${sshPortNum}/api/clusters/${clusterId}/nodes/${node}/shellws?token=${encodeURIComponent(wsToken)}`;
                         
                         term.write(`${t('connectingWs')} (Port ${sshPortNum})...\r\n`);
                         // NS: Mar 2026 - don't log wsUrl, contains session token
@@ -831,7 +843,9 @@
                             host: termInfo.host,
                             user: termInfo.user || '',
                         }).toString();
-                        const wsUrl = `${wsProto}//${window.location.hostname}:${sshPort}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/termwebsocket?${params}`;
+                        const wsUrl = fedConsoleUrl(clusterId, { token: wsToken, kind: 'term', node: vm.node, type: vm.type, vmid: String(vm.vmid),
+                                                                 ticket: termInfo.ticket, port: String(termInfo.port), host: termInfo.host, user: termInfo.user || '' })
+                            || `${wsProto}//${window.location.hostname}:${sshPort}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/termwebsocket?${params}`;
 
                         ws = new WebSocket(wsUrl);
                         wsRef.current = ws;
@@ -6159,7 +6173,9 @@
                             (ticketData.ticket && ticketData.port)
                                 ? `&pve_ticket=${encodeURIComponent(ticketData.ticket)}&pve_port=${encodeURIComponent(ticketData.port)}`
                                 : '';
-                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${vncPortNum}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vncwebsocket?token=${encodeURIComponent(vncWsToken)}${stableQS}${pvePassthroughQS}`;
+                        const wsUrl = fedConsoleUrl(clusterId, { token: vncWsToken, kind: 'vnc', node: vm.node, type: vm.type, vmid: String(vm.vmid),
+                                                                 ...(ticketData.ticket && ticketData.port ? { pve_ticket: ticketData.ticket, pve_port: String(ticketData.port) } : {}) })
+                            || `${wsProtocol}//${window.location.hostname}:${vncPortNum}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vncwebsocket?token=${encodeURIComponent(vncWsToken)}${stableQS}${pvePassthroughQS}`;
                         
                         // LW: Mar 2026 - removed wsUrl log (session leak)
                         

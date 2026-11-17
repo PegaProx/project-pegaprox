@@ -1428,7 +1428,7 @@
             const fetchHardwareOptions = async () => {
                 try {
                     // LW Nov 2026 - from this VM's cluster, not from the first one registered
-                    const response = await authFetch(`${API_URL}/hardware-options?cluster_id=${encodeURIComponent(clusterId)}`);
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/hardware-options`);
                     if (response && response.ok) {
                         setHardwareOptions(await response.json());
                     }

@@ -575,7 +575,8 @@
                                 <select className="cloud-cluster-select" value={selId != null ? String(selId) : ''} onChange={onChange}>
                                     {safe.map(c => {
                                         const cid = c && (c.id != null ? c.id : c.name);
-                                        return <option key={String(cid)} value={String(cid)}>{(c && (c.display_name || c.name)) || 'cluster'}</option>;
+                                        // LW Nov 2026 - another site's cluster (linked mode) says where it is led
+                                        return <option key={String(cid)} value={String(cid)}>{((c && (c.display_name || c.name)) || 'cluster') + (c && c.fed ? ` (${c.fed.site})` : '')}</option>;
                                     })}
                                 </select>
                             </div>
@@ -1166,7 +1167,10 @@
                                             <span className="cloud-cluster-name"><Icons.Cloud /> {(c && (c.display_name || c.name)) || 'cluster'}</span>
                                             <CloudConnChip connected={!!(c && c.connected)} t={t} />
                                         </div>
+                                        {!(c && c.fed) && (
                                         <div className="cloud-cluster-host">{(c && c.host) || '—'}</div>
+                                        )}
+                                        {c && c.fed && <div className="cloud-cluster-host">{c.fed.site}</div>}
                                         <div className="cloud-cluster-badges">
                                             <span className="cloud-chip cloud-chip-soft">{cloudClusterTypeLabel(c && c.cluster_type)}</span>
                                             {dc?.cluster?.quorate === true && <span className="cloud-chip cloud-chip-soft">Quorate</span>}

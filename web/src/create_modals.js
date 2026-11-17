@@ -55,7 +55,7 @@
                 if (!isQemu || isXcpng) return;
                 let gone = false;
                 (async () => {
-                    const r = await authFetch(`${API_URL}/hardware-options?cluster_id=${encodeURIComponent(clusterId)}`);
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/hardware-options`);
                     if (!r || !r.ok) return;
                     try {
                         const d = await r.json();

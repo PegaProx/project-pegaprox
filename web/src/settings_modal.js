@@ -10423,6 +10423,7 @@
             const [askOn, setAskOn] = useState(false);               // the confirm step before switching on
             const [askOff, setAskOff] = useState(false);             // switching off once more after a removal as gone
             const [switchError, setSwitchError] = useState('');      // why the server refused the switch
+            const [drError, setDrError] = useState('');
             const [rotate, setRotate] = useState(null);              // {kind, site, clusters} after a remove or leave
             const [filter, setFilter] = useState('');
             const [idMap, setIdMap] = useState(null);                // the identity-map answer, null until read
@@ -10465,6 +10466,7 @@
                 const r = await fedSend('GET', 'leases', null, t('fedLoadFailed'));
                 if (seq !== reads.current.leases) return;
                 if (r.ok) { setLeases(r.data); setLeasesError(''); }
+                else if (r.code === 'FED_DR_OFF') { setLeases(null); setLeasesError(''); }
                 else if (r.code !== 'AUTH') { setLeases(null); setLeasesError(r.error); }
             }
             async function refreshFedClusters() {
@@ -10534,6 +10536,10 @@
             }, [status]);
 
             const on = !!status && status.enabled === true;
+            // LW Nov 2026 - disaster recovery is a switch of its own, off by default: enrolled
+            // clusters, leases, adoption and takeover show only while it is on
+            const dr = (status && status.dr) || null;
+            const drOn = on && !!dr && dr.enabled === true;
             const forced = !!status && status.forced === true;
             // a mirrored admin may look, but only this instance's own accounts change it
             const localOk = !status || status.local_account !== false;
@@ -10768,6 +10774,7 @@
                                 </span>
                             </label>
                             <p className="text-sm text-gray-400 mt-1">{t('fedSwitchDesc')}</p>
+                            <p className="text-sm text-gray-400 mt-1" data-fed-linked-desc>{t('fedLinkedDesc')}</p>
                         </div>
                         <button id="fed-switch" type="button" role="switch" aria-checked={on}
                             onClick={() => { setSwitchError(''); if (on && untoldWarn) setAskOff(true); else if (on) flip(false); else setAskOn(true); }}
@@ -10811,6 +10818,44 @@
                             </div>
                         </div>
                     )}
+                </div>
+            );
+
+            // ---- disaster recovery: its own switch, refused off while a cluster is enrolled
+            async function flipDr(value) {
+                setBusy('dr'); setDrError('');
+                const r = await fedSend('POST', 'dr', { enabled: value }, t('fedActionFailed'));
+                setBusy('');
+                if (r.ok) {
+                    addToast(value ? t('fedDrSwitchedOn') : t('fedDrSwitchedOff'), 'success');
+                    setStatus(s => ({ ...(s || {}), dr: r.data }));
+                    if (value) refreshLeases();
+                    return;
+                }
+                if (r.code !== 'AUTH') { setDrError(r.error); addToast(r.error, 'error'); }
+            }
+            const drBlocked = drOn && Array.isArray(dr.disable_blockers) && dr.disable_blockers.length > 0;
+            const drCard = on && dr && (
+                <div className={HA_GROUP_CARD} data-fed-dr={drOn ? 'on' : 'off'}>
+                    <div className="flex items-start justify-between gap-3">
+                        <div>
+                            <h4 className="font-medium text-white flex items-center gap-2">
+                                <Icons.Shield className="w-4 h-4 text-proxmox-orange" />{t('fedDrTitle')}
+                                <span className={`text-[11px] px-1.5 py-0.5 rounded border ${drOn ? 'text-green-400 border-green-500/50' : 'text-gray-400 border-proxmox-border'}`} data-fed-dr-state>
+                                    {drOn ? t('fedSwitchStateOn') : t('fedSwitchStateOff')}
+                                </span>
+                            </h4>
+                            <p className="text-sm text-gray-400 mt-1">{t('fedDrDesc')}</p>
+                        </div>
+                        <button className={`${HA_GROUP_BTN} ${drOn ? 'bg-proxmox-dark border border-proxmox-border text-gray-300 hover:text-white' : 'bg-proxmox-orange hover:bg-proxmox-orange/90 text-white'}`} data-fed-dr-flip
+                            disabled={!!busy || !localOk || dr.forced || (drOn && dr.can_disable !== true)} onClick={() => flipDr(!drOn)}>
+                            <Icons.Power className="w-3.5 h-3.5" />{busy === 'dr' ? t('fedWorking') : (drOn ? t('fedDrOff') : t('fedDrOn'))}
+                        </button>
+                    </div>
+                    {!drOn && <p className="text-xs text-yellow-300 flex items-start gap-2"><Icons.AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" /><span>{t('fedDrNote')}</span></p>}
+                    {dr.forced && <p className="text-xs text-gray-400" data-fed-dr-forced>{fedFill(t('fedDrForced'), { value: drOn ? '1' : '0' })}</p>}
+                    {drBlocked && <p className="text-xs text-gray-400" data-fed-dr-blocked>{t('fedDrBlocked')}</p>}
+                    {drError && <p className="text-sm text-red-300" role="alert" data-fed-dr-error>{drError}</p>}
                 </div>
             );
 
@@ -11104,6 +11149,7 @@
                     {box}
                     {loadError && <div className="text-sm text-red-400">{loadError}</div>}
                     {switchCard}
+                    {drCard}
 
                     {rotate && (
                         <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl p-3 flex items-start gap-2" data-fed-rotate={rotate.kind}>
@@ -11172,7 +11218,7 @@
                         </div>
                     )}
 
-                    {on && !joined && (own.length > 0 || !!leasesError) && ownCard}
+                    {drOn && !joined && (own.length > 0 || !!leasesError) && ownCard}
 
                     {on && joined && (
                         <>
@@ -11199,11 +11245,11 @@
                                         <Icons.RefreshCw className="w-3.5 h-3.5" />{t('fedSyncNow')}
                                     </button>
                                 </div>
-                                {holdLeft > 0 && <p className="text-xs text-yellow-300" data-fed-hold>{fedFill(t('fedHold'), { seconds: holdLeft })}</p>}
+                                {drOn && holdLeft > 0 && <p className="text-xs text-yellow-300" data-fed-hold>{fedFill(t('fedHold'), { seconds: holdLeft })}</p>}
                             </div>
 
                             {/* two sites: what a federation of two does, and the risk of a takeover by hand */}
-                            {twoSites && (
+                            {drOn && twoSites && (
                                 <div className={HA_GROUP_CARD} data-fed-two-sites>
                                     <h4 className="font-medium text-white flex items-center gap-2"><Icons.AlertTriangle className="w-4 h-4 text-yellow-400" />{t('fedTwoTitle')}</h4>
                                     <p className="text-sm text-gray-400">{t('fedTwoDesc')}</p>
@@ -11252,7 +11298,7 @@
                                                     </td>
                                                     <td className="py-2 text-right">
                                                         <div className="flex gap-3 justify-end">
-                                                            {twoSites && silent(m) && m.mirrored_clusters > 0 && (
+                                                            {drOn && twoSites && silent(m) && m.mirrored_clusters > 0 && (
                                                                 <button className="text-xs text-proxmox-orange hover:text-orange-300 disabled:opacity-50 whitespace-nowrap" data-fed-takeover-all={m.instance_id.slice(0, 8)}
                                                                     disabled={!!busy || !localOk} onClick={() => askTakeover('takeoverAll', m.instance_id, m.site || m.instance_id.slice(0, 8), m.instance_id)}>
                                                                     {fedFill(t('fedTakeoverAll'), { count: m.mirrored_clusters })}</button>
@@ -11283,7 +11329,7 @@
                             {/* the next site joins with a code from here, while one more fits */}
                             {canPairMore && pairingCard}
 
-                            {ownCard}
+                            {drOn && ownCard}
 
                             {/* the linked view: every cluster of every site, asked live */}
                             <div className={HA_GROUP_CARD} data-fed-clusters>
@@ -11355,7 +11401,7 @@
                             </div>
 
                             {/* mirrors of the clusters other members lead */}
-                            {shadows.length > 0 && (
+                            {drOn && shadows.length > 0 && (
                                 <div className={HA_GROUP_CARD} data-fed-shadows>
                                     <h4 className="font-medium text-white flex items-center gap-2"><Icons.Database className="w-4 h-4 text-proxmox-orange" />{t('fedShadowsTitle')}</h4>
                                     <p className="text-sm text-gray-400">{t('fedShadowsDesc')}</p>
@@ -11395,7 +11441,7 @@
                             )}
 
                             {/* local clusters without the federation's rule: every one of them */}
-                            {unenrolled.length > 0 && (
+                            {drOn && unenrolled.length > 0 && (
                                 <div className={HA_GROUP_CARD} data-fed-unenrolled={unenrolled.length}>
                                     <h4 className="font-medium text-white flex items-center gap-2"><Icons.Server className="w-4 h-4 text-proxmox-orange" />{t('fedUnenrolledTitle')} <span className="text-xs text-gray-500">({unenrolled.length})</span></h4>
                                     <p className="text-sm text-gray-400">{t('fedUnenrolledDesc')}</p>
