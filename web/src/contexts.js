@@ -925,6 +925,21 @@
             return useContext(AuthContext);
         }
 
+        // LW Nov 2026 - linked mode: inside the view of another site's cluster, the permissions that
+        // site gives the account there (fed of a remote row, from /api/federation/linked) answer the
+        // checks of every component below, its admin flag included. Outside it nothing changes
+        function SiteAuthProvider({ fed, children }) {
+            const auth = useAuth();
+            const value = useMemo(() => {
+                if (!fed || !auth) return auth;
+                const admin = !!fed.admin;
+                const role = admin ? 'admin' : (auth.user?.role === 'admin' ? 'user' : auth.user?.role);
+                return { ...auth, isAdmin: admin,
+                    user: auth.user ? { ...auth.user, role, permissions: fed.perms || [] } : auth.user };
+            }, [auth, fed]);
+            return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+        }
+
         // LW: Feb 2026 - layout hook (reads from user preferences)
         // returns layout type and convenience boolean for corporate mode
         function useLayout() {

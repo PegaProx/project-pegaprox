@@ -1624,12 +1624,21 @@
         // LW Nov 2026 - linked mode: a cluster another site of the federation leads. It opens like
         // one of this site's and every call goes to that site; renaming, grouping, re-configuring
         // and deleting it happen there, so none of that is offered here
-        function RemoteClusterItem({ cluster, selected, expanded, onSelect, onToggle, isCorporate, t }) {
+        function RemoteClusterItem({ cluster, selected, expanded, onSelect, onToggle, onContextMenu, isCorporate, t }) {
             const name = cluster.display_name || cluster.name;
             const badge = <span className="text-[10px] px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 flex-shrink-0" title={cluster.fed.url}>{cluster.fed.site}</span>;
+            const there = fedSiteHref(cluster.fed.url, cluster.id);
+            const openThere = there && (
+                <a href={there} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} data-fed-open
+                    title={String(t('linkedOpenAtSite')).replace('{site}', cluster.fed.site)} aria-label={String(t('linkedOpenAtSite')).replace('{site}', cluster.fed.site)}
+                    className="flex-shrink-0 p-0.5 rounded text-gray-500 hover:text-blue-400">
+                    <Icons.ExternalLink className="w-3 h-3" />
+                </a>
+            );
             if (isCorporate) {
                 return (
                     <div onClick={onSelect} tabIndex={0} data-fed-cluster={cluster.id}
+                        onContextMenu={onContextMenu ? (e) => { e.preventDefault(); onContextMenu({ x: e.clientX, y: e.clientY }); } : undefined}
                         onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelect(); } }}
                         className="corp-tree-item cursor-pointer flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5"
                         style={selected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: 'var(--corp-text-secondary)'}}>
@@ -1640,6 +1649,7 @@
                         <Icons.Database className="w-4 h-4 flex-shrink-0" style={{color: cluster.connected ? 'var(--corp-accent)' : 'var(--color-error)'}} />
                         <span className="truncate flex-1 font-medium">{name}</span>
                         {badge}
+                        {openThere}
                     </div>
                 );
             }
@@ -1655,6 +1665,7 @@
                         <div className={`w-2 h-2 rounded-full flex-shrink-0 ${cluster.connected ? 'bg-green-500 status-online' : 'bg-red-500'}`} />
                         <h3 className="font-medium text-sm truncate flex-1">{name}</h3>
                         {badge}
+                        {openThere}
                     </div>
                     {!cluster.connected && (
                         <div className="flex gap-1 mt-2"><span className="text-[10px] bg-red-500/10 text-red-400 px-1.5 py-0.5 rounded">{t('offline')}</span></div>
@@ -1673,6 +1684,21 @@
         };
         function fedSiteStateText(site, t) {
             return String(t(LINKED_STATE_TEXT[site.state] || 'linkedState_refused')).replace('{site}', site.site);
+        }
+
+        // LW Nov 2026 - the address of another site, with the cluster to open there (?cluster=,
+        // which PegaProxDashboard reads on load). https only, as the HA links (haActiveHref)
+        function fedSiteHref(url, clusterId) {
+            try {
+                const u = new URL(url);
+                if (u.protocol !== 'https:') return null;
+                u.pathname = '/';
+                u.search = clusterId ? `?cluster=${encodeURIComponent(String(clusterId).split('~')[0])}` : '';
+                u.hash = '';
+                return u.toString();
+            } catch (e) {
+                return null;
+            }
         }
 
         function CorpSidebarToolRow({ id, active, icon, label, onClick }) {
@@ -14537,6 +14563,13 @@
             // what the account holds, the standby rule aside: only for a tab that just reads,
             // so a standby keeps showing it (#625); its buttons still ask can()
             const holds = (permission) => isAdmin || (Array.isArray(user?.permissions) && user.permissions.includes(permission));
+            // LW Nov 2026 - linked mode: what the site that leads the selected cluster lets the account
+            // do there (its row's fed), for the checks of the cluster view; can() for one of ours
+            const siteCan = (permission, cluster = selectedCluster) => {
+                const fed = cluster?.fed;
+                if (!fed) return can(permission);
+                return (!haReadOnly || haReadPermission(permission)) && (!!fed.admin || (fed.perms || []).includes(permission));
+            };
             // #625: the node HA parts of the HA settings write through routes that want
             // ha.config; with ha.view alone they show what is set and change nothing
             const haWrite = can('ha.config');
@@ -14553,10 +14586,13 @@
             const [remoteSites, setRemoteSites] = useState([]);
             const [remoteHome, setRemoteHome] = useState(null);
             const remoteClusters = useMemo(() => remoteSites.flatMap(s => s.state === 'ok'
-                ? (s.clusters || []).map(c => ({ ...c, display_name: c.name, fed: { iid: s.iid, site: s.site, url: s.url, perms: s.perms || [] } }))
+                ? (s.clusters || []).map(c => ({ ...c, display_name: c.name, fed: { iid: s.iid, site: s.site, url: s.url, perms: s.perms || [], admin: !!s.admin } }))
                 : []), [remoteSites]);
             const allClusters = useMemo(() => remoteClusters.length ? clusters.concat(remoteClusters) : clusters,
                 [clusters, remoteClusters]);
+            // the overview's round over every cluster runs in a timer: it reads the remote rows from here
+            const remoteClustersRef = useRef([]);
+            remoteClustersRef.current = remoteClusters;
             const [clusterGroups, setClusterGroups] = useState([]); // NS Jan 2026 - for grouping
             const [collapsedGroups, setCollapsedGroups] = useState({}); // Track which groups are collapsed
             const [showGroupManager, setShowGroupManager] = useState(false); // Group management modal
@@ -14574,6 +14610,8 @@
             const [allClusterMetrics, setAllClusterMetrics] = useState({}); // LW: metrics cache for overview page
             const [topGuests, setTopGuests] = useState([]); // top vms for overview table
             const [allClusterGuests, setAllClusterGuests] = useState({}); // NS: Mar 2026 - per-cluster guests for topology
+            const allClusterGuestsRef = useRef({});
+            allClusterGuestsRef.current = allClusterGuests;
             const [knownNodes, setKnownNodes] = useState({}); // NS: Track all nodes ever seen to show offline ones
             const [clusterResources, setClusterResources] = useState([]);
             const [clusterDatastores, setClusterDatastores] = useState({ shared: [], local: {} }); // LW: Mar 2026 - sidebar datastore list
@@ -15441,6 +15479,25 @@
                 // First update the ref synchronously
                 selectedClusterRef.current = selectedCluster;
             }, [selectedCluster]);
+
+            // LW Nov 2026 - linked mode: another site opens one of this site's clusters here with
+            // ?cluster=<id> (fedSiteHref). Taken once, when the clusters have loaded, and dropped
+            // from the address so a reload keeps whatever is open then
+            const wantedClusterRef = useRef((() => {
+                try { return new URLSearchParams(window.location.search).get('cluster'); } catch (e) { return null; }
+            })());
+            useEffect(() => {
+                const want = wantedClusterRef.current;
+                if (!want || !clusters.length) return;
+                wantedClusterRef.current = null;
+                const found = allClusters.find(c => c.id === want);
+                if (found) setSelectedCluster(found);
+                try {
+                    const u = new URL(window.location.href);
+                    u.searchParams.delete('cluster');
+                    window.history.replaceState(window.history.state, '', u.toString());
+                } catch (e) {}
+            }, [clusters, allClusters]);
             
             useEffect(() => { expandedSidebarClustersRef.current = expandedSidebarClusters; }, [expandedSidebarClusters]);
             useEffect(() => { sidebarClusterDataRef.current = sidebarClusterData; }, [sidebarClusterData]);
@@ -16436,7 +16493,9 @@
                     const response = await authFetch(`${API_URL}/global/search?q=${encodeURIComponent(query)}`);
                     if (response && response.ok) {
                         const data = await response.json();
-                        setGlobalSearchResults(data);
+                        const there = remoteSearchMatches(query);
+                        setGlobalSearchResults(there.length ? { ...data, results: (data.results || []).concat(there),
+                            count: (data.count || 0) + there.length } : data);
                         setGlobalSearchIndex(0);
                     } else if (response && response.status === 400) {
                         // LW Oct 2026 - a query the server cannot read: the dropdown says where
@@ -16452,6 +16511,26 @@
                 setGlobalSearchLoading(false);
             };
             
+            // LW Nov 2026 - linked mode: the server searches this site's clusters. The other sites'
+            // guests the overview reads (allClusterGuests) are matched here, by name or VMID; a
+            // query with a field (tag:, ip: ...) is this site's search syntax and stays there
+            const remoteSearchMatches = (query) => {
+                const q = String(query || '').trim().toLowerCase();
+                if (!q || q.includes(':')) return [];
+                const out = [];
+                for (const c of remoteClustersRef.current) {
+                    for (const r of (allClusterGuestsRef.current[c.id] || [])) {
+                        if (r.type !== 'qemu' && r.type !== 'lxc') continue;
+                        if (!String(r.name || '').toLowerCase().includes(q) && String(r.vmid) !== q) continue;
+                        out.push({ type: r.type === 'qemu' ? 'vm' : 'ct', cluster_id: c.id,
+                            cluster_name: `${c.display_name || c.name} (${c.fed.site})`, vmid: r.vmid, name: r.name,
+                            node: r.node, status: r.status, cpu: r.cpu, mem: r.mem, maxmem: r.maxmem, tags: r.tags || '' });
+                        if (out.length >= 25) return out;
+                    }
+                }
+                return out;
+            };
+
             // MK: debounce so we dont spam the API on every keystroke
             // claude helped rewrite the whole search dropdown, chatgpt did the keyboard nav
             const debouncedSearch = (query) => {
@@ -20098,6 +20177,17 @@
                 poll();
                 return () => { gone = true; if (timer) clearTimeout(timer); };
             }, [sessionId]);
+            // a selected cluster of another site follows its row (its permissions there may have
+            // changed), and new remote clusters get their overview read at once, not 30 s later
+            const remoteIdsKey = remoteClusters.map(c => c.id).join(',');
+            useEffect(() => {
+                const sel = selectedClusterRef.current;
+                if (sel?.fed) {
+                    const row = remoteClusters.find(c => c.id === sel.id);
+                    if (row && JSON.stringify(row) !== JSON.stringify(sel)) setSelectedCluster(row);
+                }
+            }, [remoteClusters]);
+            useEffect(() => { if (remoteIdsKey) fetchClusters(); }, [remoteIdsKey]);
 
             const fetchClusters = async () => {
                 try {
@@ -20114,7 +20204,9 @@
                         
                         // fetch status for all clusters (overview)
                         // LW Oct 2026 - an ESXi connection has no datacenter status to poll
-                        const connectedClusters = data.filter(c => c.connected && c.cluster_type !== 'esxi');
+                        // LW Nov 2026 - and the other sites' clusters, each read through its site
+                        const connectedClusters = data.filter(c => c.connected && c.cluster_type !== 'esxi')
+                            .concat(remoteClustersRef.current.filter(c => c.connected && c.cluster_type !== 'esxi'));
                         const allGuests = [];
                         
                         // NS #594 — this used to be a serial await-loop: one slow cluster
@@ -21164,9 +21256,13 @@
             };
 
             const handleCrossClusterMigrate = async (migrationConfig) => {
+                // LW Nov 2026 - a migration to or from another site's cluster goes through the
+                // federation, which has the target's site make its token
+                const crossSite = [migrationConfig.source_cluster, migrationConfig.target_cluster]
+                    .some(id => String(id || '').includes('~'));
                 try {
                     const response = await authFetch(
-                        `${API_URL}/cross-cluster-migrate`,
+                        `${API_URL}/${crossSite ? 'federation/migrate' : 'cross-cluster-migrate'}`,
                         {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
@@ -21347,6 +21443,28 @@
             // LW: Mar 2026 - build menu items for sidebar right-click
             // NS: kept this in dashboard so it has direct access to all the handlers
             const buildContextMenuItemsRaw = (type, target) => {
+                if (type === 'cluster' && target?.fed) {
+                    // LW Nov 2026 - linked mode: another site's cluster is renamed, grouped, checked,
+                    // re-configured and removed at its site; here it gets guests, a refresh and the way there
+                    const cluster = target;
+                    const createOn = (kind) => {
+                        if (selectedCluster?.id === cluster.id) { setShowCreateVm(kind); return; }
+                        setClusterMetrics({}); setClusterResources([]); setClusterDatastores({shared:[], local:{}});
+                        setSelectedCluster(cluster);
+                        setPendingCreateVm({ type: kind, clusterId: cluster.id });
+                    };
+                    const there = fedSiteHref(cluster.fed.url, cluster.id);
+                    return [
+                        { perm: 'vm.create', label: t('newVm') || 'New VM', icon: <Icons.Monitor className="w-3.5 h-3.5" />, onClick: () => createOn('qemu') },
+                        { perm: 'vm.create', label: t('newContainer') || 'New Container', icon: <Icons.Box className="w-3.5 h-3.5" />, onClick: () => createOn('lxc') },
+                        { separator: true },
+                        { label: t('refreshData') || 'Refresh', icon: <Icons.RefreshCw className="w-3.5 h-3.5" />, onClick: () => { fetchSidebarClusterData(cluster.id); if (selectedCluster?.id === cluster.id) { fetchClusterMetrics(cluster.id); fetchClusterResources(cluster.id); } } },
+                        ...(there ? [
+                            { separator: true },
+                            { perm: 'cluster.view', label: t('linkedOpenAtSite').replace('{site}', cluster.fed.site), icon: <Icons.ExternalLink className="w-3.5 h-3.5" />, onClick: () => window.open(there, '_blank', 'noopener,noreferrer'), here: true },
+                        ] : []),
+                    ];
+                }
                 if (type === 'cluster') {
                     const cluster = target;
                     return [
@@ -21517,7 +21635,7 @@
                     );
 
                     // cross-cluster only if multiple clusters
-                    if (clusters.length > 1) {
+                    if (allClusters.length > 1) {
                         items.push({ perm: 'vm.migrate', label: t('crossClusterMigrate') || 'Cross-Cluster', icon: <Icons.Globe className="w-3.5 h-3.5" />, onClick: () => {
                             if (isCorporate) { setDashCrossClusterVm(vm); }
                             else { selectAndNav(); setPendingVmAction({ vm, action: 'crossCluster' }); }
@@ -21608,13 +21726,21 @@
             // leader away too, while can() keeps only the reading permissions then.
             const menuAllows = (i) => !i.perm || (i.console ? holds(i.perm) : can(i.perm));
             const buildContextMenuItems = (type, target) => {
-                const kept = buildContextMenuItemsRaw(type, target).filter(menuAllows);
+                // LW Nov 2026 - linked mode: for another site's cluster, node, pool or guest an entry
+                // also asks what that site lets the account do there
+                const site = type === 'cluster' ? target?.fed
+                    : allClusters.find(c => c.id === (target?.clusterId || target?._clusterId))?.fed;
+                // an entry that only leads to the site (here) is this site's to allow
+                const siteAllows = (i) => !site || !i.perm || i.here || siteCan(i.perm, { fed: site });
+                const kept = buildContextMenuItemsRaw(type, target).filter(siteAllows).filter(menuAllows);
                 const out = [];
                 for (const item of kept) {
                     if (item.submenu) {
                         const sub = item.submenu.filter(menuAllows);
                         if (!sub.length) continue;          // no children left, drop the parent
-                        out.push({ ...item, submenu: sub });
+                        const here = sub.filter(siteAllows);
+                        if (!here.length) continue;
+                        out.push({ ...item, submenu: here });
                         continue;
                     }
                     // a dropped entry must not leave its separators stacked up or leading
@@ -21752,8 +21878,8 @@
                         {dashDeleteVm && (
                             <DeleteVmModal vm={dashDeleteVm} clusterId={dashDeleteVm._clusterId || selectedCluster?.id} onDelete={handleDeleteVm} onClose={() => setDashDeleteVm(null)} />
                         )}
-                        {dashCrossClusterVm && clusters.length > 1 && (
-                            <CrossClusterMigrateModal vm={dashCrossClusterVm} sourceCluster={selectedCluster} clusters={clusters} onMigrate={handleCrossClusterMigrate} onClose={() => setDashCrossClusterVm(null)} />
+                        {dashCrossClusterVm && allClusters.length > 1 && (
+                            <CrossClusterMigrateModal vm={dashCrossClusterVm} sourceCluster={selectedCluster} clusters={allClusters} onMigrate={handleCrossClusterMigrate} onClose={() => setDashCrossClusterVm(null)} />
                         )}
                         {dashSnapshotVm && (
                             <CreateSnapshotModal isQemu={dashSnapshotVm.type === 'qemu'} loading={dashSnapshotLoading} onSubmit={handleDashSnapshotSubmit} onClose={() => setDashSnapshotVm(null)} />
@@ -22365,6 +22491,10 @@
                     { id: 'settings', labelKey: 'settings', icon: Icons.Settings },
                 ];
             })().filter(tab => {
+                // LW Nov 2026 - linked mode: site recovery, plugins and the cluster's settings are
+                // this site's own; for another site's cluster they live at that site
+                if (selectedCluster?.fed && (['site-recovery', 'plugins', 'settings'].includes(tab.id)
+                    || (typeof tab.id === 'string' && tab.id.startsWith('plugin:')))) return false;
                 // #390 - admin role always passes (matches backend has_permission shortcut).
                 if (tab.id === 'site-recovery') return can('site_recovery.view');
                 if (tab.id === 'plugins') return can('plugins.view');
@@ -22629,7 +22759,7 @@
                                 {isCorpRedesigned && crSidebarFolded && (
                                     <CrSidebarRail active={sidebarViewMode} onView={setSidebarViewMode} onExpand={() => crFoldSidebar(false)}
                                         // LW Nov 2026 - the Tools section of the unfolded sidebar, same conditions
-                                        tools={clusters.length > 0 ? [
+                                        tools={allClusters.length > 0 ? [
                                             { id: 'guests', show: true, active: sidebarGuests, label: t('allGuestsTitle'), onClick: openGuests, icon: Icons.Monitor },
                                             { id: 'topology', show: true, active: sidebarTopology, label: t('topologyView') || 'Topology', onClick: openTopology, icon: Icons.Network },
                                             { id: 'worldmap', show: true, active: sidebarWorldmap, label: t('worldMap') || 'World Map', onClick: openWorldmap, icon: Icons.Globe },
@@ -22754,7 +22884,7 @@
                                         </div>
                                     </div>
                                     
-                                    {clusters.length === 0 ? (
+                                    {allClusters.length === 0 ? (
                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center">
                                             <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-proxmox-dark flex items-center justify-center">
                                                 <Icons.Server />
@@ -22813,7 +22943,7 @@
                                                     {isCorporate ? (t('allClusters') || 'All Clusters') : (
                                                         <div>
                                                             <div className="text-sm font-medium">{t('allClusters') || 'All Clusters'}</div>
-                                                            <div className="text-xs text-gray-500">{clusters.length} {t('clusters').toLowerCase()}</div>
+                                                            <div className="text-xs text-gray-500">{allClusters.length} {t('clusters').toLowerCase()}</div>
                                                         </div>
                                                     )}
                                                 </span>
@@ -23063,6 +23193,12 @@
                                                 <span className="flex" style={{zoom: 0.7}}><Icons.Globe /></span>
                                                 <span className="text-xs uppercase tracking-wider truncate flex-1">{site.site}</span>
                                                 {site.state === 'ok' && <span className="text-[10px]">{(site.clusters || []).length}</span>}
+                                                {fedSiteHref(site.url) && (
+                                                    <a href={fedSiteHref(site.url)} target="_blank" rel="noopener noreferrer" className="p-0.5 rounded hover:text-blue-400"
+                                                        title={String(t('linkedOpenAtSite')).replace('{site}', site.site)} aria-label={String(t('linkedOpenAtSite')).replace('{site}', site.site)}>
+                                                        <Icons.ExternalLink className="w-3 h-3" />
+                                                    </a>
+                                                )}
                                             </div>
                                             {site.state !== 'ok' && (
                                                 <div className="text-[11px] text-gray-500 px-2 pb-1" data-fed-site-state={site.state}>{fedSiteStateText(site, t)}</div>
@@ -23073,7 +23209,8 @@
                                                         selected={selectedCluster?.id === cluster.id}
                                                         expanded={!!expandedSidebarClusters[cluster.id]}
                                                         onSelect={() => setSelectedCluster(cluster)}
-                                                        onToggle={() => toggleSidebarCluster(cluster.id)} />
+                                                        onToggle={() => toggleSidebarCluster(cluster.id)}
+                                                        onContextMenu={(position) => setCtxMenu({ type: 'cluster', target: cluster, position })} />
                                                     {sidebarViewMode === 'datastores' ? renderDatastoreTree(cluster.id) : sidebarViewMode === 'pools' ? renderPoolTree(cluster.id) : sidebarViewMode === 'networks' ? renderNetworkTree(cluster.id) : renderInlineNodeTree(cluster.id)}
                                                 </React.Fragment>
                                             ))}
@@ -23084,7 +23221,7 @@
                                         hanging off All Clusters, under the clusters and above Backup Servers like the
                                         other sections. Same conditions as in Modern, so nothing here before the first
                                         cluster; the empty card has the auto-install link. */}
-                                    {isCorporate && clusters.length > 0 && (() => {
+                                    {isCorporate && allClusters.length > 0 && (() => {
                                         const tools = [
                                             { id: 'guests', show: true, active: sidebarGuests, label: t('allGuestsTitle'), onClick: openGuests,
                                               icon: <Icons.Monitor /> },
@@ -23446,7 +23583,21 @@
                             <div className={`flex-1 min-w-0 ${isCorporate ? 'px-3 py-2' : ''}${isCorpRedesigned ? ' cr-main' : ''}`}
                                 id={isCorpRedesigned ? 'cr-main' : undefined} tabIndex={isCorpRedesigned ? -1 : undefined}>
                                 {selectedCluster ? (
+                                    <SiteAuthProvider fed={selectedCluster.fed}>
                                     <div key={selectedCluster?.id} className={isCorporate ? 'space-y-3 corp-content-fade' : 'space-y-6'}>
+                                        {selectedCluster.fed && (
+                                            <div className="flex items-center gap-2 flex-wrap text-xs text-gray-400" data-fed-view={selectedCluster.fed.iid}>
+                                                <span className="flex" style={{zoom: 0.7}}><Icons.Globe /></span>
+                                                <span>{String(t('linkedClusterOfSite')).replace('{site}', selectedCluster.fed.site)}</span>
+                                                {fedSiteHref(selectedCluster.fed.url, selectedCluster.id) && (
+                                                    <a href={fedSiteHref(selectedCluster.fed.url, selectedCluster.id)} target="_blank" rel="noopener noreferrer"
+                                                        className="inline-flex items-center gap-1 text-blue-400 hover:underline">
+                                                        {String(t('linkedOpenAtSite')).replace('{site}', selectedCluster.fed.site)}
+                                                        <Icons.ExternalLink className="w-3 h-3" />
+                                                    </a>
+                                                )}
+                                            </div>
+                                        )}
                                         {/* LW: Feb 2026 - tabs, underline in corporate vs pills in modern */}
                                         {isCorpRedesigned ? (
                                             <CrTabs id="cluster" active={activeTab} onChange={setActiveTab} label={clusterLabel(selectedCluster)}
@@ -23762,7 +23913,7 @@
                                                                     onMoveNode={(nodeName) => { setNodeToMoveDash(nodeName); setShowMoveNodeDash(true); }}
                                                                     isFavorite={isFavorite('node', selectedCluster.id, null, node)}
                                                                     onToggleFavorite={(nodeName) => toggleNodeFavorite(selectedCluster.id, nodeName)}
-                                                                    guestActions={[['startall', 'vm.start'], ['stopall', 'vm.stop'], ['migrateall', 'vm.migrate']].filter(([, perm]) => can(perm)).map(([a]) => a)}
+                                                                    guestActions={[['startall', 'vm.start'], ['stopall', 'vm.stop'], ['migrateall', 'vm.migrate']].filter(([, perm]) => siteCan(perm)).map(([a]) => a)}
                                                                     onGuestsAction={(nodeName, action) => setNodeGuests({ action, clusterId: selectedCluster.id, node: nodeName })}
                                                                 />
                                                             ))}
@@ -24039,7 +24190,8 @@
                                                         onForceStop={handleForceStop}
                                                         onDelete={(vm) => setDashDeleteVm(vm)}
                                                         onCrossClusterMigrate={(vm) => setDashCrossClusterVm(vm)}
-                                                        showCrossCluster={clusters.length > 1}
+                                                        showCrossCluster={allClusters.length > 1}
+                                                        migrateTargets={allClusters}
                                                         actionLoading={actionLoading}
                                                         onShowMetrics={(vm) => setCorpMetricsVm(vm)}
                                                         addToast={addToast}
@@ -24186,7 +24338,7 @@
                                                                 {t('createContainer')}
                                                             </button>
                                                             {/* LW Nov 2026 (#1220) - Corporate Redesigned: a guest from a blueprint, picked on Automation > Blueprints & Images */}
-                                                            {isCorpRedesigned && can('vm.create') && (
+                                                            {isCorpRedesigned && siteCan('vm.create') && (
                                                                 <button type="button" onClick={() => crTaskNav.openBlueprints(selectedCluster.id)}
                                                                     className="corp-vm-btn corp-vm-btn-ghost" data-cr-bp-nav="resources">
                                                                     <Icons.Template className="w-3 h-3" />
@@ -24194,7 +24346,7 @@
                                                                 </button>
                                                             )}
                                                             {/* LW Nov 2026 (#1220) - Modern: the same way to Automation > Blueprints & Templates */}
-                                                            {!isCorporate && can('vm.create') && (!selectedCluster.cluster_type || selectedCluster.cluster_type === 'proxmox') && (
+                                                            {!isCorporate && siteCan('vm.create') && (!selectedCluster.cluster_type || selectedCluster.cluster_type === 'proxmox') && (
                                                                 <button type="button" onClick={() => mdBpNav.openBlueprints(selectedCluster.id)} data-bp-nav="resources"
                                                                     className="flex items-center gap-2 px-4 py-2 bg-proxmox-darker rounded-lg bp-fg hover:bg-proxmox-hover border border-proxmox-border transition-colors whitespace-nowrap">
                                                                     <Icons.Template className="w-4 h-4" />
@@ -25286,7 +25438,7 @@
                                                         addToast={addToast}
                                                         t={t}
                                                         isAdmin={isAdmin}
-                                                        canSnapshot={can('vm.snapshot')}
+                                                        canSnapshot={siteCan('vm.snapshot')}
                                                     />
                                                 )}
 
@@ -25305,13 +25457,13 @@
                                                 {automationSubTab === 'templates' && isCorpRedesigned && selectedCluster?.id && (
                                                     <CrBoundary key={selectedCluster.id} id="blueprints">
                                                         <CrBlueprintsTab cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
-                                                            canRead={holds('vm.create')} canWrite={can('vm.create')} isAdmin={isAdmin} nav={crTaskNav} />
+                                                            canRead={holds('vm.create')} canWrite={siteCan('vm.create')} isAdmin={isAdmin} nav={crTaskNav} />
                                                     </CrBoundary>
                                                 )}
                                                 {/* LW Nov 2026 (#1220) - Modern: the blueprints above the library cards (blueprints.js) */}
                                                 {automationSubTab === 'templates' && !isCorporate && selectedCluster?.id && (
                                                     <Blueprints key={selectedCluster.id} cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
-                                                        canRead={holds('vm.create')} canWrite={can('vm.create')} nav={mdBpNav} />
+                                                        canRead={holds('vm.create')} canWrite={siteCan('vm.create')} nav={mdBpNav} />
                                                 )}
                                                 {/* NS May 2026 — Cloud-Init Template Library sub-tab */}
                                                 {automationSubTab === 'templates' && !isCorpRedesigned && (
@@ -27548,6 +27700,7 @@
                                             </div>
                                         )}
                                     </div>
+                                    </SiteAuthProvider>
                                 ) : selectedPBS ? (
                                     /* LW: Feb 2026 - PBS view */
                                     <div className={isCorporate ? 'space-y-4' : 'space-y-6'}>
@@ -31198,7 +31351,7 @@
                                         <div className="p-2">
                                             <TopologyView
                                                 clusterName="PegaProx"
-                                                multiCluster={clusters.filter(c => c.connected).map(cluster => {
+                                                multiCluster={allClusters.filter(c => c.connected).map(cluster => {
                                                     const metrics = sidebarClusterData[cluster.id]?.metrics || {};
                                                     let nodes = Object.entries(metrics)
                                                         .filter(([k]) => k !== 'error' && k !== 'offline')
@@ -31306,7 +31459,7 @@
                                             </div>
                                         )}
                                         <WorldMapView
-                                            clusters={clusters}
+                                            clusters={allClusters}
                                             onSelectCluster={(c) => {
                                                 const full = allClusters.find(x => x.id === c.id);
                                                 if (full) { setSelectedCluster(full); setSidebarWorldmap(false); }
@@ -31678,6 +31831,8 @@
                                 ) : sidebarGuests ? (
                                     <AllGuestsView
                                         clusters={clusters}
+                                        remoteGuests={remoteClusters.map(c => ({ cluster: c,
+                                            guests: (allClusterGuests[c.id] || []).filter(r => r.type === 'qemu' || r.type === 'lxc') }))}
                                         authFetch={authFetch}
                                         addToast={addToast}
                                         onBulkMigrate={handleBulkMigrate}
@@ -31692,7 +31847,7 @@
                                     />
                                 ) : (
                                     <AllClustersOverview
-                                        clusters={clusters}
+                                        clusters={allClusters}
                                         allMetrics={allClusterMetrics}
                                         clusterGroups={clusterGroups}
                                         topGuests={topGuests}
@@ -32154,11 +32309,11 @@
                             onClose={() => setDashDeleteVm(null)}
                         />
                     )}
-                    {dashCrossClusterVm && clusters.length > 1 && (
+                    {dashCrossClusterVm && allClusters.length > 1 && (
                         <CrossClusterMigrateModal
                             vm={dashCrossClusterVm}
                             sourceCluster={selectedCluster}
-                            clusters={clusters}
+                            clusters={allClusters}
                             onMigrate={handleCrossClusterMigrate}
                             onClose={() => setDashCrossClusterVm(null)}
                         />
@@ -32786,7 +32941,7 @@
                             <div className="corp-status-bar-item">
                                 {selectedCluster
                                     ? <span>{selectedCluster.display_name || selectedCluster.name}</span>
-                                    : <span>{clusters.length} {t('clusters')}</span>
+                                    : <span>{allClusters.length} {t('clusters')}</span>
                                 }
                             </div>
                             {(() => {
