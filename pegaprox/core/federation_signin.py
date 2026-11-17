@@ -54,13 +54,17 @@ def _renew_lock(home):
 
 def _windows():
     from pegaprox.utils.ratelimit import SlidingWindow
-    return (SlidingWindow(limit=30, window=60, max_keys=64, name='fed-sign-in'),
+    return (SlidingWindow(limit=300, window=60, max_keys=64, name='fed-sign-in'),
+            SlidingWindow(limit=10, window=60, max_keys=4096, name='fed-sign-in-account'),
             SlidingWindow(limit=5, window=900, max_keys=4096, name='fed-sign-in-fail'))
 
 
-# per sending site, and per (site, account) for refused passwords and codes: a member that
-# guesses locks only itself out of that one account, never the account at its home
-_sign_in_rate, _sign_in_fails = _windows()
+# per sending site, per (site, account), and per (site, account) for refused passwords and
+# codes: a member that guesses locks only itself out of that one account, never the account
+# at its home. The sign-ins of one account (its own, with its own password) use up its own
+# budget, not the site's: 30 a minute for the whole site let one account keep every other
+# account of its home from signing in there
+_sign_in_rate, _account_rate, _sign_in_fails = _windows()
 
 
 def _failed(key):
@@ -71,8 +75,8 @@ def _failed(key):
 
 
 def reset_for_tests():
-    global _sign_in_rate, _sign_in_fails
-    _sign_in_rate, _sign_in_fails = _windows()
+    global _sign_in_rate, _account_rate, _sign_in_fails
+    _sign_in_rate, _account_rate, _sign_in_fails = _windows()
 
 
 # --- the assertion ---------------------------------------------------------------------------
@@ -161,9 +165,9 @@ def check_at_home(sender, site, data):
             and 0 < len(password) <= 1024 and isinstance(sh, str) and _HEX32.fullmatch(sh)
             and (totp is None or (isinstance(totp, str) and _TOTP_RE.fullmatch(totp)))):
         return _no(400, 'FED_SIGN_IN', 'Not a sign-in')
-    if not _sign_in_rate.allow(sender):
-        return _no(429, 'FED_BUSY', 'Too many sign-ins from your site')
     key = f'{sender}:{user}'
+    if not _account_rate.allow(key) or not _sign_in_rate.allow(sender):
+        return _no(429, 'FED_BUSY', 'Too many sign-ins from your site')
     if _failed(key) >= _sign_in_fails.limit:
         return _no(429, 'FED_SIGN_IN_LOCKED', 'Too many refused sign-ins of this account from '
                                               'your site - try again later')
@@ -276,7 +280,12 @@ def at_home(username, password, totp, user):
     sh = secrets.token_hex(16)
     body = {'user': username, 'password': password, 'sh': sh}
     if totp:
-        body['totp'] = str(totp).strip()
+        totp = str(totp).strip()
+        if not _TOTP_RE.fullmatch(totp):
+            # a code that cannot be one is a wrong code; sent on, the home refused the
+            # request as malformed and the sign-in went on here without the home's word
+            return {'state': 'denied', 'body': {'error': 'Invalid 2FA code'}}
+        body['totp'] = totp
     status, data, _h = fed.call_peer(home, 'POST', SIGN_IN_PATH, body,
                                      read_timeout=SIGN_IN_TIMEOUT)
     data = data if isinstance(data, dict) else {}
@@ -290,7 +299,8 @@ def at_home(username, password, totp, user):
         logging.warning(f'[FED] the home of {username!r} answered a sign-in with an assertion '
                         'that is not for it')
         return {'state': 'none'}
-    if status == 401:
+    if status in (400, 401):
+        # 400: the home took it for no sign-in at all, which is no reason to go on without it
         return {'state': 'denied',
                 'body': {'error': 'Invalid 2FA code' if totp else 'Invalid credentials'}}
     if status == 409 and data.get('code') == 'FED_PASSWORD_HOME':

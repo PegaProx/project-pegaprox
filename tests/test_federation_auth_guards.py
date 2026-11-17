@@ -1452,6 +1452,17 @@ def test_a_mirror_with_a_passkey_is_enrolled_under_force_2fa(fed, db):
     assert mfa_enrolment_state(db.get_user('lena'), settings, 'lena') == MFA_DUE
 
 
+def test_a_mirror_with_totp_at_its_home_is_enrolled_under_force_2fa(fed, db):
+    """Its home checks the code at every sign-in, wherever it signs in, and without the
+    home's answer it signs in at its home only: it has a second factor, and a site that
+    forces one does not hold it back (it was refused FED_RELAY_MFA there)."""
+    from pegaprox.utils.auth import mfa_enrolment_state, MFA_DUE, MFA_NOT_DUE
+    _from_member(db, [_account('tia', totp_enabled=1), _account('noa')])
+    settings = {'force_2fa': True}
+    assert mfa_enrolment_state(db.get_user('tia'), settings, 'tia') == MFA_NOT_DUE
+    assert mfa_enrolment_state(db.get_user('noa'), settings, 'noa') == MFA_DUE
+
+
 def test_a_mirror_signs_in_with_its_passkey_and_works_under_force_2fa(fed, db):
     """The same over the routes: the sign-in, validate_session and the session check each
     hand mfa_enrolment_state the account's name, which is what finds the passkey. A mapped

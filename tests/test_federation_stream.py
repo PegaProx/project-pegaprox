@@ -173,11 +173,11 @@ def test_an_open_stream_ends_when_the_account_goes_there(linked):
     a, b = linked
     call = {'user': 'alice', 'home': iid(a), 'tok': None}
     with at(b):
-        assert fstream._recheck(iid(a), call, [CID], [CID]) == [CID]
+        assert fstream._recheck(iid(a), call, [CID], [CID])[0] == [CID]
     _db_of(b).conn.execute("UPDATE users SET enabled = 0 WHERE username = 'alice'")
     _db_of(b).conn.commit()
     with at(b):
-        assert fstream._recheck(iid(a), call, [CID], [CID]) == []
+        assert fstream._recheck(iid(a), call, [CID], [CID])[0] == []
 
 
 def test_a_stream_names_the_clusters_of_this_site_only(linked):

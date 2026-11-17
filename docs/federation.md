@@ -175,6 +175,11 @@ standbys of an HA group, and go when the site is removed or this instance leaves
 can fill at most 256 mapping entries here; values beyond that stay unmapped and their
 accounts quarantined.
 
+What an account may do here follows the tenant and role it is mapped onto here, nothing
+else: an account confined at its home to one pool or to a few guests is confined here only
+as far as the tenant and role it is mapped onto are. Map the tenants of such accounts onto
+a tenant of this site that is limited as they should be.
+
 The users list marks mirrored accounts as **Mirrored** and offers no changes for them.
 An account that its home deletes goes at the next sync, with what was granted to it here,
 and its sessions end. One that its home still lists but whose row does not read is kept
@@ -255,7 +260,9 @@ home's clusters included. The site renews the assertion every few minutes while 
 works; the home refuses a renewal after a password change since the sign-in, for a disabled
 account, and after twelve hours, so those end it within five minutes. The home counts
 refused passwords and codes per site and account: a site that guesses locks only itself out
-of that account, never the account at its home. Without an answer of the home, an account of
+of that account, never the account at its home. It answers ten sign-ins a minute per
+account and 300 per site. A code that cannot be one is refused as a wrong one, and only a
+security key the account has leaves the home out of the sign-in. Without an answer of the home, an account of
 a directory (LDAP, OIDC) or one that signs in with a security key, the sign-in works for that
 site's own clusters only, and the sidebar names the home to work from.
 
@@ -275,9 +282,12 @@ plugins tabs are not shown for another site's cluster. The UI says so and links 
 **Uploads** to another site's datastores work as to this site's: the file is written to this
 instance's disk first, its SHA-256 signed, and sent on; the leading site writes it to its own
 disk, compares the digest and hands it to Proxmox VE only when it matches. Both sites check
-the account's upload permission and cluster access before a byte is written. Each side needs
-the free space of the file (plus 256 MB, uploads under way counted). One upload per account
-and at most two per site run at once.
+the account's upload permission and cluster access before a byte is written, and refuse it
+while the permissions of the account at the leading site cannot be read. Each side needs the
+free space of the file plus 256 MB, checked before and while it is written. One upload per
+account runs at once; of a site's uploads to one other site at most two are sent at once,
+taken once the file is here, so a body that comes slowly holds only its own account's
+upload.
 
 **Migrations between two sites.** A guest moves to a Proxmox VE cluster of another site, or
 from one, in the cross-cluster migration dialog. Proxmox's remote migration does the copy, as
@@ -332,7 +342,11 @@ pause. In between, and for a site that does not stream, the views poll.
 
 **Limits.** Each instance relays at most half of its request pool at once, an eighth (at
 least four) per site, of which one account holds half at most, and the leading site takes at
-most 3000 relayed calls a minute from one member. A call that finds its site's slots taken
+most 3000 relayed calls a minute from one member (counted before anything of the call is
+kept, so calls over it cost nothing there). One account makes at most 600 calls a minute to
+one site, so no account uses up its site's share for the others (`429 FED_RELAY_BUSY`). The
+address a relayed call carries is the user's at the sending site, kept for the audit; the
+leading site does not count it against that address. A call that finds its site's slots taken
 waits up to eight seconds for one, as the reads of a view come in a burst; then it is
 answered `429 FED_RELAY_BUSY`. A request body is at most
 10 MB (an upload up to the upload limit of the instance, 100 GB by default), an answer at

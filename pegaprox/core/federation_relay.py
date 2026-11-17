@@ -275,10 +275,11 @@ _slot_freed = threading.Condition()
 # uploads run for minutes and hold a spooled copy on the disk: a few at a time, outside
 # the budgets above
 _uploads_out = _Budget(4, 2)
+# how long a spooled upload waits for one of them
+UPLOAD_SLOT_WAIT = 60
 _uploads_in = _Budget(4, 2)
 # one upload at a time per account, and the bytes of the uploads being written to disk
 _upload_users = set()
-_spooling = {'bytes': 0}
 _spool_lock = threading.Lock()
 
 # a site that does not answer is not dialled for a while: 3 failed connects within 30 s
@@ -343,6 +344,8 @@ def _note_dial(iid, ok):
 
 
 def reset_for_tests():
+    global _sender_rate, _account_rate
+    _sender_rate = _account_rate = None
     with _breaker_lock:
         _breaker.clear()
     for b in (_out, _in, _out_users, _tunnels, _uploads_out, _uploads_in):
@@ -350,7 +353,6 @@ def reset_for_tests():
             b._used, b._per = 0, {}
     with _spool_lock:
         _upload_users.clear()
-        _spooling['bytes'] = 0
     with _user_tunnels_lock:
         _user_tunnels.clear()
     with _list_lock:
@@ -501,6 +503,35 @@ def relay_call(iid, method, path, query='', body=b'', ctype='', principal=None,
 
 _nonces = {}
 _nonces_lock = threading.Lock()
+# a member's calls per minute, counted before a nonce is spent: a call over the rate spends
+# none, and the store of each sender holds more than the rate lets in for a nonce's life
+# (SIGNATURE_WINDOW on both sides), so it never fills and refuses the honest calls
+_sender_rate = None
+RELAY_NONCES = 8192
+
+
+# the relayed calls one account of this site makes to one site per minute: a share of what
+# that site takes from this one (SENDER_RATE), so no account spends it for the others
+ACCOUNT_RATE = SENDER_RATE // 5
+_account_rate = None
+
+
+def account_call(iid, user):
+    """False when `user` made ACCOUNT_RATE calls to site `iid` within the last minute."""
+    global _account_rate
+    if _account_rate is None:
+        from pegaprox.utils.ratelimit import SlidingWindow
+        _account_rate = SlidingWindow(limit=ACCOUNT_RATE, window=60, max_keys=4096,
+                                      name='fed-relay-account')
+    return _account_rate.allow(f'{iid}:{user}')
+
+
+def _rate():
+    global _sender_rate
+    if _sender_rate is None:
+        from pegaprox.utils.ratelimit import SlidingWindow
+        _sender_rate = SlidingWindow(limit=SENDER_RATE, window=60, max_keys=64, name='fed-relay')
+    return _sender_rate
 
 
 def header_verdict(request):
@@ -558,14 +589,21 @@ def _header_verdict(headers, path=RELAY_PATH):
     now = time.time()
     if abs(now - int(ts)) > ha_wire.SIGNATURE_WINDOW or int(ts) < fed._started():
         return 'skewed', dict(rec, skew='early' if int(ts) < fed._started() else 'window'), None
-    with _nonces_lock:
-        if ha_wire.take_nonce(_nonces.setdefault(claimed, {}), nonce, int(ts), now) != 'ok':
-            return None, None, None
     try:
         envelope = json.loads(_unb64(env_text))
     except Exception:
         envelope = None
-    return 'member', rec, envelope if isinstance(envelope, dict) else {}
+    envelope = envelope if isinstance(envelope, dict) else {}
+    if not _rate().allow(claimed):
+        return 'busy', rec, envelope
+    with _nonces_lock:
+        spent = ha_wire.take_nonce(_nonces.setdefault(claimed, {}), nonce, int(ts), now,
+                                   cap=RELAY_NONCES)
+    if spent == 'full':
+        return 'busy', rec, envelope
+    if spent != 'ok':
+        return None, None, None
+    return 'member', rec, envelope
 
 
 def valid_envelope(envelope):
@@ -579,6 +617,12 @@ def valid_envelope(envelope):
     if '~' in path or '..' in path or '\\' in path or len(path) > 2048:
         return None
     if not isinstance(query, str) or '~' in query or len(query) > 2048:
+        return None
+    try:
+        # a lone surrogate passes JSON and the URL map but not into a WSGI environ
+        path.encode('utf-8')
+        query.encode('latin-1')
+    except UnicodeEncodeError:
         return None
     if not isinstance(ctype, str) or len(ctype) > 200 or '\n' in ctype or '\r' in ctype:
         return None
@@ -686,10 +730,6 @@ def run_relayed(app, outer, call, row, site, sender=''):
     # a spooled upload is read from its file, everything else from memory
     stream, length = (body, call['size']) if not isinstance(body, bytes) else \
         (io.BytesIO(body), len(body))
-    if call.get('tok'):
-        sid = open_relay_session(row['username'], call['tok'], call['ip'], site, api_token=True)
-    else:
-        sid = open_relay_session(row['username'], row.get('role') or 'viewer', call['ip'], site)
     environ = {
         'REQUEST_METHOD': call['method'],
         'SCRIPT_NAME': '',
@@ -703,7 +743,6 @@ def run_relayed(app, outer, call, row, site, sender=''):
         # the marker of the UI's own calls and no Origin: the CSRF gate takes it as a
         # same-origin call
         'HTTP_X_REQUESTED_WITH': 'XMLHttpRequest',
-        'HTTP_X_SESSION_ID': sid,
         'HTTP_USER_AGENT': f'PegaProx site {site}'[:200],
         'CONTENT_LENGTH': str(length),
         'wsgi.version': (1, 0),
@@ -713,12 +752,20 @@ def run_relayed(app, outer, call, row, site, sender=''):
         'wsgi.multithread': bool(outer.get('wsgi.multithread')),
         'wsgi.multiprocess': False,
         'wsgi.run_once': False,
-        RELAY_ENVIRON: {'session': sid, 'site': site, 'home': call['home'], 'rid': call['rid'],
-                        'ip': call['ip'], 'sh': call['sh'], 'sender': sender},
     }
     if call['ctype']:
         environ['CONTENT_TYPE'] = call['ctype']
+    # the session last: whatever above could fail leaves none behind (it was opened first,
+    # and a path that would not encode kept it until the session timeout)
+    if call.get('tok'):
+        sid = open_relay_session(row['username'], call['tok'], call['ip'], site, api_token=True)
+    else:
+        sid = open_relay_session(row['username'], row.get('role') or 'viewer', call['ip'], site)
     try:
+        environ['HTTP_X_SESSION_ID'] = sid
+        environ[RELAY_ENVIRON] = {'session': sid, 'site': site, 'home': call['home'],
+                                  'rid': call['rid'], 'ip': call['ip'], 'sh': call['sh'],
+                                  'sender': sender}
         return contextvars.Context().run(_dispatch, app, environ)
     finally:
         end_relay_session(sid)
@@ -797,21 +844,18 @@ def spool(stream, size):
         raise UploadRefused(413, 'FED_RELAY_TOO_LARGE', 'The upload is larger than this '
                                                          'site takes')
     where = upload_dir()
-    with _spool_lock:
-        # the uploads being written count with what they will take
-        if size + _spooling['bytes'] + UPLOAD_RESERVE > shutil.disk_usage(where).free:
-            raise UploadRefused(507, 'FED_RELAY_NO_SPACE', 'Not enough free space to take this '
-                                                            'upload on')
-        _spooling['bytes'] += size
-    try:
-        return _spool_into(where, stream, size)
-    finally:
-        with _spool_lock:
-            _spooling['bytes'] = max(0, _spooling['bytes'] - size)
+    # what the disk has now; the uploads written at the same time are checked as they write
+    # (_spool_into). A size reserved up front was held for a body that never came, and one
+    # announced the size of the disk refused every other upload
+    if size + UPLOAD_RESERVE > shutil.disk_usage(where).free:
+        raise UploadRefused(507, 'FED_RELAY_NO_SPACE', 'Not enough free space to take this '
+                                                        'upload on')
+    return _spool_into(where, stream, size)
 
 
 def _spool_into(where, stream, size):
     import tempfile
+    import shutil
     fd, path = tempfile.mkstemp(dir=where)
     digest, got = hashlib.sha256(), 0
     try:
@@ -820,6 +864,10 @@ def _spool_into(where, stream, size):
                 chunk = stream.read(min(1024 * 1024, size - got))
                 if not chunk:
                     raise UploadRefused(400, 'FED_RELAY_BODY', 'The upload ended early')
+                if got % (64 * 1024 * 1024) < len(chunk) and \
+                        shutil.disk_usage(where).free < UPLOAD_RESERVE + (size - got):
+                    raise UploadRefused(507, 'FED_RELAY_NO_SPACE', 'Not enough free space '
+                                                                    'to take this upload on')
                 digest.update(chunk)
                 out.write(chunk)
                 got += len(chunk)
@@ -830,6 +878,16 @@ def _spool_into(where, stream, size):
             pass
         raise
     return path, digest.hexdigest()
+
+
+def take_upload_slot(iid, wait=UPLOAD_SLOT_WAIT):
+    """One of the uploads this site sends to `iid` at once, waited for up to `wait` s."""
+    deadline = time.monotonic() + wait
+    while not _uploads_out.take(iid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+    return True
 
 
 def take_upload(username):

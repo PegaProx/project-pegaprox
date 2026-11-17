@@ -192,10 +192,16 @@ def create_app():
                         # a relayed request is judged by its headers, under its own domain;
                         # the budgets per sending site stand in for the address limit
                         from pegaprox.core import federation_relay as _fed_relay
-                        peer_call = _fed_relay.header_verdict(request)[0] == 'member'
+                        peer_call = _fed_relay.header_verdict(request)[0] in ('member', 'busy')
                     else:
                         from pegaprox.api.federation import request_fed_peer
                         peer_call = request_fed_peer()[0] == 'member'
+            # and a relayed request run here: the outer call was counted against its site's
+            # budgets, and the address it carries is the user's at that site, for the audit.
+            # Counted against it, a member could spend the window of any address here
+            from pegaprox.utils.auth import RELAY_ENVIRON
+            if request.environ.get(RELAY_ENVIRON):
+                peer_call = True
             if not peer_call and not any(request.path.startswith(p) for p in skip_paths):
                 # the portal_only hook below looks API tokens up only for a counted request
                 request.environ['pegaprox.rate_counted'] = True

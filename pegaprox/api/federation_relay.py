@@ -36,13 +36,10 @@ from pegaprox.core import ha_wire
 from pegaprox.api.realtime import sock
 from pegaprox.constants import PEGAPROX_VERSION
 from pegaprox.utils.audit import get_client_ip, log_audit
-from pegaprox.utils.auth import RELAY_ENVIRON, require_auth
-from pegaprox.utils.ratelimit import SlidingWindow
+from pegaprox.utils.auth import RELAY_ENVIRON, lift_body_deadline, require_auth
 
 bp = Blueprint('federation_relay', __name__)
 
-# the relayed calls of one member per minute
-_relay_rate = SlidingWindow(limit=relay.SENDER_RATE, window=60, max_keys=64, name='fed-relay')
 
 _PREFIX = '/api/federation/relay/'
 
@@ -158,6 +155,11 @@ def relay_entry(iid, raw, rest=''):
         resp = _fail(503, 'FED_SITE_UNREACHABLE', f'{site["site"]} does not answer', **site)
         resp.headers['Retry-After'] = str(relay._BREAK_FOR)
         return resp
+    if not relay.account_call(iid, principal.get('user') or ''):
+        resp = _fail(429, 'FED_RELAY_BUSY', 'Too many requests to that site from your account - '
+                                            'try again in a minute')
+        resp.headers['Retry-After'] = '30'
+        return resp
     if not relay.take_slot(iid, principal.get('user') or ''):
         resp = _fail(429, 'FED_RELAY_BUSY', 'Too many requests to that site at once - try again')
         resp.headers['Retry-After'] = '5'
@@ -214,19 +216,21 @@ def _relay_upload(iid, raw, rule, path, session, site, principal):
                                             'it has finished')
         resp.headers['Retry-After'] = '30'
         return resp
-    if not relay._uploads_out.take(iid):
-        relay.give_upload(user)
-        resp = _fail(429, 'FED_RELAY_BUSY', 'Too many uploads to that site at once - try again '
-                                            'when one has finished')
-        resp.headers['Retry-After'] = '30'
-        return resp
-    spooled = None
+    spooled, holding = None, False
     try:
         request.max_content_length = relay.MAX_UPLOAD
         try:
             spooled, digest = relay.spool(request.stream, request.content_length)
         except relay.UploadRefused as e:
             return _fail(e.status, e.code, e.error)
+        # the site's slot once the file is here: a body that comes slowly, or never, holds
+        # its own account's upload only, not one of the two this site sends to that one
+        holding = relay.take_upload_slot(iid)
+        if not holding:
+            resp = _fail(429, 'FED_RELAY_BUSY', 'Too many uploads to that site at once - try '
+                                                'again when one has finished')
+            resp.headers['Retry-After'] = '30'
+            return resp
         size = os.path.getsize(spooled)
         started = time.monotonic()
         with open(spooled, 'rb') as fh:
@@ -237,7 +241,8 @@ def _relay_upload(iid, raw, rule, path, session, site, principal):
         relay.note_answer(iid, kind, started)
     finally:
         relay.drop_spooled(spooled)
-        relay._uploads_out.give(iid)
+        if holding:
+            relay._uploads_out.give(iid)
         relay.give_upload(user)
     status, headers, out = relay.browser_answer(kind, status, headers, out, True)
     log_audit(session.get('user') or '', 'federation.relayed',
@@ -309,6 +314,12 @@ def _peer_prelude():
     if kind == 'skewed':
         return (jsonify(fed.clock_refusal(who.get('skew') or 'window', time.time(), fed._started(),
                                           request.headers.get(ha_wire.PEER_TS_HEADER))), 403), None
+    if kind == 'busy':
+        # signed, over the rate (counted before its nonce, so the call spent none)
+        rid = str((envelope or {}).get('rid') or '')
+        return _signed_refusal(request.headers.get(ha_wire.PEER_NONCE_HEADER) or '', rid,
+                               who['instance_id'], 429, 'FED_RELAY_BUSY',
+                               'Too many relayed requests from your site'), None
     if kind != 'member':
         ip = get_client_ip()
         if not api_fed._peer_failures.allow(ip):
@@ -322,11 +333,8 @@ def _peer_prelude():
     nonce = request.headers.get(ha_wire.PEER_NONCE_HEADER) or ''
     call = relay.valid_envelope(envelope)
     rid = (call or {}).get('rid') or str((envelope or {}).get('rid') or '')
-    # the address limit does not count a member's relays: its own rate and slots do, the
-    # well-formed and the malformed alike
-    if not _relay_rate.allow(sender):
-        return _signed_refusal(nonce, rid, sender, 429, 'FED_RELAY_BUSY',
-                               'Too many relayed requests from your site'), None
+    # the address limit does not count a member's relays: its own rate (counted with the
+    # signature, before the nonce) and slots do, the well-formed and the malformed alike
     if call is None:
         return _signed_refusal(nonce, rid, sender, 400, 'FED_RELAY_ENVELOPE',
                                'The relayed request is not well formed'), None
@@ -403,6 +411,10 @@ def peer_relay_upload():
     if not relay._uploads_in.take(sender):
         return _signed_refusal(nonce, rid, sender, 429, 'FED_RELAY_BUSY',
                                'Too many uploads from your site at once')
+    # signed, the account checked, and one of the sender's few upload slots held: the body
+    # may take as long as the link between the sites needs (the 30 s clock of an unknown
+    # client cut every upload slower than that)
+    lift_body_deadline()
     spooled = None
     try:
         request.max_content_length = relay.MAX_UPLOAD
@@ -654,9 +666,9 @@ def _migrate(data, session, principal):
             status, _h, out = _as_caller('POST', path, body)
             source = src_mgr
         else:
-            kind, status, h, out = relay.relay_call(
-                src_remote[1], 'POST', path, body=json.dumps(body).encode(),
-                ctype='application/json', principal=principal, read_timeout=relay.WRITE_TIMEOUT)
+            kind, status, h, out = _gated_relay(
+                src_remote[1], principal, 'POST', path, body=json.dumps(body).encode(),
+                ctype='application/json', read_timeout=relay.WRITE_TIMEOUT)
             status, _h, out = relay.browser_answer(kind, status, h, out, True)
             sid = request.headers.get('X-Session-ID') or request.cookies.get('session_id')
             source = fmig._RemoteSource(src_remote[1], raw_s, principal, sid)
@@ -708,12 +720,34 @@ def _source_gates(cluster_id, vmid, vm_type, delete_source):
             raise fmig.MigrationRefused(403, f'Access denied to this guest ({perm})')
 
 
+def _gated_relay(iid, principal, method, path, **kw):
+    """relay_call for the migration's own calls, under the breaker, the account's rate and
+    the slots every relayed call of a browser passes (relay_entry). Raises MigrationRefused."""
+    user = principal.get('user') or ''
+    if relay._broken(iid):
+        raise fmig.MigrationRefused(503, f'{_site_of(iid)["site"]} does not answer',
+                                    'FED_SITE_UNREACHABLE')
+    if not relay.account_call(iid, user):
+        raise fmig.MigrationRefused(429, 'Too many requests to that site from your account - '
+                                         'try again in a minute', 'FED_RELAY_BUSY')
+    if not relay.take_slot(iid, user):
+        raise fmig.MigrationRefused(429, 'Too many requests to that site at once - try again',
+                                    'FED_RELAY_BUSY')
+    started = time.monotonic()
+    try:
+        got = relay.relay_call(iid, method, path, principal=principal, **kw)
+        relay.note_answer(iid, got[0], started)
+        return got
+    finally:
+        relay.give_slot(iid, user)
+
+
 def _relayed_json(iid, method, path, body, principal):
     """The JSON answer of a relayed call, or MigrationRefused with what the browser would
     have been told."""
-    kind, status, h, out = relay.relay_call(iid, method, path, body=json.dumps(body).encode(),
-                                            ctype='application/json', principal=principal,
-                                            read_timeout=relay.WRITE_TIMEOUT)
+    kind, status, h, out = _gated_relay(iid, principal, method, path,
+                                        body=json.dumps(body).encode(), ctype='application/json',
+                                        read_timeout=relay.WRITE_TIMEOUT)
     status, _h, out = relay.browser_answer(kind, status, h, out, method != 'GET')
     try:
         data = json.loads(out or b'{}')
@@ -735,9 +769,8 @@ def _footprint_of(src_mgr, src_remote, node, vm_type, vmid, principal):
         fp = guest_size(src_mgr, node, vm_type, vmid) or {}
     else:
         raw, iid = src_remote
-        kind, status, _h, out = relay.relay_call(
-            iid, 'GET', f'/api/clusters/{raw}/vms/{node}/{vm_type}/{vmid}/config',
-            principal=principal)
+        kind, status, _h, out = _gated_relay(
+            iid, principal, 'GET', f'/api/clusters/{raw}/vms/{node}/{vm_type}/{vmid}/config')
         if kind != 'answer' or status != 200:
             raise fmig.MigrationRefused(status if kind == 'answer' and status >= 400 else 502,
                                         'The config of the guest could not be read at its site')
@@ -835,7 +868,8 @@ def console_token(cluster_id):
     if not ok:
         return err
     session = request.session
-    token = create_ws_token(session.get('user'), session.get('role') or 'viewer',
+    token = create_ws_token(session.get('user'),
+                            session.get('effective_role') or session.get('role') or 'viewer',
                             sid=f"fed:{mark.get('home') or ''}:{mark.get('sh') or ''}")
     settings = load_server_settings() or {}
     return jsonify({'token': token, 'expires_in': 60,
