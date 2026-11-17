@@ -268,7 +268,12 @@ class _Clocked:
         environ['wsgi.input'] = clock
         environ[BODY_DEADLINE_ENVIRON] = clock
         self.seen.append((environ.get('PATH_INFO'), clock))
-        return self.app(environ, start_response)
+        try:
+            return self.app(environ, start_response)
+        finally:
+            # as the server does once the request is done: a lifted clock gives back the
+            # account's share (realtime.hold_body), which a later test of the same name counts
+            clock.done()
 
 
 
@@ -308,7 +313,10 @@ class _ClockedSlow(_Clocked):
         environ['wsgi.input'] = clock
         environ[BODY_DEADLINE_ENVIRON] = clock
         self.seen.append((environ.get('PATH_INFO'), clock))
-        return self.app(environ, start_response)
+        try:
+            return self.app(environ, start_response)
+        finally:
+            clock.done()
 
 
 
