@@ -10554,7 +10554,7 @@
             const joined = members.length > 0;
             // max_sites counts this instance, and the server refuses a code once the
             // members plus this one reach it: a code is offered while one more fits
-            const maxSites = (status && Number.isInteger(status.max_sites) && status.max_sites > 1) ? status.max_sites : 8;
+            const maxSites = (status && Number.isInteger(status.max_sites) && status.max_sites > 1) ? status.max_sites : 4;
             const canPairMore = members.length + 1 < maxSites;
             const enoughSites = members.length + 1 >= FED_MIN_SITES_TO_ENROLL;
             // LW Nov 2026 - one of two is no majority: the owner writes alone while the other
