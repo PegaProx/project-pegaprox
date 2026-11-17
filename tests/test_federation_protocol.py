@@ -21,6 +21,14 @@ from tests.test_federation import (  # noqa: F401 - fixtures by name
     _sides, _sync, _three, _view, _wire, _without, _writes, at, iid, some_key)
 
 
+@pytest.fixture(autouse=True)
+def _five_sites(monkeypatch):
+    """The product holds four sites (MAX_SITES, as an HA group has members). The membership
+    protocol is the same for any number, and these cases need a fifth member: a majority of
+    three that a change of two does not reach."""
+    monkeypatch.setattr(federation, 'MAX_SITES', 5)
+
+
 def _settle(clock):
     """Past the settle span a view change starts, and past every promise given before."""
     clock.advance(fl.SETTLE_SECONDS + 1)

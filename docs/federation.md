@@ -4,7 +4,7 @@
 > switches it on. Try it with test instances before you rely on it. Once an instance has
 > paired, it has to leave the federation before it can be switched off again.
 
-A federation joins up to eight PegaProx instances, one per site. Each site keeps leading
+A federation joins up to four PegaProx instances, one per site. Each site keeps leading
 its own clusters; the federation adds these things on top:
 
 - **Every site's clusters, worked on from here (linked mode).** The clusters of the other
@@ -656,7 +656,7 @@ federation:
 
 ## Limits
 
-- **Eight sites** at most, this instance included. The tab offers a pairing code while
+- **Four sites** at most, this instance included. The tab offers a pairing code while
   one more site fits.
 - **Two sites** before a cluster can be enrolled. With two, a cluster of a site that is down
   is taken over by hand.
@@ -753,7 +753,7 @@ control call never passes as a relayed one, nor the other way round.
 | `FED_FORCED` | `PEGAPROX_FEDERATION` decides; change it where the service starts |
 | `FED_IN_USE` | switching off while still taking part: leave first |
 | `FED_REAUTH`, `FED_REAUTH_RECENT` | the password is missing or wrong; an OIDC account without a password signs in again first |
-| `FED_FULL` | eight sites already |
+| `FED_FULL` | four sites already |
 | `FED_NO_QUORUM` | no majority answered or agreed, or a takeover is not known at every site yet; check the network between the sites. Right after a change of the member list, every lease waits 35 seconds |
 | `FED_BUSY` | another change of the member list is under way on this instance; try again in a moment |
 | `FED_MIRROR_ADMIN` | a mirrored admin changes neither the federation nor the accounts, tenants and roles of this instance, nor who signs in through LDAP or OIDC and with which role, nor restores a backup; use an account of this instance |

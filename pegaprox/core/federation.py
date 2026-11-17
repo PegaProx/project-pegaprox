@@ -89,8 +89,9 @@ ANSWER_DOMAIN = 'pegaprox-fed-answer-2'
 ANSWER_HEADER = 'X-PegaProx-Fed-Answer'
 # one code, fifteen minutes, one member: as the HA pairing does it
 PAIRING_TTL = 15 * 60
-# a federation is a handful of sites, this instance counted
-MAX_SITES = 8
+# a federation is a handful of sites, this instance counted: four, as an HA group has
+# members (core/ha.py MAX_MEMBERS)
+MAX_SITES = 4
 # what a peer call may carry: a batch of 256 lease asks fits
 MAX_PEER_BODY = 64 * 1024
 # what an answer of a member may weigh before it is read
