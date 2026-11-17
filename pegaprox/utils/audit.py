@@ -126,6 +126,18 @@ def _via_standby():
     return str(mark.get('via') or '') if isinstance(mark, dict) else ''
 
 
+def _via_site():
+    """The member site a request came from while this instance runs it for one of that
+    site's accounts (linked mode), '' for anything else."""
+    if not has_request_context():
+        return ''
+    from pegaprox.utils.auth import RELAY_ENVIRON
+    mark = request.environ.get(RELAY_ENVIRON)
+    if not isinstance(mark, dict):
+        return ''
+    return f"{mark.get('site') or ''}, request {str(mark.get('rid') or '')[:8]}"
+
+
 def _audit_cluster_id(cluster):
     """The id of the cluster an entry names, '' when it cannot be told.
 
@@ -183,6 +195,9 @@ def log_audit(user: str, action: str, details: str = None, ip_address: str = Non
     via = _via_standby()
     if via:
         details = f'{details} (via standby {via})' if details else f'via standby {via}'
+    site = _via_site()
+    if site:
+        details = f'{details} (via site {site})' if details else f'via site {site}'
 
     # Save to database
     try:

@@ -48,6 +48,7 @@ def register_blueprints(app):
     from pegaprox.api.auto_install import bp as auto_install_bp
     from pegaprox.api.ha import bp as ha_bp
     from pegaprox.api.federation import bp as federation_bp
+    from pegaprox.api.federation_relay import bp as federation_relay_bp
     from pegaprox.api.banners import bp as banners_bp
     from pegaprox.api.whatif import bp as whatif_bp
     from pegaprox.api.timeline import bp as timeline_bp
@@ -95,6 +96,7 @@ def register_blueprints(app):
     app.register_blueprint(auto_install_bp)
     app.register_blueprint(ha_bp)
     app.register_blueprint(federation_bp)
+    app.register_blueprint(federation_relay_bp)
     app.register_blueprint(banners_bp)
     app.register_blueprint(whatif_bp)
     app.register_blueprint(timeline_bp)

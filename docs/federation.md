@@ -5,13 +5,22 @@
 > paired, it has to leave the federation before it can be switched off again.
 
 A federation joins up to eight PegaProx instances, one per site. Each site keeps leading
-its own clusters; the federation adds four things on top:
+its own clusters; the federation adds these things on top:
+
+- **Every site's clusters, worked on from here (linked mode).** The clusters of the other
+  sites appear in your sidebar, one section per site, and open here like your own: their
+  guests, nodes, storage, tasks and consoles. Every call goes to the site that leads the
+  cluster, and that site decides what you may do there. See
+  [Other sites' clusters here](#other-sites-clusters-here).
 
 - **Accounts travel.** Users, API tokens and passkeys of each site are mirrored to the
   other sites. A mirror is read-only: an account is changed at the site it belongs to
   (its home), and the other sites refuse the change. A mirrored account signs in at
   another site only after an admin there has mapped its tenant (and a custom role) onto
   one of that site.
+The rest is the **disaster recovery**, a part of its own that is off until an admin switches
+it on at every site ([Disaster recovery](#disaster-recovery)):
+
 - **Enrolled clusters are fenced.** With three or more sites, a Proxmox VE cluster you
   enroll is written by its site only while a majority of the sites backs that site's lease
   on it; when the network splits, the side without the majority stops writing to it. With
@@ -21,11 +30,13 @@ its own clusters; the federation adds four things on top:
 - **Clusters of a lost site can be taken over.** Every site holds a copy of every enrolled
   cluster's row. When a site is gone, another one takes its clusters over: by majority
   with three or more sites, by hand with two.
-- **One view of everything.** The Federation tab lists the clusters of every site, asked
-  live at the site that leads them.
+- **One table of everything.** The Federation tab lists the clusters of every site for the
+  admins, asked live at the site that leads them.
 
 Contents: [Switch it on](#switch-it-on) - [Pair two sites](#pair-two-sites) -
 [What pairing shares](#what-pairing-shares) - [Accounts of other sites](#accounts-of-other-sites) -
+[Other sites' clusters here](#other-sites-clusters-here) -
+[Disaster recovery](#disaster-recovery) -
 [Enrolled clusters and leases](#enrolled-clusters-and-leases) - [Two sites](#two-sites) -
 [Adopting a cluster](#adopting-a-cluster) - [Removing a site, leaving](#removing-a-site-leaving) -
 [HA groups](#ha-groups) - [Limits](#limits) - [Switch it off](#switch-it-off) -
@@ -211,6 +222,67 @@ A save of the server settings that changes any of them is refused as a whole wit
 `403 FED_MIRROR_ADMIN`, before anything of it is stored. The settings page sends the
 whole form, so a mirrored admin that saves other settings with these as they are stored
 (the passwords as the mask) is not refused. The sign-ins themselves are unchanged.
+
+## Other sites' clusters here
+
+With the federation on, the sidebar shows a section for every other site below this site's
+clusters, in the Modern, Corporate Redesigned and Cloud layouts (classic Corporate stays as
+it is). Each section lists the clusters you may see at that site. One opens like a cluster
+of your own: overview, guests and their config, nodes, storage, network, SDN, Ceph, backups,
+snapshots, updates, tasks, and the Proxmox VE HA of the cluster.
+
+**Who decides.** Your browser only talks to this instance. It hands every call for another
+site's cluster on to that site over the federation's pinned, signed channel, and the site
+runs it as your account there: the mirror of your account, with the tenant and role an admin
+of that site mapped it onto. Its permissions, VM permissions, pools, quotas, IP lists and
+second-factor rule apply exactly as if you had signed in there, and its audit log names you
+with `(via site <this site>)`. A site speaks only for the accounts it homes: an account of a
+third site, or that site's own `admin`, is never borrowed.
+
+So the account works on other sites' clusters from its **home site**. Signed in at another
+site with a mirrored account, the sidebar names the home to work from instead. API tokens
+are not relayed: a mirrored token works at the other site directly.
+
+**What stays at the site that leads the cluster.** The cluster's own record and credentials
+(edit, rename, group, delete, re-configure, node credentials, host keys), who may act on it
+(VM permissions, pools), what only its admins do (scripts, BMC, subscriptions, QDevice,
+recovery settings, installs on its nodes), PegaProx's own HA of the cluster, uploads to its
+datastores, and steps that name a second cluster (cross-cluster migration, storage
+clusters). The UI says so and links to that site.
+
+**Consoles.** VM consoles, node shells and VM terminals of another site open here as well.
+This instance asks the leading site for a one-time console token as you, then opens that
+site's own console server with it, over TLS checked against the site's pins, and passes the
+bytes on. The leading site checks the token, the cluster and the guest or node as for its own
+users. Between the sites its console ports (its port + 1 and + 2) have to be reachable, or,
+behind a reverse proxy, its main address. SPICE gives you the `.vv` file of that site, which
+works where your network reaches that site's Proxmox VE.
+
+**When a site gives you nothing,** its section says why: it does not answer, the federation
+is off there, an admin there has not mapped your tenant and role yet, your account has not
+arrived there yet, it is disabled there, the site asks for a second factor you have not set
+up at your home, or the clocks of the two sites are more than two minutes apart.
+
+**Limits.** Each instance relays at most half of its request pool at once, an eighth (at
+least four) per site; over that a call is answered `429 FED_RELAY_BUSY`. A request body is at
+most 10 MB, an answer at most 16 MB. A write that gets no answer is never sent again: the UI
+says it may have happened at that site, check its tasks there. A site that does not answer
+three times within 30 seconds is not called for 15 seconds. Live updates of another site's
+cluster come by polling, not by the live stream.
+
+## Disaster recovery
+
+Enrolled clusters, leases, adoption and takeover are the federation's disaster recovery.
+It is **off by default** and has a switch of its own in the Federation tab; the linked mode
+works without it. `PEGAPROX_FEDERATION_DR=1` or `0` forces it where the service starts.
+
+- Switch it on at **every** site before a cluster is enrolled: an enroll is refused while a
+  site has it off or does not answer (`409 FED_DR_OFF_AT`).
+- While it is off, nothing of it runs: no lease rounds, no copies of other sites' clusters,
+  no adoption or takeover, and every write to a cluster goes out without a lease check. The
+  routes of this section answer `409 FED_DR_OFF`.
+- It switches off only while no cluster is enrolled here, no copy of another site's
+  cluster is held and no lease or promise is held (`409 FED_DR_IN_USE`).
 
 ## Enrolled clusters and leases
 
@@ -489,7 +561,9 @@ federation:
   standby never takes over. The takeover is kept with the federation identity, so a standby
   promoted right after it carries on with the cluster; if the HA sync had not carried it yet,
   it comes back from the other site with the next sync. A standby that answers instead of its
-  active counts as no answer for the other site of a federation of two.
+  active counts as no answer for the other site of a federation of two;
+- in linked mode the other sites relay to the active. While a failover is under way, a
+  standby answers them `503 FED_STANDBY`, which their UI shows as the site switching over.
 
 ## Limits
 
@@ -498,8 +572,8 @@ federation:
 - **Two sites** before a cluster can be enrolled. With two, a cluster of a site that is down
   is taken over by hand.
 - **Proxmox VE clusters only** under leases.
-- **100 clusters per site** in the linked view; for a site with more, the tab says how
-  many are not listed.
+- **100 clusters per site** in the admins' table of the Federation tab; for a site with
+  more, the tab says how many are not listed. The sidebar lists up to 1000 per site.
 - **Experimental**: the protocol may still change between releases. Keep all sites on the
   same PegaProx version.
 
@@ -545,6 +619,9 @@ need the password, as listed above, refuse API tokens. All of them are in `docs/
 |---|---|
 | `GET /api/federation/status` | the switch (`enabled`, `forced`, `can_disable`, `disable_blockers`), and while on this instance and its members |
 | `POST /api/federation/switch` | `{"enabled": true}` or `false` |
+| `POST /api/federation/dr` | disaster recovery on or off (`{"enabled": true}`), its state in the status as `dr` |
+| `GET /api/federation/linked` | the other sites with the clusters the caller may see there, and the caller's permissions there; any signed-in account, no API token |
+| `/api/clusters/<id>~<site>/...` | any cluster route that crosses, for a cluster of another site: `<id>` its id there, `<site>` that site's instance id |
 | `POST /api/federation/pairing-code` | a one-time code for the next site |
 | `POST /api/federation/join` | join with a code |
 | `POST /api/federation/members/<id>/remove` | remove a member (`{"confirm": "REMOVE"}`; with two sites and the other one gone for good, `"gone": true`) |
@@ -558,13 +635,23 @@ need the password, as listed above, refuse API tokens. All of them are in `docs/
 | `POST /api/federation/clusters/<id>/takeover` | take over by hand, two sites only (`{"confirm": "TAKEOVER", "owner_down": true, "force": false}`) |
 
 The routes under `/api/federation/peer/` are for the members only. They take no session:
-each call is signed with the calling member's key and every answer is signed back.
+each call is signed with the calling member's key and every answer is signed back. A relayed
+request (`/api/federation/peer/relay`) is signed under a signature domain of its own, so a
+control call never passes as a relayed one, nor the other way round.
 
 ## Troubleshooting
 
 | Code | Meaning |
 |---|---|
 | `FED_DISABLED` | the federation is switched off on that instance |
+| `FED_DR_OFF`, `FED_DR_OFF_AT`, `FED_DR_IN_USE` | disaster recovery is off here, off at another site, or still holds clusters and cannot switch off |
+| `FED_RELAY_RULE` | this step of another site's cluster is done at that site; the answer names it |
+| `FED_RELAY_UNMAPPED`, `FED_RELAY_SYNCING`, `FED_RELAY_DISABLED`, `FED_RELAY_MFA` | the site that leads the cluster has not mapped your account yet, has not received it yet, has it disabled, or asks for a second factor you set up at your home |
+| `FED_RELAY_WRONG_HOME`, `FED_HOME_ELSEWHERE` | an account works on other sites' clusters from its home site only |
+| `FED_RELAY_TOKEN` | API tokens are not relayed; use the token at the site that leads the cluster |
+| `FED_RELAY_BUSY` | too many calls to or from that site at once; try again in a moment |
+| `FED_SITE_UNREACHABLE`, `FED_RELAY_NO_ANSWER` | the site that leads the cluster does not answer; for a write, check its tasks there |
+| `FED_RELAY_AUTH` | the site that leads the cluster did not take your sign-in |
 | `FED_FORCED` | `PEGAPROX_FEDERATION` decides; change it where the service starts |
 | `FED_IN_USE` | switching off while still taking part: leave first |
 | `FED_REAUTH`, `FED_REAUTH_RECENT` | the password is missing or wrong; an OIDC account without a password signs in again first |

@@ -95,8 +95,10 @@ def test_off_the_panel_asks_for_nothing_but_the_status(panel):
     # everything but the switch card sits behind `on`
     body = panel[panel.index('data-fed-panel='):]
     for card in ('{on && !joined && (', '{on && joined && (',
-                 '{on && !joined && (own.length > 0 || !!leasesError) && ownCard}'):
+                 '{drOn && !joined && (own.length > 0 || !!leasesError) && ownCard}'):
         assert card in body, card
+    # what the disaster recovery holds shows only while it is on as well
+    assert 'const drOn = on && !!dr && dr.enabled === true;' in panel
 
 
 def test_the_switch_asks_before_it_goes_on_and_not_before_it_goes_off(panel):
@@ -204,8 +206,8 @@ def test_two_sites_are_told_by_the_member_count_and_gate_every_new_control(panel
     >= 1 shows the card and the takeover to three sites (runtime test below)."""
     assert 'const twoSites = joined && members.length === 1;' in panel
     assert "const silent = (m) => !!m && m.reachable === false && !m.removed_us;" in panel
-    assert '{twoSites && (\n                                <div className={HA_GROUP_CARD} data-fed-two-sites>' in panel
-    assert '{twoSites && silent(m) && m.mirrored_clusters > 0 && (' in panel
+    assert '{drOn && twoSites && (\n                                <div className={HA_GROUP_CARD} data-fed-two-sites>' in panel
+    assert '{drOn && twoSites && silent(m) && m.mirrored_clusters > 0 && (' in panel
     assert 'goneOffered: twoSites && silent(m) })' in panel
     assert 'const byHand = twoSites && silent(members.find(m => m.instance_id === info.owner));' in panel
     assert "if (!r.ok && r.code === 'FED_NO_QUORUM' && twoSites) {" in panel
@@ -589,7 +591,10 @@ class _FedServer(_FakeServer):
                     'reauth': 'password', 'members': [], 'refuse_off': False, 'leases': {},
                     'enrolled': {}, 'hold_s': 0, 'view': {'self': [], 'peers': {}}, 'replies': {},
                     'url': '', 'site': '', 'idmap': None, 'pull_ok': True, 'removed': None, 'warnings': [],
-                    'stepped_down': {}}
+                    'stepped_down': {},
+                    # the disaster recovery: on here unless a test says otherwise, as the
+                    # leases, the enrollment and the takeover these tests drive need it
+                    'dr': True, 'dr_forced': False, 'dr_blockers': []}
         self.fed.update(fed or {})
 
     def fed_status(self):
@@ -601,6 +606,11 @@ class _FedServer(_FakeServer):
                'reauth': f['reauth']}
         if f['enabled'] and f['warnings']:
             out['disable_warnings'] = list(f['warnings'])
+        if f['enabled']:
+            dr_blockers = list(f['dr_blockers']) if f['dr'] else []
+            out['dr'] = {'enabled': f['dr'], 'forced': f['dr_forced'],
+                         'can_disable': bool(f['dr'] and not f['dr_forced'] and not dr_blockers),
+                         'disable_blockers': dr_blockers}
         if f['enabled'] and f['manage']:
             out.update({'instance_id': ME, 'public_key': 'x', 'site': f['site'], 'url': f['url'],
                         'fingerprints': [], 'max_sites': 8, 'view_epoch': 3, 'removed': f['removed'],
@@ -630,6 +640,17 @@ class _FedServer(_FakeServer):
             return answer({'error': 'Admin required'}, 403)
         if path == '/api/federation/status':
             return answer(self.fed_status())
+        if path == '/api/federation/dr':
+            value = body.get('enabled')
+            if not value and f['dr_blockers']:
+                return answer({'code': 'FED_DR_IN_USE', 'blockers': list(f['dr_blockers']),
+                               'error': 'Unenroll every cluster first'}, 409)
+            f['dr'] = value is True
+            return answer(self.fed_status()['dr'])
+        if f['enabled'] and not f['dr'] and (
+                path == '/api/federation/leases'
+                or (req.method == 'POST' and path.startswith('/api/federation/clusters/'))):
+            return answer({'code': 'FED_DR_OFF', 'error': 'Disaster recovery is switched off'}, 409)
         if path == '/api/federation/switch':
             value = body.get('enabled')
             if not isinstance(value, bool):
@@ -910,7 +931,10 @@ def test_runtime_a_viewer_sees_no_tab_and_asks_nothing(open_fed):
     except Exception:
         pass   # a viewer may not open the settings at all: then there is no tab either
     assert page.locator('button', has_text='Federation').count() == 0
-    assert not [c for c in app.server.calls if c[1].startswith('/api/federation/')]
+    # the sidebar asks for the clusters of the other sites, which every account may see;
+    # nothing of the tab is read
+    assert not [c for c in app.server.calls if c[1].startswith('/api/federation/')
+                and c[1] != '/api/federation/linked']
 
 
 def test_runtime_an_admin_without_manage_sees_no_tab(open_fed):
@@ -1592,3 +1616,36 @@ def test_runtime_a_mirrored_admin_cannot_take_over(open_fed):
     assert page.locator('[data-fed-takeover="hh1"]').is_disabled()
     assert page.locator('[data-fed-takeover-all="22222222"]').is_disabled()
     assert page.locator('[data-fed-remove="22222222"]').is_disabled()
+
+
+
+# --- the disaster recovery has a switch of its own --------------------------------------------
+
+def test_runtime_with_disaster_recovery_off_the_tab_offers_none_of_it(open_fed):
+    """Off, the enrollment, the leases and the takeover are not offered; the card switches
+    it on, and then they are."""
+    app = open_fed(fed={'enabled': True, 'members': [_member(2, 'hamburg'), _member(3, 'berlin')],
+                        'dr': False})
+    assert app.open_tab()
+    page = app.page
+    card = page.locator('[data-fed-dr="off"]')
+    card.wait_for(timeout=5000)
+    assert page.locator('[data-fed-unenrolled], [data-fed-own-leases], [data-fed-shadows]').count() == 0
+    assert not page.locator('[data-fed-leases-error]').count()
+    before = app.fed_calls('leases')
+    page.locator('[data-fed-dr-flip]').click()
+    page.locator('[data-fed-dr="on"]').wait_for(timeout=5000)
+    assert app.server.bodies['/api/federation/dr'] == [{'enabled': True}]
+    # switched on, the leases are read at once, and what they hold is shown again
+    page.wait_for_timeout(800)
+    assert app.fed_calls('leases') > before
+
+
+def test_runtime_disaster_recovery_that_holds_clusters_does_not_switch_off(open_fed):
+    app = open_fed(fed={'enabled': True, 'members': [_member(2, 'hamburg'), _member(3, 'berlin')],
+                        'dr_blockers': ['enrolled']})
+    assert app.open_tab()
+    page = app.page
+    page.locator('[data-fed-dr="on"]').wait_for(timeout=5000)
+    assert page.locator('[data-fed-dr-flip]').is_disabled()
+    assert page.locator('[data-fed-dr-blocked]').count() == 1

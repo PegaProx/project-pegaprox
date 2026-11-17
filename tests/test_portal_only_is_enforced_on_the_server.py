@@ -210,7 +210,8 @@ def test_every_other_api_route_refuses_a_portal_account(world, db, credential, m
         if rule.endpoint in UNREAD:
             # reads no credential, says the same to anyone
             expected = (200, None)
-        elif (rule.endpoint.startswith('federation.')
+        elif (rule.endpoint.startswith(('federation.', 'federation_relay.'))
+              and rule.endpoint != 'federation_relay.console_token'
               and (rule.endpoint, method) not in _OPEN_WHILE_OFF
               and getattr(world.app.view_functions.get(rule.endpoint), '_pp_auth',
                           None) is not None):

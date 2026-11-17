@@ -475,6 +475,11 @@ EXITS = {
     # the members of a federation: signed calls to other PegaProx instances on kept
     # sessions, never to a cluster, and none at all while the federation is switched off
     ('pegaprox/core/federation.py', '_session_for', 'http-session'): (1, 'peer'),
+    # linked mode: the console tunnel to another member's own console server, on its
+    # address and pinned to its certificate; that member checks the console token, the
+    # cluster and the guest or node as for its own users
+    ('pegaprox/core/federation_relay.py', 'open_console', 'socket'): (1, 'peer'),
+    ('pegaprox/core/federation_relay.py', 'open_console', 'ws'): (1, 'peer'),
     # the health check of a witness: its own port
     ('pegaprox/witness.py', 'cmd_health', 'socket'): (1, 'local'),
     # and its own port at the address it paired with (the other socket only binds, to
@@ -525,12 +530,12 @@ def test_the_inventory_counts_what_the_report_says():
     # less the ESXi guest config over REST (the API has no such call), and the session of
     # the federation's member calls (kept per member address since the batched rounds),
     # the three frees of a partial volume of the XCP-ng transfer in one helper and the
-    # cleanup of a failed ESXi disk:
-    # 259 calls out of this process, 156 (function, kind) pairs in 142 functions; 45 of
+    # cleanup of a failed ESXi disk, and the console tunnel of the federation's linked mode:
+    # 261 calls out of this process, 158 (function, kind) pairs in 143 functions; 45 of
     # them guarded at the exit and 87 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 259 and len(EXITS) == 156
-    assert len({(f, q) for f, q, _k in EXITS}) == 142
+    assert sum(n for n, _v in EXITS.values()) == 261 and len(EXITS) == 158
+    assert len({(f, q) for f, q, _k in EXITS}) == 143
     assert by['guard'] == 45 and by['client'] == 87
 
 
@@ -776,6 +781,11 @@ AUTOMATIONS = {
     # A cluster this instance lost to another member has its manager stopped in the
     # same thread, nothing new is started for it
     ('pegaprox/core/federation.py', 'start_workers'): (2, 'peer'),
+    # linked mode: one pull of the accounts of a member whose account has not arrived yet
+    # (at most once per member and half minute), and the reader of a console tunnel, which
+    # only passes another member's console bytes to the browser
+    ('pegaprox/core/federation_relay.py', '_pull_soon'): (1, 'peer'),
+    ('pegaprox/api/federation_relay.py', '_pump'): (1, 'peer'),
     # the watch over what is under way on an enrolled cluster: it only stops node commands
     # and closes SSH clients of a cluster whose federation lease is gone, nothing goes out
     ('pegaprox/core/ha_transport.py', '_watch_start'): (1, 'local'),
