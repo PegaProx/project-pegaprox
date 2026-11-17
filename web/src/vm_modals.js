@@ -4631,7 +4631,11 @@
             const [estimatedDiskGb, setEstimatedDiskGb] = useState(0);  // Track disk size for warnings
             const [unusedEntries, setUnusedEntries] = useState([]);  // MK May 2026 (#414): detached-but-not-removed disks/ISOs
 
-            const availableClusters = clusters.filter(c => c.id !== sourceCluster?.id);
+            // LW Nov 2026 - linked mode: a Proxmox VE cluster of another site is a target too; the site
+            // that leads it makes the token of the migration (/api/federation/migrate)
+            const availableClusters = clusters.filter(c => c.id !== sourceCluster?.id
+                && (!c.fed || (c.connected && (c.cluster_type || 'proxmox') === 'proxmox')));
+            const crossSite = !!(sourceCluster?.fed || availableClusters.find(c => c.id === targetCluster)?.fed);
             const isQemu = vm.type === 'qemu';
             
             // Local authFetch helper
@@ -4921,7 +4925,7 @@
             // LW Oct 2026 - the Check step, with the options Start would send
             const check = useMigPreflight(JSON.stringify(buildPayload()));
             const runCheck = () => {
-                if (!targetCluster || !targetNode || check.busy) return;
+                if (!targetCluster || !targetNode || check.busy || crossSite) return;
                 check.run(() => migPfFetch(`${API_URL}/cross-cluster-migrate/preflight`, buildPayload(),
                     getAuthHeaders, t('migPfFailed')));
             };
@@ -5061,7 +5065,7 @@
                                 >
                                     <option value="">{t('selectCluster')}</option>
                                     {availableClusters.map(c => (
-                                        <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
+                                        <option key={c.id} value={c.id}>{clusterLabel(c)}{c.fed ? ` (${c.fed.site})` : ''}</option>
                                     ))}
                                 </select>
                             </div>
@@ -5256,11 +5260,17 @@
                                 </>
                             )}
 
+                            {targetCluster && targetNode && crossSite && (
+                                <div className="text-xs text-gray-400 flex items-start gap-2" data-fed-migrate-note>
+                                    <Icons.Globe />
+                                    <span>{t('linkedMigrateNote')}</span>
+                                </div>
+                            )}
                             {targetCluster && targetNode && (check.result ? (
                                 <MigPreflightView result={check.result} stale={check.stale} override={check.override}
                                     onOverride={check.tick} confirmed={check.confirmed} onConfirm={check.setConfirmed} />
                             ) : (
-                                <div className="text-xs text-gray-400 flex items-start gap-2" data-testid="mig-pf-hint">
+                                <div className={`text-xs text-gray-400 flex items-start gap-2${crossSite ? ' hidden' : ''}`} data-testid="mig-pf-hint">
                                     <Icons.Shield />
                                     <span>{t('migPfHint')}</span>
                                 </div>
@@ -5285,7 +5295,7 @@
                             <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">
                                 {t('cancel')}
                             </button>
-                            <button onClick={runCheck} disabled={!targetCluster || !targetNode || loading || check.busy}
+                            <button onClick={runCheck} disabled={!targetCluster || !targetNode || loading || check.busy || crossSite}
                                 data-testid="xc-migrate-check"
                                 className="flex items-center gap-2 px-4 py-2 text-gray-300 hover:text-white disabled:opacity-50">
                                 {check.busy ? <span className="flex animate-spin"><Icons.RotateCw /></span> : <Icons.Shield />}

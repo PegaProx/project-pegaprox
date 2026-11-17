@@ -540,6 +540,10 @@
                                                             : (t('locationNotSet') || 'Location not set')}
                                                     </div>
                                                 </div>
+                                                {/* LW Nov 2026 - another site's cluster is placed at its site */}
+                                                {c.fed ? (
+                                                    <span className="text-[10px] px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 flex-shrink-0">{c.fed.site}</span>
+                                                ) : (
                                                 <button
                                                     onClick={() => setEditing(isEditing ? null : c)}
                                                     className="text-xs px-2.5 py-1 rounded-md bg-proxmox-dark hover:bg-proxmox-hover text-gray-300 hover:text-white border border-proxmox-border whitespace-nowrap">
@@ -547,6 +551,7 @@
                                                         ? (t('close') || 'Close')
                                                         : (placed ? (t('editLocation') || 'Edit') : (t('setLocation') || 'Set'))}
                                                 </button>
+                                                )}
                                             </div>
                                             {isEditing && (
                                                 <div className="mt-3 pt-3 border-t border-proxmox-border/50">
