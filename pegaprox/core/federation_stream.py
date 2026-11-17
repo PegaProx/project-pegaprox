@@ -92,7 +92,7 @@ def reset_for_tests():
         feeds = [f for by_site in _feeds.values() for f in by_site.values()]
         _feeds.clear()
     for f in feeds:
-        f.stopped = True
+        f.stop()
     for b in (_streams_out, _streams_in):
         with b._lock:
             b._used, b._per = 0, {}
@@ -146,7 +146,7 @@ def watch(client_id, remote_ids, principal):
         if not mine:
             _feeds.pop(client_id, None)
     for f in stop:
-        f.stopped = True
+        f.stop()
     for f in start:
         f.start()
 
@@ -183,7 +183,7 @@ def unwatch(client_id):
     with _feeds_lock:
         mine = _feeds.pop(client_id, {})
     for f in mine.values():
-        f.stopped = True
+        f.stop()
 
 
 def _client_queue(client_id):
@@ -204,6 +204,18 @@ class Feed:
         self.principal = principal
         self.stopped = False
         self.dropped = 0
+        # the close of the connection under way: a feed stopped gives its slot back now, not
+        # when the site's next line comes (a selection switched to and fro held them all)
+        self._close = None
+
+    def stop(self):
+        self.stopped = True
+        close = self._close
+        if close is not None:
+            try:
+                close()
+            except Exception:
+                pass
 
     def start(self):
         threading.Thread(target=self.run, daemon=True, name='federation-feed').start()
@@ -261,11 +273,15 @@ class Feed:
                     lines, close = bounded_lines(resp.iter_content(chunk_size=65536)), resp.close
             if status != 200 or lines is None:
                 return False
+            self._close = close
+            if self.stopped:
+                return False
             return self.read(lines, nonce, rid, ha_wire.public_key(rec.get('public_key') or ''))
         except Exception as e:
             logging.info(f'[FED] live feed of site {self.iid[:8]} broke off: {type(e).__name__}')
             return False
         finally:
+            self._close = None
             if close is not None:
                 try:
                     close()
@@ -440,7 +456,7 @@ def leading_stream(sender, call, row, nonce, rid):
                     yield signed_line(nonce, rid, seq, '{"type":"keepalive"}')
                 if now >= next_check:
                     next_check = now + RECHECK
-                    now_scope = _recheck(sender, call, raws, now_scope)
+                    now_scope, eff_now, admin_now = _recheck(sender, call, raws, now_scope)
                     if not now_scope:
                         return
                     with sse_clients_lock:
@@ -448,6 +464,11 @@ def leading_stream(sender, call, row, nonce, rid):
                         if entry is None:
                             return
                         entry['clusters'] = list(now_scope)
+                        # the role and the admin flag are what the per-guest filters of
+                        # the broadcast decide with: as the account stands now, as the
+                        # browser's own stream takes them (api/realtime.py)
+                        entry['effective_role'] = eff_now
+                        entry['is_admin'] = admin_now
         except GeneratorExit:
             pass
         finally:
@@ -477,16 +498,17 @@ class _Answer:
 
 
 def _recheck(sender, call, raws, now_scope):
-    """What the stream may still carry: [] once the switch is off, the site is no member,
-    the mirror is refused (disabled, unmapped, gone) or none of its clusters is left."""
+    """(clusters, effective role, admin): what the stream may still carry and as whom.
+    No clusters once the switch is off, the site is no member, the mirror is refused
+    (disabled, unmapped, gone) or none of its clusters is left."""
     try:
         if not fed.enabled() or fed.member_record(sender) is None:
-            return []
+            return [], None, False
         row, why = relay.resolve_principal(sender, call)
         if why:
-            return []
-        _i, _e, _a, scope = _scope(row['username'], call.get('tok'), raws)
+            return [], None, False
+        _i, eff, admin, scope = _scope(row['username'], call.get('tok'), raws)
     except Exception as e:
         logging.warning(f'[FED] a live feed of site {sender[:8]} could not be re-checked: {e}')
-        return []
-    return [r for r in now_scope if r in scope]
+        return [], None, False
+    return [r for r in now_scope if r in scope], eff, admin

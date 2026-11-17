@@ -871,10 +871,9 @@ def test_a_tls_error_on_the_answer_is_no_unsent_call(monkeypatch):
 def test_a_site_over_its_rate_is_told_to_wait(linked, monkeypatch):
     """The leading site counts a member's relayed calls on their own, whatever address
     they come from."""
-    from pegaprox.api import federation_relay as api_relay
     from pegaprox.utils.ratelimit import SlidingWindow
     a, b = linked
-    monkeypatch.setattr(api_relay, '_relay_rate', SlidingWindow(limit=1, window=60, max_keys=8))
+    monkeypatch.setattr(relay, '_sender_rate', SlidingWindow(limit=1, window=60, max_keys=8))
     sid = _session(a, 'alice')
     assert _get(a, _relay_path(b, '/status'), sid).status_code == 200
     r = _get(a, _relay_path(b, '/status'), sid)

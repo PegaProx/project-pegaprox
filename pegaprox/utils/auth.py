@@ -818,8 +818,11 @@ def mfa_enrolment_state(user: dict, settings: dict, username: str = '') -> str:
         return MFA_NOT_DUE
     # MK Nov 2026 - a mirror of a federation member enrols at its home: its TOTP secret
     # never travels and the setup routes refuse it here. A passkey it has is what
-    # auth_login asks for instead, so a mirror with one is enrolled
-    if user.get('fed_home') and username and _has_passkey(username):
+    # auth_login asks for instead, so a mirror with one is enrolled. One with TOTP at its
+    # home (totp_enabled travels) is enrolled too: every sign-in of it, at any site, has
+    # its home check the code, and without the home's answer it signs in at its home only
+    if user.get('fed_home') and (user.get('totp_enabled')
+                                 or (username and _has_passkey(username))):
         return MFA_NOT_DUE
     # OIDC/Entra accounts use their IdP's MFA
     if user.get('auth_source', 'local') in ('oidc', 'entra'):

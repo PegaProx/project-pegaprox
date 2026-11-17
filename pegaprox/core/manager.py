@@ -14609,7 +14609,9 @@ echo "AGENT_INSTALLED_OK"
                 return self._unanswered_remote_migrate(node, vmid, vm_type, target_endpoint, sent,
                                                        int(time.monotonic() - sent))
             else:
-                error_msg = response.text
+                # Proxmox may say what it was handed: the secret of the target's token stays
+                # out of the log and of the answer
+                error_msg = re.sub(r'(PVEAPIToken=[^=\s,"]+=)[^\s,"]+', r'\1***', response.text or '')
                 self.logger.error(f"[ERROR] Remote migration failed: {error_msg}")
                 return {'success': False, 'error': error_msg}
                 

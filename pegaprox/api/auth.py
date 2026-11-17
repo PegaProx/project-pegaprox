@@ -1218,7 +1218,9 @@ def auth_login():
     # A home that does not answer, or an account that signs in at its home only: the
     # sign-in goes on as before, for this site alone
     fed_signin = None
-    if user.get('fed_home') and not ldap_authenticated and not webauthn_proof:
+    # MK Nov 2026 - only a passkey the account has leaves the home out (it proves itself to
+    # this site, below); any proof field sent for an account without one did so as well
+    if user.get('fed_home') and not ldap_authenticated and not (webauthn_proof and has_webauthn):
         from pegaprox.core import federation as _fed_core, federation_signin
         if _fed_core.enabled():
             fed_signin = federation_signin.at_home(username, password, totp_code or None, user)
