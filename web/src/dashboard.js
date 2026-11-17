@@ -1630,12 +1630,13 @@
             if (isCorporate) {
                 return (
                     <div onClick={onSelect} tabIndex={0} data-fed-cluster={cluster.id}
-                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); } }}
+                        onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelect(); } }}
                         className="corp-tree-item cursor-pointer flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5"
                         style={selected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: 'var(--corp-text-secondary)'}}>
-                        <span onClick={(e) => { e.stopPropagation(); onToggle(); }} className="flex-shrink-0 p-0.5 hover:bg-white/10 rounded">
+                        <button type="button" onClick={(e) => { e.stopPropagation(); onToggle(); }} aria-expanded={expanded} aria-label={name}
+                            className="flex-shrink-0 p-0.5 hover:bg-white/10 rounded">
                             {expanded ? <Icons.ChevronDown className="w-3 h-3" /> : <Icons.ChevronRight className="w-3 h-3" />}
-                        </span>
+                        </button>
                         <Icons.Database className="w-4 h-4 flex-shrink-0" style={{color: cluster.connected ? 'var(--corp-accent)' : 'var(--color-error)'}} />
                         <span className="truncate flex-1 font-medium">{name}</span>
                         {badge}
@@ -1643,18 +1644,20 @@
                 );
             }
             return (
-                <div onClick={onSelect} data-fed-cluster={cluster.id}
+                <div onClick={onSelect} data-fed-cluster={cluster.id} tabIndex={0}
+                    onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelect(); } }}
                     className={`p-3 rounded-xl cursor-pointer transition-all border ${selected ? 'bg-proxmox-orange/10 border-proxmox-orange/50' : 'bg-proxmox-card border-proxmox-border hover:border-proxmox-orange/30'}`}>
                     <div className="flex items-center gap-2 min-w-0">
-                        <span onClick={(e) => { e.stopPropagation(); onToggle(); }} className="flex-shrink-0 p-0.5 hover:bg-white/10 rounded">
+                        <button type="button" onClick={(e) => { e.stopPropagation(); onToggle(); }} aria-expanded={expanded} aria-label={name}
+                            className="flex-shrink-0 p-0.5 hover:bg-white/10 rounded">
                             {expanded ? <Icons.ChevronDown className="w-3 h-3" /> : <Icons.ChevronRight className="w-3 h-3" />}
-                        </span>
+                        </button>
                         <div className={`w-2 h-2 rounded-full flex-shrink-0 ${cluster.connected ? 'bg-green-500 status-online' : 'bg-red-500'}`} />
                         <h3 className="font-medium text-sm truncate flex-1">{name}</h3>
                         {badge}
                     </div>
                     {!cluster.connected && (
-                        <div className="flex gap-1 mt-2"><span className="text-[10px] bg-red-500/10 text-red-400 px-1.5 py-0.5 rounded">Offline</span></div>
+                        <div className="flex gap-1 mt-2"><span className="text-[10px] bg-red-500/10 text-red-400 px-1.5 py-0.5 rounded">{t('offline')}</span></div>
                     )}
                 </div>
             );
@@ -15562,7 +15565,7 @@
                 else toggleFavorite('vm', f.cluster_id, f.vmid, f.type === 'lxc' ? 'lxc' : 'qemu');
             };
             const renderFavoritesGroup = () => {
-                const byId = new Map(clusters.map(c => [c.id, c]));
+                const byId = new Map(allClusters.map(c => [c.id, c]));
                 const rows = [];
                 (favorites.clusters || []).forEach(cid => {
                     const c = byId.get(cid);
@@ -21726,7 +21729,7 @@
                             they surface over the cloud shell. The classic copies live in the main
                             return; the skins are mutually exclusive so only one set ever mounts. */}
                         {configVm && (configVm._clusterId || selectedCluster) && (
-                            <ConfigModal vm={configVm} clusterId={configVm._clusterId || selectedCluster.id} allClusters={clusters} dashboardAuthFetch={authFetch} onClose={handleCloseConfig} addToast={addToast} isCorporate={false} />
+                            <ConfigModal vm={configVm} clusterId={configVm._clusterId || selectedCluster.id} allClusters={allClusters} dashboardAuthFetch={authFetch} onClose={handleCloseConfig} addToast={addToast} isCorporate={false} />
                         )}
                         {cloudBulk && (
                             <GuestBulkActionModal action={cloudBulk.action} guests={cloudBulk.guests} authFetch={authFetch}
@@ -32078,7 +32081,7 @@
                         <ConfigModal
                             vm={configVm}
                             clusterId={configVm._clusterId || selectedCluster.id}
-                            allClusters={clusters}
+                            allClusters={allClusters}
                             dashboardAuthFetch={authFetch}
                             onClose={handleCloseConfig}
                             addToast={addToast}
@@ -34766,10 +34769,13 @@
 
                 (async () => {
                     try {
-                        const resp = await fetch(`${API_URL}/clusters`, {
+                        // LW Nov 2026 - another site's cluster (linked mode) is in the list of the linked sites
+                        const remote = String(clusterId).includes('~');
+                        const resp = await fetch(remote ? `${API_URL}/federation/linked` : `${API_URL}/clusters`, {
                             credentials: 'include', headers: getAuthHeaders() });
                         if (!resp.ok) throw new Error(`clusters ${resp.status}`);
-                        const list = await resp.json();
+                        const got = await resp.json();
+                        const list = remote ? ((got && got.sites) || []).flatMap(s => s.clusters || []) : got;
                         const cluster = (Array.isArray(list) ? list : []).find(c => c.id === clusterId);
                         if (!cluster) throw new Error('noAccess');
                         if (cancelled) return;
