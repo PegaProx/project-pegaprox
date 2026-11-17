@@ -340,7 +340,8 @@ def test_the_two_site_strings_say_what_the_code_does():
                                                          'not confirmed that it was told')
     assert _value(de, 'fedSwitchDesc') == (
         'Verbindet diese Instanz mit bis zu sieben weiteren PegaProx-Instanzen: Konten werden zwischen den '
-        'Standorten gespiegelt, und die Cluster eines endgültig ausgefallenen Standorts lassen sich übernehmen. '
+        'Standorten gespiegelt, und mit der Disaster Recovery unten lassen sich die Cluster eines endgültig '
+        'ausgefallenen Standorts übernehmen. '
         'Ab drei Standorten schützt die Mehrheit einen aufgenommenen Cluster vor zwei Schreibern. Bei zwei '
         'Standorten übernimmt ein Admin einen Cluster von Hand, wenn der andere Standort nicht antwortet; läuft '
         'dieser noch, schreiben beide Standorte auf den Cluster, bis sie einander wieder erreichen.')

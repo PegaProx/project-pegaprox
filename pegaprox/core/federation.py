@@ -523,13 +523,32 @@ def dr_enabled():
     if held is not None and 0 <= now - held[1] < SWITCH_CACHE_SECONDS:
         return held[0]
     try:
-        value = _db().get_server_setting(DR_SETTING_KEY, False) is True
+        raw = _db().get_server_setting(DR_SETTING_KEY, None)
+        if raw is None:
+            raw = _dr_from_before_the_switch()
+        value = raw is True
     except Exception as e:
         value = held[0] if held is not None else False
         _say_once('dr-read', f'[FED] the disaster recovery setting could not be read, it '
                              f'stays {"on" if value else "off"}: {e}')
     _runtime['dr'] = (value, now)
     return value
+
+
+def _dr_from_before_the_switch():
+    """An instance that enrolled clusters, or holds copies of other sites' clusters, before
+    the switch existed keeps its disaster recovery on: off, its writes there would be refused.
+    Decided once and saved; anything else starts with it off."""
+    try:
+        held = _db().conn.execute(
+            "SELECT 1 FROM clusters WHERE fed_owner != '' LIMIT 1").fetchone() is not None
+    except Exception:
+        held = False
+    if held:
+        _db().save_server_setting(DR_SETTING_KEY, True)
+        logging.warning('[FED] clusters are enrolled from before disaster recovery had a '
+                        'switch of its own: it stays on')
+    return held
 
 
 def dr_blockers():
@@ -574,23 +593,15 @@ def set_dr_enabled(value):
         raise FederationError(f'The server sets this with {DR_ENV_SWITCH}='
                               f'{"1" if f == "on" else "0"} - change it there',
                               code='FED_FORCED')
-    if not value and dr_enabled():
-        blockers = dr_blockers()
-        if blockers:
-            raise FederationError(DR_IN_USE_ERROR.format(reasons=', '.join(blockers)),
-                                  code='FED_DR_IN_USE', blockers=blockers)
-    was_on = dr_enabled()
-    _db().save_server_setting(DR_SETTING_KEY, value)
-    _runtime['dr'] = (value, time.monotonic())
-    if value and not was_on:
-        # the snapshots pulled while it was off left the cluster copies and the ownership
-        # records out: the etags go, so the next sync takes every snapshot whole
-        try:
-            conn = _db().conn
-            conn.execute('DELETE FROM federation_sync_state')
-            conn.commit()
-        except Exception as e:
-            logging.warning(f'[FED] the next sync may skip the cluster copies: {e}')
+    # under the lock an enroll writes its first owner under: neither slips past the other
+    with _lock:
+        if not value and dr_enabled():
+            blockers = dr_blockers()
+            if blockers:
+                raise FederationError(DR_IN_USE_ERROR.format(reasons=', '.join(blockers)),
+                                      code='FED_DR_IN_USE', blockers=blockers)
+        _db().save_server_setting(DR_SETTING_KEY, value)
+        _runtime['dr'] = (value, time.monotonic())
     return dr_status()
 
 
@@ -1665,9 +1676,14 @@ def _send(url, fingerprints, method, path, body=None, headers=None, read_timeout
     return status, parsed, rh
 
 
-def _wire_call(url, fingerprints, method, path, data, headers, read_timeout, cap):
+def _wire_call(url, fingerprints, method, path, data, headers, read_timeout, cap,
+               sent=None):
+    """`sent`, a dict when given, gets 'never': True when the request did not leave this
+    instance: no connection, or no TLS session under any pin."""
     import requests
     if not url or not _url_ok(url + path):
+        if sent is not None:
+            sent['never'] = True
         return 0, None, {}
     pins = list(fingerprints or []) or ['']
     for i, fp in enumerate(pins):
@@ -1681,9 +1697,13 @@ def _wire_call(url, fingerprints, method, path, data, headers, read_timeout, cap
                 # the other host of an HA group answers under the next pin
                 continue
             logging.warning(f'[FED] call to {url}{path}: the certificate matches no pin ({e})')
+            if sent is not None:
+                sent['never'] = True
             return 0, None, {}
         except Exception as e:
             logging.warning(f'[FED] call to {url}{path} failed: {type(e).__name__}')
+            if sent is not None and _never_connected(e):
+                sent['never'] = True
             return 0, None, {}
         try:
             # 304 is the conditional identity pull's "nothing changed", no redirect
@@ -1701,6 +1721,19 @@ def _wire_call(url, fingerprints, method, path, data, headers, read_timeout, cap
         finally:
             resp.close()
     return 0, None, {}
+
+
+def _never_connected(e):
+    """True for a request that failed before a connection stood: refused, no route, a
+    name that does not resolve, or the connect timeout. A break after that may have
+    delivered it."""
+    import requests
+    from urllib3.exceptions import ConnectTimeoutError
+    if isinstance(e, requests.exceptions.ConnectTimeout):
+        return True
+    if not isinstance(e, requests.exceptions.ConnectionError) or not e.args:
+        return False
+    return isinstance(getattr(e.args[0], 'reason', None), ConnectTimeoutError)
 
 
 def _call(iid, rec, method, path, body=None, read_timeout=10, extra_headers=None,
@@ -1874,11 +1907,6 @@ def accept_join(code, url, joiner_id, joiner_key, site, fingerprints=None, joine
     me = instance_id()
     if not me or joiner_id == me:
         raise FederationError('This instance cannot pair with itself', code='FED_CODE')
-    if joiner_dr is not True and _db().conn.execute(
-            "SELECT 1 FROM clusters WHERE fed_owner != '' LIMIT 1").fetchone():
-        raise FederationError('Clusters of this federation are enrolled, and the joining '
-                              'instance has its disaster recovery off: switch it on there '
-                              'first, under Federation', code='FED_DR_OFF_AT')
     secret = parts['secret']
     with _lock:
         st = _lease_state()
@@ -1907,6 +1935,13 @@ def accept_join(code, url, joiner_id, joiner_key, site, fingerprints=None, joine
         if len(members()) + 1 >= MAX_SITES:
             raise FederationError(f'The federation has {MAX_SITES} sites, the most it can '
                                   'hold', code='FED_FULL')
+        # asked only once the code held: nobody without one learns whether clusters are
+        # enrolled here
+        if joiner_dr is not True and _db().conn.execute(
+                "SELECT 1 FROM clusters WHERE fed_owner != '' LIMIT 1").fetchone():
+            raise FederationError('Clusters of this federation are enrolled, and the joining '
+                                  'instance has its disaster recovery off: switch it on there '
+                                  'first, under Federation', code='FED_DR_OFF_AT')
         _refuse_pairing_with_old_rows()
         rec = {'url': url, 'public_key': joiner_key, 'site': _clean_site(site),
                'fingerprints': _clean_fps(fingerprints or [])}
@@ -4281,7 +4316,11 @@ def _apply_credentials(conn, home, table, incoming, maps, scope, seen, report, c
             changes.append((kind, _label(table, dict(held_row)), '-', 'deleted'))
 
 
-def apply_identity_snapshot(body, sender):
+# the end of a pull's etag when the snapshot was taken with the disaster recovery off
+NODR_MARK = '~nodr'
+
+
+def apply_identity_snapshot(body, sender, dr=None):
     """Take a snapshot member `sender` signed for us: its users, tokens and passkeys
     mirrored, resolved through the mapping, our own rows never touched. Returns the report
     the admin route shows; raises FederationError for a body that is no snapshot of that
@@ -4290,6 +4329,8 @@ def apply_identity_snapshot(body, sender):
 
     Only what really changed is written and audited: a held row equal to what it would
     become is left alone."""
+    if dr is None:
+        dr = dr_enabled()
     if not isinstance(body, dict) or body.get('fed') != FED_MARK \
             or not isinstance(body.get('rows'), dict):
         raise FederationError('That answer is no identity snapshot')
@@ -4330,8 +4371,7 @@ def apply_identity_snapshot(body, sender):
         # the clusters the home leads become mirrors in the same transaction - one
         # snapshot, one commit, and the etag below only says 'pulled' when both went in
         # (with the disaster recovery off, no copy of another site's cluster is kept)
-        _apply_cluster_mirrors(home, body.get('clusters') if dr_enabled() else None,
-                               report, changes)
+        _apply_cluster_mirrors(home, body.get('clusters') if dr else None, report, changes)
         conn.commit()
     except Exception:
         _rollback(conn)
@@ -4345,7 +4385,8 @@ def apply_identity_snapshot(body, sender):
     for name in sorted(ended):
         _end_sessions_of(name)
     _audit_applied(home, changes, raised)
-    _note_pull(home, body.get('etag') or '', report)
+    etag = body.get('etag') or ''
+    _note_pull(home, etag + NODR_MARK if etag and not dr else etag, report)
     return report
 
 
@@ -4455,11 +4496,17 @@ def _pull_identities(sender, extra_headers=None):
         return None
     headers = dict(extra_headers or {})
     state = sync_state().get(sender) or {}
-    if state.get('etag'):
-        headers['If-None-Match'] = state['etag']
+    # a snapshot taken with the disaster recovery off left the cluster copies and the
+    # records out, and its etag says so (NODR_MARK): with it on, that etag is no shortcut
+    dr = dr_enabled()
+    etag = state.get('etag') or ''
+    if etag.endswith(NODR_MARK):
+        etag = '' if dr else etag[:-len(NODR_MARK)]
+    if etag:
+        headers['If-None-Match'] = etag
     status, body, _h = call_peer(sender, 'GET', IDENTITIES_PATH, None, extra_headers=headers,
                                  cap=MAX_SNAPSHOT_ANSWER)
-    if status == 304 and state.get('etag'):
+    if status == 304 and etag:
         _note_pull(sender, state['etag'], {'unchanged': state.get('rows') or 0})
         return {'unchanged': True, 'quarantined': _quarantined_count(sender)}
     if status == 304:
@@ -4469,10 +4516,10 @@ def _pull_identities(sender, extra_headers=None):
     if status != 200 or not isinstance(body, dict):
         logging.warning(f"[FED] identity pull from {sender} answered {status or 'nothing'}")
         return {'failed': True}
-    if body.get('etag') and state.get('etag') == body.get('etag'):
+    if body.get('etag') and etag == body.get('etag'):
         _note_pull(sender, state['etag'], {'unchanged': state.get('rows') or 0})
         return {'unchanged': True, 'quarantined': _quarantined_count(sender)}
-    if isinstance(body.get('records'), list) and body['records'] and dr_enabled():
+    if isinstance(body.get('records'), list) and body['records'] and dr:
         # before the cluster rows: a cluster this instance took over and lost in an HA
         # failover is led here again first, and its row is not dropped as one the
         # sender no longer lists
@@ -4482,7 +4529,7 @@ def _pull_identities(sender, extra_headers=None):
                             'its snapshot waits for the next sync')
             return {'failed': True}
     try:
-        return apply_identity_snapshot(body, sender)
+        return apply_identity_snapshot(body, sender, dr=dr)
     except Exception as e:
         logging.warning(f"[FED] identity pull from {sender} refused: {e}")
         return {'failed': True}
@@ -5025,6 +5072,23 @@ def guard_exit(cluster_id, action, kind=None):
     a thaw: what is under way is kept for cut_cluster only after a write."""
     if not cluster_id or kind in ('console', 'login', 'thaw'):
         return False
+    if not enabled():
+        try:
+            owner = cluster_owner(cluster_id)
+        except FederationError:
+            owner = 'unknown'
+        if not owner:
+            return True
+        _say_once(('refused-off', cluster_id), f'[FED] {action} to cluster {cluster_id} '
+                                               'refused: it is enrolled in a federation that '
+                                               'is switched off here')
+        raise LeaseRefused(cluster_id, action)
+    from pegaprox.core import ha
+    if kind == 'ssh' and ha.in_read_request():
+        # a GET answered here: the command is how the read gets to the node
+        return False
+    if ha.reading_now():
+        return False
     if not dr_enabled():
         # with disaster recovery off nothing is leased: a row nobody owns is this
         # instance's alone, a row a federation still owns is fenced as with the switch off
@@ -5034,16 +5098,14 @@ def guard_exit(cluster_id, action, kind=None):
             owner = 'unknown'
         if not owner:
             return True
-        _say_once(('refused-off', cluster_id), f'[FED] {action} to cluster {cluster_id} '
-                                               'refused: it is enrolled in a federation whose '
-                                               'disaster recovery is switched off here')
+        said = _refusal_list()
+        if said is not None:
+            said.append(cluster_id)
+        _say_once(('refused-dr-off', cluster_id), f'[FED] {action} to cluster {cluster_id} '
+                                                  'refused: it is enrolled in a federation '
+                                                  'whose disaster recovery is switched off '
+                                                  'here')
         raise LeaseRefused(cluster_id, action)
-    from pegaprox.core import ha
-    if kind == 'ssh' and ha.in_read_request():
-        # a GET answered here: the command is how the read gets to the node
-        return False
-    if ha.reading_now():
-        return False
     try:
         ok = takes_writes_for(cluster_id)
     except FederationError:
