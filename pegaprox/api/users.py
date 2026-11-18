@@ -1189,7 +1189,9 @@ def create_user():
         }
     })
 
-@bp.route('/api/users/<username>', methods=['PUT'])
+# JB Nov 2026 (#1367) - path: the pre-#1141 OIDC keys carry a '/' from the sub. The rules with
+# a static tail (/password, /2fa, /permissions ...) still match first
+@bp.route('/api/users/<path:username>', methods=['PUT'])
 @require_auth(perms=['admin.users'])
 def update_user(username):
     """Update a user (admin only)"""
@@ -1360,7 +1362,7 @@ def update_user(username):
     
     return jsonify({'success': True})
 
-@bp.route('/api/users/<username>', methods=['DELETE'])
+@bp.route('/api/users/<path:username>', methods=['DELETE'])
 @require_auth(perms=['admin.users'])
 def delete_user(username):
     """Delete a user (admin only)"""

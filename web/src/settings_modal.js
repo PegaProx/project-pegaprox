@@ -4489,7 +4489,7 @@
             
             const handleUpdateUser = async (username, updates) => {
                 try {
-                    const response = await fetch(`${API_URL}/users/${username}`, {
+                    const response = await fetch(`${API_URL}/users/${encodeURIComponent(username)}`, {
                         method: 'PUT',
                         credentials: 'include',
                         headers: {
@@ -4519,7 +4519,7 @@
                 if (!confirm(t('deleteUserConfirm'))) return;
                 
                 try {
-                    const response = await fetch(`${API_URL}/users/${username}`, {
+                    const response = await fetch(`${API_URL}/users/${encodeURIComponent(username)}`, {
                         method: 'DELETE',
                         credentials: 'include',
                         headers: getAuthHeaders()
