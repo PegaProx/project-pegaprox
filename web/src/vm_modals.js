@@ -860,7 +860,7 @@
 
         // VM Detail Panel Component (inline, not modal)
         // LW: this shows when you click a VM in detail view mode
-        function VmDetailPanel({ vm, clusterId, clusterType = 'proxmox', onAction, onOpenConsole, onOpenSpice, onOpenLxcShell, onOpenConfig, onMigrate, onClone, onForceStop, onDelete, onCrossClusterMigrate, showCrossCluster, actionLoading, onShowMetrics, addToast }) {
+        function VmDetailPanel({ vm, clusterId, clusterType = 'proxmox', nodeUiSuffix = '', onAction, onOpenConsole, onOpenSpice, onOpenLxcShell, onOpenConfig, onMigrate, onClone, onForceStop, onDelete, onCrossClusterMigrate, showCrossCluster, actionLoading, onShowMetrics, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders, haReadOnly, haConsolesElsewhere } = useAuth();
             const acts = !haReadOnly;  // #625: a standby shows this VM, the active acts on it
@@ -923,8 +923,11 @@
                 vm.ipAddress,
                 vm.node
             ].find(value => typeof value === 'string' && value.trim());
-            const proxmoxUrl = proxmoxHost
-                ? `https://${proxmoxHost.trim()}:8006/#v1:0:=${encodeURIComponent(`${vm.type}/${vm.vmid}`)}:4:::::::`
+            // #1381 - with a node suffix on the cluster the link goes to <node>.<suffix>, as in the table
+            const proxmoxSuffix = (nodeUiSuffix || '').trim().replace(/^\.+/, '');
+            const proxmoxLinkHost = proxmoxSuffix && vm.node ? `${vm.node}.${proxmoxSuffix}` : (proxmoxHost || '').trim();
+            const proxmoxUrl = proxmoxLinkHost
+                ? `https://${proxmoxLinkHost}:8006/#v1:0:=${encodeURIComponent(`${vm.type}/${vm.vmid}`)}:4:::::::`
                 : null;
 
             const handleAction = async (action) => {
