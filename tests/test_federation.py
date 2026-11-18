@@ -25,6 +25,7 @@ import contextlib
 import contextvars
 import io
 import json
+import math
 import os
 import secrets
 import threading
@@ -195,7 +196,9 @@ class Clock:
 
 @pytest.fixture
 def clock(monkeypatch):
-    c = Clock(fl._lease_now())
+    # from the next whole second: the boot clock of a fresh CI runner sits near 1024 s,
+    # where t + 28 rounds and t + 10 does not, and int() makes a lease's 18 s left 17
+    c = Clock(math.ceil(fl._lease_now()))
     monkeypatch.setattr(fl, '_lease_now', c)
     return c
 
