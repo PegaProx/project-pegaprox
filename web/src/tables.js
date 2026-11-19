@@ -2925,6 +2925,7 @@
                                         vm={selectedDetailVm}
                                         clusterId={clusterId}
                                         clusterType={((clusters || []).find(c => c.id === clusterId) || sourceCluster || {}).cluster_type || 'proxmox'}
+                                        nodeUiSuffix={sourceCluster?.node_ui_suffix || ''}
                                         onAction={handleAction}
                                         onOpenConsole={onOpenConsole}
                                         onOpenSpice={onOpenSpice}
