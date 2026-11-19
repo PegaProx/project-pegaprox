@@ -8800,6 +8800,7 @@ def snapshots_overview_delete():
     snapshots = data.get('snapshots', [])
     from pegaprox.utils.sanitization import validate_hostname
     from pegaprox.utils.rbac import acts_as_admin
+    from pegaprox.api.snapshots import _delete_done
     is_admin = acts_as_admin(user_data)
     user_clusters = get_user_clusters(user_data)   # None => all clusters
     
@@ -8847,12 +8848,15 @@ def snapshots_overview_delete():
                 continue
 
             result = mgr.delete_snapshot(node, vmid, vm_type, snapname)
-            
-            if result.get('success'):
+            # #1347: PVE takes the guest's lock only inside the delete task, so the next
+            # delete is sent once this task has ended, and only a task that ended OK counts
+            gone, why = _delete_done(mgr, node, result)
+
+            if gone:
                 deleted_count += 1
                 log_audit(user, 'snapshot.deleted', f"{vm_type.upper()} {vmid} - snapshot '{snapname}' deleted", cluster=mgr.config.name)
             else:
-                errors.append(f"Failed to delete {snapname}: {result.get('error', 'Unknown error')}")
+                errors.append(f"Failed to delete {snapname}: {why}")
                 
         except Exception as e:
             errors.append(f"Error deleting snapshot: {e}")
