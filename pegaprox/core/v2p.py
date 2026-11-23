@@ -6281,6 +6281,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     esxi_test_path = f"/vmfs/volumes/{datastore}/{vm_dir}/{flat0}"
     
     qemu_ssh_works = False
+    no_ssh_driver = False
     qtest_spec = json.dumps({'file.driver': 'ssh', 'file.host': esxi_host, 'file.port': 22,
                              'file.path': esxi_test_path, 'file.user': esxi_user,
                              'file.host-key-check.mode': 'known_hosts',
@@ -6294,6 +6295,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         task.log("QEMU SSH driver: connection OK")
     else:
         task.log(f"QEMU SSH driver test failed: {_qemu_open_reason(task._redact(qtest_out))}")
+        # JB Nov 2026 (#1269) - the QEMU of PVE 9 is built without the ssh block driver: no URL
+        # syntax can connect then, and "libssh cannot connect" below would send people looking for a network fault
+        no_ssh_driver = "Unknown driver 'ssh'" in qtest_out
+    if not qemu_ssh_works and not no_ssh_driver:
         # Try alternative: qemu-img with simpler SSH URL syntax
         import urllib.parse
         qt2_url = f"ssh://{esxi_user}@{esxi_host}{urllib.parse.quote(esxi_test_path, safe='/')}"
@@ -6312,9 +6317,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     # ----------------------------------------------------------------
     https_boot = False
     https_flat_paths = []
+    ssh_why = "QEMU on this node has no ssh driver" if no_ssh_driver else "libssh cannot connect"
     
     if not qemu_ssh_works:
-        task.log("libssh cannot connect - trying HTTPS-backed boot (ESXi datastore)...")
+        task.log(f"{ssh_why} - trying HTTPS-backed boot (ESXi datastore)...")
 
         import urllib.parse
         # NS Oct 2026 (#1098) - the password sat in the URL as basic auth, so it landed in
@@ -6410,7 +6416,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     sshfs_flat_paths = []
     
     if not qemu_ssh_works and not https_boot:
-        task.log("libssh cannot connect - trying SSHFS-backed boot (OpenSSH)...")
+        task.log(f"{ssh_why} - trying SSHFS-backed boot (OpenSSH)...")
         
         # Verify SSHFS mount is still alive
         sshfs_ok = True
