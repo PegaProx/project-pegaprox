@@ -150,7 +150,7 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
 
 ### ESXi Migration
 - 🔀 **ESXi Import Wizard** - Migrate VMs from ESXi hosts to Proxmox
-- ⚡ **Near-Zero Downtime** - Transfer running VMs with minimal interruption (max. 1 VM recommended)
+- ⚡ **Live Migration Modes** - Copy running VMs and switch over at the end: Snapshot-Iterative catches up with the guest's writes through ESXi change tracking, so the downtime follows what the guest writes; Live Clone compares every block at the switchover, so its downtime grows with the disk size
 - 🔌 **Offline Migration** - Shut down and transfer for maximum reliability
 - 🔑 **SSH Required** - ESXi host must have SSH enabled
 

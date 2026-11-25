@@ -909,8 +909,8 @@ class VMwareManager:
             if not vm:
                 return {'error': 'VM not found'}
             try:
-                vm.CreateSnapshot_Task(name=name, description=description,
-                                        memory=memory, quiesce=quiesce)
+                task = vm.CreateSnapshot_Task(name=name, description=description,
+                                               memory=memory, quiesce=quiesce)
             except Exception as e:
                 return {'error': f'CreateSnapshot_Task call failed: {e}'}
             # Poll snapshot tree directly for the named entry (more reliable than task.info)
@@ -925,6 +925,13 @@ class VMwareManager:
                 return None
             for _ in range(60):  # 60s should be plenty — direct vim-cmd takes ~2s
                 _t.sleep(1)
+                # MK Nov 2026 - a refused snapshot (a question pending on the VM, another task
+                # running) said "did not appear within 60s" and kept ESXi's reason to itself
+                try:
+                    if str(task.info.state) == 'error':
+                        return {'error': f"snapshot refused: {getattr(task.info.error, 'msg', task.info.error)}"}
+                except Exception:
+                    pass
                 try:
                     # Re-fetch VM to refresh snapshot tree
                     vm2 = self._soap_get_managed_object(vim.VirtualMachine, vm_id)
@@ -976,7 +983,145 @@ class VMwareManager:
             return {'error': 'remove timed out'}
         except Exception as e:
             return {'error': str(e)}
-    
+
+    # -- Change tracking --
+    # MK Nov 2026 - the Snapshot-Iterative migration asks ESXi which areas of a disk were written
+    # since a change id and copies only those. Only the SOAP API has the calls for it.
+
+    def _soap_vm(self, vm_id):
+        if self._connection_type != 'soap':
+            return None, 'change tracking is only reachable over the SOAP API of the host'
+        from pyVmomi import vim
+        vm = self._soap_get_managed_object(vim.VirtualMachine, vm_id)
+        return (vm, None) if vm else (None, 'VM not found')
+
+    @staticmethod
+    def _soap_named_snapshot(vm, name):
+        """The snapshot object called `name`, None when there is none. Two of that name are an
+        error: which one a caller meant cannot be told."""
+        found = []
+
+        def _walk(snaps):
+            for s in snaps or []:
+                if s.name == name:
+                    found.append(s.snapshot)
+                _walk(s.childSnapshotList)
+        if vm.snapshot:
+            _walk(vm.snapshot.rootSnapshotList)
+        if len(found) > 1:
+            raise ValueError(f'{len(found)} snapshots are called {name}')
+        return found[0] if found else None
+
+    def change_tracking_state(self, vm_id: str) -> dict:
+        """Whether the VM can track changes and does, and for each disk (by key) its file,
+        its disk mode and whether it maps a raw device."""
+        try:
+            from pyVmomi import vim
+            vm, err = self._soap_vm(vm_id)
+            if err:
+                return {'error': err}
+            disks = {}
+            for dev in (vm.config.hardware.device if vm.config else []):
+                if isinstance(dev, vim.vm.device.VirtualDisk):
+                    b = dev.backing
+                    disks[str(dev.key)] = {
+                        'file': getattr(b, 'fileName', '') or '',
+                        'mode': getattr(b, 'diskMode', '') or '',
+                        'raw': isinstance(b, vim.vm.device.VirtualDisk.RawDiskMappingVer1BackingInfo),
+                    }
+            return {'data': {
+                'supported': bool(getattr(vm.capability, 'changeTrackingSupported', False)),
+                'enabled': bool(getattr(vm.config, 'changeTrackingEnabled', False)),
+                'disks': disks,
+            }}
+        except Exception as e:
+            return {'error': getattr(e, 'msg', None) or str(e)}
+
+    def set_change_tracking(self, vm_id: str, enabled: bool) -> dict:
+        """Turn change tracking on or off. A running VM starts tracking at its next snapshot,
+        that is when ESXi opens the tracking files."""
+        try:
+            from pyVmomi import vim
+            vm, err = self._soap_vm(vm_id)
+            if err:
+                return {'error': err}
+            t = vm.ReconfigVM_Task(spec=vim.vm.ConfigSpec(changeTrackingEnabled=bool(enabled)))
+            import time as _t
+            for _ in range(60):
+                _t.sleep(1)
+                if str(t.info.state) == 'error':
+                    return {'error': f'reconfigure failed: {getattr(t.info.error, "msg", t.info.error)}'}
+                # the config is read back, the task state alone has lagged before (see above)
+                vm2 = self._soap_get_managed_object(vim.VirtualMachine, vm_id)
+                if vm2 and vm2.config and bool(vm2.config.changeTrackingEnabled) == bool(enabled):
+                    return {'data': 'ok'}
+            return {'error': f"change tracking is still {'off' if enabled else 'on'} after 60s"}
+        except Exception as e:
+            return {'error': getattr(e, 'msg', None) or str(e)}
+
+    def snapshot_disk_state(self, vm_id: str, snapshot_name: str) -> dict:
+        """{disk key: {'file', 'change_id'}} of the disks as the snapshot holds them. The file is
+        the state of the disk at the snapshot, which stays as it is while the snapshot exists;
+        the change id marks that state for changed_disk_areas, '' without change tracking."""
+        try:
+            from pyVmomi import vim
+            vm, err = self._soap_vm(vm_id)
+            if err:
+                return {'error': err}
+            snap = self._soap_named_snapshot(vm, snapshot_name)
+            if snap is None:
+                return {'error': f'snapshot {snapshot_name} not found'}
+            out = {}
+            for dev in snap.config.hardware.device:
+                if isinstance(dev, vim.vm.device.VirtualDisk):
+                    out[str(dev.key)] = {'file': getattr(dev.backing, 'fileName', '') or '',
+                                         'change_id': getattr(dev.backing, 'changeId', '') or ''}
+            return {'data': out}
+        except Exception as e:
+            return {'error': getattr(e, 'msg', None) or str(e)}
+
+    def changed_disk_areas(self, vm_id: str, disk_key, change_id: str, capacity: int,
+                           snapshot_name: str = None) -> dict:
+        """[(start, length), ...] in bytes: what was written to the disk since change_id, as the
+        named snapshot holds the disk, or as the disk is now without one. ESXi answers the
+        second only for a powered off VM. It answers in parts, so this asks on from where
+        each answer ended until the whole disk is covered."""
+        try:
+            vm, err = self._soap_vm(vm_id)
+            if err:
+                return {'error': err}
+            snap = None
+            if snapshot_name:
+                snap = self._soap_named_snapshot(vm, snapshot_name)
+                if snap is None:
+                    return {'error': f'snapshot {snapshot_name} not found'}
+            areas, off = [], 0
+            while off < int(capacity):
+                r = vm.QueryChangedDiskAreas(snapshot=snap, deviceKey=int(disk_key),
+                                             startOffset=off, changeId=change_id)
+                areas += [(int(a.start), int(a.length)) for a in (r.changedArea or [])]
+                end = int(r.startOffset) + int(r.length)
+                if end <= off:
+                    return {'error': f'the answer for offset {off} covered nothing'}
+                off = end
+            return {'data': areas}
+        except Exception as e:
+            return {'error': getattr(e, 'msg', None) or str(e)}
+
+    def shutdown_guest(self, vm_id: str) -> dict:
+        """Ask the guest OS to shut down. Needs running guest tools; returns at once, the
+        caller waits for the power state."""
+        try:
+            vm, err = self._soap_vm(vm_id)
+            if err:
+                return {'error': err}
+            if str(getattr(vm.guest, 'toolsRunningStatus', '')) != 'guestToolsRunning':
+                return {'error': 'the guest tools are not running'}
+            vm.ShutdownGuest()
+            return {'data': 'ok'}
+        except Exception as e:
+            return {'error': getattr(e, 'msg', None) or str(e)}
+
     # -- Hosts --
     
     def get_hosts(self) -> dict:

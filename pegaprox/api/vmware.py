@@ -1659,6 +1659,10 @@ def _migrate_body_refusal(vmware_id, data, dry_run):
     _bridge = data.get('network_bridge')
     if _bridge not in (None, '') and not _v2p.valid_bridge_name(_bridge):
         return 'Invalid network_bridge: a bridge or VNet name, letters, digits and ._- only', None
+    # MK Nov 2026 - a mode name this code does not know ran the pre-sync flow of Auto, which
+    # falls back to Live Mirror; say so instead of running something else than was asked for
+    if data.get('transfer_mode') not in (None, '') and data.get('transfer_mode') not in _BULK_MODES:
+        return f"transfer_mode is one of {', '.join(_BULK_MODES)}", None
     _full_refusal = _v2p.full_verify_refusal(data.get('transfer_mode', 'auto')) \
         if _opts['verify'] == 'full' else None
     if _full_refusal and not dry_run:

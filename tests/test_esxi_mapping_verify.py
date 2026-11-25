@@ -631,12 +631,12 @@ def test_a_plan_that_does_not_fit_says_why(opts, needle):
     assert any(needle in e for e in p['errors']), p['errors']
 
 
-@pytest.mark.parametrize('mode', ['sshfs_boot', 'snapshot_zero'])
-def test_full_verify_is_refused_where_it_cannot_be_done(mode):
-    p = _plan({'verify': 'full'}, transfer_mode=mode)
+def test_full_verify_is_refused_where_it_cannot_be_done():
+    p = _plan({'verify': 'full'}, transfer_mode='sshfs_boot')
     assert not p['ok'] and any('verify=full is not possible' in e for e in p['errors'])
-    assert v2p.full_verify_refusal(mode)
-    for ok_mode in ('offline', 'vmkfstools_clone', 'auto'):
+    assert v2p.full_verify_refusal('sshfs_boot')
+    # Snapshot-Iterative compares its first copy with the frozen clone, like Live Clone
+    for ok_mode in ('offline', 'vmkfstools_clone', 'auto', 'snapshot_zero'):
         assert v2p.full_verify_refusal(ok_mode) is None
 
 
@@ -714,19 +714,20 @@ def test_a_disk_outside_the_boot_folder_stops_per_disk_choices_on_the_folder_mod
     assert ('esxi_api', 'power', 'stop', 'POWERED_ON') not in r.log
 
 
-def test_snapshot_zero_pairs_deltas_with_the_disks_that_were_copied(monkeypatch):
-    seen = {}
+def test_snapshot_zero_copies_and_tracks_only_the_disks_the_map_keeps(monkeypatch):
+    # Snapshot-Iterative runs on the live clone; change tracking is asked about the kept disks
+    import test_v2p_tpm_and_folder_copy as farm
+    orig = v2p.V2PMigrationTask
 
-    def loop(pve_mgr, task, vmw, host, user, pw, ds, vm_dir, descs, vols, mnt):
-        seen['descs'], seen['vols'] = list(descs), [v[0] for v in vols]
-        return True, 1, []
-    r = Run(monkeypatch, mode='snapshot_zero', ndisks=3,
-            config={'disk_map': [{'index': 1, 'skip': True}, {'index': 2, 'storage': 'fast-lvm'}]})
-    monkeypatch.setattr(v2p, '_snapshot_zero_v2p_delta_loop', loop)
-    r.go()
+    def task(*a, config=None, **k):
+        return orig(*a, config={**config, 'disk_map': [{'index': 1, 'skip': True},
+                                                       {'index': 2, 'storage': 'fast-lvm'}]}, **k)
+    monkeypatch.setattr(v2p, 'V2PMigrationTask', task)
+    r = farm.Run(monkeypatch, mode='snapshot_zero', ndisks=3).go()
     assert r.task.status == 'completed', r.task.error
-    assert seen['descs'] == ['app01.vmdk', 'app01_2.vmdk']
-    assert seen['vols'] == [f'local-lvm:vm-{VMID}-disk-0', f'fast-lvm:vm-{VMID}-disk-2']
+    assert {e[2] for e in r.log if e[:2] == ('esxi_api', 'changed_areas')} == {'2000', '2002'}
+    assert set(r.attached()) == {'scsi0', 'scsi2'}
+    assert r.attached()['scsi2'].startswith('fast-lvm:')
     # the sector-size args name only devices the VM has
     assert r.task.kept_disks(3) == [0, 2]
 
@@ -902,9 +903,8 @@ def test_auto_presync_is_checked_against_the_frozen_base(monkeypatch):
     assert len(checks) == 2 and all(r.log.index(('node', 'pve1', c)) < stop for c in checks)
 
 
-@pytest.mark.parametrize('mode', ['sshfs_boot', 'snapshot_zero'])
-def test_full_verify_never_starts_on_a_mode_that_cannot_do_it(monkeypatch, mode):
-    r = Run(monkeypatch, mode=mode, config={'verify': 'full'}).go()
+def test_full_verify_never_starts_on_a_mode_that_cannot_do_it(monkeypatch):
+    r = Run(monkeypatch, mode='sshfs_boot', config={'verify': 'full'}).go()
     assert r.task.status == 'failed' and 'verify=full is not possible' in r.task.error
     assert r.log == []
 
@@ -1086,9 +1086,8 @@ def test_names_that_could_reach_a_shell_or_a_net_line_are_refused_at_the_door(ro
 
 
 def test_full_verify_on_a_mode_that_cannot_do_it_is_refused_at_the_start(route):
-    for mode in ('sshfs_boot', 'snapshot_zero'):
-        r = route.post(verify='full', transfer_mode=mode)
-        assert r.status_code == 400 and 'verify=full is not possible' in r.get_json()['error']
+    r = route.post(verify='full', transfer_mode='sshfs_boot')
+    assert r.status_code == 400 and 'verify=full is not possible' in r.get_json()['error']
     time.sleep(0.05)
     assert route.started == []
 

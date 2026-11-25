@@ -27,8 +27,6 @@ def _run(monkeypatch, extra, **kw):
     def task(*a, config=None, **k):
         return orig(*a, config={**config, 'disk_discard': 'ignore', **extra}, **k)
     monkeypatch.setattr(v2p, 'V2PMigrationTask', task)
-    if kw.get('mode') == 'snapshot_zero':
-        monkeypatch.setattr(v2p, '_snapshot_zero_v2p_delta_loop', lambda *a, **k: (True, 1, []))
     r = Run(monkeypatch, **kw).go()
     assert r.task.status == 'completed', r.task.error
     return r
@@ -104,7 +102,8 @@ def test_every_attach_of_a_final_disk_carries_the_drive_options():
     attaches = re.findall(r'qm set \{task\.proxmox_vmid\} --\{disk_bus\}\{\w+\} '
                           r'\{(?:shlex\.quote\()?\w*vol\w*\)?\}(\S*)',
                           inspect.getsource(v2p))
-    assert len(attaches) >= 11, attaches
+    # 10 since Snapshot-Iterative attaches through the live clone's code
+    assert len(attaches) >= 10, attaches
     assert [a for a in attaches if not a.startswith('{task._disk_attach_opts()}')] == []
 
 

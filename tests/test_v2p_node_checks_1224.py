@@ -67,18 +67,18 @@ class Node:
         return sum(1 for _n, c in self.sent if needle in c)
 
 
-def _sent_by_a_run(key, answer=(0, '', '')):
+def _sent_by_a_run(key, answer=(0, '', ''), mode='vmkfstools_clone'):
     """Every command a run sends for `key` ('tool_probe', 'tcp_probe', 'mount'), from a run
     of its own that gets `answer` to each."""
     sent = []
     with pytest.MonkeyPatch.context() as mp:
-        _run(mp, **{key: lambda cmd, t: sent.append(cmd) or answer}).go()
+        _run(mp, mode=mode, **{key: lambda cmd, t: sent.append(cmd) or answer}).go()
     assert sent, f'no {key} was sent'
     return sent
 
 
-def _run(monkeypatch, **node_kw):
-    r = Run(monkeypatch)
+def _run(monkeypatch, mode='vmkfstools_clone', **node_kw):
+    r = Run(monkeypatch, mode=mode)
     created = []
     real_post = r.pve._api_post
 
@@ -245,14 +245,16 @@ def _on_this_machine(cmd, tmp_path):
 
 def _mount_answers(tmp_path, bin_dir=None, rewrite=lambda c: c):
     """What the node says to each of a run's three mount attempts, from bash."""
-    sent = _sent_by_a_run('mount', answer=(1, '', ''))
+    # Auto needs the mount (it can fall back to the Live Mirror); Live Clone and
+    # Snapshot-Iterative go on without it
+    sent = _sent_by_a_run('mount', answer=(1, '', ''), mode='auto')
     assert len(sent) == 3, sent
     return [_bash(rewrite(_on_this_machine(c, tmp_path)), path=bin_dir) for c in sent]
 
 
 def _replay(monkeypatch, answers):
     it = iter(answers)
-    return _run(monkeypatch, mount=lambda cmd, t: next(it)).go()
+    return _run(monkeypatch, mode='auto', mount=lambda cmd, t: next(it)).go()
 
 
 def test_the_mount_failure_says_why_ssh_on_the_node_gave_up(monkeypatch, tmp_path):
@@ -290,8 +292,33 @@ def test_each_mount_attempt_logs_its_own_answer(monkeypatch):
     answers = iter([(1, '', 'read: Connection reset by peer\nroot@esx1.lab: Permission denied (keyboard-interactive).'),
                     (1, '', 'fuse: bad mount point'),
                     (1, '', '')])
-    r = _run(monkeypatch, mount=lambda cmd, t: next(answers)).go()
+    r = _run(monkeypatch, mode='auto', mount=lambda cmd, t: next(answers)).go()
     log = '\n'.join(r.task.log_lines)
     assert 'SSHFS mount attempt 1/3 failed, trying fewer options: root@esx1.lab: Permission denied' in log
     assert 'SSHFS mount attempt 2/3 failed, trying fewer options: fuse: bad mount point' in log
     assert r.task.error == 'SSHFS mount failed: fuse: bad mount point'
+
+
+def test_a_live_clone_goes_on_when_the_mount_fails(monkeypatch):
+    """The live clone copies over HTTPS or ssh; the mount is only its last way out."""
+    r = _run(monkeypatch, mount=lambda cmd, t: (1, '', 'fuse: bad mount point')).go()
+    assert r.task.status == 'completed', r.task.error
+    assert any('SSHFS mount failed (fuse: bad mount point): the copies go over HTTPS or ssh' in line
+               for line in r.task.log_lines)
+    assert r.target.count('sshfs -o password_stdin') == 3
+
+
+def test_a_live_clone_on_a_node_without_sshfs_installs_nothing_and_mounts_nothing(monkeypatch):
+    r = _run(monkeypatch)
+    real = r.target.run.node
+
+    def node(mgr, n, cmd, timeout=600, **kw):
+        if cmd.startswith('command -v sshfs'):
+            return 0, 'MISSING\n', ''
+        return real(mgr, n, cmd, timeout, **kw)
+    r.target.run.node = node
+    r.go()
+    assert r.task.status == 'completed', r.task.error
+    assert r.target.count('apt-get install -y sshfs') == 0
+    assert r.target.count('sshfs -o password_stdin') == 0
+    assert any('sshfs is not installed on pve1' in line for line in r.task.log_lines)

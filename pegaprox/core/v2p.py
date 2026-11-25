@@ -41,9 +41,10 @@ class V2PCutoverCancelled(Exception):
 
 VERIFY_MODES = ('sample', 'full', 'off')
 # transfer modes whose copy can be held against a source that does not change before the
-# target takes over. sshfs_boot runs the guest on the target while it copies, snapshot_zero
-# assembles the disk from delta extents of a running chain; neither has that point.
-FULL_VERIFY_MODES = ('offline', 'vmkfstools_clone', 'auto')
+# target takes over. sshfs_boot runs the guest on the target while it copies and has no such
+# point. Snapshot-Iterative compares its first copy with the frozen clone, as Live Clone does,
+# and every block of the folded-back source at the switchover.
+FULL_VERIFY_MODES = ('offline', 'vmkfstools_clone', 'auto', 'snapshot_zero')
 NIC_MAP_MAX = 32
 DISK_MAP_MAX = 64
 # a Linux interface name (15 chars) or an SDN VNet id; no comma, '=' or blank, which would
@@ -166,12 +167,10 @@ def full_verify_refusal(transfer_mode):
     mode = str(transfer_mode or 'auto')
     if mode in FULL_VERIFY_MODES:
         return None
-    why = {'sshfs_boot': 'the guest already runs on the target while its disks are copied',
-           'snapshot_zero': 'the disks are put together from snapshot deltas of the running '
-                            'source, there is no single unchanged source to compare with'}
+    why = {'sshfs_boot': 'the guest already runs on the target while its disks are copied'}
     return (f"verify=full is not possible with the {mode} transfer mode: "
             f"{why.get(mode, 'it has no point where the copy can be compared with an unchanged source')}. "
-            f"Use Live Clone, Auto or Offline Copy, or choose verify sample or off.")
+            f"Use Live Clone, Snapshot-Iterative, Auto or Offline Copy, or choose verify sample or off.")
 
 
 def vlan_tag(value):
@@ -218,8 +217,8 @@ def selected_nics_refusal(raw):
 
 # The transfer modes that copy what the boot disk's folder holds. A disk elsewhere is not
 # there, and a disk running on a snapshot of the VM has its current state in delta files the
-# copy does not read. Live Clone reads each disk from its own file as it is now.
-FOLDER_COPY_MODES = ('offline', 'sshfs_boot', 'snapshot_zero')
+# copy does not read. Live Clone and Snapshot-Iterative read each disk from its own file.
+FOLDER_COPY_MODES = ('offline', 'sshfs_boot')
 _MODE_NAMES = {'offline': 'Offline Copy', 'sshfs_boot': 'Live Mirror', 'snapshot_zero': 'Snapshot-Iterative',
                'auto': 'Auto', 'vmkfstools_clone': 'Live Clone'}
 _DISK_FILE_RE = re.compile(r'^\[([^\]]+)\]\s+(.+\.vmdk)$')
@@ -465,6 +464,11 @@ def resolve_migration_plan(inv, source_disks, source_nics, opts, target_storage,
     elif gap and mode == 'auto':
         warnings.append(f"{gap}. Should the live clone not be possible, Auto stops instead of falling "
                         f"back to a copy of the boot disk's folder")
+    if mode == 'snapshot_zero' and any((d or {}).get('snapshot_delta') for d in (source_disks or [])
+                                       if isinstance(d, dict)):
+        errors.append("the VM runs on snapshots of its own. The switchover of Snapshot-Iterative reads "
+                      "each disk from its own file, which only holds the disk once they are gone: delete "
+                      "or consolidate them on ESXi first, or use Live Clone")
 
     return {'ok': not errors, 'errors': errors, 'warnings': warnings, 'nics': nic_rows,
             'disks': disk_rows, 'storages': storage_rows, 'verify': verify,
@@ -1322,7 +1326,7 @@ def _run_v2p_migration(task):
         aligned, folder_gap = folder_copy_gap(disks, datastore, vm_dir, descriptor_files)
         if folder_gap is None:
             descriptor_files = aligned
-        elif task.transfer_mode not in ('vmkfstools_clone', 'auto'):
+        elif task.transfer_mode not in ('vmkfstools_clone', 'auto', 'snapshot_zero'):
             task.set_phase('failed', folder_copy_refusal(task.transfer_mode, folder_gap))
             return
         # the names ESXi listed go into root commands on the node and on ESXi from here on,
@@ -1344,23 +1348,36 @@ def _run_v2p_migration(task):
         # which matched even when install silently failed (lock held, mirror down).
         # New: check PRESENT/INSTALLED/FAILED sentinel from the post-install probe.
         task.log(f"Verifying sshfs on Proxmox node {task.target_node}...")
-        rc, out, _ = _pve_node_exec(pve_mgr, task.target_node,
-            "if command -v sshfs >/dev/null 2>&1; then echo PRESENT; else "
-            "  DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true; "
-            "  DEBIAN_FRONTEND=noninteractive apt-get install -y sshfs >/tmp/v2p-sshfs-install.log 2>&1; "
-            "  if command -v sshfs >/dev/null 2>&1; then echo INSTALLED; "
-            "  else echo FAILED; tail -5 /tmp/v2p-sshfs-install.log 2>/dev/null; fi; "
-            "fi",
-            timeout=180)
+        # MK Nov 2026 - Live Clone and Snapshot-Iterative copy over HTTPS or ssh, the SSHFS mount
+        # is only their last way out. A node without sshfs and without a repository to fetch it
+        # from stopped them here, after minutes of apt. They look for it and go on without.
+        sshfs_optional = task.transfer_mode in ('vmkfstools_clone', 'snapshot_zero')
+        use_sshfs = True
+        if sshfs_optional:
+            rc, out, _ = _pve_node_exec(pve_mgr, task.target_node,
+                "command -v sshfs >/dev/null 2>&1 && echo PRESENT || echo MISSING", timeout=15)
+        else:
+            rc, out, _ = _pve_node_exec(pve_mgr, task.target_node,
+                "if command -v sshfs >/dev/null 2>&1; then echo PRESENT; else "
+                "  DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true; "
+                "  DEBIAN_FRONTEND=noninteractive apt-get install -y sshfs >/tmp/v2p-sshfs-install.log 2>&1; "
+                "  if command -v sshfs >/dev/null 2>&1; then echo INSTALLED; "
+                "  else echo FAILED; tail -5 /tmp/v2p-sshfs-install.log 2>/dev/null; fi; "
+                "fi",
+                timeout=180)
         verdict = ''
         for line in reversed(str(out or '').splitlines()):
             line = line.strip()
-            if line in ('PRESENT', 'INSTALLED', 'FAILED'):
+            if line in ('PRESENT', 'INSTALLED', 'FAILED', 'MISSING'):
                 verdict = line; break
         if verdict == 'PRESENT':
             task.log("sshfs OK (already installed)")
         elif verdict == 'INSTALLED':
             task.log("sshfs auto-installed on target node ✓")
+        elif sshfs_optional:
+            use_sshfs = False
+            task.log(f"sshfs is not installed on {task.target_node}: the copies go over HTTPS or ssh, "
+                     f"without the SSHFS fallback")
         else:
             task.set_phase('failed',
                 f'sshfs not available on {task.target_node} and auto-install failed. '
@@ -1630,7 +1647,8 @@ def _run_v2p_migration(task):
         task.log("=== PRE-SYNC: VM continues running on VMware ===")
         
         # Mount ESXi datastore via SSHFS (for file listing/discovery only)
-        task.log("Mounting ESXi datastore via SSHFS...")
+        if use_sshfs:
+            task.log("Mounting ESXi datastore via SSHFS...")
 
         # Pre-flight: check root partition space and resolve TMPDIR for subprocesses
         rc_df, df_out, _ = _pve_node_exec(pve_mgr, task.target_node,
@@ -1707,8 +1725,9 @@ def _run_v2p_migration(task):
         
         _src = f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)}"
         mount_cmd = _sshfs_mount_cmd(mnt_path, f"{sshfs_ssh_opts},{sshfs_algo_opts}", _src)
-        rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd, timeout=30,
-                                      stdin_data=esxi_pass)
+        rc, out, err = (_pve_node_exec(pve_mgr, task.target_node, mount_cmd, timeout=30,
+                                       stdin_data=esxi_pass)
+                        if use_sshfs else (0, '', ''))
         # what the node's sshfs/ssh said goes into the log for each attempt, the last
         # thing it said into the failure
         _mount_err = ''
@@ -1739,206 +1758,25 @@ def _run_v2p_migration(task):
                                           stdin_data=esxi_pass)
             if rc != 0:
                 _mount_err = _mount_said(err, out) or _mount_err or f'exit code {rc}, no output'
-                task.set_phase('failed', f'SSHFS mount failed: {_mount_err}'); return
-        task.log(f"SSHFS mounted: {mnt_path}")
-        
-        # Verify files visible
-        rc, out, err = _pve_node_exec(pve_mgr, task.target_node,
-            f"ls {shlex.quote(mnt_path + '/' + vm_dir)}/*.vmdk 2>/dev/null | head -20", timeout=15)
-        task.log(f"VMDK files via SSHFS: {len([l for l in out.strip().split(chr(10)) if l.strip()])}")
+                if not sshfs_optional:
+                    task.set_phase('failed', f'SSHFS mount failed: {_mount_err}'); return
+                use_sshfs = False
+                task.log(f"SSHFS mount failed ({_mount_err}): the copies go over HTTPS or ssh without it")
+        if use_sshfs:
+            task.log(f"SSHFS mounted: {mnt_path}")
+            # Verify files visible
+            rc, out, err = _pve_node_exec(pve_mgr, task.target_node,
+                f"ls {shlex.quote(mnt_path + '/' + vm_dir)}/*.vmdk 2>/dev/null | head -20", timeout=15)
+            task.log(f"VMDK files via SSHFS: {len([l for l in out.strip().split(chr(10)) if l.strip()])}")
         
         # ================================================================
         # TRANSFER MODE ROUTING
         # ================================================================
         # sshfs_boot:    Stop VM → Boot Proxmox from SSHFS → Live-move disks (near-zero downtime)
         # offline:       Stop VM → Full copy via SSH dd → Start Proxmox (more downtime, simpler)
-        # snapshot_zero: ESXi snapshot rotation iterative-delta, VM stays running until cutover (~10s downtime)
+        # snapshot_zero: Live Clone, then catch-up rounds from ESXi's change tracking while the VM
+        #                runs; the switchover copies what was written since the last round
         # auto:          Try pre-sync while running → fallback to sshfs_boot if locked
-
-        # NS Apr 2026 — snapshot_zero owns its own dispatch so it doesn't get sucked into the
-        # auto-mode's silent-fallback-to-sshfs_boot. We log clearly and fail explicitly if
-        # pre-sync can't access the base VMDK (typical: VM running but VMDK locked because of
-        # active snapshot disagreement).
-        if task.transfer_mode == 'snapshot_zero':
-            task.log("=== TRANSFER MODE: snapshot_zero (zero-downtime via snapshot rotation) ===")
-            task.log("Creating initial migration snapshot (S0)...")
-            # NS Apr 2026 — DO NOT use quiesce=True here. Quiesce requires VMware Tools running
-            # and responsive; if Tools are stuck (common after multiple power-cycles or guest BSOD)
-            # the call returns "success" but the snapshot is never actually created on disk.
-            # We accept slightly stale guest state in exchange for the snapshot reliably appearing.
-            snap_result = vmware_mgr.create_snapshot(
-                task.vm_id, '_pegaprox_migration_snap',
-                'PegaProx live migration - do not delete manually',
-                memory=False, quiesce=False)
-            if 'error' in snap_result:
-                task.set_phase('failed', f'snapshot_zero S0 creation failed: {snap_result.get("error")}')
-                _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
-                return
-            # Verify the snapshot ACTUALLY exists on ESXi (defensive — REST returns 200 even on issues)
-            time.sleep(3)
-            verify_snaps = vmware_mgr.get_snapshots(task.vm_id).get('data', []) or []
-            if not any(s.get('name') == '_pegaprox_migration_snap' for s in verify_snaps):
-                task.set_phase('failed',
-                    'snapshot_zero S0 was reported created but is not present on ESXi. '
-                    'Likely cause: VMware Tools unresponsive (try rebooting the source VM cleanly first), '
-                    'or vCenter/ESXi rejected the snapshot (check vCenter task log).')
-                _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
-                return
-            task.log("  S0 confirmed on ESXi — base VMDKs frozen, delta1 active")
-            task.log("  Waiting 10s for ESXi to settle snapshot state...")
-            time.sleep(10)
-
-            task.set_phase('pre_sync')
-            task.log("=== PRE-SYNC: copy base VMDKs while VM keeps running ===")
-            presync_volumes = []
-            # the descriptors of the copied disks, in step with presync_volumes: the delta
-            # loop pairs the two lists by position, a skipped disk must leave both
-            sz_desc = []
-            for i, desc_file in enumerate(descriptor_files):
-                if task.disk_target(i) is None:
-                    continue
-                sz_desc.append(desc_file)
-                dk = f'disk{i}'
-                disk_size = task.disk_progress[dk]['total']
-                task.log(f"Pre-sync disk {i}: {desc_file} ({disk_size / (1024**3):.1f} GB)")
-                vol_id, vol_path = _ssh_pipe_transfer(
-                    pve_mgr, task, esxi_host, esxi_user, esxi_pass,
-                    datastore, vm_dir, desc_file, i)
-                if not vol_id:
-                    task.set_phase('failed',
-                        f'snapshot_zero pre-sync failed for disk {i} ({desc_file}). '
-                        f'No fallback — set transfer_mode to "auto" or "offline" if you accept higher downtime.')
-                    try: vmware_mgr.delete_migration_snapshot(task.vm_id)
-                    except: pass
-                    _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
-                    return
-                # Resolve flat path on ESXi for delta-extent reads later
-                flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
-                esxi_flat = f"/vmfs/volumes/{datastore}/{vm_dir}/{flat_file}"
-                presync_volumes.append((vol_id, vol_path, esxi_flat, disk_size))
-                # attach to Proxmox VM shell — NS May 2026 (#222): rc-check
-                rc_a2, out_a2, _ = _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --{disk_bus}{i} {shlex.quote(vol_id)}{task._disk_attach_opts()} 2>&1", timeout=30)
-                if rc_a2 != 0:
-                    out_full = str(out_a2 or '').strip()
-                    # MK 2026-06-09 (#438 crcro): qm prints a "successfully created '<vol>'"
-                    # notice first, so [:200] showed that and cut the real error off the end.
-                    # Log the whole thing; surface the tail where qm puts the actual failure.
-                    task.log(f"  ✗ qm set --{disk_bus}{i} failed (rc={rc_a2}): {out_full}")
-                    task.set_phase('failed', f'qm set --{disk_bus}{i} → {out_full[-300:]}')
-                    _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
-                    return
-                task.log(f"  Disk {i} attached as {disk_bus}{i}")
-                task.update_progress(dk, disk_size, disk_size)
-            task.log("=== PRE-SYNC COMPLETE — entering snapshot-iterative delta loop ===")
-
-            # Iterative delta loop (VM still running on ESXi)
-            task.set_phase('delta_sync')
-            try:
-                ok, n_iters, snap_chain = _snapshot_zero_v2p_delta_loop(
-                    pve_mgr, task, vmware_mgr, esxi_host, esxi_user, esxi_pass,
-                    datastore, vm_dir, sz_desc, presync_volumes, mnt_path)
-                if not ok:
-                    raise Exception("delta loop returned failure")
-                task.log(f"=== DELTA LOOP CONVERGED after {n_iters} iterations ===")
-
-                # #562 — optional operator-scheduled cutover (source still running here)
-                task.await_cutover_confirmation()
-                # Cutover — minimal downtime
-                task.set_phase('cutover')
-                cut_t0 = time.time()
-                task.log("=== CUTOVER: pausing ESXi VM (downtime starts) ===")
-                pwr = vmware_mgr.vm_power_action(task.vm_id, 'suspend')
-                if 'error' in pwr:
-                    task.log(f"  Suspend failed ({pwr.get('error')}), falling back to power-off")
-                    vmware_mgr.vm_power_action(task.vm_id, 'stop')
-                else:
-                    task._source_suspended = True
-                time.sleep(3)
-
-                vmware_mgr.create_snapshot(task.vm_id, '_pegaprox_v2p_final',
-                                            'V2P final cutover delta', memory=False, quiesce=False)
-                snap_chain.append('_pegaprox_v2p_final')
-                task._extra_snapshots.append('_pegaprox_v2p_final')
-                time.sleep(1)
-
-                all_deltas = _list_delta_files_on_esxi(esxi_host, esxi_user, esxi_pass,
-                                                        datastore, vm_dir, sz_desc)
-                final_bytes = 0
-                for di, (vol_id, vol_path, _, _) in enumerate(presync_volumes):
-                    deltas = all_deltas[di] if di < len(all_deltas) else []
-                    if not deltas:
-                        continue
-                    final_delta = deltas[-2] if len(deltas) >= 2 else deltas[-1]
-                    desc_e = final_delta.replace('-delta.vmdk', '.vmdk')
-                    rel = desc_e.replace(f"/vmfs/volumes/{datastore}/", "")
-                    sshfs_d = f"{mnt_path}/{rel}"
-                    sshfs_data = sshfs_d.replace('.vmdk', '-delta.vmdk')
-                    extents = _qemu_map_extents_via_sshfs(pve_mgr, task, sshfs_d) or []
-                    deltas_top = [e for e in extents if e.get('data') and (e.get('depth', 0) == 0)]
-                    for e in deltas_top:
-                        if _apply_extent_dd(pve_mgr, task, sshfs_data, vol_path,
-                                            e.get('start', 0), e.get('length', 0)):
-                            final_bytes += e.get('length', 0)
-                task.log(f"  Final cutover delta: {final_bytes / (1024**2):.2f} MB applied")
-
-                # Apply Proxmox-side fixes (sector size, EFI, BOOTX64 fallback)
-                _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --boot order={disk_bus}0 2>&1", timeout=15)
-                if bios == 'ovmf':
-                    pending = getattr(task, '_pending_efidisk', None) or {'efitype': '4m', 'pre_enrolled_keys': '1'}
-                    pre_keys = pending.get('pre_enrolled_keys', '1')
-                    _pve_node_exec(pve_mgr, task.target_node,
-                        f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
-                        timeout=15)
-                _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
-                _register_uefi_fallback_loader(pve_mgr, task)
-                try: _inject_virtio_drivers(pve_mgr, task)
-                except Exception as _ve: _virtio_not_injected(task, _ve)
-
-                # Start Proxmox VM
-                if task.start_after:
-                    pve_mgr._api_post(
-                        f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}"
-                        f"/qemu/{task.proxmox_vmid}/status/start")
-                cut_t1 = time.time()
-                actual_downtime = cut_t1 - cut_t0
-                task.log(f"=== ACTUAL DOWNTIME: {actual_downtime:.1f}s ===")
-                task.total_downtime_seconds = actual_downtime
-
-                # Cleanup ESXi: power-off + delete migration snapshots
-                task.log("Cleaning up ESXi snapshot chain + powering off source...")
-                try:
-                    vmware_mgr.vm_power_action(task.vm_id, 'stop')
-                    time.sleep(3)
-                except Exception:
-                    pass
-                for sn in reversed(snap_chain):
-                    try:
-                        snap_list = vmware_mgr.get_snapshots(task.vm_id).get('data', []) or []
-                        target = next((s for s in snap_list if s.get('name') == sn), None)
-                        if target:
-                            vmware_mgr.delete_snapshot(task.vm_id, str(target.get('snapshot') or target.get('id') or ''))
-                    except Exception as _ce:
-                        task.log(f"  Snapshot cleanup of '{sn}' failed: {_ce}")
-                try: vmware_mgr.delete_migration_snapshot(task.vm_id)
-                except: pass
-                if task.remove_source:
-                    _remove_source_once_target_runs(pve_mgr, vmware_mgr, task)
-
-                task.set_phase('verify')
-                time.sleep(5)
-                task.set_phase('cleanup')
-                _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
-                task.set_phase('completed')
-                task.log(f"COMPLETED (snapshot_zero, downtime: {actual_downtime:.1f}s): {task.vm_name} -> VMID {task.proxmox_vmid}")
-                return
-            except Exception as _szerr:
-                task.set_phase('failed', f'snapshot_zero exception: {_szerr}')
-                _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
-                try: vmware_mgr.delete_migration_snapshot(task.vm_id)
-                except: pass
-                return
 
         if task.transfer_mode == 'sshfs_boot':
             task.log(f"=== TRANSFER MODE: QEMU SSH Boot + Live Copy ===")
@@ -1976,7 +1814,7 @@ def _run_v2p_migration(task):
                                      v2p_tmpdir=v2p_tmpdir)
             return
         
-        if task.transfer_mode in ('vmkfstools_clone', 'auto'):
+        if task.transfer_mode in ('vmkfstools_clone', 'auto', 'snapshot_zero'):
             # NS Jun 2026 - VDDK-free live clone. We snapshot the running VM (freezes the
             # base, writes go to the delta), then vmkfstools-clone the *frozen base* ON the ESXi
             # host. vmkfstools is vmkernel-aware, so it reads the active-chain base extent that a
@@ -1990,30 +1828,67 @@ def _run_v2p_migration(task):
             # auto should prefer the clone). For 'auto' we fall back to the legacy pre-sync flow
             # below if the source can't be snapshotted/cloned — raised as _VmkFallback BEFORE any
             # irreversible PVE-side work. An explicit 'vmkfstools_clone' request hard-fails instead.
+            # MK Nov 2026 - Snapshot-Iterative runs here too. Its own flow read the delta files of
+            # the running chain, which ESXi does not open while the VM runs, looked for -delta.vmdk
+            # only (VMFS6 writes -sesparse.vmdk) and wrote the sparse file's bytes at guest offsets;
+            # it said completed with missing or wrong data. Now the first copy is the live clone's,
+            # catch-up rounds follow from change tracking and the switchover copies only what was
+            # written since the last round (see _snapshot_iterative_rounds).
             _vmk_auto = (task.transfer_mode == 'auto')
+            _iterative = (task.transfer_mode == 'snapshot_zero')
             class _VmkFallback(Exception):
                 pass
             class _VmkSwitchoverFailed(Exception):
                 pass
-            task.log(f"=== TRANSFER MODE: {'Auto -> vmkfstools_clone' if _vmk_auto else 'vmkfstools_clone'} (VDDK-free live clone) ===")
+            task.log(f"=== TRANSFER MODE: {'Auto -> vmkfstools_clone' if _vmk_auto else task.transfer_mode} "
+                     f"({'live clone + change tracking rounds' if _iterative else 'VDDK-free live clone'}) ===")
             clone_bases = []  # (datastore, vm_dir, basename) to rm on every exit path (#561: per-disk)
             src_stopped = False        # we powered off a running source at the switchover
             target_start_sent = False  # from here on a rollback would leave two VMs running
             restart_cap = 3600         # how long a rollback keeps asking ESXi to start the source
+            tracking_on = False        # Snapshot-Iterative switched change tracking on for this run
+            si_base = None             # Snapshot-Iterative: the state the target disks are at
+            si_keys = {}               # disk index -> ESXi device key, for change tracking
+            si_clone_s, si_bytes, si_xfer_s = 0.0, 0, 0.0
+            si_clone_used = {}         # disk index -> bytes its first clone took on the datastore
+
+            def _si_restore_tracking():
+                # the source keeps the setting it had, change tracking was only for this run
+                if not tracking_on:
+                    return
+                for _wait in (0, 30, 60, 120, 240):
+                    time.sleep(_wait)
+                    res = vmware_mgr.set_change_tracking(task.vm_id, False)
+                    # ESXi takes one task per VM: a snapshot still being removed refuses it
+                    if 'error' not in res or not _ESXI_BUSY_RE.search(str(res['error'])):
+                        break
+                if 'error' in res:
+                    task.log(f"  Change tracking stays on for the source VM ({res['error']}), "
+                             f"switch it off on ESXi if it is not wanted")
+                else:
+                    task.log("  Change tracking of the source VM is off again, as it was before")
 
             def _vc_cleanup_clones():
                 for _cb_ds, _cb_dir, b in clone_bases:
                     try: _esxi_rm_clone(esxi_host, esxi_user, esxi_pass, _cb_ds, _cb_dir, b)
                     except Exception: pass
 
-            def _vc_drop_clone_snap():
+            def _vc_drop_clone_snap(merge_bytes=0):
+                # MK Nov 2026 - a catch-up round of Snapshot-Iterative can leave a second snapshot
+                # of ours. It goes first and ESXi has to finish with it; the remove of the last
+                # one is answered as before
                 try:
                     snaps = vmware_mgr.get_snapshots(task.vm_id)
                     if 'error' in snaps:
                         return {'error': f"snapshot listing failed: {snaps['error']}"}
-                    for s in (snaps.get('data') or []):
-                        if s.get('name') == '_pegaprox_clone_snap':
-                            return vmware_mgr.delete_snapshot(task.vm_id, str(s.get('snapshot') or s.get('id') or ''))
+                    ours = [s for n in (_CATCHUP_SNAP, '_pegaprox_clone_snap')
+                            for s in (snaps.get('data') or []) if s.get('name') == n]
+                    for s in ours[:-1]:
+                        if not _drop_snapshot_waiting(vmware_mgr, task, s.get('name'), merge_bytes):
+                            return {'error': f"snapshot {s.get('name')} was not removed"}
+                    if ours:
+                        return vmware_mgr.delete_snapshot(
+                            task.vm_id, str(ours[-1].get('snapshot') or ours[-1].get('id') or ''))
                 except Exception as _de:
                     return {'error': str(_de)}
                 return None
@@ -2050,9 +1925,31 @@ def _run_v2p_migration(task):
                 # the snapshot; the consolidation check waits for exactly those again
                 backing_before = _disk_backing_files(disks)
 
+                if _iterative:
+                    why = _snapshot_iterative_refusal(
+                        vmware_mgr, task.vm_id, disks,
+                        {str(d.get('key')) for _i, d in enumerate(disks) if task.disk_target(_i) is not None})
+                    if why:
+                        task.set_phase('failed', why)
+                        _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                        return
+                    if (vmware_mgr.change_tracking_state(task.vm_id).get('data') or {}).get('enabled'):
+                        task.log("Change tracking is on for the source VM already")
+                    else:
+                        res = vmware_mgr.set_change_tracking(task.vm_id, True)
+                        if 'error' in res:
+                            task.set_phase('failed', f"Change tracking could not be switched on for the source VM: "
+                                           f"{res['error']}. Nothing was copied, the source VM was not touched.")
+                            _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                            return
+                        tracking_on = True
+                        task.log("Change tracking switched on for the source VM (off again after the run), "
+                                 "it starts with the clone snapshot")
+
                 # --- freeze the base (VM keeps running) ---
                 task.log("Creating clone snapshot (freezes base VMDKs; VM stays up)...")
-                # quiesce=False on purpose — see the snapshot_zero note above (Tools can stall).
+                # quiesce=False on purpose: quiescing needs responsive guest tools, and with stuck
+                # tools the call reported success while no snapshot landed on disk.
                 # MK Jun 2026 (edge test) — a busy or just-booted guest can make the
                 # CreateSnapshot_Task API call's internal wait time out ("did not appear
                 # within 60s") even though the snapshot actually lands a few seconds later.
@@ -2096,10 +1993,12 @@ def _run_v2p_migration(task):
                         'Clone snapshot could not be created/confirmed on ESXi after 2 attempts. '
                         'The guest may be too busy (retry when it is idle) or VMware Tools is '
                         'unresponsive (reboot the source VM cleanly first).')
+                    _si_restore_tracking()
                     _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
                     return
                 # register for the outer-except recovery (resumes source + drops the snapshot)
                 task._extra_snapshots.append('_pegaprox_clone_snap')
+                si_snap_at = time.monotonic()
                 task.log("  Snapshot confirmed — base frozen, writes now hit the delta")
                 task.log("  Waiting 10s for ESXi to settle...")
                 time.sleep(10)
@@ -2130,18 +2029,14 @@ def _run_v2p_migration(task):
                     # security (C-2/M-2): each component is shell-interpolated as root on ESXi
                     if not validate_esxi_path_component(_ds_i) or not validate_esxi_path_component(_desc_i) \
                        or not all(validate_esxi_path_component(p) for p in _vmdir_i.split('/') if p):
-                        _vc_cleanup_clones()
-                        task.set_phase('failed', f'Unsafe ESXi path for disk {_i}: [{_ds_i}] {_vmdir_i}/{_desc_i}')
-                        _cleanup_sshfs(pve_mgr, task.target_node, mnt_path); return
+                        raise _VmkSwitchoverFailed(f'Unsafe ESXi path for disk {_i}: [{_ds_i}] {_vmdir_i}/{_desc_i}')
                     disk_specs.append((_ds_i, _vmdir_i, _desc_i, _dsk.get('capacity_bytes', 0) or 0))
 
                 # never migrate a partial disk set silently — that was the #561 symptom
                 if len(disk_specs) != len(disks):
-                    _vc_cleanup_clones()
-                    task.set_phase('failed',
+                    raise _VmkSwitchoverFailed(
                         f'Disk enumeration mismatch: VM has {len(disks)} disk(s) but only {len(disk_specs)} '
                         f'could be resolved — refusing to migrate a partial set (#561).')
-                    _cleanup_sshfs(pve_mgr, task.target_node, mnt_path); return
                 _ds_set = sorted({s[0] for s in disk_specs})
                 if len(_ds_set) > 1:
                     task.log(f"Multi-datastore VM: disks span {_ds_set} — each cloned from its own datastore")
@@ -2150,6 +2045,14 @@ def _run_v2p_migration(task):
                 task.disk_progress = {f'disk{_i}': {'copied': 0, 'total': _c or 1, 'pct': 0, 'file': _d}
                                       for _i, (_a, _b, _d, _c) in enumerate(disk_specs)
                                       if task.disk_target(_i) is not None}
+
+                if _iterative:
+                    si_keys = {_i: str(disks[_i].get('key')) for _i in range(len(disk_specs))
+                               if task.disk_target(_i) is not None}
+                    si_base, why = _tracking_baseline(vmware_mgr, task, '_pegaprox_clone_snap', si_keys, si_snap_at)
+                    if why:
+                        raise _VmkSwitchoverFailed(f'{why}. Nothing was copied, the source VM was not touched')
+                    task.log(f"  Change tracking ids taken for {len(si_keys)} disk(s)")
 
                 clone_vols = {}  # disk index -> (vol_id, vol_path, size), what the replay writes to
                 for i, (ds_i, vmdir_i, desc_file, disk_size) in enumerate(disk_specs):
@@ -2171,8 +2074,10 @@ def _run_v2p_migration(task):
                         pass
 
                     task.log(f"Cloning frozen base of disk {i}: [{ds_i}] {vmdir_i}/{desc_file} ({disk_size/(1024**3):.1f} GB)")
+                    _t_clone = time.monotonic()
                     cdesc, cflat = _esxi_vmkfstools_clone(
                         esxi_host, esxi_user, esxi_pass, ds_i, vmdir_i, desc_file, cb, task=task)
+                    si_clone_s += time.monotonic() - _t_clone
                     if not cdesc:
                         _vc_cleanup_clones()
                         _esxi_rm_clone(esxi_host, esxi_user, esxi_pass, ds_i, vmdir_i, cb)
@@ -2186,9 +2091,7 @@ def _run_v2p_migration(task):
                                         vmware_mgr.delete_snapshot(task.vm_id, str(s.get('snapshot') or s.get('id') or ''))
                             except Exception: pass
                             raise _VmkFallback()
-                        task.set_phase('failed', f'vmkfstools clone failed for disk {i} ({desc_file})')
-                        _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
-                        return
+                        raise _VmkSwitchoverFailed(f'vmkfstools clone failed for disk {i} ({desc_file})')
                     clone_bases.append((ds_i, vmdir_i, cb))
 
                     # RDM / raw-LUN guard: a RawDiskMapping descriptor clones only the tiny stub,
@@ -2197,27 +2100,30 @@ def _run_v2p_migration(task):
                     rc_sz, out_sz, _ = _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass,
                         f"stat -c '%s' {shlex.quote(cflat)} 2>/dev/null", timeout=15)
                     csz = int(out_sz.strip()) if str(out_sz or '').strip().isdigit() else 0
+                    if _iterative:
+                        # what a clone of this disk takes on its datastore: a round clones it again
+                        _rc_du, _out_du, _ = _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass,
+                            f"du -k {shlex.quote(cflat)} 2>/dev/null | cut -f1", timeout=30)
+                        if str(_out_du or '').strip().isdigit():
+                            si_clone_used[i] = int(_out_du.strip()) * 1024
                     if disk_size and csz < disk_size * 0.5:
-                        task.set_phase('failed',
+                        raise _VmkSwitchoverFailed(
                             f'Disk {i} clone is implausibly small ({csz} vs {disk_size} bytes) — '
                             f'likely a raw-device-mapped (RDM) disk, which vmkfstools cannot clone. '
                             f'Use offline transfer mode for this VM.')
-                        _vc_cleanup_clones()
-                        _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
-                        return
 
                     # --- transfer the static clone via the existing pipe ---
                     # _ssh_pipe_transfer derives "<cb>-flat.vmdk", allocates the target volume for
                     # WHATEVER storage type (RBD/LVM/LVM-thin/dir via _pvesm_alloc_disk incl. krbd
                     # map) and streams it in. We feed it the clone descriptor name, same datastore/dir.
+                    _t_xfer = time.monotonic()
                     vol_id, vol_path = _ssh_pipe_transfer(
                         pve_mgr, task, esxi_host, esxi_user, esxi_pass,
                         ds_i, vmdir_i, f"{cb}.vmdk", i)
+                    si_xfer_s += time.monotonic() - _t_xfer
+                    si_bytes += disk_size or csz
                     if not vol_id:
-                        task.set_phase('failed', f'Transfer/import of clone for disk {i} failed')
-                        _vc_cleanup_clones()
-                        _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
-                        return
+                        raise _VmkSwitchoverFailed(f'Transfer/import of clone for disk {i} failed')
 
                     # --- attach (offline pattern; keep the #438 tail) ---
                     rc_a, out_a, _ = _pve_node_exec(pve_mgr, task.target_node,
@@ -2225,10 +2131,7 @@ def _run_v2p_migration(task):
                     if rc_a != 0:
                         out_full = str(out_a or '').strip()
                         task.log(f"  ✗ qm set --{disk_bus}{i} failed (rc={rc_a}): {out_full}")
-                        task.set_phase('failed', f'qm set --{disk_bus}{i} → {out_full[-300:]}')
-                        _vc_cleanup_clones()
-                        _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
-                        return
+                        raise _VmkSwitchoverFailed(f'qm set --{disk_bus}{i} → {out_full[-300:]}')
                     task.log(f"  Disk {i}: cloned → transferred → attached as {disk_bus}{i}")
                     task.update_progress(dk, disk_size, disk_size)
                     clone_vols[i] = (vol_id, vol_path, disk_size or csz)
@@ -2248,9 +2151,16 @@ def _run_v2p_migration(task):
                 # checksums of the untouched copies ahead of the switchover, so it only has to
                 # read the ESXi side. Nothing writes to the target disks before the replay, the
                 # post-copy steps come after it.
+                # Snapshot-Iterative takes none: its rounds write to the copies, and its
+                # switchover only compares blocks when change tracking fails, from both sides then.
+                # Its first clones only take space from here on, each round clones afresh.
                 pristine = {}
-                task.log("Checksumming the copied disks for the switchover...")
-                for i, (_vid, vol_path, size) in clone_vols.items():
+                if _iterative:
+                    _vc_cleanup_clones()
+                    clone_bases.clear()
+                else:
+                    task.log("Checksumming the copied disks for the switchover...")
+                for i, (_vid, vol_path, size) in ({} if _iterative else clone_vols).items():
                     if len(fc_sums.get(i) or []) == (size + DELTA_BLOCK_SIZE - 1) // DELTA_BLOCK_SIZE:
                         # the full check just read this copy block by block
                         pristine[i] = fc_sums[i]
@@ -2268,16 +2178,32 @@ def _run_v2p_migration(task):
                 task.await_cutover_confirmation(
                     source_running=_vm_power_state(vmware_mgr, task.vm_id) != 'POWERED_OFF')
 
+                if _iterative:
+                    # after the hold: what the guest wrote during it is part of the rounds too
+                    task.log("=== CATCH-UP ROUNDS: copying what was written since, the source keeps running ===")
+                    try:
+                        si_base = _snapshot_iterative_rounds(
+                            pve_mgr, vmware_mgr, task, (esxi_host, esxi_user, esxi_pass), si_keys, clone_vols,
+                            si_base, {'bps': si_bytes / si_xfer_s if si_xfer_s > 0 else 0, 'clone_s': si_clone_s,
+                                      'clone_used': si_clone_used})
+                    except RuntimeError as _re:
+                        raise _VmkSwitchoverFailed(str(_re))
+
                 # --- switchover: stop the source, fold the snapshot back, copy what changed ---
                 task.set_phase('delta_sync')
                 cut_t0 = time.time()
                 src_state = _vm_power_state(vmware_mgr, task.vm_id)
                 if src_state != 'POWERED_OFF':
                     task.log(f"=== SWITCHOVER: stopping the source VM on ESXi ({src_state or 'state unknown'}), downtime starts ===")
-                    vmware_mgr.vm_power_action(task.vm_id, 'stop')
-                    src_stopped = src_state != 'SUSPENDED'
-                    if not _wait_power_state(vmware_mgr, task.vm_id, 'POWERED_OFF', 120):
-                        raise _VmkSwitchoverFailed('The source VM did not power off within 120s')
+                    # Snapshot-Iterative lets the guest shut down first, so what it holds in memory
+                    # reaches the disk that the switchover copies
+                    if _iterative and src_state == 'POWERED_ON' and _shut_down_guest(vmware_mgr, task):
+                        src_stopped = True
+                    else:
+                        vmware_mgr.vm_power_action(task.vm_id, 'stop')
+                        src_stopped = src_state != 'SUSPENDED'
+                        if not _wait_power_state(vmware_mgr, task.vm_id, 'POWERED_OFF', 120):
+                            raise _VmkSwitchoverFailed('The source VM did not power off within 120s')
                     task.log("  Source VM is powered off")
                 else:
                     task.log("=== SWITCHOVER: the source VM is already powered off ===")
@@ -2299,7 +2225,8 @@ def _run_v2p_migration(task):
                 restart_cap = max(restart_cap, fold_limit)
                 task.log("Removing the clone snapshot, ESXi folds what changed since then back into the source disks...")
                 for _try in range(2):
-                    _res = _vc_drop_clone_snap()
+                    _res = _vc_drop_clone_snap(delta_bytes if delta_bytes is not None
+                                               else sum(s[3] for s in disk_specs))
                     _err = str(_res.get('error') or '') if isinstance(_res, dict) else ''
                     if _err:
                         task.log(f"  Snapshot removal reported: {_err}")
@@ -2322,6 +2249,23 @@ def _run_v2p_migration(task):
                     dk = f'disk{i}'
                     vol_id, vol_path, size = clone_vols[i]
                     src_flat, full_desc = _vc_replay_source(i, ds_i, vmdir_i, desc_file)
+                    if si_base and _carry_over_changes(
+                            pve_mgr, vmware_mgr, task, (esxi_host, esxi_user, esxi_pass), i, si_keys[i],
+                            si_base['ids'][i], src_flat, vol_path, size):
+                        ok_fc = task.verify_mode != 'full'
+                        if not ok_fc:
+                            # verify=full holds every block against the source as it is now, the
+                            # areas change tracking named included; that read is downtime
+                            task._copy_sources[i] = (src_flat, size)
+                            ok_fc, why_fc, _ = _full_check(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
+                                                           {i: (vol_id, vol_path)}, f'disk {i} at the switchover')
+                            if not ok_fc:
+                                _result_warning(task, f"Disk {i}: the full check after copying the written areas "
+                                                      f"failed ({why_fc}), every block was compared and copied "
+                                                      f"where it differed")
+                        if ok_fc:
+                            task.update_progress(dk, task.disk_progress[dk]['total'], task.disk_progress[dk]['total'])
+                            continue
                     task.log(f"Disk {i}: comparing [{ds_i}] {vmdir_i}/{os.path.basename(src_flat)} with {vol_id}")
                     if not _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
                                               src_flat, vol_path, size, i, pve_checksums=pristine.get(i)):
@@ -2349,7 +2293,7 @@ def _run_v2p_migration(task):
                                 raise _VmkSwitchoverFailed(why_fc)
                     task.update_progress(dk, task.disk_progress[dk]['total'], task.disk_progress[dk]['total'])
 
-                # --- post-copy fix chain (mirror offline/snapshot_zero) ---
+                # --- post-copy fix chain (as in the offline flow) ---
                 # MK Oct 2026 (#1124) - after the replay: the UEFI loader, the VirtIO drivers and
                 # the qcow2 move write to the target disks, a replay after them would undo that
                 _pve_node_exec(pve_mgr, task.target_node,
@@ -2394,16 +2338,14 @@ def _run_v2p_migration(task):
                 time.sleep(3)
                 task.set_phase('cleanup')
                 _vc_cleanup_clones()
-                try:
-                    sl = vmware_mgr.get_snapshots(task.vm_id).get('data', []) or []
-                    tgt = next((s for s in sl if s.get('name') == '_pegaprox_clone_snap'), None)
-                    if tgt:
-                        vmware_mgr.delete_snapshot(task.vm_id, str(tgt.get('snapshot') or tgt.get('id') or ''))
-                except Exception as _ce:
-                    task.log(f"  snapshot cleanup failed: {_ce}")
+                _res = _vc_drop_clone_snap()
+                if isinstance(_res, dict) and _res.get('error'):
+                    task.log(f"  snapshot cleanup failed: {_res['error']}")
                 try: vmware_mgr.delete_migration_snapshot(task.vm_id)
                 except: pass
                 _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
+                if not (task.remove_source and target_running):
+                    _si_restore_tracking()
                 if task.remove_source and target_running:
                     task.log("Deleting source VM on ESXi (remove_source=true)")
                     try: vmware_mgr.delete_vm(task.vm_id)
@@ -2413,13 +2355,14 @@ def _run_v2p_migration(task):
                              "stays on ESXi, delete it there once the target runs")
 
                 task.set_phase('completed')
-                task.log(f"COMPLETED (vmkfstools_clone, downtime ~{actual_downtime:.1f}s): "
+                task.log(f"COMPLETED ({'snapshot_zero' if _iterative else 'vmkfstools_clone'}, downtime ~{actual_downtime:.1f}s): "
                          f"{task.vm_name} -> VMID {task.proxmox_vmid}")
                 return
             except V2PCutoverCancelled:
                 # the hold comes before the source is touched. The outer handler marks the run
                 # cancelled and drops the clone snapshot, the clones go here
                 _vc_cleanup_clones()
+                _si_restore_tracking()
                 raise
             except _VmkFallback:
                 # auto-mode: clone path bailed before any irreversible work — drop through to
@@ -2449,6 +2392,7 @@ def _run_v2p_migration(task):
                 _res = _vc_drop_clone_snap()
                 if isinstance(_res, dict) and _res.get('error'):
                     task.log(f"  Clone snapshot not removed ({_res['error']}), check _pegaprox_clone_snap on ESXi")
+                _si_restore_tracking()
                 try: vmware_mgr.delete_migration_snapshot(task.vm_id)
                 except: pass
                 _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
@@ -2722,114 +2666,6 @@ def _run_v2p_migration(task):
                 except: pass
                 return
 
-        # NS Apr 2026 — snapshot_zero mode: iterative delta with VM running, then suspend + tiny final delta.
-        # Falls back to standard delta_sync on any error.
-        if task.transfer_mode == 'snapshot_zero' and not stopped_for_presync:
-            task.set_phase('delta_sync')
-            task.log("=== SNAPSHOT-ZERO MODE: iterative delta, VM keeps running ===")
-            try:
-                ok, n_iters, snap_chain = _snapshot_zero_v2p_delta_loop(
-                    pve_mgr, task, vmware_mgr, esxi_host, esxi_user, esxi_pass,
-                    datastore, vm_dir, [descriptor_files[i] for i in presync_index],
-                    presync_volumes, mnt_path)
-                if not ok:
-                    task.log("snapshot-zero loop failed, falling back to standard delta")
-                    raise Exception("snapshot_zero failed")
-                task.log(f"=== SNAPSHOT-ZERO converged after {n_iters} iterations ===")
-
-                # #562 — optional operator-scheduled cutover (source still running here)
-                task.await_cutover_confirmation()
-                # ===== CUTOVER: ESXi-suspend → final delta → start Proxmox VM =====
-                task.set_phase('cutover')
-                cut_t0 = time.time()
-                task.log("=== CUTOVER: pausing ESXi VM ===")
-                pwr = vmware_mgr.vm_power_action(task.vm_id, 'suspend')
-                if 'error' in pwr:
-                    task.log(f"  Suspend failed ({pwr['error']}), falling back to power-off")
-                    vmware_mgr.vm_power_action(task.vm_id, 'stop')
-                else:
-                    task._source_suspended = True
-                # Give ESXi a moment to write final delta blocks
-                time.sleep(3)
-
-                # Take FINAL snapshot to freeze post-suspend state
-                vmware_mgr.create_snapshot(task.vm_id, '_pegaprox_v2p_final',
-                                            'V2P final cutover delta', memory=False, quiesce=False)
-                snap_chain.append('_pegaprox_v2p_final')
-                task._extra_snapshots.append('_pegaprox_v2p_final')
-                time.sleep(1)
-
-                # Apply final tiny delta — same logic as inside the loop
-                all_deltas = _list_delta_files_on_esxi(esxi_host, esxi_user, esxi_pass,
-                                                        datastore, vm_dir,
-                                                        [descriptor_files[i] for i in presync_index])
-                final_bytes = 0
-                for di, (vol_id, vol_path, _, _) in enumerate(presync_volumes):
-                    deltas = all_deltas[di] if di < len(all_deltas) else []
-                    if not deltas:
-                        continue
-                    final_delta = deltas[-2] if len(deltas) >= 2 else deltas[-1]
-                    desc_e = final_delta.replace('-delta.vmdk', '.vmdk')
-                    rel = desc_e.replace(f"/vmfs/volumes/{datastore}/", "")
-                    sshfs_d = f"{mnt_path}/{rel}"
-                    sshfs_data = sshfs_d.replace('.vmdk', '-delta.vmdk')
-                    extents = _qemu_map_extents_via_sshfs(pve_mgr, task, sshfs_d) or []
-                    deltas_top = [e for e in extents if e.get('data') and (e.get('depth', 0) == 0)]
-                    for e in deltas_top:
-                        if _apply_extent_dd(pve_mgr, task, sshfs_data, vol_path,
-                                            e.get('start', 0), e.get('length', 0)):
-                            final_bytes += e.get('length', 0)
-                task.log(f"  Final cutover delta: {final_bytes / (1024**2):.2f} MB applied")
-
-                # Now do the same post-disk-attach steps as the normal path:
-                _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --boot order={disk_bus}0 2>&1", timeout=15)
-                if bios == 'ovmf':
-                    pending = getattr(task, '_pending_efidisk', None) or {'efitype': '4m', 'pre_enrolled_keys': '1'}
-                    pre_keys = pending.get('pre_enrolled_keys', '1')
-                    _pve_node_exec(pve_mgr, task.target_node,
-                        f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
-                        timeout=15)
-                _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
-                _register_uefi_fallback_loader(pve_mgr, task)
-                try: _inject_virtio_drivers(pve_mgr, task)
-                except Exception as _ve: _virtio_not_injected(task, _ve)
-
-                # Start Proxmox VM
-                if task.start_after:
-                    pve_mgr._api_post(
-                        f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}"
-                        f"/qemu/{task.proxmox_vmid}/status/start")
-                cut_t1 = time.time()
-                actual_downtime = cut_t1 - cut_t0
-                task.log(f"=== ACTUAL DOWNTIME: {actual_downtime:.1f}s ===")
-                task.total_downtime_seconds = actual_downtime
-
-                # Cleanup ESXi snapshots (collapse chain back to base, then remove)
-                task.log("Cleaning up ESXi snapshot chain...")
-                for sn in reversed(snap_chain):
-                    try:
-                        snap_list = vmware_mgr.get_snapshots(task.vm_id).get('data', []) or []
-                        target = next((s for s in snap_list if s.get('name') == sn), None)
-                        if target:
-                            vmware_mgr.delete_snapshot(task.vm_id, str(target.get('snapshot') or target.get('id') or ''))
-                    except Exception as _ce:
-                        task.log(f"  Snapshot cleanup of '{sn}' failed: {_ce}")
-
-                if task.remove_source:
-                    _remove_source_once_target_runs(pve_mgr, vmware_mgr, task, power_off=True)
-
-                task.set_phase('verify')
-                time.sleep(5)
-                task.set_phase('cleanup')
-                _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
-                task.set_phase('completed')
-                task.log(f"COMPLETED (snapshot_zero, downtime: {actual_downtime:.1f}s): {task.vm_name} -> VMID {task.proxmox_vmid}")
-                return
-            except Exception as _szerr:
-                task.log(f"snapshot_zero exception: {_szerr} — falling back to legacy delta_sync")
-                # fall through to legacy path below
-
         if stopped_for_presync:
             # VM was stopped during pre-sync -- we have a clean copy, skip delta-sync
             task.log("=== SKIPPING DELTA SYNC (VM was stopped, copy is clean) ===")
@@ -3068,6 +2904,11 @@ def _run_v2p_migration(task):
         # both success and failure, after the guest has started.
         try:
             _unmap_v2p_rbd_devices(pve_mgr, task.target_node, task)
+        except Exception:
+            pass
+        # the key Snapshot-Iterative put on ESXi for a node without sshpass
+        try:
+            _drop_area_copy_key(pve_mgr, task, esxi_host, esxi_user)
         except Exception:
             pass
 
@@ -3858,17 +3699,6 @@ def _inject_virtio_drivers(pve_mgr, task):
     return _virtio_not_injected(task, why or f"the node script ended with exit code {rc}")
 
 
-# NS Apr 2026 — Snapshot-iterative ZERO-DOWNTIME V2P (transfer_mode='snapshot_zero').
-# VM stays running on ESXi the entire time except for ~5-15s final cutover.
-# Multi-disk capable. Algorithm:
-#   pre-sync (existing) → S0 + base copied
-#   loop:
-#     take Sn → freezes previous delta-vmdk
-#     for each disk: read frozen delta extents via qemu-img map, apply via dd
-#     if total bytes < threshold OR last iteration was small → break
-#   suspend VM on ESXi
-#   take final snapshot, transfer last delta
-#   start VM on Proxmox, shut down ESXi VM, cleanup all snapshots
 def _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass, cmd, timeout=30):
     """Run a command on ESXi via sshpass+ssh from this PegaProx host. Returns (rc, stdout, stderr).
 
@@ -3990,11 +3820,12 @@ def _disk_backing_files(disks):
 
 
 def _clone_snap_consolidated(vmware_mgr, vm_id, backing_before):
-    """True once _pegaprox_clone_snap is gone and every disk runs on the file it used before
-    the snapshot again. A listing that fails reads as not yet."""
+    """True once _pegaprox_clone_snap (and a catch-up snapshot of Snapshot-Iterative) is gone
+    and every disk runs on the file it used before the snapshot again. A listing that fails
+    reads as not yet."""
     try:
         snaps = vmware_mgr.get_snapshots(vm_id)
-        if 'error' in snaps or any(s.get('name') == '_pegaprox_clone_snap'
+        if 'error' in snaps or any(s.get('name') in _OUR_SNAPS
                                    for s in (snaps.get('data') or [])):
             return False
         now = vmware_mgr.get_vm_disks_for_export(vm_id)
@@ -4094,6 +3925,476 @@ def _restart_source(vmware_mgr, vm_id, task, cap, backing_before):
                  f"{', ESXi is still merging the clone snapshot' if busy else ''} - asking again in {pause}s")
         time.sleep(pause)
         pause = min(pause * 2, 300)
+
+
+# MK Nov 2026 - Snapshot-Iterative (transfer_mode 'snapshot_zero') is the live clone plus ESXi's
+# change tracking. The live clone copies the disks as the clone snapshot froze them. Catch-up
+# rounds then copy, while the source runs, what was written since; the switchover copies the
+# rest from the folded-back disk. Change tracking names the written areas, so neither side has
+# to read the whole disk, and the downtime follows what the guest wrote since the last round.
+#
+# ESXi opens no file of a running VM's snapshot chain for a plain read ("Device or resource
+# busy", the delta files included); vmkfstools reads them. A round therefore clones each disk as
+# its snapshot holds it and copies the written areas out of that clone.
+_CATCHUP_SNAP = '_pegaprox_catchup_snap'
+# the snapshots the live clone and its rounds take; a round takes whichever name is free, so
+# the two take turns as the state the copies are at
+_OUR_SNAPS = ('_pegaprox_clone_snap', _CATCHUP_SNAP)
+# the rounds end once what is left would copy in about this many seconds at the switchover,
+SI_SWITCH_SECONDS = 30
+# after this many copies,
+SI_MAX_ROUNDS = 4
+# or when a round would not bring what is left below this share of itself: the guest writes
+# about as fast as a round (a clone of each disk plus the copy) gets through
+SI_SHRINK = 0.6
+# how long the switchover waits for the guest to shut itself down before it powers it off
+SI_GUEST_SHUTDOWN_SECONDS = 300
+# what a round's clone leaves free on the datastore at least, for the deltas of the running VM
+_ROUND_SPACE_MARGIN = 10 * 1024 ** 3
+
+# written areas become dd runs: widened to whole 64 KiB, joined across gaps of up to 256 KiB
+# (one dd call costs more than reading that much) and cut at 32 MiB so a run that differs is
+# small to find
+_RUN_ALIGN = 64 * 1024
+_RUN_JOIN = 256 * 1024
+_RUN_MAX = 32 * 1024 ** 2
+
+
+def _change_runs(areas, size):
+    """[(start, length)] runs of the written areas of a disk of `size` bytes, in disk order."""
+    size = int(size or 0)
+    spans = []
+    for s, ln in sorted((int(s), int(ln)) for s, ln in (areas or []) if int(ln) > 0):
+        a = s // _RUN_ALIGN * _RUN_ALIGN
+        b = min(size, -(-(s + ln) // _RUN_ALIGN) * _RUN_ALIGN)
+        if a >= b:
+            continue
+        if spans and a <= spans[-1][1] + _RUN_JOIN:
+            spans[-1][1] = max(spans[-1][1], b)
+        else:
+            spans.append([a, b])
+    runs = []
+    for a, b in spans:
+        while a < b:
+            e = min(b, a + _RUN_MAX)
+            runs.append((a, e - a))
+            a = e
+    return runs
+
+
+def _dd_run(start, length):
+    """(bs, skip, count) for one run. Runs start on 64 KiB; only the last one of a disk whose
+    size is not a multiple of it ends elsewhere, on a sector (ESXi sizes disks in KiB)."""
+    for bs in (_RUN_ALIGN, 512, 1):
+        if start % bs == 0 and length % bs == 0:
+            return bs, start // bs, length // bs
+
+
+def _write_node_file(pve_mgr, node, data, tag, timeout=60):
+    """Like _write_node_script, but the content travels on stdin: a list of runs can be far
+    longer than a command line takes."""
+    tag = re.sub(r'[^a-z0-9-]', '', str(tag).lower()) or 'data'
+    rc, out, _ = _pve_node_exec(pve_mgr, node,
+        f"umask 077; f=$(mktemp /tmp/v2p-{tag}-XXXXXXXXXX) && cat > \"$f\" && echo \"$f\"",
+        timeout=timeout, stdin_data=data)
+    path = (str(out or '').strip().splitlines() or [''])[-1].strip()
+    return path if rc == 0 and _NODE_SCRIPT_RE.fullmatch(path) else None
+
+
+def _copy_runs_script(runs_file, login, esxi_user, esxi_host, src_path, vol_path):
+    """Node script copying the runs listed in runs_file ('bs skip count' per line) from
+    src_path on ESXi into vol_path, then comparing the md5 of every run on both sides.
+    login is ('password', file for sshpass) or ('key', private key file).
+
+    ESXi reads the list on its stdin and sends the runs one after the other; the node reads
+    the same list and writes each run where it belongs. fullblock makes every dd wait for its
+    whole run on the pipe. The last line names the outcome: RUNS_MATCH <n>, or what failed."""
+    q_src = shlex.quote(src_path)
+    read = f"while read b s c; do dd if={q_src} bs=$b skip=$s count=$c 2>/dev/null || exit 7; done"
+    sums = (f"while read b s c; do dd if={q_src} bs=$b skip=$s count=$c 2>/dev/null "
+            f"| md5sum | cut -d' ' -f1; done")
+    kind, secret = login
+    via = (f"sshpass -f {shlex.quote(secret)} ssh " if kind == 'password' else
+           f"ssh -i {shlex.quote(secret)} -o IdentitiesOnly=yes -o BatchMode=yes "
+           f"-o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 ")
+    return (
+        "#!/bin/bash\n"
+        "set -o pipefail\n"
+        f"RUNS={shlex.quote(runs_file)}\n"
+        f"VOL={shlex.quote(vol_path)}\n"
+        f"esxi() {{ {via}-o StrictHostKeyChecking={_node_hkc()} "
+        f"-o ConnectTimeout=15 -o ServerAliveInterval=30 "
+        f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
+        f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
+        f"{esxi_user}@{esxi_host} \"$1\"; }}\n"
+        "SE=$(mktemp /tmp/v2p-sums-XXXXXXXXXX) && SN=$(mktemp /tmp/v2p-sums-XXXXXXXXXX) || { echo NO_TEMP_FILES; exit 9; }\n"
+        "trap 'rm -f \"$RUNS\" \"$SE\" \"$SN\"' EXIT\n"
+        f"esxi {shlex.quote(read)} < \"$RUNS\" | {{ while read -r -u 3 b s c; do "
+        "dd of=\"$VOL\" bs=$b seek=$s count=$c iflag=fullblock conv=notrunc status=none || exit 8; "
+        "done 3< \"$RUNS\"; }\n"
+        "st=(\"${PIPESTATUS[@]}\")\n"
+        "[ \"${st[0]}\" = 0 ] && [ \"${st[1]}\" = 0 ] || { echo \"COPY_FAILED ${st[0]}/${st[1]}\"; exit 3; }\n"
+        "sync\n"
+        f"esxi {shlex.quote(sums)} < \"$RUNS\" > \"$SE\" || {{ echo ESXI_SUMS_FAILED; exit 4; }}\n"
+        "while read -r b s c; do dd if=\"$VOL\" bs=$b skip=$s count=$c iflag=fullblock status=none "
+        "| md5sum | cut -d' ' -f1; done < \"$RUNS\" > \"$SN\" || { echo NODE_SUMS_FAILED; exit 7; }\n"
+        "n=$(wc -l < \"$RUNS\")\n"
+        "[ \"$(wc -l < \"$SE\")\" = \"$n\" ] || { echo \"ESXI_SUMS_SHORT $(wc -l < \"$SE\") of $n\"; exit 5; }\n"
+        "[ \"$(wc -l < \"$SN\")\" = \"$n\" ] || { echo \"NODE_SUMS_SHORT $(wc -l < \"$SN\") of $n\"; exit 7; }\n"
+        "bad=$(paste -d' ' \"$SE\" \"$SN\" | awk '$1 != $2 {print NR}' | head -3 | tr '\\n' ' ')\n"
+        "[ -z \"$bad\" ] || { echo \"RUNS_DIFFER $bad\"; exit 6; }\n"
+        "echo \"RUNS_MATCH $n\"\n"
+    )
+
+
+def _copy_changed_areas(pve_mgr, task, esxi_host, esxi_user, esxi_pass, src_path, vol_path, runs,
+                        disk_index):
+    """Copy the runs of src_path on ESXi into vol_path on the target node and compare each run
+    on both sides afterwards. (True, '') or (False, why)."""
+    if not runs:
+        return True, ''
+    total = sum(ln for _s, ln in runs)
+    listing = ''.join('%d %d %d\n' % _dd_run(s, ln) for s, ln in runs)
+    runs_file = _write_node_file(pve_mgr, task.target_node, listing, f"runs-{task.id}-{disk_index}")
+    if not runs_file:
+        return False, 'the list of areas could not be written on the node'
+    kind, key_path = _area_copy_login(pve_mgr, task, esxi_host, esxi_user, esxi_pass)
+    pass_file = None
+    try:
+        if kind == 'password':
+            pass_file = _node_secret_file(pve_mgr, task, f"runs-{disk_index}", esxi_pass)
+            if not pass_file:
+                return False, 'the password file for the copy could not be written on the node'
+            login = ('password', pass_file)
+        elif key_path:
+            login = ('key', key_path)
+        else:
+            return False, 'the node has no sshpass and no key could be put on ESXi for it'
+        script = _write_node_script(pve_mgr, task.target_node,
+                                    _copy_runs_script(runs_file, login, esxi_user, esxi_host,
+                                                      src_path, vol_path),
+                                    f"runs-{task.id}-{disk_index}")
+        if not script:
+            return False, 'the copy script could not be written on the node'
+        try:
+            # ESXi reads every run twice (copy, then md5) and the node once more; one dd call
+            # per run on each side on top
+            budget = min(86400, max(600, total * 3 // (20 * 1024 ** 2) + len(runs) // 5))
+            # timeout ends the script and its ssh and dd with it once the budget is gone: a
+            # copy left running would go on writing an older state over what came after it
+            rc, out, err = _pve_node_exec(pve_mgr, task.target_node,
+                                          f"timeout -k 30 {budget} bash {script} 2>&1", timeout=budget + 60)
+        finally:
+            _pve_node_exec(pve_mgr, task.target_node, f"rm -f {shlex.quote(script)}", timeout=10)
+        last = (str(out or '').strip().splitlines() or [str(err or '').strip()])[-1]
+        if rc == 0 and last == f'RUNS_MATCH {len(runs)}':
+            return True, ''
+        return False, last[:300] or f'the copy ended with exit code {rc}'
+    finally:
+        # the script removes the list itself, this covers a script that never ran
+        _pve_node_exec(pve_mgr, task.target_node, f"rm -f {shlex.quote(runs_file)}", timeout=10)
+        _drop_node_secret(pve_mgr, task, pass_file)
+
+
+def _area_copy_login(pve_mgr, task, esxi_host, esxi_user, esxi_pass):
+    """('password', None) when the node has sshpass, else ('key', key file) with a key put on
+    ESXi for this run, as the Live Mirror does; ('none', None) when neither works. Decided once
+    a run: the apt attempt and a new key per disk and round cost minutes, part of them at the
+    switchover. The end of the run takes the key away (_drop_area_copy_key)."""
+    held = getattr(task, '_area_login', None)
+    if held:
+        return held
+    rc, _o, _e = _pve_node_exec(pve_mgr, task.target_node,
+        "command -v sshpass >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y sshpass "
+        ">/dev/null 2>&1; command -v sshpass >/dev/null 2>&1", timeout=120)
+    if rc == 0:
+        held = ('password', None)
+    else:
+        key = _setup_temp_ssh_key(pve_mgr, task.target_node, esxi_host, esxi_user, esxi_pass)
+        held = ('key', key) if key else ('none', None)
+        if key:
+            task.log("  The node has no sshpass: the copies of written areas log in with a key put on ESXi for this run")
+    task._area_login = held
+    return held
+
+
+def _drop_area_copy_key(pve_mgr, task, esxi_host, esxi_user):
+    kind, key = getattr(task, '_area_login', None) or (None, None)
+    if kind == 'key' and key:
+        _cleanup_temp_ssh_key(pve_mgr, task.target_node, key, esxi_host, esxi_user)
+    task._area_login = None
+
+
+def _snapshot_iterative_refusal(vmware_mgr, vm_id, disks, keys=None):
+    """Why Snapshot-Iterative cannot run on this VM, None when it can. Asked before anything
+    is touched. keys, when given, are the device keys of the disks the run copies: a raw or
+    independent disk the disk map leaves behind is no reason to refuse."""
+    live = ' Live Clone works without change tracking. Nothing was copied, the source VM was not touched.'
+    st = vmware_mgr.change_tracking_state(vm_id) if hasattr(vmware_mgr, 'change_tracking_state') \
+        else {'error': 'this connection cannot read it'}
+    if 'error' in st:
+        return f"Snapshot-Iterative reads ESXi's change tracking of the disks, which failed: {st['error']}.{live}"
+    st = st.get('data') or {}
+    if not st.get('supported'):
+        return ("Snapshot-Iterative reads ESXi's change tracking of the disks, and this VM does not "
+                "support it (virtual hardware older than version 7)." + live)
+    for key, d in sorted((st.get('disks') or {}).items()):
+        if keys is not None and str(key) not in keys:
+            continue
+        name = d.get('file') or key
+        if d.get('raw'):
+            return f"Disk {name} maps a raw device, which no snapshot freezes." + live
+        if str(d.get('mode') or '').startswith('independent'):
+            return (f"Disk {name} is independent: snapshots leave it out, so nothing holds it still "
+                    f"for the copy. Set it to dependent on ESXi, or use Offline Copy.")
+    snaps = vmware_mgr.get_snapshots(vm_id)
+    if 'error' in snaps:
+        return f"The snapshots of the VM could not be listed: {snaps['error']}. The source VM was not touched."
+    names = [str(s.get('name') or '') for s in (snaps.get('data') or [])]
+    if names or any((d or {}).get('snapshot_delta') for d in (disks or [])
+                    if keys is None or str((d or {}).get('key')) in keys):
+        return (f"The VM has snapshots ({', '.join(names[:5]) or 'its disks run on delta files'}). The "
+                f"switchover of Snapshot-Iterative reads each disk from its own file, which only holds "
+                f"the disk once those are gone: delete or consolidate them on ESXi first, or use Live "
+                f"Clone. Nothing was copied, the source VM was not touched.")
+    return None
+
+
+def _tracking_baseline(vmware_mgr, task, snap_name, disk_keys, at):
+    """{'snap', 'ids': {disk index: change id}, 'at'} for the disks as snapshot snap_name holds
+    them, or (None, why) when change tracking has no id for one of them."""
+    state = vmware_mgr.snapshot_disk_state(task.vm_id, snap_name)
+    if 'error' in state:
+        return None, f"the change tracking ids of snapshot {snap_name} could not be read: {state['error']}"
+    ids = {}
+    for i, key in disk_keys.items():
+        cid = ((state.get('data') or {}).get(str(key)) or {}).get('change_id')
+        if not cid:
+            return None, f"change tracking did not start for disk {i} (no change id at snapshot {snap_name})"
+        ids[i] = cid
+    return {'snap': snap_name, 'ids': ids, 'at': at,
+            'files': {i: ((state.get('data') or {}).get(str(k)) or {}).get('file') for i, k in disk_keys.items()}}, None
+
+
+def _drop_snapshot_waiting(vmware_mgr, task, name, merge_bytes):
+    """Remove snapshot `name` and wait until ESXi no longer lists it. True once it is gone.
+
+    The remove call gives up after 120s while ESXi keeps merging; the next snapshot or the
+    switchover's power off would be refused until it is done, so this waits it out."""
+    try:
+        listing = vmware_mgr.get_snapshots(task.vm_id)
+        snap = next((s for s in (listing.get('data') or []) if s.get('name') == name), None)
+        if snap is None and 'error' not in listing:
+            return True
+        res = vmware_mgr.delete_snapshot(task.vm_id, str((snap or {}).get('snapshot') or (snap or {}).get('id') or ''))
+    except Exception as e:
+        res = {'error': str(e)}
+    err = str(res.get('error') or '') if isinstance(res, dict) else ''
+    limit = _consolidation_timeout(merge_bytes) if not err or _remove_still_running(err) else 60
+    deadline = time.monotonic() + limit
+    while True:
+        names = _snapshot_names(vmware_mgr, task.vm_id)
+        if names is not None and name not in names:
+            return True
+        if time.monotonic() >= deadline:
+            task.log(f"  Snapshot {name} is still there after {limit}s{f' ({err})' if err else ''}")
+            return False
+        time.sleep(10)
+
+
+def _must_drop(vmware_mgr, task, name, merge_bytes):
+    """_drop_snapshot_waiting, or the run ends here, while the source still runs: ESXi takes
+    no other task on the VM while it merges, the switchover could not power it off."""
+    if not _drop_snapshot_waiting(vmware_mgr, task, name, merge_bytes):
+        raise RuntimeError(f"ESXi did not finish removing snapshot {name} of the running source VM; "
+                           f"nothing was stopped, the source runs on")
+
+
+def _snapshot_names(vmware_mgr, vm_id):
+    try:
+        listing = vmware_mgr.get_snapshots(vm_id)
+    except Exception:
+        return None
+    if 'error' in listing:
+        return None
+    return [s.get('name') for s in (listing.get('data') or [])]
+
+
+def _snapshot_iterative_rounds(pve_mgr, vmware_mgr, task, esxi, disk_keys, vols, base, rates):
+    """Catch-up rounds while the source runs. Returns the state the target disks are at:
+    {'snap', 'ids': {disk index: change id}, 'at'}, what the switchover copies on from.
+
+    A round takes a snapshot and asks change tracking what was written since `base`. It ends
+    the rounds when that would copy in about SI_SWITCH_SECONDS, or when the guest writes so
+    fast that a round would not shrink it below SI_SHRINK; SI_MAX_ROUNDS copies at most. Otherwise it
+    clones each disk as the snapshot holds it, copies the written areas out of the clone and
+    compares them on both sides; the snapshot becomes the new state and the old one is removed
+    while the VM runs, which folds its delta into the disk below.
+
+    No round can leave the target wrong: the switchover copies everything written since the
+    state returned here, which covers what an unfinished round touched. A round that fails
+    ends the rounds and keeps the state before it.
+
+    vols is {disk index: (vol_id, vol_path, size)}, rates {'bps': copy bytes/s, 'clone_s':
+    seconds the clones of all disks took}."""
+    host, user, pw = esxi
+    bps = max(5 * 1024 ** 2, min(500 * 1024 ** 2, rates.get('bps') or 50 * 1024 ** 2))
+    clone_s = rates.get('clone_s') or 0
+    for n in range(1, SI_MAX_ROUNDS + 1):
+        new = _CATCHUP_SNAP if base['snap'] != _CATCHUP_SNAP else '_pegaprox_clone_snap'
+        task.log(f"--- Catch-up round {n}: snapshot {new} ---")
+        taken_at = time.monotonic()
+        res = vmware_mgr.create_snapshot(task.vm_id, new, 'PegaProx catch-up round - do not delete',
+                                         memory=False, quiesce=False)
+        if new not in (_snapshot_names(vmware_mgr, task.vm_id) or []):
+            why = res.get('error') if isinstance(res, dict) else res
+            task.log(f"  The snapshot did not come up ({why}), the switchover copies what is left")
+            return base
+        if new not in task._extra_snapshots:
+            task._extra_snapshots.append(new)
+        nxt, why = _tracking_baseline(vmware_mgr, task, new, disk_keys, taken_at)
+        areas, written = {}, 0
+        if not why:
+            for i in sorted(vols):
+                got = vmware_mgr.changed_disk_areas(task.vm_id, disk_keys[i], base['ids'][i], vols[i][2],
+                                                    snapshot_name=new)
+                if 'error' in got:
+                    why = f"change tracking did not answer for disk {i}: {got['error']}"
+                    break
+                areas[i] = _change_runs(got['data'], vols[i][2])
+                written += sum(ln for _s, ln in areas[i])
+        if why:
+            task.log(f"  {why}; the switchover copies what is left")
+            _must_drop(vmware_mgr, task, new, written)
+            return base
+
+        since = max(1.0, taken_at - base['at'])
+        left_s = written / bps
+        task.log(f"  {written / 1024 ** 2:.1f} MiB written in the {since:.0f}s since the copied state, "
+                 f"about {left_s:.0f}s to copy")
+        stop = None
+        if left_s <= SI_SWITCH_SECONDS:
+            stop = 'that is small enough for the switchover'
+        else:
+            # what the guest would write while a round runs: a clone of every disk plus the copy
+            expect = written / since * (clone_s + left_s)
+            if expect > written * SI_SHRINK:
+                stop = (f"the guest writes about {written / since / 1024 ** 2:.1f} MiB/s, a round of about "
+                        f"{clone_s + left_s:.0f}s would leave about {expect / 1024 ** 2:.0f} MiB: no shorter switchover")
+        if stop:
+            task.log(f"  No copy in this round: {stop}")
+            _must_drop(vmware_mgr, task, new, written)
+            return base
+
+        t0 = time.monotonic()
+        ok, took_clone, took_copy = _catch_up_copy(pve_mgr, task, esxi, nxt['files'], vols, areas,
+                                                   rates.get('clone_used') or {})
+        if not ok:
+            task.log("  The round stopped, the switchover copies what is left")
+            _must_drop(vmware_mgr, task, new, written)
+            return base
+        task.log(f"  Round {n}: {written / 1024 ** 2:.1f} MiB copied and checked in {time.monotonic() - t0:.0f}s")
+        clone_s = took_clone
+        if took_copy > 0 and written:
+            bps = max(5 * 1024 ** 2, min(500 * 1024 ** 2, written / took_copy))
+        old, base = base['snap'], nxt
+        _must_drop(vmware_mgr, task, old, written)
+    task.log(f"  The rounds end after {SI_MAX_ROUNDS} copies, the switchover copies what was written since")
+    return base
+
+
+def _catch_up_copy(pve_mgr, task, esxi, files, vols, areas, clone_used=None):
+    """One round's copy: per disk with written areas, clone the disk as the round's snapshot
+    holds it (`files`, '[ds] dir/name.vmdk' per disk index), copy the areas out of the clone
+    and remove it. (ok, seconds of cloning, seconds of copying).
+
+    The clone lands on the source datastore, next to the snapshot deltas of the running VM: a
+    datastore that runs full stops the VM. A disk is only cloned with room for its first clone
+    (clone_used, by disk index; the disk size where unknown) and a margin left over."""
+    from pegaprox.utils.sanitization import validate_esxi_path_component
+    host, user, pw = esxi
+    took_clone = took_copy = 0.0
+    for i in sorted(areas):
+        if not areas[i]:
+            continue
+        m = _DISK_FILE_RE.match(str(files.get(i) or '').strip())
+        if not m:
+            task.log(f"  Disk {i}: the snapshot does not say which file holds it")
+            return False, took_clone, took_copy
+        ds, rest = m.group(1).strip(), m.group(2).strip()
+        vm_dir, name = os.path.dirname(rest), os.path.basename(rest)
+        if not validate_esxi_path_component(ds) or not validate_esxi_path_component(name) \
+                or not all(validate_esxi_path_component(p) for p in vm_dir.split('/') if p):
+            task.log(f"  Disk {i}: unsafe ESXi path [{ds}] {rest}")
+            return False, took_clone, took_copy
+        need = int((clone_used or {}).get(i) or vols[i][2]) * 11 // 10 + _ROUND_SPACE_MARGIN
+        rc_df, out_df, _ = _ssh_esxi_exec(host, user, pw, f"df -k {shlex.quote(f'/vmfs/volumes/{ds}')} "
+                                          f"2>/dev/null | tail -1", timeout=15)
+        try:
+            free = int(str(out_df or '').split()[3]) * 1024
+        except (IndexError, ValueError):
+            free = None
+        if free is None or free < need:
+            task.log(f"  Disk {i}: [{ds}] has {'unknown' if free is None else f'{free / 1024 ** 3:.1f} GiB'} free, "
+                     f"a clone needs about {need / 1024 ** 3:.1f} GiB with room left for the running VM; no round")
+            return False, took_clone, took_copy
+        cb = f"_pegaprox_round_{task.proxmox_vmid}_{i}"
+        t0 = time.monotonic()
+        try:
+            _cdesc, cflat = _esxi_vmkfstools_clone(host, user, pw, ds, vm_dir, name, cb, task=task)
+            took_clone += time.monotonic() - t0
+            if not cflat:
+                task.log(f"  Disk {i}: the clone of {name} failed")
+                return False, took_clone, took_copy
+            runs = areas[i]
+            task.log(f"  Disk {i}: copying {len(runs)} areas ({sum(ln for _s, ln in runs) / 1024 ** 2:.1f} MiB)")
+            t1 = time.monotonic()
+            ok, why = _copy_changed_areas(pve_mgr, task, host, user, pw, cflat, vols[i][1], runs, i)
+            took_copy += time.monotonic() - t1
+            if not ok:
+                task.log(f"  Disk {i}: {why}")
+                return False, took_clone, took_copy
+        finally:
+            _esxi_rm_clone(host, user, pw, ds, vm_dir, cb)
+    return True, took_clone, took_copy
+
+
+def _carry_over_changes(pve_mgr, vmware_mgr, task, esxi, i, key, change_id, src_path, vol_path, size):
+    """Switchover of Snapshot-Iterative for disk i, the source off and folded back: copy what
+    change tracking says was written since change_id from src_path. True when copied and
+    checked; False sends the caller to the block compare."""
+    host, user, pw = esxi
+    got = vmware_mgr.changed_disk_areas(task.vm_id, key, change_id, size)
+    if 'error' in got:
+        _result_warning(task, f"Disk {i}: change tracking did not answer at the switchover ({got['error']}), "
+                              f"every block was compared instead, which made the downtime longer")
+        return False
+    runs = _change_runs(got['data'], size)
+    task.log(f"Disk {i}: {len(runs)} areas ({sum(ln for _s, ln in runs) / 1024 ** 2:.1f} MiB) written "
+             f"since the last copy")
+    ok, why = _copy_changed_areas(pve_mgr, task, host, user, pw, src_path, vol_path, runs, i)
+    if ok:
+        task.log(f"  Disk {i}: copied, every area matches on both sides")
+        return True
+    _result_warning(task, f"Disk {i}: copying the written areas failed ({why}), every block was compared "
+                          f"instead, which made the downtime longer")
+    return False
+
+
+def _shut_down_guest(vmware_mgr, task, timeout=SI_GUEST_SHUTDOWN_SECONDS):
+    """Ask the guest to shut down and wait for it. True once the VM is off; False when the
+    guest tools could not take the request or the guest did not finish in time (the caller
+    powers it off then)."""
+    res = vmware_mgr.shutdown_guest(task.vm_id) if hasattr(vmware_mgr, 'shutdown_guest') \
+        else {'error': 'not offered by this connection'}
+    if 'error' in res:
+        task.log(f"  The guest cannot be shut down from outside ({res['error']}), powering it off")
+        return False
+    task.log(f"  Shutting the guest down (up to {timeout}s)...")
+    if _wait_power_state(vmware_mgr, task.vm_id, 'POWERED_OFF', timeout, poll=3):
+        return True
+    task.log(f"  The guest did not shut down within {timeout}s, powering it off")
+    return False
 
 
 def _pve_vm_status(pve_mgr, node, vmid):
@@ -4204,23 +4505,6 @@ def _start_target_vm(pve_mgr, task, task_wait=300, run_wait=30, poll=2):
     return 'unknown', why or f"status {state or 'unreadable'}"
 
 
-def _list_delta_files_on_esxi(esxi_host, esxi_user, esxi_pass, datastore, vm_dir, descriptor_files):
-    """For each disk in descriptor_files, return list of -delta.vmdk paths
-    (on ESXi-side path /vmfs/volumes/<ds>/<vm_dir>/<basename>-NNNNNN-delta.vmdk),
-    sorted oldest→newest. Multi-disk: descriptor_files[i] like 'Test-VM.vmdk' or 'Test-VM_1.vmdk'."""
-    base_path = f"/vmfs/volumes/{datastore}/{vm_dir}"
-    per_disk = []
-    for desc in descriptor_files:
-        # base name without extension
-        bn = desc[:-5] if desc.endswith('.vmdk') else desc
-        # match <bn>-NNNNNN-delta.vmdk; only the * between the quoted parts is a pattern
-        cmd = f"ls -1 {shlex.quote(f'{base_path}/{bn}-')}*-delta.vmdk 2>/dev/null | sort"
-        rc, out, _ = _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass, cmd, timeout=15)
-        items = [l.strip() for l in (out or '').splitlines() if l.strip()]
-        per_disk.append(items)
-    return per_disk
-
-
 def _descriptor_extents_are_local(pve_mgr, node, sshfs_descriptor_path):
     """True only if every extent a VMDK descriptor names is a plain file in its own directory.
 
@@ -4248,121 +4532,6 @@ def _descriptor_extents_are_local(pve_mgr, node, sshfs_descriptor_path):
                 or name.startswith('.') or ':' in name):
             return False
     return saw_extent
-
-
-def _qemu_map_extents_via_sshfs(pve_mgr, task, sshfs_descriptor_path):
-    """Run qemu-img map --output=json on Proxmox node against an SSHFS-mounted descriptor.
-    Returns list of {start, length, depth, data} dicts. Only data:true entries are real data."""
-    cmd = f"qemu-img map --output=json -f vmdk {shlex.quote(sshfs_descriptor_path)} 2>&1"
-    rc, out, _ = _pve_node_exec(pve_mgr, task.target_node, cmd, timeout=180)
-    if rc != 0:
-        return None
-    try:
-        return json.loads(str(out or '').strip())
-    except Exception:
-        return None
-
-
-def _apply_extent_dd(pve_mgr, task, sshfs_source_path, target_lvm_path, offset, length):
-    """Apply one extent (offset+length bytes) from sshfs-mounted source to LVM target.
-    Both are on the Proxmox node. Reads from SSHFS (= ESXi datastore), writes to LVM raw block device."""
-    BS = 1024 * 1024  # 1 MB
-    if length <= 0:
-        return True
-    # Compute aligned start + tail handling. For simplicity, fall back to bs=1 for non-MB-aligned.
-    if offset % BS == 0 and length % BS == 0:
-        skip_blocks = offset // BS
-        count_blocks = length // BS
-        cmd = (f"dd if={shlex.quote(sshfs_source_path)} bs={BS} "
-               f"skip={skip_blocks} count={count_blocks} "
-               f"of={shlex.quote(target_lvm_path)} seek={skip_blocks} "
-               f"conv=notrunc oflag=seek_bytes iflag=skip_bytes "
-               f"status=none 2>&1") if False else \
-              (f"dd if={shlex.quote(sshfs_source_path)} of={shlex.quote(target_lvm_path)} "
-               f"bs={BS} skip={skip_blocks} count={count_blocks} seek={skip_blocks} "
-               f"conv=notrunc status=none 2>&1")
-    else:
-        # Byte-precise (slower)
-        cmd = (f"dd if={shlex.quote(sshfs_source_path)} of={shlex.quote(target_lvm_path)} "
-               f"bs=1M iflag=skip_bytes,count_bytes oflag=seek_bytes "
-               f"skip={offset} count={length} seek={offset} "
-               f"conv=notrunc status=none 2>&1")
-    rc, out, _ = _pve_node_exec(pve_mgr, task.target_node, cmd, timeout=600)
-    return rc == 0
-
-
-def _snapshot_zero_v2p_delta_loop(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, esxi_pass,
-                                    datastore, vm_dir, descriptor_files, presync_volumes,
-                                    mnt_path):
-    """Iterative snapshot-based delta sync. Returns (success, total_iterations, snapshots_to_cleanup)."""
-    MAX_ITERATIONS = 6
-    CONVERGENCE_BYTES = 64 * 1024 * 1024  # converge if last delta < 64 MB
-    snapshot_chain = []  # names we created, in order
-    last_iter_bytes = -1
-
-    for iteration in range(1, MAX_ITERATIONS + 1):
-        snap_name = f"_pegaprox_v2p_iter{iteration}"
-        task.log(f"--- Snapshot-zero iter {iteration}: take {snap_name} ---")
-        snap_result = vmware_mgr.create_snapshot(task.vm_id, snap_name,
-                                                  f"V2P delta iter {iteration}",
-                                                  memory=False, quiesce=False)
-        if 'error' in snap_result:
-            task.log(f"  Snapshot iter {iteration} failed: {snap_result['error']}")
-            break
-        snapshot_chain.append(snap_name)
-        time.sleep(2)
-
-        # Find the FROZEN delta files (the ones that were active before this snapshot)
-        all_deltas = _list_delta_files_on_esxi(esxi_host, esxi_user, esxi_pass,
-                                                 datastore, vm_dir, descriptor_files)
-        iter_total_bytes = 0
-        for di, (vol_id, vol_path, _esxi_flat, _flat_size) in enumerate(presync_volumes):
-            disk_deltas = all_deltas[di] if di < len(all_deltas) else []
-            if not disk_deltas:
-                task.log(f"  Disk {di}: no delta files yet")
-                continue
-            # The just-frozen delta is the next-to-last (last is the new active)
-            # Actually after taking snapshot, the OLD active becomes the LAST frozen one.
-            # Sort returns oldest first, so "frozen most recent" = disk_deltas[-2] if multiple,
-            # else disk_deltas[-1] is the freshest frozen.
-            # On first iteration there's only 1 delta file (= the just-frozen pre-sync delta).
-            target_delta = disk_deltas[-1] if iteration == 1 else (
-                disk_deltas[-2] if len(disk_deltas) >= 2 else disk_deltas[-1]
-            )
-            # The descriptor for this delta has same path minus '-delta'
-            desc_on_esxi = target_delta.replace('-delta.vmdk', '.vmdk')
-            # We have an existing SSHFS mount on the Proxmox node at mnt_path → maps the entire datastore
-            # Build the equivalent path on the SSHFS mount
-            # mnt_path is something like /tmp/v2p-<task.id>/  → datastore root
-            esxi_relative = desc_on_esxi.replace(f"/vmfs/volumes/{datastore}/", "")
-            sshfs_desc = f"{mnt_path}/{esxi_relative}"
-            sshfs_data = sshfs_desc.replace('.vmdk', '-delta.vmdk')
-
-            extents = _qemu_map_extents_via_sshfs(pve_mgr, task, sshfs_desc)
-            if extents is None:
-                task.log(f"  Disk {di}: qemu-img map failed for {sshfs_desc}")
-                continue
-            # Filter: only allocated regions at the top of the chain (depth=0 = this delta only)
-            # Some qemu-img versions don't include depth — fall back to data=true.
-            data_extents = [e for e in extents if e.get('data') and (e.get('depth', 0) == 0)]
-            disk_bytes = sum(e.get('length', 0) for e in data_extents)
-            task.log(f"  Disk {di}: {len(data_extents)} extents, {disk_bytes / (1024**2):.1f} MB to transfer")
-            iter_total_bytes += disk_bytes
-
-            applied = 0
-            for e in data_extents:
-                if _apply_extent_dd(pve_mgr, task, sshfs_data, vol_path,
-                                    e.get('start', 0), e.get('length', 0)):
-                    applied += e.get('length', 0)
-            task.log(f"  Disk {di}: applied {applied / (1024**2):.1f} MB")
-
-        task.log(f"  Iteration {iteration}: total delta = {iter_total_bytes / (1024**2):.1f} MB")
-        last_iter_bytes = iter_total_bytes
-        if iter_total_bytes < CONVERGENCE_BYTES and iteration >= 2:
-            task.log(f"  Converged at iteration {iteration}")
-            break
-
-    return True, len(snapshot_chain), snapshot_chain
 
 
 def _rebuild_sector_args(pve_mgr, node, vmid):
@@ -5604,10 +5773,10 @@ def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
         f"ssh -i {key_path} {ESXI_SSH_OPTS} "
         f"{esxi_user}@{esxi_host} "
         f"'grep -v \"pegaprox-v2p-{key_id}\" /etc/ssh/keys-{esxi_user}/authorized_keys > "
-        f"/etc/ssh/keys-{esxi_user}/authorized_keys.tmp 2>/dev/null && "
-        f"mv /etc/ssh/keys-{esxi_user}/authorized_keys.tmp /etc/ssh/keys-{esxi_user}/authorized_keys 2>/dev/null; "
-        f"grep -v \"pegaprox-v2p-{key_id}\" ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp 2>/dev/null && "
-        f"mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys 2>/dev/null; "
+        f"/etc/ssh/keys-{esxi_user}/authorized_keys.{key_id} 2>/dev/null && "
+        f"mv /etc/ssh/keys-{esxi_user}/authorized_keys.{key_id} /etc/ssh/keys-{esxi_user}/authorized_keys 2>/dev/null; "
+        f"grep -v \"pegaprox-v2p-{key_id}\" ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.{key_id} 2>/dev/null && "
+        f"mv ~/.ssh/authorized_keys.{key_id} ~/.ssh/authorized_keys 2>/dev/null; "
         f"echo CLEANED' 2>&1", timeout=10)
     if _rc_rm != 0 or 'CLEANED' not in (_out_rm or ''):
         logging.warning(
@@ -8280,10 +8449,23 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     except Exception:
         pass
     prefer_ssh = bool(task.config.get('prefer_ssh_pipe', False)) if hasattr(task, 'config') else False
-    if (not src_running) or prefer_ssh:
-        if test_bytes > 0:
-            task.log(f"  HTTPS test OK but VM is offline — using direct SSH dd pipe (faster).")
-        test_bytes = 0  # force METHOD 2
+    # MK Nov 2026 - the SSH pipe logged in through sshpass only. On a node without it (and
+    # without a repository to fetch it from) the pipe failed and the copy never came back to
+    # the HTTPS download that had just worked. Such a node gets a key on ESXi for the copy, as
+    # the Live Mirror does; without that too, the copy stays on HTTPS.
+    ssh_key = None
+    if ((not src_running) or prefer_ssh) and test_bytes > 0:
+        rc_sp, _o, _e = _pve_node_exec(pve_mgr, task.target_node,
+            "command -v sshpass >/dev/null 2>&1", timeout=15)
+        if rc_sp != 0:
+            ssh_key = _setup_temp_ssh_key(pve_mgr, task.target_node, esxi_host, esxi_user, esxi_pass)
+        if rc_sp == 0 or ssh_key:
+            task.log(f"  HTTPS test OK but VM is offline - using direct SSH dd pipe (faster)"
+                     f"{', logged in with a temporary key (no sshpass on the node)' if ssh_key else ''}.")
+            test_bytes = 0  # force METHOD 2
+        else:
+            task.log("  HTTPS test OK; the node has no sshpass and no key could be put on ESXi, "
+                     "so the copy stays on HTTPS")
 
     try:
         # ================================================================
@@ -8333,19 +8515,26 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
         # ================================================================
         if not dl_success:
             task.log(f"  SSH dd pipe ({flat_size_gb:.1f} GB)...")
-            _pve_node_exec(pve_mgr, task.target_node,
-                "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1", timeout=30)
+            if not ssh_key:
+                rc_sp2, _o, _e = _pve_node_exec(pve_mgr, task.target_node,
+                    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1; "
+                    "which sshpass >/dev/null 2>&1", timeout=30)
+                if rc_sp2 != 0:
+                    ssh_key = _setup_temp_ssh_key(pve_mgr, task.target_node, esxi_host, esxi_user, esxi_pass)
 
             dd_log2 = f"/tmp/v2p-{task.id}-sshdd-{disk_index}.log"
             # sshpass reads the password from its 0600 file: SSHPASS=<pw> in the command
             # was on the node shell's command line for the whole copy
-            pass_file = _node_secret_file(pve_mgr, task, f"ssh-{disk_index}", esxi_pass)
+            pass_file = None if ssh_key else _node_secret_file(pve_mgr, task, f"ssh-{disk_index}", esxi_pass)
             q_pass = shlex.quote(pass_file or '')
             # ESXi's shell parses the remote command once more: quoted for both
             remote = f"dd if={shlex.quote(esxi_flat_path)} bs=4M"
+            login = (f"ssh -i {shlex.quote(ssh_key)} -o IdentitiesOnly=yes -o BatchMode=yes "
+                     f"-o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 " if ssh_key else
+                     f"sshpass -f {q_pass} ssh ")
 
             ssh_cmd = (
-                f"sshpass -f {q_pass} ssh -o StrictHostKeyChecking={_node_hkc()} "
+                f"{login}-o StrictHostKeyChecking={_node_hkc()} "
                 f"-o ConnectTimeout=15 "
                 f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
                 f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
@@ -8361,7 +8550,8 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
             # task log showed only "SSH: " with empty tail and no actionable
             # diagnostic.
             rc_s, out_s, err_s = (_pve_node_exec(pve_mgr, task.target_node, ssh_cmd, timeout=86400)
-                                  if pass_file else (1, '', 'the password file could not be written on the node'))
+                                  if pass_file or ssh_key
+                                  else (1, '', 'the password file could not be written on the node'))
             _drop_node_secret(pve_mgr, task, pass_file)
             ssh_out = str(out_s or '').strip()
             task.log(f"  SSH: {ssh_out[-250:]}")
@@ -8413,6 +8603,8 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
         # Cleanup
         _drop_node_secret(pve_mgr, task, auth_file)
         _pve_node_exec(pve_mgr, task.target_node, f"rm -f {cookie_jar}", timeout=5)
+        if ssh_key:
+            _cleanup_temp_ssh_key(pve_mgr, task.target_node, ssh_key, esxi_host, esxi_user)
 
     if not dl_success:
         task.log(f"  ALL methods failed ({downloaded} of {flat_size} bytes)")

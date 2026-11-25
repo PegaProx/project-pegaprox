@@ -99,14 +99,23 @@ def test_a_comma_stops_only_the_modes_that_can_end_in_the_live_mirror(monkeypatc
         _nothing_touched(r)
     # where the name reaches no drive spec it is taken, with the other signs, and each disk
     # is copied from its very file
-    monkeypatch.setattr(v2p, '_snapshot_zero_v2p_delta_loop', lambda *a, **k: (True, 1, []))
     names = TAKEN + ['web,3.vmdk']
-    for mode in ('offline', 'snapshot_zero'):
-        r = _run(monkeypatch, names, mode=mode).go()
-        assert r.task.status == 'completed', (mode, r.task.error)
-        att = r.attached()
-        src = {k: r.node.copied_from.get(f'/dev/{v.replace(":", "/", 1)}') for k, v in att.items()}
-        assert src == {f'scsi{i}': _flat(n) for i, n in enumerate(names)}, (mode, src)
+    r = _run(monkeypatch, names, mode='offline').go()
+    assert r.task.status == 'completed', r.task.error
+    att = r.attached()
+    src = {k: r.node.copied_from.get(f'/dev/{v.replace(":", "/", 1)}') for k, v in att.items()}
+    assert src == {f'scsi{i}': _flat(n) for i, n in enumerate(names)}, src
+    # Snapshot-Iterative clones each disk from its very file, the name quoted for ESXi's shell.
+    # Like Live Clone it takes the names validate_esxi_path_component allows ('#', '&', a comma
+    # and umlauts are not among them)
+    names = ['data disk+2.vmdk', 'App (1)_x.vmdk']
+    for i in range(len(names)):
+        monkeypatch.setitem(farm.FLATS, f'_pegaprox_clone_{farm.VMID}_{i}-flat.vmdk', GiB)
+    r = _run(monkeypatch, names, mode='snapshot_zero').go()
+    assert r.task.status == 'completed', r.task.error
+    clones = [e[1] for e in r.log if e[0] == 'esxi_cli' and 'nohup vmkfstools -i' in e[1]]
+    assert [shlex.split(c.split('nohup vmkfstools -i ', 1)[1])[0] for c in clones] == \
+        [f'/vmfs/volumes/ds1/app01/{n}' for n in names], clones
 
 
 @pytest.mark.parametrize('mode', [None, '', 'Auto', 'live_mirror'])
@@ -231,28 +240,3 @@ def test_the_live_mirror_over_sshfs_hands_qemu_nbd_and_the_copy_the_exact_file(m
     for name, body in zip(TAKEN, bodies):
         streams = [ln for ln in body.splitlines() if ' ssh ' in ln]
         assert streams and all(_esxi_reads(ln) == [_esxi_path(name)] for ln in streams), streams
-
-
-# --------------------------------------------------------------------------- the ESXi listing
-
-def test_the_delta_listing_keeps_the_name_one_word_for_the_esxi_shell(monkeypatch, tmp_path):
-    folder = tmp_path / 'vmfs' / 'ds1' / 'app01'
-    folder.mkdir(parents=True)
-    taken = 'App (1) #2 & co+ä'
-    for n in (1, 2):
-        (folder / f'{taken}-00000{n}-delta.vmdk').write_text('')
-    ran = []
-
-    def esxi(host, user, pw, cmd, timeout=30):
-        ran.append(cmd)
-        p = subprocess.run(['sh', '-c', cmd.replace('/vmfs/volumes/', f'{tmp_path}/vmfs/')],
-                           capture_output=True, text=True, cwd=tmp_path, timeout=30)
-        return p.returncode, p.stdout.replace(f'{tmp_path}/vmfs/', '/vmfs/volumes/'), p.stderr
-    monkeypatch.setattr(v2p, '_ssh_esxi_exec', esxi)
-
-    breaking = "x'$(touch canary)'y"
-    got = v2p._list_delta_files_on_esxi('esx1', 'root', 'pw', 'ds1', 'app01',
-                                        [f'{breaking}.vmdk', f'{taken}.vmdk'])
-    assert not (tmp_path / 'canary').exists(), f'the ESXi shell ran what the name held: {ran[0]}'
-    assert got[0] == []
-    assert got[1] == [f'/vmfs/volumes/ds1/app01/{taken}-00000{n}-delta.vmdk' for n in (1, 2)], got
