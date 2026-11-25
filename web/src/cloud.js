@@ -1385,12 +1385,12 @@
         // #625: `acts` is false on a standby, and the pages show their changing buttons
         // only with it; a refusal that still comes back says why, in the user's language.
         // True again on a standby that forwards; the active out of reach says so too.
-        // A member that serves users names the leader in both.
+        // A member that serves users names the leader in both. onDone runs once the server took it.
         function useCloudMutate(reload) {
             const { getAuthHeaders, haReadOnly, haServing } = useAuth();
             const { t } = useTranslation();
             const [busy, setBusy] = React.useState('');
-            const run = React.useCallback((key, method, path, body, confirmMsg) => {
+            const run = React.useCallback((key, method, path, body, confirmMsg, onDone) => {
                 if (confirmMsg && !window.confirm(confirmMsg)) return;
                 setBusy(key);
                 const opts = { method, headers: Object.assign({}, getAuthHeaders(), { 'Content-Type': 'application/json' }) };
@@ -1399,8 +1399,8 @@
                     .then(r => r.ok ? r.json().catch(() => ({})) : r.json().catch(() => ({})).then(b => Promise.reject(
                         new Error(b && b.code === 'HA_STANDBY' ? (haServing ? t('pgHaServingRefused') : t('pgHaStandbyRefused'))
                             : b && b.code === 'HA_ACTIVE_UNREACHABLE' ? (haServing ? t('pgHaLeaderUnreachable') : t('pgHaActiveUnreachable'))
-                            : 'HTTP ' + r.status))))
-                    .then(() => { setBusy(''); if (reload) reload(); })
+                            : PegaProxApiErrors.said(b, 'HTTP ' + r.status)))))
+                    .then(() => { setBusy(''); if (onDone) onDone(); if (reload) reload(); })
                     .catch(e => { setBusy(''); window.alert('Action failed: ' + (e && e.message || e)); });
             }, [reload, t, haServing]);
             return { busy, run, acts: !haReadOnly };
@@ -1548,13 +1548,17 @@
                 if (!clusterId) { window.alert(t('cloud.noClusterSel') || 'No cluster selected.'); return; }
                 const body = { type: form.type, action: form.action, enable: 1 };
                 ['proto', 'dport', 'source', 'dest', 'comment'].forEach(k => { if (String(form[k]).trim()) body[k] = String(form[k]).trim(); });
+                // the hint under the field says why
+                if (fwIcmpTypeProblem(body.proto, body.dport)) return;
                 // Guard against an unconstrained ACCEPT rule (no proto/port/source/dest = allow-all).
                 const constrained = ['proto', 'dport', 'source', 'dest'].some(k => body[k]);
                 if (form.action === 'ACCEPT' && !constrained) {
                     if (!window.confirm(t('cloud.fwAllowAllWarn') || 'This ACCEPT rule matches ALL traffic (no protocol, port, source or destination set). Create this allow-all rule anyway?')) return;
                 }
-                mut.run('newrule', 'POST', `/api/clusters/${clusterId}/datacenter/firewall/rules`, body);
-                setShowNew(false); setForm({ type: 'in', action: 'ACCEPT', proto: '', dport: '', source: '', dest: '', comment: '' });
+                // LW Nov 2026 - the dialog and what was typed stay until Proxmox VE took the rule
+                mut.run('newrule', 'POST', `/api/clusters/${clusterId}/datacenter/firewall/rules`, fwIcmpTypeInBody(body), undefined, () => {
+                    setShowNew(false); setForm({ type: 'in', action: 'ACCEPT', proto: '', dport: '', source: '', dest: '', comment: '' });
+                });
             };
             return (
                 <div className="cloud-body">
@@ -1568,23 +1572,27 @@
                             {cloudHead({ icon: <Icons.Shield />, title: t('cloud.firewall') || 'Firewall', count: rules.length })}
                             <div className="cloud-table-scroll"><table className="cloud-table">
                                 <thead><tr><th>#</th><th>{t('cloud.colDir') || 'Dir'}</th><th>{t('cloud.colAction') || 'Action'}</th><th>{t('cloud.colProto') || 'Proto'}</th><th>{t('cloud.colPort') || 'Port'}</th><th>{t('cloud.colSource') || 'Source'}</th><th>{t('cloud.colDest') || 'Dest'}</th><th>{t('cloud.colComment') || 'Comment'}</th><th>{t('cloud.colState') || 'State'}</th><th style={{ textAlign: 'right' }}>{t('cloud.colActions') || ''}</th></tr></thead>
-                                <tbody>{rules.map((r, i) => (<tr className="cloud-table-row cloud-table-row-static" key={r.pos != null ? r.pos : i}>
+                                <tbody>{rules.map((r, i) => { const problems = fwRuleProblems(r); return (<tr className="cloud-table-row cloud-table-row-static" key={r.pos != null ? r.pos : i} data-fw-rule={r.pos}>
                                     <td className="cloud-cell-muted">{r.pos != null ? r.pos : i}</td>
                                     <td><span className="cloud-chip cloud-chip-soft">{(r.type || '').toUpperCase() || '—'}</span></td>
                                     <td>{actChip(r.action)}</td>
                                     <td className="cloud-table-mono">{r.proto || '—'}</td>
+                                    {r['icmp-type'] && !r.dport ? <td className="cloud-table-mono">{r['icmp-type']}</td> : (
                                     <td className="cloud-table-mono">{r.dport || '—'}</td>
+                                    )}
                                     <td className="cloud-table-mono">{r.source || '—'}</td>
                                     <td className="cloud-table-mono">{r.dest || '—'}</td>
-                                    <td className="cloud-cell-muted">{r.comment || ''}</td>
-                                    <td>{(Number(r.enable) === 1 || r.enable === true) ? <CloudConnChip connected={true} t={t} /> : <CloudConnChip connected={false} t={t} />}</td>
+                                    <td className="cloud-cell-muted">{r.comment || ''}{problems.length > 0 && <div className="text-xs text-red-400" data-fw-invalid-why={r.pos}>{t('fwRuleSkipped')} {problems.join('; ')}
+                                        <div className="cloud-cell-muted" data-fw-invalid-fix="">{t('fwRuleInvalidFix')}</div></div>}</td>
+                                    <td>{problems.length > 0 ? <span className="cloud-chip cloud-chip-err" title={[...problems, t('fwRuleInvalidFix')].join('\n')} data-fw-invalid="">{t('fwRuleInvalid')}</span>
+                                        : (Number(r.enable) === 1 || r.enable === true) ? <CloudConnChip connected={true} t={t} /> : <CloudConnChip connected={false} t={t} />}</td>
                                     <CloudRowActions>
                                         {mut.acts && (<>
                                         <CloudIconBtn icon="Power" title={(Number(r.enable) === 1 || r.enable === true) ? (t('disable') || 'Disable') : (t('enable') || 'Enable')} onClick={() => mut.run('t' + r.pos, 'PUT', `/api/clusters/${clusterId}/datacenter/firewall/rules/${r.pos}`, { enable: (Number(r.enable) === 1 || r.enable === true) ? 0 : 1 })} />
                                         <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + r.pos, 'DELETE', `/api/clusters/${clusterId}/datacenter/firewall/rules/${r.pos}`, undefined, (t('cloud.confirmDelRule') || 'Delete this firewall rule?'))} />
                                         </>)}
                                     </CloudRowActions>
-                                </tr>))}</tbody>
+                                </tr>); })}</tbody>
                             </table></div>
                         </div>
                     </CloudSectionState>
@@ -1596,7 +1604,11 @@
                             </div>
                             <div style={{ display: 'flex', gap: 10 }}>
                                 <CloudField label={t('cloud.colProto') || 'Protocol'}><input className="cloud-input" value={form.proto} onChange={e => setForm({ ...form, proto: e.target.value })} placeholder="tcp" /></CloudField>
-                                <CloudField label={t('cloud.colPort') || 'Dest port'}><input className="cloud-input" value={form.dport} onChange={e => setForm({ ...form, dport: e.target.value })} placeholder="22" /></CloudField>
+                                <CloudField label={fwIcmpTypes(form.proto) ? t('fwIcmpType') : (t('cloud.colPort') || 'Dest port')}>
+                                    <input className="cloud-input" value={form.dport} onChange={e => setForm({ ...form, dport: e.target.value })}
+                                        placeholder={fwIcmpTypes(form.proto) ? t('fwIcmpTypePlaceholder') : '22'} list={fwIcmpTypes(form.proto) ? 'cloud-fw-icmp-types' : undefined} />
+                                    <FwIcmpTypeHint proto={form.proto} dport={form.dport.trim()} listId="cloud-fw-icmp-types" />
+                                </CloudField>
                             </div>
                             <div style={{ display: 'flex', gap: 10 }}>
                                 <CloudField label={t('cloud.colSource') || 'Source'}><input className="cloud-input" value={form.source} onChange={e => setForm({ ...form, source: e.target.value })} placeholder="0.0.0.0/0" /></CloudField>

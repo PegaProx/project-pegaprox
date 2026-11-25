@@ -3473,6 +3473,27 @@
         }
         try { window.PegaProxFingerprintFetcher = FingerprintFetcher; } catch (_) {}
 
+        // LW Nov 2026 - Proxmox VE 9.3 writes the identity of a guest into its backups and refuses to
+        // restore one over a guest it did not come from ("backup belongs to another guest"), force
+        // or not. Where a restore overwrites a guest the user may say it is meant to: the restore then
+        // carries allow_identity_mismatch, which the server only passes to nodes that know it.
+        const restoreRefusedOtherGuest = (text) => /backup belongs to another guest/i.test(String(text || ''));
+
+        function RestoreOtherGuestOption({ checked, onChange, refused }) {
+            const { t } = useTranslation();
+            return (
+                <div className="space-y-1" data-restore-other-guest={refused ? 'refused' : ''}>
+                    <label className="flex items-start gap-2 text-sm cursor-pointer">
+                        <input type="checkbox" checked={!!checked} onChange={e => onChange(e.target.checked)} className="mt-0.5" data-restore-allow-mismatch="" />
+                        <span>{t('restoreAllowOtherGuest')}</span>
+                    </label>
+                    <div className={`text-xs ${refused ? 'text-yellow-400' : 'text-gray-500'}`}>
+                        {t(refused ? 'restoreOtherGuestRefused' : 'restoreAllowOtherGuestHint')}
+                    </div>
+                </div>
+            );
+        }
+
         // Backup Restore Wizard — three-mode (new/overwrite/test)
         function BackupRestoreWizard({ clusterId, snapshot, datastoreName, nodes, storages, authFetch, apiUrl, onClose, onStarted }) {
             const { t } = useTranslation();
@@ -3485,6 +3506,7 @@
             const [targetStorage, setTargetStorage] = React.useState('');
             const [running, setRunning] = React.useState(false);
             const [error, setError] = React.useState(null);
+            const [otherGuest, setOtherGuest] = React.useState(false);
 
             // suggested next free vmid for "new" mode
             React.useEffect(() => {
@@ -3511,6 +3533,7 @@
                         mode,
                     };
                     if (targetStorage) body.target_storage = targetStorage;
+                    if (mode === 'overwrite' && otherGuest) body.allow_identity_mismatch = true;
                     const r = await authFetch(`${apiUrl}/clusters/${clusterId}/backup-restore`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -3591,6 +3614,10 @@
                                     {(storages || []).map(s => <option key={s} value={s}>{s}</option>)}
                                 </select>
                             </div>
+
+                            {mode === 'overwrite' && (
+                                <RestoreOtherGuestOption checked={otherGuest} onChange={setOtherGuest} refused={restoreRefusedOtherGuest(error)} />
+                            )}
 
                             {error && <div style={{ color: '#f54f47', fontSize: '12px' }}>{error}</div>}
 
@@ -3944,6 +3971,7 @@
             const [how, setHow] = useState('sequential');
             const [parallel, setParallel] = useState(2);
             const [confirmed, setConfirmed] = useState(false);
+            const [otherGuest, setOtherGuest] = useState(false);
             const [busy, setBusy] = useState(false);
             const [error, setError] = useState('');
             const [refused, setRefused] = useState([]);
@@ -4034,6 +4062,7 @@
                 if (targetStorage) body.target_storage = targetStorage;
                 if (mode === 'new') body.first_vmid = parseInt(firstVmid, 10);
                 if (mode === 'overwrite') body.confirm = confirmed;
+                if (mode === 'overwrite' && otherGuest) body.allow_identity_mismatch = true;
                 let res = null;
                 try {
                     res = await call(`${API_URL}/clusters/${encodeURIComponent(clusterId)}/backup-restore/batch`,
@@ -4170,6 +4199,10 @@
                                 <span>{bkpFill(t('batchRestoreConfirm'), { n: count })}</span>
                             </label>
                         )}
+                        {mode === 'overwrite' && (
+                            <RestoreOtherGuestOption checked={otherGuest} onChange={setOtherGuest}
+                                refused={restoreRefusedOtherGuest(error) || refused.some(r => restoreRefusedOtherGuest(r.error))} />
+                        )}
                         {error && <div className="text-sm text-red-400 break-all" data-br-error>{error}</div>}
                         {refused.length > 0 && (
                             <div className="text-xs text-red-400 space-y-0.5" data-br-refused>
@@ -4243,6 +4276,9 @@
                                 ))}
                             </div>
                         </>)}
+                        {run && (run.rows || []).some(r => r.state === 'failed' && restoreRefusedOtherGuest(r.note)) && (
+                            <div className="text-xs text-yellow-400" data-br-other-guest>{t('restoreOtherGuestBatch')}</div>
+                        )}
                         <div className="text-xs text-gray-400 flex items-start gap-2"><Icons.Info /><span>{t('batchRestoreServerNote')}</span></div>
                         {error && <div className="text-sm text-red-400 break-all" data-br-error>{error}</div>}
                     </div>
