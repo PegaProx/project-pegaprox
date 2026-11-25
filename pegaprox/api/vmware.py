@@ -34,6 +34,21 @@ _vmware_migrations = {}
 _migration_lock_v2p = threading.Lock()
 
 
+def migrations_a_restart_would_end():
+    """'name (id)' of every ESXi migration this process still runs, and of the guests a bulk
+    run has yet to start. A restart (update, rollback, the restart button) ends them: their
+    state lives in this process only. MK Nov 2026"""
+    from pegaprox.core import esxi_bulk
+    out = [f"{getattr(t, 'vm_name', '') or getattr(t, 'vm_id', '')} ({mid})"
+           for mid, t in list(_vmware_migrations.items()) if getattr(t, 'status', '') == 'running']
+    for run in esxi_bulk.runs():
+        if run.state == 'running':
+            waiting = [it for it in run.items if it.get('state') == esxi_bulk.WAITING]
+            if waiting:
+                out.append(f"bulk run {run.id}: {len(waiting)} guest(s) not started yet")
+    return out
+
+
 def _esxi_failed(result):
     """The answer for a failed call to an ESXi server.
 

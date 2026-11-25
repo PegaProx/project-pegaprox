@@ -442,6 +442,26 @@ def _refuse_confined_updater():
     return None
 
 
+def _refuse_restart_while_migrating(data, what):
+    """409 while ESXi migrations run and the caller did not say while_migrating: the restart
+    after `what` would end them, the source VM possibly stopped and the target half copied.
+    MK Nov 2026"""
+    if (data or {}).get('while_migrating') is True:
+        return None
+    try:
+        from pegaprox.api.vmware import migrations_a_restart_would_end
+        busy = migrations_a_restart_would_end()
+    except Exception as e:
+        logging.warning(f"[Settings] could not list running ESXi migrations: {e}")
+        return None
+    if not busy:
+        return None
+    return jsonify({'error': f"{len(busy)} ESXi migration(s) are running: {', '.join(busy[:5])}. "
+                             f"The restart after the {what} would end them. Wait until they are done, "
+                             f"or send while_migrating to {what} anyway.",
+                    'migrations_running': busy}), 409
+
+
 @bp.route('/api/pegaprox/check-update', methods=['GET'])
 @require_auth(perms=['update.manage'])
 def check_pegaprox_update():
@@ -588,6 +608,9 @@ def perform_pegaprox_update():
         return _uerr
     try:
         data = request.json or {}
+        _busy = _refuse_restart_while_migrating(data, 'update')
+        if _busy:
+            return _busy
         force = data.get('force', False)
         allow_managed = bool(data.get('allow_managed', False))  # power-user escape hatch
 
@@ -1218,6 +1241,10 @@ def rollback_pegaprox_update():
     try:
         data = request.json or {}
         backup_name = data.get('backup')
+        # without a backup named this only lists them
+        _busy = _refuse_restart_while_migrating(data, 'rollback') if backup_name else None
+        if _busy:
+            return _busy
         # MK Mar 2026 - sanitize to prevent path traversal (../../../etc/passwd)
         if backup_name:
             backup_name = sanitize_identifier(backup_name, max_length=128)
@@ -2466,6 +2493,9 @@ def delete_login_background():
 @require_auth(perms=['admin.settings'])
 def restart_server():
     """Restart the PegaProx server (admin only)"""
+    _busy = _refuse_restart_while_migrating(request.get_json(silent=True), 'restart')
+    if _busy:
+        return _busy
     try:
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'system')

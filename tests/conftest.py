@@ -316,6 +316,20 @@ def _node_scopes_forgotten():
 
 
 @pytest.fixture(autouse=True)
+def _esxi_migrations_forgotten():
+    """The ESXi migrations and bulk runs live in process-wide registries. One a test left
+    'running' made the update, rollback and restart routes of every later test in the worker
+    answer 409: they wait until no migration runs."""
+    from pegaprox.api import vmware
+    from pegaprox.core import esxi_bulk
+    vmware._vmware_migrations.clear()
+    esxi_bulk.reset_for_tests()
+    yield
+    vmware._vmware_migrations.clear()
+    esxi_bulk.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _history_reports_forgotten():
     """The power, cost and right-sizing reports are kept per cluster id for minutes
     (helpers.history_report), and the next test's cluster_1 has another history."""
