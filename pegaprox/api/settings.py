@@ -6220,6 +6220,10 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             if not maintenance_task:
                 logging.error(f"[RollingUpdate] Failed to start maintenance mode on {node_name}")
                 raise Exception(f"Failed to start maintenance mode")
+            refused = getattr(maintenance_task, 'native_ha_refused', None)
+            # a node HA does not track (a cluster without HA guests) has nothing for HA to do
+            if isinstance(refused, str) and refused and 'not tracked by HA' not in refused:
+                _log(f"Proxmox HA did not set its maintenance flag: {refused} - PegaProx moves the guests itself")
 
             # Wait for evacuation to complete (unless skipped)
             if skip_evacuation:

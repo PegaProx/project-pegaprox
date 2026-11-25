@@ -4865,6 +4865,11 @@ def create_proxmox_ha_group(cluster_id):
     
     if not group_name or not nodes:
         return jsonify({'error': 'group and nodes required'}), 400
+    # MK Nov 2026 - PVE 9.3 node-affinity rules can be negative: the nodes are the ones the
+    # guests avoid. positive is the default and is not sent, an older PVE does not know the key
+    affinity = str(data.get('affinity') or 'positive').strip().lower()
+    if affinity not in ('positive', 'negative'):
+        return jsonify({'error': 'affinity must be positive or negative'}), 400
     
     try:
         host, port = manager.host, manager.api_port
@@ -4883,12 +4888,17 @@ def create_proxmox_ha_group(cluster_id):
         }
         if data.get('restricted'):
             rules_payload['strict'] = 1
+        if affinity == 'negative':
+            rules_payload['affinity'] = 'negative'
         if data.get('comment'):
             rules_payload['comment'] = data['comment']
 
         rules_url = f"https://{host}:{port}/api2/json/cluster/ha/rules"
         resp = manager._api_post(rules_url, data=rules_payload)
 
+        if resp.status_code in (404, 501) and affinity == 'negative':
+            # a PVE 8 group only lists the nodes a guest goes to, it would read the other way round
+            return jsonify({'error': 'This Proxmox VE version has no negative node affinity'}), 400
         if resp.status_code in (404, 501):
             # PVE 8.x — legacy groups path
             legacy_url = f"https://{host}:{port}/api2/json/cluster/ha/groups"

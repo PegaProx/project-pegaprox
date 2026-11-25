@@ -4053,12 +4053,14 @@ class PegaProxManager:
 
     _GUEST_VOLUME_KEY = re.compile(r'^(?:scsi|virtio|ide|sata|unused|mp)\d+$|^(?:efidisk0|tpmstate0|rootfs)$')
 
-    def _evacuation_placement(self):
+    def _evacuation_placement(self, cluster_nodes=None):
         """MK Oct 2026 (#647) - where HA and storage.cfg let guests go, read once per
         evacuation. ha-manager refuses a target outside a strict node-affinity rule
         (exit 2) and the CRM quietly drops a move to a node without the guest's storage,
         and we used to pick such targets. Returns (vmid -> allowed nodes, storage ->
-        nodes it is limited to); a guest or storage missing from a map is unrestricted."""
+        nodes it is limited to); a guest or storage missing from a map is unrestricted.
+        cluster_nodes: every node of the cluster, a negative rule (PVE 9.3) allows the
+        ones it does not name; without them it is not applied."""
         from pegaprox.core.preflight import ha_node_limits, node_names, restricted_groups
         ha_nodes, storage_nodes = {}, {}
 
@@ -4079,7 +4081,8 @@ class PegaProxManager:
         # not migrated them yet); the migration preflight reads them the same way
         rules = _data('/cluster/ha/rules')
         groups = restricted_groups(_data('/cluster/ha/groups'))
-        ha_nodes = ha_node_limits(rules, groups, _data('/cluster/ha/resources') if groups else [])
+        ha_nodes = ha_node_limits(rules, groups, _data('/cluster/ha/resources') if groups else [],
+                                  cluster_nodes)
 
         for s in _data('/storage'):
             if s.get('nodes'):
@@ -5613,8 +5616,14 @@ class PegaProxManager:
     # the same ha-manager crm-command we send over SSH, so it needs no SSH and no sudo and works
     # on a token cluster. A node without it answers 501, a login without Sys.Modify on / a 403,
     # an unreachable one nothing at all: the SSH ladder stays the way for all of them.
+    # ha-manager of PVE 9.3 refuses what the CRM would ignore: an enable while HA is disarmed or
+    # the node is not online, either mode for a node HA does not track. The API answers 500 with
+    # that reason, and SSH would run the same command and get the same answer.
+    _HA_MAINT_REFUSED = re.compile(r"cannot (?:enable|disable) maintenance mode for node [^\r\n]+")
+
     def _ha_maintenance_via_api(self, node_name, mode):
-        """True when PVE took `mode` ('enable' or 'disable') for the node over its own API."""
+        """(taken, refused): taken when PVE took `mode` ('enable' or 'disable') for the node over
+        its own API, refused is the reason when ha-manager said no. Neither: SSH is next."""
         from urllib.parse import quote
         url = (f"https://{self.host}:{self.api_port}/api2/json/nodes/"
                f"{quote(node_name, safe='')}/maintenance")
@@ -5622,22 +5631,37 @@ class PegaProxManager:
             r = self._api_put(url, data={'maintenance-mode': mode})
         except Exception as e:
             self.logger.info(f"[MAINT] PVE API maintenance {mode} for {node_name} not sent ({e}), trying SSH")
-            return False
+            return False, None
         if r.status_code == 200:
             self.logger.info(f"[MAINT] PVE API took maintenance {mode} for {node_name}")
-            return True
+            return True, None
         why = (getattr(r, 'reason', '') or '')[:160]
+        said = why
+        try:
+            said += '\n' + str(r.json().get('message') or '')
+        except Exception:
+            pass
+        refused = self._HA_MAINT_REFUSED.search(said)
+        if refused:
+            # a node HA does not track runs no HA guest, so HA has nothing to do there: no fault
+            log = self.logger.info if 'not tracked by HA' in refused.group(0) else self.logger.warning
+            log(f"[MAINT] Proxmox HA refused maintenance {mode} for {node_name}: {refused.group(0)}")
+            return False, refused.group(0)[:200]
         self.logger.info(f"[MAINT] PVE API maintenance {mode} for {node_name}: {r.status_code} {why}, trying SSH")
-        return False
+        return False, None
 
     # NS feb 2026 - try ha-manager crm-command node-maintenance enable (#78)
     # returns True if proxmox takes over, False = we do our own evacuation
     def _try_native_ha_maintenance(self, node_name, task):
         try:
-            if self._ha_maintenance_via_api(node_name, 'enable'):
+            taken, refused = self._ha_maintenance_via_api(node_name, 'enable')
+            if taken:
                 task.native_ha = True
                 self.logger.info(f"[MAINT] native HA flag set for {node_name}")
                 return True
+            if refused:
+                task.native_ha_refused = refused
+                return False
 
             node_ip = self._get_node_ip(node_name)
             if not node_ip:
@@ -5760,7 +5784,7 @@ class PegaProxManager:
 
             # Sort VMs by memory (smallest first for faster evacuation)
             node_vms.sort(key=lambda x: x.get('mem', 0))
-            placement = self._evacuation_placement()
+            placement = self._evacuation_placement(list(nodes))
 
             # JB Nov 2026 - a cancel or an exit of maintenance takes the task off the node. This thread went on moving every
             # guest off a node that was no longer in maintenance
@@ -6045,8 +6069,12 @@ class PegaProxManager:
     # run it on any other reachable node instead
     def _try_disable_native_ha_maintenance(self, node_name):
         try:
-            if self._ha_maintenance_via_api(node_name, 'disable'):
+            taken, refused = self._ha_maintenance_via_api(node_name, 'disable')
+            if taken:
                 return True
+            if refused:
+                # a node HA does not track has no flag to take off
+                return 'not tracked by HA' in refused
 
             ssh_user = node_login(self.config)
             prefix = "sudo " if ssh_user != 'root' else ""
@@ -13225,6 +13253,8 @@ echo "AGENT_INSTALLED_OK"
                         '_pve_rule_id': r.get('rule', ''),
                         '_pve_rule_resources': r.get('resources', ''),
                         '_pve_rule_disable': 1 if r.get('disable') else 0,
+                        # MK Nov 2026 - PVE 9.3: 'negative' means the nodes are the ones it avoids
+                        'affinity': r.get('affinity') or 'positive',
                     })
                 return groups
             if response.status_code not in (404, 501):

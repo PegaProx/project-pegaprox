@@ -39,7 +39,7 @@ def mgr(monkeypatch):
     m.nodes_in_maintenance = {}
     m.maintenance_lock = threading.Lock()
     m._rolling_update = None
-    m._evacuation_placement = lambda: ({}, {})
+    m._evacuation_placement = lambda *a: ({}, {})
     m._evacuation_allowed_nodes = lambda vm, p: None
     m._derive_proxlb_tag_rules = lambda vms=None: {'pins': {}, 'rules': [], 'ignored': set(), 'unresolved': []}
     m.migrate_vm = MagicMock(return_value=True)
