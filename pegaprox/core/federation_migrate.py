@@ -271,14 +271,15 @@ def _make_token(mgr, name, vmid, storages, bridges):
                                             'token - its PegaProx account needs '
                                             'Permissions.Modify and Sys.Modify: '
                                             + _pve_error(r))
-    user = mgr.config.user
-    r = mgr._api_post(f'{base}/access/users/{user}/token/{name}',
-                      data={'privsep': 1, 'expire': _expiry(),
-                            'comment': 'PegaProx migration from another site'})
+    # the way past PVE's rule that a token makes no token (#1389)
+    r, why = mgr._token_request('POST', name, {'privsep': 1, 'expire': _expiry(),
+                                               'comment': 'PegaProx migration from another site'})
+    if r is None:
+        raise MigrationRefused(409, 'The target cluster made no migration token: ' + why)
     if r.status_code != 200:
         raise MigrationRefused(502, 'The target cluster made no migration token: ' + _pve_error(r))
     data = (r.json() or {}).get('data') or {}
-    token = {'token_id': data.get('full-tokenid') or f'{user}!{name}',
+    token = {'token_id': data.get('full-tokenid') or f'{mgr._token_owner()}!{name}',
              'token_value': data.get('value') or '', 'token_name': name}
     acls = [('/', 'PegaProxFedIncoming', 0), (f'/vms/{vmid}', 'PegaProxFedGuest', 1)]
     acls += [(path, 'PegaProxFedNet', 1) for path in _bridge_paths(mgr, base, bridges)]

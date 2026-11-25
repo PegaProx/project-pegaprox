@@ -15265,7 +15265,9 @@ def cross_cluster_migrate_api():
         logging.info(f"Creating temporary API token on target cluster ({target_cluster_id}) for user {target_manager.config.user}...")
         token_result = target_manager.create_api_token(token_name, expire=transfer_net.token_expiry())
         if not token_result.get('success'):
-            return jsonify({'error': f'Could not create API token on target cluster: {token_result.get("error")}'}), 500
+            # refused: the target cluster's login cannot make one, which a retry does not change
+            return jsonify({'error': f'Could not create API token on target cluster: {token_result.get("error")}'}), \
+                409 if token_result.get('refused') else 500
         
         target_token = token_result
         logging.info(f"Created token on target cluster: {target_token['token_id']}")

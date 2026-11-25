@@ -295,7 +295,8 @@ EXITS = {
     # PVE REST
     ('pegaprox/core/manager.py', 'PegaProxManager._create_session', 'http-session'): (1, 'guard'),
     ('pegaprox/core/manager.py', 'PegaProxManager.connect_to_proxmox', 'http-session'): (1, 'guard'),
-    ('pegaprox/core/manager.py', 'PegaProxManager.create_privileged_session', 'http-session'): (1, 'guard'),
+    # the password login of root's disk operations and of a migration token (#1389)
+    ('pegaprox/core/manager.py', '_password_login', 'http-session'): (1, 'guard'),
     ('pegaprox/core/manager.py', 'PegaProxManager.mint_console_auth_ticket', 'http-urllib'): (1, 'console'),
     ('pegaprox/core/manager.py', 'PegaProxManager.tls_fingerprint', 'socket'): (1, 'read'),
     # the connection check: GET /version per API address (the session only while it is

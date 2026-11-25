@@ -1199,14 +1199,20 @@ def delete_cluster(cluster_id):
         try:
             token_user = mgr.config.api_token_user  # e.g. root@pam!pegaprox
             user_part, token_id = token_user.split('!', 1)
-            url = f"https://{mgr.host}:{mgr.api_port}/api2/json/access/users/{user_part}/token/{token_id}"
-            resp = mgr._create_session().delete(url, timeout=10)
-            if resp.status_code == 200:
+            # MK Nov 2026 - the token cannot delete itself unless it holds User.Modify, and a
+            # refused revoke left it on PVE for good (no expire): the account's own login does
+            if user_part == mgr._token_owner():
+                resp, why = mgr._token_request('DELETE', token_id)
+            else:
+                url = f"https://{mgr.host}:{mgr.api_port}/api2/json/access/users/{user_part}/token/{token_id}"
+                resp, why = mgr._create_session().delete(url, timeout=10), None
+            if resp is not None and resp.status_code == 200:
                 logging.info(f"Revoked API token {token_user} on PVE")
             else:
-                logging.warning(f"Could not revoke API token {token_user}: HTTP {resp.status_code}")
+                logging.warning(f"Could not revoke API token {token_user}: "
+                                f"{why or f'HTTP {resp.status_code}'} - delete it on the cluster")
         except Exception as e:
-            logging.debug(f"Token revocation failed (non-critical): {e}")
+            logging.warning(f"Could not revoke API token on PVE ({type(e).__name__}) - delete it on the cluster")
 
     # Our cluster claim leaves the cluster with it (#625): once the cluster is gone
     # from PegaProx nobody could take the file out of /etc/pve/pegaprox any more.

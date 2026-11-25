@@ -46,6 +46,11 @@ class _NoHostnameCheckAdapter(HTTPAdapter):
         return super().init_poolmanager(*args, **kwargs)
 
 
+class LoginNotTaken(Exception):
+    """A password login PVE answered with neither a ticket nor a no (a 5xx while pveproxy
+    restarts): nothing to remember as refused."""
+
+
 class RedirectRefused(requests.exceptions.RequestException):
     """A Proxmox VE API answered with a redirect, which PegaProx does not follow."""
 
@@ -74,6 +79,57 @@ def _refuse_redirects(session):
         return resp
     session.request = no_redirects
     return session
+
+
+def _password_login(mgr, usr, pwd, what):
+    """A session of its own with a fresh password ticket of `usr` and its CSRF token, at
+    mgr.host. (session, None, 200), or (None, why, status) when PVE said no: a refused
+    login (401) or a partial ticket of a two-factor account. A login that got no such
+    answer raises, LoginNotTaken for another status. The caller closes the session."""
+    s = None
+    try:
+        s = requests.Session()
+        s.trust_env = False
+        _pool_kw = dict(pool_connections=2, pool_maxsize=4, pool_block=False, max_retries=0)
+        if mgr._ssl_verify:
+            _ca = ssl.get_default_verify_paths()
+            s.verify = _ca.cafile or _ca.openssl_cafile or True
+            s.mount('https://', HTTPAdapter(**_pool_kw))
+        else:
+            s.verify = False
+            s.mount('https://', _NoHostnameCheckAdapter(**_pool_kw))
+        # MK Nov 2026 - the same path check as the cached session, this one is a password login
+        from pegaprox.utils.sanitization import refuse_climbing_paths
+        refuse_climbing_paths(s)
+        _refuse_redirects(s)
+        ha_transport.guard_session(s, cluster_id=getattr(mgr, 'id', None))
+        # mgr.host is already IPv6-bracketed by the property, use it directly.
+        login_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/access/ticket"
+        # failed over to a node with a root password of its own: that one (#1136)
+        if node_creds.secrets_of(getattr(mgr, 'id', None)):
+            pwd = mgr.api_password_for(mgr.host) or pwd
+        resp = s.post(login_url, data={'username': usr, 'password': pwd}, timeout=10)
+        if resp.status_code != 200:
+            try: s.close()
+            except Exception: pass
+            said = f'{usr} password authentication failed (HTTP {resp.status_code})'
+            if resp.status_code == 401:
+                return None, said, 401
+            raise LoginNotTaken(said)
+        data = resp.json()['data']
+        if data.get('NeedTFA'):
+            try: s.close()
+            except Exception: pass
+            return None, (f'{usr} has two-factor authentication enabled, so a password '
+                          f'login cannot open the session Proxmox wants for {what}.'), 200
+        s.cookies.set('PVEAuthCookie', data['ticket'])
+        s.headers.update({'CSRFPreventionToken': data['CSRFPreventionToken']})
+        return s, None, 200
+    except BaseException:
+        if s is not None:
+            try: s.close()
+            except Exception: pass
+        raise
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -14765,6 +14821,70 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"Error getting fingerprint: {e}")
             return {'success': False, 'error': str(e)}
 
+    # MK Nov 2026 (#1389) - PVE makes and deletes an API token for the user itself, or for
+    # someone with User.Modify on its groups (a token without privilege separation made for
+    # another also wants Permissions.Modify on / and the realm). An API token never counts
+    # as its own user. On a cluster we talk to with a token (the one minted at the first
+    # connect, or one typed in as the login) the temporary token of a migration got a 403
+    # that way, unless the token holds those rights anyway, as root's does. The password
+    # login of the account itself is the way left, and a cluster without one is told so
+    # instead of handing its own token to the source.
+    # A login PVE refused is not sent again for TOKEN_LOGIN_HOLD while the stored password
+    # stays the same: a Site Recovery run asks once per guest, the balancer every interval,
+    # and each failed login counts on the realm's lockout and on a fail2ban of pveproxy.
+    TOKEN_LOGIN_HOLD = 1800
+
+    def _token_owner(self):
+        """The user@realm the API tokens of this cluster's account belong to. A login with
+        an API token keeps 'user@realm!tokenid' in config.user."""
+        return (getattr(self.config, 'user', '') or '').split('!', 1)[0]
+
+    def _token_request(self, method, token_name, data=None):
+        """POST or DELETE `token_name` of the cluster's account: over the session we
+        have, and once more over a password login of the account when PVE refused the
+        token we talk to it with. (response, None), or (None, why) when neither works. A
+        login that got no answer, or one that is no yes or no, raises."""
+        from urllib.parse import quote
+        owner = self._token_owner()
+        url = (f"https://{self.host}:{self.api_port}/api2/json/access/users/"
+               f"{quote(owner, safe='@')}/token/{quote(token_name, safe='')}")
+        kw = {} if data is None else {'data': data}
+        call = self._api_post if method == 'POST' else self._api_delete
+        response = call(url, **kw)
+        if response.status_code != 403 or not getattr(self, '_using_api_token', False):
+            return response, None
+        if '!' in (getattr(self.config, 'user', '') or ''):
+            return None, (f"Proxmox does not let an API token make or delete another one, and "
+                          f"this cluster signs in with the API token {self.config.user} only. "
+                          f"A cross-cluster migration needs a temporary token there: add the "
+                          f"cluster with the password of {owner} instead (PegaProx still makes "
+                          f"a token of its own for everything else).")
+        pwd = getattr(self.config, 'pass_', None) or getattr(self.config, 'password', None)
+        if not pwd:
+            return None, (f"Proxmox does not let an API token make or delete another one, and "
+                          f"this cluster has no password of {owner} stored. A cross-cluster "
+                          f"migration needs a temporary token there: add the password in the "
+                          f"cluster settings.")
+        import hashlib
+        stored = hashlib.sha256(pwd.encode('utf-8', 'replace')).hexdigest()
+        held = getattr(self, '_token_login_refused', None)
+        if held and held[0] == stored and time.monotonic() - held[1] < self.TOKEN_LOGIN_HOLD:
+            return None, held[2]
+        # no answer, or one that is not a no, raises: that is no refusal, a retry may work
+        sess, why, status = _password_login(self, owner, pwd, 'the temporary API token of a migration')
+        if sess is None:
+            if status == 401:
+                why += (" - the password stored for this cluster is wrong, or its realm asks "
+                        "for a second factor")
+            self._token_login_refused = (stored, time.monotonic(), why)
+            return None, why
+        self._token_login_refused = None
+        try:
+            return sess.request(method, url, timeout=self.api_timeout, **kw), None
+        finally:
+            try: sess.close()
+            except Exception: pass
+
     def create_api_token(self, token_name: str = 'pegaprox-migrate', expire: int = 0) -> Dict[str, Any]:
         # MK May 2026 (#413 layer 6, blackshocks bundle 20260530_220647):
         # if a prior Planned/Emergency failover crashed or its token cleanup
@@ -14777,8 +14897,7 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
 
         host = self.host
-        user = self.config.user
-        url = f"https://{host}:{self.api_port}/api2/json/access/users/{user}/token/{token_name}"
+        owner = self._token_owner()
 
         def _do_create():
             data = {
@@ -14788,25 +14907,30 @@ echo "AGENT_INSTALLED_OK"
                 'expire': int(expire or 0),
                 'comment': 'PegaProx temporary migration token'
             }
-            return self._api_post(url, data=data)
+            return self._token_request('POST', token_name, data)
 
         try:
-            response = _do_create()
+            response, why = _do_create()
 
             # Stale token from a previous run? Drop it and retry once.
-            if response.status_code != 200 and 'already exists' in (response.text or '').lower():
+            if response is not None and response.status_code != 200 \
+                    and 'already exists' in (response.text or '').lower():
                 self.logger.warning(f"[create_api_token] stale '{token_name}' on {host}, dropping + retry")
                 try:
-                    self._api_delete(url)
+                    self._token_request('DELETE', token_name)
                 except Exception as _e:
                     self.logger.debug(f"[create_api_token] pre-delete swallowed: {_e}")
-                response = _do_create()
+                response, why = _do_create()
+
+            if response is None:
+                self.logger.error(f"[ERROR] Failed to create API token: {why}")
+                return {'success': False, 'error': why, 'refused': True}
 
             if response.status_code == 200:
                 result = response.json()
                 token_data = result.get('data', {})
                 token_value = token_data.get('value', '')
-                full_token_id = token_data.get('full-tokenid', f"{user}!{token_name}")
+                full_token_id = token_data.get('full-tokenid', f"{owner}!{token_name}")
 
                 self.logger.info(f"[OK] Created API token: {full_token_id}")
                 return {
@@ -14831,14 +14955,14 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
-            host = self.host
-            user = self.config.user
-            
-            url = f"https://{host}:{self.api_port}/api2/json/access/users/{user}/token/{token_name}"
-            response = self._api_delete(url)
+            owner = self._token_owner()
+            response, why = self._token_request('DELETE', token_name)
+            if response is None:
+                self.logger.warning(f"[WARN] Failed to delete API token: {why}")
+                return {'success': False, 'error': why}
             
             if response.status_code == 200:
-                self.logger.info(f"[OK] Deleted API token: {user}!{token_name}")
+                self.logger.info(f"[OK] Deleted API token: {owner}!{token_name}")
                 return {'success': True}
             else:
                 error_msg = response.text
@@ -16678,46 +16802,12 @@ echo "AGENT_INSTALLED_OK"
             return None, ('This operation requires the cluster root@pam password '
                           f'(Proxmox rejects API tokens for {what}). '
                           'Add the password in the cluster settings.')
-        s = None
         try:
-            s = requests.Session()
-            s.trust_env = False
-            _pool_kw = dict(pool_connections=2, pool_maxsize=4, pool_block=False, max_retries=0)
-            if self._ssl_verify:
-                _ca = ssl.get_default_verify_paths()
-                s.verify = _ca.cafile or _ca.openssl_cafile or True
-                s.mount('https://', HTTPAdapter(**_pool_kw))
-            else:
-                s.verify = False
-                s.mount('https://', _NoHostnameCheckAdapter(**_pool_kw))
-            # MK Nov 2026 - the same path check as the cached session, this one is root@pam
-            from pegaprox.utils.sanitization import refuse_climbing_paths
-            refuse_climbing_paths(s)
-            _refuse_redirects(s)
-            ha_transport.guard_session(s, cluster_id=getattr(self, 'id', None))
-            # self.host is already IPv6-bracketed by the property — use it directly.
-            login_url = f"https://{self.host}:{self.api_port}/api2/json/access/ticket"
-            # failed over to a node with a root password of its own: that one (#1136)
-            if node_creds.secrets_of(getattr(self, 'id', None)):
-                pwd = self.api_password_for(self.host) or pwd
-            resp = s.post(login_url, data={'username': usr, 'password': pwd}, timeout=10)
-            if resp.status_code != 200:
-                try: s.close()
-                except Exception: pass
-                return None, f'root@pam password authentication failed (HTTP {resp.status_code})'
-            data = resp.json()['data']
-            if data.get('NeedTFA'):
-                try: s.close()
-                except Exception: pass
-                return None, ('root@pam has two-factor authentication enabled, so a password '
-                              f'login cannot open the session Proxmox wants for {what}.')
-            s.cookies.set('PVEAuthCookie', data['ticket'])
-            s.headers.update({'CSRFPreventionToken': data['CSRFPreventionToken']})
-            return s, None
+            session, why, _status = _password_login(self, usr, pwd, what)
+            return session, why
+        except LoginNotTaken as e:
+            return None, str(e)
         except Exception as e:
-            if s is not None:
-                try: s.close()
-                except Exception: pass
             self.logger.warning(f"[CEPH] privileged-session mint failed: {type(e).__name__}")
             return None, f'Could not mint root@pam session: {type(e).__name__}'
 

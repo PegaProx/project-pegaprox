@@ -73,6 +73,11 @@ def pve(monkeypatch):
     tgt._api_post.side_effect, tgt._api_put.side_effect = post, put
     tgt._api_get.side_effect = get
     tgt.delete_api_token.side_effect = delete
+    # the token path itself is the manager's own (#1389), over the fake API above
+    from pegaprox.core.manager import PegaProxManager
+    tgt._token_owner.side_effect = lambda: PegaProxManager._token_owner(tgt)
+    tgt._token_request.side_effect = \
+        lambda *a, **kw: PegaProxManager._token_request(tgt, *a, **kw)
     tgt.get_cluster_fingerprint.return_value = {'success': True, 'host': '10.0.0.5',
                                                 'fingerprint': 'AA:BB'}
     g.cluster_managers[CID] = tgt
