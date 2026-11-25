@@ -5394,10 +5394,36 @@ class PegaProxManager:
         else:
             self.logger.info(f"[MAINT] HA poll ({source}): no nodes in native maintenance")
 
+    # MK Nov 2026 - pve-manager 9.2 got PUT /nodes/{node}/maintenance (their bug 6144). It runs
+    # the same ha-manager crm-command we send over SSH, so it needs no SSH and no sudo and works
+    # on a token cluster. A node without it answers 501, a login without Sys.Modify on / a 403,
+    # an unreachable one nothing at all: the SSH ladder stays the way for all of them.
+    def _ha_maintenance_via_api(self, node_name, mode):
+        """True when PVE took `mode` ('enable' or 'disable') for the node over its own API."""
+        from urllib.parse import quote
+        url = (f"https://{self.host}:{self.api_port}/api2/json/nodes/"
+               f"{quote(node_name, safe='')}/maintenance")
+        try:
+            r = self._api_put(url, data={'maintenance-mode': mode})
+        except Exception as e:
+            self.logger.info(f"[MAINT] PVE API maintenance {mode} for {node_name} not sent ({e}), trying SSH")
+            return False
+        if r.status_code == 200:
+            self.logger.info(f"[MAINT] PVE API took maintenance {mode} for {node_name}")
+            return True
+        why = (getattr(r, 'reason', '') or '')[:160]
+        self.logger.info(f"[MAINT] PVE API maintenance {mode} for {node_name}: {r.status_code} {why}, trying SSH")
+        return False
+
     # NS feb 2026 - try ha-manager crm-command node-maintenance enable (#78)
     # returns True if proxmox takes over, False = we do our own evacuation
     def _try_native_ha_maintenance(self, node_name, task):
         try:
+            if self._ha_maintenance_via_api(node_name, 'enable'):
+                task.native_ha = True
+                self.logger.info(f"[MAINT] native HA flag set for {node_name}")
+                return True
+
             node_ip = self._get_node_ip(node_name)
             if not node_ip:
                 self.logger.warning(f"[MAINT] can't resolve {node_name} IP, custom evacuation")
@@ -5804,6 +5830,9 @@ class PegaProxManager:
     # run it on any other reachable node instead
     def _try_disable_native_ha_maintenance(self, node_name):
         try:
+            if self._ha_maintenance_via_api(node_name, 'disable'):
+                return True
+
             ssh_user = node_login(self.config)
             prefix = "sudo " if ssh_user != 'root' else ""
             cmd = f"{prefix}ha-manager crm-command node-maintenance disable {node_name}"
