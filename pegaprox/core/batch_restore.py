@@ -36,32 +36,72 @@ OVER = ('done', 'failed', 'skipped', 'cancelled', 'unknown')
 _runs = {}
 _lock = threading.Lock()
 
+# MK Nov 2026 - since pve-manager 9.2.33 (guest identities) a restore over a guest whose uid is
+# not the backup's is refused in its task, 'force' alone no longer overwrites another guest.
+# 'allow-identity-mismatch' does; a node before that knows no such parameter and refuses the
+# whole call for it, and has no such check either.
+IDENTITY_OVERRIDE_PVE = (9, 2, 33)
+IDENTITY_MISMATCH = 'IDENTITY_MISMATCH'
 
-def start_restore(mgr, volid, node, vmid, storage, overwrite):
+
+def identity_override_withheld(mgr, node):
+    """Why `node` is not sent allow-identity-mismatch, '' when it takes it. A node before
+    9.2.33 has neither the option nor the check; one whose version cannot be read is not
+    sent it either, and may refuse the restore in its task."""
+    try:
+        ver = mgr.get_node_pve_version(node)
+    except Exception:
+        ver = None
+    if not isinstance(ver, tuple):
+        return (f"allow-identity-mismatch was not sent: the Proxmox VE version of {node} could not be "
+                f"read. Should the restore fail because the backup belongs to another guest, start it again.")
+    if ver < IDENTITY_OVERRIDE_PVE:
+        return (f"allow-identity-mismatch was not sent: {node} runs pve-manager {'.'.join(map(str, ver))}, "
+                f"which has neither that option nor the check it lifts")
+    return ''
+
+
+def identity_refused(text):
+    """Whether Proxmox refused a restore because the backup belongs to another guest"""
+    text = str(text or '')
+    return 'backup belongs to another guest' in text or "use 'allow-identity-mismatch'" in text
+
+
+def start_restore(mgr, volid, node, vmid, storage, overwrite, allow_identity_mismatch=False):
     """Hand one restore to Proxmox (qmrestore or pct restore, by the backup): {'upid'} or
-    {'error', 'status'} with what Proxmox said. Raises when Proxmox is not reached."""
+    {'error', 'status'} with what Proxmox said. Raises when Proxmox is not reached.
+    allow_identity_mismatch: overwrite a guest the backup is not of, on the caller's word;
+    identity_warning says why it was not sent."""
     is_lxc = '/ct/' in volid or volid.endswith('.lxc.tar') or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid
     # a container restore is a create from the archive: pct takes it as ostemplate with
     # restore set, it has no archive parameter (qmrestore does)
     params = {'vmid': vmid, 'ostemplate': volid, 'restore': 1} if is_lxc else {'vmid': vmid, 'archive': volid}
     if storage:
         params['storage'] = storage
+    warned = {}
     if overwrite:
         params['force'] = 1
+        if allow_identity_mismatch:
+            why = identity_override_withheld(mgr, node)
+            if why:
+                warned['identity_warning'] = why
+            else:
+                params['allow-identity-mismatch'] = 1
     r = mgr._api_post(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{'lxc' if is_lxc else 'qemu'}",
                       data=params, timeout=30)
     if r.status_code == 200:
         # the restored config replaces what the search index read under that id
         from pegaprox.background import guest_index
         guest_index.drop(getattr(mgr, 'id', None), 'lxc' if is_lxc else 'qemu', vmid)
-        return {'upid': r.json().get('data'), 'kind': 'lxc' if is_lxc else 'qemu'}
+        return {'upid': r.json().get('data'), 'kind': 'lxc' if is_lxc else 'qemu', **warned,
+                **({'identity_override': True} if 'allow-identity-mismatch' in params else {})}
     try:
         err = r.json().get('errors') or r.json().get('message') or r.text
         if isinstance(err, dict):
             err = ', '.join(f'{k}: {v}' for k, v in err.items())
     except Exception:
         err = r.text or f'HTTP {r.status_code}'
-    return {'error': err, 'status': r.status_code}
+    return {'error': err, 'status': r.status_code, **warned}
 
 
 def backup_footprint(mgr, node, volid):
@@ -132,7 +172,7 @@ def restore_adds(mgr, node, volid, src_vmid, target_vmid, overwrite, rows=None, 
 
 class BatchRun:
     def __init__(self, cluster_id, cluster_name, user, session, ip, storage, mode, node,
-                 target_storage, how, parallel, rows):
+                 target_storage, how, parallel, rows, allow_identity_mismatch=False):
         self.id = uuid.uuid4().hex[:16]
         self.cluster_id, self.cluster_name = cluster_id, cluster_name
         self.user, self.ip = user, ip
@@ -141,6 +181,7 @@ class BatchRun:
         self.storage, self.mode = storage, mode
         self.node, self.target_storage = node, target_storage
         self.how, self.parallel = how, parallel
+        self.allow_identity_mismatch = bool(allow_identity_mismatch)
         self.rows = rows
         self.state = 'running'          # running, done, cancelled, stopped
         self.reason = ''
@@ -165,6 +206,7 @@ class BatchRun:
             out = {'id': self.id, 'cluster_id': self.cluster_id, 'cluster': self.cluster_name,
                    'user': self.user, 'mine': bool(me) and me == self.user, 'storage': self.storage,
                    'mode': self.mode, 'node': self.node, 'target_storage': self.target_storage,
+                   'allow_identity_mismatch': self.allow_identity_mismatch,
                    'run': self.how, 'parallel': self.parallel if self.how == 'parallel' else None,
                    'state': self.state, 'reason': self.reason, 'cancelled_by': self.cancelled_by,
                    'created': int(self.created), 'finished': int(self.finished) if self.finished else None,
@@ -290,18 +332,23 @@ def _begin(run, mgr, row):
     _row_set(row, RESTORING, '', began=int(time.time()))
     try:
         got = start_restore(mgr, row['volid'], row['node'], row['target_vmid'], run.target_storage,
-                            run.mode == 'overwrite')
+                            run.mode == 'overwrite', allow_identity_mismatch=run.allow_identity_mismatch)
     except Exception as e:
         logging.error(f"[BATCH-RESTORE] {run.id}: starting {row['volid']} failed: {e}")
         got = {'error': 'The restore could not be started'}
+    # the batch's own audit line names the override by the rows it went out for
+    said = {k: got[k] for k in ('identity_override', 'identity_warning') if got.get(k)}
     if 'upid' not in got:
-        _row_set(row, 'failed', got.get('error') or 'The restore could not be started')
+        _row_set(row, 'failed', got.get('error') or 'The restore could not be started', **said)
         return False
+    with _lock:
+        row.update(said)
     upid = got['upid'] if isinstance(got['upid'], str) and got['upid'].startswith('UPID:') else None
     try:
         log_audit(run.user, 'backup.restored',
                   f"Restoring {row['volid']} -> {got.get('kind')}/{row['target_vmid']} on {row['node']} "
-                  f"(mode={run.mode}, batch {run.id})", ip_address=run.ip, cluster=run.cluster_name)
+                  f"(mode={run.mode}{', allow-identity-mismatch' if got.get('identity_override') else ''}, "
+                  f"batch {run.id})", ip_address=run.ip, cluster=run.cluster_name)
     except Exception as e:
         logging.error(f"[BATCH-RESTORE] audit of {row['volid']} failed: {e}")
     if not upid:
@@ -334,6 +381,9 @@ def _follow(run, mgr, row):
         return False
     if state == 'ok':
         _row_set(row, 'done', detail if detail != 'OK' else '')
+    elif identity_refused(detail):
+        # the dialog can offer to start it again with allow_identity_mismatch
+        _row_set(row, 'failed', detail, code=IDENTITY_MISMATCH)
     else:
         _row_set(row, 'failed', detail)
     return True
@@ -429,6 +479,7 @@ def _finish(run):
     by = {}
     for r in rows:
         by.setdefault(r['state'], []).append(str(r['vmid']))
+    overridden = [str(r['target_vmid']) for r in rows if r.get('identity_override')]
     parts = []
     for state in OVER:
         ids = by.get(state)
@@ -438,6 +489,8 @@ def _finish(run):
     try:
         log_audit(run.user, 'backup.batch_restore_finished',
                   f"Batch restore {run.id} from {run.storage} {run.state}: " + (', '.join(parts) or 'nothing')
+                  + (f"; allow-identity-mismatch sent for {', '.join(overridden[:20])}"
+                     f"{' ...' if len(overridden) > 20 else ''}" if overridden else '')
                   + (f" - {run.reason}" if run.reason else ''), ip_address=run.ip, cluster=run.cluster_name)
     except Exception as e:
         logging.error(f"[BATCH-RESTORE] audit of batch {run.id} failed: {e}")

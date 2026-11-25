@@ -8,6 +8,8 @@ bad rule was lost, and a 401 or 403 of PVE was not the 502 UPSTREAM_AUTH of #114
 
 The status PVE sent now travels as pve_status, as the storage and PBS routes name it.
 """
+import json
+
 import pytest
 
 CID = 'c1'
@@ -46,11 +48,12 @@ def pve(api):
 
 
 def test_a_rule_pve_refuses_keeps_its_status_and_its_reason(admin, pve):
-    pve.post.return_value = _Resp(400, {'errors': REASON}, text='{"errors":{"action":"..."}}')
+    pve.post.return_value = _Resp(400, {'errors': REASON}, text=json.dumps({'errors': REASON}))
     r = admin.post(URL, json=RULE)
     body = r.get_json()
     assert r.status_code == 400, (r.status_code, body)
-    assert body['error'] == REASON
+    # the reason as text, the fields as PVE named them, as the other rule writes answer
+    assert body['error'] == f"action: {REASON['action']}" and body['errors'] == REASON
     assert body['pve_status'] == 400
     # the cluster was asked, at the rules of that VM
     assert pve.post.call_args.args[0] == 'https://pve1.lab:8006/api2/json/nodes/pve1/qemu/100/firewall/rules'

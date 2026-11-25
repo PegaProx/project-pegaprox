@@ -1340,6 +1340,31 @@ def parse_pve_error(response_text, fallback='Proxmox API error'):
     return html.escape(text) if text else fallback
 
 
+def pve_refusal(response_text, fallback='Proxmox API error'):
+    """(text, errors) of something Proxmox VE refused.
+
+    MK Nov 2026 - a parameter PVE refuses comes back as its reason per field, next to the
+    bare message 'Parameter verification failed.' that parse_pve_error takes. text then
+    names the fields ("dport: invalid icmp-type '010' - ..."), errors has them as PVE sent
+    them. Without fields it is parse_pve_error's text and {}; a body with neither a
+    message nor fields ({"data": null}) is the fallback, not that JSON."""
+    import html
+    import json
+    try:
+        body = json.loads((response_text or '').replace('\n', ' ').replace('\r', ''))
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        errs = body.get('errors')
+        if isinstance(errs, dict) and errs:
+            text = '; '.join(f'{k}: {str(v).strip()}' for k, v in errs.items())
+            # the quotes stay, PVE names the value it refused in them
+            return html.escape(text[:500], quote=False), errs
+        if not body.get('message'):
+            return fallback, {}
+    return parse_pve_error(response_text, fallback), {}
+
+
 # MK Oct 2026 (#1142) - a 401 or 403 from a system behind PegaProx (Proxmox VE, PBS, an ESXi
 # server) is about the credentials PegaProx keeps for it, never about the caller's session.
 # Handed on as it came, the browser read the 401 as its own session running out and signed

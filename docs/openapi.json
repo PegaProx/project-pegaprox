@@ -7471,7 +7471,7 @@
           }
         },
         "summary": "Restore a VM from backup",
-        "description": "MK: Can restore to same VMID (overwrite) or new VMID",
+        "description": "MK: Can restore to same VMID (overwrite) or new VMID\n\nBody: {volid, target_vmid?, storage?, start?, allow_identity_mismatch?}.\nallow_identity_mismatch (default false): over the same VMID, overwrite a guest the backup\nis not of. Proxmox VE 9.3 refuses that in the restore task without it ('backup belongs\nto another guest'); a node before 9.2.33 has no such check and is not sent the option.\nAsked for and not sent, the answer says why in identity_warning.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -24798,7 +24798,7 @@
           }
         },
         "summary": "Restore a backup. Three modes: - mode='new': qmrestore into a new VMID (target_vmid) - mode='overwrite': qmrestore into an existing VMID (force) - mode='test': like the verify pipeline but skip auto-cleanup; user keeps the test VM",
-        "description": "Body: {volid, target_node, target_vmid, mode, target_storage?}",
+        "description": "Body: {volid, target_node, target_vmid, mode, target_storage?, allow_identity_mismatch?}\nallow_identity_mismatch (default false): with 'overwrite', overwrite a guest the backup\nis not of. Proxmox VE 9.3 refuses that in the restore task without it ('backup belongs\nto another guest'); a node before 9.2.33 has no such check and is not sent the option.\nAsked for and not sent, the answer says why in identity_warning.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -24854,7 +24854,7 @@
           }
         },
         "summary": "Restore several backups in one go",
-        "description": "Body: {items: [{volid, target_vmid?}], mode: 'new'|'overwrite', target_node,\ntarget_storage?, first_vmid?, run: 'sequential'|'parallel', parallel? (2-4), confirm?}.\nOne backup per guest, all from one storage, 1 to 100 of them. 'new' restores each on\ntarget_node into a VMID of its own (its target_vmid, else the next free one from\nfirst_vmid on). 'overwrite' restores each over the guest it came from, on the node that\nguest is on (target_node for one that is gone), and only with confirm: true. Every backup\nis checked as POST /backup-restore checks it before anything starts: one refused and\nnone starts (403, refused names each). Answers 202 {run}, to follow with GET\n/api/batch-restores/<run_id>.",
+        "description": "Body: {items: [{volid, target_vmid?}], mode: 'new'|'overwrite', target_node,\ntarget_storage?, first_vmid?, run: 'sequential'|'parallel', parallel? (2-4), confirm?,\nallow_identity_mismatch?}.\nOne backup per guest, all from one storage, 1 to 100 of them. 'new' restores each on\ntarget_node into a VMID of its own (its target_vmid, else the next free one from\nfirst_vmid on). 'overwrite' restores each over the guest it came from, on the node that\nguest is on (target_node for one that is gone), and only with confirm: true. Every backup\nis checked as POST /backup-restore checks it before anything starts: one refused and\nnone starts (403, refused names each). Answers 202 {run}, to follow with GET\n/api/batch-restores/<run_id>. A row Proxmox VE refused because its backup belongs to\nanother guest fails with code IDENTITY_MISMATCH; allow_identity_mismatch: true (default\nfalse) overwrites such guests anyway, as POST /backup-restore does; a row it was not sent\nfor says why in identity_warning.",
         "parameters": [
           {
             "name": "cluster_id",

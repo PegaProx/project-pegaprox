@@ -18774,8 +18774,16 @@ echo "AGENT_INSTALLED_OK"
             try:
                 members = (self.get_pool_members(poolid) or {}).get('members', []) or []
                 member_ids = [str(m.get('vmid')) for m in members if m.get('vmid') is not None]
-                if member_ids:
-                    self._api_put(base, data={'vms': ','.join(member_ids), 'delete': 1})
+                # MK Nov 2026 - PVE 9.3 (fix #7294) has SDN VNets as members too, type 'network'
+                # with 'network' as the PUT takes it back ('vnet/<zone>/<vnet>[/<tag>|/*]'); one
+                # of them left the delete refused. Same PUT, so a refusal leaves the pool whole.
+                vnets = [m['network'] for m in members if m.get('type') == 'network' and m.get('network')]
+                drop = {k: ','.join(v) for k, v in (('vms', member_ids), ('network', vnets)) if v}
+                if drop:
+                    r = self._api_put(base, data={**drop, 'delete': 1})
+                    if r.status_code != 200:
+                        self.logger.warning(f"delete_pool({poolid}): un-pooling the members failed: "
+                                            f"PVE {r.status_code}: {(r.text or '').strip()[:200]}")
             except Exception as e:
                 self.logger.warning(f"delete_pool({poolid}): member cleanup failed: {e}")
             resp = self._api_delete(base)
@@ -19574,6 +19582,22 @@ echo "AGENT_INSTALLED_OK"
             self._pve_version_cache = None
             return None
     
+    # MK Nov 2026 - PVE 9.3 came as 9.2.x updates of pve-manager, so (9, 2) does not say what
+    # a node takes. Not cached: asked only where a call depends on it, for that one node.
+    def get_node_pve_version(self, node):
+        """(major, minor, patch) of pve-manager on `node`, e.g. (9, 2, 33). None on error."""
+        try:
+            resp = self._api_get(f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/version",
+                                 timeout=10)
+            if resp.status_code != 200:
+                return None
+            ver = str((resp.json().get('data') or {}).get('version') or '')
+        except Exception:
+            return None
+        # "9.2.33", PVE 7 and older wrote "7.4-3"
+        m = re.match(r'(\d+)\.(\d+)[.-](\d+)', ver)
+        return tuple(int(x) for x in m.groups()) if m else None
+
     def get_scsi_controllers(self) -> List[Dict]:
         
         return [
@@ -19847,6 +19871,42 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"Error getting network config: {e}")
             return unread(UnreadList, error=e)
     
+    # MK Nov 2026 - pve-manager 9.2.28 (PSA-2026-00077-1) refuses '${' and '<%' in the comments
+    # of an interface: with python3-mako installed ifupdown2 runs them as a template. PVE only
+    # says "value does not match the regex pattern", and the dialog sends the comment PVE
+    # holds on every save, so one written before blocks the interface for good. 9.2.38 refuses
+    # them in ovs_options too, which goes into the file even on an interface that is no OVS one.
+    _IFACE_TEMPLATE_TAG = re.compile(r'<%|\$\{')
+    _IFACE_TEMPLATE_FIELDS = {'comments': ('the comment', (9, 2, 28)), 'comments6': ('the comment', (9, 2, 28)),
+                              'ovs_options': ('the OVS options', (9, 2, 38))}
+
+    def _iface_template_refusal(self, node, config):
+        """The answer for template tags `node` refuses, None when it takes them or its version
+        cannot be read (then PVE decides, as before)."""
+        if not isinstance(config, dict):
+            return None
+        tagged = [k for k in self._IFACE_TEMPLATE_FIELDS
+                  if isinstance(config.get(k), str) and self._IFACE_TEMPLATE_TAG.search(config[k])]
+        if not tagged:
+            return None
+        ver = self.get_node_pve_version(node)
+        refused = [k for k in tagged if ver is not None and ver >= self._IFACE_TEMPLATE_FIELDS[k][1]]
+        if not refused:
+            return None
+        what = ' and '.join(dict.fromkeys(self._IFACE_TEMPLATE_FIELDS[k][0] for k in refused))
+        return {'success': False, 'status': 400,
+                'error': f"Proxmox VE on {node} (pve-manager {'.'.join(map(str, ver))}) refuses '${{' and "
+                         f"'<%' in {what} of an interface, as ifupdown2 can run them as a template. "
+                         f"Remove them ({', '.join(refused)}) and save again."}
+
+    def _iface_write_failure(self, response):
+        from pegaprox.api.helpers import pve_refusal, UPSTREAM_AUTH_STATUSES
+        # a 401 or 403 names its status in the answer already
+        text, errs = pve_refusal(response.text, '' if response.status_code in UPSTREAM_AUTH_STATUSES
+                                 else f'HTTP {response.status_code}')
+        return {'success': False, 'error': text, 'status': response.status_code,
+                **({'errors': errs} if errs else {})}
+
     def update_node_network(self, node: str, iface: str, config: Dict) -> Dict[str, Any]:
         
         if not self.is_connected:
@@ -19854,12 +19914,15 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect'}
         
         try:
+            refused = self._iface_template_refusal(node, config)
+            if refused:
+                return refused
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/network/{iface}"
             response = self._api_put(url, data=config)
             
             if response.status_code == 200:
                 return {'success': True, 'message': 'Network updated'}
-            return {'success': False, 'error': response.text}
+            return self._iface_write_failure(response)
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
@@ -19878,12 +19941,15 @@ echo "AGENT_INSTALLED_OK"
             }
             # Remove empty values
             data = {k: v for k, v in data.items() if v is not None and v != ''}
+            refused = self._iface_template_refusal(node, data)
+            if refused:
+                return refused
             
             response = self._api_post(url, data=data)
             
             if response.status_code == 200:
                 return {'success': True, 'message': f'Interface {iface} created'}
-            return {'success': False, 'error': response.text}
+            return self._iface_write_failure(response)
         except Exception as e:
             return {'success': False, 'error': str(e)}
     

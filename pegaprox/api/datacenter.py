@@ -18,7 +18,7 @@ from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.sanitization import bounded_list
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, require_unconfined
-from pegaprox.api.helpers import upstream_failure, unread_failure
+from pegaprox.api.helpers import upstream_failure, unread_failure, pve_refusal
 from pegaprox.utils.ssh import read_capped as _read_capped
 
 bp = Blueprint('datacenter', __name__)
@@ -981,6 +981,24 @@ def _plugin_fingerprint(f):
 
 # what decides where PVE sends the stored token or key
 _PLUGIN_TARGET = {'url': _plugin_url, 'fingerprint': _plugin_fingerprint}
+
+
+def _trimmed_plugin_fields(data):
+    # MK Nov 2026 - PVE 9.3 (pve-network 006bb97e) takes url, token and key of an IPAM or DNS
+    # plugin only without whitespace; one pasted with a space or line feed at its end went
+    # through before and is refused now
+    if isinstance(data, dict):
+        for k in ('url', 'token', 'key'):
+            if isinstance(data.get(k), str):
+                data[k] = data[k].strip()
+    return data
+
+
+def _plugin_refusal(response):
+    # what PVE refuses here it names per field next to the bare 'Parameter verification
+    # failed.', since 9.3 also a url, token or key with whitespace inside
+    text, errs = pve_refusal(response.text)
+    return upstream_failure(response.status_code, text, **({'errors': errs} if errs else {}))
 
 
 def _plugin_secret_moves(session, entry_url, data, secret, what):
@@ -1981,7 +1999,7 @@ def create_sdn_ipam(cluster_id):
     
     try:
         host, port = manager.host, manager.api_port
-        data = request.json or {}
+        data = _trimmed_plugin_fields(request.json or {})
         
         url = f"https://{host}:{port}/api2/json/cluster/sdn/ipams"
         response = manager._create_session().post(url, data=data, timeout=10)
@@ -1990,7 +2008,7 @@ def create_sdn_ipam(cluster_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.ipam_created', f"Created IPAM: {data.get('ipam', 'unknown')} ({data.get('type', '')})", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'IPAM created'})
-        return upstream_failure(response.status_code, parse_pve_error(response.text))
+        return _plugin_refusal(response)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create IPAM')}), 500
 
@@ -2011,7 +2029,7 @@ def update_sdn_ipam(cluster_id, ipam_id):
     
     try:
         host, port = manager.host, manager.api_port
-        data = request.json or {}
+        data = _trimmed_plugin_fields(request.json or {})
         
         url = f"https://{host}:{port}/api2/json/cluster/sdn/ipams/{ipam_id}"
         session = manager._create_session()
@@ -2024,7 +2042,7 @@ def update_sdn_ipam(cluster_id, ipam_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.ipam_updated', f"Updated IPAM: {ipam_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'IPAM updated'})
-        return upstream_failure(response.status_code, parse_pve_error(response.text))
+        return _plugin_refusal(response)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update IPAM')}), 500
 
@@ -2107,7 +2125,7 @@ def create_sdn_dns(cluster_id):
     
     try:
         host, port = manager.host, manager.api_port
-        data = request.json or {}
+        data = _trimmed_plugin_fields(request.json or {})
         
         url = f"https://{host}:{port}/api2/json/cluster/sdn/dns"
         response = manager._create_session().post(url, data=data, timeout=10)
@@ -2116,7 +2134,7 @@ def create_sdn_dns(cluster_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.dns_created', f"Created DNS: {data.get('dns', 'unknown')}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'DNS created'})
-        return upstream_failure(response.status_code, parse_pve_error(response.text))
+        return _plugin_refusal(response)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create DNS config')}), 500
 
@@ -2137,7 +2155,7 @@ def update_sdn_dns(cluster_id, dns_id):
     
     try:
         host, port = manager.host, manager.api_port
-        data = request.json or {}
+        data = _trimmed_plugin_fields(request.json or {})
         
         url = f"https://{host}:{port}/api2/json/cluster/sdn/dns/{dns_id}"
         session = manager._create_session()
@@ -2150,7 +2168,7 @@ def update_sdn_dns(cluster_id, dns_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.dns_updated', f"Updated DNS: {dns_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'DNS updated'})
-        return upstream_failure(response.status_code, parse_pve_error(response.text))
+        return _plugin_refusal(response)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update DNS config')}), 500
 

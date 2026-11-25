@@ -53,7 +53,7 @@ from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined, caller_is_scoped
 from pegaprox.api.helpers import node_shell_address, node_shell_refusal
 from pegaprox.api.helpers import xapi_permission_missing, upstream_failure, tenant_quota_gate, guest_size, quota_hold_alive
-from pegaprox.api.helpers import UPSTREAM_AUTH, UPSTREAM_AUTH_STATUSES
+from pegaprox.api.helpers import UPSTREAM_AUTH, UPSTREAM_AUTH_STATUSES, pve_refusal
 from pegaprox.api.helpers import pve_read_failed, pve_unreachable, _checkbox
 from pegaprox.api.helpers import evacuation_options, evacuation_options_said, guest_storage_totals
 from pegaprox.api.helpers import (sees_whole_maintenance, maintenance_without_guests,
@@ -1846,6 +1846,12 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
     """Restore a VM from backup
     
     MK: Can restore to same VMID (overwrite) or new VMID
+
+    Body: {volid, target_vmid?, storage?, start?, allow_identity_mismatch?}.
+    allow_identity_mismatch (default false): over the same VMID, overwrite a guest the backup
+    is not of. Proxmox VE 9.3 refuses that in the restore task without it ('backup belongs
+    to another guest'); a node before 9.2.33 has no such check and is not sent the option.
+    Asked for and not sent, the answer says why in identity_warning.
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok:
@@ -1921,6 +1927,14 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
             'vmid': target_vmid,
             'force': 1 if str(target_vmid) == str(vmid) else 0  # force overwrite if same vmid
         }
+        _iwarn = {}
+        if restore_params['force'] and data.get('allow_identity_mismatch') is True:
+            from pegaprox.core.batch_restore import identity_override_withheld
+            _why = identity_override_withheld(manager, node)
+            if _why:
+                _iwarn['identity_warning'] = _why
+            else:
+                restore_params['allow-identity-mismatch'] = 1
         # MK Oct 2026 - pct has no archive parameter, a container restore is a create from
         # the backup as ostemplate with restore set (same as core/batch_restore.start_restore)
         if vm_type == 'qemu':
@@ -1944,12 +1958,14 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
             # the restored config replaces what the search index read under that id
             guest_index.drop(cluster_id, vm_type, target_vmid)
             user = getattr(request, 'session', {}).get('user', 'system')
-            log_audit(user, 'backup.restored', f"Restored {volid} to VMID {target_vmid}", cluster=manager.config.name)
+            log_audit(user, 'backup.restored', f"Restored {volid} to VMID {target_vmid}"
+                      + (' (allow-identity-mismatch)' if 'allow-identity-mismatch' in restore_params else ''),
+                      cluster=manager.config.name)
             return jsonify({'success': True, 'task': task, 'vmid': target_vmid,
-                            **({'quota_warning': _qwarn} if _qwarn else {})})
+                            **({'quota_warning': _qwarn} if _qwarn else {}), **_iwarn})
         
         # NS: proxmox sometimes returns weird error messages, should probably parse them better
-        return upstream_failure(response.status_code, parse_pve_error(response.text))
+        return upstream_failure(response.status_code, parse_pve_error(response.text), **_iwarn)
         
     except Exception as e:
         logging.error(f"[BACKUP] Error restoring backup: {e}")
@@ -2506,6 +2522,16 @@ def set_firewall_options(cluster_id):
         return jsonify({'error': safe_error(e, 'Failed to set firewall options')}), 500
 
 
+# MK Nov 2026 - pve-firewall 6.0.8 (PVE 9.3) checks the whole rule again on every update, also
+# one that only toggles 'enable', and refuses rules it took before (an ICMP type with a leading
+# zero or as a list, a group name over 18 characters). The rule lists hand on its 'errors' per
+# rule as they are; a refused write went out as PVE's raw JSON body (the VM rule create: its
+# fields as error). Now its reason as text, the fields it named as errors, its status as pve_status.
+def _rule_refusal(r):
+    text, errs = pve_refusal(r.text, '' if r.status_code in UPSTREAM_AUTH_STATUSES else f'HTTP {r.status_code}')
+    return upstream_failure(r.status_code, text, pve_status=r.status_code, **({'errors': errs} if errs else {}))
+
+
 @bp.route('/api/clusters/<cluster_id>/datacenter/firewall/rules', methods=['GET'])
 @require_auth(perms=['cluster.view'])
 def get_firewall_rules(cluster_id):
@@ -2555,7 +2581,7 @@ def create_firewall_rule(cluster_id):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'firewall.rule_created', f"Firewall rule created", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Firewall rule created'})
-        return upstream_failure(r.status_code, r.text)
+        return _rule_refusal(r)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create firewall rule')}), 500
 
@@ -2582,7 +2608,7 @@ def update_firewall_rule(cluster_id, pos):
         
         if r.status_code == 200:
             return jsonify({'success': True, 'message': 'Firewall rule updated'})
-        return upstream_failure(r.status_code, r.text)
+        return _rule_refusal(r)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update firewall rule')}), 500
 
@@ -2781,23 +2807,8 @@ def create_vm_firewall_rule(cluster_id, node, vmtype, vmid):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'vm.firewall.rule_created', f"VM {vmid} firewall rule created", cluster=manager.config.name)
             return jsonify({'success': True})
-        # Extract Proxmox error message: the errors per field of a rule it refused as they
-        # are, else the message of its error body; a body that is no JSON goes out short,
-        # a page not at all
-        try:
-            body = r.json()
-        except ValueError:
-            body = None
-        errs = body.get('errors') if isinstance(body, dict) else None
-        if isinstance(errs, dict) and errs:
-            pve_err = errs
-        elif isinstance(body, dict) and not body.get('message'):
-            pve_err = ''    # {"data": null}: the status is all PVE said
-        else:
-            # a 401 or 403 names its status in the answer already, an empty body adds nothing
-            pve_err = parse_pve_error(r.text, '' if r.status_code in (401, 403) else f'HTTP {r.status_code}')
         logging.warning(f"VM FW rule create failed: {r.status_code} data={data} pve_response={r.text[:300]}")
-        return upstream_failure(r.status_code, pve_err, pve_status=r.status_code)
+        return _rule_refusal(r)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create VM firewall rule')}), 500
 
@@ -2817,7 +2828,7 @@ def update_vm_firewall_rule(cluster_id, node, vmtype, vmid, pos):
         r = manager._create_session().put(_vm_fw_url(manager, node, vmtype, vmid, f'/rules/{pos}'), data=data, timeout=10)
         if r.status_code == 200:
             return jsonify({'success': True})
-        return upstream_failure(r.status_code, r.text)
+        return _rule_refusal(r)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update VM firewall rule')}), 500
 
