@@ -132,6 +132,71 @@ def _password_login(mgr, usr, pwd, what):
         raise
 
 
+# MK Nov 2026 - PVE 9.3 has a datacenter API token policy (datacenter.cfg 'token-policy'): it
+# can want an expire on every new token, cap its lifetime and want privilege separation, and
+# refuses a token that does not fit with a 500. PVE checks it against its own clock. GET
+# /cluster/options hands it out without Sys.Audit too; older PVE has no such key, and a
+# policy that cannot be read leaves our tokens as they were.
+TOKEN_POLICY_KEYS = ('require-expiry', 'max-lifetime', 'disallow-expiry-extension',
+                     'default-to-max-lifetime', 'allow-extension-on-regenerate',
+                     'require-privilege-separation')
+# an expire goes this far below the longest one the policy allows: our idea of PVE's clock
+# comes from a Date header, to the second
+TOKEN_EXPIRE_MARGIN = 120
+# the management token under a policy that wants an expire and names no lifetime
+MANAGEMENT_TOKEN_LIFETIME = 365 * 86400
+_MANAGEMENT_TOKEN_RE = re.compile(r'pegaprox_[0-9]{6}')
+_POLICY_WORDS = {'true': 1, 'yes': 1, 'on': 1, 'false': 0, 'no': 0, 'off': 0}
+
+
+def token_policy_of(resp):
+    """(policy, seconds PVE's clock runs ahead of ours) from an answer of GET
+    /cluster/options. The policy holds the keys PVE set, as numbers, {} for none."""
+    data = (resp.json() or {}).get('data')
+    raw = data.get('token-policy') if isinstance(data, dict) else None
+    if isinstance(raw, str):
+        raw = dict(part.split('=', 1) for part in raw.split(',') if '=' in part)
+    policy = {}
+    for key, value in (raw.items() if isinstance(raw, dict) else ()):
+        key = str(key).strip()
+        if isinstance(value, str):
+            value = _POLICY_WORDS.get(value.strip().lower(), value)
+        try:
+            if key in TOKEN_POLICY_KEYS:
+                policy[key] = int(value)
+        except (TypeError, ValueError):
+            pass
+    ahead = 0.0
+    try:
+        from email.utils import parsedate_to_datetime
+        ahead = parsedate_to_datetime(resp.headers['Date']).timestamp() - time.time()
+    except Exception:
+        pass
+    return policy, ahead
+
+
+def policy_expire(policy, ahead, wanted):
+    """`wanted` (an expire in seconds since the epoch, 0 for none) as `policy` lets a new
+    token have it: no later than its max-lifetime from now on PVE's clock."""
+    life = policy.get('max-lifetime') or 0
+    if life <= 0:
+        return int(wanted or 0)
+    latest = int(time.time() + ahead) + life - min(TOKEN_EXPIRE_MARGIN, life // 10)
+    return min(int(wanted), latest) if wanted else latest
+
+
+def management_token_form(policy, ahead):
+    """The form the cluster's management token is made with (#110): the rights of the
+    account, an expire only where the policy wants one. None under a policy that wants
+    privilege separation, which leaves such a token without a single right."""
+    if policy.get('require-privilege-separation'):
+        return None
+    expire = policy_expire(policy, ahead, 0)
+    if not expire and policy.get('require-expiry'):
+        expire = int(time.time() + ahead) + MANAGEMENT_TOKEN_LIFETIME
+    return {'privsep': '0', 'expire': str(expire), 'comment': 'PegaProx management token'}
+
+
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise urllib.error.HTTPError(req.full_url, code, 'Proxmox VE answered with a redirect, '
@@ -1387,6 +1452,37 @@ class PegaProxManager:
                 f"after {self._auth_failures} consecutive auth failures"
             )
 
+    def _auth_refused(self, session):
+        """PVE answered 401 to a request sent over `session`: the login is dropped and the
+        401 counted against the breaker (#444).
+        MK Nov 2026 - not so for a management token PegaProx made itself, which the API token
+        policy of the cluster (PVE 9.3) lets run out while we run. Its first 401 has
+        connect_to_proxmox log in with the password and make a new one right away, and a
+        password PVE refuses arms the breaker there as before. A request still out with it
+        while a connect runs, or once the session has left it, counts for nothing."""
+        sent = str((getattr(session, 'headers', None) or {}).get('Authorization') or '')
+        token_user = sent.split('=', 2)[1] if sent.startswith('PVEAPIToken=') else ''
+        if not token_user or not self._is_own_management_token(token_user):
+            self._ticket = None
+            self._csrf_token = None
+            self._register_auth_failure()
+            return
+        with self._auth_failure_lock:
+            current = sent == f"PVEAPIToken={getattr(self, '_api_token', None)}"
+            again = current and getattr(self, '_remint_tried', None) == token_user
+            remint = current and not again and not self._connect_lock.locked()
+            if remint:
+                self._remint_tried = token_user
+        if again:
+            self._ticket = None
+            self._csrf_token = None
+            self._register_auth_failure()
+        elif remint:
+            self.logger.warning(f"[AUTH] cluster '{self.config.name}': PVE no longer takes the API "
+                                f"token {token_user} PegaProx made for it - logging in with the "
+                                f"password to make a new one")
+            self.connect_to_proxmox()
+
     def _reset_auth_failures(self):
         with self._auth_failure_lock:
             if self._auth_failures:
@@ -1518,9 +1614,7 @@ class PegaProxManager:
             # MK May 2026 (#444) — PVE rejected the ticket. Invalidate locally so the
             # next call has to re-login (which the circuit breaker will gate).
             if response.status_code == 401:
-                self._ticket = None
-                self._csrf_token = None
-                self._register_auth_failure()
+                self._auth_refused(session)
             return response
         except requests.exceptions.Timeout as e:
             # MK: Timeout != offline. Proxmox might just be slow (happens a lot with ZFS)
@@ -1549,9 +1643,7 @@ class PegaProxManager:
             self._auto_capture_upid(resp)  # MK May 2026 — bind PVE task to PegaProx user
             self._record_api_sample('POST', url, (time.monotonic() - t0) * 1000.0, resp.status_code)
             if resp.status_code == 401:
-                self._ticket = None
-                self._csrf_token = None
-                self._register_auth_failure()
+                self._auth_refused(sess)
             return resp
         except requests.exceptions.Timeout as e:
             # MK: Timeout does NOT mean cluster is offline
@@ -1579,9 +1671,7 @@ class PegaProxManager:
             self._auto_capture_upid(response)
             self._record_api_sample('PUT', url, (time.monotonic() - t0) * 1000.0, response.status_code)
             if response.status_code == 401:
-                self._ticket = None
-                self._csrf_token = None
-                self._register_auth_failure()
+                self._auth_refused(session)
             return response
         except requests.exceptions.Timeout as e:
             # MK: Timeout does NOT mean cluster is offline - operation might have succeeded
@@ -1735,6 +1825,9 @@ class PegaProxManager:
                 _stored_token = True
                 self._using_api_token = True
                 self._api_token = f"{self.config.api_token_user}={self.config.api_token_secret}"
+            # MK Nov 2026 - our own management token PVE answered 401 (ran out under the
+            # cluster's token policy, or was removed): replaced once the password login works
+            stale_token = None
 
             # MK May 2026 (#444) — track 401 across the host loop. If primary
             # returned 401 the fallbacks will too (same creds), no point hitting
@@ -1823,6 +1916,9 @@ class PegaProxManager:
                             # NS: stored token got revoked on PVE? fall back to password
                             if _stored_token and resp.status_code in (401, 403):
                                 self.logger.info("Stored API token rejected, trying password auth")
+                                if resp.status_code == 401 and self._is_own_management_token(
+                                        self.config.api_token_user):
+                                    stale_token = self.config.api_token_user
                                 self._using_api_token = False
                                 self._api_token = None
                                 _stored_token = False
@@ -1860,6 +1956,17 @@ class PegaProxManager:
                                        "(Datacenter → Permissions → API Tokens), or temporarily disable "
                                        "two-factor authentication on the account to add it (PegaProx "
                                        "creates an API token automatically), then re-enable it.")
+                                if stale_token:
+                                    # the token that kept this account working is gone
+                                    msg = (f"Proxmox no longer takes the API token {stale_token} PegaProx "
+                                           f"made for this cluster: it has expired (an API token policy "
+                                           f"of the cluster gives new tokens an end) or was removed. "
+                                           f"{self.config.user} has two-factor authentication enabled, so "
+                                           f"PegaProx cannot log in to make a new one. Reconfigure the "
+                                           f"cluster with an API token of {self.config.user} as its login "
+                                           f"(user@realm!tokenid and its secret), or turn two-factor "
+                                           f"authentication off for {self.config.user} until PegaProx has "
+                                           f"connected and made a new token, then on again.")
                                 self.logger.warning(f"{host}: account requires 2FA (NeedTFA) — password auth cannot proceed")
                                 self._ticket = None
                                 self._csrf_token = None
@@ -1905,8 +2012,10 @@ class PegaProxManager:
                             # write it into a synced clusters row, where it stays - the standby
                             # polls with If-None-Match, so no sync replaces the row until the
                             # active changes something itself.
-                            if not self.config.api_token_user and ha.is_active():
-                                self._try_create_api_token(session, host)
+                            if (not self.config.api_token_user or stale_token) and ha.is_active():
+                                self._try_create_api_token(session, host, replaces=stale_token,
+                                                           login=(data['ticket'],
+                                                                  data['CSRFPreventionToken']))
 
                             self._reset_auth_failures()  # MK (#444)
                             self._clear_host_failure(host)  # MK May 2026 — host is warm again
@@ -1990,26 +2099,54 @@ class PegaProxManager:
         except Exception as e:
             self.logger.debug(f"Could not auto-discover fallback hosts: {e}")
 
-    def _try_create_api_token(self, session, host):
+    def _try_create_api_token(self, session, host, replaces=None, login=None):
         """Auto-create a PVE API token so REST auth survives 2FA being enabled later.
-        SSH keeps using the password regardless. - MK Mar 2026 (#110)"""
+        SSH keeps using the password regardless. - MK Mar 2026 (#110)
+        replaces: our own token PVE no longer takes, deleted after the new one is made.
+        login: (ticket, CSRF token) of the password login, else the manager's own."""
         # the caller asks too; this one holds for any other caller (#625)
         if not ha.is_active():
             return
+        base = f"https://{self._bracket_ipv6(host)}:{self.api_port}/api2/json"
+        # MK Nov 2026 - the login's own: a request still out with the dead token answers
+        # 401 meanwhile, and that empties self._ticket (_api_get)
+        ticket, csrf = login or (self._ticket, self._csrf_token)
+        if replaces:
+            # out of the config whether a new one comes or not
+            self.logger.warning(f"PVE no longer takes the API token {replaces} PegaProx made for this "
+                                f"cluster (expired or removed) - making a new one")
+            self.config.api_token_user = ''
+            self.config.api_token_secret = ''
         try:
             user = self.config.user  # e.g. root@pam
             import random, string
             suffix = ''.join(random.choices(string.digits, k=6))
             token_id = f'pegaprox_{suffix}'
-            url = f"https://{self._bracket_ipv6(host)}:{self.api_port}/api2/json/access/users/{user}/token/{token_id}"
+            url = f"{base}/access/users/{user}/token/{token_id}"
             # NS: need to set ticket cookie on login session, it only has it in the response not as a cookie
-            session.cookies.set('PVEAuthCookie', self._ticket)
-            headers = {'CSRFPreventionToken': self._csrf_token}
-            payload = {'privsep': '0', 'expire': '0', 'comment': 'PegaProx management token'}
+            session.cookies.set('PVEAuthCookie', ticket)
+            headers = {'CSRFPreventionToken': csrf}
+            # the token as the cluster's API token policy takes it (PVE 9.3)
+            policy, ahead = {}, 0.0
+            try:
+                r = session.get(f"{base}/cluster/options", timeout=10)
+                if r.status_code == 200:
+                    policy, ahead = token_policy_of(r)
+            except Exception as e:
+                self.logger.debug(f"Token policy unreadable ({type(e).__name__}), none assumed")
+            payload = management_token_form(policy, ahead)
 
-            resp = session.post(url, data=payload, headers=headers, timeout=10)
+            if payload is None:
+                self.logger.warning(
+                    f"Not creating an API token for {user}: the API token policy of this cluster wants "
+                    f"privilege separation, and such a token holds no right without ACLs of its own. "
+                    f"PegaProx stays on password logins, which two-factor authentication on {user} "
+                    f"would end")
+                resp = None
+            else:
+                resp = session.post(url, data=payload, headers=headers, timeout=10)
 
-            if resp.status_code == 200:
+            if resp is not None and resp.status_code == 200:
                 token_data = resp.json().get('data', {})
                 full_tokenid = token_data.get('full-tokenid', f'{user}!{token_id}')
                 secret = token_data.get('value', '')
@@ -2033,15 +2170,37 @@ class PegaProxManager:
                     except:
                         pass  # NS: non-critical, token still works in memory for this session
                     self.logger.info(f"Auto-created API token {full_tokenid} for 2FA safety")
+                    ends = int((token_data.get('info') or {}).get('expire') or 0)
+                    if ends:
+                        self.logger.info(f"API token {full_tokenid} expires {datetime.fromtimestamp(ends)} "
+                                         f"under the API token policy of the cluster; PegaProx makes a new "
+                                         f"one then, unless {user} has two-factor authentication")
                     save_config()
-            elif resp.status_code == 400:
-                # token already exists, try to use it (user might have created it manually)
-                self.logger.debug(f"API token '{token_id}' already exists for {user}")
-            else:
-                # 403 = no permission, 5xx = PVE issue - just continue with password
-                self.logger.debug(f"Could not create API token: HTTP {resp.status_code}")
+            elif resp is not None:
+                # 400 = a token of that name (made by hand?), 403 = no permission, 500 = PVE or its
+                # API token policy said no - the cluster goes on with the password
+                self.logger.warning(f"Could not create an API token for {user}: HTTP {resp.status_code} "
+                                    f"{_pve_message(getattr(resp, 'text', ''))} - PegaProx stays on password "
+                                    f"logins, which two-factor authentication on {user} would end")
         except Exception as e:
-            self.logger.debug(f"API token creation failed (non-critical): {e}")
+            self.logger.warning(f"API token creation failed (non-critical): {type(e).__name__}: {e}")
+        if not replaces:
+            return
+        if not self.config.api_token_user:
+            save_config()   # no new one: the dead one goes from the stored row as well
+        try:
+            old_user, old_id = replaces.split('!', 1)
+            gone = session.delete(f"{base}/access/users/{old_user}/token/{old_id}",
+                                  headers={'CSRFPreventionToken': csrf}, timeout=10)
+            if gone.status_code == 200:
+                self.logger.info(f"Deleted the old API token {replaces}")
+            else:
+                self.logger.warning(f"Could not delete the old API token {replaces}: "
+                                    f"{_pve_message(gone.text)} - delete it on the cluster if "
+                                    f"it is still there")
+        except Exception as e:
+            self.logger.warning(f"Could not delete the old API token {replaces} ({type(e).__name__}) - "
+                                f"delete it on the cluster if it is still there")
 
     def _get_api_url(self, path: str) -> str:
         host = self.host
@@ -14847,17 +15006,61 @@ echo "AGENT_INSTALLED_OK"
         an API token keeps 'user@realm!tokenid' in config.user."""
         return (getattr(self.config, 'user', '') or '').split('!', 1)[0]
 
-    def _token_request(self, method, token_name, data=None):
-        """POST or DELETE `token_name` of the cluster's account: over the session we
+    def _is_own_management_token(self, token_user):
+        """True for the id of a token _try_create_api_token made for this cluster's account."""
+        owner, _, name = (token_user or '').partition('!')
+        return owner == self.config.user and bool(_MANAGEMENT_TOKEN_RE.fullmatch(name))
+
+    # the cluster's API token policy (token_policy_of) is read again after this
+    TOKEN_POLICY_TTL = 120
+
+    def token_policy(self):
+        """(policy, seconds PVE's clock runs ahead of ours) of this cluster: ({}, 0.0) for
+        none, and for a policy that cannot be read, which is not kept."""
+        held = getattr(self, '_token_policy_held', None)
+        if held and time.monotonic() - held[0] < self.TOKEN_POLICY_TTL:
+            return held[1], held[2]
+        try:
+            r = self._api_get(f"https://{self.host}:{self.api_port}/api2/json/cluster/options")
+            if r.status_code != 200:
+                raise ValueError(f"HTTP {r.status_code}")
+            policy, ahead = token_policy_of(r)
+        except Exception as e:
+            self.logger.debug(f"[TOKEN] datacenter options unreadable ({type(e).__name__}: {e}), "
+                              f"no API token policy assumed")
+            return {}, 0.0
+        self._token_policy_held = (time.monotonic(), policy, ahead)
+        return policy, ahead
+
+    def token_expire(self, wanted):
+        """The expire of a new temporary token that should end at `wanted`: no later than the
+        cluster's API token policy allows. PVE deletes no token when it runs out, and takes
+        the delete of one that has (drop_token_when_done) as before."""
+        policy, ahead = self.token_policy()
+        expire = policy_expire(policy, ahead, wanted)
+        if wanted and expire < int(wanted):
+            self.logger.warning(
+                f"[TOKEN] The API token policy of cluster '{self.config.name}' allows a token "
+                f"{policy.get('max-lifetime')}s at most: this migration token ends "
+                f"{datetime.fromtimestamp(expire)}, and a migration still running then loses its "
+                f"access to the cluster. It is deleted when its task ends, as before.")
+        return expire
+
+    def _token_request(self, method, token_name, data=None,
+                       what='the temporary API token of a migration'):
+        """POST, PUT or DELETE `token_name` of the cluster's account: over the session we
         have, and once more over a password login of the account when PVE refused the
         token we talk to it with. (response, None), or (None, why) when neither works. A
-        login that got no answer, or one that is no yes or no, raises."""
+        login that got no answer, or one that is no yes or no, raises. `what` is the work
+        a refusal names."""
         from urllib.parse import quote
         owner = self._token_owner()
         url = (f"https://{self.host}:{self.api_port}/api2/json/access/users/"
                f"{quote(owner, safe='@')}/token/{quote(token_name, safe='')}")
         kw = {} if data is None else {'data': data}
-        call = self._api_post if method == 'POST' else self._api_delete
+        # PUT: the new secret of a token (PVE 9.2), which 9.3 refuses a token without
+        # Permissions.Modify on / as well
+        call = {'POST': self._api_post, 'PUT': self._api_put}.get(method, self._api_delete)
         response = call(url, **kw)
         if response.status_code != 403 or not getattr(self, '_using_api_token', False):
             return response, None
@@ -14869,17 +15072,16 @@ echo "AGENT_INSTALLED_OK"
                           f"a token of its own for everything else).")
         pwd = getattr(self.config, 'pass_', None) or getattr(self.config, 'password', None)
         if not pwd:
-            return None, (f"Proxmox does not let an API token make or delete another one, and "
-                          f"this cluster has no password of {owner} stored. A cross-cluster "
-                          f"migration needs a temporary token there: add the password in the "
-                          f"cluster settings.")
+            return None, (f"Proxmox does not let an API token make, renew or delete the tokens "
+                          f"of its user, and this cluster has no password of {owner} stored for "
+                          f"{what}: add the password in the cluster settings.")
         import hashlib
         stored = hashlib.sha256(pwd.encode('utf-8', 'replace')).hexdigest()
         held = getattr(self, '_token_login_refused', None)
         if held and held[0] == stored and time.monotonic() - held[1] < self.TOKEN_LOGIN_HOLD:
             return None, held[2]
         # no answer, or one that is not a no, raises: that is no refusal, a retry may work
-        sess, why, status = _password_login(self, owner, pwd, 'the temporary API token of a migration')
+        sess, why, status = _password_login(self, owner, pwd, what)
         if sess is None:
             if status == 401:
                 why += (" - the password stored for this cluster is wrong, or its realm asks "
@@ -14906,6 +15108,18 @@ echo "AGENT_INSTALLED_OK"
 
         host = self.host
         owner = self._token_owner()
+        # MK Nov 2026 - the cluster's API token policy (PVE 9.3): an expire no later than it
+        # allows, and no token where it wants privilege separation, which this one goes
+        # without (PVE would refuse it with a 500)
+        policy, _ahead = self.token_policy()
+        if policy.get('require-privilege-separation'):
+            why = (f"The API token policy of this cluster requires privilege separation "
+                   f"(Datacenter > Options > API Token Policy), and the temporary token of a "
+                   f"cross-cluster migration has the rights of {owner} without it. Turn "
+                   f"'Require Privilege Separation' off there to move guests into this cluster.")
+            self.logger.warning(f"[create_api_token] {why}")
+            return {'success': False, 'error': why, 'refused': True}
+        expire = self.token_expire(expire)
 
         def _do_create():
             data = {
@@ -14948,7 +15162,7 @@ echo "AGENT_INSTALLED_OK"
                     'token_name': token_name
                 }
             else:
-                error_msg = response.text
+                error_msg = _pve_message(response.text, 300)
                 self.logger.error(f"[ERROR] Failed to create API token: {error_msg}")
                 return {'success': False, 'error': error_msg}
 

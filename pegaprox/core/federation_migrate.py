@@ -3,10 +3,10 @@
 Proxmox's remote migration does the copy: the source node opens a tunnel to the target
 cluster with an API token of it. Here that token is made for the one migration by the site
 that leads the target cluster, after its own checks of the user, and with only the rights
-the migration needs there: privilege separation, Sys.Incoming on the root, the guest's
-VMID, the target storages and the bridges (ACLs of the token, on roles of its own). Never
-the full rights of the account PegaProx uses there, which is what a migration between two
-clusters of one instance hands the source node.
+the migration needs there: privilege separation, Sys.Incoming and Sys.Audit on the root, the
+guest's VMID, the target storages, the bridges and a custom CPU model (ACLs of the token, on
+roles of its own). Never the full rights of the account PegaProx uses there, which is what a
+migration between two clusters of one instance hands the source node.
 
 The site the user works at leads the migration: it asks the target's site for the token
 (mint_target, through the relay as the user, or here for a cluster of its own), hands it
@@ -16,8 +16,8 @@ once the task has ended (transfer_net.drop_token_when_done). The drop is the ask
 site's, a signed member call: it only takes rights away, and it has to work when the
 user's session or sign-in has run out meanwhile. The tokens a site made are kept in a
 host-local file, so a restart forgets none. The token never reaches a browser and is
-never logged; PVE refuses it on its own after transfer_net.token_expiry() should nobody
-get to drop it.
+never logged; PVE refuses it on its own after transfer_net.token_expiry(), or sooner where
+the cluster's API token policy wants it, should nobody get to drop it.
 
 MK Nov 2026
 """
@@ -40,15 +40,23 @@ _TOKEN_NAME_RE = re.compile(r'pegaprox-fedmig-[0-9]{10}-[0-9a-f]{8}')
 _NAME_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}')
 # the roles the token's ACLs name, with their privileges. A remote migration needs
 # Sys.Incoming on / and VM.Allocate on the guest's VMID to open its tunnel (qemu-server
-# and pve-container, mtunnel); the disks are allocated on the target storages, and the
-# config is checked against the bridges it names
+# and pve-container, mtunnel), and Sys.Audit on / for the GET /cluster/status the source's
+# remote_migrate asks the target before it starts the task; the disks are allocated on the
+# target storages, and the config is checked against the bridges it names. A VM on a custom
+# CPU model has the source read that model at the target (Mapping.Audit on
+# /mapping/cpu/custom-<name>), and the config step of the mtunnel wants Mapping.Use on
+# /mapping/cpu/<name> (qemu-server check_cpu_model_access). A privileged container would
+# want Sys.Modify on / and is refused at the site that leads the migration instead
+# (privileged_container).
 ROLES = {
-    'PegaProxFedIncoming': 'Sys.Incoming',
+    'PegaProxFedIncoming': 'Sys.Incoming,Sys.Audit',
     'PegaProxFedGuest': ('VM.Allocate,VM.Audit,VM.PowerMgmt,VM.Config.Disk,VM.Config.CPU,'
                          'VM.Config.Memory,VM.Config.Network,VM.Config.Options,'
                          'VM.Config.HWType,VM.Config.CDROM,VM.Config.Cloudinit'),
     'PegaProxFedStorage': 'Datastore.AllocateSpace,Datastore.Audit',
     'PegaProxFedNet': 'SDN.Use',
+    'PegaProxFedCPU': 'Mapping.Audit',
+    'PegaProxFedCPUUse': 'Mapping.Use',
 }
 MAX_TARGETS = 16
 DROP_PATH = '/api/federation/peer/migration-drop'
@@ -138,6 +146,24 @@ def _footprint(value):
     return out
 
 
+def custom_cpu_model(cfg):
+    """The name of the custom CPU model a VM config runs on ('custom-<name>' as the cputype
+    of its cpu), None for none."""
+    value = cfg.get('cpu') if isinstance(cfg, dict) else None
+    for part in (value.split(',') if isinstance(value, str) else ()):
+        key, eq, val = part.partition('=')
+        cputype = (val if eq else key).strip()
+        if (not eq or key.strip() == 'cputype') and cputype.startswith('custom-'):
+            name = cputype[len('custom-'):]
+            return name if _NAME_RE.fullmatch(name) else None
+    return None
+
+
+def privileged_container(cfg):
+    """True for the config of a container without 'unprivileged: 1'."""
+    return str(cfg.get('unprivileged', 0)).strip().lower() not in ('1', 'true')
+
+
 # --- the target's site -------------------------------------------------------------------------
 
 def mint_target(cluster_id, data, user, username, sender=''):
@@ -173,6 +199,10 @@ def mint_target(cluster_id, data, user, username, sender=''):
     _vmid_free(mgr, vmid)
     storages = _names(data.get('storages'), 'storages')
     bridges = _names(data.get('bridges'), 'bridges')
+    cpu = data.get('cpu_model') or None
+    if cpu is not None and (vm_type != 'qemu' or not isinstance(cpu, str)
+                            or not _NAME_RE.fullmatch(cpu)):
+        raise MigrationRefused(400, 'cpu_model is the name of the custom CPU model of a VM')
     footprint = _footprint(data.get('footprint'))
     source = str(data.get('source') or '')[:120]
     if caller_is_scoped(user, cluster_id):
@@ -197,8 +227,9 @@ def mint_target(cluster_id, data, user, username, sender=''):
     name = f'{TOKEN_PREFIX}{int(time.time())}-{secrets.token_hex(4)}'
     # Proxmox VE reserves nothing for the nextid answer above: two migrations to the same
     # VMID would both get a token for it, and the second one rights on the first one's guest.
-    # A token not dropped holds its VMID until Proxmox VE lets it run out.
-    until = _expiry()
+    # A token not dropped holds its VMID until Proxmox VE lets it run out, which the
+    # cluster's API token policy can make sooner than _expiry()
+    until = mgr.token_expire(_expiry())
     with _minted_lock:
         now = time.time()
         if any(h.get('cluster_id') == cluster_id and h.get('vmid') == vmid
@@ -210,7 +241,7 @@ def mint_target(cluster_id, data, user, username, sender=''):
                          'user': username, 'at': now, 'until': until, 'making': True}
     try:
         granted = _mint(mgr, cluster_id, user, username, name, node, vm_type, vmid, storages,
-                        bridges, footprint, source)
+                        bridges, footprint, source, cpu, until)
     except BaseException:
         with _minted_lock:
             if (_held().get(name) or {}).get('making'):
@@ -223,7 +254,7 @@ def mint_target(cluster_id, data, user, username, sender=''):
 
 
 def _mint(mgr, cluster_id, user, username, name, node, vm_type, vmid, storages, bridges,
-          footprint, source):
+          footprint, source, cpu=None, expire=None):
     from pegaprox.api.helpers import tenant_quota_gate
     from pegaprox.utils.rbac import landing_adds, quota_tenant
     from pegaprox.core import transfer_net
@@ -238,7 +269,7 @@ def _mint(mgr, cluster_id, user, username, name, node, vm_type, vmid, storages, 
         raise MigrationRefused(403, (body or {}).get('error') or 'The tenant quota refuses it',
                                'QUOTA_EXCEEDED')
     try:
-        token = _make_token(mgr, name, vmid, storages, bridges)
+        token = _make_token(mgr, name, vmid, storages, bridges, cpu, expire)
     except BaseException:
         _release_hold(name)
         raise
@@ -272,9 +303,10 @@ def _mint(mgr, cluster_id, user, username, name, node, vm_type, vmid, storages, 
     return out
 
 
-def _make_token(mgr, name, vmid, storages, bridges):
+def _make_token(mgr, name, vmid, storages, bridges, cpu=None, expire=None):
     """A privilege-separated API token of the cluster's PegaProx account with the ACLs one
-    migration needs; dropped again when any step fails."""
+    migration needs (cpu: the custom CPU model of the VM, None for none; expire: its end as
+    mgr.token_expire gave it, None to ask it here); dropped again when any step fails."""
     base = f'https://{mgr.host}:{mgr.api_port}/api2/json'
     for roleid, privs in ROLES.items():
         r = mgr._api_post(f'{base}/access/roles', data={'roleid': roleid, 'privs': privs})
@@ -286,8 +318,11 @@ def _make_token(mgr, name, vmid, storages, bridges):
                                             'token - its PegaProx account needs '
                                             'Permissions.Modify and Sys.Modify: '
                                             + _pve_error(r))
-    # the way past PVE's rule that a token makes no token (#1389)
-    r, why = mgr._token_request('POST', name, {'privsep': 1, 'expire': _expiry(),
+    # the way past PVE's rule that a token makes no token (#1389), with an expire the
+    # cluster's API token policy (PVE 9.3) takes
+    if expire is None:
+        expire = mgr.token_expire(_expiry())
+    r, why = mgr._token_request('POST', name, {'privsep': 1, 'expire': expire,
                                                'comment': 'PegaProx migration from another site'})
     if r is None:
         raise MigrationRefused(409, 'The target cluster made no migration token: ' + why)
@@ -299,6 +334,12 @@ def _make_token(mgr, name, vmid, storages, bridges):
     acls = [('/', 'PegaProxFedIncoming', 0), (f'/vms/{vmid}', 'PegaProxFedGuest', 1)]
     acls += [(path, 'PegaProxFedNet', 1) for path in _bridge_paths(mgr, base, bridges)]
     acls += [(f'/storage/{s}', 'PegaProxFedStorage', 1) for s in storages]
+    if cpu:
+        # the source reads the model as the VM config names it, so PVE checks the path with
+        # 'custom-' in it (pve-manager CustomCPUModels.pm, '/mapping/cpu/{cputype}'); the
+        # mtunnel's config step checks the name without it (qemu-server Qemu.pm)
+        acls.append((f'/mapping/cpu/custom-{cpu}', 'PegaProxFedCPU', 0))
+        acls.append((f'/mapping/cpu/{cpu}', 'PegaProxFedCPUUse', 0))
     try:
         for path, role, propagate in acls:
             r = mgr._api_put(f'{base}/access/acl', data={'path': path, 'roles': role,

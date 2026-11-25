@@ -78,6 +78,10 @@ def pve(monkeypatch):
     tgt._token_owner.side_effect = lambda: PegaProxManager._token_owner(tgt)
     tgt._token_request.side_effect = \
         lambda *a, **kw: PegaProxManager._token_request(tgt, *a, **kw)
+    # and so is its reading of the cluster's API token policy (/cluster/options above)
+    tgt._token_policy_held, tgt.TOKEN_POLICY_TTL = None, PegaProxManager.TOKEN_POLICY_TTL
+    tgt.token_policy.side_effect = lambda: PegaProxManager.token_policy(tgt)
+    tgt.token_expire.side_effect = lambda wanted: PegaProxManager.token_expire(tgt, wanted)
     tgt.get_cluster_fingerprint.return_value = {'success': True, 'host': '10.0.0.5',
                                                 'fingerprint': 'AA:BB'}
     g.cluster_managers[CID] = tgt

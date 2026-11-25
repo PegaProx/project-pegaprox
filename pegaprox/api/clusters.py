@@ -28,7 +28,7 @@ from pegaprox.utils.rbac import (
 )
 from pegaprox.utils.realtime import broadcast_sse, broadcast_update, push_immediate_update
 from pegaprox.core.config import load_config, save_config
-from pegaprox.core.manager import PegaProxManager, ha_cache_node_status
+from pegaprox.core.manager import PegaProxManager, ha_cache_node_status, management_token_form
 from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
 from pegaprox.utils.sanitization import bounded_list, validate_ssh_user, validate_host_address, dns_suffix
 from pegaprox.utils.sanitization import task_ref_ok
@@ -317,8 +317,13 @@ def export_cluster_config(cluster_id):
 
 # MK May 2026 (PVE 9.2) — rotate the auto-created API token without dropping
 # its ACL entries. The classic delete+recreate path resets all permissions;
-# the new /access/users/{user}/token/{id} POST in 9.2 regenerates the secret
-# in place. On pre-9.2 we fall back to delete+create + warn that ACLs reset.
+# PVE 9.2 regenerates the secret in place. On pre-9.2 we fall back to a new
+# token + warn that ACLs reset.
+# MK Nov 2026 - the in-place one is PUT .../token/{id} regenerate=1 (a POST there is a new
+# token, "Token already exists"). It goes through the manager's token ladder: 9.3 wants
+# Permissions.Modify for it over a token, else the account's password login does it. The
+# session takes the new secret at once. Pre-9.2 gets its new token before the old one,
+# which the session signs in with, is deleted.
 @bp.route('/api/clusters/<cluster_id>/api-token/rotate', methods=['POST'])
 @require_auth(perms=['cluster.config'])
 def rotate_cluster_api_token(cluster_id):
@@ -338,60 +343,108 @@ def rotate_cluster_api_token(cluster_id):
     try:
         token_user = mgr.config.api_token_user
         user_part, token_id = token_user.split('!', 1)
-        base = f"https://{mgr.host}:{mgr.api_port}/api2/json/access/users/{user_part}/token/{token_id}"
-
+        if user_part != mgr._token_owner():
+            return jsonify({'error': f'The stored API token {token_user} is not one of '
+                                     f'{mgr._token_owner()}: reconfigure the cluster'}), 409
         pve_ver = mgr.get_pve_version_tuple()
         new_secret = None
+        preserved = False
         # NS May 2026 — only try the 9.2 in-place regenerate when we KNOW the
-        # cluster is 9.2+. Pre-9.2 PVE doesn't reject POST on an existing
-        # token cleanly — it hangs / times out on some 9.1 builds. Falling
-        # back is cheaper than waiting for a 10s read timeout per attempt.
+        # cluster is 9.2+. Older PVE gets the new token below instead.
         if pve_ver is not None and pve_ver >= (9, 2):
-            try:
-                resp = mgr._api_post(base, data={}, timeout=8)
-                if resp.status_code == 200:
-                    data = resp.json().get('data') or {}
-                    new_secret = data.get('value') or data.get('secret')
-                    preserved = True
-                elif resp.status_code in (404, 405, 501):
-                    preserved = False  # fall through to delete+create
-                else:
-                    return upstream_failure(resp.status_code, parse_pve_error(resp.text))
-            except Exception as probe_err:
-                mgr.logger.warning(f"[token-rotate] in-place regenerate probe failed ({probe_err}); falling back")
-                preserved = False
-        else:
-            preserved = False
+            resp, why = mgr._token_request('PUT', token_id, {'regenerate': 1},
+                                           what='a new secret of its API token')
+            if resp is None:
+                return jsonify({'error': why}), 409
+            if resp.status_code == 200:
+                data = resp.json().get('data') or {}
+                new_secret = data.get('value')
+                preserved = True
+                if not new_secret:
+                    return jsonify({'error': 'Token regenerated but PVE did not return a secret'}), 502
+            elif not _lacks_regenerate(resp):
+                return upstream_failure(resp.status_code, parse_pve_error(resp.text))
 
-        if new_secret is None:
-            # Legacy path: delete + recreate. Warn caller ACLs are lost.
-            mgr._create_session().delete(base, timeout=10)
-            create_resp = mgr._api_post(base, data={})
-            if create_resp.status_code != 200:
-                return upstream_failure(create_resp.status_code, parse_pve_error(create_resp.text))
-            data = create_resp.json().get('data') or {}
-            new_secret = data.get('value') or data.get('secret')
-            preserved = False
+        new_user = token_user
+        if not preserved:
+            # Legacy path: a new token, then the old one goes. Warn caller ACLs are lost.
+            import random, string
+            new_name = 'pegaprox_' + ''.join(random.choices(string.digits, k=6))
+            form = management_token_form(*mgr.token_policy())
+            if form is None:
+                return jsonify({'error': 'The API token policy of this cluster requires privilege '
+                                         'separation, which leaves a new token of PegaProx '
+                                         'without any right'}), 409
+            create, why = mgr._token_request('POST', new_name, form, what='a new API token')
+            if create is None:
+                return jsonify({'error': why}), 409
+            if create.status_code != 200:
+                return upstream_failure(create.status_code, parse_pve_error(create.text))
+            data = create.json().get('data') or {}
+            new_secret = data.get('value')
+            new_user = data.get('full-tokenid') or f'{user_part}!{new_name}'
+            if not new_secret:
+                return jsonify({'error': 'Token created but PVE did not return a secret'}), 502
 
-        if not new_secret:
-            return jsonify({'error': 'Token regenerated but PVE did not return a secret'}), 502
-
-        # Persist the new secret in our DB so subsequent connects use it
+        # Persist the new secret in our DB so subsequent connects use it, and the session
+        # signs in with it from now on
+        on_it = getattr(mgr, '_api_token', None) and mgr._api_token.split('=', 1)[0] == token_user
+        mgr.config.api_token_user = new_user
         mgr.config.api_token_secret = new_secret
-        save_config()
+        if on_it:
+            mgr._api_token = f'{new_user}={new_secret}'
+        # MK Nov 2026 - PVE took the rotation from here on: what fails below goes with the
+        # success instead of a 500, and the audit entry is written either way
+        try:
+            saved = save_config() is not False
+        except Exception as e:
+            logging.error(f"[token-rotate] the new secret of {token_user} was not stored: "
+                          f"{type(e).__name__}")
+            saved = False
+
+        dropped = True
+        if not preserved:
+            try:
+                gone, why = mgr._token_request('DELETE', token_id, what='deleting the old API token')
+            except Exception as e:
+                gone, why = None, f'no answer ({type(e).__name__})'
+            dropped = gone is not None and gone.status_code == 200
+            if not dropped:
+                logging.warning(f"[token-rotate] old API token {token_user} was not deleted: "
+                                f"{why or parse_pve_error(gone.text)} - delete it on the cluster")
 
         user = getattr(request, 'session', {}).get('user', 'system')
         log_audit(user, 'cluster.api_token_rotated',
-                  f"Rotated API token {token_user} (ACLs preserved={preserved})",
+                  f"Rotated API token {token_user}" + (f" to {new_user}" if new_user != token_user else '')
+                  + f" (ACLs preserved={preserved})" + ('' if saved else ', not stored'),
                   cluster=mgr.config.name)
-        return jsonify({
-            'success': True,
-            'acls_preserved': preserved,
-            'message': 'Token rotated; ACLs preserved' if preserved
-                       else 'Token rotated via delete+recreate; ACL entries on this token were lost (pre-PVE-9.2 cluster)',
-        })
+        message = 'Token rotated; ACLs preserved' if preserved else \
+            'Token rotated via a new token; ACL entries on the old token were lost (pre-PVE-9.2 cluster)'
+        if not dropped:
+            message += f'. The old token {token_user} is still on the cluster: delete it there'
+        out = {'success': True, 'acls_preserved': preserved}
+        if not saved:
+            out['warning'] = ('The new secret is in use, but PegaProx could not store it: after its '
+                              'next start it signs in with the token stored before. Rotate again '
+                              'once its database can be written.')
+            message += '. ' + out['warning']
+        out['message'] = message
+        return jsonify(out)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Token rotation failed')}), 500
+
+
+def _lacks_regenerate(resp):
+    """True when PVE answered a regenerate=1 with the parameter error of a release that
+    does not know it, or with no such method."""
+    if resp.status_code in (404, 405, 501):
+        return True
+    if resp.status_code != 400:
+        return False
+    try:
+        return 'regenerate' in ((resp.json() or {}).get('errors') or {})
+    except ValueError:
+        return False
 
 
 @bp.route('/api/clusters/<cluster_id>/reconfigure', methods=['POST'])

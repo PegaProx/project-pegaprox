@@ -94,6 +94,18 @@ pveum aclmod / --users pegaprox@pve --roles PegaProx
 Add the cluster with `pegaprox@pve` and that password. PegaProx creates an API token of
 its own at the first login and keeps the password for what a token cannot do.
 
+Under an API token policy of the cluster (Proxmox VE 9.3, Datacenter > Options > API Token
+Policy) that token gets the longest lifetime the policy allows, a year where it only wants
+an expiry. Once Proxmox refuses it, PegaProx logs in with the password right away, makes a
+new one and deletes the old one. An account with two-factor login cannot log in
+that way: the cluster then says its token has expired, and needs an API token as its login
+or two-factor login off for one connect. A policy that requires privilege separation gets
+no such token, since it would hold no right without ACLs of its own: PegaProx stays on
+password logins and logs a warning. *Rotate API Token* in the cluster settings gives the
+token a new secret in place on Proxmox VE 9.2 and later (over the password login where
+Proxmox refuses it to the token itself); before 9.2 it makes a new token and deletes the
+old one after.
+
 ## What no role gives
 
 - **SSH to the nodes**: node shell, rolling updates, SMBIOS auto configuration, custom
@@ -126,7 +138,11 @@ its own at the first login and keeps the password for what a token cannot do.
   `pegaprox-sr-<hex>` or `xcrepl-<job>-<number>` in `pveum user token list <user>`,
   created with an expiry eight days ahead. A token PegaProx did not get to delete, after a
   restart or a lost lease during the migration, stays listed there until it is deleted by
-  hand, and Proxmox refuses it once its expiry has passed.
+  hand, and Proxmox refuses it once its expiry has passed. Where the API token policy of the
+  target cluster allows a shorter lifetime, the token gets that one, and a migration still
+  running when it ends loses its access to the target; the log says so when the token is
+  made. A policy that requires privilege separation refuses these migrations into the
+  cluster up front: the token holds the rights of the account without it.
 
 ## What works with a connection
 

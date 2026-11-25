@@ -295,15 +295,28 @@ between two clusters of one instance, but the API token the source node uses at 
 made by the site that leads the target, after its own checks of you (the migrate permission,
 the cluster as yours, not reached through one guest or pool, the VMID range and quota of
 your tenant there, a VMID that is free there), and it carries only what this migration needs:
-privilege separation, and ACLs for `Sys.Incoming`, the guest's new VMID, the target storages
-and the named bridges (an SDN vnet in its zone), on roles of its own (`PegaProxFedIncoming`,
-`PegaProxFedGuest`, `PegaProxFedStorage`, `PegaProxFedNet`). The account PegaProx uses at that
-cluster therefore needs `Permissions.Modify` and `Sys.Modify`. The token never reaches a
-browser; the site that asked for it has it dropped once the migration task has ended (a
-signed call of that site, which also works after your session ended), the site that made it
-keeps a list of its tokens over a restart, and Proxmox VE refuses one on its own after eight
-days should nothing else drop it. A migration whose start is refused drops its token and the
-quota it held at once. The
+privilege separation, and ACLs for `Sys.Incoming` and `Sys.Audit` on `/` (the source node
+reads the cluster status of the target before it starts), the guest's new VMID, the target
+storages, the named bridges (an SDN vnet in its zone) and, for a VM on a custom CPU model,
+`Mapping.Audit` on `/mapping/cpu/custom-<name>` (the source compares the two definitions)
+and `Mapping.Use` on `/mapping/cpu/<name>` (the target checks it when it writes the config),
+on roles of its own (`PegaProxFedIncoming`, `PegaProxFedGuest`, `PegaProxFedStorage`,
+`PegaProxFedNet`, `PegaProxFedCPU`, `PegaProxFedCPUUse`). The account PegaProx uses at that
+cluster therefore needs `Permissions.Modify` and `Sys.Modify`. `Sys.Audit` on `/` also lets
+whoever holds the token (the source cluster, and the site that asked for it) read, for as
+long as the token lives, the target's datacenter options (all of `datacenter.cfg`, an
+`http_proxy` with any credentials in its URL included), its cluster task list and the other
+cluster-wide settings Proxmox VE shows to that right. A privileged container is
+refused before any token is made: Proxmox VE takes one in only from a token with
+`Sys.Modify` on the whole target cluster, which this token never gets; make it unprivileged
+first, or move it with a backup and a restore. The token never reaches a browser; the site
+that asked for it has it dropped once the migration task has ended (a signed call of that
+site, which also works after your session ended), the site that made it keeps a list of its
+tokens over a restart, and Proxmox VE refuses one on its own after eight days should nothing
+else drop it. Where the API token policy of the target cluster (Proxmox VE 9.3, Datacenter >
+Options) allows a shorter lifetime, the token gets that one, and a migration still running
+when it ends loses its access to the target. A migration whose start is refused drops its
+token and the quota it held at once. The
 preflight check of the dialog is for two clusters of one site; between sites each site
 checks its half when the migration starts.
 

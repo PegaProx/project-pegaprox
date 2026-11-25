@@ -630,17 +630,26 @@ def _migrate(data, session, principal):
         _source_gates(src_id, vmid, vm_type, delete_source)
 
     # the target half: the token, made where the target cluster is led
+    footprint, guest = _guest_of(src_mgr, src_remote, source_node, vm_type, vmid, principal)
+    if vm_type == 'lxc' and guest is not None and fmig.privileged_container(guest):
+        # MK Nov 2026 - refused here, before the target site makes a token for it
+        raise fmig.MigrationRefused(
+            409, f'Container {vmid} is privileged: Proxmox VE takes a privileged container in '
+                 'only from a token with Sys.Modify on the whole target cluster, which the '
+                 'token of a migration from another site does not get. Make it an unprivileged '
+                 'container first, or move it with a backup and a restore.')
     target_body = {'target_node': target_node, 'vm_type': vm_type, 'vmid': vmid,
                    'target_vmid': target_vmid, 'storages': storages, 'bridges': bridges,
-                   'footprint': _footprint_of(src_mgr, src_remote, source_node, vm_type, vmid,
-                                              principal),
-                   'source': src_label}
+                   'footprint': footprint, 'source': src_label}
     if src_mgr is not None:
         # MK Nov 2026 - the target's site refuses an older target node before the token
         # (core/migration_tunnel.py)
         tunnel = migration_tunnel.tunnel_version(src_mgr, source_node, vm_type)
         if tunnel is not None:
             target_body['source_tunnel'] = tunnel
+    cpu = fmig.custom_cpu_model(guest) if vm_type == 'qemu' else None
+    if cpu:
+        target_body['cpu_model'] = cpu
     if tgt_mgr is not None:
         from pegaprox.api.helpers import acting_user, check_cluster_access
         from pegaprox.utils.rbac import has_permission
@@ -771,12 +780,22 @@ def _relayed_json(iid, method, path, body, principal):
     return data
 
 
-def _footprint_of(src_mgr, src_remote, node, vm_type, vmid, principal):
-    """{cores, memory_gb, disk_gb} of the guest, for the tenant quota at the target."""
+def _guest_of(src_mgr, src_remote, node, vm_type, vmid, principal):
+    """({cores, memory_gb, disk_gb} of the guest for the tenant quota at the target, its
+    config as Proxmox VE has it or None where that could not be read)."""
     from pegaprox.utils.rbac import config_footprint
+    conf = None
     if src_mgr is not None:
         from pegaprox.api.helpers import guest_size
         fp = guest_size(src_mgr, node, vm_type, vmid) or {}
+        try:
+            got = src_mgr.get_vm_config(node, vmid, vm_type)
+            # get_vm_config parses the config and keeps PVE's own keys under 'raw'
+            parsed = got.get('config') if isinstance(got, dict) and got.get('success') else None
+            if isinstance(parsed, dict) and isinstance(parsed.get('raw'), dict):
+                conf = parsed['raw']
+        except Exception as e:
+            logging.debug(f'[FED] config of {vm_type} {vmid} unreadable: {e}')
     else:
         raw, iid = src_remote
         kind, status, _h, out = _gated_relay(
@@ -789,15 +808,15 @@ def _footprint_of(src_mgr, src_remote, node, vm_type, vmid, principal):
         except Exception:
             cfg = {}
         cfg = cfg if isinstance(cfg, dict) else {}
-        fp = config_footprint(cfg.get('raw') if isinstance(cfg.get('raw'), dict) else cfg,
-                              vm_type) or {}
+        conf = (cfg.get('raw') if isinstance(cfg.get('raw'), dict) else cfg) or None
+        fp = config_footprint(conf or {}, vm_type) or {}
     out = {}
     for key in ('cores', 'memory_gb', 'disk_gb'):
         try:
             out[key] = max(0, float(fp.get(key) or 0))
         except (TypeError, ValueError):
             out[key] = 0
-    return out
+    return out, conf
 
 
 def _as_caller(method, path, body):
