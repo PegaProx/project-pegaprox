@@ -3105,18 +3105,32 @@
                 }
             };
             
+            // LW Nov 2026 - an update, a rollback or a restart ends the ESXi migrations that run:
+            // the server answers 409 and goes ahead only when asked again
+            const postRestarting = async (url, body) => {
+                const send = (extra) => fetch(url, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...body, ...extra })
+                });
+                let r = await send({});
+                if (r.status === 409) {
+                    const d = await r.clone().json().catch(() => ({}));
+                    if (d.migrations_running && confirm(`${d.error}\n\n${t('restartWhileMigrating')}`)) {
+                        r = await send({ while_migrating: true });
+                    }
+                }
+                return r;
+            };
+
             // Perform update
             const performUpdate = async () => {
                 if (!confirm(t('confirmUpdate') || 'This will download and install the update. A backup will be created. The server will restart automatically. Continue?')) return;
                 setUpdateLoading(true);
                 setUpdateProgress({ status: 'downloading', message: t('downloadingUpdate') || 'Downloading update...' });
                 try {
-                    const r = await fetch(`${API_URL}/pegaprox/update`, {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-                        body: JSON.stringify({})
-                    });
+                    const r = await postRestarting(`${API_URL}/pegaprox/update`, {});
                     const data = await r.json();
                     if (r.ok && data.success) {
                         if (data.restarting) {
@@ -3196,12 +3210,7 @@
                 setUpdateLoading(true);
                 setUpdateProgress({ status: 'restoring', message: t('restoringBackup') || 'Restoring from backup...' });
                 try {
-                    const r = await fetch(`${API_URL}/pegaprox/update/rollback`, {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ backup: backupName })
-                    });
+                    const r = await postRestarting(`${API_URL}/pegaprox/update/rollback`, { backup: backupName });
                     const data = await r.json();
                     if (r.ok && data.success) {
                         setShowRollbackModal(false);
@@ -4230,11 +4239,7 @@
             const handleRestartServer = async () => {
                 setRestartLoading(true);
                 try {
-                    const response = await fetch(`${API_URL}/settings/server/restart`, {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: getAuthHeaders()
-                    });
+                    const response = await postRestarting(`${API_URL}/settings/server/restart`, {});
                     
                     if (response && response.ok) {
                         addToast(t('restartInitiated'), 'success');

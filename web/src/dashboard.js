@@ -2408,7 +2408,7 @@
             const checkItems = Object.fromEntries(((check && check.items) || []).map(it => [it.vm_id, it]));
             const bridges = (check && check.available && check.available.bridges) || [];
             const storages = (check && check.available && check.available.storages) || [];
-            const fullHere = !['sshfs_boot', 'snapshot_zero'].includes(form.transfer_mode);
+            const fullHere = form.transfer_mode !== 'sshfs_boot';
             const input = 'w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm';
             const small = 'px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-xs disabled:opacity-40';
             const tabs = [['settings', t('esxiBulkStepSettings')], ['guests', t('esxiBulkStepGuests')],
@@ -2500,7 +2500,7 @@
                                 <div className="grid grid-cols-2 gap-3">
                                     <div>
                                         <label className="text-xs text-gray-500 mb-1 block">{t('transferMode')}</label>
-                                        <select value={form.transfer_mode} onChange={e => set({transfer_mode: e.target.value, verify: form.verify === 'full' && ['sshfs_boot', 'snapshot_zero'].includes(e.target.value) ? 'sample' : form.verify})} className={input}>
+                                        <select value={form.transfer_mode} onChange={e => set({transfer_mode: e.target.value, verify: form.verify === 'full' && e.target.value === 'sshfs_boot' ? 'sample' : form.verify})} className={input}>
                                             {ESXI_BULK_MODES.map(([v, k]) => <option key={v} value={v}>{t(k)}</option>)}
                                         </select>
                                     </div>
@@ -14828,7 +14828,7 @@
                 start_after:true,remove_source:false,transfer_mode:'vmkfstools_clone',bios:'auto',preserve_mac:true,
                 wait_for_confirmation:false, // #562 — hold before the final switchover until the operator confirms
                 // hardware overrides (#222)
-                ostype:'auto',scsihw:'auto',disk_bus:'auto',vga:'vmware',net_driver:'auto',
+                ostype:'auto',scsihw:'auto',disk_bus:'auto',vga:'std',net_driver:'auto',
                 sockets:0,cores_per_socket:0,memory:0,cpu_type:'host',
                 // advanced
                 disk_format:'raw',disk_cache:'none',disk_iothread:true,disk_discard:'on',disk_ssd:false,aio_mode:'',
@@ -19739,7 +19739,7 @@
             // verify: full by default for a cold migration (offline copy, or a VM
             // that is off) where the mode can do it, the spot check otherwise; a pick wins
             const v2pVerifyFor = (form, plan) => {
-                const fullOk = !['sshfs_boot', 'snapshot_zero'].includes(form.transfer_mode);
+                const fullOk = form.transfer_mode !== 'sshfs_boot';
                 const cold = form.transfer_mode === 'offline' || plan?.source?.power_state === 'POWERED_OFF';
                 return form.verify || (cold && fullOk ? 'full' : 'sample');
             };
@@ -30345,22 +30345,22 @@
                                                                 )}
 
                                                                 {/* Transfer Mode — NS Apr 2026: added 'sshfs_boot' as recommended default
-                                                                    (live drive-mirror, ~30s downtime), 'snapshot_zero' for ESXi setups that
-                                                                    allow concurrent base-VMDK reads during snapshot. */}
+                                                                    (live drive-mirror, ~30s downtime). LW Nov 2026: 'snapshot_zero' is the
+                                                                    live clone plus change tracking rounds now. */}
                                                                 <div>
                                                                     <label className="text-xs text-gray-500 mb-1 block">{t('transferMode') || 'Transfer Mode'}</label>
                                                                     <select value={vmwareMigrateForm.transfer_mode} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, transfer_mode: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
                                                                         <option value="vmkfstools_clone">{t('transferModeVmkClone') || 'Live Clone (recommended)'}</option>
                                                                         <option value="auto">{t('transferModeAuto') || 'Auto (Pre-Sync + Delta)'}</option>
                                                                         <option value="sshfs_boot">{t('transferModeSshfsBoot') || 'Live Mirror — Near-Zero Downtime'}</option>
-                                                                        <option value="snapshot_zero">{t('transferModeSnapshotZero') || 'Snapshot-Iterative — Zero Downtime (experimental)'}</option>
+                                                                        <option value="snapshot_zero">{t('transferModeSnapshotZero') || 'Snapshot-Iterative - short downtime (change tracking)'}</option>
                                                                         <option value="offline">{t('transferModeOffline') || 'Offline Copy (Full Downtime)'}</option>
                                                                     </select>
                                                                     <p className="text-xs text-gray-300 mt-1 leading-relaxed">
                                                                         {vmwareMigrateForm.transfer_mode === 'auto' && (t('transferModeAutoDesc') || 'Uses Live Clone. If the VM cannot be snapshotted or cloned, it copies the disks while the VM runs and carries over the changed blocks at the switchover (pre-sync + delta), and switches to Live Mirror if a disk is locked.')}
                                                                         {vmwareMigrateForm.transfer_mode === 'sshfs_boot' && (t('transferModeSshfsBootDesc') || 'QEMU drive-mirror live-pivots disks from SSHFS-mounted source to local LVM. ~30s real downtime. Multi-disk capable. Recommended for most workloads — limit to 1-2 concurrent VMs to keep mirror throughput high.')}
-                                                                        {vmwareMigrateForm.transfer_mode === 'vmkfstools_clone' && (t('transferModeVmkCloneDesc') || 'Snapshots the running VM, clones the frozen base disk at the vmkernel level on the ESXi host and imports it to Proxmox while the VM keeps running. At the switchover the source VM is stopped and every block changed since the snapshot is copied over. That reads each disk once on the ESXi host, so the downtime grows with disk size - for the shortest downtime on large disks use Live Mirror. Works where Live-Mirror / Snapshot-Iterative fail (no locked-base-disk problem). Supports all Proxmox storage types (Ceph/RBD, LVM, LVM-Thin, dir). Needs ESXi SSH enabled.')}
-                                                                        {vmwareMigrateForm.transfer_mode === 'snapshot_zero' && (t('transferModeSnapshotZeroDesc') || 'ESXi snapshot rotation — VM stays running through pre-sync + iterative delta sync, only ~10s downtime at cutover. ⚠️ May not work on your system (e.g. ESXi 6.x or VMFS6 with strict locking) — requires ESXi setup that releases base-VMDK lock after snapshot.')}
+                                                                        {vmwareMigrateForm.transfer_mode === 'vmkfstools_clone' && (t('transferModeVmkCloneDesc') || 'Snapshots the running VM, clones the frozen base disk at the vmkernel level on the ESXi host and imports it to Proxmox while the VM keeps running. At the switchover the source VM is stopped and every block changed since the snapshot is copied over. That reads each disk once on the ESXi host, so the downtime grows with disk size - for the shortest downtime on large disks use Live Mirror. Works where Live-Mirror fails (no locked-base-disk problem). Supports all Proxmox storage types (Ceph/RBD, LVM, LVM-Thin, dir). Needs ESXi SSH enabled.')}
+                                                                        {vmwareMigrateForm.transfer_mode === 'snapshot_zero' && (t('transferModeSnapshotZeroDesc') || 'Starts like Live Clone, then copies only what the guest wrote, as ESXi\'s change tracking names it: in rounds while the VM keeps running, and the rest at the switchover. The downtime follows how much the guest writes, not the disk size.')}
                                                                         {vmwareMigrateForm.transfer_mode === 'offline' && (t('transferModeOfflineDesc') || 'Stops ESXi VM, copies disks via SSH dd, then starts on Proxmox (full downtime ~ disk-size / network-speed)')}
                                                                     </p>
                                                                 </div>
@@ -30375,7 +30375,7 @@
                                                                         <option value="off">{t('v2pVerifyOff')}</option>
                                                                     </select>
                                                                     {v2pVerifyFor(vmwareMigrateForm, vmwareMigrationPlan) === 'full' && (
-                                                                        ['sshfs_boot', 'snapshot_zero'].includes(vmwareMigrateForm.transfer_mode)
+                                                                        vmwareMigrateForm.transfer_mode === 'sshfs_boot'
                                                                             ? <p className="text-xs text-red-400 mt-1">{t('v2pVerifyFullNotHere')}</p>
                                                                             : <p className="text-xs text-gray-400 mt-1 leading-relaxed">{t('v2pVerifyFullDesc')}</p>
                                                                     )}
@@ -30468,8 +30468,8 @@
                                                                     <div>
                                                                         <label className="text-xs text-gray-500 mb-1 block">VGA Display</label>
                                                                         <select value={vmwareMigrateForm.vga} onChange={e => setVmwareMigrateForm(f => ({...f, vga: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white">
-                                                                            <option value="vmware">VMware SVGA (recommended)</option>
-                                                                            <option value="std">Standard VGA</option>
+                                                                            <option value="std">Standard VGA (recommended)</option>
+                                                                            <option value="vmware">SVGA (ESXi-compatible, may display distorted)</option>
                                                                             <option value="virtio">VirtIO GPU</option>
                                                                             <option value="virtio-gl">VirtIO-GPU (virgl)</option>
                                                                             <option value="qxl">QXL (SPICE)</option>
