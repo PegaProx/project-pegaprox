@@ -145,7 +145,8 @@ def mint_target(cluster_id, data, user, username, sender=''):
     (`user` the identity its rights are judged on) from member `sender`, '' for a migration
     this site leads itself. Checks the user as a
     migration between two clusters of this site would, holds the tenant quota, makes the
-    token and answers {endpoint, token_name, target_vmid, transfer_network}. Raises
+    token and answers {endpoint, token_name, target_vmid, transfer_network}, and tunnel, the
+    migration tunnel version of the target node, when it could be read. Raises
     MigrationRefused."""
     from pegaprox.globals import cluster_managers
     from pegaprox.utils.sanitization import validate_hostname
@@ -183,6 +184,16 @@ def mint_target(cluster_id, data, user, username, sender=''):
         ok, msg = check_tenant_vmid(user.get('tenant_id') or DEFAULT_TENANT_ID, vmid)
         if not ok:
             raise MigrationRefused(403, msg)
+    # MK Nov 2026 - a PVE 9.3 source refuses an older target in the task, once the VMID is
+    # reserved here: refused before the token when the asking site sent the source's tunnel
+    # version, and ours goes back for the source's site to compare (core/migration_tunnel.py)
+    from pegaprox.core import migration_tunnel
+    landing = migration_tunnel.landing_nodes(mgr, node)
+    why = migration_tunnel.refusal_from(migration_tunnel.known(data.get('source_tunnel')),
+                                        f"the source node ({source or 'the other site'})",
+                                        vm_type, mgr, landing)
+    if why:
+        raise MigrationRefused(409, why, migration_tunnel.CODE)
     name = f'{TOKEN_PREFIX}{int(time.time())}-{secrets.token_hex(4)}'
     # Proxmox VE reserves nothing for the nextid answer above: two migrations to the same
     # VMID would both get a token for it, and the second one rights on the first one's guest.
@@ -198,13 +209,17 @@ def mint_target(cluster_id, data, user, username, sender=''):
         _held()[name] = {'cluster_id': cluster_id, 'vmid': vmid, 'sender': sender,
                          'user': username, 'at': now, 'until': until, 'making': True}
     try:
-        return _mint(mgr, cluster_id, user, username, name, node, vm_type, vmid, storages,
-                     bridges, footprint, source)
+        granted = _mint(mgr, cluster_id, user, username, name, node, vm_type, vmid, storages,
+                        bridges, footprint, source)
     except BaseException:
         with _minted_lock:
             if (_held().get(name) or {}).get('making'):
                 _held().pop(name, None)
         raise
+    tunnel = migration_tunnel.lowest(mgr, landing, vm_type)
+    if tunnel is not None:
+        granted['tunnel'] = tunnel
+    return granted
 
 
 def _mint(mgr, cluster_id, user, username, name, node, vm_type, vmid, storages, bridges,

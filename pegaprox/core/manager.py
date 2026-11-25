@@ -14664,6 +14664,14 @@ echo "AGENT_INSTALLED_OK"
             
             if delete_source:
                 data['delete'] = 1
+            else:
+                # MK Nov 2026 - since PVE 9.3 the copy takes the guest's uid along, and a target
+                # cluster that has the uid already (an earlier copy of it) refuses the move. A
+                # kept source is a second guest anyway: let it get a new uid there. Only nodes
+                # that know the parameter get it, older ones refuse it
+                from pegaprox.core import migration_tunnel
+                if migration_tunnel.takes_allow_new_uid(self, node, vm_type):
+                    data['allow-new-uid'] = 1
             
             if bwlimit:
                 data['bwlimit'] = bwlimit

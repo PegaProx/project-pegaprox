@@ -18,7 +18,7 @@ from datetime import datetime
 
 from pegaprox.globals import cluster_managers
 from pegaprox.core.db import get_db
-from pegaprox.core import ha, transfer_net
+from pegaprox.core import ha, migration_tunnel, transfer_net
 from pegaprox.utils.audit import log_audit
 
 logger = logging.getLogger('pegaprox.xclb')
@@ -131,23 +131,40 @@ def run_cross_cluster_balance_check(group):
 
     # 5. find source/target nodes
     source_node = _pick_node(hi_mgr, highest=True)
-    target_node = _pick_node(lo_mgr, highest=False)
-    if not source_node or not target_node:
+    if not source_node:
         logger.warning("[XCLB] Could not determine source/target nodes")
         return
+    # MK Nov 2026 - the least loaded cluster, or the next one up when Proxmox VE would refuse
+    # the move into it: a PVE 9.3 source and an older target cluster (core/migration_tunnel.py).
+    # It refuses in the task only, so every interval made a token and a failed task there
+    vm = None
+    for lo_cid, lo_mgr, lo_score in scored[:-1]:
+        if hi_score - lo_score <= threshold:
+            break
+        target_node = _pick_node(lo_mgr, highest=False)
+        if not target_node:
+            logger.warning("[XCLB] Could not determine source/target nodes")
+            return
 
-    # 6. find migration candidate on source
-    # sec/correctness (audit): this passed source_node as its OWN target. Two gates inside
-    # find_migration_candidate then evaluated against the node the guest is already on, so
-    # neither could ever refuse: a guest with a plb_pin tag matched its own node and got picked
-    # to be moved off the pin, and the "does the target have this storage" check asked our own
-    # cluster about our own node and always said yes. target_mgr sends the storage lookup to
-    # the cluster that will actually receive the guest.
-    vm = hi_mgr.find_migration_candidate(source_node, target_node,
-                                         include_containers=include_containers,
-                                         target_mgr=lo_mgr)
+        # 6. find migration candidate on source
+        # sec/correctness (audit): this passed source_node as its OWN target. Two gates inside
+        # find_migration_candidate then evaluated against the node the guest is already on, so
+        # neither could ever refuse: a guest with a plb_pin tag matched its own node and got picked
+        # to be moved off the pin, and the "does the target have this storage" check asked our own
+        # cluster about our own node and always said yes. target_mgr sends the storage lookup to
+        # the cluster that will actually receive the guest.
+        vm = hi_mgr.find_migration_candidate(source_node, target_node,
+                                             include_containers=include_containers,
+                                             target_mgr=lo_mgr)
+        if not vm:
+            logger.info(f"[XCLB] No migration candidate on {hi_cid}/{source_node}")
+            return
+        why = migration_tunnel.refusal(hi_mgr, source_node, vm.get('type', 'qemu'), lo_mgr, target_node)
+        if not why:
+            break
+        logger.warning(f"[XCLB] Group '{group_name}': not to {lo_cid} - {why}")
+        vm = None
     if not vm:
-        logger.info(f"[XCLB] No migration candidate on {hi_cid}/{source_node}")
         return
 
     vmid = vm.get('vmid')

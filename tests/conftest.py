@@ -330,6 +330,16 @@ def _esxi_migrations_forgotten():
 
 
 @pytest.fixture(autouse=True)
+def _tunnel_versions_forgotten():
+    """The package versions of the nodes a remote migration compares are kept per cluster id
+    and node for minutes (core/migration_tunnel.py), and the next test's pve1 is another node."""
+    from pegaprox.core import migration_tunnel
+    migration_tunnel.reset_for_tests()
+    yield
+    migration_tunnel.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _history_reports_forgotten():
     """The power, cost and right-sizing reports are kept per cluster id for minutes
     (helpers.history_report), and the next test's cluster_1 has another history."""

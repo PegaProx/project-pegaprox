@@ -348,7 +348,7 @@ def test_every_reason_the_preflight_can_emit_is_made_with_a_code_and_args():
 
 
 # these carry a sentence Proxmox or the manager made up, args hold it whole: no wording of their own
-FREE_TEXT = ('large_disk', 'transfer_fallback', 'vmid_range')
+FREE_TEXT = ('large_disk', 'transfer_fallback', 'vmid_range', 'tunnel_too_old')
 
 
 def test_the_codes_have_translations_in_every_language():

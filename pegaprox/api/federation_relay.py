@@ -33,6 +33,7 @@ from pegaprox.core import federation_relay as relay
 from pegaprox.core import federation_signin as fsign
 from pegaprox.core import federation_stream as fstream
 from pegaprox.core import ha_wire
+from pegaprox.core import migration_tunnel
 from pegaprox.api.realtime import sock
 from pegaprox.constants import PEGAPROX_VERSION
 from pegaprox.utils.audit import get_client_ip, log_audit
@@ -634,6 +635,12 @@ def _migrate(data, session, principal):
                    'footprint': _footprint_of(src_mgr, src_remote, source_node, vm_type, vmid,
                                               principal),
                    'source': src_label}
+    if src_mgr is not None:
+        # MK Nov 2026 - the target's site refuses an older target node before the token
+        # (core/migration_tunnel.py)
+        tunnel = migration_tunnel.tunnel_version(src_mgr, source_node, vm_type)
+        if tunnel is not None:
+            target_body['source_tunnel'] = tunnel
     if tgt_mgr is not None:
         from pegaprox.api.helpers import acting_user, check_cluster_access
         from pegaprox.utils.rbac import has_permission
@@ -661,6 +668,9 @@ def _migrate(data, session, principal):
     body = {'target_endpoint': granted['endpoint'], 'target_storage': pve_storage,
             'target_bridge': pve_bridge, 'target_vmid': target_vmid, 'online': online,
             'delete_source': delete_source, 'bwlimit': bwlimit}
+    if migration_tunnel.known(granted.get('tunnel')) is not None:
+        # the source's site holds it against its node, which the target's site could not
+        body['target_tunnel'] = granted['tunnel']
     try:
         if src_mgr is not None:
             status, _h, out = _as_caller('POST', path, body)

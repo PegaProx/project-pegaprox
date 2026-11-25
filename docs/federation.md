@@ -746,6 +746,7 @@ control call never passes as a relayed one, nor the other way round.
 | `FED_STREAM_SCOPE` | none of the clusters a live stream asked for streams to the account at that site |
 | `FED_MIGRATE` | a migration between two sites was refused; the answer says by which site and why |
 | `FED_MIGRATE_VMID` | the VMID the guest would get is taken on the target cluster, or held by another migration's token there; choose another one |
+| `PVE_TUNNEL_TOO_OLD` | the source node runs the migration tunnel of Proxmox VE 9.3 (qemu-server 9.2.21, pve-container 6.1.25 or newer) and the target node an older one, which Proxmox VE refuses; upgrade the target cluster first. Answered with 409 by `POST /api/federation/migrate`, by `POST /api/cross-cluster-migrate` (a dry run and `POST /api/cross-cluster-migrate/preflight` list the reason `tunnel_too_old` instead) and by a guest's `remote-migrate` route when the call carries the target node's version, as a move between sites does. Cross-cluster replication, Site Recovery and the cross-cluster balancer report the same text without a code: in the job's last error, in the guest's result of the run, in the log |
 | `FED_RELAY_BUSY` | too many calls to or from that site at once; try again in a moment |
 | `FED_SITE_UNREACHABLE` | the site that leads the cluster cannot be reached or does not answer, or (for an upload) what you may do there cannot be read now; nothing was sent to it when the error says so |
 | `FED_RELAY_NO_ANSWER` | a write went out and no answer came back; it may have happened there, check its tasks |

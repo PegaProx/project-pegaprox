@@ -169,6 +169,7 @@
     "pegaprox/core/incremental_repl.py",
     "pegaprox/core/keystore.py",
     "pegaprox/core/manager.py",
+    "pegaprox/core/migration_tunnel.py",
     "pegaprox/core/node_creds.py",
     "pegaprox/core/node_history.py",
     "pegaprox/core/pbs.py",

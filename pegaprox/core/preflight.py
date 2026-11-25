@@ -18,7 +18,9 @@ It reads only, and little: per cluster the guest list and node status the live v
 keeps, one storage list (/cluster/resources?type=storage, shared with the health score),
 the HA resources and rules and the replication jobs once each; per target node its
 network config (shared with the transfer network, core/transfer_net.py). Per guest only
-its config, a few at a time. A read that fails makes a warning, never a block.
+its config, a few at a time. A read that fails makes a warning, never a block. A remote
+migration reads the package versions of its source and target nodes as well, which
+refuse it only when they are known (core/migration_tunnel.py).
 
 The single guest's migrate check (api/vms.py migrate-check) and the DR drill's mapping
 checks (api/dr_drill.py) take their volume, bridge and storage rules from here.
@@ -1346,6 +1348,13 @@ def _cross_checks(src, tgt, sim, gv, t, storage_map, target_storage, bridge_map,
     _busy_checks(gv)
     if delete_source and not may_delete:
         gv.block('needs_delete', 'Removing the source guest needs vm.delete on it', args={})
+    if gv.node:
+        # MK Nov 2026 - a PVE 9.3 source refuses an older target in the task, after the target
+        # reserved the VMID (core/migration_tunnel.py)
+        from pegaprox.core import migration_tunnel
+        why = migration_tunnel.refusal(src.mgr, gv.node, gv.kind, tgt.mgr, t)
+        if why:
+            gv.block('tunnel_too_old', why, args={'detail': why})
     live = bool(online)
     if gv.kind == 'qemu' and gv.cfg is not None:
         live, _gb_total, note = cross_online(gv.cfg, bool(online), bool(force_online))

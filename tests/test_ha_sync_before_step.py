@@ -207,6 +207,9 @@ class _Cluster:
             return _R(200, [{'storage': 'fast', 'type': 'lvmthin'}])
         if path.endswith('/config'):
             return _R(200, {'scsi0': 'fast:vm-9100-disk-0,size=8G'})
+        if path == f'/nodes/{self.node}/apt/versions':
+            # a PVE 8 node: a run removes a replica only once it knows the migration goes through
+            return _R(200, [{'Package': 'qemu-server', 'OldVersion': '8.3.13'}])
         return _R(404)
 
     def _api_post(self, url, data=None, **kw):

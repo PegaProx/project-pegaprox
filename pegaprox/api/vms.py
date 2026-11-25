@@ -61,7 +61,7 @@ from pegaprox.api.helpers import (sees_whole_maintenance, maintenance_without_gu
                                   _request_caller)
 from pegaprox.api.ha import standby_console_refusal, STANDBY_CONSOLE_ERROR
 from pegaprox.core import ha, ha_transport
-from pegaprox.core import transfer_net, preflight
+from pegaprox.core import transfer_net, preflight, migration_tunnel
 from pegaprox.core.transfer_net import transfer_ssh_address
 from pegaprox.background import guest_index
 from pegaprox.utils.ssh import get_paramiko, ssh_password_for, ssh_password_to, ssh_blocked_for, bare_host, node_login
@@ -9177,6 +9177,10 @@ def _free_local_target_vmid(mgr, tgt_vmid, src_vmid, vm_type, target_node):
         if vname != f'repl-{src_vmid}-{target_node}':
             return (False, (f'Target VMID {tgt_vmid} is in use by "{vname or "unknown"}" which is not a '
                             f'replica of VM {src_vmid}. Pick a free VMID or remove that VM first.'))
+        # the clone that follows takes the VMID anew (PVE 9.3 next-id)
+        refused = _next_id_refusal(mgr, tgt_vmid)
+        if refused:
+            return (False, refused)
 
         # it's our old replica — stop (if running) and delete
         if existing.get('status') == 'running':
@@ -9668,6 +9672,60 @@ def _running_replica_error(vmid, node):
             f"the job again.")
 
 
+def _next_id_refusal(mgr, vmid):
+    """Why a replica removed at `vmid` could not come back under that VMID, or None.
+
+    MK Nov 2026 - the datacenter option next-id of PVE 9.3 with 'enforce' refuses a new
+    guest outside its lower/upper range, and with 'unique' also one whose VMID was used
+    before (pve-guest-common GuestID.pm, "guest ID N was used before"). Removing the old
+    replica records its VMID as used, so the copy that follows under it is refused and
+    the target has no replica at all. Options that cannot be read refuse nothing."""
+    try:
+        r = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/options")
+        opts = (r.json().get('data') or {}) if r.status_code == 200 else {}
+    except Exception as e:
+        logging.debug(f"[REPL] datacenter options unreadable: {e}")
+        return None
+    nid = opts.get('next-id') if isinstance(opts, dict) else None
+    if isinstance(nid, str):
+        # a property string where the option comes unparsed
+        nid = dict(p.strip().split('=', 1) for p in nid.split(',') if '=' in p)
+    if not isinstance(nid, dict):
+        return None
+
+    def on(key):
+        return str(nid.get(key, '')).strip().lower() in ('1', 'true', 'yes', 'on')
+    if not on('enforce'):
+        return None
+    try:
+        lower, upper = int(nid.get('lower') or 100), int(nid.get('upper') or 1000000)
+    except (TypeError, ValueError):
+        lower, upper = 100, 1000000
+    name = getattr(getattr(mgr, 'config', None), 'name', None) or 'The cluster'
+    if not lower <= int(vmid) < upper:
+        return (f"{name} enforces its datacenter option next-id: no new guest outside {lower} to "
+                f"{upper - 1}, so a replica removed at VMID {vmid} could not be created again. Nothing "
+                f"was removed - give the job a target VMID in that range.")
+    if on('unique'):
+        return (f"{name} enforces unique guest IDs (datacenter option next-id, 'unique' and "
+                f"'enforce'): once the old replica is removed, VMID {vmid} counts as used and the new "
+                f"replica could not be created under it. Nothing was removed - a replica that is "
+                f"replaced on every run cannot keep its VMID there while 'enforce' is set.")
+    return None
+
+
+def _replace_refusal(source_mgr, source_node, vm_type, target_mgr, target_node, tgt_vmid):
+    """Why a cross-cluster run must not remove the guest at tgt_vmid for its new copy, or
+    None. The old replica goes before its successor arrives under the same VMID, so not
+    while the migration could still be refused for the tunnel version (one that cannot be
+    read counts), nor when the target lets no new guest take that VMID."""
+    why = migration_tunnel.refusal(source_mgr, source_node, vm_type, target_mgr, target_node or None,
+                                   strict=True)
+    if why:
+        return why + f" - the old replica {tgt_vmid} is kept, the next run tries again"
+    return _next_id_refusal(target_mgr, tgt_vmid)
+
+
 # ============================================================================
 # #174 aderumier — incremental cross-cluster replication (RBD)
 # ============================================================================
@@ -9796,6 +9854,10 @@ def _xcincr_remove_existing_replica(target_mgr, tgt_vmid, vm_type, job_id):
         return False, foreign
     if not node:
         return True, None   # nothing there
+    # the replica VM is created anew under the VMID after the seed (PVE 9.3 next-id)
+    refused = _next_id_refusal(target_mgr, tgt_vmid)
+    if refused:
+        return False, refused
     try:
         base = f"https://{target_mgr.host}:{target_mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{tgt_vmid}"
         sr = target_mgr._api_post(f"{base}/status/stop", data={})
@@ -10186,6 +10248,20 @@ def _execute_replication(job):
             _update_repl_status(db, job_id, 'error', f'VM {vmid} not found on source cluster')
             return
 
+        # MK Nov 2026 - a PVE 9.3 source refuses an older target only once the old replica is
+        # gone, and a next-id with 'enforce' may refuse its successor the VMID: both asked here,
+        # before anything is made. A run that has to replace a replica asks as strictly as the
+        # removal below, which asks again for what the clone's time can change
+        replacing = _xcincr_vm_node(target_mgr, tgt_vmid)[0]
+        if replacing:
+            why = _replace_refusal(source_mgr, source_node, vm_type, target_mgr, target_node, tgt_vmid)
+        else:
+            why = migration_tunnel.refusal(source_mgr, source_node, vm_type, target_mgr, target_node or None)
+        if why:
+            _update_repl_status(db, job_id, 'error', why)
+            logging.error(f"[XCREPL] Job {job_id}: ABORT - {why}")
+            return
+
         logging.info(f"[XCREPL] Job {job_id}: replicating {vm_type}/{vmid} from {source_node} -> {target_node} ({target_cid})")
 
         # MK May 2026 (#456 @DarmokNoob) — capture source identity (hostname/name +
@@ -10393,6 +10469,16 @@ def _execute_replication(job):
                                f"unrelated VM, pick a different target VMID for the job.")
                     _update_repl_status(db, job_id, 'error', err_msg)
                     logging.error(f"[XCREPL] Job {job_id}: ABORT — {err_msg}")
+                    return
+
+                # once more: an upgrade or a changed next-id during the clone, or a replica the
+                # first look could not see
+                err_msg = _replace_refusal(source_mgr, source_node, vm_type, target_mgr, target_node, tgt_vmid)
+                if err_msg:
+                    target_mgr.delete_api_token(token_name)
+                    _cleanup_clone_and_snap(source_mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
+                    _update_repl_status(db, job_id, 'error', err_msg)
+                    logging.error(f"[XCREPL] Job {job_id}: ABORT - {err_msg}")
                     return
 
                 logging.info(f"[XCREPL] Job {job_id}: VM {tgt_vmid} already on target node {existing_target_node}, removing old replica (tag verified)")
@@ -14920,6 +15006,13 @@ def remote_migrate_vm_api(cluster_id, node, vm_type, vmid):
         if delete_source and not user_can_access_vm(user, cluster_id, vmid, 'vm.delete', vm_type):
             return jsonify({'error': 'Access denied: removing the source guest needs '
                                      'vm.delete on it'}), 403
+        # MK Nov 2026 - the tunnel version of the target node when the caller read it there
+        # (a migration from another site, core/federation_migrate.py)
+        _tunnel = migration_tunnel.known(data.get('target_tunnel'))
+        if _tunnel is not None:
+            why = migration_tunnel.refusal_to(manager, node, vm_type, _tunnel, 'the target node')
+            if why:
+                return jsonify({'error': why, 'code': migration_tunnel.CODE}), 409
         result = manager.remote_migrate_vm(
             node, vmid, vm_type,
             target_endpoint, target_storage, target_bridge,
@@ -14998,8 +15091,10 @@ def _cross_preflight_for(data, src_id, tgt_id, vmids, vm_type, target_node, stor
         return pf, (jsonify({'dry_run': True, 'preflight': pf, 'steps': pf['steps']}), 200)
     row = pf['guests'][0]
     if not preflight.moving(row):
-        return pf, (jsonify({'error': f"The migration preflight blocks it: {preflight.block_note(row)}",
-                             'preflight': pf}), 409)
+        out = {'error': f"The migration preflight blocks it: {preflight.block_note(row)}", 'preflight': pf}
+        if any(r['code'] == 'tunnel_too_old' for r in row['reasons']):
+            out['code'] = migration_tunnel.CODE
+        return pf, (jsonify(out), 409)
     return pf, None
 
 
