@@ -5769,15 +5769,20 @@ def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
     # behind on the customer's ESXi host whenever the local .pub had already gone. Always try,
     # and say so in the log when it does not work, rather than failing silently.
     # Remove from ESXi -- both paths
+    # MK Nov 2026 - grep -v answers 1 when no line is left, which it is whenever our key was the
+    # only one in the file. The `&& mv` skipped the swap then: the key stayed authorized on ESXi,
+    # its filtered copy stayed next to it, and CLEANED was echoed anyway. 0 and 1 both mean the
+    # file was read. CLEANED now means our key is in neither file any more.
     _rc_rm, _out_rm, _err_rm = _pve_node_exec(pve_mgr, node,
         f"ssh -i {key_path} {ESXI_SSH_OPTS} "
         f"{esxi_user}@{esxi_host} "
-        f"'grep -v \"pegaprox-v2p-{key_id}\" /etc/ssh/keys-{esxi_user}/authorized_keys > "
-        f"/etc/ssh/keys-{esxi_user}/authorized_keys.{key_id} 2>/dev/null && "
-        f"mv /etc/ssh/keys-{esxi_user}/authorized_keys.{key_id} /etc/ssh/keys-{esxi_user}/authorized_keys 2>/dev/null; "
-        f"grep -v \"pegaprox-v2p-{key_id}\" ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.{key_id} 2>/dev/null && "
-        f"mv ~/.ssh/authorized_keys.{key_id} ~/.ssh/authorized_keys 2>/dev/null; "
-        f"echo CLEANED' 2>&1", timeout=10)
+        f"'L=; for F in /etc/ssh/keys-{esxi_user}/authorized_keys ~/.ssh/authorized_keys; do "
+        f"[ -f \"$F\" ] || continue; "
+        f"grep -v \"pegaprox-v2p-{key_id}\" \"$F\" > \"$F.{key_id}\" 2>/dev/null; "
+        f"if [ $? -le 1 ]; then mv \"$F.{key_id}\" \"$F\" 2>/dev/null; fi; "
+        f"rm -f \"$F.{key_id}\" 2>/dev/null; "
+        f"grep -q \"pegaprox-v2p-{key_id}\" \"$F\" 2>/dev/null && L=1; "
+        f"done; [ -n \"$L\" ] || echo CLEANED' 2>&1", timeout=10)
     if _rc_rm != 0 or 'CLEANED' not in (_out_rm or ''):
         logging.warning(
             f"[V2P] could not remove the temporary migration key from {esxi_host} "
