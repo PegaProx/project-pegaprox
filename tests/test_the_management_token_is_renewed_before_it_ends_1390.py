@@ -175,13 +175,18 @@ def _near(fake, tid, left=DAY):
     """Its end comes in `left` seconds: on PVE, and in the end PegaProx kept of it, as that
     much of its lifetime went by."""
     fake.expires[tid] = int(time.time()) + left
+    _kept_end(tid, fake.expires[tid])
+
+
+def _kept_end(tid, ends):
+    """The end PegaProx kept of `tid` is `ends`, whatever PVE has."""
     kept = mgrmod._management_token_kept('c1389')
     if kept.get('token') == tid:
-        assert mgrmod._keep_management_token('c1389', {**kept, 'expire': fake.expires[tid]})
+        assert mgrmod._keep_management_token('c1389', {**kept, 'expire': ends})
     from pegaprox.globals import cluster_managers
     for m in cluster_managers.values():
         if (getattr(m, '_token_end_held', None) or ('',))[0] == tid:
-            m._token_end_held = (tid, fake.expires[tid])
+            m._token_end_held = (tid, ends)
 
 
 def _end_not_kept():
@@ -627,6 +632,36 @@ def test_a_new_token_whose_answer_never_came_is_deleted_before_the_next_one(clus
     assert mgrmod._management_token_kept('c1389').get('unanswered') == []
 
 
+def test_a_token_stored_at_a_later_look_deletes_the_one_before_over_the_password_login(
+        cluster, db, said, monkeypatch):
+    """The documented role renews over the password login, and its token may delete no
+    token. A new token the row took only at a later look deleted the one it replaced over
+    itself: PVE said no, and the old token, with every right of the account, stayed until
+    its own end."""
+    fake = RenewPVE({USER: PASSWORD})
+    m = said.listen(cluster.make(fake))
+    old = m.config.api_token_user
+    _near(fake, old)
+    monkeypatch.setattr(mgrmod, 'save_config', lambda: True)
+
+    _look(m)
+
+    new = m.config.api_token_user
+    assert new != old and old in fake.tokens and db.get_cluster('c1389')['api_token_user'] == old
+
+    from pegaprox.core import config
+    monkeypatch.setattr(mgrmod, 'save_config', config.save_config)
+    fake.seen.clear()
+    _look(m)
+
+    row = db.get_cluster('c1389')
+    assert (row['api_token_user'], row['api_token_secret']) == (new, fake.tokens[new])
+    assert _tokens_of(fake) == {new}
+    assert ('DELETE', old.split('!', 1)[1], 'user') in fake.calls('DELETE')
+    assert not [s for s in said.at(logging.WARNING) if '[TOKEN]' in s]
+    assert _works(m)
+
+
 def test_a_name_noted_for_a_token_in_use_is_never_deleted(cluster, db):
     """A note the database kept of a name that is now the token in use (the answer came
     after all) deletes nothing."""
@@ -752,6 +787,80 @@ def test_an_end_that_cannot_be_read_is_said_once_at_info_without_an_alert(cluste
     _look(m)
     assert len([s for s in said.at(logging.INFO) if '[TOKEN]' in s and 'cannot read' in s]) == 1
     assert said.alerts == []
+
+
+@pytest.mark.parametrize('how', ['two-factor', 'no-password'])
+def test_a_kept_end_that_passed_while_pve_still_takes_the_token_is_no_end(cluster, said, how):
+    """The documented role, and no password login: PegaProx said the token ends and cannot
+    be renewed, and the admin moved its end on the cluster (Expire in the GUI), which the
+    token may not read. Once the end PegaProx kept had passed the cluster still worked, yet
+    every look asked PVE for a new token, the two-factor login went out every half hour, and
+    every restart warned and alerted that the token ends at a time already gone, with the
+    advice to grant privileges. A kept end that has passed while PVE takes the token is no
+    end: read like one never kept, and said once at INFO."""
+    fake = RenewPVE({USER: PASSWORD})
+    m = cluster.make(fake)
+    tid = m.config.api_token_user
+    pw = '' if how == 'no-password' else PASSWORD
+    if how == 'two-factor':
+        fake.tfa.add(USER)
+    m = said.listen(cluster.restart(m, pw=pw))
+    _near(fake, tid)
+    _look(m)
+    assert len(said.alerts) == 1        # nothing renews it, as it should be said
+
+    # the admin moves its end on the cluster, and the end PegaProx kept goes by
+    fake.expires[tid] = int(time.time()) + 20 * DAY
+    _kept_end(tid, int(time.time()) - 3600)
+    m._token_renew_held = m._token_login_refused = None     # hours went by
+    fake.seen.clear()
+    for _ in range(6):
+        _look(m)                        # five minutes apart
+    for _ in range(3):
+        m._token_renew_held = m._token_login_refused = None
+        _look(m)                        # hours apart
+
+    assert m.config.api_token_user == tid and _works(m)
+    assert fake.calls('POST', 'PUT', 'DELETE') == []
+    assert len(fake.logins()) <= (1 if how == 'two-factor' else 0)
+    assert len(said.alerts) == 1 and len([s for s in said.at(logging.WARNING) if '[TOKEN]' in s]) == 1
+    [told] = [s for s in said.at(logging.INFO) if '[TOKEN]' in s and 'cannot read' in s]
+    assert tid in told and 'passed' in told and 'Permissions.Modify' not in told
+    assert mgrmod._management_token_kept('c1389').get('expire') is None
+
+    # nor after a restart
+    m = said.listen(cluster.restart(m, pw=pw))
+    fake.seen.clear()
+    _look(m)
+    assert fake.calls('POST', 'PUT', 'DELETE') == [] and len(said.alerts) == 1
+    assert len([s for s in said.at(logging.WARNING) if '[TOKEN]' in s]) == 1
+    assert len([s for s in said.at(logging.INFO) if '[TOKEN]' in s and 'cannot read' in s]) == 1
+
+
+def test_a_kept_end_that_passed_is_left_alone_while_pve_says_nothing(cluster, said, monkeypatch):
+    """A look PVE does not answer tells nothing of whether it still takes the token: the
+    end that passed is neither acted on nor forgotten."""
+    fake = RenewPVE({USER: PASSWORD})
+    m = cluster.make(fake)
+    tid = m.config.api_token_user
+    fake.tfa.add(USER)
+    m = said.listen(cluster.restart(m))
+    passed = int(time.time()) - 3600
+    _kept_end(tid, passed)
+    fake.seen.clear()
+    real = m._api_get
+
+    def busy(url, **kw):
+        if '/token/' in url:
+            raise mgrmod.requests.exceptions.Timeout('pveproxy busy')
+        return real(url, **kw)
+    monkeypatch.setattr(m, '_api_get', busy)
+
+    _look(m)
+
+    assert fake.calls() == [] and fake.logins() == []
+    assert said.alerts == [] and not [s for s in said.at(logging.WARNING) if '[TOKEN]' in s]
+    assert mgrmod._management_token_kept('c1389').get('expire') == passed
 
 
 def test_a_new_secret_whose_answer_never_came_is_said_at_once(cluster, said):

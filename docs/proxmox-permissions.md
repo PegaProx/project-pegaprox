@@ -121,7 +121,9 @@ PegaProx notes its name before it asks and deletes it at the next look, also aft
 restart. A token made by an older PegaProx has no kept end; PegaProx reads it over the
 token, or once over the password login. Where neither may read it, PegaProx says so once,
 in the log at info level and without an alert, since a token made before the cluster had a
-policy has no end at all. Each renewal is in the audit log. A token typed in by hand, and
+policy has no end at all. A kept end that has passed while Proxmox still takes the token,
+as after its *Expire* was changed on the cluster by hand, counts as one neither may read.
+Each renewal is in the audit log. A token typed in by hand, and
 a cluster added with a token as its login, are never renewed; a token without an end, as
 on a cluster that never had such a policy, sees no change. Should the
 token still run out, PegaProx logs in with the password right away, makes a new one and
