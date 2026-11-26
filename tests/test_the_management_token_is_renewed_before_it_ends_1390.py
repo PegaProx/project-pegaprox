@@ -9,11 +9,13 @@ its access with the token.
 Now the IP refresh loop looks at the token's end every few minutes, and once it is within
 two days (a fifth of its lifetime where that is less) renews it: over the password login
 where there is one, else over the token itself, which PVE takes from a token that may
-manage the tokens of its user. Where the policy lets a new secret move the end, the secret
-is renewed in place; else a new token is made, stored and read back, and only then is the
-old one deleted. When nothing works, the admin is told once, at WARNING and as an alert,
-while there is still time, and nothing tries again in a loop. A cluster without such a
-policy, a token typed in by hand and a login that is a token itself are left alone.
+manage the tokens of its user. A new token is made, stored and read back, and only then
+is the old one deleted; the secret is renewed in place only where PVE refuses that and the
+policy lets a new secret move the end, as PVE drops the old secret as it does so. When
+nothing works, the admin is told once per lifetime of the token, at WARNING and as an
+alert, while there is still time, and nothing tries again in a loop; a lock or a restart
+of pveproxy is tried again soon. A cluster without such a policy, a token typed in by hand
+and a login that is a token itself are left alone.
 
 Real requests: an HTTPS endpoint on loopback keeps PVE's rules for the token paths, the
 policy (assert_token_policy) and what a token of the Administrator role may do.
@@ -32,6 +34,7 @@ from tests.test_a_cluster_token_policy_bounds_the_tokens_pegaprox_makes import (
     pve, tls)
 
 POLICY = {'max-lifetime': 30 * DAY}
+ALLOW = {'max-lifetime': 30 * DAY, 'disallow-expiry-extension': 1, 'allow-extension-on-regenerate': 1}
 NODES = '/api2/json/nodes'
 
 
@@ -43,14 +46,16 @@ class RenewPVE(PolicyPVE):
     Administrator role). `modify_only`: accounts whose tokens hold User.Modify, which reads
     and deletes the tokens of their user, but not Permissions.Modify on /, which a token
     without privilege separation for another user wants (a token never counts as its own
-    user). `refuse`: a 500 for every new token or secret a token asks for. `keep_end`: a
-    new secret keeps the end it had, whatever the request said."""
+    user). `refuse`: a 500 for every new token or secret a token asks for. `refuse_new`:
+    the same for a new token only, a refusal a new secret does not share. `keep_end`: a
+    new secret keeps the end it had, whatever the request said. `slow_put`: seconds a new
+    secret takes to answer once PVE has carried it out (a user.cfg lock, a lossy link)."""
 
     def __init__(self, users, admins=(), modify_only=(), **kw):
         kw.setdefault('policy', POLICY)
         super().__init__(users, **kw)
         self.admins, self.modify_only = set(admins), set(modify_only)
-        self.refuse, self.keep_end = None, False
+        self.refuse, self.refuse_new, self.keep_end, self.slow_put = None, None, False, 0
 
     def _token(self, method, userid, name, who, form):
         owner = who[1].split('!', 1)[0] if who[0] == 'token' else None
@@ -69,8 +74,9 @@ class RenewPVE(PolicyPVE):
         if who[0] == 'token' and method in ('POST', 'PUT'):
             if owner in self.modify_only:
                 return 403, {'message': 'Permission check failed (/, Permissions.Modify)\n', 'data': None}
-            if self.refuse:
-                return 500, {'message': f'generating token failed: {self.refuse}\n', 'data': None}
+            refuse = self.refuse or (self.refuse_new if method == 'POST' else None)
+            if refuse:
+                return 500, {'message': f'generating token failed: {refuse}\n', 'data': None}
         if method == 'PUT':
             return self._update(tid, name, userid, form)
         return super()._token(method, userid, name, who, form)
@@ -96,6 +102,7 @@ class RenewPVE(PolicyPVE):
         if regen:
             self.tokens[tid] = str(uuid.uuid4())
             out['value'] = self.tokens[tid]
+        time.sleep(self.slow_put)
         return 200, {'data': out}
 
     def calls(self, *methods):
@@ -358,15 +365,39 @@ def test_without_a_password_login_an_administrator_token_renews_itself(cluster, 
     _no_secret_in(said, old_secret, fake.tokens[new], PASSWORD)
 
 
-def test_where_the_policy_lets_a_new_secret_move_the_end_the_secret_is_renewed_in_place(
+def test_where_the_policy_lets_a_new_secret_move_the_end_a_new_token_still_comes_first(
         cluster, db, said):
-    fake = RenewPVE({USER: PASSWORD}, admins=[USER], tfa=[], policy={
-        'max-lifetime': 30 * DAY, 'disallow-expiry-extension': 1, 'allow-extension-on-regenerate': 1})
-    m = cluster.make(fake)
+    """PVE drops the old secret as it carries a new one out. Asked first, a new secret whose
+    answer came too late (a user.cfg lock, a lossy link to a remote cluster) left PegaProx
+    with a dead secret days before the token ended, and nobody was told. A new token holds
+    up against that: the old one goes only once the new one is in use and stored."""
+    fake = RenewPVE({USER: PASSWORD}, admins=[USER], policy=ALLOW)
+    m = said.listen(cluster.make(fake))
+    old = m.config.api_token_user
+    fake.tfa.add(USER)
+    fake.slow_put = 2.5     # a new secret answers after the manager stopped waiting
+    m.api_timeout = 1
+    _near(fake, old)
+    fake.seen.clear()
+
+    _look(m)
+
+    # the secret in use and the one stored both still open the cluster
+    assert _works(m)
+    row = db.get_cluster('c1389')
+    assert fake.tokens.get(row['api_token_user']) == row['api_token_secret']
+    new = _renewed_and_stored(fake, m, db, old)
+    assert fake.calls('POST', 'PUT', 'DELETE') == [('POST', new.split('!', 1)[1], 'token'),
+                                                   ('DELETE', old.split('!', 1)[1], 'token')]
+
+
+def test_the_secret_is_renewed_in_place_only_where_pve_refuses_a_new_token(cluster, db, said):
+    fake = RenewPVE({USER: PASSWORD}, admins=[USER], policy=ALLOW)
+    m = said.listen(cluster.make(fake))
     tid = m.config.api_token_user
     old_secret = fake.tokens[tid]
     fake.tfa.add(USER)
-    said.listen(m)
+    fake.refuse_new = 'the datacenter token policy says no'
     _near(fake, tid)
     fake.seen.clear()
 
@@ -376,10 +407,11 @@ def test_where_the_policy_lets_a_new_secret_move_the_end_the_secret_is_renewed_i
     assert m._api_token == f'{tid}={fake.tokens[tid]}'
     assert db.get_cluster('c1389')['api_token_secret'] == fake.tokens[tid]
     assert time.time() + 30 * DAY - 300 < fake.expires[tid] <= time.time() + 30 * DAY
-    assert fake.calls('POST', 'PUT', 'DELETE') == [('PUT', tid.split('!', 1)[1], 'token')]
+    assert [c[0] for c in fake.calls('POST', 'PUT', 'DELETE')] == ['POST', 'PUT']
     [form] = [f for meth, p, _w, f in fake.seen if meth == 'PUT']
     assert form['regenerate'] == '1' and int(form['expire']) == fake.expires[tid]
     assert _works(m)
+    assert not [s for s in said.at(logging.WARNING) if '[TOKEN]' in s] and said.alerts == []
     _no_secret_in(said, old_secret, fake.tokens[tid])
 
 
@@ -398,21 +430,25 @@ def test_where_the_policy_keeps_the_end_of_a_token_a_new_one_is_made(cluster, db
     assert fake.calls('PUT') == []
 
 
-def test_a_new_secret_that_left_the_end_where_it_was_is_followed_by_a_new_token(cluster, db):
-    """Else the next look, five minutes on, renews the secret again, and so on."""
-    fake = RenewPVE({USER: PASSWORD}, admins=[USER], policy={
-        'max-lifetime': 30 * DAY, 'disallow-expiry-extension': 1, 'allow-extension-on-regenerate': 1})
-    m = cluster.make(fake)
-    old = m.config.api_token_user
+def test_a_new_secret_that_left_the_end_where_it_was_is_said_once(cluster, db, said):
+    """PVE refused a new token and renewed the secret but kept its end: the new secret is in
+    use and stored, and the admin is told once, as nothing moved the end. Not renewed
+    again at the next look, five minutes on."""
+    fake = RenewPVE({USER: PASSWORD}, admins=[USER], policy=ALLOW)
+    m = said.listen(cluster.make(fake))
+    tid = m.config.api_token_user
     fake.tfa.add(USER)
-    fake.keep_end = True
-    _near(fake, old)
+    fake.refuse_new, fake.keep_end = 'the datacenter token policy says no', True
+    _near(fake, tid)
     fake.seen.clear()
 
     _look(m)
 
-    _renewed_and_stored(fake, m, db, old)
-    assert [c[0] for c in fake.calls('POST', 'PUT', 'DELETE')] == ['PUT', 'POST', 'DELETE']
+    assert [c[0] for c in fake.calls('POST', 'PUT', 'DELETE')] == ['POST', 'PUT']
+    assert m._api_token == f'{tid}={fake.tokens[tid]}' and _works(m)
+    assert db.get_cluster('c1389')['api_token_secret'] == fake.tokens[tid]
+    [warned] = [s for s in said.at(logging.WARNING) if '[TOKEN]' in s]
+    assert 'kept the end it had' in warned and len(said.alerts) == 1
     fake.seen.clear()
     _look(m)
     assert fake.calls('POST', 'PUT', 'DELETE') == []
@@ -420,7 +456,8 @@ def test_a_new_secret_that_left_the_end_where_it_was_is_followed_by_a_new_token(
 
 def test_a_new_token_that_could_not_be_stored_leaves_the_old_one_on_pve(cluster, db, said, monkeypatch):
     """save_config answers True for a row it could not write: the row read back decides. The
-    next start signs in with the old token while it lasts."""
+    next start signs in with the old token while it lasts; the next looks store the new one
+    and delete the old one then."""
     fake = RenewPVE({USER: PASSWORD}, admins=[USER])
     m = said.listen(cluster.make(fake))
     old = m.config.api_token_user
@@ -438,6 +475,43 @@ def test_a_new_token_that_could_not_be_stored_leaves_the_old_one_on_pve(cluster,
     assert any('could not be stored' in s and old in s for s in said.at(logging.ERROR))
     (_user, _action, details), = said.audits
     assert 'not stored' in details
+
+    # the database takes it again
+    from pegaprox.core import config
+    monkeypatch.setattr(mgrmod, 'save_config', config.save_config)
+    _look(m)
+    row = db.get_cluster('c1389')
+    assert (row['api_token_user'], row['api_token_secret']) == (new, fake.tokens[new])
+    assert old not in fake.tokens and _works(m)
+
+
+def test_a_new_secret_the_row_did_not_take_is_said_at_once_and_stored_later(
+        cluster, db, said, monkeypatch):
+    """PVE takes the secret before it no more, so a restart before the row holds the new one
+    signs in with a dead secret. The admin hears of it at once, and the next looks store it."""
+    fake = RenewPVE({USER: PASSWORD}, admins=[USER], policy=ALLOW)
+    m = said.listen(cluster.make(fake))
+    tid = m.config.api_token_user
+    fake.tfa.add(USER)
+    fake.refuse_new = 'the datacenter token policy says no'
+    _near(fake, tid)
+    monkeypatch.setattr(mgrmod, 'save_config', lambda: True)
+
+    _look(m)
+
+    secret = fake.tokens[tid]
+    assert m._api_token == f'{tid}={secret}' and _works(m)
+    assert db.get_cluster('c1389')['api_token_secret'] != secret
+    assert len(said.alerts) == 1
+    assert said.alerts[0]['severity'] == 'critical' and 'restart' in said.alerts[0]['message']
+    assert any('could not store' in s and tid in s for s in said.at(logging.ERROR))
+    _no_secret_in(said, secret)
+
+    from pegaprox.core import config
+    monkeypatch.setattr(mgrmod, 'save_config', config.save_config)
+    _look(m)
+    assert db.get_cluster('c1389')['api_token_secret'] == secret
+    cluster.restart(m)
 
 
 # --- nothing works ----------------------------------------------------------------------------
@@ -508,6 +582,128 @@ def test_an_end_neither_the_token_nor_a_login_may_read_is_said_once(cluster, sai
     fake.seen.clear()
     _look(m)
     assert fake.logins() == [] and fake.seen == []
+
+
+def test_a_new_secret_whose_answer_never_came_is_said_at_once(cluster, said):
+    """Where PVE refused a new token the secret is renewed in place. An answer that comes too
+    late leaves PegaProx with a secret PVE takes no more: said at once, not taken for no
+    answer and left to the next 401."""
+    fake = RenewPVE({USER: PASSWORD}, admins=[USER], policy=ALLOW)
+    m = said.listen(cluster.make(fake))
+    tid = m.config.api_token_user
+    old_secret = fake.tokens[tid]
+    fake.tfa.add(USER)
+    fake.refuse_new, fake.slow_put = 'the datacenter token policy says no', 2.5
+    m.api_timeout = 1
+    _near(fake, tid)
+
+    _look(m)
+
+    assert fake.tokens[tid] != old_secret      # PVE carried it out
+    assert len(said.alerts) == 1 and said.alerts[0]['severity'] == 'critical'
+    [error] = [s for s in said.at(logging.ERROR) if '[TOKEN]' in s]
+    assert tid in error and 'never came' in error and 'two-factor' in error
+    _no_secret_in(said, old_secret, fake.tokens[tid], PASSWORD)
+
+
+def test_a_new_secret_pve_did_not_carry_out_is_tried_again_soon(cluster, said):
+    """pveproxy restarting answers the PUT with a 503: the secret PegaProx has still works,
+    so it is tried again in a quarter of an hour, and nothing is said yet."""
+    fake = RenewPVE({USER: PASSWORD}, admins=[USER], policy=ALLOW)
+    m = said.listen(cluster.make(fake))
+    tid = m.config.api_token_user
+    secret = fake.tokens[tid]
+    fake.tfa.add(USER)
+    fake.refuse_new = 'the datacenter token policy says no'
+    fake._update = lambda *a: (503, {'data': None})
+    _near(fake, tid, 36 * 3600)    # inside the margin of two days, not past half of it
+
+    _look(m)
+
+    assert fake.tokens[tid] == secret and m._api_token == f'{tid}={secret}' and _works(m)
+    assert said.alerts == [] and not [s for s in said.at(logging.WARNING) if '[TOKEN]' in s]
+    _tid, until = m._token_renew_held
+    assert until - time.monotonic() <= 15 * 60
+
+
+def test_a_refusal_is_said_again_in_the_next_lifetime_of_a_token_renewed_in_place(
+        cluster, said, monkeypatch):
+    """A secret renewed in place keeps the id of the token: what was said in its last
+    lifetime must not keep the next one quiet."""
+    fake = RenewPVE({USER: PASSWORD}, admins=[USER], policy=ALLOW)
+    m = said.listen(cluster.make(fake))
+    tid = m.config.api_token_user
+    fake.tfa.add(USER)
+    fake.refuse_new = 'the datacenter token policy says no'
+    fake.refuse = 'privileges taken away'
+    _near(fake, tid)
+    _look(m)
+    assert len(said.alerts) == 1
+
+    # given back: renewed in place, the same token
+    fake.refuse = None
+    monkeypatch.setattr(m, '_token_renew_held', None)
+    _look(m)
+    assert m.config.api_token_user == tid and _works(m) and len(said.alerts) == 1
+
+    # its next end comes near, and they are gone again
+    _near(fake, tid)
+    fake.refuse = 'privileges taken away'
+    _look(m)
+    assert len(said.alerts) == 2
+    assert len([s for s in said.at(logging.WARNING) if '[TOKEN]' in s]) == 2
+
+
+LOCK = "error with cfs lock 'file-user_cfg': got lock request timeout"
+
+
+def test_a_lock_timeout_is_tried_again_soon_and_said_once_time_runs_short(cluster, said, monkeypatch):
+    """A lifetime of a day is renewed 4.8 hours ahead. A lock timeout of user.cfg is no
+    refusal: held for six hours like one, a token with four hours left got no second try
+    before its end, and the admin was told to change privileges."""
+    fake = RenewPVE({USER: PASSWORD}, admins=[USER], policy={'max-lifetime': DAY})
+    m = said.listen(cluster.make(fake))
+    tid = m.config.api_token_user
+    fake.tfa.add(USER)
+    _near(fake, tid, 4 * 3600)
+    fake.refuse = LOCK
+
+    _look(m)
+
+    # tried again well before the end, and nothing to do for the admin yet
+    _tid, until = m._token_renew_held
+    assert until - time.monotonic() < (fake.expires[tid] - time.time()) / 4
+    assert said.alerts == [] and not [s for s in said.at(logging.WARNING) if '[TOKEN]' in s]
+
+    # under half the margin left it is said, once, as something PVE gets over
+    _near(fake, tid, 2 * 3600)
+    for _ in range(2):
+        monkeypatch.setattr(m, '_token_renew_held', None)
+        _look(m)
+    [warned] = [s for s in said.at(logging.WARNING) if '[TOKEN]' in s]
+    assert 'tries again' in warned and 'lock request timeout' in warned
+    assert 'Permissions.Modify' not in warned and len(said.alerts) == 1
+
+    # and the try once the lock is free renews it
+    fake.refuse = None
+    monkeypatch.setattr(m, '_token_renew_held', None)
+    _look(m)
+    assert m.config.api_token_user != tid and _works(m)
+
+
+def test_a_refusal_close_to_the_end_is_tried_again_before_it(cluster, said):
+    """Six hours between two tries outlast a token with four hours left."""
+    fake = RenewPVE({USER: PASSWORD}, modify_only=[USER], policy={'max-lifetime': DAY})
+    m = said.listen(cluster.make(fake))
+    tid = m.config.api_token_user
+    fake.tfa.add(USER)
+    _near(fake, tid, 4 * 3600)
+
+    _look(m)
+
+    assert len(said.alerts) == 1
+    _tid, until = m._token_renew_held
+    assert until - time.monotonic() <= (fake.expires[tid] - time.time()) / 4 + 1
 
 
 # --- the loop -------------------------------------------------------------------------------
