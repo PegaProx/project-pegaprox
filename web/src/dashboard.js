@@ -15275,6 +15275,7 @@
             const [snapshotSortBy, setSnapshotSortBy] = useState('age'); // vmid, vm_name, node, snapshot_name, snapshot_date, age
             const [snapshotSortDir, setSnapshotSortDir] = useState('desc');
             const [selectedSnaps, setSelectedSnaps] = useState({}); // #696 — multi-select in the snapshot overview (key -> true)
+            const [snapsDeleting, setSnapsDeleting] = useState(false); // LW Nov 2026 (#1347) - a bulk delete of them is under way
             const [logEvents, setLogEvents] = useState([]);
             const [logEventsLoading, setLogEventsLoading] = useState(false);
             const [logEventsError, setLogEventsError] = useState('');
@@ -16905,12 +16906,18 @@
             const snapDeleteError = (data, fallback) => ((data && data.errors) || []).join('; ') || (data && data.error) || fallback;
 
             // #696 — bulk-delete the checked snapshots (backend /snapshots/delete already loops an array)
+            // LW Nov 2026 (#1347) - the server waits for each delete in Proxmox now, so the answer can take
+            // a minute. One bulk delete at a time: a second click sent the same snapshots into the locks of
+            // the first. The list is read again whatever came back, also when a proxy stopped waiting while
+            // the server went on; what did not go stays selected and can be sent again.
             const deleteSelectedSnapshots = async (clusterId) => {
+                if (snapsDeleting) return;
                 const chosen = (sortedSnapshots || []).filter(s => selectedSnaps[snapKey(s)]);
                 if (chosen.length === 0) return;
                 if (!window.confirm(`Delete ${chosen.length} selected snapshot(s)?`)) {
                     return;
                 }
+                setSnapsDeleting(true);
                 try {
                     const res = await authFetch(`${API_URL}/snapshots/delete`, {
                         method: 'POST',
@@ -16919,17 +16926,19 @@
                     });
                     const data = res ? await res.json().catch(() => ({})) : {};
                     if (!res || !res.ok) {
-                        addToast(snapDeleteError(data, 'Failed to delete selected snapshots'), 'error');
-                        return;
+                        addToast(snapDeleteError(data, res ? `Failed to delete selected snapshots (HTTP ${res.status})` : 'Failed to delete selected snapshots'), 'error');
+                    } else {
+                        addToast(`${data.deleted ?? chosen.length} snapshot(s) deleted`, 'success');
+                        if (data.errors && data.errors.length) addToast(data.errors.join('; '), 'error');
+                        else setSelectedSnaps({});
                     }
-                    addToast(`${data.deleted ?? chosen.length} snapshot(s) deleted`, 'success');
-                    if (data.errors && data.errors.length) addToast(data.errors.join('; '), 'error');
-                    setSelectedSnaps({});
-                    await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
                 } catch (err) {
                     console.error('Bulk snapshot delete failed:', err);
                     addToast('Failed to delete selected snapshots', 'error');
+                } finally {
+                    setSnapsDeleting(false);
                 }
+                await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
             };
 
             const deleteGlobalSnapshot = async (snap, clusterId) => {
@@ -24416,7 +24425,7 @@
                                                             onFilter={() => applySnapshotFilter(selectedCluster.id)} onRefresh={() => fetchGlobalSnapshots(selectedCluster.id)}
                                                             canDelete={canDeleteSnaps} selected={selectedSnaps} onSelect={setSelectedSnaps} keyOf={snapKey}
                                                             onDelete={(snap) => deleteGlobalSnapshot(snap, selectedCluster.id)}
-                                                            onDeleteSelected={() => deleteSelectedSnapshots(selectedCluster.id)} nav={crTaskNav} />
+                                                            onDeleteSelected={() => deleteSelectedSnapshots(selectedCluster.id)} deleting={snapsDeleting} nav={crTaskNav} />
                                                     </CrBoundary>
                                                 )}
                                                 {resourcesSubTab === 'snapshots' && !isCorpRedesigned && (
@@ -24499,8 +24508,9 @@
                                                                     <span className="text-sm text-gray-200">{selCount} {t('selected') || 'selected'}</span>
                                                                     <button
                                                                         onClick={() => deleteSelectedSnapshots(selectedCluster.id)}
-                                                                        className="inline-flex items-center gap-1 rounded-lg bg-red-600 hover:bg-red-500 px-3 py-1.5 text-sm font-medium text-white">
-                                                                        <Icons.Trash className="w-4 h-4" /> {t('deleteSelected') || 'Delete selected'}
+                                                                        disabled={snapsDeleting} aria-busy={snapsDeleting ? 'true' : undefined}
+                                                                        className="inline-flex items-center gap-1 rounded-lg bg-red-600 hover:bg-red-500 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-60 disabled:cursor-wait">
+                                                                        <Icons.Trash className="w-4 h-4" /> {snapsDeleting ? t('crAffDeleting') : (t('deleteSelected') || 'Delete selected')}
                                                                     </button>
                                                                     <button onClick={() => setSelectedSnaps({})} className="text-sm text-gray-400 hover:text-white">
                                                                         {t('clear') || 'Clear'}

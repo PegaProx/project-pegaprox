@@ -1083,7 +1083,7 @@
         }
 
         function CrSnapOverview({ cluster, rows, loading, readErr, filterDate, onFilterDate, onFilter, onRefresh, canDelete, selected, onSelect,
-                                  keyOf, onDelete, onDeleteSelected, nav }) {
+                                  keyOf, onDelete, onDeleteSelected, deleting, nav }) {
             const { t } = useTranslation();
             const cid = cluster.id;
             const now = Date.now();
@@ -1161,7 +1161,8 @@
                     {canDelete && nSel > 0 && (
                         <div className="cr-snap-bar" role="status" data-cr-snap-bar="">
                             <span className="cr-strong">{crFill(t('crSnapNSel'), { n: nSel })}</span>
-                            <CrButton variant="danger" icon={<Icons.Trash />} onClick={onDeleteSelected} data-cr-snap-del-sel="">{t('crSnapDelSel')}</CrButton>
+                            <CrButton variant="danger" icon={<Icons.Trash />} onClick={onDeleteSelected} disabled={!!deleting} aria-busy={deleting ? 'true' : undefined}
+                                data-cr-snap-del-sel="">{deleting ? t('crAffDeleting') : t('crSnapDelSel')}</CrButton>
                             <CrButton onClick={() => onSelect({})} data-cr-snap-sel-clear="">{t('clear')}</CrButton>
                         </div>
                     )}
