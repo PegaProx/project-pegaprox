@@ -23,7 +23,10 @@ Requires:       python3-urllib3
 Requires:       python3-dns
 Requires:       python3-cryptography
 Requires:       python3-argon2-cffi
-Requires:       python3-jwt
+# NS Nov 2026 - 2.8.0 is the first PyJWT whose PyJWKClient takes lifespan and ssl_context
+# (utils/oidc.py); with EPEL 9's 2.4.0 every OIDC sign-in is refused. requirements.txt asks
+# 2.15.1 (no JWKS redirect followed before 2.14.0), which no released Fedora or EPEL has yet
+Requires:       python3-jwt >= 2.8.0
 Requires:       python3-pyotp
 Requires:       python3-pyOpenSSL
 Requires:       python3-pillow
@@ -32,11 +35,13 @@ Requires:       python3-websocket-client
 Requires:       python3-greenlet
 Requires:       python3-defusedxml
 Requires:       python3-pyvmomi
-Requires:       sqlcipher
 
 #Custom Build Python Package
 # gevent-websocket, XenAPI and sqlcipher3 are in neither Fedora nor EPEL; the apt repo builds
-# the last two (and flask-sock) from PyPI the same way (packaging/apt/build-python-debs.py)
+# the last two (and flask-sock) from PyPI the same way (packaging/apt/build-python-debs.py).
+# No sqlcipher here: nothing runs that CLI, and python3-sqlcipher3 brings its own SQLCipher
+# (the wheel has it built in; a build from source links the system library, and rpmbuild
+# adds that Requires by itself)
 Requires:       python3-backports-zstd
 Requires:       python3-flask-compress
 Requires:       python3-flask-cors
@@ -129,12 +134,13 @@ EOF
 %changelog
 * Thu Nov 26 2026 MrMasterbay <gamesucht1236@gmail.com> - 1.5.1-1
 - Update to 1.5.1
-- Require python3-jwt and python3-websocket-client, both imported at runtime
-  (OIDC token verification, the console and linked mode)
+- Require python3-jwt >= 2.8.0 and python3-websocket-client, both imported at
+  runtime (OIDC token verification, the console and linked mode); an older
+  PyJWT has no lifespan and ssl_context for its JWKS client
 - Require every other module PegaProx imports, the same set as debian/control:
   python3-werkzeug, python3-requests-toolbelt, python3-urllib3, python3-dns,
   python3-greenlet, python3-pillow, python3-ldap3, python3-defusedxml,
-  python3-pyvmomi, sqlcipher and the locally built python3-gevent-websocket,
+  python3-pyvmomi and the locally built python3-gevent-websocket,
   python3-xenapi and python3-sqlcipher3
 - Name python3-flask-cors and python3-qrcode once
 
