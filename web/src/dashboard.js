@@ -2224,6 +2224,45 @@
             return key ? t(key) : state;
         }
 
+        // LW Nov 2026 (#1252) - what an ESXi migration may install on the target node and which
+        // of it is missing (node_packages of a review). A package the node was not asked about
+        // shows as not checked, never as installed.
+        const V2P_PKG_FOR = {sshfs: 'v2pPkgForSshfs', sshpass: 'v2pPkgForSshpass', virtio: 'v2pPkgForVirtio',
+                             virtio_build: 'v2pPkgForVirtioBuild', rbd: 'v2pPkgForRbd', lz4: 'v2pPkgForLz4'};
+        function V2pNodePackages({ np, t }) {
+            if (!np || !Array.isArray(np.items) || !np.items.length) return null;
+            const state = (p) => {
+                if (p.installed === true) return [t('v2pPkgInstalled'), 'text-green-400'];
+                if (p.installed !== false) return [t('v2pPkgNotChecked'), 'text-gray-500'];
+                if (np.allow_install) return [t('v2pPkgWillInstall'), 'text-yellow-300'];
+                return [t('v2pPkgMissing'), p.needed ? 'text-red-300' : 'text-yellow-300'];
+            };
+            return (
+                <div data-v2p-packages>
+                    <div className="text-xs text-gray-400 font-semibold mb-1">{t('v2pPkgTitle').replace('{node}', np.node || '')}</div>
+                    {!np.checked && (
+                        <div className="text-xs text-yellow-300 mb-1">{t('v2pPkgCouldNotCheck')}{np.error ? `: ${np.error}` : ''}</div>
+                    )}
+                    <div className="space-y-0.5 text-xs">
+                        {np.items.map(p => {
+                            const [label, cls] = state(p);
+                            return (
+                                <div key={p.package} className="flex flex-wrap gap-2 text-gray-300" data-v2p-package={p.package}>
+                                    <span className="font-mono">{p.package}</span>
+                                    <span className="text-gray-500">{V2P_PKG_FOR[p.feature] ? t(V2P_PKG_FOR[p.feature]) : p.feature}, {p.needed ? t('v2pPkgNeeded') : t('v2pPkgOptional')}</span>
+                                    <span className={`ml-auto ${cls}`}>{label}</span>
+                                </div>
+                            );
+                        })}
+                    </div>
+                    {np.items.some(p => !p.needed) && <p className="text-[11px] text-gray-500 mt-1">{t('v2pPkgOptionalHint')}</p>}
+                    {np.apt_command && (
+                        <div className="text-xs text-gray-400 mt-1">{t('v2pPkgManual')} <code className="font-mono text-gray-200 select-all">{np.apt_command}</code></div>
+                    )}
+                </div>
+            );
+        }
+
         function EsxiBulkMigrate({ server, vms, runId, onClose, onStarted, authFetch, addToast, t, haReadOnly }) {
             const [step, setStep] = React.useState(runId ? 'run' : 'settings');
             const [guests, setGuests] = React.useState(vms || []);
@@ -2233,6 +2272,7 @@
                 target_cluster: '', target_node: '', target_storage: '', network_bridge: 'vmbr0', net_vlan_tag: '',
                 transfer_mode: 'vmkfstools_clone', verify: 'sample', start_after: true, remove_source: false,
                 wait_for_confirmation: false, preserve_mac: true, esxi_user: 'root', width: 2,
+                allow_package_install: true,
             });
             const [password, setPassword] = React.useState('');
             const [rows, setRows] = React.useState({});
@@ -2548,6 +2588,13 @@
                                         <span className="block text-xs text-gray-500 mt-0.5">{t('esxiBulkWaitHint')}</span>
                                     </span>
                                 </label>
+                                <label className="flex items-start gap-2 text-sm text-gray-400 bg-proxmox-dark border border-proxmox-border rounded-lg p-3 cursor-pointer">
+                                    <input type="checkbox" checked={form.allow_package_install !== false} onChange={e => set({allow_package_install: e.target.checked})} className="rounded mt-0.5" data-esxi-bulk-allow-packages />
+                                    <span>
+                                        <span className="text-gray-200">{t('v2pAllowPackageInstall')}</span>
+                                        <span className="block text-xs text-gray-500 mt-0.5">{t('v2pAllowPackageInstallDesc')}</span>
+                                    </span>
+                                </label>
                                 <div className="grid grid-cols-2 gap-3">
                                     <div>
                                         <label className="text-xs text-gray-500 mb-1 block">{t('esxiBulkSshUser')}</label>
@@ -2722,6 +2769,7 @@
                                                 ))}
                                             </div>
                                         )}
+                                        <V2pNodePackages np={check.node_packages} t={t} />
                                     </div>
                                 )}
                                 {!password && <p className="text-xs text-yellow-300">{t('esxiBulkNeedPassword')}</p>}
@@ -14872,6 +14920,8 @@
                 // kann das hier aktivieren. Voraussetzung: virtio-win.iso liegt unter
                 // /var/lib/vz/template/iso/.
                 install_virtio_drivers:false, virtio_iso_path:'',
+                // LW Nov 2026 (#1252) - off: nothing is installed on the target node
+                allow_package_install:true,
             });
             const [migrateWizardStep, setMigrateWizardStep] = useState('target'); // target, hardware, advanced, review
             const [vmwareMigrateLoading, setVmwareMigrateLoading] = useState(false);
@@ -19875,8 +19925,9 @@
                     try {
                         const resp = await authFetch(`${API_URL}/vmware/${selectedVMware.id}/vms/${vmwareSelectedVm}/migrate`, {
                             method: 'POST', headers: {'Content-Type':'application/json'},
+                            // LW Nov 2026 - the package check belongs to the review, not to every target change
                             body: JSON.stringify({target_cluster: f.target_cluster, target_node: f.target_node,
-                                                  target_storage: f.target_storage, dry_run: true})
+                                                  target_storage: f.target_storage, dry_run: true, check_packages: false})
                         });
                         const data = resp?.ok ? await resp.json().catch(() => null) : null;
                         if (!gone) setV2pInventory(data?.available || null);
@@ -30505,6 +30556,15 @@
                                                                     </span>
                                                                 </label>
 
+                                                                {/* LW Nov 2026 (#1252) - off for nodes kept by config management: the review lists what is missing */}
+                                                                <label className="flex items-start gap-2 text-sm text-gray-400 bg-proxmox-dark/40 border border-proxmox-border rounded-lg p-3 cursor-pointer">
+                                                                    <input type="checkbox" checked={vmwareMigrateForm.allow_package_install !== false} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, allow_package_install: e.target.checked})} className="rounded mt-0.5" data-v2p-allow-packages />
+                                                                    <span>
+                                                                        <span className="text-gray-200">{t('v2pAllowPackageInstall')}</span>
+                                                                        <span className="block text-xs text-gray-500 mt-0.5">{t('v2pAllowPackageInstallDesc')}</span>
+                                                                    </span>
+                                                                </label>
+
                                                                 {/* Requirements */}
                                                                 {vmwareMigrationPlan.requirements && (
                                                                     <div className="bg-yellow-500/5 border border-yellow-500/20 rounded-lg p-3">
@@ -30830,6 +30890,7 @@
                                                                                     </div>
                                                                                 </div>
                                                                             )}
+                                                                            <V2pNodePackages np={rv.node_packages} t={t} />
                                                                             {rv.verify && (
                                                                                 <div className="text-xs text-gray-400">{t('v2pVerify')}: <span className="text-gray-200">{rv.verify === 'full' ? t('v2pVerifyFull') : rv.verify === 'off' ? t('v2pVerifyOff') : t('v2pVerifySample')}</span></div>
                                                                             )}
