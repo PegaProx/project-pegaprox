@@ -9,6 +9,12 @@
 # the first key was authorized again, after its run had said CLEANED. A key added between the
 # read and the move of a removal was lost the same way. Both now wait for a lock on ESXi.
 #
+# The lock of a shell that died with it is taken over. That was "looks stale, rmdir": two
+# waiters at the same dead lock, the first broke it and took a new one, the second's rmdir
+# removed that new one and both rewrote at once. And a dead holder's lock younger than the stale
+# age made every run wait ten seconds and rewrite without it. The holder's file in the lock now
+# changes hands with one rename, and the removal never rewrites without the lock.
+#
 # The removal runs here in a real shell against real files, the way the ESXi shell runs it.
 
 import logging
@@ -52,14 +58,15 @@ class Esxi:
         self.output = None
         self.outputs = {}
         self.deployed = []
+        self.env = {}           # key id -> extra environment of that removal's shell
         monkeypatch.setattr(v2p, '_pve_node_exec', self._node)
         monkeypatch.setattr(v2p, '_ssh_exec', self._esxi_login)
 
-    def _run(self, script):
+    def _run(self, script, extra=None):
         script = script.replace('/etc/ssh/', f'{self.root}/etc/ssh/').replace(LOCK, str(self.lock))
         path = os.environ['PATH'] if not self.shims else f'{self.shims}:{os.environ["PATH"]}'
-        return subprocess.run([*self.shell, '-c', script], capture_output=True, text=True, timeout=30,
-                              env={'HOME': str(self.home), 'PATH': path})
+        return subprocess.run([*self.shell, '-c', script], capture_output=True, text=True, timeout=120,
+                              env={'HOME': str(self.home), 'PATH': path, **(extra or {})})
 
     def _node(self, mgr, node, cmd, timeout=600, **kw):
         if cmd.startswith('cat /tmp/v2p-key-') and cmd.endswith('.pub'):
@@ -69,11 +76,12 @@ class Esxi:
             return 0, '', ''      # the key files on the node: keygen, rm, the ssh config
         start = cmd.index("root@esxi.lab '") + len("root@esxi.lab '")
         script = cmd[start:cmd.rindex("' 2>&1")]
-        p = self._run(script)
-        out = p.stdout + p.stderr
         m = re.search(r'"pegaprox-v2p-([\w-]+)"', script)    # the lock is named pegaprox-v2p- too
-        if m:
-            self.output = self.outputs[m.group(1)] = out
+        key = m.group(1) if m else None
+        p = self._run(script, self.env.get(key))
+        out = p.stdout + p.stderr
+        if key:
+            self.output = self.outputs[key] = out
         return p.returncode, p.stdout, p.stderr
 
     def _esxi_login(self, host, user, password, cmd, timeout=30, **kw):
@@ -96,6 +104,34 @@ class Esxi:
         f = self.shims / name
         f.write_text('#!/bin/sh\n' + body)
         f.chmod(0o755)
+
+    def slow(self, name):
+        """name does what it did, then naps $SLOW_<NAME> seconds when a run has that set and the
+        call went to the lock and worked: the run acts on what it saw before the nap."""
+        real = shutil.which(name)
+        var = 'SLOW_' + name.upper()
+        self.shim(name, f'{real} "$@"; rc=$?\n'
+                        f'case "$*" in *pegaprox-v2p-keys.lock*) '
+                        f'[ $rc -eq 0 ] && [ -n "${var}" ] && sleep "${var}";; esac\n'
+                        'exit $rc\n')
+
+    def clock(self, start, step):
+        """date +%s gives start, then start+step, start+2*step, ... (step 0: the clock stands)."""
+        tick = self.root / 'clock'
+        tick.write_text(str(start))
+        self.shim('date', f'case "$1" in +%s) ;; *) exec {shutil.which("date")} "$@";; esac\n'
+                          f'n=$(cat {tick}); echo $((n+{step})) > {tick}; echo $n\n')
+
+    def naps(self):
+        """sleep returns at once and notes how long it was asked to take."""
+        naps = self.root / 'naps'
+        self.shim('sleep', f'echo "$1" >> {naps}\n')
+        return lambda: sum(float(x) for x in naps.read_text().split()) if naps.exists() else 0.0
+
+    def held_by(self, epoch, pid=99999):
+        """The lock as a holder leaves it: the directory with the holder's file in it."""
+        self.lock.mkdir()
+        (self.lock / f'o.{epoch}.{pid}').write_text('')
 
     def leftovers(self):
         return sorted(str(p.relative_to(self.root)) for p in self.root.rglob(f'*.{KEY_ID}'))
@@ -235,6 +271,7 @@ def test_a_key_is_added_only_once_the_lock_is_free(esxi):
 
 
 def test_a_lock_left_by_a_dead_shell_is_taken_over(esxi):
+    """An empty lock five minutes old: a shell died between its mkdir and its file."""
     esxi.keys.write_text(ADMIN + '\n' + OURS + '\n')
     esxi.lock.mkdir()
     old = time.time() - 300
@@ -247,20 +284,157 @@ def test_a_lock_left_by_a_dead_shell_is_taken_over(esxi):
     assert not esxi.lock.exists()
 
 
-def test_a_lock_nobody_gives_back_ends_the_wait_and_stays_theirs(dash_esxi):
-    """The wait is about ten seconds. After it the key goes anyway, an authorized key left on
-    ESXi is worse, and the lock of the other run is not ours to remove."""
+def test_the_lock_of_a_holder_that_died_with_it_changes_hands(esxi):
+    """A shell died while it held the lock: its file is five minutes old. The lock passes to
+    the removal at once instead of after a wait and a rewrite without it."""
+    esxi.keys.write_text(ADMIN + '\n' + OURS + '\n')
+    esxi.held_by(int(time.time()) - 300)
+    t0 = time.monotonic()
+    esxi.clean()
+    assert time.monotonic() - t0 < 8
+    assert esxi.keys.read_text() == ADMIN + '\n'
+    assert 'CLEANED' in esxi.output
+    assert not esxi.lock.exists()
+
+
+def _slow_rewrite(e, seconds=1.5):
+    real = shutil.which('grep')
+    e.shim('grep', f'{real} "$@"; rc=$?\ncase "$1" in -v) sleep {seconds};; esac\nexit $rc\n')
+
+
+def _late_then_early(e, caplog):
+    """The removal of OTHER_RUN looks at the lock first and acts late, ours comes a moment
+    later and acts at once."""
+    with caplog.at_level(logging.WARNING):
+        late = _in_thread(e.clean, 'ffff0000')
+        time.sleep(0.15)
+        early = _in_thread(e.clean, KEY_ID)
+        late.join(60)
+        early.join(60)
+    assert not late.is_alive() and not early.is_alive()
+
+
+def test_two_waiters_at_a_dead_lock_do_not_both_take_it(dash_esxi, caplog):
+    """Both waiters see the same dead lock. Ours breaks it and takes a new one, the other acts
+    on what it saw before its find came back: its rmdir removed our new lock, both rewrote at
+    once, and the removed key was authorized again after both runs had said CLEANED."""
     e = dash_esxi
-    naps = e.root / 'naps'
-    e.shim('sleep', f'echo "$1" >> {naps}\n')
-    e.keys.write_text(ADMIN + '\n' + OURS + '\n')
+    e.slow('find')
+    _slow_rewrite(e)
+    e.keys.write_text('\n'.join([ADMIN, OURS, OTHER_RUN]) + '\n')
     e.lock.mkdir()
+    old = time.time() - 300
+    os.utime(e.lock, (old, old))
+    e.env['ffff0000'] = {'SLOW_FIND': '0.5'}
+    _late_then_early(e, caplog)
+    assert e.keys.read_text() == ADMIN + '\n'
+    assert 'CLEANED' in e.outputs[KEY_ID] and 'CLEANED' in e.outputs['ffff0000']
+    assert 'temporary migration key' not in caplog.text
+    assert not e.lock.exists()
+
+
+def test_two_waiters_at_a_dead_holders_lock_hand_it_on_once(dash_esxi, caplog):
+    """The holder died with the lock and its file names it. Both waiters see that file, only
+    one rename can find it: the other waits for the new holder instead of rewriting next to it."""
+    e = dash_esxi
+    e.slow('ls')
+    _slow_rewrite(e)
+    e.keys.write_text('\n'.join([ADMIN, OURS, OTHER_RUN]) + '\n')
+    e.held_by(int(time.time()) - 300)
+    old = time.time() - 300
+    os.utime(e.lock, (old, old))
+    e.env['ffff0000'] = {'SLOW_LS': '0.5'}
+    _late_then_early(e, caplog)
+    assert e.keys.read_text() == ADMIN + '\n'
+    assert 'CLEANED' in e.outputs[KEY_ID] and 'CLEANED' in e.outputs['ffff0000']
+    assert 'temporary migration key' not in caplog.text
+    assert not e.lock.exists()
+
+
+def test_a_fresh_lock_before_its_file_is_written_is_not_shared(dash_esxi, caplog):
+    """An empty dead lock is still taken away with rmdir, and that rmdir can meet the fresh lock
+    of a waiter that has made its directory but not yet its file. Here ours is that slow waiter:
+    the other one removes our directory and makes its own, our file lands next to its file, and
+    we back off instead of rewriting at the same time."""
+    e = dash_esxi
+    e.slow('find')
+    e.slow('mkdir')
+    _slow_rewrite(e)
+    e.keys.write_text('\n'.join([ADMIN, OURS, OTHER_RUN]) + '\n')
+    e.lock.mkdir()
+    old = time.time() - 300
+    os.utime(e.lock, (old, old))
+    e.env['ffff0000'] = {'SLOW_FIND': '0.5'}
+    e.env[KEY_ID] = {'SLOW_MKDIR': '1'}
+    _late_then_early(e, caplog)
+    assert e.keys.read_text() == ADMIN + '\n'
+    assert 'CLEANED' in e.outputs[KEY_ID] and 'CLEANED' in e.outputs['ffff0000']
+    assert 'temporary migration key' not in caplog.text
+    assert not e.lock.exists()
+
+
+def test_a_dead_holders_young_lock_is_waited_out_not_skipped(dash_esxi):
+    """The holder died a moment ago, its lock is younger than the stale age. Every removal
+    waited ten seconds and then rewrote with that lock still in place. It now waits until the
+    lock is past the stale age, takes it over, and only then rewrites. One clock second per
+    round here, sleep returns at once."""
+    e = dash_esxi
+    now = int(time.time())
+    e.clock(now, 1)
+    waited = e.naps()
+    seen = e.root / 'lock-during-rewrite'
+    real = shutil.which('grep')
+    e.shim('grep', f'{real} "$@"; rc=$?\ncase "$1" in -v) ls {e.lock} >> {seen} 2>&1;; esac\nexit $rc\n')
+    e.keys.write_text(ADMIN + '\n' + OURS + '\n')
+    e.held_by(now)
     e.clean()
-    waited = sum(float(x) for x in naps.read_text().split())
-    assert 5 <= waited <= 15, waited
+    held = seen.read_text().split()
+    assert len(held) == 1 and not held[0].endswith('.99999'), f'rewrote while the lock was {held}'
+    assert re.fullmatch(r'o\.\d+\.\d+', held[0]), held
+    assert int(held[0].split('.')[1]) - now > v2p._ESXI_KEYS_LOCK_STALE
+    assert waited() >= 25
     assert e.keys.read_text() == ADMIN + '\n'
     assert 'CLEANED' in e.output
-    assert e.lock.is_dir()
+    assert not e.lock.exists()
+
+
+def test_a_lock_held_through_the_whole_wait_leaves_the_key_and_says_so(dash_esxi, caplog):
+    """Another run keeps the lock through the whole wait (the clock stands still here, so its
+    lock never ages). The removal gave up after ten seconds and rewrote anyway, the race the lock
+    is there for. It now waits past the stale age, leaves the files alone, and the run reports
+    the key as maybe left; the lock stays the other run's."""
+    e = dash_esxi
+    now = int(time.time())
+    e.clock(now, 0)
+    waited = e.naps()
+    e.keys.write_text(ADMIN + '\n' + OURS + '\n')
+    e.held_by(now, 4242)
+    with caplog.at_level(logging.WARNING):
+        e.clean()
+    assert e.keys.read_text() == ADMIN + '\n' + OURS + '\n', 'rewrote without the lock'
+    assert 'CLEANED' not in e.output
+    assert 'stays held by another run' in e.output
+    assert 'could not remove the temporary migration key' in caplog.text
+    assert waited() > v2p._ESXI_KEYS_LOCK_STALE
+    assert os.listdir(e.lock) == [f'o.{now}.4242']
+    assert e.leftovers() == []
+
+
+def test_a_deploy_appends_once_the_wait_is_over(dash_esxi):
+    """An append cannot bring a removed key back and no removal rewrites without the lock, so a
+    deploy that could not have the lock within the wait adds its key all the same."""
+    e = dash_esxi
+    now = int(time.time())
+    e.clock(now, 0)
+    waited = e.naps()
+    e.keys.write_text(ADMIN + '\n')
+    e.held_by(now, 4242)
+    e.deploy()
+    assert e.deployed and e.deployed[0]
+    lines = e.keys.read_text().splitlines()
+    assert len(lines) == 2 and lines[0] == ADMIN and 'pegaprox-v2p-' in lines[1]
+    assert waited() > v2p._ESXI_KEYS_LOCK_STALE
+    assert os.listdir(e.lock) == [f'o.{now}.4242']
 
 
 def test_cleaned_is_the_state_after_the_lock_is_given_back(dash_esxi, caplog):

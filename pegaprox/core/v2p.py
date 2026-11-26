@@ -5667,14 +5667,18 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
     
     # Method A: ESXi standard path /etc/ssh/keys-<username>/authorized_keys
     # MK Nov 2026 - each append waits for the lock of the key removal (see _esxi_keys_locked): a
-    # removal of another run moving its filtered copy over the file took a key added meanwhile with it
+    # removal of another run moving its filtered copy over the file took a key added meanwhile with it.
+    # The wait runs past the lock's stale age, hence the longer timeouts; after it the append goes ahead.
+    def _append(cmd):
+        return _esxi_keys_locked(cmd, unlocked=cmd)
+
     deploy_cmd_a = (
         f"mkdir -p /etc/ssh/keys-{shlex.quote(esxi_user)} 2>/dev/null; "
-        + _esxi_keys_locked(
+        + _append(
             f"echo {shlex.quote(pub)} >> /etc/ssh/keys-{shlex.quote(esxi_user)}/authorized_keys; ") +
         "echo DEPLOYED"
     )
-    rc_a, out_a, _ = _ssh_exec(esxi_host, esxi_user, esxi_pass, deploy_cmd_a, timeout=30)
+    rc_a, out_a, _ = _ssh_exec(esxi_host, esxi_user, esxi_pass, deploy_cmd_a, timeout=120)
     if 'DEPLOYED' in str(out_a or ''):
         deployed = True
         logging.info(f"[V2P] Key deployed via ESXi keys-{esxi_user} path (paramiko)")
@@ -5685,11 +5689,11 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
     if not deployed:
         deploy_cmd_b = (
             f"mkdir -p ~/.ssh 2>/dev/null; chmod 700 ~/.ssh 2>/dev/null; "
-            + _esxi_keys_locked(f"echo {shlex.quote(pub)} >> ~/.ssh/authorized_keys; ") +
+            + _append(f"echo {shlex.quote(pub)} >> ~/.ssh/authorized_keys; ") +
             "chmod 600 ~/.ssh/authorized_keys 2>/dev/null; "
             "echo DEPLOYED"
         )
-        rc_b, out_b, _ = _ssh_exec(esxi_host, esxi_user, esxi_pass, deploy_cmd_b, timeout=30)
+        rc_b, out_b, _ = _ssh_exec(esxi_host, esxi_user, esxi_pass, deploy_cmd_b, timeout=120)
         if 'DEPLOYED' in str(out_b or ''):
             deployed = True
             logging.info("[V2P] Key deployed via ~/.ssh/authorized_keys (paramiko)")
@@ -5700,12 +5704,12 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
     if not deployed:
         deploy_cmd_c = (
             f"mkdir -p /etc/ssh/keys-{shlex.quote(esxi_user)} ~/.ssh 2>/dev/null; "
-            + _esxi_keys_locked(
+            + _append(
                 f"echo {shlex.quote(pub)} >> /etc/ssh/keys-{shlex.quote(esxi_user)}/authorized_keys 2>/dev/null; "
                 f"echo {shlex.quote(pub)} >> ~/.ssh/authorized_keys 2>/dev/null; ") +
             "echo DEPLOYED"
         )
-        rc_c, out_c, _ = _ssh_exec(esxi_host, esxi_user, esxi_pass, deploy_cmd_c, timeout=30)
+        rc_c, out_c, _ = _ssh_exec(esxi_host, esxi_user, esxi_pass, deploy_cmd_c, timeout=120)
         if 'DEPLOYED' in str(out_c or ''):
             deployed = True
             logging.info("[V2P] Key deployed via both paths (paramiko)")
@@ -5766,22 +5770,51 @@ def _qemu_open_reason(output):
 # MK Nov 2026 - the key removal reads authorized_keys and moves a filtered copy over it. A bulk
 # run migrates up to five VMs of one host at once, and a second removal (or a key added) between
 # the read and the move of the first one came back or got lost. mkdir is atomic in busybox ash
-# too, so a directory is the lock. A holder gives it back within milliseconds, so the wait is
-# short; one older than a minute was left by a dead shell and is taken over. After the wait the
-# change runs without the lock, a temporary key left authorized on ESXi is worse.
+# too, so a directory is the lock, and its holder puts a file named o.<epoch>.<pid> in it.
+# A holder needs milliseconds; one whose file is older than a minute died with the lock.
+# Taking such a lock over used to be "looks stale, rmdir": two waiters saw the same dead lock,
+# the first broke it and made its own, the second's rmdir then removed that fresh one and both
+# rewrote at once. Now the dead holder's file is renamed to the new holder's name, and only one
+# mv can find it. rmdir is left for an empty directory (a shell that died between its mkdir and
+# its file); that one can still meet a fresh lock in the same gap, so a shell runs the body only
+# once its file is the single entry in the directory, and backs off otherwise.
+# The wait runs past the stale age, so a dead holder's lock is taken over within it. The removal
+# never rewrites without the lock: the key is then reported as maybe left. The appends of the
+# deploy go ahead after the wait, an append cannot bring a key back and no rewrite runs unlocked.
 _ESXI_KEYS_LOCK = '/tmp/pegaprox-v2p-keys.lock'
+_ESXI_KEYS_LOCK_STALE = 60    # seconds
+_ESXI_KEYS_LOCK_WAIT = 70     # seconds, past the stale age
 
 
-def _esxi_keys_locked(body):
-    """body (shell, ends with '; ') run on ESXi with the lock on the authorized_keys files held."""
+def _esxi_keys_locked(body, unlocked=''):
+    """body (shell, ends with '; ') run on ESXi with the lock on the authorized_keys files held;
+    `unlocked` runs in its place when the lock could not be had within the wait."""
     return (
-        f'LD={_ESXI_KEYS_LOCK}; LH=; LN=0; '
-        'while [ $LN -lt 20 ]; do LN=$((LN+1)); '
-        'if mkdir "$LD" 2>/dev/null; then LH=1; break; fi; '
-        '[ -n "$(find "$LD" -maxdepth 0 -mmin +1 2>/dev/null)" ] && rmdir "$LD" 2>/dev/null && continue; '
-        'sleep 0.5 2>/dev/null || sleep 1; done; '
-        + body +
-        '[ -z "$LH" ] || rmdir "$LD" 2>/dev/null; '
+        f'LD={_ESXI_KEYS_LOCK}; LH=; LN=0; LB=; LS=-; LF=0; '
+        f'while [ $LN -lt {2 * _ESXI_KEYS_LOCK_WAIT + 10} ]; do LN=$((LN+1)); LW=; LX=; '
+        # LE is now, LT the name of our file; no number from date means no clock to judge age by
+        'LE=$(date +%s 2>/dev/null); case "$LE" in ""|*[!0-9]*) LE=0;; esac; '
+        'LB=${LB:-$LE}; LT=o.$LE.$$; '
+        'if mkdir "$LD" 2>/dev/null; then { : > "$LD/$LT"; } 2>/dev/null; LW=1; '
+        'else LO=$(ls "$LD" 2>/dev/null); '
+        # LF: since when the lock looked like this to us, LA: when its holder took it (the older
+        # of the two, so a file with an odd name or a clock set back still ages)
+        '[ "$LO" = "$LS" ] || { LS=$LO; LF=$LE; }; '
+        'LA=${LO#o.}; LA=${LA%%.*}; case "$LA" in ""|0*|*[!0-9]*) LA=$LF;; esac; '
+        '[ "$LA" -lt "$LF" ] || LA=$LF; '
+        f'[ $((LE-LA)) -gt {_ESXI_KEYS_LOCK_STALE} ] && LX=1; '
+        '[ -z "$LO" ] && [ -n "$(find "$LD" -maxdepth 0 -mmin +1 2>/dev/null)" ] && LX=1; '
+        'if [ -n "$LX" ]; then case "$LO" in '
+        '"") rmdir "$LD" 2>/dev/null && continue;; '
+        'o.*) mv "$LD/$LO" "$LD/$LT" 2>/dev/null && LW=1;; esac; fi; fi; '
+        'if [ -n "$LW" ]; then [ "$(ls "$LD" 2>/dev/null)" = "$LT" ] && LH=1 && break; '
+        'rm -f "$LD/$LT" 2>/dev/null; rmdir "$LD" 2>/dev/null; fi; '
+        f'[ $((LE-LB)) -gt {_ESXI_KEYS_LOCK_WAIT} ] && break; '
+        # the rounds of half a second reach past the wait too, the cap when the clock gives no number
+        'sleep 0.5 2>/dev/null || { sleep 1; LN=$((LN+1)); }; done; '
+        'if [ -n "$LH" ]; then ' + body +
+        'rm "$LD/$LT" 2>/dev/null && rmdir "$LD" 2>/dev/null; '
+        'else ' + (unlocked or ': ; ') + 'fi; '
     )
 
 
@@ -5817,7 +5850,8 @@ def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
     # its filtered copy stayed next to it, and CLEANED was echoed anyway. 0 and 1 both mean the
     # file was read. CLEANED now means our key is in neither file any more.
     # MK Nov 2026 - the swap runs under the lock, the check once the lock is given back: CLEANED
-    # is what the files hold after we are done with them
+    # is what the files hold after we are done with them. No lock within the wait (it runs past
+    # the stale age), no swap: the key then stays and the warning below says so.
     _files = f"/etc/ssh/keys-{esxi_user}/authorized_keys ~/.ssh/authorized_keys"
     _swap = _esxi_keys_locked(
         f"for F in {_files}; do "
@@ -5825,13 +5859,14 @@ def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
         f"grep -v \"pegaprox-v2p-{key_id}\" \"$F\" > \"$F.{key_id}\" 2>/dev/null; "
         f"if [ $? -le 1 ]; then mv \"$F.{key_id}\" \"$F\" 2>/dev/null; fi; "
         f"rm -f \"$F.{key_id}\" 2>/dev/null; "
-        f"done; ")
+        f"done; ",
+        unlocked=f"echo \"{_ESXI_KEYS_LOCK} stays held by another run, the key files were not touched\"; ")
     _rc_rm, _out_rm, _err_rm = _pve_node_exec(pve_mgr, node,
         f"ssh -i {key_path} {ESXI_SSH_OPTS} "
         f"{esxi_user}@{esxi_host} "
         f"'{_swap}L=; for F in {_files}; do "
         f"grep -q \"pegaprox-v2p-{key_id}\" \"$F\" 2>/dev/null && L=1; "
-        f"done; [ -n \"$L\" ] || echo CLEANED' 2>&1", timeout=30)
+        f"done; [ -n \"$L\" ] || echo CLEANED' 2>&1", timeout=120)
     if _rc_rm != 0 or 'CLEANED' not in (_out_rm or ''):
         logging.warning(
             f"[V2P] could not remove the temporary migration key from {esxi_host} "
