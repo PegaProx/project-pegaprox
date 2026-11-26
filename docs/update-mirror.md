@@ -33,12 +33,46 @@ to single files. `update.sh` takes either.
 - By hand: Actions, "Update mirror", "Run workflow" on `main`.
 
 A sync compares the SHA-256 of every file with the checksum the zone reports and uploads
-only what differs (Bunny checks each upload against the `Checksum` header). It uploads
-everything else first, then `archive/main.tar.gz.sha256`, then `version.json`, so an install
-never reads a version whose archive is not there yet. Then it deletes. If any upload fails,
-after retries, the run stops before `version.json` and before deleting anything, and the
-next run picks up from there. The log ends with a line like
+only what differs (Bunny checks each upload against the `Checksum` header). It uploads the
+single files first, several at a time, then one after the other
+`archive/main.tar.gz.sha256`, `archive/main.tar.gz` and `version.json`, and deletes only
+after that. So an install never reads a version whose files or archive are not there yet,
+and nothing a version still lists is gone. The archive goes up as late as it can because of
+the in-app updater (see "Halfway through a sync" below). If any upload fails, after
+retries, the run stops before `version.json` and before deleting anything, and the next
+run picks up from there. The log ends with a line like
 `synced 64f62631d924: 3 uploaded, 1464 unchanged, 0 deleted, 21093120 bytes sent`.
+
+## Halfway through a sync
+
+A Bunny storage zone has no way to switch many files at once, so while a sync runs, and
+after one that failed until the next run, the zone holds files of two releases. What each
+updater reads, when GitHub does not answer:
+
+- The in-app updater reads `version.json`, then `archive/main.tar.gz`, and compares the
+  `version.json` inside the archive with it. Equal: it installs the archive, which is
+  whole. Not equal and both from the mirror: it installs nothing and says the mirror is
+  between two releases (HTTP 503, try again later). Only when the archive cannot be
+  downloaded or unpacked does it take single files, by the list in `version.json`.
+- `update.sh` reads only the version number from `version.json`, then installs whatever
+  archive it downloads (whole, of one release) and warns when its version differs. It too
+  takes single files only when no archive can be downloaded.
+- No updater reads `archive/main.tar.gz.sha256`, it is there for people checking by hand.
+
+With the upload order above, the archive matches `version.json` all through a sync except
+between the uploads of the archive and of `version.json` (two requests, or until the next
+run if `version.json` is the upload that failed). A run that fails anywhere before the
+archive leaves the old archive with the old `version.json`. Between the `.sha256` and the
+archive the `.sha256` belongs to the new archive, so a check by hand then reports a
+mismatch, never a match for the wrong file.
+
+What stays: the single files are ahead of `version.json` from the start of a sync until it
+ends, and an updater that takes single files then gets a mix with nothing to tell it so.
+Neither updater checks single files against a list of hashes, and adding one is a change to
+both updaters first. A `SHA256SUMS` file in the zone in particular would stop every
+`update.sh` run (see above). That only bites an install that cannot reach GitHub and cannot
+use the archive from the mirror either. An update run once the mirror is through puts it
+right, both updaters always apply the whole release.
 
 ## Jobs, environment, secret
 
@@ -121,7 +155,10 @@ as "differs" and uploads that file again.
 ## Limits
 
 - The pull zone's cache is not purged after a sync (neither did the cron), so a changed
-  file can take until its cache time runs out to show up on updates.pegaprox.com.
+  file can take until its cache time runs out to show up on updates.pegaprox.com. Each
+  file runs out on its own, so for that time the pull zone can serve files of two
+  releases side by side whatever order they were uploaded in, with what "Halfway through
+  a sync" describes.
 - The watchdog checks the `mirror` environment's branch rule, not where the secret lives:
   a repository secret of the same name it cannot see (the workflow token cannot list
   secrets).

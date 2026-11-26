@@ -14,10 +14,15 @@ Unlike the cron's it has a top directory, project-pegaprox-main/ like GitHub's o
 in-app updater only looks one level down for pegaprox_multi_cluster.py and dropped to
 single files with the old flat one. update.sh takes either.
 
-The sync lists the zone, uploads what differs (Bunny checks the Checksum header), then
-archive/main.tar.gz.sha256 and version.json last, so version.json never announces an
-archive that is not up yet, and deletes what main no longer has. A failed upload stops
-the run before version.json and before any delete.
+The sync lists the zone and uploads what differs (Bunny checks the Checksum header): the
+single files first, side by side, then archive/main.tar.gz.sha256, archive/main.tar.gz and
+version.json one after the other, and only then deletes what main no longer has. So
+version.json never announces a file or an archive that is not up yet, and the archive
+changes right before version.json: an archive of another version than version.json sends
+the in-app updater to the single files, which halfway through a sync are half one release
+and half the other. A failed upload stops the run before version.json and before any
+delete. NS Nov 2026 - the archive used to go up among the single files, near the top of
+the list, and a run that failed after it left that state until the next one.
 
     mirror_to_bunny.py --tree-only --ref origin/main --out DIR   build the tree and the archive, no network
     mirror_to_bunny.py --ref origin/main --dry-run               compare with the zone, write nothing
@@ -57,8 +62,9 @@ ARCHIVE_TOP = 'project-pegaprox-main'
 ARCHIVE = 'archive/main.tar.gz'
 ARCHIVE_SUM = 'archive/main.tar.gz.sha256'
 MANIFEST = 'version.json'
-# uploaded after everything else, in this order
-LAST = (ARCHIVE_SUM, MANIFEST)
+# uploaded after everything else, one by one, in this order. The archive as late as it
+# can: until it changes, it agrees with the version.json the zone still serves
+LAST = (ARCHIVE_SUM, ARCHIVE, MANIFEST)
 # a tree without these is a broken checkout, not a release: syncing it would delete the mirror
 REQUIRED = (MANIFEST, 'pegaprox_multi_cluster.py')
 MODES = {'100644': 0o644, '100755': 0o755}
