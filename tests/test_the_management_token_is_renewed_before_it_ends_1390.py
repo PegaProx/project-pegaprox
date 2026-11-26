@@ -1315,6 +1315,80 @@ def test_a_migration_logs_in_at_once_after_the_renewal_got_no_answer(cluster, sa
     assert mgrmod._management_token_kept('c1389').get('expire') == fake.expires[tid]
 
 
+def test_the_cleanup_of_a_token_made_paced_logs_in_paced(cluster, said, minutes, monkeypatch):
+    """The balancer and scheduled replication make their token paced, and its cleanup after
+    the migration deleted it unpaced: three tries 150s apart, each over a password login
+    where the token may not delete tokens, three failed logins within five minutes while
+    the directory gives no answer. A token made paced is deleted paced now, from wherever
+    its cleanup runs, and a token made by hand is still deleted at once."""
+    from pegaprox.core import transfer_net
+    fake = RenewPVE({USER: PASSWORD})
+    m = cluster.make(fake)
+    made = m.create_api_token('xclb-1', paced=True)
+    assert made['success'], made
+    monkeypatch.setattr(transfer_net, 'TOKEN_DELETE_PAUSE', 0)
+    back = _login_without_answer(fake, monkeypatch, 'timeout')
+    fake.seen.clear()
+
+    assert transfer_net._drop_token(m, 'xclb-1', 'a balancer move', m.logger, False) is False
+
+    assert len(fake.logins()) == 1
+    assert f'{USER}!xclb-1' in fake.tokens
+
+    back()
+    minutes.ahead += m.TOKEN_LOGIN_HOLD
+    assert m.delete_api_token('xclb-1')['success']
+    assert f'{USER}!xclb-1' not in fake.tokens and 'xclb-1' not in m._paced_tokens
+
+
+def test_paced_logins_at_the_same_moment_send_one(cluster, said, minutes, monkeypatch):
+    """The balancer, scheduled replication and the renewal look on their own: each passed
+    the check while the login before it was still on its way, and each sent one. They go
+    one at a time now, and the ones after a login that got no answer wait as told."""
+    import threading
+    fake = RenewPVE({USER: PASSWORD})
+    m = cluster.make(fake)
+    sent = []
+
+    def slow_and_lost(mgr, usr, pwd, what):
+        sent.append(what)
+        time.sleep(0.3)
+        raise mgrmod.requests.exceptions.ReadTimeout('Read timed out. (read timeout=10)')
+    monkeypatch.setattr(mgrmod, '_password_login', slow_and_lost)
+    got = []
+    runs = [threading.Thread(target=lambda n=n: got.append(m.create_api_token(f'xclb-{n}', paced=True)))
+            for n in range(3)]
+    for t in runs:
+        t.start()
+    for t in runs:
+        t.join(10)
+
+    assert len(sent) == 1, sent
+    assert len(got) == 3 and not any(g['success'] for g in got)
+    assert sum('at the earliest' in g['error'] for g in got) == 2
+
+
+def test_a_refused_login_does_not_lose_the_end(cluster, said, minutes):
+    """PVE answers a realm whose directory refuses or fails the bind with a 401 as well.
+    Such a no settled the end as unreadable for good: no look read it again, and the token
+    ran into its end. Asked again once the paced login may go out, and said as a login
+    that failed, not as one that is not there."""
+    fake = RenewPVE({USER: PASSWORD})
+    m, tid = _asking_for_a_login(cluster, fake, 'end-unknown')
+    said.listen(m)
+    fake.users[USER] = 'the-directory-says-no'
+    fake.seen.clear()
+    _pass(m)
+    assert len(fake.logins()) == 1
+    fake.users[USER] = PASSWORD
+
+    sent = _logins_over(m, fake, minutes, 2 * 3600)
+
+    assert len(sent) == 1, sent
+    assert mgrmod._management_token_kept('c1389').get('expire') == fake.expires[tid]
+    assert not [s for s in said.records if 'there is no password login' in s.getMessage()]
+
+
 # --- the loop -------------------------------------------------------------------------------
 
 def test_a_look_that_fails_does_not_end_the_loop(monkeypatch):

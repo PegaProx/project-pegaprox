@@ -15462,15 +15462,23 @@ echo "AGENT_INSTALLED_OK"
                     except Exception:
                         self._token_renew_held = quarter
                         raise
-                    if sess is None:
-                        # a no, a ticket that cannot read it (two-factor), or no password:
-                        # the same answer at every look
+                    failed = getattr(self, '_token_login_failed', None)
+                    refused = bool(failed) and failed.get('mark') == mark[1] and failed.get('refused')
+                    if sess is None and not refused:
+                        # a ticket that cannot read it (two-factor), or no password: the same
+                        # answer at every look. MK Nov 2026 - a no can be a directory that is
+                        # down for a while (PVE says 401 for that too): asked again once the
+                        # paced login may go out
                         self._token_end_login_tried = mark
                 if sess is None:
                     if why:
                         self.logger.debug(f"[TOKEN] the end of {tid} unread: {why}")
-                    unread = (f"Proxmox does not let the token read itself, and there is no "
-                              f"password login of {self._token_owner()} to read it with")
+                    if getattr(self, '_token_end_login_tried', None) == mark:
+                        unread = (f"Proxmox does not let the token read itself, and there is no "
+                                  f"password login of {self._token_owner()} to read it with")
+                    else:
+                        unread = (f"Proxmox does not let the token read itself, and the password "
+                                  f"login of {self._token_owner()} to read it with failed: {why}")
                     return None, (f"{stale}; {unread}" if stale else unread)
                 try:
                     r = sess.get(url, timeout=self.api_timeout)
@@ -15938,6 +15946,18 @@ echo "AGENT_INSTALLED_OK"
             return None, (f"Proxmox does not let an API token make, renew or delete the tokens "
                           f"of its user, and this cluster has no password of {owner} stored for "
                           f"{what}: add the password in the cluster settings.")
+        if not paced:
+            return self._account_login_now(what, owner, pwd, paced)
+        # MK Nov 2026 - one paced login at a time per cluster: the balancer, scheduled
+        # replication and the renewal can look at once, and each would pass the check below
+        # while the login before it is still on its way
+        lock = self.__dict__.get('_paced_login_lock') or \
+            self.__dict__.setdefault('_paced_login_lock', threading.RLock())
+        with lock:
+            return self._account_login_now(what, owner, pwd, paced)
+
+    def _account_login_now(self, what, owner, pwd, paced):
+        """_account_login once the account is known to have a password (`pwd`)."""
         stored = self._password_mark()
         held = getattr(self, '_token_login_refused', None)
         if held and held[0] == stored and time.monotonic() - held[1] < self.TOKEN_LOGIN_HOLD:
@@ -16033,6 +16053,9 @@ echo "AGENT_INSTALLED_OK"
             return {'success': False, 'error': why, 'refused': True}
         expire = self.token_expire(expire)
 
+        if paced:
+            self.__dict__.setdefault('_paced_tokens', set()).add(token_name)
+
         def _do_create():
             data = {
                 'privsep': 0,  # No privilege separation - token has same permissions as user
@@ -16082,20 +16105,25 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"[ERROR] Error creating API token: {e}")
             return {'success': False, 'error': str(e)}
 
-    def delete_api_token(self, token_name: str = 'pegaprox-migrate') -> Dict[str, Any]:
-        
+    def delete_api_token(self, token_name: str = 'pegaprox-migrate', paced=None) -> Dict[str, Any]:
+        # MK Nov 2026 (#1390) - a token made paced (the balancer, scheduled replication) is
+        # deleted paced too, from wherever its cleanup runs: the cleanup of a migration tries
+        # TOKEN_DELETE_TRIES times, each over a password login where the token is refused
+        if paced is None:
+            paced = token_name in (self.__dict__.get('_paced_tokens') or ())
         if not self.is_connected:
             if not self.connect_to_proxmox():
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
             owner = self._token_owner()
-            response, why = self._token_request('DELETE', token_name)
+            response, why = self._token_request('DELETE', token_name, paced=paced)
             if response is None:
                 self.logger.warning(f"[WARN] Failed to delete API token: {why}")
                 return {'success': False, 'error': why}
             
             if response.status_code == 200:
+                (self.__dict__.get('_paced_tokens') or set()).discard(token_name)
                 self.logger.info(f"[OK] Deleted API token: {owner}!{token_name}")
                 return {'success': True}
             else:
