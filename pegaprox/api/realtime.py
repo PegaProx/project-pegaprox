@@ -818,10 +818,18 @@ def sse_updates():
                             _client_ip) is None:
                         logging.info(f"[SSE] '{_sl(user)}' may no longer work on other "
                                      f"sites' clusters - their feeds stopped")
-                        federation_stream.unwatch(client_id)
-                        with sse_clients_lock:
-                            if client_id in sse_clients:
-                                sse_clients[client_id]['remote'] = []
+                        # MK Nov 2026 - selection and feeds go under the subscription lock
+                        # here too, and what is left of this site is read under it: an
+                        # update landing between the unwatch and the cleared selection
+                        # left its feeds running for a stream that showed no remote id
+                        with _fed_watch_lock:
+                            with sse_clients_lock:
+                                _ci = sse_clients.get(client_id)
+                                if _ci is not None:
+                                    _ci['remote'] = []
+                                    _here_empty = (_ci.get('clusters') is not None
+                                                   and not _ci.get('clusters'))
+                            federation_stream.unwatch(client_id)
                         if _here_empty:
                             return
         except GeneratorExit:
