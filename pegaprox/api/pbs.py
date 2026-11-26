@@ -4570,7 +4570,14 @@ def restore_backup(cluster_id):
       - mode='overwrite': qmrestore into an existing VMID (force)
       - mode='test':   like the verify pipeline but skip auto-cleanup; user keeps the test VM
 
-    Body: {volid, target_node, target_vmid, mode, target_storage?}
+    Body: {volid, target_node, target_vmid, mode, target_storage?, allow_identity_mismatch?}
+    allow_identity_mismatch (default false): with 'overwrite', overwrite a guest the backup
+    is not of. Proxmox VE 9.3 refuses that in the restore task without it ('backup belongs
+    to another guest'); a node before 9.2.33 has no such check and is not sent the option.
+    Asked for and not sent, the answer says why in identity_warning. Over a guest that is
+    there and without the option, the task is followed for a few seconds: refused for this
+    reason, the answer is 409 with code IDENTITY_MISMATCH, PVE's words and the task (upid),
+    and the restore can be sent again with allow_identity_mismatch.
     """
     # MK: restore is destructive (qmrestore into a VMID) — gate on cluster access, not just vm.backup
     ok, err = check_cluster_access(cluster_id)
@@ -4639,16 +4646,33 @@ def restore_backup(cluster_id):
 
     # qmrestore or pct restore by the backup (pbs:backup/vm/100/... vs pbs:backup/ct/100/...);
     # a batch restore hands each of its backups through here too
-    from pegaprox.core.batch_restore import start_restore
+    from pegaprox.core.batch_restore import start_restore, identity_refusal_in_task, IDENTITY_MISMATCH
     try:
-        got = start_restore(cm, volid, target_node, target_vmid, target_storage, mode == 'overwrite')
+        got = start_restore(cm, volid, target_node, target_vmid, target_storage, mode == 'overwrite',
+                            allow_identity_mismatch=body.get('allow_identity_mismatch') is True)
+        _iwarn = {'identity_warning': got['identity_warning']} if got.get('identity_warning') else {}
         if 'upid' in got:
+            # MK Nov 2026 - over a guest that is there and without the override, PVE 9.3 may
+            # refuse it in the task: that comes back as 409 IDENTITY_MISMATCH with PVE's words,
+            # which the wizard turns into its hint to tick the box
+            refused = ''
+            if (mode == 'overwrite' and body.get('allow_identity_mismatch') is not True
+                    and guest_is_there(cluster_id, target_vmid)):
+                refused = identity_refusal_in_task(cm, target_node, got['upid'])
+            if refused:
+                log_audit(request.session.get('user', 'system'), 'backup.restore_refused',
+                          f"Restore of {volid} → {got['kind']}/{target_vmid} on {target_node} (mode={mode}) "
+                          f"refused by Proxmox VE: the backup belongs to another guest",
+                          cluster=cm.config.name)
+                return jsonify({'error': refused[:500], 'code': IDENTITY_MISMATCH, 'upid': got['upid'],
+                                'mode': mode, 'target_vmid': target_vmid}), 409
             log_audit(request.session.get('user', 'system'), 'backup.restored',
-                      f"Restoring {volid} → {got['kind']}/{target_vmid} on {target_node} (mode={mode})",
+                      f"Restoring {volid} → {got['kind']}/{target_vmid} on {target_node} (mode={mode}"
+                      f"{', allow-identity-mismatch' if got.get('identity_override') else ''})",
                       cluster=cm.config.name)
             return jsonify({'success': True, 'upid': got['upid'], 'mode': mode, 'target_vmid': target_vmid,
-                            **({'quota_warning': _qwarn} if _qwarn else {})})
-        return upstream_failure(got['status'], got['error'], pve_status=got['status'])
+                            **({'quota_warning': _qwarn} if _qwarn else {}), **_iwarn})
+        return upstream_failure(got['status'], got['error'], pve_status=got['status'], **_iwarn)
     except Exception as e:
         return jsonify({'error': safe_error(e)}), 500
 
@@ -4815,14 +4839,18 @@ def restore_backup_batch(cluster_id):
     """Restore several backups in one go
 
     Body: {items: [{volid, target_vmid?}], mode: 'new'|'overwrite', target_node,
-    target_storage?, first_vmid?, run: 'sequential'|'parallel', parallel? (2-4), confirm?}.
+    target_storage?, first_vmid?, run: 'sequential'|'parallel', parallel? (2-4), confirm?,
+    allow_identity_mismatch?}.
     One backup per guest, all from one storage, 1 to 100 of them. 'new' restores each on
     target_node into a VMID of its own (its target_vmid, else the next free one from
     first_vmid on). 'overwrite' restores each over the guest it came from, on the node that
     guest is on (target_node for one that is gone), and only with confirm: true. Every backup
     is checked as POST /backup-restore checks it before anything starts: one refused and
     none starts (403, refused names each). Answers 202 {run}, to follow with GET
-    /api/batch-restores/<run_id>.
+    /api/batch-restores/<run_id>. A row Proxmox VE refused because its backup belongs to
+    another guest fails with code IDENTITY_MISMATCH; allow_identity_mismatch: true (default
+    false) overwrites such guests anyway, as POST /backup-restore does; a row it was not sent
+    for says why in identity_warning.
     """
     from pegaprox.core import batch_restore as batch
     from pegaprox.utils.auth import build_authz_user
@@ -4919,7 +4947,8 @@ def restore_backup_batch(cluster_id):
     usr = request.session.get('user', 'system')
     from pegaprox.utils.audit import get_client_ip
     run = batch.BatchRun(cluster_id, cm.config.name, usr, request.session, get_client_ip(), storage,
-                         body['mode'], target_node, target_storage, how, parallel, rows)
+                         body['mode'], target_node, target_storage, how, parallel, rows,
+                         allow_identity_mismatch=body.get('allow_identity_mismatch') is True)
     try:
         batch.register(run)
     except batch.TooMany as e:

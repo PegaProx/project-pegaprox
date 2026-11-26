@@ -2,6 +2,8 @@
 
 Classic Corporate only gets fixes from now on. A bar under its header says so, with a Switch
 now button and Dismiss; a header button switches as well and stays after the bar is closed.
+The layout choice no longer offers classic Corporate to an account that has left it, so the
+bar says the switch cannot be undone in the interface and points nowhere for a way back.
 The switch saves only ui_layout, so the palette of the top bar toggle (light, dark or the
 system choice) carries over. Neither shows in Corporate Redesigned, Modern or Cloud, nor
 under an admin lock that pins Corporate (the server would refuse the switch there).
@@ -42,11 +44,12 @@ def test_every_new_key_is_in_every_language_once_before_the_ha_chain(lang):
 
 
 @pytest.mark.parametrize('lang', LANGS)
-def test_the_notice_names_the_new_layout_and_where_to_switch_back(lang):
+def test_the_notice_names_the_new_layout_and_promises_no_way_back(lang):
+    # My Profile lists classic Corporate only while the account is still on it
     block = _blocks()[lang]
     text = _value(block, 'corpClassicDeprecated')
     assert 'Corporate Redesigned' in text, lang
-    assert _value(block, 'myProfile') in text, lang
+    assert _value(block, 'myProfile') not in text, lang
 
 
 # --- runtime -------------------------------------------------------------------------------
@@ -64,7 +67,8 @@ def test_runtime_classic_corporate_switches_to_the_redesign(open_page, via):
     app = open_page(layout='corporate', language='en')
     assert _shown(app) == (1, 1)
     text = app.page.locator(BAR).inner_text()
-    assert 'Classic Corporate is deprecated' in text and 'My Profile' in text, text
+    assert 'no longer developed' in text and 'cannot select classic Corporate again' in text, text
+    assert 'My Profile' not in text, text
     if via == 'bar':
         app.page.locator(BAR).get_by_role('button', name=re.compile('Switch now', re.I)).click()
     else:
@@ -116,7 +120,8 @@ def test_runtime_dismiss_closes_the_bar_for_good_and_keeps_the_header_button(ope
 def test_runtime_the_bar_speaks_the_page_language(open_page):
     app = open_page(layout='corporate', language='de')
     text = app.page.locator(BAR).inner_text()
-    assert 'abgekündigt' in text and 'Mein Profil' in text, text
+    assert 'nicht mehr weiterentwickelt' in text and 'nicht wieder auswählen' in text, text
+    assert 'Mein Profil' not in text, text
     assert 'corpClassic' not in app.page.locator('header').inner_text() + text
     assert not app.errors, app.errors
 

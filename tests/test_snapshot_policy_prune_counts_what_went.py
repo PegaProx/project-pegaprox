@@ -51,11 +51,15 @@ class _Guest:
             self.running = upid
         return {'success': True, 'task': upid}
 
-    def _wait_for_task(self, node, upid, timeout=600):
+    def _wait_for_task(self, node, upid, timeout=600, first_poll=2):
         name, status = self.tasks[upid]
         if self.running == upid:
             self.settle()
         return status == 'OK'
+
+    def get_task_status(self, node, upid):
+        # what PVE says of a task once _wait_for_task gave up on it: these all ended
+        return {'status': 'stopped', 'exitstatus': self.tasks[upid][1], 'upid': upid}
 
     def settle(self):
         if self.running:
@@ -85,7 +89,7 @@ def test_a_delete_task_that_failed_is_not_counted(caplog):
     guest = _Guest(count=3)
     first = guest.delete_snapshot('pve1', 100, 'qemu', 'by-hand')['task']   # someone else's, still running
     assert sn._prune(guest, 'pve1', 100, 'qemu', POLICY) == 0
-    assert caplog.text.count('the delete task did not end OK') == 2
+    assert caplog.text.count('VM is locked (snapshot-delete)') == 2
     guest._wait_for_task('pve1', first)
     # the next run takes them
     assert sn._prune(guest, 'pve1', 100, 'qemu', POLICY) == 2
@@ -122,9 +126,21 @@ def test_the_run_record_counts_what_went_and_logs_what_did_not(api, seed, db):
     m.list_snapshots.side_effect = guest.list_snapshots
     m.delete_snapshot.side_effect = guest.delete_snapshot
     m._wait_for_task.side_effect = guest._wait_for_task
+    m.get_task_status.side_effect = guest.get_task_status
     api.set_manager('c1', m)
     sn._execute_policy(PID)
     run = db.conn.execute('SELECT snapshots_pruned, log FROM snapshot_runs WHERE policy_id=?', (PID,)).fetchone()
     assert run['snapshots_pruned'] == 2
-    assert f'not pruned {PREFIX}3: the delete task did not end OK' in run['log']
+    assert f'not pruned {PREFIX}3: rbd error: error setting snapshot context' in run['log']
     assert guest.names() == ['by-hand', f'{PREFIX}0', f'{PREFIX}3']
+
+
+def test_a_delete_whose_task_cannot_be_read_is_not_counted_and_says_so():
+    """A task status that cannot be read after the wait is not a failure PVE named (#1347):
+    the line says the delete was started and its status not read."""
+    guest = _Guest(count=2)
+    guest.get_task_status = lambda node, upid: None
+    guest.delete_snapshot('pve1', 100, 'qemu', 'by-hand')     # someone else's, still running
+    errors = []
+    assert sn._prune(guest, 'pve1', 100, 'qemu', POLICY, errors) == 0
+    assert len(errors) == 1 and 'its delete task was started, its status could not be read (UPID:' in errors[0]

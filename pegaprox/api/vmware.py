@@ -34,6 +34,21 @@ _vmware_migrations = {}
 _migration_lock_v2p = threading.Lock()
 
 
+def migrations_a_restart_would_end():
+    """'name (id)' of every ESXi migration this process still runs, and of the guests a bulk
+    run has yet to start. A restart (update, rollback, the restart button) ends them: their
+    state lives in this process only. MK Nov 2026"""
+    from pegaprox.core import esxi_bulk
+    out = [f"{getattr(t, 'vm_name', '') or getattr(t, 'vm_id', '')} ({mid})"
+           for mid, t in list(_vmware_migrations.items()) if getattr(t, 'status', '') == 'running']
+    for run in esxi_bulk.runs():
+        if run.state == 'running':
+            waiting = [it for it in run.items if it.get('state') == esxi_bulk.WAITING]
+            if waiting:
+                out.append(f"bulk run {run.id}: {len(waiting)} guest(s) not started yet")
+    return out
+
+
 def _esxi_failed(result):
     """The answer for a failed call to an ESXi server.
 
@@ -1444,6 +1459,13 @@ def start_vmware_migration(vmware_id, vm_id):
     allowed, err_response = check_cluster_access(data['target_cluster'])
     if not allowed:
         return err_response
+    # MK Nov 2026 - the guest lands on the target cluster over many steps: none of them
+    # starts where this instance holds no federation lease on it
+    if not dry_run:
+        from pegaprox.api.federation import refuse_unleased
+        refused = refuse_unleased(data['target_cluster'], f"cluster {data['target_cluster']}")
+        if refused:
+            return refused
     # MK Nov 2026 (#1224) - the planning step runs commands on target_node over SSH with the
     # target cluster's key or password: one of its nodes, nothing else
     try:
@@ -1652,6 +1674,10 @@ def _migrate_body_refusal(vmware_id, data, dry_run):
     _bridge = data.get('network_bridge')
     if _bridge not in (None, '') and not _v2p.valid_bridge_name(_bridge):
         return 'Invalid network_bridge: a bridge or VNet name, letters, digits and ._- only', None
+    # MK Nov 2026 - a mode name this code does not know ran the pre-sync flow of Auto, which
+    # falls back to Live Mirror; say so instead of running something else than was asked for
+    if data.get('transfer_mode') not in (None, '') and data.get('transfer_mode') not in _BULK_MODES:
+        return f"transfer_mode is one of {', '.join(_BULK_MODES)}", None
     _full_refusal = _v2p.full_verify_refusal(data.get('transfer_mode', 'auto')) \
         if _opts['verify'] == 'full' else None
     if _full_refusal and not dry_run:
@@ -2266,6 +2292,12 @@ def start_vmware_bulk_migration(vmware_id):
         return err_response
     me = request.session.get('user', '')
     if not dry_run:
+        # the guests land on the target over many steps: none starts without the
+        # federation lease on it
+        from pegaprox.api.federation import refuse_unleased
+        refused = refuse_unleased(target, f'cluster {target}')
+        if refused:
+            return refused
         busy = ebulk.room(vmware_id, me)
         if busy:
             return jsonify({'error': busy}), 409

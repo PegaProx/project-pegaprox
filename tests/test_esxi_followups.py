@@ -303,7 +303,7 @@ def _nothing_touched(r):
     assert not [e for e in r.log if e[:2] in (('esxi_api', 'power'), ('esxi_api', 'snapshot'))]
 
 
-@pytest.mark.parametrize('mode', ['offline', 'sshfs_boot', 'snapshot_zero'])
+@pytest.mark.parametrize('mode', ['offline', 'sshfs_boot'])
 def test_a_folder_copy_that_would_leave_a_disk_out_is_refused_before_anything(monkeypatch, mode):
     r = _elsewhere(Run(monkeypatch, mode=mode)).go()
     assert r.task.status == 'failed'

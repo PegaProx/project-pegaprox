@@ -428,6 +428,9 @@
             // changes to the active. serving: true on a member that serves users as an
             // active instance, leader_reachable: false once the leader stops answering.
             const [ha, setHa] = useState({ role: 'standalone' });
+            // LW Nov 2026 (#1372) - whether the federation runs on this instance, from login and
+            // /auth/check. The dashboard asks for the other sites' clusters only while it does
+            const [federationOn, setFederationOn] = useState(false);
             // LW Oct 2026 (#1189) - the layout an admin pinned for this account, '' when it
             // picks its own. The server default theme is kept for lockedTheme().
             const layoutLock = lockedLayoutFor(uiLock, user);
@@ -462,13 +465,17 @@
                 setHa(prev => JSON.stringify(prev) === JSON.stringify(v) ? prev : v);
             };
 
-            // re-read only the ha part of /auth/check (last sync time, role after a sync)
+            // re-read only the ha part of /auth/check (last sync time, role after a sync), and
+            // whether the federation runs, which an admin may have switched since
             const refreshHa = useCallback(async () => {
                 try {
                     const r = await fetch(`${API_URL}/auth/check?t=${Date.now()}`, { credentials: 'include' });
                     if (!r.ok) return;
                     const d = await r.json();
-                    if (d.authenticated) applyHa(d.ha);
+                    if (d.authenticated) {
+                        applyHa(d.ha);
+                        setFederationOn(d.federation_enabled === true);
+                    }
                 } catch (_) {}
             }, []);
 
@@ -559,6 +566,8 @@
                             // before setUser: an exempt admin's dashboard opens in their own language
                             setLockRole(d.user?.role || '');
                             defaultThemeRef.current = d.default_theme || '';
+                            // before the session id, so the dashboard's first look already knows
+                            setFederationOn(d.federation_enabled === true);
                             setUser(d.user);
                             setIsAuthenticated(true);
                             // NS: Get session_id from response for WebSocket auth
@@ -685,6 +694,7 @@
                         const lock = await lockLoad;
                         setLockRole(data.user?.role || '');
                         defaultThemeRef.current = data.default_theme || '';
+                        setFederationOn(data.federation_enabled === true);
                         setUser(data.user);
                         setIsAuthenticated(true);
                         // NS: Keep session_id in memory for WebSocket auth
@@ -847,7 +857,7 @@
             const haServing = haStandby && ha.serving === true;
 
             return(
-                <AuthContext.Provider value={{ user, sessionId, isAuthenticated, loading, error, login, logout, getAuthHeaders, isAdmin: user?.role === 'admin', passwordExpiry, requires2FASetup, setRequires2FASetup, updatePreferences, updateCurrentUser, ldapEnabled, oidcEnabled, oidcButtonText, loginBackground, reverseProxyEnabled, needsSetup, setNeedsSetup, ha, refreshHa, haReadOnly, haStandby, haConsolesElsewhere, haServing, layoutLock }}>
+                <AuthContext.Provider value={{ user, sessionId, isAuthenticated, loading, error, login, logout, getAuthHeaders, isAdmin: user?.role === 'admin', passwordExpiry, requires2FASetup, setRequires2FASetup, updatePreferences, updateCurrentUser, ldapEnabled, oidcEnabled, oidcButtonText, loginBackground, reverseProxyEnabled, needsSetup, setNeedsSetup, ha, refreshHa, haReadOnly, haStandby, haConsolesElsewhere, haServing, layoutLock, federationOn }}>
                     {children}
                 </AuthContext.Provider>
             );
@@ -923,6 +933,21 @@
         
         function useAuth() {
             return useContext(AuthContext);
+        }
+
+        // LW Nov 2026 - linked mode: inside the view of another site's cluster, the permissions that
+        // site gives the account there (fed of a remote row, from /api/federation/linked) answer the
+        // checks of every component below, its admin flag included. Outside it nothing changes
+        function SiteAuthProvider({ fed, children }) {
+            const auth = useAuth();
+            const value = useMemo(() => {
+                if (!fed || !auth) return auth;
+                const admin = !!fed.admin;
+                const role = admin ? 'admin' : (auth.user?.role === 'admin' ? 'user' : auth.user?.role);
+                return { ...auth, isAdmin: admin,
+                    user: auth.user ? { ...auth.user, role, permissions: fed.perms || [] } : auth.user };
+            }, [auth, fed]);
+            return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
         }
 
         // LW: Feb 2026 - layout hook (reads from user preferences)

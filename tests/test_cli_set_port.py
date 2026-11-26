@@ -65,6 +65,11 @@ def install(tmp_path, monkeypatch):
     monkeypatch.setattr(constants, 'CONFIG_OWNED_BY_US', True)
     monkeypatch.setenv('PEGAPROX_DB_KEY', KEY.decode())
     monkeypatch.setattr(keystore, '_CACHED', None)
+    # MK Nov 2026 - set_port reads the opt-out: one exported in the shell that runs the tests
+    # turned "left to the next start" into a write
+    monkeypatch.delenv('PEGAPROX_DISABLE_AUTO_ENCRYPT', raising=False)
+    monkeypatch.setattr(dbcrypto, '_OPENS_PLAIN', {})
+    monkeypatch.setattr(dbcrypto, '_CONVERSION_FAILED', set())
     yield cfg / 'pegaprox.db'
     keystore.reset_cache()
 
@@ -99,6 +104,24 @@ def test_a_plain_database_with_sqlcipher_is_left_to_the_next_start(install, caps
     assert set_port.main(['8443']) == 4
     assert stored_port(install) is None
     assert 'next start of PegaProx encrypts it' in capsys.readouterr().err
+
+
+@needs_sqlcipher
+def test_with_the_opt_out_the_port_goes_into_the_plain_database(install, monkeypatch, capsys):
+    """MK Nov 2026 - no start encrypts it then, and dbcrypto.connect() opens it plain."""
+    c = sqlite3.connect(install)
+    _settings_table(c)
+    monkeypatch.setenv('PEGAPROX_DISABLE_AUTO_ENCRYPT', '1')
+    monkeypatch.setattr(dbcrypto, '_OPENS_PLAIN', {})
+    # no key is needed for it either
+    monkeypatch.setattr(keystore, 'peek_master_key', lambda: None)
+
+    def no_key():
+        raise AssertionError('a plain database that stays plain needs no key')
+    monkeypatch.setattr(keystore, 'load_master_key', no_key)
+    assert set_port.main(['8443']) == 0, capsys.readouterr().err
+    assert stored_port(install) == 8443
+    assert dbcrypto.file_state(str(install)) == 'plain'
 
 
 def test_no_database_yet_makes_none(install, capsys):

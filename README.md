@@ -22,8 +22,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.5.0-blue" alt="Version"/>
-  <img src="https://img.shields.io/badge/python-3.8+-green" alt="Python"/>
+  <img src="https://img.shields.io/badge/version-1.5.1-blue" alt="Version"/>
+  <img src="https://img.shields.io/badge/python-3.10+-green" alt="Python"/>
   <img src="https://img.shields.io/badge/license-AGPL--3.0--License-orange" alt="License"/>
 </p>
 
@@ -150,7 +150,7 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
 
 ### ESXi Migration
 - 🔀 **ESXi Import Wizard** - Migrate VMs from ESXi hosts to Proxmox
-- ⚡ **Near-Zero Downtime** - Transfer running VMs with minimal interruption (max. 1 VM recommended)
+- ⚡ **Live Migration Modes** - Copy running VMs and switch over at the end: Snapshot-Iterative catches up with the guest's writes through ESXi change tracking, so the downtime follows what the guest writes; Live Clone compares every block at the switchover, so its downtime grows with the disk size
 - 🔌 **Offline Migration** - Shut down and transfer for maximum reliability
 - 🔑 **SSH Required** - ESXi host must have SSH enabled
 
@@ -196,6 +196,7 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
 - 📦 **Backup SLA Tracking** - SLA dashboard per cluster + datastore: last-backup age vs configured RPO, integrated with the Alert pipeline.
 - 🔁 **ZFS / Cross-Cluster Replication** - Native PVE replication monitor + cross-cluster replication for clusters without shared storage.
 - 🪽 **PegaProx High Availability** - Pair up to 4 PegaProx instances: standbys keep a copy of the configuration, show a live view and pass changes on to the leader; failover is a confirmed, manual promote, or (beta, switched on per group) automatic by majority vote, with an optional witness as the third vote
+- 🛰️ **Federation (experimental, off by default)** - Pair up to 4 PegaProx instances at different sites: accounts are mirrored between the sites, and every site's clusters show in your own sidebar and open there, consoles, uploads, live updates and migrations between sites included, from any site you sign in at, with the site that leads a cluster deciding what you may do. A disaster recovery of its own, also off by default, lets the clusters of a lost site be taken over; with three or more sites a majority fences the writes PegaProx sends to an enrolled Proxmox VE cluster against two writers (changes made in Proxmox VE directly are not fenced). With two sites an admin takes a cluster over by hand; if the other site was only cut off, both write to it until they reach each other again ([docs](docs/federation.md))
 - 🧩 **Automated PVE Installations** - Serve answer files for the Proxmox VE auto-installer from profiles (guided setup or editor) and follow every installation run
 - 🛠️ **V2P / ESXi Migration** - Pyvmomi + SSHFS-based, with VirtIO driver pre-staging via MSI bulk-install (Windows guests).
 
@@ -374,7 +375,7 @@ A fresh install has no default credentials:
 - Session tokens expire after inactivity; optional strict-IP binding.
 - Per-IP rate limiting on login + every authenticated endpoint.
 - Input sanitization, CSRF Origin matching, RBAC enforced server-side on every route.
-- Auto-encryption on first boot - operators can opt out with `PEGAPROX_DISABLE_AUTO_ENCRYPT=1` if they want to take their own pre-encryption backup first.
+- Auto-encryption on first boot - operators can opt out with `PEGAPROX_DISABLE_AUTO_ENCRYPT=1` if they want to take their own pre-encryption backup first; the database then stays plain SQLite and opens without the key. A conversion that fails (a full disk, it needs about twice the database size free) leaves the database plain and running, and the next start tries again.
 
 ## 📖 Documentation
 

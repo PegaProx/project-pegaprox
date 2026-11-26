@@ -1334,7 +1334,11 @@
         // NS: Added bulk select for mass operations (migration, etc.)
         // This component does a lot... might need to split it up eventually
         // NS: filtering + sorting uses useMemo below (lines 1320+)
-        function ResourceTable({ resources, clusterId, clusters, sourceCluster, onVmAction, onOpenConsole, onOpenSpice, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, datastores, onOpenTags, highlightedVm, addToast, pendingVmAction, onPendingActionConsumed, onVmNavigate, backupStatus, authFetch, onBulkDone, favorites, onToggleFavorite, openGuest, onOpenGuestDone }) {
+        // the IP column's own reads (#127): at most this many at once, each for so long
+        const GUEST_INFO_AT_ONCE = 2;
+        const GUEST_INFO_TIMEOUT_MS = 15000;
+
+        function ResourceTable({ resources, clusterId, clusters, migrateTargets, sourceCluster, onVmAction, onOpenConsole, onOpenSpice, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, datastores, onOpenTags, highlightedVm, addToast, pendingVmAction, onPendingActionConsumed, onVmNavigate, backupStatus, authFetch, onBulkDone, favorites, onToggleFavorite, openGuest, onOpenGuestDone }) {
             const { t } = useTranslation();
             const { getAuthHeaders, user, haReadOnly, haConsolesElsewhere } = useAuth();
             // #625 v2 - a standby shows the guests live but acts on none of them: no power,
@@ -1662,22 +1666,29 @@
             }, [filteredResources, effectivePage, itemsPerPage]);
 
             // fetch IPs for visible running qemu VMs - #127
-            useEffect(() => {
-                if (!paginatedResources?.length) return;
-                const now = Date.now();
-                const toFetch = paginatedResources.filter(r =>
-                    r.type === 'qemu' && r.status === 'running' && !ipCache.current[r.vmid]
-                    && !(ipRetryAt.current[r.vmid] > now)
-                );
-                if (!toFetch.length) return;
-                toFetch.forEach(vm => {
-                    ipCache.current[vm.vmid] = 'loading';
+            // LW Nov 2026 - every request here holds one of the six connections a browser opens to
+            // this server (one of them is the live stream's). They all went at once: a page of a
+            // cluster far away on a lossy line held every connection for half a minute and the
+            // rest of the panel waited behind its guests. Now two at a time, 15 s each at most,
+            // and only for a guest the server's own IP sweep has no address for (r.ip) and does
+            // not know to run without an agent
+            const ipFetch = useRef({ busy: 0, queue: [], ctrls: new Set(), visible: new Set() });
+            const pumpIps = useCallback(() => {
+                const q = ipFetch.current;
+                while (q.busy < GUEST_INFO_AT_ONCE && q.queue.length) {
+                    const vm = q.queue.shift();
+                    // scrolled or filtered away while it waited
+                    if (!q.visible.has(vm.vmid)) { ipCache.current[vm.vmid] = null; continue; }
+                    q.busy++;
+                    const ctrl = new AbortController();
+                    q.ctrls.add(ctrl);
+                    const timer = setTimeout(() => ctrl.abort(), GUEST_INFO_TIMEOUT_MS);
                     const cid = vm._clusterId || clusterId;
                     // no address yet (agent still starting or not installed): again in a minute.
-                    // A refused or failed call, a 429 among them, waits five
+                    // A refused, failed or timed out call, a 429 among them, waits five
                     const retryIn = (ms) => { ipCache.current[vm.vmid] = null; ipRetryAt.current[vm.vmid] = Date.now() + ms; };
                     fetch(`/api/clusters/${cid}/vms/${vm.node}/qemu/${vm.vmid}/guest-info`, {
-                        credentials: 'include', headers: getAuthHeaders()
+                        credentials: 'include', headers: getAuthHeaders(), signal: ctrl.signal
                     })
                     .then(r => r.ok ? r.json() : Promise.reject(r.status))
                     .then(data => {
@@ -1686,9 +1697,30 @@
                         delete ipRetryAt.current[vm.vmid];
                         setIpTick(t => t + 1);
                     })
-                    .catch(() => retryIn(300000));
-                });
+                    .catch(() => { if (ctrl.left) ipCache.current[vm.vmid] = null; else retryIn(300000); })
+                    .finally(() => { clearTimeout(timer); q.ctrls.delete(ctrl); q.busy--; pumpIps(); });
+                }
+            }, [clusterId]);
+            useEffect(() => {
+                const q = ipFetch.current;
+                q.visible = new Set((paginatedResources || []).map(r => r.vmid));
+                if (!paginatedResources?.length) return;
+                const now = Date.now();
+                const toFetch = paginatedResources.filter(r =>
+                    r.type === 'qemu' && r.status === 'running' && !r.ip && r.agent_running !== false
+                    && !ipCache.current[r.vmid] && !(ipRetryAt.current[r.vmid] > now)
+                );
+                if (!toFetch.length) return;
+                toFetch.forEach(vm => { ipCache.current[vm.vmid] = 'loading'; q.queue.push(vm); });
+                pumpIps();
             }, [paginatedResources]);
+            // another cluster (or the list gone): what waits is dropped, what runs is stopped
+            useEffect(() => () => {
+                const q = ipFetch.current;
+                q.queue.forEach(vm => { ipCache.current[vm.vmid] = null; });
+                q.queue = [];
+                q.ctrls.forEach(c => { c.left = true; c.abort(); });
+            }, [clusterId]);
 
             const handleSort = (col) => {
                 let nextBy = col, nextDir = 'asc';
@@ -1853,14 +1885,14 @@
                 { key: 'vmid', label: 'ID' },
                 { key: 'name', label: t('name') },
                 { key: 'type', label: t('type') },
-                { key: 'node', label: 'Node' },
+                { key: 'node', label: t('node') },
                 { key: 'ip', label: 'IP' },
                 { key: 'cpu_percent', label: 'CPU' },
                 { key: 'mem', label: 'RAM' },
                 { key: 'disk', label: t('disk') },
                 ...(showAgent ? [{ key: 'agent', label: t('listColAgent') }] : []),
                 ...(showIo ? [{ key: 'diskio', label: t('listColDiskIo') }] : []),
-                { key: 'status', label: 'Status' },
+                { key: 'status', label: t('status') },
                 { key: 'actions', label: t('actions') },
             ];
 
@@ -2315,7 +2347,7 @@
                                                                 <Icons.ArrowRight className="w-4 h-4" />
                                                                 {t('migrate')}
                                                             </button>
-                                                            {clusters && clusters.length > 1 && (
+                                                            {(migrateTargets || clusters || []).length > 1 && (
                                                                 <button
                                                                     onClick={() => { setShowCrossClusterMigrate(resource); setOpenDropdown(null); }}
                                                                     className="w-full px-3 py-2 text-left text-sm text-gray-300 hover:bg-proxmox-hover flex items-center gap-2"
@@ -2512,7 +2544,7 @@
                                                     <span className="text-sm text-gray-300 truncate block" style={{maxWidth:'min(140px, 12vw)'}} title={resource.node}>{resource.node}</span>
                                                 </td>
                                                 <td className="px-4 py-3">
-                                                    <span className="text-xs font-mono text-gray-400">{ipCache.current[resource.vmid] && ipCache.current[resource.vmid] !== 'loading' ? ipCache.current[resource.vmid] : '-'}</span>
+                                                    <span className="text-xs font-mono text-gray-400">{getIp(resource) || '-'}</span>
                                                 </td>
                                                 <td className="px-4 py-3">
                                                     <div className="flex items-center gap-2">
@@ -2706,7 +2738,7 @@
                                                         >
                                                             <Icons.ArrowRight />
                                                         </button>
-                                                        {clusters && clusters.length > 1 && (
+                                                        {(migrateTargets || clusters || []).length > 1 && (
                                                             <button
                                                                 onClick={() => setShowCrossClusterMigrate(resource)}
                                                                 className="p-1.5 rounded-lg bg-proxmox-dark hover:bg-emerald-500/20 text-gray-400 hover:text-emerald-400 transition-all"
@@ -2902,7 +2934,7 @@
                                         onForceStop={onForceStop}
                                         onDelete={() => setShowDeleteConfirm(selectedDetailVm)}
                                         onCrossClusterMigrate={(vm) => setShowCrossClusterMigrate(vm)}
-                                        showCrossCluster={clusters && clusters.length > 1}
+                                        showCrossCluster={(migrateTargets || clusters || []).length > 1}
                                         actionLoading={actionLoading}
                                         onShowMetrics={(vm) => setShowMetricsModal(vm)}
                                         addToast={addToast}
@@ -3065,11 +3097,11 @@
                     )}
 
                     {/* Cross-Cluster Migrate Modal */}
-                    {showCrossClusterMigrate && clusters && clusters.length > 1 && (
+                    {showCrossClusterMigrate && (migrateTargets || clusters || []).length > 1 && (
                         <CrossClusterMigrateModal
                             vm={showCrossClusterMigrate}
                             sourceCluster={sourceCluster}
-                            clusters={clusters}
+                            clusters={migrateTargets || clusters}
                             onMigrate={onCrossClusterMigrate}
                             onClose={() => setShowCrossClusterMigrate(null)}
                         />
@@ -3103,7 +3135,7 @@
             return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
         }
 
-        function AllGuestsView({ clusters, authFetch, addToast, onOpenGuest, onBulkMigrate }) {
+        function AllGuestsView({ clusters, remoteGuests, authFetch, addToast, onOpenGuest, onBulkMigrate }) {
             const { t, language } = useTranslation();
             const { haReadOnly } = useAuth();
             const { isCorporate } = useLayout();
@@ -3115,6 +3147,15 @@
                 return { q: '', cluster: '', status: '', type: '', tag: '', by: 'name', dir: 'asc',
                     size: ALL_GUESTS_SIZES.includes(size) ? size : 100, page: 0 };
             });
+            // LW Nov 2026 - linked mode: the guests of the other sites' clusters, as the overview reads
+            // them through their sites; the search and the status filter of the page apply
+            const remoteRows = useMemo(() => {
+                const q = (view.q || '').trim().toLowerCase();
+                return (remoteGuests || []).flatMap(({ cluster, guests }) => guests.map(g => ({ g, cluster })))
+                    .filter(({ g }) => (!q || String(g.name || '').toLowerCase().includes(q) || String(g.vmid) === q)
+                        && (!view.status || (view.status === 'other' ? !['running', 'stopped'].includes(g.status) : g.status === view.status)))
+                    .sort((x, y) => String(x.g.name || '').localeCompare(String(y.g.name || '')));
+            }, [remoteGuests, view.q, view.status]);
             const [data, setData] = useState(null);
             const [loading, setLoading] = useState(false);
             // the text filter takes the expressions of the global search; one the server cannot read
@@ -3545,6 +3586,50 @@
                         )}
                         <div className="p-3 border-t border-proxmox-border">{pager}</div>
                     </div>
+                    {(() => {
+                        const rows = remoteRows;
+                        if (!rows.length) return null;
+                        return (
+                            <div data-all-guests-remote className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                <div className="px-4 py-3 border-b border-proxmox-border text-sm font-medium text-gray-300">
+                                    {t('linkedGuestsOtherSites')} <span className="text-gray-500 font-normal">({num(rows.length)})</span>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-sm">
+                                        <thead>
+                                            <tr className="text-left text-xs text-gray-500 border-b border-proxmox-border">
+                                                <th className="px-3 py-2 font-medium">{t('name')}</th>
+                                                <th className="px-3 py-2 font-medium">VMID</th>
+                                                <th className="px-3 py-2 font-medium">{t('status')}</th>
+                                                <th className="px-3 py-2 font-medium">{t('node')}</th>
+                                                <th className="px-3 py-2 font-medium">{t('cluster')}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {rows.slice(0, 500).map(({ g, cluster }) => (
+                                                <tr key={`${cluster.id}:${g.vmid}`} onClick={() => onOpenGuest && onOpenGuest(cluster, g)}
+                                                    className="border-b border-proxmox-border/50 hover:bg-proxmox-hover cursor-pointer">
+                                                    <td className="px-3 py-2 text-white truncate max-w-xs">{g.name || g.vmid}</td>
+                                                    <td className="px-3 py-2 text-gray-400 font-mono text-xs">{g.vmid}</td>
+                                                    <td className="px-3 py-2 text-xs">
+                                                        <span className={g.status === 'running' ? 'text-green-400' : 'text-gray-400'}>{g.status || '-'}</span>
+                                                    </td>
+                                                    <td className="px-3 py-2 text-xs text-gray-400">{g.node || '-'}</td>
+                                                    <td className="px-3 py-2 text-xs text-gray-400">
+                                                        {cluster.display_name || cluster.name}{' '}
+                                                        <span className="text-[10px] px-1 py-0.5 rounded bg-blue-500/10 text-blue-400">{cluster.fed.site}</span>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                    {rows.length > 500 && (
+                                        <p className="text-xs text-gray-500 px-3 py-2 border-t border-proxmox-border/50" data-remote-guests-more>{fillText(t('srPickMore'), { n: num(rows.length - 500) })}</p>
+                                    )}
+                                </div>
+                            </div>
+                        );
+                    })()}
                     {modals}
                 </div>
             );

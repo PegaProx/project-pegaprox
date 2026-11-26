@@ -47,6 +47,8 @@ def register_blueprints(app):
     from pegaprox.api.multi_sdn import bp as multi_sdn_bp, start_scanner as start_multi_sdn_scanner
     from pegaprox.api.auto_install import bp as auto_install_bp
     from pegaprox.api.ha import bp as ha_bp
+    from pegaprox.api.federation import bp as federation_bp
+    from pegaprox.api.federation_relay import bp as federation_relay_bp
     from pegaprox.api.banners import bp as banners_bp
     from pegaprox.api.whatif import bp as whatif_bp
     from pegaprox.api.timeline import bp as timeline_bp
@@ -93,6 +95,8 @@ def register_blueprints(app):
     app.register_blueprint(multi_sdn_bp)
     app.register_blueprint(auto_install_bp)
     app.register_blueprint(ha_bp)
+    app.register_blueprint(federation_bp)
+    app.register_blueprint(federation_relay_bp)
     app.register_blueprint(banners_bp)
     app.register_blueprint(whatif_bp)
     app.register_blueprint(timeline_bp)
@@ -133,3 +137,15 @@ def register_blueprints(app):
         start_snap_scheduler()
     except Exception as e:
         logging.warning(f"snapshot scheduler start failed: {e}")
+
+    # MK Nov 2026 - the federation's sync and lease workers, only when the federation is
+    # switched on (off by default). A switch later on starts them without a restart
+    try:
+        from pegaprox.core import federation as _fed_core
+        # an inherited identity whose drop failed earlier goes first; until it is gone the
+        # federation stays off here
+        _fed_core.retry_forget()
+        if _fed_core.enabled():
+            _fed_core.start_workers()
+    except Exception as e:
+        logging.warning(f"federation worker start failed: {e}")

@@ -35,6 +35,7 @@ from pegaprox.api.helpers import (
     rolling_moved_templates, rolling_rules_give_way, rolling_rules_back_on, rolling_in_maintenance,
     rolling_moved_guests, rolling_wind_down, rolling_guests_left_moved, UI_LANGUAGE_LOCKS,
 )
+from pegaprox.api.federation import refuse_mirror_caller
 from pegaprox.app import get_allowed_origins, add_allowed_origin
 from pegaprox.globals import _cors_origins_env, _auto_allowed_origins
 
@@ -441,6 +442,36 @@ def _refuse_confined_updater():
     return None
 
 
+def _refuse_restart_while_migrating(data, what):
+    """409 while ESXi migrations run and the caller did not say while_migrating: the restart
+    after `what` would end them, the source VM possibly stopped and the target half copied.
+    MK Nov 2026"""
+    if (data or {}).get('while_migrating') is True:
+        return None
+    try:
+        from pegaprox.api.vmware import migrations_a_restart_would_end
+        busy = migrations_a_restart_would_end()
+    except Exception as e:
+        logging.warning(f"[Settings] could not list running ESXi migrations: {e}")
+        return None
+    if not busy:
+        return None
+    return jsonify({'error': f"{len(busy)} ESXi migration(s) are running: {', '.join(busy[:5])}. "
+                             f"The restart after the {what} would end them. Wait until they are done, "
+                             f"or send while_migrating to {what} anyway.",
+                    'migrations_running': busy}), 409
+
+
+class _MirrorBetweenReleases(RuntimeError):
+    """The version.json and the archive of updates.pegaprox.com are of two releases.
+
+    MK Nov 2026 - the zone cannot switch all its files at once: during a sync, after a
+    failed one, or while its pull zone still caches some files and not others, it serves
+    one release's archive next to the other's version.json. The single files from it are
+    then half one release and half the other, and nothing on them says which, so the
+    updater stops instead of falling back to them."""
+
+
 @bp.route('/api/pegaprox/check-update', methods=['GET'])
 @require_auth(perms=['update.manage'])
 def check_pegaprox_update():
@@ -587,6 +618,9 @@ def perform_pegaprox_update():
         return _uerr
     try:
         data = request.json or {}
+        _busy = _refuse_restart_while_migrating(data, 'update')
+        if _busy:
+            return _busy
         force = data.get('force', False)
         allow_managed = bool(data.get('allow_managed', False))  # power-user escape hatch
 
@@ -644,6 +678,7 @@ def perform_pegaprox_update():
             return jsonify({'error': 'Invalid version data from server'}), 500
 
         new_version = remote_version.get('version', '0.0')
+        version_from_mirror = version_url == MIRROR_VERSION_URL
 
         # Version check
         # MK 2026-06-07: never SKIP on version-equality. A prior interrupted/partial update
@@ -711,11 +746,13 @@ def perform_pegaprox_update():
             import tempfile
 
             resp = None
+            archive_url = None
             for aurl in archive_urls:
                 logging.info(f"Trying archive: {aurl}")
                 try:
                     resp = requests.get(aurl, timeout=120, stream=True)
                     if resp.status_code == 200:
+                        archive_url = aurl
                         break
                 except requests.RequestException:
                     continue
@@ -756,6 +793,12 @@ def perform_pegaprox_update():
                 except (OSError, ValueError) as _ve:
                     raise RuntimeError(f"archive version.json unreadable ({_ve}) — treating as stale")
                 if new_version and _arch_ver and _arch_ver != new_version:
+                    # a stale GitHub archive falls back to GitHub's raw files. With version.json
+                    # and the archive both from the mirror, its single files are of two releases
+                    if version_from_mirror and archive_url == MIRROR_ARCHIVE_URL:
+                        raise _MirrorBetweenReleases(
+                            f"{MIRROR_RAW_URL} is between two releases: its version.json says "
+                            f"{str(new_version)[:40]!r}, its archive holds {str(_arch_ver)[:40]!r}")
                     raise RuntimeError(
                         f"stale archive: tarball is {_arch_ver}, expected {new_version}")
 
@@ -793,6 +836,21 @@ def perform_pegaprox_update():
             update_method = 'archive'
             logging.info(f"Archive update: {len(downloaded_files)} files installed, {len(failed_files)} failed")
 
+        except _MirrorBetweenReleases as between:
+            # nothing of the install was touched yet, only the backup above was written.
+            # MK Nov 2026 - drop it: a retry every few minutes during a sync left ~60 MB and
+            # a rollback entry per try, of an install that never changed. Every other
+            # failure below may have written files and keeps its backup
+            try:
+                shutil.rmtree(backup_path)
+            except OSError as rm_err:
+                logging.warning(f"[update] could not remove the unused backup {backup_path}: {rm_err}")
+            logging.warning(f"[update] {between}, nothing installed")
+            return jsonify({
+                'error': f'{between}. Nothing was installed, try again in a few minutes.',
+                'hint': 'GitHub did not answer, and the update mirror is in the middle of a '
+                        'sync or its cache still holds files of the release before',
+            }), 503
         except Exception as archive_err:
             logging.warning(f"Archive download failed ({archive_err}), trying individual files...")
 
@@ -1217,6 +1275,10 @@ def rollback_pegaprox_update():
     try:
         data = request.json or {}
         backup_name = data.get('backup')
+        # without a backup named this only lists them
+        _busy = _refuse_restart_while_migrating(data, 'rollback') if backup_name else None
+        if _busy:
+            return _busy
         # MK Mar 2026 - sanitize to prevent path traversal (../../../etc/passwd)
         if backup_name:
             backup_name = sanitize_identifier(backup_name, max_length=128)
@@ -1679,6 +1741,115 @@ def _ldap_endpoint(server, port):
     return host.lower().rstrip('.'), url_port or _port_of(port, 389)
 
 
+def _ldap_group_mappings(value):
+    """ldap_group_mappings as the save stores them (group_dn and role); None for a value
+    that is no list, which the save leaves alone."""
+    if not isinstance(value, list):
+        return None
+    return [{'group_dn': str(m.get('group_dn', '')).strip(), 'role': str(m.get('role', 'viewer')).strip()}
+            for m in value if isinstance(m, dict) and m.get('group_dn')]
+
+
+def _oidc_group_mappings(value):
+    if not isinstance(value, list):
+        return None
+    return [{'group_id': str(m.get('group_id') or m.get('group_dn', '')).strip(),
+             'role': str(m.get('role', 'viewer')).strip()}
+            for m in value if isinstance(m, dict) and (m.get('group_id') or m.get('group_dn'))]
+
+
+# MK Nov 2026 - what decides the role, the tenant or the admin status an LDAP or OIDC
+# sign-in gives an account here (utils/ldap.py, utils/oidc.py), each as the save below
+# stores it. While the federation runs, a caller mirrored from another site changes none of
+# it: mapping a directory group it is in to admin would make it a local admin. The settings
+# page sends the whole form, so only a value that differs from the stored one counts
+EXTERNAL_ROLE_SETTINGS = {
+    'ldap_group_mappings': _ldap_group_mappings,
+    'ldap_admin_group': lambda v: str(v or '').strip(),
+    'ldap_user_group': lambda v: str(v or '').strip(),
+    'ldap_viewer_group': lambda v: str(v or '').strip(),
+    'ldap_default_role': lambda v: str(v).strip() if v else 'viewer',
+    'ldap_auto_create_users': bool,
+    # which groups a user is found in, and so which of the above match
+    'ldap_group_base_dn': lambda v: str(v or '').strip(),
+    'ldap_group_filter': lambda v: str(v or '(&(objectClass=group)(member={user_dn}))').strip(),
+    # what the provider is asked for: without the group scope (Graph group read with Entra)
+    # no group arrives, and a new account gets the default role in the default tenant
+    'oidc_scopes': lambda v: str(v).strip(),
+    'oidc_group_mappings': _oidc_group_mappings,
+    'oidc_admin_group_id': lambda v: str(v).strip(),
+    'oidc_user_group_id': lambda v: str(v).strip(),
+    'oidc_viewer_group_id': lambda v: str(v).strip(),
+    'oidc_default_role': lambda v: str(v).strip() if v else ROLE_VIEWER,
+    'oidc_auto_create_users': bool,
+}
+
+
+def _oidc_claim(v):
+    from pegaprox.utils.oidc import OIDC_USERNAME_CLAIMS
+    v = str(v or '').strip()
+    return v if v in OIDC_USERNAME_CLAIMS else ''
+
+
+# and who signs in at all: a mirrored admin that points LDAP or OIDC at a directory or
+# provider it runs (or turns off what checks it) gets the groups above for any account it
+# makes up there. Compared after the save below has taken the server field apart and
+# cleaned the CA, as it stores them
+EXTERNAL_SOURCE_SETTINGS = {
+    'ldap_enabled': bool,
+    'ldap_server': lambda v: str(v or '').strip(),
+    'ldap_port': lambda v: max(1, min(65535, int(v or 389))),
+    'ldap_use_ssl': bool,
+    'ldap_use_starttls': bool,
+    'ldap_bind_dn': lambda v: str(v or '').strip(),
+    'ldap_base_dn': lambda v: str(v or '').strip(),
+    'ldap_user_filter': lambda v: str(v or '(&(objectClass=person)(sAMAccountName={username}))').strip(),
+    'ldap_username_attribute': lambda v: str(v or 'sAMAccountName').strip(),
+    'ldap_verify_tls': bool,
+    'ldap_ca_cert': lambda v: str(v or ''),
+    'oidc_enabled': bool,
+    'oidc_provider': lambda v: str(v) if v in ('entra', 'okta', 'generic') else 'entra',
+    'oidc_cloud_environment': lambda v: str(v) if v in ('commercial', 'gcc', 'gcc_high', 'dod') else 'commercial',
+    'oidc_client_id': lambda v: str(v).strip(),
+    'oidc_tenant_id': lambda v: str(v).strip(),
+    'oidc_authority': lambda v: str(v).strip(),
+    'oidc_audiences': lambda v: str(v or '').strip(),
+    'oidc_username_claim': _oidc_claim,
+    'oidc_skip_jwt_verification': bool,
+    'oidc_skip_ssl_verify': bool,
+    'oidc_allow_private_ip': bool,
+}
+# stored encrypted and sent back as the mask: any other value is a new one
+EXTERNAL_SOURCE_SECRETS = ('ldap_bind_password', 'oidc_client_secret')
+
+
+def _external_role_changes(data, settings):
+    """The keys of EXTERNAL_ROLE_SETTINGS, EXTERNAL_SOURCE_SETTINGS and
+    EXTERNAL_SOURCE_SECRETS this save would change."""
+    after = {}
+    for key, stored_as in (*EXTERNAL_ROLE_SETTINGS.items(), *EXTERNAL_SOURCE_SETTINGS.items()):
+        if key in data:
+            try:
+                value = stored_as(data[key])
+            except (TypeError, ValueError):
+                value = data[key]       # the save fails on it too; counted as a change
+            if value is not None:
+                after[key] = value
+    # no scopes is stored as the provider's default, as the save does
+    if after.get('oidc_scopes') == '':
+        after['oidc_scopes'] = ('openid profile email User.Read GroupMember.Read.All'
+                                if after.get('oidc_provider', settings.get('oidc_provider')) == 'entra'
+                                else 'openid profile email')
+    changed = [k for k in EXTERNAL_SOURCE_SECRETS
+               if k in data and str(data[k] or '') not in ('', '********')]
+    # mappings that are saved clear the built-in groups, as the save does
+    if after.get('ldap_group_mappings'):
+        after.update(ldap_admin_group='', ldap_user_group='', ldap_viewer_group='')
+    if after.get('oidc_group_mappings'):
+        after.update(oidc_admin_group_id='', oidc_user_group_id='', oidc_viewer_group_id='')
+    return sorted(changed + [k for k, v in after.items() if v != settings.get(k)])
+
+
 @bp.route('/api/settings/server', methods=['POST'])
 @require_auth(perms=['admin.settings'])
 def update_server_settings():
@@ -1753,6 +1924,13 @@ def update_server_settings():
                 if _ca_error:
                     return jsonify({'error': _ca_error, 'code': 'LDAP_CA_CERT_INVALID'}), 400
                 data['ldap_ca_cert'] = _ca
+            # refused as a whole, before anything of it is saved
+            if _external_role_changes(data, settings):
+                denied = refuse_mirror_caller('Your account is mirrored from another site. Who '
+                                              'signs in here through LDAP or OIDC, and with which '
+                                              "role, is set by this instance's own accounts")
+                if denied:
+                    return denied
             
             # server config
             if 'domain' in data:
@@ -2033,16 +2211,8 @@ def update_server_settings():
             # NS: Feb 2026 - Simplified: just group_dn + role (including custom roles)
             # tenant/tenant_role kept for backwards compat but no longer in UI
             if 'ldap_group_mappings' in data:
-                mappings = data['ldap_group_mappings']
-                if isinstance(mappings, list):
-                    # Validate each mapping
-                    clean_mappings = []
-                    for m in mappings:
-                        if isinstance(m, dict) and m.get('group_dn'):
-                            clean_mappings.append({
-                                'group_dn': str(m.get('group_dn', '')).strip(),
-                                'role': str(m.get('role', 'viewer')).strip(),
-                            })
+                clean_mappings = _ldap_group_mappings(data['ldap_group_mappings'])
+                if clean_mappings is not None:
                     settings['ldap_group_mappings'] = clean_mappings
                     # NS: Feb 2026 - Clear old built-in group fields when unified mappings are saved
                     # Prevents priority conflicts (built-in checked before custom in auth)
@@ -2116,15 +2286,8 @@ def update_server_settings():
             # LW: OIDC custom group mappings
             # NS: Feb 2026 - Simplified: just group_id + role (including custom roles)
             if 'oidc_group_mappings' in data:
-                mappings = data['oidc_group_mappings']
-                if isinstance(mappings, list):
-                    clean = []
-                    for m in mappings:
-                        if isinstance(m, dict) and (m.get('group_id') or m.get('group_dn')):
-                            clean.append({
-                                'group_id': str(m.get('group_id') or m.get('group_dn', '')).strip(),
-                                'role': str(m.get('role', 'viewer')).strip(),
-                            })
+                clean = _oidc_group_mappings(data['oidc_group_mappings'])
+                if clean is not None:
                     settings['oidc_group_mappings'] = clean
                     # NS: Feb 2026 - Clear old built-in group fields when unified mappings are saved
                     if clean:
@@ -2364,6 +2527,9 @@ def delete_login_background():
 @require_auth(perms=['admin.settings'])
 def restart_server():
     """Restart the PegaProx server (admin only)"""
+    _busy = _refuse_restart_while_migrating(request.get_json(silent=True), 'restart')
+    if _busy:
+        return _busy
     try:
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'system')
@@ -3209,6 +3375,11 @@ def restore_config():
     - restore_users: Restore user accounts (default: false for safety)
     - dry_run: Validate only, don't apply (default: false)
     """
+    # a backup carries the server settings and, with restore_users, accounts of any role:
+    # not a mirrored admin's to bring in (none while the federation is off)
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     try:
         logging.info("[Restore] Starting config restore...")
         # NS: these help when debugging upload issues
@@ -4467,7 +4638,7 @@ def add_cors_origin():
 def index():
     """Serve the web interface
 
-    NS May 2026 — when air-gap mode is on, inject the localStorage flag
+    NS May 2026 - when air-gap mode is on, inject the localStorage flag
     *before* the boot loader runs. Otherwise the very first page load on
     a fresh browser (no localStorage yet) hits cdn.jsdelivr while waiting
     for /auth/check to come back. We rewrite a tiny prelude into <head>
@@ -5845,6 +6016,25 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                  current_node=nodes_to_update[at] if at < total else '', current_step=resume_at['phase'])
         return status
 
+    def _lease_holds(idx, node_name, phase):
+        """MK Nov 2026 - a cluster enrolled in the federation takes a step of a rolling
+        update only while this instance holds a live lease on it: every phase of a node
+        writes on the cluster. The run waits, paused, and each Continue looks again, so a
+        Continue never gets past the fence. False when the run was cancelled meanwhile.
+        Nothing is asked while the federation is off."""
+        from pegaprox.core import federation as _fed
+        while _fed.enabled() and not _fed.worker_takes_writes_for(cluster_id):
+            status = _hold('federation_lease', 'paused_lease',
+                           {'node': node_name,
+                            'message': 'This instance holds no live federation lease on the '
+                                       'cluster - the run waits for it.'},
+                           {'index': idx, 'phase': phase},
+                           f"⏸ PAUSED - no live federation lease on {cluster_id}. "
+                           f"Continue once this instance holds it, or Cancel.")
+            if status != 'running':
+                return False
+        return True
+
     def _quorum_holds(idx, node_name, phase):
         """MK Oct 2026 - before node_name goes into maintenance and before its update: the
         cluster keeps its quorum with it down, or the run waits (paused, reason 'quorum'), and
@@ -6000,6 +6190,8 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 logging.info(f"[RollingUpdate] Node {node_name} has {update_count} updates available")
 
         if todo('maintenance'):
+            if not _lease_holds(idx, node_name, 'maintenance'):
+                return 'stop'
             if not _quorum_holds(idx, node_name, 'maintenance'):
                 return 'stop'
             # NS: force-refresh maintenance state from PVE before each node (#141)
@@ -6062,6 +6254,10 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             if not maintenance_task:
                 logging.error(f"[RollingUpdate] Failed to start maintenance mode on {node_name}")
                 raise Exception(f"Failed to start maintenance mode")
+            refused = getattr(maintenance_task, 'native_ha_refused', None)
+            # a node HA does not track (a cluster without HA guests) has nothing for HA to do
+            if isinstance(refused, str) and refused and 'not tracked by HA' not in refused:
+                _log(f"Proxmox HA did not set its maintenance flag: {refused} - PegaProx moves the guests itself")
 
             # Wait for evacuation to complete (unless skipped)
             if skip_evacuation:
@@ -6127,6 +6323,8 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 rolling_moved_guests(mgr, node_name, running, maintenance_task)
 
         if todo('updating'):
+            if not _lease_holds(idx, node_name, 'updating'):
+                return 'stop'
             if not _quorum_holds(idx, node_name, 'updating'):
                 return 'stop'
             # Step 2: Run apt update/upgrade
@@ -6250,6 +6448,8 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             return 'stop'
 
         if todo('finishing'):
+            if not _lease_holds(idx, node_name, 'finishing'):
+                return 'stop'
             # Step 5: Disable maintenance mode. A node that came back while nobody watched is a
             # target for migrations again as well
             _set(current_step='finishing', node=(node_name, {'phase': 'finishing'}), drop={'rebooting_nodes': node_name},
@@ -6277,6 +6477,21 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 _set(node=(node_name, {'in_maintenance': False}))
             else:
                 _log(f"⚠ {node_name} maintenance exit failed (will retry at end of run)")
+            if exited and not is_xcpng and idx < total - 1:
+                # #1387 - Proxmox HA lets go of the node a little after the exit, and until then
+                # it takes no guests: the next node's evacuation would have nowhere to send them
+                ha_waited = 0
+                while ha_waited < 120 and _status() == 'running':
+                    try:
+                        held_by_ha = node_name in mgr._get_native_ha_maintenance_nodes()
+                    except Exception:
+                        held_by_ha = False
+                    if not held_by_ha:
+                        break
+                    if ha_waited == 0:
+                        _log(f"  → waiting for Proxmox HA to take {node_name} out of maintenance")
+                    time.sleep(5)
+                    ha_waited += 5
             _log(f"  → Ceph (if present): noout + norebalance cleared for {node_name}")
 
         if todo('ceph'):
@@ -6411,6 +6626,10 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                  log=(f"=== Continuing {node_name} ({idx+1}/{total}) from phase {from_phase} ===" if resuming
                       else f"=== Processing {node_name} ({idx+1}/{total}) ==="))
             logging.info(f"[RollingUpdate] Processing node: {node_name}")
+
+            # the federation lease before the node, and again before each of its phases
+            if not _lease_holds(idx, node_name, from_phase):
+                break
 
             try:
                 if run_node(idx, node_name, from_phase, resuming and resume.get('recheck', True)) == 'stop':
@@ -7115,7 +7334,10 @@ def refresh_node_repos(cluster_id, node):
     # XCP-ng uses yum - use refresh_node_apt which handles both
     if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
         try:
-            mgr.refresh_node_apt(node)
+            # JB Nov 2026 - it answers a failed yum or SSH login, it does not raise
+            result = mgr.refresh_node_apt(node)
+            if not result.get('success'):
+                return jsonify({'error': result.get('error') or 'Failed to refresh package list'}), 500
             return jsonify({'success': True, 'message': 'Package list refresh started'})
         except Exception as e:
             logging.error(f"[API] Failed to refresh packages: {e}")

@@ -813,6 +813,16 @@ SCENARIOS = {
     'signing environment lost its branch rule': (
         lambda w: _env(w, 'apt-signing', protection_rules=[]), 'environments', 'environment:apt-signing'),
     'Pages environment gone': (lambda w: w.envs.pop('github-pages'), 'environments', 'environment:github-pages'),
+    # the update mirror's zone password: GitHub creates the environment open to every
+    # branch when a job names it before anyone set it up
+    'mirror environment never set up': (lambda w: w.envs.pop('mirror'), 'environments', 'environment:mirror'),
+    'mirror environment created open by GitHub': (
+        lambda w: _env(w, 'mirror', deployment_branch_policy=None, protection_rules=[]),
+        'environments', 'environment:mirror'),
+    'mirror environment also deploys from Testing': (
+        lambda w: w.env_policies['mirror'].append(['Testing', 'branch']), 'environments', 'environment:mirror'),
+    'mirror environment lets v* tags in': (
+        lambda w: w.env_policies['mirror'].append(['v*', 'tag']), 'environments', 'environment:mirror'),
     'apt.pegaprox.com no longer on this site': (
         lambda w: w.pages.update(cname='apt.evil.invalid'), 'environments', 'pages'),
     # a check that falls over on what it is given

@@ -886,6 +886,13 @@ def install_ipmitool_api(cluster_id):
     })
 
 
+def _network_write_failure(result):
+    # the status PVE answered and its reason as text; a manager that names no status
+    # (XCP-ng, or no answer at all) is a 500 as before
+    extra = {'errors': result['errors']} if result.get('errors') else {}
+    return upstream_failure(result.get('status') or 500, result.get('error', ''), **extra)
+
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/<iface>', methods=['PUT'])
 @require_auth(perms=['node.network'])
 def update_node_network_api(cluster_id, node, iface):
@@ -903,7 +910,7 @@ def update_node_network_api(cluster_id, node, iface):
     
     if result['success']:
         return jsonify({'message': result['message']})
-    return jsonify({'error': result['error']}), 500
+    return _network_write_failure(result)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/network', methods=['POST'])
@@ -932,7 +939,7 @@ def create_node_network_api(cluster_id, node):
     
     if result['success']:
         return jsonify({'message': result['message']})
-    return jsonify({'error': result['error']}), 500
+    return _network_write_failure(result)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/<iface>', methods=['DELETE'])

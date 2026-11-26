@@ -21,9 +21,10 @@ that (see [Set up a cluster](#set-up-a-cluster)).
 
 ## When you want one
 
-- **Clusters of two nodes.** This is what it is made for. Rolling updates in PegaProx stop
-  at every node of a 2-node cluster without one (the quorum gate), and count the QDevice
-  vote with one.
+- **Clusters of two nodes.** This is what it is made for. Without one, rolling updates in
+  PegaProx pause before every node of a 2-node cluster (the quorum gate); a cluster whose
+  corosync runs with `two_node` passes it once PegaProx has read that flag, which it does
+  when it checks the cluster for its HA agents. With one, the gate counts the QDevice vote.
 - **Clusters with an even number of nodes** (4, 6, ...): a split down the middle leaves
   both halves without a majority; the QDevice vote decides.
 - **Not for an odd number of nodes.** PegaProx refuses those, as `pvecm qdevice setup`
@@ -72,7 +73,7 @@ What all of them need:
   package manager of the host: apt-get on Debian and Ubuntu (`corosync-qnetd`,
   `libnss3-tools`), dnf or yum on RHEL, its rebuilds and Fedora (`corosync-qnetd`,
   `nss-tools`), zypper on SUSE (`corosync-qnetd`, `mozilla-nss-tools`). On RHEL and its
-  rebuilds they are in the High Availability repository, and on SLES in the High
+  rebuilds corosync-qnetd is in the High Availability repository, and on SLES in the High
   Availability extension: enable that first. Elsewhere install the two by hand.
 - **Each cluster name once per QNetd.** The QNetd tells clusters apart by their corosync
   cluster name only. PegaProx refuses a second cluster with the same name - also one it
@@ -81,8 +82,10 @@ What all of them need:
 
 ## How it works
 
-On the QNetd host, everything goes through one small, root-owned script:
-`/usr/lib/pegaprox/qnetd/pegaprox-qnetd-helper`. It does a fixed set of things and nothing
+On the QNetd host, everything goes through one small script:
+`/usr/lib/pegaprox/qnetd/pegaprox-qnetd-helper`, owned by root and run as root. In the
+Docker sidecar it is the copy inside the PegaProx image, which the sidecar runs as the
+image's unprivileged pegaprox user. It does a fixed set of things and nothing
 else: say its version (helper protocol 2: also the operations it knows and the package
 manager it would use), set up corosync-qnetd and its CA (`init`), hand out the CA
 certificate, sign the certificate request of a cluster, report which clusters and nodes are
@@ -119,7 +122,8 @@ step fails halfway, PegaProx rolls back as `pvecm qdevice remove` does (the devi
 out again, `/etc/corosync/qdevice` removed on all nodes, the service stopped), takes out
 the firewall rules this run added for the cluster, and tells you the step that failed.
 Because the result is what `pvecm` writes, `pvecm qdevice remove` on a node works on a
-QDevice PegaProx set up, and the other way round.
+QDevice PegaProx set up, and the other way round (PegaProx does not notice a removal by
+hand, though, see [Remove](#remove)).
 
 The CA key never leaves the QNetd host. Whoever has it can make certificates the QNetd
 accepts for any cluster name, so treat that host like any other piece of your cluster
@@ -157,9 +161,10 @@ the socket PegaProx reaches the helper through:
   included), dnf, yum or zypper, `certutil` and `systemctl`, or `firewall` from running
   ufw or firewall-cmd.
 
-There is no sudo rule, and the PegaProx unit keeps all its own hardening
-(`NoNewPrivileges` included): PegaProx itself never becomes root. The rpm unit runs
-PegaProx as root; there is no group `pegaprox` then, and the socket belongs to root alone.
+The installer adds no sudo rule and takes nothing away from the hardening of the PegaProx
+unit (the unit of the apt package keeps `NoNewPrivileges`): PegaProx reaches the local
+helper only through the socket, never through sudo. The rpm unit runs PegaProx as root;
+there is no group `pegaprox` then, and the socket belongs to root alone.
 If an earlier build of this installer left a sudo rule (`/etc/sudoers.d/pegaprox-qnetd`)
 and a drop-in for the pegaprox unit behind, it removes both and asks you to restart
 PegaProx once (`systemctl restart pegaprox`). Files of those names it did not write stay.
@@ -182,7 +187,7 @@ Run it from a copy only root can write instead, taken from the release you run:
 
 ```sh
 d=$(mktemp -d)
-git clone --depth 1 --branch v1.5.0 https://github.com/PegaProx/project-pegaprox.git "$d/src"
+git clone --depth 1 --branch v1.5.1 https://github.com/PegaProx/project-pegaprox.git "$d/src"
 # the same files as in /opt/PegaProx? Any difference: find out why before going on
 cmp "$d/src/packaging/qnetd/pegaprox-qnetd-helper" /opt/PegaProx/packaging/qnetd/pegaprox-qnetd-helper
 sh "$d/src/packaging/qnetd/install.sh"
@@ -195,8 +200,9 @@ use that copy for `--uninstall` later. Everything else is as for the packages ab
 
 ### On the witness host
 
-Add `--qnetd` to the witness installer. On a new witness, append it to the line
-**Add witness** shows (after `--code -`); on a witness that runs already:
+Add `--qnetd` to the witness installer. On a new witness, append it to the Linux line (or
+the offline line) that **Create witness code** shows under **Add a witness**, after
+`--code -`. On a witness that runs already:
 
 ```sh
 sh /opt/pegaprox-witness/install.sh --qnetd
@@ -214,7 +220,8 @@ see [TLS](#tls)); one that was there before stays as it was. See also
 ### Any other Linux host (ssh)
 
 Nothing to install by hand on Debian, Ubuntu, RHEL and its rebuilds, Fedora or SUSE (on
-RHEL and SLES, enable the High Availability repository or extension first). Add the host in
+RHEL and its rebuilds, enable the High Availability repository first, and on SLES the High
+Availability extension). Add the host in
 PegaProx with an SSH login - under QNetd hosts, or right in the setup of a cluster - and
 press **Check**, or let the setup do it: PegaProx installs its helper (and, through the
 helper's `init`, corosync-qnetd with TLS required) on first contact, and keeps the helper up
@@ -335,8 +342,9 @@ Press **Set up QDevice** next to the nodes of the cluster. PegaProx also suggest
 cluster with an even number of nodes and no QDevice shows a notice with that button (to
 administrators who may manage QNetd hosts; **Hide for 30 days** hides it for that
 cluster), and a rolling update that waits at the quorum gate of such a cluster offers it
-next to **Continue anyway** - once the QDevice is set up and connected, **Continue** passes
-the gate by itself.
+next to **Continue anyway** (not on the update page of the Corporate Redesigned layout,
+which has no such button) - once the QDevice is set up and connected, **Continue Update**
+passes the gate by itself.
 
 The setup is a wizard in three steps:
 
@@ -380,8 +388,13 @@ the steps of the plan.
 The checks, and every one of them has to pass (where the run fixes something itself, the
 plan says so instead):
 
+- a Proxmox VE cluster that PegaProx is connected to and whose status it can read;
+- no other QDevice job running on this cluster or on this QNetd host;
 - an even number of nodes, all online, and the cluster quorate;
-- no QDevice configured yet;
+- PegaProx can run commands on every node and can read `corosync.conf` through one of them;
+- a cluster name Proxmox VE allows (letters, digits and `-`, at most 15 characters, not
+  starting or ending with `-`);
+- no QDevice configured yet, and `two_node` not set in `corosync.conf`;
 - `corosync-qdevice` installed on every node - or ticked
   **Install corosync-qdevice where it is missing**, and PegaProx runs
   `apt-get install corosync-qdevice` on the nodes (they need a working package source: the
@@ -389,6 +402,9 @@ plan says so instead):
   that cannot reach them; install the package there by hand);
 - the QNetd host ready (helper there and current, corosync-qnetd running) - for an ssh
   host the run installs or updates the helper and sets up corosync-qnetd itself;
+- with **Open port 5403 on the QNetd host for the cluster nodes** ticked: PegaProx can read
+  the firewall of the QNetd host, a firewall there that blocks the port is ufw or firewalld,
+  and PegaProx knows the address each node sends from towards the QNetd host;
 - port 5403 of the QNetd reachable **from every node** (tested on the nodes, not from
   PegaProx; with the firewall option on ufw or firewalld, the run opens it and tests again);
 - the cluster name not in use on that QNetd - by another cluster of PegaProx or by one
@@ -563,9 +579,9 @@ every 30 seconds.
 | Install | The helper | corosync-qnetd |
 |---|---|---|
 | apt, rpm, appliance | comes with every package update into `/usr/lib/pegaprox/qnetd/`; the socket units stay | the distribution's updates |
-| git | after an update of PegaProx, run the installer again from a root-owned copy of the new release (see [git install](#on-the-pegaprox-host-git-install)), never from `/opt/PegaProx`. PegaProx cannot replace a root-owned helper; it says "outdated, re-run install.sh" until you do | the distribution's updates |
+| git | after an update of PegaProx, run the installer again from a root-owned copy of the new release (see [git install](#on-the-pegaprox-host-git-install)), never from `/opt/PegaProx`. PegaProx cannot replace a root-owned helper. It reports one that speaks an older helper protocol ("helper outdated, re-run install.sh") and does not use it, but a helper of the same protocol goes on being used without any notice, so run the installer after every update | the distribution's updates |
 | Docker | pull the new image and recreate both containers (`docker compose --profile qdevice pull && docker compose --profile qdevice up -d`) | comes with the image |
-| ssh (root or passwordless sudo) | **Check** installs a newer helper itself | the distribution's updates |
+| ssh (root or passwordless sudo) | **Check** (or the next setup) puts the helper of this PegaProx there itself when the host has none or one of an older helper protocol; a helper of the same protocol stays as it is | the distribution's updates |
 | ssh (a user for the helper only) | copy the new helper by hand (see above) | the distribution's updates |
 
 This release speaks **helper protocol 2** (the firewall operation and the package managers
@@ -585,9 +601,14 @@ updates of those clusters.
 to confirm). PegaProx runs `pvecm qdevice remove` on one node, drops the attachment, and
 has the helper take out the firewall rules it added for that cluster on the QNetd host
 (only those, see [The firewall](#the-firewall); one it cannot take out is a warning in the
-job log). `pvecm qdevice remove` by hand on a node does the same on the cluster side, but
-leaves those rules on the QNetd host: delete them there by hand (ufw: the rules with the
-comment `pegaprox-qnetd <cluster>`; firewalld: the rich rules for the node addresses). The
+job log). `pvecm qdevice remove` by hand on a node does the same on the cluster side, but PegaProx
+does not notice it: the cluster stays attached to that QNetd host in PegaProx (the host's
+card still lists it and **Delete** on the card is refused), and the firewall rules PegaProx
+added for it stay on the QNetd host. So remove a QDevice that PegaProx set up with
+**Remove QDevice**. After a removal by hand, delete those rules on the QNetd host by hand
+(ufw: the rules with the comment `pegaprox-qnetd <cluster>`; firewalld: the rich rules for
+the node addresses); to clear the attachment, set the QDevice of that cluster up again with
+PegaProx and then use **Remove QDevice**. The
 cluster's certificate stays on the QNetd host; it is harmless there, and the plan of a later
 setup of a cluster of that name shows it and offers to replace it.
 
@@ -610,12 +631,15 @@ corosync-qnetd and its CA: clusters keep their vote. `--purge` also deletes the 
 NSS database - every cluster certificate of that QNetd becomes worthless - and refuses
 while a cluster is still connected. The packages stay; remove them with the package
 manager once you are done (`apt-get purge corosync-qnetd`, `dnf remove corosync-qnetd`,
-`zypper remove corosync-qnetd`). By hand, the same is:
+`zypper remove corosync-qnetd`). By hand, the same is (the last two lines only on a git
+install; on an apt or rpm install the package owns those two files):
 
 ```sh
 systemctl disable --now pegaprox-qnetd-helper.socket
 rm -f /etc/systemd/system/pegaprox-qnetd-helper.socket /etc/systemd/system/pegaprox-qnetd-helper@.service
 systemctl daemon-reload
+rm -f /usr/lib/pegaprox/qnetd/pegaprox-qnetd-helper /usr/lib/pegaprox/qnetd/install.sh
+rmdir /usr/lib/pegaprox/qnetd /usr/lib/pegaprox
 ```
 
 **Docker:** stop and remove the sidecar with `docker compose --profile qdevice rm -sf pegaprox-qnetd`
@@ -635,13 +659,16 @@ Removing the witness (`--uninstall`) leaves corosync-qnetd alone on purpose.
 
 - **The CA key** stays on the QNetd host (`/etc/corosync/qnetd/nssdb`, readable by root
   and the `coroqnetd` group the daemon runs as) or in the sidecar's volume. PegaProx only
-  ever gets the CA certificate and the signed cluster certificates.
+  ever gets the CA certificate and the signed cluster certificates from it. The cluster's
+  own key (the p12 bundle made on the first node) passes through PegaProx in memory only,
+  on its way to the other nodes, and is neither stored nor logged.
 - **The helper signs only what a node asks for:** a certificate request for exactly
   `CN=<cluster name>` and nothing else. `certutil` copies every extension a request asks
   for into the certificate it signs - a request asking to be a CA would come back as a
   sub-CA - so a request with any extension or attribute is refused.
-- **The socket** belongs to root and the group `pegaprox` (mode 0660), and the helper
-  answers only root and the user `pegaprox`, by the kernel's word on the peer
+- **The socket** belongs to root and the group `pegaprox` (the group root where there is
+  no group `pegaprox`, as on an rpm install, where PegaProx runs as root), mode 0660, and
+  the helper answers only root and the user `pegaprox`, by the kernel's word on the peer
   (`SO_PEERCRED`). It takes one request line of at most 64 KiB, its fixed operations and
   nothing else. Under root its paths are fixed; none of its settings come from the
   environment. Every child process gets a clean environment and a time limit.
@@ -706,9 +733,9 @@ the agreement.
 **`plan_changed`** - "The plan changed since you agreed: check again". Between your
 agreement and the start something differed: a node, the QNetd host (its address, port or
 SSH login, or what has to be set up there), a package to install, a certificate store to
-remove, a node address for the firewall, an option, a warning. Found in the `plan` step,
-nothing was changed. Found in the `preflight` step (a node changed while the QNetd host
-was set up): the QNetd host stays set up (helper, packages, CA, TLS, the service; the next
+remove, a node address for the firewall, an option, a warning. Found in the step **Compare
+with the agreed plan**, nothing was changed. Found in the step **Checks** (a node changed
+while the QNetd host was set up): the QNetd host stays set up (helper, packages, CA, TLS, the service; the next
 setup uses it as it is), the firewall rules this setup added are taken out again, and
 nothing on the nodes or in `corosync.conf` was touched. Either way, look at the new plan
 and agree again.

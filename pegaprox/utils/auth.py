@@ -349,6 +349,17 @@ def load_users(readonly: bool = False) -> dict:
     return {}
 
 
+def mirror_switched_off(user: dict) -> bool:
+    """Whether `user` is a mirror of another federation member while the federation is off
+    here (forced off, or a database restored onto a plain install). Nothing syncs such a row
+    and none of the mirror guards run, so it is treated like a disabled account. Asks the
+    federation only for a row that has a home at all."""
+    if not (user or {}).get('fed_home'):
+        return False
+    from pegaprox.core import federation
+    return not federation.enabled()
+
+
 def apply_token_role(user: dict, token_role: str) -> dict:
     """Return a COPY of `user` carrying the effective_role an API token acts under.
 
@@ -434,7 +445,9 @@ def resolve_authz_user(auth: dict):
     except Exception as e:
         logging.warning(f"[AUTHZ] could not read account {username!r}: {type(e).__name__}")
         return None
-    if not stored:
+    if not stored or mirror_switched_off(stored):
+        # MK Nov 2026 - a federation mirror with the federation off here is a disabled
+        # account for the consoles too, not only for the require_auth routes
         return None
     user = dict(stored, username=username)
     role = auth.get('role')
@@ -672,10 +685,10 @@ def save_sessions():
             del active_sessions[sid]
         
         # Save to database - without the sessions of forwarded writes, which hold for
-        # one request in this process and nowhere else
+        # one request in this process and nowhere else, nor those of relayed requests
         db = get_db()
         db.save_all_sessions({sid: sess for sid, sess in active_sessions.items()
-                              if not sess.get('ha_forward')})
+                              if not sess.get('ha_forward') and not sess.get('fed_relay')})
         
     except Exception as e:
         logging.error(f"Failed to save sessions: {e}")
@@ -746,7 +759,8 @@ def create_session(username: str, role: str, remember: bool = False) -> str:
         # not the one-request session of a write a standby forwarded (#625), it ends
         # on its own a moment later
         user_sessions = [(sid, sess) for sid, sess in active_sessions.items()
-                         if sess.get('user') == username and not sess.get('ha_forward')]
+                         if sess.get('user') == username and not sess.get('ha_forward')
+                         and not sess.get('fed_relay')]
 
         # Sort by last_activity, remove oldest if more than 2 (new one will be 3rd)
         rotated = []
@@ -792,14 +806,23 @@ MFA_HELD_ENVIRON = 'pegaprox.mfa_enrolment_due'
 _MFA_RECHECK_S = 30
 
 
-def mfa_enrolment_state(user: dict, settings: dict) -> str:
+def mfa_enrolment_state(user: dict, settings: dict, username: str = '') -> str:
     """Whether force_2fa still holds `user` back. MFA_SKIPPED_ON_STANDBY is an admin let
     past it on a standby that cannot hand the enrolment to the active (#625); the
-    sign-in puts that on the record."""
+    sign-in puts that on the record. `username`: the account's name, which the row
+    itself does not carry."""
     if not settings.get('force_2fa') or not TOTP_AVAILABLE:
         return MFA_NOT_DUE
     # enrolled = a code can be asked for, which is what auth_login asks
     if user.get('totp_enabled') and user.get('totp_secret'):
+        return MFA_NOT_DUE
+    # MK Nov 2026 - a mirror of a federation member enrols at its home: its TOTP secret
+    # never travels and the setup routes refuse it here. A passkey it has is what
+    # auth_login asks for instead, so a mirror with one is enrolled. One with TOTP at its
+    # home (totp_enabled travels) is enrolled too: every sign-in of it, at any site, has
+    # its home check the code, and without the home's answer it signs in at its home only
+    if user.get('fed_home') and (user.get('totp_enabled')
+                                 or (username and _has_passkey(username))):
         return MFA_NOT_DUE
     # OIDC/Entra accounts use their IdP's MFA
     if user.get('auth_source', 'local') in ('oidc', 'entra'):
@@ -815,6 +838,18 @@ def mfa_enrolment_state(user: dict, settings: dict) -> str:
         if ha.is_standby() and not ha.forwarding():
             return MFA_SKIPPED_ON_STANDBY
     return MFA_DUE
+
+
+def _has_passkey(username: str) -> bool:
+    """Whether `username` has a WebAuthn credential. False when it cannot be told: the
+    account then stays held, as without one."""
+    try:
+        row = get_db().query_one(
+            'SELECT COUNT(*) AS n FROM webauthn_credentials WHERE username = ?', (username,))
+        return bool(row and row['n'] > 0)
+    except Exception as e:
+        logging.warning(f"[2FA] cannot read the passkeys of {username!r}: {e}")
+        return False
 
 
 def _mfa_enrolment_lets_through(session: dict) -> bool:
@@ -836,7 +871,8 @@ def _mfa_enrolment_lets_through(session: dict) -> bool:
         try:
             user = get_db().get_user(session.get('user', ''))
             from pegaprox.api.helpers import load_server_settings
-            fresh = bool(user) and mfa_enrolment_state(user, load_server_settings()) == MFA_DUE
+            fresh = bool(user) and mfa_enrolment_state(user, load_server_settings(),
+                                                       session.get('user', '')) == MFA_DUE
         except Exception as e:
             # keep the last answer; a session never judged stays held until it can be
             logging.warning(f"[2FA] cannot tell whether force_2fa holds "
@@ -997,6 +1033,10 @@ def validate_session(session_id: str) -> dict:
     # holds inside that one request and nowhere else (open_forwarded_session)
     if session.get('ha_forward') and not _serves_forwarded_write(session_id):
         return None
+    # MK Nov 2026 - and one another site of the federation opened for a request it relayed
+    # (open_relay_session) holds inside that request alone
+    if session.get('fed_relay') and not _serves_relayed_request(session_id):
+        return None
 
     # MK: security audit — IP binding. Default: log-only (mobile roaming friendly).
     # NS 2026-04-24: when `strict_session_ip` is enabled in server settings, invalidate
@@ -1072,6 +1112,60 @@ def _serves_forwarded_write(session_id: str) -> bool:
             return False
         from pegaprox.core.ha import FORWARD_ENVIRON
         mark = _req.environ.get(FORWARD_ENVIRON)
+        return isinstance(mark, dict) and mark.get('session') == session_id
+    except Exception:
+        return False
+
+
+# MK Nov 2026 - linked mode: a request another site of the federation relays for one of
+# its own accounts runs here under a session of its own (core/federation_relay.py). The
+# environ key that names it is set by the relay route alone; no header can.
+RELAY_ENVIRON = 'pegaprox.fed_relay'
+
+
+def open_relay_session(username: str, role: str, ip: str, site: str,
+                       api_token: bool = False) -> str:
+    """A session for one request a member site relays for `username`, a mirror of an
+    account that site homes. Like open_forwarded_session it ends no session of the user's,
+    saves nothing and holds only inside the request that carries it. The relaying site
+    asked its own sign-in for the second factor, and the relay checked this instance's
+    force_2fa before it opened this, so the enrolment hold is not asked again.
+
+    With api_token the request came from an API token there: `role` is that token's
+    built-in role, and every check here floors it to the mirror's own role as for a token
+    of this instance."""
+    session_id = generate_session_id()
+    now = time.time()
+    sess = {
+        'user': username,
+        'role': role,
+        'created_at': now,
+        'last_activity': now,
+        'ip': ip,
+        'user_agent': (f'via site {site}' + (' (API token)' if api_token else ''))[:200],
+        'remember': False,
+        'fed_relay': site,
+        'mfa_due': False,
+        'mfa_checked_at': now,
+    }
+    if api_token:
+        sess.update(api_token=True, token_name=f'via site {site}', token_id=None)
+    with sessions_lock:
+        active_sessions[session_id] = sess
+    return session_id
+
+
+def end_relay_session(session_id: str):
+    with sessions_lock:
+        active_sessions.pop(session_id, None)
+
+
+def _serves_relayed_request(session_id: str) -> bool:
+    try:
+        from flask import request as _req, has_request_context
+        if not has_request_context():
+            return False
+        mark = _req.environ.get(RELAY_ENVIRON)
         return isinstance(mark, dict) and mark.get('session') == session_id
     except Exception:
         return False
@@ -1377,7 +1471,8 @@ def ensure_api_tokens_table():
                 last_used_at TEXT,
                 last_used_ip TEXT,
                 created_at TEXT NOT NULL,
-                revoked INTEGER DEFAULT 0
+                revoked INTEGER DEFAULT 0,
+                fed_home TEXT NOT NULL DEFAULT ''
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash)')
@@ -1519,7 +1614,7 @@ def require_auth(roles: list = None, perms: list = None):
                 _g.current_user = user
             except Exception:
                 pass
-            if not user.get('enabled', True):
+            if not user.get('enabled', True) or mirror_switched_off(user):
                 return jsonify({'error': 'Account is disabled', 'code': 'ACCOUNT_DISABLED'}), 401
             # MK Oct 2026 - a portal_only account reaches the Client Portal and nothing else,
             # by session or by one of its API tokens (PORTAL_ONLY_ENDPOINTS)

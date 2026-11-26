@@ -288,14 +288,15 @@ def _func(rel, qualname):
 #   read      reads only
 #   local     this host (systemctl, dpkg, ping, ip route, scp to here, a local convert)
 #   external  not a cluster: the update server, webhooks, OIDC, ACME, SMTP, SIEM, push
-#   peer      the other PegaProx members (signed peer calls, ha.py)
+#   peer      the other PegaProx members (signed peer calls, ha.py, federation.py)
 #   unused    no caller; the first one has to guard it
 
 EXITS = {
     # PVE REST
     ('pegaprox/core/manager.py', 'PegaProxManager._create_session', 'http-session'): (1, 'guard'),
     ('pegaprox/core/manager.py', 'PegaProxManager.connect_to_proxmox', 'http-session'): (1, 'guard'),
-    ('pegaprox/core/manager.py', 'PegaProxManager.create_privileged_session', 'http-session'): (1, 'guard'),
+    # the password login of root's disk operations and of a migration token (#1389)
+    ('pegaprox/core/manager.py', '_password_login', 'http-session'): (1, 'guard'),
     ('pegaprox/core/manager.py', 'PegaProxManager.mint_console_auth_ticket', 'http-urllib'): (1, 'console'),
     ('pegaprox/core/manager.py', 'PegaProxManager.tls_fingerprint', 'socket'): (1, 'read'),
     # the connection check: GET /version per API address (the session only while it is
@@ -363,10 +364,11 @@ EXITS = {
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_ping_host', 'socket'): (1, 'read'),
     ('pegaprox/utils/ssh.py', '_ssh_exec._make_sock', 'socket'): (1, 'guard'),
     ('pegaprox/core/xhm.py', '_connect_ssh', 'ssh-paramiko'): (3, 'guard'),
-    ('pegaprox/core/xhm.py', '_run_xcpng_to_pve', 'ssh-exec'): (6, 'client'),
+    ('pegaprox/core/xhm.py', '_run_xcpng_to_pve', 'ssh-exec'): (3, 'client'),
     ('pegaprox/core/xhm.py', '_run_pve_to_xcpng', 'ssh-exec'): (2, 'client'),
-    ('pegaprox/core/xhm.py', '_run_esxi_to_pve', 'ssh-exec'): (14, 'client'),
+    ('pegaprox/core/xhm.py', '_run_esxi_to_pve', 'ssh-exec'): (15, 'client'),
     ('pegaprox/core/xhm.py', '_ssh_cleanup', 'ssh-exec'): (1, 'client'),
+    ('pegaprox/core/xhm.py', '_free_partial', 'ssh-exec'): (1, 'client'),
     ('pegaprox/core/xhm.py', '_run_esxi_to_xcpng', 'subprocess'): (2, 'local'),
     ('pegaprox/core/incremental_repl.py', '_relay_pipe', 'ssh-exec'): (2, 'client'),
     ('pegaprox/core/incremental_repl.py', '_relay_pipe._slurp', 'ssh-exec'): (1, 'client'),
@@ -471,6 +473,14 @@ EXITS = {
     # the kept connections of the lease calls (_LeaseLink), to members only
     ('pegaprox/core/ha.py', '_LeaseLink._connect', 'socket'): (1, 'peer'),
     ('pegaprox/witness.py', 'https_call', 'http-session'): (1, 'peer'),
+    # the members of a federation: signed calls to other PegaProx instances on kept
+    # sessions, never to a cluster, and none at all while the federation is switched off
+    ('pegaprox/core/federation.py', '_session_for', 'http-session'): (1, 'peer'),
+    # linked mode: the console tunnel to another member's own console server, on its
+    # address and pinned to its certificate; that member checks the console token, the
+    # cluster and the guest or node as for its own users
+    ('pegaprox/core/federation_relay.py', 'open_console', 'socket'): (1, 'peer'),
+    ('pegaprox/core/federation_relay.py', 'open_console', 'ws'): (1, 'peer'),
     # the health check of a witness: its own port
     ('pegaprox/witness.py', 'cmd_health', 'socket'): (1, 'local'),
     # and its own port at the address it paired with (the other socket only binds, to
@@ -518,13 +528,16 @@ def test_the_inventory_counts_what_the_report_says():
     # S4 with the witness and the lease link, and the connection check, the three restarts
     # asking systemctl in one helper, the join fingerprint read through tls_fingerprint,
     # and the QDevice setup with its QNetd hosts, and the stored key's leg of _pve_node_exec,
-    # less the ESXi guest config over REST (the API has no such call):
-    # 259 calls out of this process, 154 (function, kind) pairs in 140 functions; 45 of
-    # them guarded at the exit and 88 execs on a client from a guarded factory. No route
+    # less the ESXi guest config over REST (the API has no such call), and the session of
+    # the federation's member calls (kept per member address since the batched rounds),
+    # the three frees of a partial volume of the XCP-ng transfer in one helper and the
+    # cleanup of a failed ESXi disk, and the console tunnel of the federation's linked mode:
+    # 261 calls out of this process, 158 (function, kind) pairs in 143 functions; 45 of
+    # them guarded at the exit and 87 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 259 and len(EXITS) == 154
-    assert len({(f, q) for f, q, _k in EXITS}) == 140
-    assert by['guard'] == 45 and by['client'] == 88
+    assert sum(n for n, _v in EXITS.values()) == 261 and len(EXITS) == 158
+    assert len({(f, q) for f, q, _k in EXITS}) == 143
+    assert by['guard'] == 45 and by['client'] == 87
 
 
 @pytest.mark.parametrize('key', sorted(k for k, v in EXITS.items() if v[1] == 'guard'),
@@ -764,6 +777,25 @@ AUTOMATIONS = {
     # one thread (a greenlet under gevent) per client of the extra HTTP redirect port
     ('pegaprox/app.py', '_start_http_redirect'): (1, 'local'),
     ('pegaprox/core/ha.py', 'pull_soon'): (1, 'peer'),
+    # the federation's sync (60 s) and lease rounds (10 s): member calls and this host's
+    # database, no cluster call of their own; started when the federation is switched on.
+    # A cluster this instance lost to another member has its manager stopped in the
+    # same thread, nothing new is started for it
+    ('pegaprox/core/federation.py', 'start_workers'): (2, 'peer'),
+    # linked mode: one pull of the accounts of a member whose account has not arrived yet
+    # (at most once per member and half minute), and the reader of a console tunnel, which
+    # only passes another member's console bytes to the browser
+    ('pegaprox/core/federation_relay.py', '_pull_soon'): (1, 'peer'),
+    ('pegaprox/api/federation_relay.py', '_pump'): (1, 'peer'),
+    # the end of a migration between two sites: follows its task and drops the target's
+    # token, like the cleanup of a migration between two clusters of this instance
+    ('pegaprox/core/federation_migrate.py', 'follow'): (1, 'job'),
+    # the live feed of another site's clusters: reads that site's frames into a browser's
+    # stream here, sends nothing to a cluster
+    ('pegaprox/core/federation_stream.py', 'Feed.start'): (1, 'peer'),
+    # the watch over what is under way on an enrolled cluster: it only stops node commands
+    # and closes SSH clients of a cluster whose federation lease is gone, nothing goes out
+    ('pegaprox/core/ha_transport.py', '_watch_start'): (1, 'local'),
     # the lease loop, the etag tick and when_active (the deferred boot gates)
     ('pegaprox/core/ha.py', '_lease_spawn'): (1, 'lease'),
     ('pegaprox/api/vms.py', 'cross_cluster_migrate_api'): (1, 'job'),

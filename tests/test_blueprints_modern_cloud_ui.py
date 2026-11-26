@@ -1090,13 +1090,13 @@ def test_modern_mounts_the_section_and_classic_corporate_does_not():
     assert len(mounts) == 1
     head = dash[dash.rindex('{automationSubTab', 0, mounts[0]):mounts[0]]
     assert "automationSubTab === 'templates' && !isCorporate && selectedCluster?.id" in head
-    assert "canRead={holds('vm.create')} canWrite={can('vm.create')} nav={mdBpNav} />" in dash[mounts[0]:]
+    assert "canRead={holds('vm.create')} canWrite={siteCan('vm.create')} nav={mdBpNav} />" in dash[mounts[0]:]
     # above the library, which every layout but the redesign keeps
     assert mounts[0] < dash.index('<TemplatesLibraryTab\n')
     assert ("label: isCorpRedesigned ? t('crBpNavTab') : isCorporate ? (t('templateLibrary') || 'Templates') : t('bpNavTab')") in dash
     # the ways there: the Resources button of Modern, Ctrl+K for the redesign and Modern
     btn = dash.index('data-bp-nav="resources"')
-    assert ("{!isCorporate && can('vm.create') && (!selectedCluster.cluster_type || selectedCluster.cluster_type === 'proxmox') && ("
+    assert ("{!isCorporate && siteCan('vm.create') && (!selectedCluster.cluster_type || selectedCluster.cluster_type === 'proxmox') && ("
             in dash[btn - 400:btn])
     assert "extraActions={(isCorpRedesigned || !isCorporate) && can('vm.create') && " in dash
     assert "if (c) (crTaskNav || mdBpNav).openBlueprints(c.id);" in dash

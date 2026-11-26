@@ -37,11 +37,13 @@ def main(argv) -> int:
               file=sys.stderr)
         return 4
     if dbcrypto.is_encrypted():
-        if state == 'plain':
+        # MK Nov 2026 - with PEGAPROX_DISABLE_AUTO_ENCRYPT no start encrypts it, and
+        # dbcrypto.connect() opens it plain
+        if state == 'plain' and not dbcrypto.auto_encrypt_disabled():
             print(f'{db_path} is still plain SQLite, the next start of PegaProx encrypts it: '
                   'set the port after that', file=sys.stderr)
             return 4
-        if keystore.peek_master_key() is None:
+        if state != 'plain' and keystore.peek_master_key() is None:
             print('no master key found (--keystore-status says where it looked)', file=sys.stderr)
             return 4
     elif state != 'plain':

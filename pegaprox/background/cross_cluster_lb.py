@@ -18,7 +18,7 @@ from datetime import datetime
 
 from pegaprox.globals import cluster_managers
 from pegaprox.core.db import get_db
-from pegaprox.core import ha, transfer_net
+from pegaprox.core import ha, migration_tunnel, transfer_net
 from pegaprox.utils.audit import log_audit
 
 logger = logging.getLogger('pegaprox.xclb')
@@ -70,10 +70,15 @@ def _pick_node(manager, highest=True):
 def run_cross_cluster_balance_check(group):
     """Core logic: compare cluster scores within a group, migrate if needed.
     NS: Intentionally conservative - one VM per cycle, dry_run default on.
-    """
+    A cluster enrolled in the federation migrates only while this instance
+    holds a live lease on it (the worker lease check)."""
     # a standby migrates nothing, from the loop or from the manual trigger
     if not ha.is_active():
         return
+    # the worker lease check: the federation lease - a balance move is a write on the
+    # source. Nothing is asked while the federation is off
+    from pegaprox.core import federation as _fed
+    _fed_on = _fed.enabled()
     group_id = group['id']
     group_name = group.get('name', group_id)
     threshold = group.get('cross_cluster_threshold', 30)
@@ -92,6 +97,9 @@ def run_cross_cluster_balance_check(group):
     scored = []
     for r in rows:
         mgr = cluster_managers.get(r['id'])
+        if _fed_on and not _fed.worker_takes_writes_for(r['id']):
+            logging.info(f"[LB] cluster {r['id']} is enrolled without a live lease here - skipped")
+            continue
         if not mgr:
             continue
         score = compute_cluster_score(mgr)
@@ -123,23 +131,40 @@ def run_cross_cluster_balance_check(group):
 
     # 5. find source/target nodes
     source_node = _pick_node(hi_mgr, highest=True)
-    target_node = _pick_node(lo_mgr, highest=False)
-    if not source_node or not target_node:
+    if not source_node:
         logger.warning("[XCLB] Could not determine source/target nodes")
         return
+    # MK Nov 2026 - the least loaded cluster, or the next one up when Proxmox VE would refuse
+    # the move into it: a PVE 9.3 source and an older target cluster (core/migration_tunnel.py).
+    # It refuses in the task only, so every interval made a token and a failed task there
+    vm = None
+    for lo_cid, lo_mgr, lo_score in scored[:-1]:
+        if hi_score - lo_score <= threshold:
+            break
+        target_node = _pick_node(lo_mgr, highest=False)
+        if not target_node:
+            logger.warning("[XCLB] Could not determine source/target nodes")
+            return
 
-    # 6. find migration candidate on source
-    # sec/correctness (audit): this passed source_node as its OWN target. Two gates inside
-    # find_migration_candidate then evaluated against the node the guest is already on, so
-    # neither could ever refuse: a guest with a plb_pin tag matched its own node and got picked
-    # to be moved off the pin, and the "does the target have this storage" check asked our own
-    # cluster about our own node and always said yes. target_mgr sends the storage lookup to
-    # the cluster that will actually receive the guest.
-    vm = hi_mgr.find_migration_candidate(source_node, target_node,
-                                         include_containers=include_containers,
-                                         target_mgr=lo_mgr)
+        # 6. find migration candidate on source
+        # sec/correctness (audit): this passed source_node as its OWN target. Two gates inside
+        # find_migration_candidate then evaluated against the node the guest is already on, so
+        # neither could ever refuse: a guest with a plb_pin tag matched its own node and got picked
+        # to be moved off the pin, and the "does the target have this storage" check asked our own
+        # cluster about our own node and always said yes. target_mgr sends the storage lookup to
+        # the cluster that will actually receive the guest.
+        vm = hi_mgr.find_migration_candidate(source_node, target_node,
+                                             include_containers=include_containers,
+                                             target_mgr=lo_mgr)
+        if not vm:
+            logger.info(f"[XCLB] No migration candidate on {hi_cid}/{source_node}")
+            return
+        why = migration_tunnel.refusal(hi_mgr, source_node, vm.get('type', 'qemu'), lo_mgr, target_node)
+        if not why:
+            break
+        logger.warning(f"[XCLB] Group '{group_name}': not to {lo_cid} - {why}")
+        vm = None
     if not vm:
-        logger.info(f"[XCLB] No migration candidate on {hi_cid}/{source_node}")
         return
 
     vmid = vm.get('vmid')
@@ -155,7 +180,9 @@ def run_cross_cluster_balance_check(group):
     # clusters and a guest still moving can be picked again, and a token of the same name
     # is replaced, which revoked the one a running migration authenticates with
     token_name = f"xclb-{group_id[:8]}-{vmid}-{uuid.uuid4().hex[:6]}"
-    token = lo_mgr.create_api_token(token_name, expire=transfer_net.token_expiry())
+    # MK Nov 2026 - paced: a target that makes it over a password login of its account sent
+    # one at every interval while its directory was down, each a failed login on PVE's side
+    token = lo_mgr.create_api_token(token_name, expire=transfer_net.token_expiry(), paced=True)
     if not token.get('success'):
         logger.error(f"[XCLB] Token creation failed on {lo_cid}: {token.get('error')}")
         return

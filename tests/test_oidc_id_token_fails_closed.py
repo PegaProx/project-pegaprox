@@ -54,7 +54,9 @@ def _claims(**over):
     now = int(time.time())
     body = {'iss': ISSUER, 'sub': 'alice', 'aud': 'pegaprox', 'iat': now, 'exp': now + 300,
             'nonce': 'n-1', 'groups': ['pp-admins']}
-    body.update(over)
+    # a callable takes the clock when the token is made: a case list read at collection would
+    # put nbf in the past once a long suite gets to it
+    body.update({k: v(now) if callable(v) else v for k, v in over.items()})
     return body
 
 
@@ -349,9 +351,9 @@ def test_without_the_keys_and_with_verified_tls_the_token_is_read_with_its_claim
 @pytest.mark.parametrize('over,nonce,error', [
     ({'aud': 'someone-else'}, 'n-1', INVALID),
     ({'iss': 'https://other-idp.invalid'}, 'n-1', INVALID),
-    ({'exp': int(time.time()) - 900}, 'n-1', {'error': 'ID token has expired'}),
+    ({'exp': lambda now: now - 900}, 'n-1', {'error': 'ID token has expired'}),
     ({'exp': 'tomorrow'}, 'n-1', INVALID),
-    ({'nbf': int(time.time()) + 3600}, 'n-1', INVALID),
+    ({'nbf': lambda now: now + 3600}, 'n-1', INVALID),
     ({'nbf': 'tomorrow'}, 'n-1', INVALID),
     ({'aud': ['pegaprox', 'other-app'], 'azp': 'other-app'}, 'n-1', INVALID),
     ({}, 'n-2', NONCE),
@@ -395,8 +397,8 @@ def test_with_the_switch_the_signature_is_not_checked(keys, stranger, caplog):
 
 @pytest.mark.parametrize('over,nonce,error', [
     ({'aud': 'someone-else'}, 'n-1', INVALID),
-    ({'exp': int(time.time()) - 900}, 'n-1', {'error': 'ID token has expired'}),
-    ({'nbf': int(time.time()) + 3600}, 'n-1', INVALID),
+    ({'exp': lambda now: now - 900}, 'n-1', {'error': 'ID token has expired'}),
+    ({'nbf': lambda now: now + 3600}, 'n-1', INVALID),
     ({'aud': ['pegaprox', 'other-app'], 'azp': 'other-app'}, 'n-1', INVALID),
     ({}, 'n-2', NONCE),
 ], ids=['aud', 'expired', 'nbf', 'azp', 'nonce'])

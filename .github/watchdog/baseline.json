@@ -51,6 +51,7 @@
       "apt-repo.yml": "signs and deploys apt.pegaprox.com (Pages) and attaches the .deb to the release",
       "docker-testing.yml": "pushes ghcr.io/pegaprox/pegaprox-testing on every Testing push",
       "docker.yml": "pushes the release images to ghcr.io and Docker Hub",
+      "mirror.yml": "syncs main to the Bunny storage zone behind updates.pegaprox.com",
       "release-images.yml": "attaches the VM and LXC appliance images to the release",
       "sbom.yml": "attaches the SBOM to the release"
     },
@@ -136,6 +137,18 @@
         [
           "v*",
           "tag"
+        ]
+      ]
+    },
+    "mirror": {
+      "deployment_branch_policy": {
+        "custom_branch_policies": true,
+        "protected_branches": false
+      },
+      "branch_policies": [
+        [
+          "main",
+          "branch"
         ]
       ]
     }

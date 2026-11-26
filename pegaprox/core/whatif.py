@@ -367,8 +367,9 @@ def _sids(spec):
 
 def ha_config(mgr):
     """The Proxmox HA configuration as the scenarios use it, or None when its resources
-    cannot be read: {resources: {sid: row}, placement: {sid: {rule, nodes, strict}},
-    apart: [{rule, sids}], together: [{rule, sids}], rules_read, crs}."""
+    cannot be read: {resources: {sid: row}, placement: {sid: {rule, nodes, strict, negative}},
+    apart: [{rule, sids}], together: [{rule, sids}], rules_read, crs}. A negative placement
+    (PVE 9.3) names the nodes the guest avoids."""
     def read():
         ok, resources = _get(mgr, '/cluster/ha/resources')
         if not ok:
@@ -389,7 +390,8 @@ def ha_config(mgr):
             if rtype == 'node-affinity':
                 for sid in _sids(rule.get('resources')):
                     out['placement'][sid] = {'rule': name, 'nodes': _nodes_spec(rule.get('nodes')),
-                                             'strict': str(rule.get('strict') or '').lower() in _ON}
+                                             'strict': str(rule.get('strict') or '').lower() in _ON,
+                                             'negative': str(rule.get('affinity') or '').lower() == 'negative'}
             elif rtype == 'resource-affinity':
                 which = 'apart' if str(rule.get('affinity') or '').lower() == 'negative' else 'together'
                 out[which].append({'rule': name, 'sids': _sids(rule.get('resources'))})
@@ -864,13 +866,25 @@ def _vote_math(run, survivors):
     return quorate, left, need
 
 
+def _in_force(run, placement):
+    """The placement as PVE applies it: a negative rule that names every node of the cluster
+    is dropped (NodeAffinity.pm, check_nonempty_negative_nodes_complement) and limits nothing."""
+    if placement and placement.get('negative') and all(n in placement['nodes'] for n in run.status):
+        return None
+    return placement
+
+
 def _ha_pick(run, ha, sid, pool, placed, crs):
     """The node Proxmox HA would recover sid to among pool, or (None, code, args)."""
-    rule = ha['placement'].get(sid)
+    rule = _in_force(run, ha['placement'].get(sid))
     allowed = list(pool)
     prios = {}
     if rule:
-        prios = {n: p for n, p in rule['nodes'].items()}
+        if rule.get('negative'):
+            # what PVE makes of it: the other nodes first, strict allows only those
+            prios = {n: 0 for n in allowed if n not in rule['nodes']}
+        else:
+            prios = {n: p for n, p in rule['nodes'].items()}
         in_rule = [n for n in allowed if n in prios]
         if rule['strict']:
             allowed = in_rule
@@ -1086,7 +1100,7 @@ def _maintenance(run):
     avail = [n for n in run.online if n not in nodes and n not in run.in_maintenance and n not in exclude]
 
     try:
-        ha_nodes, storage_nodes = mgr._evacuation_placement()
+        ha_nodes, storage_nodes = mgr._evacuation_placement(list(run.status))
     except Exception as e:
         log.debug(f"[WHATIF] evacuation placement unreadable: {e}")
         ha_nodes, storage_nodes = {}, {}
@@ -1250,7 +1264,17 @@ def _headroom(run):
             per_node[vm['node']].append((run.mem_of(vm), run.cores_of(vm), _sid(vm)))
     for n in per_node:
         per_node[n].sort(key=lambda g: g[2])
-    strict = {sid: set(p['nodes']) for sid, p in ((ha or {}).get('placement') or {}).items() if p['strict']}
+    others = {}
+
+    def allowed(p):
+        # the guests of one negative rule share the set of the nodes it leaves them
+        if not p.get('negative'):
+            return set(p['nodes'])
+        if p['rule'] not in others:
+            others[p['rule']] = frozenset(n for n in candidates if n not in p['nodes'])
+        return others[p['rule']]
+    strict = {sid: allowed(p) for sid, p in ((ha or {}).get('placement') or {}).items()
+              if p['strict'] and _in_force(run, p)}
 
     def simulate(failed):
         survivors = [n for n in candidates if n not in failed]

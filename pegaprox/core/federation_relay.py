@@ -1,0 +1,1248 @@
+"""Linked mode: the clusters of the other sites, worked on from this instance.
+
+A remote cluster has the id <raw>~<iid>: its id at the site that leads it, a tilde, and
+that site's instance id. The UI builds its cluster URLs with that id like with any other;
+RemotePaths, a WSGI wrapper in front of the Flask app, moves such a path onto the relay
+route (api/federation_relay.py), and the relay sends the request on to the leading site
+over the federation's pinned channel. There it runs through that site's own app under a
+session that holds for that one request: its sign-in, permissions, quotas and audit
+decide, exactly as for a request made there.
+
+Who may: a site speaks only for the accounts it homes. The leading site takes a request
+only for a mirror of an account the sending site homes, mapped there (resolve_principal),
+and only for a cluster route that crosses (rule_verdict): the cluster's own record, the
+site's access rules, admin settings, scripts and installs on its nodes, routes that name
+a second cluster, uploads, sockets and PegaProx's own HA of a cluster stay where they are.
+
+The wire: a POST to RELAY_PATH with the inner body raw and an envelope of at most 4 KiB
+in a header, signed with the member key under a domain of its own; the answer is signed
+back over the request's nonce. A control call never verifies as a relay call, nor the
+other way round. The receiving side refuses a call signed before its process started.
+
+Off (the federation switch), RemotePaths changes no path and the routes answer 404, so a
+'~' id gets the answer of any unknown cluster.
+
+MK Nov 2026
+"""
+import base64
+import contextvars
+import hashlib
+import hmac
+import io
+import json
+import logging
+import os
+import re
+import secrets
+import sys
+import threading
+import time
+
+from pegaprox.core import federation as fed
+from pegaprox.core import ha_wire
+
+RELAY_PATH = '/api/federation/peer/relay'
+# an upload to a datastore of another site's cluster: its own path, so the size limit of
+# uploads holds for it (app.py)
+RELAY_UPLOAD_PATH = RELAY_PATH + '/upload'
+# the live updates of another site's clusters (core/federation_stream.py)
+RELAY_STREAM_PATH = RELAY_PATH + '/stream'
+RELAY_DOMAIN = 'pegaprox-fed-relay-1'
+ANSWER_DOMAIN = 'pegaprox-fed-relay-answer-1'
+ENVELOPE_HEADER = 'X-PegaProx-Relay'
+BODY_HEADER = 'X-PegaProx-Relay-Body'
+ANSWER_HEADER = 'X-PegaProx-Relay-Answer'
+SIG_HEADER = 'X-PegaProx-Relay-Sig'
+SITE_HEADER = 'X-PegaProx-Site'
+# the path a request came in with before RemotePaths moved it, and the mark of an answer
+# that came from another site (add_security_headers sandboxes those)
+ENTRY_ENVIRON = 'pegaprox.fed_entry'
+RELAYED_ENVIRON = 'pegaprox.fed_relayed'
+_VERDICT_ENVIRON = 'pegaprox.fed_relay_verdict'
+
+RELAY_VERSION = 1
+MAX_ENVELOPE = 4096
+MAX_BODY = 10 * 1024 * 1024
+MAX_ANSWER = 16 * 1024 * 1024
+READ_TIMEOUT = 30
+WRITE_TIMEOUT = 180
+LIST_TIMEOUT = 5
+
+CLUSTER_RULE = '/api/clusters/<cluster_id>'
+LIST_RULE = '/api/federation/linked/self'
+UPLOAD_RULE = CLUSTER_RULE + '/datastores/<storage_name>/upload'
+# an upload goes as large as one to a cluster of this instance (app.py), and its answer
+# comes once the leading site has handed it to Proxmox
+MAX_UPLOAD = int(os.environ.get('PEGAPROX_MAX_UPLOAD_SIZE', 100 * 1024 ** 3))
+UPLOAD_TIMEOUT = 3900
+# kept free on the disk the upload is spooled to
+UPLOAD_RESERVE = 256 * 1024 ** 2
+_SAFE_METHODS = ('GET', 'HEAD')
+_METHODS = ('GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE')
+_HEX64 = re.compile(r'[0-9a-f]{64}')
+_RID_RE = re.compile(r'[0-9a-f]{32}')
+# who a relayed request runs for: the account, its home, a handle of the session or token
+# it came in with, the browser's address, for an API token the built-in role it holds at the
+# sending site, and for an account another site homes the assertion of that home
+# (core/federation_signin.py). A key the leading site does not know refuses the request, so no
+# restriction a newer sender adds is dropped on the way
+PRINCIPAL_KEYS = frozenset({'user', 'home', 'sh', 'ip', 'tok', 'asr'})
+# the roles an API token crosses with: a custom role names nothing at another site
+TOKEN_ROLES = ('admin', 'user', 'viewer')
+
+# what an answer from another site may be: no HTML and no SVG reach this origin
+ANSWER_TYPES = ('application/json', 'text/plain', 'text/csv', 'application/octet-stream',
+                'application/x-virt-viewer')
+_INLINE_TYPES = ('application/json', 'text/plain')
+_PASS_HEADERS = ('Content-Type', 'Content-Disposition', 'Retry-After', 'ETag')
+
+# --- what crosses ------------------------------------------------------------------------
+#
+# Every route under CLUSTER_RULE crosses unless it is named here or its view asks for an
+# admin, the site's access rules, scripts or settings (rule_verdict). The tail is the rule
+# after CLUSTER_RULE. tests/test_federation_relay.py pins the full list of the rules that
+# cross, so a cluster route added later is decided on before it is relayed.
+_EXCLUDED = {
+    # the cluster's own record and credentials at the site that leads it
+    'record': frozenset({
+        ('PUT', ''), ('DELETE', ''), ('PATCH', '/config'), ('GET', '/config/export'),
+        ('POST', '/reconfigure'), ('POST', '/api-token/rotate'),
+        ('GET', '/node-credentials'), ('POST', '/node-credentials/check'),
+        ('PUT', '/node-credentials/<node>'), ('DELETE', '/node-credentials/<node>'),
+        ('POST', '/ssh/repin-host-keys'), ('PUT', '/rename'), ('PUT', '/group'),
+        ('PUT', '/sort-order'), ('PUT', '/location'), ('POST', '/ha/claim'),
+        ('GET', '/esxi-hosts'), ('POST', '/esxi-hosts'), ('DELETE', '/esxi-hosts/<host_id>'),
+        ('POST', '/connection-check')}),
+    # installs of software on the site's nodes
+    'install': frozenset({
+        ('POST', '/reports/install-debsecan'), ('POST', '/ha/install-self-fence'),
+        ('POST', '/ha/uninstall-self-fence')}),
+    # a second cluster: this site's pickers hold this site's ids
+    'second_cluster': frozenset({
+        ('POST', '/transfer-network/check')}),
+    # sockets, which have their own way
+    'transport': frozenset({
+        ('POST', '/vms/<node>/<vm_type>/<int:vmid>/vnc-poll'),
+        ('GET', '/vms/<node>/<vm_type>/<int:vmid>/vncwebsocket'),
+        ('GET', '/nodes/<node>/shellws')}),
+    # PegaProx's own HA of the cluster, set and acted on at the site that leads it
+    'ha': frozenset({
+        ('PUT', '/ha'), ('PUT', '/ha/config'), ('POST', '/ha/enable'),
+        ('POST', '/ha/disable'), ('POST', '/ha/agent-check'),
+        ('POST', '/ha/interrupted-recoveries/dismiss'),
+        ('POST', '/ha/interrupted-recoveries/start')}),
+}
+_ADMIN_PERMS = frozenset({'admin.scripts', 'admin.settings'})
+
+REASONS = {
+    'record': 'The settings and credentials of this cluster are kept at the site that leads it',
+    'access': 'Who may act on this cluster is set at the site that leads it',
+    'admin': 'This is set by an admin of the site that leads the cluster',
+    'install': 'Software on the nodes of this cluster is installed from the site that leads it',
+    'second_cluster': 'This names a second cluster, which is picked at the site that leads it',
+    'transport': 'This goes to the site that leads the cluster its own way',
+    'ha': "PegaProx's HA of this cluster is set at the site that leads it",
+    'scope': 'Only the cluster routes of another site are relayed',
+}
+
+
+def rule_verdict(app, method, rule):
+    """None when `method` on the url rule `rule` (a werkzeug Rule) crosses to another site,
+    else the key of REASONS that says why not. A HEAD is judged as the GET it runs."""
+    if method == 'HEAD':
+        method = 'GET'
+    path = rule.rule
+    if path == LIST_RULE:
+        return None if method == 'GET' else 'scope'
+    if not (path == CLUSTER_RULE or path.startswith(CLUSTER_RULE + '/')):
+        return 'scope'
+    if getattr(rule, 'websocket', False):
+        return 'transport'
+    tail = path[len(CLUSTER_RULE):]
+    for reason, pairs in _EXCLUDED.items():
+        if (method, tail) in pairs:
+            return reason
+    auth = getattr(app.view_functions.get(rule.endpoint), '_pp_auth', None) or {}
+    perms = set(auth.get('perms') or ())
+    if 'admin' in (auth.get('roles') or ()) or perms & _ADMIN_PERMS:
+        return 'admin'
+    if 'admin.users' in perms:
+        return 'access'
+    return None
+
+
+def match_rule(app, method, path):
+    """(werkzeug Rule, view args) that serves `method` on `path` here, or (None, None)."""
+    try:
+        return app.url_map.bind('localhost').match(path, method=method, return_rule=True)
+    except Exception:
+        return None, None
+
+
+# --- remote ids ------------------------------------------------------------------------------
+
+def split_remote(cluster_id):
+    """(raw id, instance id) of a remote cluster id, None for anything else."""
+    if not isinstance(cluster_id, str) or '~' not in cluster_id:
+        return None
+    raw, _, iid = cluster_id.rpartition('~')
+    if not fed.CLUSTER_ID_RE.fullmatch(raw) or not ha_wire.ID_RE.fullmatch(iid):
+        return None
+    return raw, iid
+
+
+def remote_id(raw, iid):
+    return f'{raw}~{iid}'
+
+
+def _local_ids():
+    from pegaprox import globals as g
+    return getattr(g, 'cluster_managers', None) or {}
+
+
+class RemotePaths:
+    """The WSGI app in front of Flask: a path under /api/clusters/ whose cluster id is a
+    remote one goes to the relay route, every other path as it came. With the federation
+    off it changes nothing, so a '~' id gets the answer of any unknown cluster. A cluster
+    of this instance whose id happens to carry a '~' stays local."""
+
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        path = environ.get('PATH_INFO') or ''
+        if path.startswith('/api/clusters/') and '~' in path and not environ.get('HTTP_UPGRADE'):
+            cid, sep, rest = path[len('/api/clusters/'):].partition('/')
+            ids = split_remote(cid)
+            if ids and fed.enabled() and cid not in _local_ids():
+                environ[ENTRY_ENVIRON] = path
+                environ['PATH_INFO'] = f'/api/federation/relay/{ids[1]}/clusters/{ids[0]}{sep}{rest}'
+        return self.wsgi_app(environ, start_response)
+
+
+# --- budgets -------------------------------------------------------------------------------
+#
+# Sized from the request pool of this process (app.py), so relays never hold every slot:
+# half the pool for all sites together, an eighth (at least four) per site. Over a budget
+# the answer is 429 FED_RELAY_BUSY at once, never a wait.
+
+def _pool_size():
+    try:
+        return max(8, int(os.environ.get('PEGAPROX_WORKERS') or max(32, (os.cpu_count() or 2) * 16)))
+    except ValueError:
+        return 32
+
+
+class _Budget:
+    def __init__(self, total, each):
+        self.total, self.each = total, each
+        self._lock = threading.Lock()
+        self._used, self._per = 0, {}
+
+    def take(self, key):
+        with self._lock:
+            if self._used >= self.total or self._per.get(key, 0) >= self.each:
+                return False
+            self._used += 1
+            self._per[key] = self._per.get(key, 0) + 1
+            return True
+
+    def give(self, key):
+        with self._lock:
+            self._used = max(0, self._used - 1)
+            n = self._per.get(key, 0) - 1
+            if n > 0:
+                self._per[key] = n
+            else:
+                self._per.pop(key, None)
+
+
+_P = _pool_size()
+# the relayed calls one member may make per minute, whatever they carry
+SENDER_RATE = 3000
+# relay_call's kinds for no answer: sent with none back, or never sent
+_NO_ANSWER = ('silent', 'unsent')
+# what this instance sends out (per receiving site) and runs for others (per sender)
+_out = _Budget(max(4, _P // 2), max(4, _P // 8))
+_in = _Budget(max(4, _P // 2), max(4, _P // 8))
+# of a site's share, one account holds half at most: a view that opens with ten reads at
+# once queues them, and leaves room for the other accounts working on that site
+_out_users = _Budget(10 ** 6, max(2, _out.each // 2))
+# how long a call waits for a slot before it is answered 429 FED_RELAY_BUSY
+SLOT_WAIT = 8
+# a slot given back wakes the calls that wait for one
+_slot_freed = threading.Condition()
+# uploads run for minutes and hold a spooled copy on the disk: a few at a time, outside
+# the budgets above
+_uploads_out = _Budget(4, 2)
+# how long a spooled upload waits for one of them
+UPLOAD_SLOT_WAIT = 60
+_uploads_in = _Budget(4, 2)
+# one upload at a time per account, and the bytes of the uploads being written to disk
+_upload_users = set()
+_spool_lock = threading.Lock()
+
+# a site that does not answer is not dialled for a while: 3 failed connects within 30 s
+# keep it closed for 15 s
+_BREAK_AFTER, _BREAK_WINDOW, _BREAK_FOR = 3, 30, 15
+_breaker = {}
+_breaker_lock = threading.Lock()
+
+
+def take_slot(iid, user, wait=None):
+    """A slot for a call of `user` to site `iid`, waited for up to SLOT_WAIT seconds: the
+    calls of one view come in a burst, and a short wait serves them where a refusal would
+    leave the view empty. True when taken; give it back with give_slot."""
+    deadline = time.monotonic() + (SLOT_WAIT if wait is None else wait)
+    with _slot_freed:
+        while True:
+            if _out_users.take((user, iid)):
+                if _out.take(iid):
+                    return True
+                _out_users.give((user, iid))
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            _slot_freed.wait(left)
+
+
+def give_slot(iid, user):
+    _out.give(iid)
+    _out_users.give((user, iid))
+    with _slot_freed:
+        _slot_freed.notify_all()
+
+
+def _broken(iid):
+    with _breaker_lock:
+        st = _breaker.get(iid)
+        return bool(st and st.get('until', 0) > time.monotonic())
+
+
+def note_answer(iid, kind, started):
+    """What a relayed call says about the site, for the breaker: a signed or unsigned answer
+    is a site that runs; no answer counts only when it came fast (a refused or unreachable
+    address), so a slow request of one user does not close the site for everybody."""
+    if kind not in _NO_ANSWER:
+        _note_dial(iid, True)
+    elif time.monotonic() - started < fed.CONNECT_TIMEOUT + 2:
+        _note_dial(iid, False)
+
+
+def _note_dial(iid, ok):
+    now = time.monotonic()
+    with _breaker_lock:
+        st = _breaker.setdefault(iid, {'fails': [], 'until': 0})
+        if ok:
+            st['fails'] = []
+            st['until'] = 0
+            return
+        st['fails'] = [t for t in st['fails'] if now - t < _BREAK_WINDOW] + [now]
+        if len(st['fails']) >= _BREAK_AFTER:
+            st['until'] = now + _BREAK_FOR
+            st['fails'] = []
+
+
+def reset_for_tests():
+    global _sender_rate, _account_rate
+    _sender_rate = _account_rate = None
+    with _breaker_lock:
+        _breaker.clear()
+    for b in (_out, _in, _out_users, _tunnels, _uploads_out, _uploads_in):
+        with b._lock:
+            b._used, b._per = 0, {}
+    with _spool_lock:
+        _upload_users.clear()
+    with _user_tunnels_lock:
+        _user_tunnels.clear()
+    with _list_lock:
+        _list_cache.clear()
+    with _nonces_lock:
+        _nonces.clear()
+    _pulls.clear()
+
+
+# --- the wire ------------------------------------------------------------------------------
+
+def _sha(data):
+    return hashlib.sha256(data or b'').hexdigest()
+
+
+def _b64(data):
+    return base64.urlsafe_b64encode(data).decode().rstrip('=')
+
+
+def _unb64(text):
+    return base64.urlsafe_b64decode(text + '=' * (-len(text) % 4))
+
+
+def _request_message(body_sha, env_sha, ts, nonce, receiver, sender, path=RELAY_PATH):
+    return '\n'.join((RELAY_DOMAIN, 'POST', path, body_sha, env_sha, ts, nonce,
+                      receiver, sender)).encode()
+
+
+def _answer_message(nonce, rid, answer_sha, body_sha, responder, requester):
+    return '\n'.join((ANSWER_DOMAIN, nonce, rid, answer_sha, body_sha, responder,
+                      requester)).encode()
+
+
+def signed_request(iid, method, path, query, body_sha, ctype, principal, wire_path):
+    """(headers, nonce, rid) of a request to member `iid` at `wire_path` that runs `method`
+    `path` there as `principal`, or None when its envelope is too long to send."""
+    rid = secrets.token_hex(16)
+    envelope = {'v': RELAY_VERSION, 'rid': rid, 'method': method, 'path': path,
+                'query': query or '', 'ctype': ctype or '', 'principal': principal or {}}
+    env_text = _b64(json.dumps(envelope, separators=(',', ':'), sort_keys=True).encode())
+    if len(env_text) > MAX_ENVELOPE:
+        return None
+    sender = fed.instance_id()
+    ts, nonce = str(int(time.time())), secrets.token_urlsafe(18)
+    sig = fed.signing_key().sign(_request_message(body_sha, _sha(env_text.encode()), ts, nonce,
+                                                  iid, sender, wire_path))
+    headers = {ha_wire.PEER_HEADER: sender, ha_wire.PEER_TS_HEADER: ts,
+               ha_wire.PEER_NONCE_HEADER: nonce,
+               ha_wire.PEER_SIG_HEADER: base64.b64encode(sig).decode(),
+               ENVELOPE_HEADER: env_text, BODY_HEADER: body_sha,
+               'X-Requested-With': fed.PEER_XHR, 'Accept': '*/*',
+               'Content-Type': ctype or 'application/json'}
+    return headers, nonce, rid
+
+
+def session_handle(session_id):
+    """What the other sites know of a session of this instance: an HMAC of its id, which
+    never leaves this instance itself."""
+    key = hashlib.sha256(b'pegaprox-fed-session-1' + fed._own_field_key()[0]).digest()
+    return hmac.new(key, (session_id or '').encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def relay_call(iid, method, path, query='', body=b'', ctype='', principal=None,
+               read_timeout=READ_TIMEOUT, upload=None):
+    """Send one request to member `iid` to run there as `principal`.
+
+    Returns (kind, status, headers, body): kind 'answer' for a signed answer of the site
+    (status, headers and body are the inner request's, or the site's signed refusal),
+    'refused' for an unsigned refusal before any check of ours went through there (its
+    JSON in body), 'silent' when no answer came at all, 'unsent' when the request did not
+    leave this instance (no connection to the site).
+
+    `upload`, a spooled body (open file, size, sha256), goes in place of `body` to
+    RELAY_UPLOAD_PATH, read from the file as it is sent."""
+    rec = fed.member_record(iid)
+    if not rec or not rec.get('url'):
+        return 'silent', 0, {}, b''
+    wire_path = RELAY_PATH
+    if upload is not None:
+        body, size, body_sha = upload
+        wire_path = RELAY_UPLOAD_PATH
+    else:
+        size, body_sha = len(body or b''), _sha(body)
+    signed = signed_request(iid, method, path, query, body_sha, ctype if size else '',
+                            principal, wire_path)
+    if signed is None:
+        return 'refused', 414, {}, json.dumps({'code': 'FED_RELAY_TOO_LARGE', 'error':
+                                              'The request is too long to relay'}).encode()
+    headers, nonce, rid = signed
+    sender = fed.instance_id()
+    if upload is not None:
+        headers['Content-Length'] = str(size)
+    transport = fed._runtime.get('transport')
+    sent = {}
+    if transport is not None:
+        try:
+            data = body.read() if upload is not None else (body or b'')
+            status, raw, rh = transport(rec['url'], 'POST', wire_path, data, headers)
+        except Exception as e:
+            logging.warning(f'[FED] relay to {iid} failed: {e}')
+            status, raw, rh = 0, None, {}
+            if isinstance(e, ConnectionRefusedError):
+                sent['never'] = True
+    else:
+        status, raw, rh = fed._wire_call(rec['url'], rec.get('fingerprints') or [], 'POST',
+                                         wire_path, body or b'', headers, read_timeout,
+                                         MAX_ANSWER, sent=sent)
+    if not status:
+        return ('unsent' if sent.get('never') else 'silent'), 0, {}, b''
+    raw = raw or b''
+    rh = {k.lower(): v for k, v in (rh or {}).items() if isinstance(k, str)}
+    answer_text, answer_sig = rh.get(ANSWER_HEADER.lower()), rh.get(SIG_HEADER.lower())
+    key = ha_wire.public_key(rec.get('public_key') or '')
+    signed = False
+    if (status == 200 and isinstance(answer_text, str) and isinstance(answer_sig, str)
+            and key is not None and len(answer_text) <= 4 * MAX_ENVELOPE):
+        from cryptography.exceptions import InvalidSignature
+        try:
+            key.verify(base64.b64decode(answer_sig),
+                       _answer_message(nonce, rid, _sha(answer_text.encode()), _sha(raw), iid,
+                                       sender))
+            signed = True
+        except (InvalidSignature, ValueError):
+            signed = False
+    if not signed:
+        if status == 200:
+            logging.warning(f'[FED] the answer of {iid} to a relayed request carries no good '
+                            'signature - taken as no answer')
+            return 'silent', 0, {}, b''
+        return 'refused', status, {}, raw[:4096]
+    try:
+        answer = json.loads(_unb64(answer_text))
+    except Exception:
+        return 'silent', 0, {}, b''
+    if not isinstance(answer, dict) or answer.get('rid') != rid:
+        return 'silent', 0, {}, b''
+    inner = answer.get('status')
+    if not isinstance(inner, int) or isinstance(inner, bool) or not 100 <= inner < 600:
+        return 'silent', 0, {}, b''
+    out_headers = {}
+    for k, v in (answer.get('headers') or {}).items():
+        if k in _PASS_HEADERS and isinstance(v, str) and '\n' not in v and '\r' not in v:
+            out_headers[k] = v[:512]
+    return 'answer', inner, out_headers, raw
+
+
+# --- the leading side ------------------------------------------------------------------------
+
+_nonces = {}
+_nonces_lock = threading.Lock()
+# a member's calls per minute, counted before a nonce is spent: a call over the rate spends
+# none, and the store of each sender holds more than the rate lets in for a nonce's life
+# (SIGNATURE_WINDOW on both sides), so it never fills and refuses the honest calls
+_sender_rate = None
+RELAY_NONCES = 8192
+
+
+# the relayed calls one account of this site makes to one site per minute: a share of what
+# that site takes from this one (SENDER_RATE), so no account spends it for the others
+ACCOUNT_RATE = SENDER_RATE // 5
+_account_rate = None
+
+
+def account_call(iid, user):
+    """False when `user` made ACCOUNT_RATE calls to site `iid` within the last minute."""
+    global _account_rate
+    if _account_rate is None:
+        from pegaprox.utils.ratelimit import SlidingWindow
+        _account_rate = SlidingWindow(limit=ACCOUNT_RATE, window=60, max_keys=4096,
+                                      name='fed-relay-account')
+    return _account_rate.allow(f'{iid}:{user}')
+
+
+def _rate():
+    global _sender_rate
+    if _sender_rate is None:
+        from pegaprox.utils.ratelimit import SlidingWindow
+        _sender_rate = SlidingWindow(limit=SENDER_RATE, window=60, max_keys=64, name='fed-relay')
+    return _sender_rate
+
+
+def header_verdict(request):
+    """Who sent this relayed request, from its headers alone (no byte of the body is read):
+    ('member', record, envelope), ('removed', tombstone, None), ('skewed', record, None) or
+    (None, None, None). Worked out once per request; the nonce is spent with the 'member'
+    verdict, so the request counts once. The signature holds for the path it came to."""
+    env = request.environ
+    if _VERDICT_ENVIRON in env:
+        return env[_VERDICT_ENVIRON]
+    verdict = (None, None, None)
+    try:
+        if request.path in (RELAY_PATH, RELAY_UPLOAD_PATH, RELAY_STREAM_PATH):
+            verdict = _header_verdict(request.headers, request.path)
+    except Exception as e:
+        logging.warning(f'[FED] could not check a relayed request: {e}')
+    env[_VERDICT_ENVIRON] = verdict
+    return verdict
+
+
+def _header_verdict(headers, path=RELAY_PATH):
+    claimed = headers.get(ha_wire.PEER_HEADER) or ''
+    ts, nonce, sig = (headers.get(ha_wire.PEER_TS_HEADER), headers.get(ha_wire.PEER_NONCE_HEADER),
+                      headers.get(ha_wire.PEER_SIG_HEADER))
+    env_text, body_sha = headers.get(ENVELOPE_HEADER), headers.get(BODY_HEADER)
+    if not (ha_wire.ID_RE.fullmatch(claimed) and isinstance(env_text, str)
+            and 0 < len(env_text) <= MAX_ENVELOPE and isinstance(body_sha, str)
+            and _HEX64.fullmatch(body_sha) and all(isinstance(v, str) for v in (ts, nonce, sig))
+            and ha_wire.TS_RE.fullmatch(ts) and ha_wire.NONCE_RE.fullmatch(nonce)
+            and ha_wire.SIGNATURE_RE.fullmatch(sig)):
+        return None, None, None
+    ident = fed.identity() or {}
+    me = ident.get('instance_id') or ''
+    if not me:
+        return None, None, None
+    view = (ident.get('view') or {}).get('members') or {}
+    rec = view.get(claimed)
+    kind = 'member'
+    if rec is None:
+        rec = (ident.get('tombstones') or {}).get(claimed)
+        kind = 'removed'
+    key = ha_wire.public_key((rec or {}).get('public_key') or '')
+    if key is None:
+        return None, None, None
+    from cryptography.exceptions import InvalidSignature
+    try:
+        key.verify(base64.b64decode(sig),
+                   _request_message(body_sha, _sha(env_text.encode()), ts, nonce, me, claimed,
+                                    path))
+    except (InvalidSignature, ValueError):
+        return None, None, None
+    rec = dict(rec, instance_id=claimed)
+    if kind == 'removed':
+        return 'removed', rec, None
+    now = time.time()
+    if abs(now - int(ts)) > ha_wire.SIGNATURE_WINDOW or int(ts) < fed._started():
+        return 'skewed', dict(rec, skew='early' if int(ts) < fed._started() else 'window'), None
+    try:
+        envelope = json.loads(_unb64(env_text))
+    except Exception:
+        envelope = None
+    envelope = envelope if isinstance(envelope, dict) else {}
+    if not _rate().allow(claimed):
+        return 'busy', rec, envelope
+    with _nonces_lock:
+        spent = ha_wire.take_nonce(_nonces.setdefault(claimed, {}), nonce, int(ts), now,
+                                   cap=RELAY_NONCES)
+    if spent == 'full':
+        return 'busy', rec, envelope
+    if spent != 'ok':
+        return None, None, None
+    return 'member', rec, envelope
+
+
+def valid_envelope(envelope):
+    """The envelope's fields when they are well formed, else None."""
+    if not isinstance(envelope, dict) or envelope.get('v') != RELAY_VERSION:
+        return None
+    method, path, query = envelope.get('method'), envelope.get('path'), envelope.get('query')
+    ctype, rid, principal = envelope.get('ctype'), envelope.get('rid'), envelope.get('principal')
+    if method not in _METHODS or not isinstance(path, str) or not path.startswith('/api/'):
+        return None
+    if '~' in path or '..' in path or '\\' in path or len(path) > 2048:
+        return None
+    if not isinstance(query, str) or '~' in query or len(query) > 2048:
+        return None
+    try:
+        # a lone surrogate passes JSON and the URL map but not into a WSGI environ
+        path.encode('utf-8')
+        query.encode('latin-1')
+    except UnicodeEncodeError:
+        return None
+    if not isinstance(ctype, str) or len(ctype) > 200 or '\n' in ctype or '\r' in ctype:
+        return None
+    if not isinstance(rid, str) or not _RID_RE.fullmatch(rid) or not isinstance(principal, dict):
+        return None
+    if not set(principal) <= PRINCIPAL_KEYS:
+        return None
+    user, home = principal.get('user'), principal.get('home')
+    sh, ip = principal.get('sh', ''), principal.get('ip', '')
+    tok = principal.get('tok')
+    if not (isinstance(user, str) and 0 < len(user) <= 128 and isinstance(home, str)
+            and ha_wire.ID_RE.fullmatch(home) and isinstance(sh, str) and len(sh) <= 64
+            and isinstance(ip, str) and len(ip) <= 64):
+        return None
+    if tok is not None and tok not in TOKEN_ROLES:
+        return None
+    asr = principal.get('asr')
+    if asr is not None:
+        from pegaprox.core.federation_signin import well_formed
+        if not well_formed(asr) or tok is not None:
+            return None
+    try:
+        import ipaddress
+        ip = str(ipaddress.ip_address(ip)) if ip else ''
+    except ValueError:
+        return None
+    return {'method': method, 'path': path, 'query': query, 'ctype': ctype, 'rid': rid,
+            'user': user, 'home': home, 'sh': sh, 'ip': ip, 'tok': tok, 'asr': asr}
+
+
+# a mirror that has not arrived yet is pulled from its home once per half minute
+_pulls = {}
+_PULL_EVERY = 30
+
+
+def _pull_soon(home):
+    now = time.monotonic()
+    if now - _pulls.get(home, -1e9) < _PULL_EVERY:
+        return
+    _pulls[home] = now
+
+    def go():
+        try:
+            fed.pull_identities(home)
+        except Exception as e:
+            logging.warning(f'[FED] the accounts of {home} could not be pulled: {e}')
+    threading.Thread(target=go, daemon=True, name='federation-relay-pull').start()
+
+
+def resolve_principal(sender, call):
+    """(user row, None) when this instance runs the call as a mirror of an account the
+    sender homes, or as an account signed in at the sender through its home (this instance
+    or another member: the home's assertion, core/federation_signin.py), else (None,
+    (status, code, sentence))."""
+    from pegaprox.core.db import get_db
+    home = call['home']
+    if home != sender:
+        from pegaprox.core.federation_signin import refusal
+        why = refusal(sender, call)
+        if why:
+            return None, why
+    own = home == fed.instance_id()
+    try:
+        row = get_db().conn.execute('SELECT * FROM users WHERE username = ?',
+                                    (call['user'],)).fetchone()
+    except Exception as e:
+        logging.warning(f'[FED] could not read the account of a relayed request: {e}')
+        return None, (503, 'FED_UNAVAILABLE', 'The accounts of this site cannot be read')
+    if row is None and own:
+        return None, (403, 'FED_RELAY_DISABLED', 'Your account is gone at its home site')
+    if row is None:
+        _pull_soon(home)
+        return None, (503, 'FED_RELAY_SYNCING', 'Your account has not reached this site yet - '
+                                                'try again in a moment')
+    row = dict(row)
+    if (row.get('fed_home') or '') != ('' if own else home):
+        return None, (403, 'FED_RELAY_WRONG_HOME', 'This site has an account of its own with '
+                                                   'that name')
+    if row.get('tenant') == fed.QUARANTINE or row.get('role') == fed.QUARANTINE:
+        return None, (403, 'FED_RELAY_UNMAPPED', 'An admin of this site has not mapped your '
+                                                 'tenant and role yet')
+    if not row.get('enabled', 1):
+        return None, (403, 'FED_RELAY_DISABLED', 'Your account is disabled at this site')
+    if row.get('portal_only'):
+        return None, (403, 'PORTAL_ONLY', 'This account can only use the Client Portal')
+    try:
+        from pegaprox.utils.auth import mfa_enrolment_state, MFA_DUE
+        from pegaprox.api.helpers import load_server_settings
+        user = get_db().get_user(call['user']) or {}
+        if mfa_enrolment_state(user, load_server_settings(), call['user']) == MFA_DUE:
+            return None, (403, 'FED_RELAY_MFA', 'This site asks every account for a second '
+                                                'factor: set one up at your home site')
+    except Exception as e:
+        logging.warning(f'[FED] could not tell whether force_2fa holds a relayed request: {e}')
+        return None, (503, 'FED_UNAVAILABLE', 'The second-factor rule of this site cannot be read')
+    return row, None
+
+
+def run_relayed(app, outer, call, row, site, sender=''):
+    """Run the call through this app as the mirror `row`: (status, headers, body). A call an
+    API token made at its site runs as a token of that role here, floored to the mirror's
+    role as every token of this instance is."""
+    from pegaprox.utils.auth import open_relay_session, end_relay_session, RELAY_ENVIRON
+    body = call['body']
+    # a spooled upload is read from its file, everything else from memory
+    stream, length = (body, call['size']) if not isinstance(body, bytes) else \
+        (io.BytesIO(body), len(body))
+    environ = {
+        'REQUEST_METHOD': call['method'],
+        'SCRIPT_NAME': '',
+        'PATH_INFO': call['path'].encode('utf-8').decode('latin-1'),
+        'QUERY_STRING': call['query'],
+        'SERVER_NAME': outer.get('SERVER_NAME') or 'localhost',
+        'SERVER_PORT': outer.get('SERVER_PORT') or '443',
+        'SERVER_PROTOCOL': 'HTTP/1.1',
+        'REMOTE_ADDR': call['ip'] or outer.get('REMOTE_ADDR') or '',
+        'HTTP_HOST': outer.get('HTTP_HOST') or 'localhost',
+        # the marker of the UI's own calls and no Origin: the CSRF gate takes it as a
+        # same-origin call
+        'HTTP_X_REQUESTED_WITH': 'XMLHttpRequest',
+        'HTTP_USER_AGENT': f'PegaProx site {site}'[:200],
+        'CONTENT_LENGTH': str(length),
+        'wsgi.version': (1, 0),
+        'wsgi.url_scheme': outer.get('wsgi.url_scheme') or 'https',
+        'wsgi.input': stream,
+        'wsgi.errors': outer.get('wsgi.errors') or sys.stderr,
+        'wsgi.multithread': bool(outer.get('wsgi.multithread')),
+        'wsgi.multiprocess': False,
+        'wsgi.run_once': False,
+    }
+    if call['ctype']:
+        environ['CONTENT_TYPE'] = call['ctype']
+    # the session last: whatever above could fail leaves none behind (it was opened first,
+    # and a path that would not encode kept it until the session timeout)
+    if call.get('tok'):
+        sid = open_relay_session(row['username'], call['tok'], call['ip'], site, api_token=True)
+    else:
+        sid = open_relay_session(row['username'], row.get('role') or 'viewer', call['ip'], site)
+    try:
+        environ['HTTP_X_SESSION_ID'] = sid
+        environ[RELAY_ENVIRON] = {'session': sid, 'site': site, 'home': call['home'],
+                                  'rid': call['rid'], 'ip': call['ip'], 'sh': call['sh'],
+                                  'sender': sender}
+        return contextvars.Context().run(_dispatch, app, environ)
+    finally:
+        end_relay_session(sid)
+
+
+def _dispatch(app, environ):
+    started, chunks = {}, []
+
+    def start_response(status, headers, exc_info=None):
+        started['status'], started['headers'] = status, headers
+        return chunks.append
+
+    result = app(environ, start_response)
+    size, too_large = 0, False
+    try:
+        for chunk in result:
+            size += len(chunk)
+            if size > MAX_ANSWER:
+                too_large = True
+                break
+            chunks.append(chunk)
+    finally:
+        close = getattr(result, 'close', None)
+        if close:
+            close()
+    if too_large:
+        return 502, {'Content-Type': 'application/json'}, json.dumps({
+            'code': 'FED_RELAY_TOO_LARGE',
+            'error': 'Done at the site that leads the cluster, but its answer is too large to '
+                     'carry - look there'}).encode()
+    status = int(str(started.get('status') or '500').split(' ', 1)[0])
+    wanted = {name.lower(): name for name in _PASS_HEADERS}
+    headers = {wanted[k.lower()]: v for k, v in started.get('headers') or ()
+               if k.lower() in wanted}
+    return status, headers, b''.join(chunks)
+
+
+def sign_answer(nonce, rid, requester, status, headers, body):
+    """The answer headers of a relayed request: the inner status and headers in an envelope,
+    signed over the request's nonce, the rid and the body."""
+    answer_text = _b64(json.dumps({'status': int(status), 'headers': headers, 'rid': rid},
+                                  separators=(',', ':'), sort_keys=True).encode())
+    sig = fed.signing_key().sign(_answer_message(nonce, rid, _sha(answer_text.encode()),
+                                                 _sha(body), fed.instance_id(), requester))
+    return {ANSWER_HEADER: answer_text, SIG_HEADER: base64.b64encode(sig).decode()}
+
+
+# --- uploads ---------------------------------------------------------------------------------
+#
+# The body of an upload is written to a file first, at each of the two sites, with its
+# sha256 taken on the way: the sending site signs that digest, the leading site hands the
+# file on to its upload route only when its copy has the same one.
+
+class UploadRefused(Exception):
+    def __init__(self, status, code, error):
+        super().__init__(error)
+        self.status, self.code, self.error = status, code, error
+
+
+def upload_dir():
+    """Where uploads are spooled: the directory the upload route of this instance uses
+    (api/vms.py), not /tmp, which is often too small in a container."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tmp')
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def spool(stream, size):
+    """(path, sha256) of `size` bytes read from `stream` into a file of their own. Raises
+    UploadRefused when the size is no upload's or the disk cannot hold it, or when the
+    stream ends early; the file is gone then."""
+    import shutil
+    if not isinstance(size, int) or size <= 0:
+        raise UploadRefused(411, 'FED_RELAY_LENGTH', 'An upload has to say its length')
+    if size > MAX_UPLOAD:
+        raise UploadRefused(413, 'FED_RELAY_TOO_LARGE', 'The upload is larger than this '
+                                                         'site takes')
+    where = upload_dir()
+    # what the disk has now; the uploads written at the same time are checked as they write
+    # (_spool_into). A size reserved up front was held for a body that never came, and one
+    # announced the size of the disk refused every other upload
+    if size + UPLOAD_RESERVE > shutil.disk_usage(where).free:
+        raise UploadRefused(507, 'FED_RELAY_NO_SPACE', 'Not enough free space to take this '
+                                                        'upload on')
+    return _spool_into(where, stream, size)
+
+
+def _spool_into(where, stream, size):
+    import tempfile
+    import shutil
+    fd, path = tempfile.mkstemp(dir=where)
+    digest, got = hashlib.sha256(), 0
+    try:
+        with os.fdopen(fd, 'wb') as out:
+            while got < size:
+                chunk = stream.read(min(1024 * 1024, size - got))
+                if not chunk:
+                    raise UploadRefused(400, 'FED_RELAY_BODY', 'The upload ended early')
+                if got % (64 * 1024 * 1024) < len(chunk) and \
+                        shutil.disk_usage(where).free < UPLOAD_RESERVE + (size - got):
+                    raise UploadRefused(507, 'FED_RELAY_NO_SPACE', 'Not enough free space '
+                                                                    'to take this upload on')
+                digest.update(chunk)
+                out.write(chunk)
+                got += len(chunk)
+    except BaseException:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    return path, digest.hexdigest()
+
+
+def take_upload_slot(iid, wait=UPLOAD_SLOT_WAIT):
+    """One of the uploads this site sends to `iid` at once, waited for up to `wait` s."""
+    deadline = time.monotonic() + wait
+    while not _uploads_out.take(iid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+    return True
+
+
+def take_upload(username):
+    """One upload at a time per account: False while one of its uploads runs."""
+    with _spool_lock:
+        if username in _upload_users:
+            return False
+        _upload_users.add(username)
+        return True
+
+
+def give_upload(username):
+    with _spool_lock:
+        _upload_users.discard(username)
+
+
+def upload_refusal(row, call, cluster_id):
+    """(status, code, sentence) when the upload route would refuse the mirror `row` here,
+    else None: asked before a byte of the body is read, so a refused upload is not written
+    to this site's disk first. The route asks again when it runs."""
+    from pegaprox.core.db import get_db
+    from pegaprox.api.helpers import caller_is_scoped
+    from pegaprox.utils.rbac import get_user_clusters, has_permission
+    try:
+        user = dict(get_db().get_user(row['username']) or {}, username=row['username'])
+    except Exception:
+        return 503, 'FED_UNAVAILABLE', 'The accounts of this site cannot be read'
+    if call.get('tok'):
+        from pegaprox.utils.auth import apply_token_role
+        user = apply_token_role(user, call['tok'])
+    if not has_permission(user, 'storage.upload'):
+        return 403, 'MISSING_PERMISSION', 'Permission denied: storage.upload'
+    allowed = get_user_clusters(user)
+    if (allowed is not None and cluster_id not in allowed) or caller_is_scoped(user, cluster_id):
+        return 403, 'FED_RELAY_SCOPE', 'An upload to this cluster needs access to the whole cluster'
+    return None
+
+
+def drop_spooled(path):
+    if path:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+# --- the entry side: what the browser gets back ----------------------------------------------
+
+def browser_answer(kind, status, headers, body, write):
+    """(status, headers, body) for the browser from relay_call's result. An answer from
+    another site never carries HTML or SVG, a cookie or a redirect; a file other than JSON
+    or text is a download. A sign-in refusal there is no lost session here."""
+    if kind == 'unsent':
+        return _json(503, 'FED_SITE_UNREACHABLE', 'The site that leads this cluster cannot be '
+                                                  'reached - nothing was sent to it')
+    if kind == 'silent':
+        if write:
+            return _json(504, 'FED_RELAY_NO_ANSWER', 'The site that leads this cluster did not '
+                                                     'answer. The change may have happened '
+                                                     'there - check its tasks')
+        return _json(503, 'FED_SITE_UNREACHABLE', 'The site that leads this cluster does not '
+                                                  'answer')
+    if kind == 'refused':
+        code = ''
+        try:
+            code = (json.loads(body or b'{}') or {}).get('code') or ''
+        except Exception:
+            pass
+        if code == 'FED_DISABLED':
+            return _json(503, 'FED_SITE_OFF', 'The federation is switched off at the site that '
+                                              'leads this cluster')
+        if code in ('FED_STANDBY',) or str(code).startswith('HA_'):
+            return _json(503, 'FED_SITE_SWITCHING', 'The site that leads this cluster is '
+                                                    'switching over - try again in a moment')
+        if code == 'FED_CLOCK':
+            return _json(503, 'FED_CLOCK', 'The clocks of this site and the site that leads '
+                                           'this cluster are more than two minutes apart')
+        if code == 'FED_REMOVED':
+            return _json(410, 'FED_REMOVED', 'This site is no longer a member there')
+        return _json(502, 'FED_RELAY_REFUSED', 'The site that leads this cluster refused the '
+                                               'request')
+    out = dict(headers)
+    if 300 <= status < 400 and status != 304:
+        return _json(502, 'FED_RELAY_REDIRECT', 'The site that leads this cluster answered with '
+                                                'a redirect')
+    if status == 401:
+        try:
+            inner = json.loads(body or b'{}')
+        except Exception:
+            inner = {}
+        return _json(403, 'FED_RELAY_AUTH', (inner or {}).get('error')
+                     or 'The site that leads this cluster did not take your sign-in')
+    try:
+        code = (json.loads(body) or {}).get('code') if body and \
+            out.get('Content-Type', '').startswith('application/json') else ''
+    except Exception:
+        code = ''
+    if isinstance(code, str) and code.startswith('HA_'):
+        return _json(503, 'FED_SITE_SWITCHING', 'The site that leads this cluster is switching '
+                                                'over - try again in a moment')
+    ctype = (out.get('Content-Type') or '').split(';', 1)[0].strip().lower()
+    if body and ctype not in ANSWER_TYPES:
+        return _json(502, 'FED_RELAY_TYPE', 'The site that leads this cluster answered with '
+                                            'content this site does not pass on')
+    if body and ctype not in _INLINE_TYPES:
+        disp = out.get('Content-Disposition') or ''
+        name = re.search(r'filename="?([^";]{1,120})', disp)
+        safe = re.sub(r'[^A-Za-z0-9._-]', '_', name.group(1)) if name else 'download'
+        out['Content-Disposition'] = f'attachment; filename="{safe}"'
+    elif 'Content-Disposition' in out:
+        out.pop('Content-Disposition')
+    return status, out, body
+
+
+def _json(status, code, error):
+    return status, {'Content-Type': 'application/json'}, json.dumps(
+        {'code': code, 'error': error}).encode()
+
+
+# --- the cluster list ------------------------------------------------------------------------
+#
+# Each site answers LIST_RULE through the relay for the user asking: the clusters that user
+# may see there, with that user's permissions there. Kept here for half a minute per
+# (site, user); a site that does not answer never fails the list.
+
+LIST_SECONDS = 30
+MAX_LIST_ROWS = 1000
+# (site, user) lists kept: the expired go first, then the oldest
+MAX_LISTS = 2048
+# what is asked again at the next poll rather than kept
+_PASSING_STATES = ('unreachable', 'busy', 'switching', 'loading')
+# of these, the ones where the site itself runs
+_BUSY_STATES = ('busy', 'loading')
+
+
+def _good(held):
+    return held is not None and held[0].get('state') == 'ok'
+_list_cache = {}
+_list_lock = threading.Lock()
+
+
+def _list_row(r, iid):
+    if not isinstance(r, dict):
+        return None
+    raw = r.get('id')
+    if not isinstance(raw, str) or not fed.CLUSTER_ID_RE.fullmatch(raw):
+        return None
+    out = {'id': remote_id(raw, iid), 'name': str(r.get('name') or raw)[:80],
+           'cluster_type': r.get('type') if r.get('type') in fed.CLUSTER_TYPES else 'other',
+           'connected': r.get('connected') is True}
+    for field in ('nodes', 'vms'):
+        n = fed._count(r.get(field))
+        if n is not None:
+            out[field] = n
+    lat, lon = r.get('latitude'), r.get('longitude')
+    if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (lat, lon)) \
+            and -90 <= lat <= 90 and -180 <= lon <= 180:
+        out.update(latitude=lat, longitude=lon,
+                   location_label=str(r.get('location_label') or '')[:80])
+    return out
+
+
+def site_list(iid, rec, principal, now=None):
+    """The entry of one site in /api/federation/linked for one user, as it asks: a session
+    and each token role of the account have lists of their own."""
+    now = time.monotonic() if now is None else now
+    key = (iid, principal['user'], principal.get('home') or '', principal.get('tok') or '')
+    with _list_lock:
+        held = _list_cache.get(key)
+    if held is not None and 0 <= now - held[1] < LIST_SECONDS:
+        return held[0]
+    entry = {'iid': iid, 'site': rec.get('site') or iid[:8], 'url': rec.get('url') or '',
+             'state': 'ok', 'clusters': [], 'perms': []}
+    if _broken(iid):
+        entry['state'] = 'unreachable'
+    elif not _out.take(iid):
+        # the relays of the site come first; the last list is shown as it was
+        return dict(held[0], stale=True) if _good(held) else dict(entry, state='loading')
+    else:
+        try:
+            started = time.monotonic()
+            kind, status, _h, body = relay_call(iid, 'GET', LIST_RULE, principal=principal,
+                                                read_timeout=LIST_TIMEOUT)
+            note_answer(iid, kind, started)
+        finally:
+            _out.give(iid)
+        entry.update(_list_state(kind, status, body, iid))
+    if entry['state'] in _PASSING_STATES:
+        # asked again at the next poll, not kept. A site that is busy runs, and its last good
+        # list stays; one that does not answer or switches over says so
+        if entry['state'] in _BUSY_STATES and _good(held):
+            return dict(held[0], stale=True)
+        return entry
+    with _list_lock:
+        if len(_list_cache) >= MAX_LISTS:
+            for k in [k for k, v in _list_cache.items() if not 0 <= now - v[1] < LIST_SECONDS]:
+                _list_cache.pop(k, None)
+            while len(_list_cache) >= MAX_LISTS:
+                _list_cache.pop(next(iter(_list_cache)))
+        _list_cache[key] = (entry, now)
+    return entry
+
+
+_LIST_STATES = {'FED_RELAY_UNMAPPED': 'unmapped', 'FED_RELAY_SYNCING': 'syncing',
+                'FED_RELAY_WRONG_HOME': 'name_taken', 'FED_RELAY_DISABLED': 'disabled_account',
+                'FED_RELAY_MFA': 'mfa', 'PORTAL_ONLY': 'portal_only'}
+
+
+def _list_state(kind, status, body, iid):
+    if kind in _NO_ANSWER:
+        return {'state': 'unreachable'}
+    try:
+        data = json.loads(body or b'{}')
+    except Exception:
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    if kind == 'refused':
+        code = data.get('code') or ''
+        if code == 'FED_DISABLED':
+            return {'state': 'off'}
+        if code == 'FED_CLOCK':
+            return {'state': 'clock'}
+        if code == 'FED_STANDBY' or str(code).startswith('HA_'):
+            return {'state': 'switching'}
+        if status in (404, 405):
+            return {'state': 'old_release'}
+        return {'state': 'refused'}
+    if status == 429:
+        return {'state': 'busy'}
+    if status != 200:
+        return {'state': _LIST_STATES.get(data.get('code'), 'refused')}
+    rows = [x for x in (_list_row(r, iid) for r in (data.get('clusters') or [])[:MAX_LIST_ROWS])
+            if x]
+    perms = [p for p in (data.get('perms') or []) if isinstance(p, str) and len(p) <= 64][:256]
+    return {'state': 'ok', 'clusters': rows, 'perms': perms, 'admin': data.get('admin') is True,
+            'release': str(data.get('release') or '')[:32]}
+
+
+def forget_lists(iid=None):
+    with _list_lock:
+        for key in [k for k in _list_cache if iid is None or k[0] == iid]:
+            _list_cache.pop(key, None)
+
+
+# --- consoles --------------------------------------------------------------------------------
+#
+# A console of another site's guest or node opens through this instance: the browser opens
+# CONSOLE_PATH on this instance's main port, which asks the leading site for a console token
+# as the user (CONSOLE_TOKEN_RULE, through the relay) and opens that site's own console
+# server with it, over TLS checked against the site's pins before a byte of the upgrade
+# leaves. The leading site's console server checks the token, the cluster and the guest or
+# node exactly as for a browser of its own. Only that site's console ports, or its main port
+# behind a reverse proxy, have to be reachable from here.
+
+CONSOLE_PATH = '/api/federation/console'
+CONSOLE_TOKEN_RULE = CLUSTER_RULE + '/console-token'
+# the target half of a migration between two sites (core/federation_migrate.py)
+MIGRATION_TARGET_RULE = CLUSTER_RULE + '/migration-target'
+# cluster rules a site asks for itself, never for a browser: what they answer (a console
+# token, a migration token) goes to the asking site's server only
+SERVER_RULES = frozenset({CONSOLE_TOKEN_RULE, MIGRATION_TARGET_RULE})
+CONSOLE_KINDS = ('vnc', 'shell', 'term')
+# what the browser may hand on to the leading site's console server, per kind: the PVE
+# ticket the relayed ticket call gave it, nothing else
+CONSOLE_PARAMS = {'vnc': ('pve_ticket', 'pve_port'), 'shell': (),
+                  'term': ('ticket', 'port', 'host', 'user')}
+_NODE_RE = re.compile(r'[a-zA-Z][a-zA-Z0-9.\-]{0,62}')
+# open tunnels per user, per site and in all
+TUNNELS_PER_USER = 4
+_tunnels = _Budget(max(4 * TUNNELS_PER_USER, _P // 2), max(3 * TUNNELS_PER_USER, _P // 4))
+_user_tunnels = {}
+_user_tunnels_lock = threading.Lock()
+
+
+def take_tunnel(username, iid):
+    with _user_tunnels_lock:
+        if _user_tunnels.get(username, 0) >= TUNNELS_PER_USER:
+            return False
+        if not _tunnels.take(iid):
+            return False
+        _user_tunnels[username] = _user_tunnels.get(username, 0) + 1
+        return True
+
+
+def give_tunnel(username, iid):
+    with _user_tunnels_lock:
+        n = _user_tunnels.get(username, 0) - 1
+        if n > 0:
+            _user_tunnels[username] = n
+        else:
+            _user_tunnels.pop(username, None)
+    _tunnels.give(iid)
+
+
+def console_target(kind, raw, node, vm_type, vmid, params):
+    """The path of the leading site's console server for one console, the token left out:
+    None for anything malformed."""
+    from urllib.parse import urlencode
+    if kind not in CONSOLE_KINDS or not _NODE_RE.fullmatch(node or ''):
+        return None
+    extra = {}
+    for name in CONSOLE_PARAMS[kind]:
+        value = params.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, str) or len(value) > 1024 or '\n' in value:
+            return None
+        extra[name] = value
+    if kind == 'shell':
+        return f'/api/clusters/{raw}/nodes/{node}/shellws', extra
+    if vm_type not in ('qemu', 'lxc') or not isinstance(vmid, int) or not 0 < vmid < 10 ** 9:
+        return None
+    leaf = 'vncwebsocket' if kind == 'vnc' else 'termwebsocket'
+    return f'/api/clusters/{raw}/vms/{node}/{vm_type}/{vmid}/{leaf}', extra
+
+
+def _pins_match(der, pins):
+    got = hashlib.sha256(der or b'').hexdigest()
+    return any(isinstance(p, str) and p.replace(':', '').lower() == got for p in pins)
+
+
+def open_console(rec, kind, path, query, reverse_proxy, timeout=10):
+    """A websocket-client connection to the leading site's console server for `path`?`query`.
+    Its certificate must match the site's pins (or, without pins, a CA and its host name)
+    before the upgrade goes out. Raises on anything else."""
+    import socket
+    import ssl
+    from urllib.parse import urlsplit
+    import websocket
+    url = urlsplit(rec.get('url') or '')
+    host = url.hostname
+    if url.scheme != 'https' or not host or not fed._url_ok(rec['url'] + path):
+        raise ValueError('the site has no https address this instance may dial')
+    base = url.port or 443
+    port = base if reverse_proxy else base + (1 if kind == 'vnc' else 2)
+    pins = list(rec.get('fingerprints') or [])
+    raw_sock = socket.create_connection((host, port), timeout=timeout)
+    try:
+        if pins:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        else:
+            ctx = ssl.create_default_context()
+        # MK Nov 2026 - TLS 1.2 at least, whatever the build or the system policy allows
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        tls = ctx.wrap_socket(raw_sock, server_hostname=host)
+        if pins and not _pins_match(tls.getpeercert(binary_form=True), pins):
+            tls.close()
+            raise ssl.SSLError('the console server of the site shows a certificate none of its '
+                               'pins match')
+    except Exception:
+        raw_sock.close()
+        raise
+    netloc = f'[{host}]' if ':' in host else host
+    return websocket.create_connection(f'wss://{netloc}:{port}{path}?{query}', socket=tls,
+                                       timeout=timeout, redirect_limit=0,
+                                       header={'User-Agent': 'PegaProx-Federation/2'})

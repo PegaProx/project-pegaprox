@@ -10,6 +10,7 @@ this just decides *when* to call it based on the schedule field.
 
 import time
 import logging
+import functools
 import threading
 from datetime import datetime
 
@@ -27,6 +28,9 @@ _xcrepl_running = False
 # (Set + lock live here because both the loop and the API blueprint need them.)
 _xcrepl_inflight = set()
 _xcrepl_inflight_lock = threading.Lock()
+
+# jobs held for a federation lease, so the loop says so once and not every tick
+_held_logged = set()
 
 
 def is_job_inflight(job_id):
@@ -125,6 +129,19 @@ def _xcrepl_loop():
                 now = time.time()
                 for job in jobs:
                     job = dict(job)
+                    # the worker lease check: a job of a cluster enrolled in the federation
+                    # runs only while this instance holds a live lease on it - source and
+                    # target both, the copy writes on either. Not asked while it is off
+                    from pegaprox.core import federation as _fed
+                    if _fed.enabled() and not (
+                            _fed.worker_takes_writes_for(job.get('source_cluster') or '')
+                            and _fed.worker_takes_writes_for(job.get('target_cluster') or '')):
+                        if job['id'] not in _held_logged:
+                            _held_logged.add(job['id'])
+                            logger.info(f"[XCREPL] Job {job['id']} (VM {job['vmid']}) held: its "
+                                        "cluster(s) are enrolled without a live lease here")
+                        continue
+                    _held_logged.discard(job['id'])
                     # a NULL in the column raised here and ended the tick for every job after it
                     interval = _parse_interval_seconds(str(job.get('schedule') or '0 */6 * * *'))
                     last_run = job.get('last_run', '')
@@ -151,7 +168,10 @@ def _xcrepl_loop():
 
                         # NS: same-cluster uses local replication (no remote-migrate)
                         is_local = job.get('source_cluster') == job.get('target_cluster')
-                        handler = _execute_local_replication if is_local else _execute_replication
+                        # MK Nov 2026 - a scheduled run makes its token paced, its password
+                        # login waits after failed ones; a run started by hand does not
+                        handler = (_execute_local_replication if is_local
+                                   else functools.partial(_execute_replication, paced=True))
                         logger.info(f"[XCREPL] Scheduling {'local' if is_local else 'cross-cluster'} job {job['id']} (VM {job['vmid']})")
                         # an automatic leader that lost its lease starts no job (#625)
                         if not ha.confirm_step(f"replication job {job['id']}"):

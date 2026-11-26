@@ -19,7 +19,7 @@ def _mgr():
     m.nodes_in_maintenance = {}
     m.maintenance_lock = threading.Lock()
     m._rolling_update = None
-    m._evacuation_placement = lambda: ({}, {})
+    m._evacuation_placement = lambda *a: ({}, {})
     m._evacuation_allowed_nodes = lambda vm, p: None
     m._derive_proxlb_tag_rules = lambda vms=None: {'pins': {}, 'rules': [], 'ignored': set(), 'unresolved': []}
     m.get_node_status = lambda: {'n2': {'status': 'online', 'score': 1}, 'n1': {'status': 'online', 'score': 1}}

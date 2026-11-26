@@ -53,7 +53,7 @@ from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined, caller_is_scoped
 from pegaprox.api.helpers import node_shell_address, node_shell_refusal
 from pegaprox.api.helpers import xapi_permission_missing, upstream_failure, tenant_quota_gate, guest_size, quota_hold_alive
-from pegaprox.api.helpers import UPSTREAM_AUTH, UPSTREAM_AUTH_STATUSES
+from pegaprox.api.helpers import UPSTREAM_AUTH, UPSTREAM_AUTH_STATUSES, pve_refusal
 from pegaprox.api.helpers import pve_read_failed, pve_unreachable, _checkbox
 from pegaprox.api.helpers import evacuation_options, evacuation_options_said, guest_storage_totals
 from pegaprox.api.helpers import (sees_whole_maintenance, maintenance_without_guests,
@@ -61,7 +61,7 @@ from pegaprox.api.helpers import (sees_whole_maintenance, maintenance_without_gu
                                   _request_caller)
 from pegaprox.api.ha import standby_console_refusal, STANDBY_CONSOLE_ERROR
 from pegaprox.core import ha, ha_transport
-from pegaprox.core import transfer_net, preflight
+from pegaprox.core import transfer_net, preflight, migration_tunnel
 from pegaprox.core.transfer_net import transfer_ssh_address
 from pegaprox.background import guest_index
 from pegaprox.utils.ssh import get_paramiko, ssh_password_for, ssh_password_to, ssh_blocked_for, bare_host, node_login
@@ -1846,6 +1846,15 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
     """Restore a VM from backup
     
     MK: Can restore to same VMID (overwrite) or new VMID
+
+    Body: {volid, target_vmid?, storage?, start?, allow_identity_mismatch?}.
+    allow_identity_mismatch (default false): over the same VMID, overwrite a guest the backup
+    is not of. Proxmox VE 9.3 refuses that in the restore task without it ('backup belongs
+    to another guest'); a node before 9.2.33 has no such check and is not sent the option.
+    Asked for and not sent, the answer says why in identity_warning. Over a guest that is
+    there and without the option, the task is followed for a few seconds: refused for this
+    reason, the answer is 409 with code IDENTITY_MISMATCH, PVE's words and the task, and the
+    restore can be sent again with allow_identity_mismatch.
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok:
@@ -1921,6 +1930,14 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
             'vmid': target_vmid,
             'force': 1 if str(target_vmid) == str(vmid) else 0  # force overwrite if same vmid
         }
+        _iwarn = {}
+        if restore_params['force'] and data.get('allow_identity_mismatch') is True:
+            from pegaprox.core.batch_restore import identity_override_withheld
+            _why = identity_override_withheld(manager, node)
+            if _why:
+                _iwarn['identity_warning'] = _why
+            else:
+                restore_params['allow-identity-mismatch'] = 1
         # MK Oct 2026 - pct has no archive parameter, a container restore is a create from
         # the backup as ostemplate with restore set (same as core/batch_restore.start_restore)
         if vm_type == 'qemu':
@@ -1944,12 +1961,28 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
             # the restored config replaces what the search index read under that id
             guest_index.drop(cluster_id, vm_type, target_vmid)
             user = getattr(request, 'session', {}).get('user', 'system')
-            log_audit(user, 'backup.restored', f"Restored {volid} to VMID {target_vmid}", cluster=manager.config.name)
+            # MK Nov 2026 - over the guest itself and without the override, PVE 9.3 may refuse
+            # it in the task: 409 IDENTITY_MISMATCH with PVE's words, the Backups tab shows its
+            # hint to tick the box (as POST /backup-restore)
+            if restore_params['force'] and data.get('allow_identity_mismatch') is not True:
+                from pegaprox.api.pbs import guest_is_there
+                from pegaprox.core.batch_restore import identity_refusal_in_task, IDENTITY_MISMATCH
+                refused = (identity_refusal_in_task(manager, node, task)
+                           if guest_is_there(cluster_id, target_vmid) else '')
+                if refused:
+                    log_audit(user, 'backup.restore_refused', f"Restore of {volid} to VMID {target_vmid} "
+                              f"refused by Proxmox VE: the backup belongs to another guest",
+                              cluster=manager.config.name)
+                    return jsonify({'error': refused[:500], 'code': IDENTITY_MISMATCH, 'task': task,
+                                    'vmid': target_vmid}), 409
+            log_audit(user, 'backup.restored', f"Restored {volid} to VMID {target_vmid}"
+                      + (' (allow-identity-mismatch)' if 'allow-identity-mismatch' in restore_params else ''),
+                      cluster=manager.config.name)
             return jsonify({'success': True, 'task': task, 'vmid': target_vmid,
-                            **({'quota_warning': _qwarn} if _qwarn else {})})
+                            **({'quota_warning': _qwarn} if _qwarn else {}), **_iwarn})
         
         # NS: proxmox sometimes returns weird error messages, should probably parse them better
-        return upstream_failure(response.status_code, parse_pve_error(response.text))
+        return upstream_failure(response.status_code, parse_pve_error(response.text), **_iwarn)
         
     except Exception as e:
         logging.error(f"[BACKUP] Error restoring backup: {e}")
@@ -2506,6 +2539,16 @@ def set_firewall_options(cluster_id):
         return jsonify({'error': safe_error(e, 'Failed to set firewall options')}), 500
 
 
+# MK Nov 2026 - pve-firewall 6.0.8 (PVE 9.3) checks the whole rule again on every update, also
+# one that only toggles 'enable', and refuses rules it took before (an ICMP type with a leading
+# zero or as a list, a group name over 18 characters). The rule lists hand on its 'errors' per
+# rule as they are; a refused write went out as PVE's raw JSON body (the VM rule create: its
+# fields as error). Now its reason as text, the fields it named as errors, its status as pve_status.
+def _rule_refusal(r):
+    text, errs = pve_refusal(r.text, '' if r.status_code in UPSTREAM_AUTH_STATUSES else f'HTTP {r.status_code}')
+    return upstream_failure(r.status_code, text, pve_status=r.status_code, **({'errors': errs} if errs else {}))
+
+
 @bp.route('/api/clusters/<cluster_id>/datacenter/firewall/rules', methods=['GET'])
 @require_auth(perms=['cluster.view'])
 def get_firewall_rules(cluster_id):
@@ -2555,7 +2598,7 @@ def create_firewall_rule(cluster_id):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'firewall.rule_created', f"Firewall rule created", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Firewall rule created'})
-        return upstream_failure(r.status_code, r.text)
+        return _rule_refusal(r)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create firewall rule')}), 500
 
@@ -2582,7 +2625,7 @@ def update_firewall_rule(cluster_id, pos):
         
         if r.status_code == 200:
             return jsonify({'success': True, 'message': 'Firewall rule updated'})
-        return upstream_failure(r.status_code, r.text)
+        return _rule_refusal(r)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update firewall rule')}), 500
 
@@ -2781,23 +2824,8 @@ def create_vm_firewall_rule(cluster_id, node, vmtype, vmid):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'vm.firewall.rule_created', f"VM {vmid} firewall rule created", cluster=manager.config.name)
             return jsonify({'success': True})
-        # Extract Proxmox error message: the errors per field of a rule it refused as they
-        # are, else the message of its error body; a body that is no JSON goes out short,
-        # a page not at all
-        try:
-            body = r.json()
-        except ValueError:
-            body = None
-        errs = body.get('errors') if isinstance(body, dict) else None
-        if isinstance(errs, dict) and errs:
-            pve_err = errs
-        elif isinstance(body, dict) and not body.get('message'):
-            pve_err = ''    # {"data": null}: the status is all PVE said
-        else:
-            # a 401 or 403 names its status in the answer already, an empty body adds nothing
-            pve_err = parse_pve_error(r.text, '' if r.status_code in (401, 403) else f'HTTP {r.status_code}')
         logging.warning(f"VM FW rule create failed: {r.status_code} data={data} pve_response={r.text[:300]}")
-        return upstream_failure(r.status_code, pve_err, pve_status=r.status_code)
+        return _rule_refusal(r)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create VM firewall rule')}), 500
 
@@ -2817,7 +2845,7 @@ def update_vm_firewall_rule(cluster_id, node, vmtype, vmid, pos):
         r = manager._create_session().put(_vm_fw_url(manager, node, vmtype, vmid, f'/rules/{pos}'), data=data, timeout=10)
         if r.status_code == 200:
             return jsonify({'success': True})
-        return upstream_failure(r.status_code, r.text)
+        return _rule_refusal(r)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update VM firewall rule')}), 500
 
@@ -3808,7 +3836,7 @@ def join_node_to_cluster(cluster_id):
             return jsonify({'success': False, 'error': 'Could not get cluster fingerprint. Check server logs for details.'}), 500
         
         # Connect to new node via SSH
-        ssh = secure_ssh_client(paramiko)
+        ssh = secure_ssh_client(paramiko, cluster_id=cluster_id)
         ssh.connect(node_ip, port=ssh_port, username=username, password=password, timeout=30)
         persist_host_keys(ssh)
         
@@ -3859,7 +3887,7 @@ def join_node_to_cluster(cluster_id):
             # Reconnect SSH after pve-cluster restart
             ssh.close()
             time.sleep(2)
-            ssh = secure_ssh_client(paramiko)
+            ssh = secure_ssh_client(paramiko, cluster_id=cluster_id)
             ssh.connect(node_ip, port=ssh_port, username=username, password=password, timeout=30)
             persist_host_keys(ssh)
         
@@ -4140,7 +4168,7 @@ def remove_node_from_cluster(cluster_id, node_name):
         # Connect to an online node via SSH (its commands ask the transport guard, #625).
         # Each of the two nodes gets its own password where it has one (#1136)
         ssh_password = ssh_password_to(mgr, online_node_ip)
-        ssh = secure_ssh_client(paramiko)
+        ssh = secure_ssh_client(paramiko, cluster_id=cluster_id)
         
         # Try SSH key first, then password
         connected = False
@@ -4198,7 +4226,7 @@ def remove_node_from_cluster(cluster_id, node_name):
         if removed_node_ip:
             try:
                 logging.info(f"[RemoveNode] Cleaning up cluster config on removed node {node_name} ({removed_node_ip})")
-                ssh_cleanup = secure_ssh_client(paramiko)
+                ssh_cleanup = secure_ssh_client(paramiko, cluster_id=cluster_id)
                 
                 # Try to connect to the removed node
                 cleanup_connected = False
@@ -4442,7 +4470,7 @@ def node_action_api(cluster_id, node_name, action):
             # Always use PTY for reliable execution. The channel of a transport is no
             # exec of the guarded client: the shutdown asks the guard itself (#625)
             transport = ssh.get_transport()
-            ha_transport.guard_ssh(node_ip, 'shutdown')
+            ha_transport.guard_ssh(node_ip, 'shutdown', cluster_id=cluster_id)
             channel = transport.open_session()
             channel.get_pty()
             channel.settimeout(10)
@@ -8805,7 +8833,10 @@ def snapshots_overview_delete():
     
     deleted_count = 0
     errors = []
-    result = {'success': False}
+    # MK Nov 2026 (#1347) - what passes the checks is deleted below, per guest one snapshot after
+    # the other: sent all at once, the second delete of a guest died on the lock of the first in
+    # PVE, and its accepted task counted as deleted here
+    guests = {}
 
     for snapshot in snapshots:
         try:
@@ -8846,25 +8877,71 @@ def snapshots_overview_delete():
                 errors.append(f"Permission denied: {_missing} for VM {vmid}")
                 continue
 
-            result = mgr.delete_snapshot(node, vmid, vm_type, snapname)
-            
-            if result.get('success'):
-                deleted_count += 1
-                log_audit(user, 'snapshot.deleted', f"{vm_type.upper()} {vmid} - snapshot '{snapname}' deleted", cluster=mgr.config.name)
-            else:
-                errors.append(f"Failed to delete {snapname}: {result.get('error', 'Unknown error')}")
-                
+            guests.setdefault((cluster_id, str(vmid)), []).append(
+                {'mgr': mgr, 'cluster_id': cluster_id, 'node': node, 'vmid': vmid, 'vm_type': vm_type, 'name': snapname})
+
         except Exception as e:
             errors.append(f"Error deleting snapshot: {e}")
             logging.debug(f"Snapshot deletion failed: {e}")
 
-    if deleted_count > 0:
+    from pegaprox.api.snapshots import delete_per_guest
+    # MK Nov 2026 - a delete Proxmox took and we did not see end (its task still ran when the
+    # request had to answer, or could not be read) is neither deleted nor failed. Before #1347
+    # every delete Proxmox took went to the audit log, and one PegaProx started still does. A
+    # DELETE Proxmox did not answer may or may not have started: audited as sent, and answered
+    # under 'started' too (state 'unanswered'), its guest held back the same way
+    started = []
+    for job in delete_per_guest(list(guests.values()), user):
+        if job['state'] == 'gone':
+            deleted_count += 1
+            log_audit(user, 'snapshot.deleted', f"{str(job['vm_type']).upper()} {job['vmid']} - snapshot '{job['name']}' deleted",
+                      cluster=job['mgr'].config.name)
+        elif job['state'] == 'unanswered':
+            log_audit(user, 'snapshot.delete_sent',
+                      f"{str(job['vm_type']).upper()} {job['vmid']} - snapshot '{job['name']}' delete sent, "
+                      "no answer from Proxmox: it may or may not have started",
+                      cluster=job['mgr'].config.name)
+            started.append({'cluster_id': job['cluster_id'], 'node': job['node'], 'vmid': job['vmid'],
+                            'vm_type': job['vm_type'], 'snapshot_name': job['name'],
+                            'state': 'unanswered', 'task': None, 'why': job['why']})
+        elif job['state'] in ('busy', 'unread'):
+            running = job['state'] == 'busy'
+            log_audit(user, 'snapshot.delete_started',
+                      f"{str(job['vm_type']).upper()} {job['vmid']} - snapshot '{job['name']}' delete started, "
+                      + ('still running in Proxmox' if running else 'result not read')
+                      + (f" ({job['task']})" if job.get('task') else ''),
+                      cluster=job['mgr'].config.name)
+            started.append({'cluster_id': job['cluster_id'], 'node': job['node'], 'vmid': job['vmid'],
+                            'vm_type': job['vm_type'], 'snapshot_name': job['name'],
+                            'state': 'running' if running else 'unread', 'task': job.get('task'), 'why': job['why']})
+        elif job['state'] == 'error':
+            errors.append(f"Error deleting snapshot: {job['why']}")
+            logging.debug(f"Snapshot deletion failed: {job['why']}")
+        else:
+            errors.append(f"Failed to delete {job['name']} of VM {job['vmid']}: {job['why']}")
+            if job['state'] == 'failed' and job.get('task'):
+                # MK Nov 2026 - Proxmox ran this delete and its task ended with an error. It may
+                # have removed some disk snapshots already (snapstate 'delete'), so it is audited
+                # too; a DELETE Proxmox refused outright started nothing
+                log_audit(user, 'snapshot.delete_failed',
+                          f"{str(job['vm_type']).upper()} {job['vmid']} - snapshot '{job['name']}' delete failed in Proxmox: "
+                          + job['why'] + ('' if job['task'] in job['why'] else f" ({job['task']})"),
+                          cluster=job['mgr'].config.name)
+
+    if deleted_count > 0 or started:
+        # 202 when none was seen gone yet: Proxmox has the rest, or may have, the UI tells it from a failure
+        unanswered = sum(1 for s in started if s['state'] == 'unanswered')
         return jsonify({
             'success': True,
-            'message': f'{deleted_count} snapshot(s) deleted',
+            'message': f'{deleted_count} snapshot(s) deleted'
+                       + (f', {len(started) - unanswered} delete(s) started in Proxmox and not seen to end'
+                          if len(started) > unanswered else '')
+                       + (f', {unanswered} delete(s) sent with no answer from Proxmox, they may or may not have started'
+                          if unanswered else ''),
             'deleted': deleted_count,
+            'started': started,
             'errors': errors if errors else None
-        })
+        }), (200 if deleted_count else 202)
     else:
         return jsonify({
             'success': False,
@@ -9177,6 +9254,10 @@ def _free_local_target_vmid(mgr, tgt_vmid, src_vmid, vm_type, target_node):
         if vname != f'repl-{src_vmid}-{target_node}':
             return (False, (f'Target VMID {tgt_vmid} is in use by "{vname or "unknown"}" which is not a '
                             f'replica of VM {src_vmid}. Pick a free VMID or remove that VM first.'))
+        # the clone that follows takes the VMID anew (PVE 9.3 next-id)
+        refused = _next_id_refusal(mgr, tgt_vmid)
+        if refused:
+            return (False, refused)
 
         # it's our old replica — stop (if running) and delete
         if existing.get('status') == 'running':
@@ -9668,6 +9749,69 @@ def _running_replica_error(vmid, node):
             f"the job again.")
 
 
+def _next_id_refusal(mgr, vmid):
+    """Why a replica removed at `vmid` could not come back under that VMID, or None.
+
+    MK Nov 2026 - the datacenter option next-id of PVE 9.3 with 'enforce' refuses a new
+    guest outside its lower/upper range, and with 'unique' also one whose VMID was used
+    before (pve-guest-common GuestID.pm, "guest ID N was used before"). Removing the old
+    replica records its VMID as used, so the copy that follows under it is refused and
+    the target has no replica at all. Every caller removes a replica next, so options that
+    cannot be read refuse as well (a Proxmox VE without the option answers them without
+    it); the next run asks again."""
+    name = getattr(getattr(mgr, 'config', None), 'name', None) or 'The cluster'
+    try:
+        r = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/options")
+        unread = None if r.status_code == 200 else f'HTTP {r.status_code}'
+        opts = (r.json().get('data') or {}) if unread is None else {}
+    except Exception as e:
+        unread = f'no answer ({type(e).__name__})'
+    if unread is not None or not isinstance(opts, dict):
+        logging.warning(f"[REPL] datacenter options of {name} unreadable ({unread or 'no object'}), "
+                        f"replica {vmid} kept")
+        return (f"The datacenter options of {name} could not be read ({unread or 'no object'}), so "
+                f"whether its next-id setting lets a new guest take VMID {vmid} again is not known. "
+                f"Nothing was removed - the next run tries again (the PegaProx account needs "
+                f"Sys.Audit on /).")
+    nid = opts.get('next-id')
+    if isinstance(nid, str):
+        # a property string where the option comes unparsed
+        nid = dict(p.strip().split('=', 1) for p in nid.split(',') if '=' in p)
+    if not isinstance(nid, dict):
+        return None
+
+    def on(key):
+        return str(nid.get(key, '')).strip().lower() in ('1', 'true', 'yes', 'on')
+    if not on('enforce'):
+        return None
+    try:
+        lower, upper = int(nid.get('lower') or 100), int(nid.get('upper') or 1000000)
+    except (TypeError, ValueError):
+        lower, upper = 100, 1000000
+    if not lower <= int(vmid) < upper:
+        return (f"{name} enforces its datacenter option next-id: no new guest outside {lower} to "
+                f"{upper - 1}, so a replica removed at VMID {vmid} could not be created again. Nothing "
+                f"was removed - give the job a target VMID in that range.")
+    if on('unique'):
+        return (f"{name} enforces unique guest IDs (datacenter option next-id, 'unique' and "
+                f"'enforce'): once the old replica is removed, VMID {vmid} counts as used and the new "
+                f"replica could not be created under it. Nothing was removed - a replica that is "
+                f"replaced on every run cannot keep its VMID there while 'enforce' is set.")
+    return None
+
+
+def _replace_refusal(source_mgr, source_node, vm_type, target_mgr, target_node, tgt_vmid):
+    """Why a cross-cluster run must not remove the guest at tgt_vmid for its new copy, or
+    None. The old replica goes before its successor arrives under the same VMID, so not
+    while the migration could still be refused for the tunnel version (one that cannot be
+    read counts), nor when the target lets no new guest take that VMID."""
+    why = migration_tunnel.refusal(source_mgr, source_node, vm_type, target_mgr, target_node or None,
+                                   strict=True)
+    if why:
+        return why + f" - the old replica {tgt_vmid} is kept, the next run tries again"
+    return _next_id_refusal(target_mgr, tgt_vmid)
+
+
 # ============================================================================
 # #174 aderumier — incremental cross-cluster replication (RBD)
 # ============================================================================
@@ -9796,6 +9940,10 @@ def _xcincr_remove_existing_replica(target_mgr, tgt_vmid, vm_type, job_id):
         return False, foreign
     if not node:
         return True, None   # nothing there
+    # the replica VM is created anew under the VMID after the seed (PVE 9.3 next-id)
+    refused = _next_id_refusal(target_mgr, tgt_vmid)
+    if refused:
+        return False, refused
     try:
         base = f"https://{target_mgr.host}:{target_mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{tgt_vmid}"
         sr = target_mgr._api_post(f"{base}/status/stop", data={})
@@ -10094,9 +10242,10 @@ def _execute_replication_incremental(job):
                 pass
 
 
-def _execute_replication(job):
+def _execute_replication(job, paced=False):
     """
-    Run a single cross-cluster replication cycle for one job.
+    Run a single cross-cluster replication cycle for one job. `paced`: a run of the
+    scheduler, whose token is made as create_api_token(paced=True) makes it.
 
     Steps: snapshot source VM -> clone from snapshot -> remote-migrate clone
     to target cluster -> cleanup snapshot + clone on source.
@@ -10184,6 +10333,20 @@ def _execute_replication(job):
 
         if not source_node:
             _update_repl_status(db, job_id, 'error', f'VM {vmid} not found on source cluster')
+            return
+
+        # MK Nov 2026 - a PVE 9.3 source refuses an older target only once the old replica is
+        # gone, and a next-id with 'enforce' may refuse its successor the VMID: both asked here,
+        # before anything is made. A run that has to replace a replica asks as strictly as the
+        # removal below, which asks again for what the clone's time can change
+        replacing = _xcincr_vm_node(target_mgr, tgt_vmid)[0]
+        if replacing:
+            why = _replace_refusal(source_mgr, source_node, vm_type, target_mgr, target_node, tgt_vmid)
+        else:
+            why = migration_tunnel.refusal(source_mgr, source_node, vm_type, target_mgr, target_node or None)
+        if why:
+            _update_repl_status(db, job_id, 'error', why)
+            logging.error(f"[XCREPL] Job {job_id}: ABORT - {why}")
             return
 
         logging.info(f"[XCREPL] Job {job_id}: replicating {vm_type}/{vmid} from {source_node} -> {target_node} ({target_cid})")
@@ -10313,7 +10476,7 @@ def _execute_replication(job):
         # remote-migrate clone to target cluster
         # same token/fingerprint flow as cross_cluster_lb.py
         token_name = f"xcrepl-{job_id}-{int(time.time()) % 100000}"
-        token = target_mgr.create_api_token(token_name, expire=transfer_net.token_expiry())
+        token = target_mgr.create_api_token(token_name, expire=transfer_net.token_expiry(), paced=paced)
         if not token.get('success'):
             _cleanup_clone_and_snap(source_mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
             _update_repl_status(db, job_id, 'error', f'Token creation failed: {token.get("error")}')
@@ -10393,6 +10556,16 @@ def _execute_replication(job):
                                f"unrelated VM, pick a different target VMID for the job.")
                     _update_repl_status(db, job_id, 'error', err_msg)
                     logging.error(f"[XCREPL] Job {job_id}: ABORT — {err_msg}")
+                    return
+
+                # once more: an upgrade or a changed next-id during the clone, or a replica the
+                # first look could not see
+                err_msg = _replace_refusal(source_mgr, source_node, vm_type, target_mgr, target_node, tgt_vmid)
+                if err_msg:
+                    target_mgr.delete_api_token(token_name)
+                    _cleanup_clone_and_snap(source_mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
+                    _update_repl_status(db, job_id, 'error', err_msg)
+                    logging.error(f"[XCREPL] Job {job_id}: ABORT - {err_msg}")
                     return
 
                 logging.info(f"[XCREPL] Job {job_id}: VM {tgt_vmid} already on target node {existing_target_node}, removing old replica (tag verified)")
@@ -11363,8 +11536,20 @@ def get_hardware_options():
     or an ESXi host with none. Without the parameter: the first Proxmox VE cluster the caller
     may see.
     """
+    return _hardware_options_of(request.args.get('cluster_id'))
+
+
+@bp.route('/api/clusters/<cluster_id>/hardware-options', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_cluster_hardware_options(cluster_id):
+    """The same for one cluster, on its own cluster path: a dialog for another site's cluster
+    asks it there through the federation's relay (core/federation_relay.py), which carries
+    cluster paths only. MK Nov 2026"""
+    return _hardware_options_of(cluster_id)
+
+
+def _hardware_options_of(cluster_id):
     manager = None
-    cluster_id = request.args.get('cluster_id')
     if cluster_id:
         ok, err = check_cluster_access(cluster_id)
         if not ok:
@@ -11428,7 +11613,8 @@ def _console_authz(user, cluster_id, vmid, vm_type=None, by_session=False):
         return False, 'no user'
     # NS Aug 2026 (audit re-verify) — a disabled account keeps no console access, even via a
     # pre-minted ws_token (this path is reached without require_auth's account-state gate).
-    if not user.get('enabled', True):
+    from pegaprox.utils.auth import mirror_switched_off
+    if not user.get('enabled', True) or mirror_switched_off(user):
         return False, 'account disabled'
     # MK Oct 2026 - a portal_only account opens a console with the ws token the portal's
     # vm/console route mints, which asks whether the hoster offers consoles at all. The
@@ -14907,6 +15093,13 @@ def remote_migrate_vm_api(cluster_id, node, vm_type, vmid):
         if delete_source and not user_can_access_vm(user, cluster_id, vmid, 'vm.delete', vm_type):
             return jsonify({'error': 'Access denied: removing the source guest needs '
                                      'vm.delete on it'}), 403
+        # MK Nov 2026 - the tunnel version of the target node when the caller read it there
+        # (a migration from another site, core/federation_migrate.py)
+        _tunnel = migration_tunnel.known(data.get('target_tunnel'))
+        if _tunnel is not None:
+            why = migration_tunnel.refusal_to(manager, node, vm_type, _tunnel, 'the target node')
+            if why:
+                return jsonify({'error': why, 'code': migration_tunnel.CODE}), 409
         result = manager.remote_migrate_vm(
             node, vmid, vm_type,
             target_endpoint, target_storage, target_bridge,
@@ -14985,8 +15178,10 @@ def _cross_preflight_for(data, src_id, tgt_id, vmids, vm_type, target_node, stor
         return pf, (jsonify({'dry_run': True, 'preflight': pf, 'steps': pf['steps']}), 200)
     row = pf['guests'][0]
     if not preflight.moving(row):
-        return pf, (jsonify({'error': f"The migration preflight blocks it: {preflight.block_note(row)}",
-                             'preflight': pf}), 409)
+        out = {'error': f"The migration preflight blocks it: {preflight.block_note(row)}", 'preflight': pf}
+        if any(r['code'] == 'tunnel_too_old' for r in row['reasons']):
+            out['code'] = migration_tunnel.CODE
+        return pf, (jsonify(out), 409)
     return pf, None
 
 
@@ -15168,6 +15363,16 @@ def cross_cluster_migrate_api():
     _xu = build_authz_user(request.session.get('user', ''), request.session)
     if caller_is_scoped(_xu, target_cluster_id):
         return jsonify({'error': 'Access denied to the target cluster'}), 403
+    # MK Nov 2026 - the migration writes on both clusters: neither may be one this instance
+    # holds no federation lease on. A dry run only reads (the preflight), as on the ESXi
+    # migrations
+    _dry = str((data or {}).get('dry_run', '')).lower() in ('1', 'true', 'yes')
+    if not _dry:
+        from pegaprox.api.federation import refuse_unleased
+        for _cid in (source_cluster_id, target_cluster_id):
+            refused = refuse_unleased(_cid, f'cluster {_cid}')
+            if refused:
+                return refused
     from pegaprox.utils.rbac import acts_as_admin
     if not acts_as_admin(_xu):
         from pegaprox.utils.rbac import check_tenant_vmid, DEFAULT_TENANT_ID
@@ -15192,7 +15397,6 @@ def cross_cluster_migrate_api():
     source_manager = cluster_managers[source_cluster_id]
     target_manager = cluster_managers[target_cluster_id]
 
-    _dry = str((data or {}).get('dry_run', '')).lower() in ('1', 'true', 'yes')
     # MK Oct 2026 - the quota before the preflight (a refused preflight answers 409 and lets the
     # hold go again); a dry run takes no hold, its preflight weighs the quota itself.
     # The guest lands as a new one on the target; kept at the source too it is
@@ -15243,7 +15447,9 @@ def cross_cluster_migrate_api():
         logging.info(f"Creating temporary API token on target cluster ({target_cluster_id}) for user {target_manager.config.user}...")
         token_result = target_manager.create_api_token(token_name, expire=transfer_net.token_expiry())
         if not token_result.get('success'):
-            return jsonify({'error': f'Could not create API token on target cluster: {token_result.get("error")}'}), 500
+            # refused: the target cluster's login cannot make one, which a retry does not change
+            return jsonify({'error': f'Could not create API token on target cluster: {token_result.get("error")}'}), \
+                409 if token_result.get('refused') else 500
         
         target_token = token_result
         logging.info(f"Created token on target cluster: {target_token['token_id']}")

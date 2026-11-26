@@ -578,7 +578,10 @@ def _auth_ok():
                     owner = get_db().get_user(info.get('user'))
                 except Exception:
                     owner = None
-                if not (owner and owner.get('enabled', True)):
+                # a mirror of another federation member with the federation off here
+                # counts as disabled, as it does for every require_auth route
+                from pegaprox.utils.auth import mirror_switched_off
+                if not (owner and owner.get('enabled', True)) or mirror_switched_off(owner):
                     logging.warning(f"[metrics] rejected token for '{info.get('user')}' - "
                                     "account is gone or disabled")
                     return False

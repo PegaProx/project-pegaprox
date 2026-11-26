@@ -2,6 +2,17 @@
         // PegaProx - Node Modals
         // NodeShell terminal, NodeModal, ConsoleModal
         // ═══════════════════════════════════════════════
+
+        // LW Nov 2026 - linked mode: the console of another site's guest or node opens on this
+        // instance's main port, which tunnels it to that site (api/federation_relay.py). null for a
+        // cluster of this site, whose consoles keep their own servers
+        function fedConsoleUrl(clusterId, params) {
+            if (!String(clusterId || '').includes('~')) return null;
+            const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const q = new URLSearchParams({ cluster: clusterId, ...params }).toString();
+            return `${proto}//${window.location.host}/api/federation/console?${q}`;
+        }
+
         function getNodeProxmoxUrl(nodeIp = '', nodeName = '') {
             if (!nodeIp || !nodeName) return null;
             return `https://${nodeIp.trim()}:8006/#v1:0:=${encodeURIComponent(`node/${nodeName}`)}:4:=aptrepositories:=contentIso:::9::`;
@@ -277,7 +288,8 @@
 
                         setSshPort(sshPortNum);
                         // no ?ip= any more: the server resolves the node and would not take one (#1143)
-                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${sshPortNum}/api/clusters/${clusterId}/nodes/${node}/shellws?token=${encodeURIComponent(wsToken)}`;
+                        const wsUrl = fedConsoleUrl(clusterId, { token: wsToken, kind: 'shell', node })
+                            || `${wsProtocol}//${window.location.hostname}:${sshPortNum}/api/clusters/${clusterId}/nodes/${node}/shellws?token=${encodeURIComponent(wsToken)}`;
                         
                         term.write(`${t('connectingWs')} (Port ${sshPortNum})...\r\n`);
                         // NS: Mar 2026 - don't log wsUrl, contains session token
@@ -831,7 +843,9 @@
                             host: termInfo.host,
                             user: termInfo.user || '',
                         }).toString();
-                        const wsUrl = `${wsProto}//${window.location.hostname}:${sshPort}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/termwebsocket?${params}`;
+                        const wsUrl = fedConsoleUrl(clusterId, { token: wsToken, kind: 'term', node: vm.node, type: vm.type, vmid: String(vm.vmid),
+                                                                 ticket: termInfo.ticket, port: String(termInfo.port), host: termInfo.host, user: termInfo.user || '' })
+                            || `${wsProto}//${window.location.hostname}:${sshPort}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/termwebsocket?${params}`;
 
                         ws = new WebSocket(wsUrl);
                         wsRef.current = ws;
@@ -4256,8 +4270,8 @@
                                                     </div>
                                                     <LineChart
                                                         datasets={[
-                                                            { label: 'Net In', data: perfNet.metrics.net_in, color: '#06b6d4' },
-                                                            { label: 'Net Out', data: perfNet.metrics.net_out, color: '#8b5cf6' }
+                                                            { label: t('netIn'), data: perfNet.metrics.net_in, color: '#06b6d4' },
+                                                            { label: t('netOut'), data: perfNet.metrics.net_out, color: '#8b5cf6' }
                                                         ]}
                                                         timestamps={perfNet.timestamps}
                                                         label="Network I/O"
@@ -6101,7 +6115,9 @@
                         // binary RFB. Default OFF — opt-in for environments that need it.
                         const stableMode = (typeof window !== 'undefined') &&
                                            window.localStorage &&
-                                           window.localStorage.getItem('pegaprox-vnc-stable-mode') === '1';
+                                           window.localStorage.getItem('pegaprox-vnc-stable-mode') === '1' &&
+                                           // not for another site's guest: its console server never sees the handle
+                                           !String(clusterId).includes('~');
                         console.log('VNC: Getting ticket...' + (stableMode ? ' (stable mode)' : ''));
                         const ticketResponse = await fetch(
                             `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/console${stableMode ? '?stable=1' : ''}`,
@@ -6159,7 +6175,9 @@
                             (ticketData.ticket && ticketData.port)
                                 ? `&pve_ticket=${encodeURIComponent(ticketData.ticket)}&pve_port=${encodeURIComponent(ticketData.port)}`
                                 : '';
-                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${vncPortNum}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vncwebsocket?token=${encodeURIComponent(vncWsToken)}${stableQS}${pvePassthroughQS}`;
+                        const wsUrl = fedConsoleUrl(clusterId, { token: vncWsToken, kind: 'vnc', node: vm.node, type: vm.type, vmid: String(vm.vmid),
+                                                                 ...(ticketData.ticket && ticketData.port ? { pve_ticket: ticketData.ticket, pve_port: String(ticketData.port) } : {}) })
+                            || `${wsProtocol}//${window.location.hostname}:${vncPortNum}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vncwebsocket?token=${encodeURIComponent(vncWsToken)}${stableQS}${pvePassthroughQS}`;
                         
                         // LW: Mar 2026 - removed wsUrl log (session leak)
                         
@@ -6523,6 +6541,9 @@
             // open PVE's own GUI (the External button below) and lose our console entirely.
             // Named window per guest, so clicking twice focuses the existing one instead of
             // stacking duplicates. The in-app tab closes: the session lives in the popup now.
+            // LW Nov 2026 - another site's console runs over this instance's main port
+            // (/api/federation/console): there is no second port whose certificate needs accepting
+            const fedRemote = String(clusterId || vm?._clusterId || '').includes('~');
             const popOutConsole = () => {
                 const cid = clusterId || vm?._clusterId;
                 if (!cid || !vm) return;
@@ -6789,7 +6810,7 @@
                                     <div className="text-center max-w-md p-6">
                                         <div className="text-red-400 text-xl mb-4">⚠️ {t('connectionError')}</div>
                                         
-                                        {window.location.protocol === 'https:' && !reverseProxyEnabled && (
+                                        {window.location.protocol === 'https:' && !reverseProxyEnabled && !fedRemote && (
                                             <div className="text-gray-400 text-sm mb-4 p-4 bg-proxmox-dark rounded-lg text-left">
                                                 <p className="mb-3 font-medium text-white">{t('certInstructions')}</p>
                                                 <p className="mb-2">{t('certStep1')}</p>
@@ -6807,7 +6828,7 @@
                                         )}
                                         
                                         <div className="flex gap-3 justify-center">
-                                            {!reverseProxyEnabled && (
+                                            {!reverseProxyEnabled && !fedRemote && (
                                                 <button
                                                     onClick={() => {
                                                         const port = vncPort || ((parseInt(window.location.port) || 443) + 1);
@@ -8019,7 +8040,7 @@
                                                         <LineChart {...perfZoom.series('iowait')} label="IO Wait" color="#eab308" unit="%" />
                                                         <LineChart {...perfZoom.series('loadavg')} label="Load Average" color="#22c55e" unit="" />
                                                     </div>
-                                                    <LineChart datasets={[{label: 'Net In', data: perfNet.metrics.net_in, color: '#06b6d4'}, {label: 'Net Out', data: perfNet.metrics.net_out, color: '#8b5cf6'}]} timestamps={perfNet.timestamps} label="Network I/O" unit=" KB/s" />
+                                                    <LineChart datasets={[{label: t('netIn'), data: perfNet.metrics.net_in, color: '#06b6d4'}, {label: t('netOut'), data: perfNet.metrics.net_out, color: '#8b5cf6'}]} timestamps={perfNet.timestamps} label="Network I/O" unit=" KB/s" />
                                                     <div className="grid grid-cols-2 gap-3">
                                                         <LineChart {...perfZoom.series('swap')} label="Swap" color="#ec4899" unit="%" yMin={0} yMax={100} />
                                                         <LineChart {...perfZoom.series('rootfs')} label="Root FS" color="#a855f7" unit="%" yMin={0} yMax={100} />
@@ -8171,7 +8192,7 @@
                                                         </div>
                                                     </div>
                                                     <table className="corp-datagrid">
-                                                        <thead><tr><th>{t('name')}</th><th>{t('type')}</th><th>CIDR</th><th>Gateway</th><th>{t('active') || 'Active'}</th><th>{t('comment')}</th><th style={{width: '60px'}}></th></tr></thead>
+                                                        <thead><tr><th>{t('name')}</th><th>{t('type')}</th><th>CIDR</th><th>{t('gateway')}</th><th>{t('active') || 'Active'}</th><th>{t('comment')}</th><th style={{width: '60px'}}></th></tr></thead>
                                                         <tbody>
                                                             {(Array.isArray(data.network) ? data.network : []).map((iface, i) => (
                                                                 <tr key={i}>
@@ -8195,7 +8216,7 @@
                                                                     </td>
                                                                 </tr>
                                                             ))}
-                                                            {(!data.network || data.network.length === 0) && <tr><td colSpan={7} className="text-center py-4" style={{color: '#728b9a'}}>No network interfaces</td></tr>}
+                                                            {(!data.network || data.network.length === 0) && <tr><td colSpan={7} className="text-center py-4" style={{color: '#728b9a'}}>{t('noNetworkInterfaces')}</td></tr>}
                                                         </tbody>
                                                     </table>
                                                     </>)}

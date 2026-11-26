@@ -505,10 +505,11 @@ def test_the_token_is_created_with_the_expire_it_is_given(expire, sent):
     posted = []
     answer = types.SimpleNamespace(status_code=200, text='',
                                    json=lambda: {'data': {'value': 'v', 'full-tokenid': 'root@pam!t'}})
-    mgr = types.SimpleNamespace(is_connected=True, host='10.0.0.11', api_port=8006,
-                                config=types.SimpleNamespace(user='root@pam'),
-                                logger=logging.getLogger('test.migration_token.target'),
-                                _api_post=lambda url, data=None, **kw: posted.append((url, data)) or answer)
+    mgr = PegaProxManager.__new__(PegaProxManager)
+    mgr.is_connected, mgr.current_host = True, '10.0.0.11'
+    mgr.config = types.SimpleNamespace(user='root@pam', host='10.0.0.11', api_port=8006)
+    mgr.logger = logging.getLogger('test.migration_token.target')
+    mgr._api_post = lambda url, data=None, **kw: posted.append((url, data)) or answer
     kw = {} if expire is None else {'expire': expire}
     assert PegaProxManager.create_api_token(mgr, 't', **kw)['success']
     [(url, data)] = posted

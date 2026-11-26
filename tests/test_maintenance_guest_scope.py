@@ -307,7 +307,7 @@ def test_every_field_of_a_maintenance_is_placed():
     that names no guest. This fails until it is placed on one side."""
     from pegaprox.api.helpers import MAINTENANCE_GUEST_FIELDS
     no_guest = {'node', 'started_at', 'total_vms', 'migrated_vms', 'status', 'progress_percent',
-                'error', 'acknowledged', 'native_ha', 'note'}
+                'error', 'acknowledged', 'native_ha', 'native_ha_refused', 'note'}
     fields = set(MaintenanceTask('n1').to_dict())
     assert fields == no_guest | set(MAINTENANCE_GUEST_FIELDS)
     assert not no_guest & set(MAINTENANCE_GUEST_FIELDS)

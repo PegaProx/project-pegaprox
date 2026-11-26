@@ -209,7 +209,7 @@ def _feed_stdin(stdin, data):
 
 
 def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
-              connect_timeout=8, stdin_data=None, port=22):
+              connect_timeout=8, stdin_data=None, port=22, cluster_id=None):
     """Execute command on remote host via SSH.
     Handles ESXi which only allows 'keyboard-interactive' and 'publickey'.
 
@@ -220,6 +220,9 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
     cluster whose nodes listen elsewhere got no node command from this path. For any
     other port the pin is looked up and stored as [host]:port, the name paramiko and
     OpenSSH give it.
+
+    cluster_id: the Proxmox VE cluster the host is a node of, whose federation lease a
+    command needs; None for any other host (an ESXi server, a QNetd host).
 
     ESXi SSH quirks:
     - Only allows keyboard-interactive and publickey auth (NOT password)
@@ -258,7 +261,11 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
     # right before the command goes out either way
     from pegaprox.core import ha_transport
     from pegaprox.core.ha import GuardRefused
-    ha_transport.guard_ssh(host, cmd)
+    from pegaprox.core.federation import LeaseRefused
+    # refusals of this instance's own guards (the HA lease, the federation's): nothing
+    # left for the node, so neither a reason to try another way nor a failure of the node
+    refused_here = (GuardRefused, LeaseRefused)
+    wrote = ha_transport.guard_ssh(host, cmd, cluster_id=cluster_id)
 
     def _make_sock():
         """Pre-create socket with explicit connect_timeout — paramiko.Transport
@@ -415,7 +422,13 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
 
         # Execute command (the connects above may have taken a while: checked again, #625)
         try:
-            ha_transport.guard_ssh(host, cmd, again=True)
+            if wrote:
+                # a write: closed with its channel if the cluster's federation lease goes
+                # meanwhile. Kept before the ask below, so a hand-over while it connected
+                # is refused there or finds it to close
+                ha_transport.track_client(client, cluster_id)
+            if ha_transport.guard_ssh(host, cmd, again=True, cluster_id=cluster_id):
+                ha_transport.track_client(client, cluster_id)
             stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
             if stdin_data is not None:
                 _feed_stdin(stdin, stdin_data)
@@ -427,11 +440,11 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         except Exception as e:
             try: client.close()
             except: pass
-            if isinstance(e, GuardRefused):
+            if isinstance(e, refused_here):
                 raise
             raise Exception(f'Paramiko exec failed: {e}')
 
-    except GuardRefused:
+    except refused_here:
         raise
     except Exception as paramiko_err:
         last_err = str(paramiko_err)
@@ -471,13 +484,13 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         # process group of its own in an automatic group (#625)
         result = ha_transport.node_cmd(
             ssh_args, capture_output=True, text=True, timeout=timeout, env=env,
-            host=host, again=True, **extra
+            host=host, again=True, cluster_id=cluster_id, **extra
         )
         if result.returncode == 0:
             return result.returncode, result.stdout, result.stderr
         # sshpass also failed
         return result.returncode, result.stdout, result.stderr or last_err
-    except GuardRefused:
+    except refused_here:
         raise
     except Exception as sub_err:
         return 1, '', f'All SSH methods failed: {last_err}; subprocess: {sub_err}'
@@ -669,7 +682,7 @@ def _stored_key_exec(pve_mgr, node, host, user, cmd, timeout, fallback, stdin_da
     # asked before anything connects, as _ssh_exec does (#625); the client's own ask at
     # the exec is then this same call once more
     from pegaprox.core import ha_transport
-    ha_transport.guard_ssh(host, cmd)
+    ha_transport.guard_ssh(host, cmd, cluster_id=getattr(pve_mgr, 'id', None))
 
     failure = {}
     try:
@@ -872,7 +885,8 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
             return 1, '', f"cannot run node commands on '{node}': {_why}"
         rc, out, err = _ssh_exec(node_host, _ssh_user, _ssh_pass, cmd,
                                   timeout=timeout, use_controlmaster=use_controlmaster,
-                                  stdin_data=stdin_data, port=node_ssh_port(pve_mgr.config))
+                                  stdin_data=stdin_data, port=node_ssh_port(pve_mgr.config),
+                                  cluster_id=getattr(pve_mgr, 'id', None))
         # SSH error patterns that indicate the node itself is dead, not the cmd
         looks_like_node_down = (
             rc != 0 and any(s in str(err).lower() for s in (
@@ -903,8 +917,10 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
         return rc, out, err
     except Exception as e:
         from pegaprox.core.ha import GuardRefused
-        if isinstance(e, GuardRefused):
-            # this instance may not send it (#625): that says nothing about the node
+        from pegaprox.core.federation import LeaseRefused
+        if isinstance(e, (GuardRefused, LeaseRefused)):
+            # this instance may not send it (#625, or no federation lease): that says
+            # nothing about the node
             return 1, '', str(e)
         try:
             pve_mgr._register_node_failure(node)

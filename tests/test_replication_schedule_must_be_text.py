@@ -94,3 +94,29 @@ def test_a_stored_null_schedule_does_not_stop_the_jobs_after_it(db, monkeypatch)
     # due under the default 6 hours only after 6 hours
     _job(db, 'jnull-recent', 102, None, (datetime.now() - timedelta(hours=1)).isoformat())
     assert _tick(monkeypatch) == ['jgood', 'jnull']
+
+
+def test_a_job_held_for_its_lease_says_so_once(db, monkeypatch, caplog):
+    """A job of a cluster enrolled in the federation, without a live lease here, is held
+    every tick. It says so when it is held, not once a minute for as long as it is."""
+    import logging
+    from pegaprox.core import federation
+    _job(db, 'jheld', 100, '0 */6 * * *')
+    monkeypatch.setattr(xcr, '_held_logged', set(), raising=False)
+    monkeypatch.setattr(federation, 'enabled', lambda: True)
+    lease = {'held': False}
+    monkeypatch.setattr(federation, 'worker_takes_writes_for', lambda cid: lease['held'])
+    caplog.set_level(logging.INFO, logger='pegaprox.xcrepl')
+
+    def said():
+        return len([r for r in caplog.records if 'held: its' in r.getMessage()])
+    for _ in range(3):
+        assert _tick(monkeypatch) == []
+    assert said() == 1
+    # the lease comes back: the job runs; held again, it says so again
+    lease['held'] = True
+    assert _tick(monkeypatch) == ['jheld']
+    db.execute("UPDATE cross_cluster_replications SET last_run = '' WHERE id = 'jheld'")
+    lease['held'] = False
+    assert _tick(monkeypatch) == [] and _tick(monkeypatch) == []
+    assert said() == 2

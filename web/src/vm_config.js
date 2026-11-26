@@ -913,6 +913,9 @@
             const [backupLoading, setBackupLoading] = useState(false);
             const [showCreateBackup, setShowCreateBackup] = useState(false);
             const [showRestoreBackup, setShowRestoreBackup] = useState(null);
+            // LW Nov 2026 - over this guest (the VMID field holds its own), and whether a backup of
+            // another guest may replace it, which Proxmox VE 9.3 refuses unless told
+            const [restoreIdentity, setRestoreIdentity] = useState({ over: true, allow: false, refused: false });
             const [verifyingBackup, setVerifyingBackup] = useState(null);
             const [verifyResults, setVerifyResults] = useState({});
             // File-restore browser states
@@ -1428,7 +1431,7 @@
             const fetchHardwareOptions = async () => {
                 try {
                     // LW Nov 2026 - from this VM's cluster, not from the first one registered
-                    const response = await authFetch(`${API_URL}/hardware-options?cluster_id=${encodeURIComponent(clusterId)}`);
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/hardware-options`);
                     if (response && response.ok) {
                         setHardwareOptions(await response.json());
                     }
@@ -1830,7 +1833,7 @@
                 setBackupLoading(false);
             };
             
-            const handleRestoreBackup = async (volid, targetVmid, storage, startAfter) => {
+            const handleRestoreBackup = async (volid, targetVmid, storage, startAfter, allowOtherGuest) => {
                 // LW: confirmation before restore - learned this the hard way lol
                 if (!confirm(t('confirmRestore') || `Really restore this backup? ${targetVmid === vm.vmid ? 'VM will be overwritten!' : ''}`)) return;
                 
@@ -1841,7 +1844,8 @@
                         {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ volid, target_vmid: targetVmid, storage, start: startAfter })
+                            body: JSON.stringify({ volid, target_vmid: targetVmid, storage, start: startAfter,
+                                                   ...(allowOtherGuest ? { allow_identity_mismatch: true } : {}) })
                         }
                     );
                     if (response && response.ok) {
@@ -1850,6 +1854,7 @@
                         setShowRestoreBackup(null);
                     } else if (response) {
                         const err = await response.json();
+                        if (restoreRefusedOtherGuest(err.error, err.code)) setRestoreIdentity(r => ({ ...r, refused: true }));
                         addToast(err.error || 'Restore failed', 'error');
                     }
                 } catch (error) {
@@ -4573,7 +4578,7 @@
                                                                         <Icons.FolderOpen />
                                                                     </button>
                                                                     <button
-                                                                        onClick={() => setShowRestoreBackup(backup)}
+                                                                        onClick={() => { setRestoreIdentity({ over: true, allow: false, refused: false }); setShowRestoreBackup(backup); }}
                                                                         disabled={backupLoading}
                                                                         className="p-2 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 transition-colors disabled:opacity-50"
                                                                         title={t('restore') || 'Restore'}
@@ -4864,6 +4869,7 @@
                                                                     type="number"
                                                                     id="restore-vmid"
                                                                     defaultValue={vm.vmid}
+                                                                    onChange={e => setRestoreIdentity(r => ({ ...r, over: String(e.target.value) === String(vm.vmid) }))}
                                                                     className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
                                                                 />
                                                                 <p className="text-xs text-yellow-400 mt-1">
@@ -4893,6 +4899,10 @@
                                                                     {t('startAfterRestore') || 'Start after restore'}
                                                                 </label>
                                                             </div>
+                                                            {restoreIdentity.over && (
+                                                                <RestoreOtherGuestOption checked={restoreIdentity.allow} refused={restoreIdentity.refused}
+                                                                    onChange={v => setRestoreIdentity(r => ({ ...r, allow: v }))} />
+                                                            )}
                                                             <div className="flex gap-2 justify-end pt-2">
                                                                 <button
                                                                     onClick={() => setShowRestoreBackup(null)}
@@ -4905,7 +4915,8 @@
                                                                         const targetVmid = parseInt(document.getElementById('restore-vmid').value);
                                                                         const storage = document.getElementById('restore-storage').value;
                                                                         const startAfter = document.getElementById('restore-start').checked;
-                                                                        handleRestoreBackup(showRestoreBackup.volid, targetVmid, storage, startAfter);
+                                                                        handleRestoreBackup(showRestoreBackup.volid, targetVmid, storage, startAfter,
+                                                                                            restoreIdentity.over && restoreIdentity.allow);
                                                                     }}
                                                                     disabled={backupLoading}
                                                                     className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50"
@@ -5070,7 +5081,7 @@
                                                                     className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
                                                                 >
                                                                     <option value="">{t('selectCluster') || 'Select cluster...'}</option>
-                                                                    {allClusters.filter(c => c.id !== clusterId && c.connected).map(c => (
+                                                                    {allClusters.filter(c => c.id !== clusterId && c.connected && !c.fed).map(c => (
                                                                         <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
                                                                     ))}
                                                                 </select>
@@ -5398,8 +5409,9 @@
                                                                     <tbody>
                                                                         {(!fwRules || fwRules.length === 0) ? (
                                                                             <tr><td colSpan="11" className="p-8 text-center text-gray-500">{(crFail.firewall || {}).rules != null && isCorpRedesigned ? t('crVmNotRead') : (t('noFirewallRules') || 'No firewall rules configured')}</td></tr>
-                                                                        ) : (Array.isArray(fwRules) ? fwRules : []).map((rule, idx) => (
-                                                                            <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
+                                                                        ) : (Array.isArray(fwRules) ? fwRules : []).map((rule, idx) => { const problems = fwRuleProblems(rule); return (
+                                                                            <React.Fragment key={idx}>
+                                                                            <tr className="border-t border-proxmox-border hover:bg-proxmox-dark/50" data-fw-rule={rule.pos}>
                                                                                 <td className="p-3 text-gray-400">{rule.pos}</td>
                                                                                 <td className="p-3">
                                                                                     <span className={`px-2 py-0.5 rounded text-xs ${
@@ -5423,7 +5435,7 @@
                                                                                 <td className="p-3 font-mono text-xs text-gray-300">{rule.source || '-'}</td>
                                                                                 <td className="p-3 font-mono text-xs text-gray-300">{rule.dest || '-'}</td>
                                                                                 <td className="p-3 text-gray-300">{rule.proto || '-'}</td>
-                                                                                <td className="p-3 font-mono text-xs text-gray-300">{rule.dport || '-'}</td>
+                                                                                <td className="p-3 font-mono text-xs text-gray-300">{rule.dport || rule['icmp-type'] || '-'}</td>
                                                                                 <td className="p-3">
                                                                                     <button
                                                                                         onClick={async () => {
@@ -5438,15 +5450,16 @@
                                                                                                         r.pos === rule.pos ? { ...r, enable: rule.enable ? 0 : 1 } : r
                                                                                                     ));
                                                                                                 } else {
-                                                                                                    const err = await res.json().catch(() => ({}));
-                                                                                                    addToast(err.error || `Failed to toggle rule (HTTP ${res?.status || '?'})`, 'error');
+                                                                                                    const err = await res?.json().catch(() => ({}));
+                                                                                                    addToast(PegaProxApiErrors.said(err, `Failed to toggle rule (HTTP ${res?.status || '?'})`), 'error');
                                                                                                 }
                                                                                             } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
                                                                                         }}
-                                                                                        className={`w-8 h-5 rounded-full transition-colors ${rule.enable ? 'bg-green-500' : 'bg-gray-600'}`}
+                                                                                        className={`w-8 h-5 rounded-full transition-colors ${problems.length ? 'bg-red-500/80' : rule.enable ? 'bg-green-500' : 'bg-gray-600'}`}
                                                                                     >
                                                                                         <div className={`w-4 h-4 rounded-full bg-white transition-transform ${rule.enable ? 'translate-x-3.5' : 'translate-x-0.5'}`}></div>
                                                                                     </button>
+                                                                                    {problems.length > 0 && <div className="mt-1"><FwRuleInvalidBadge problems={problems} /></div>}
                                                                                 </td>
                                                                                 <td className="p-3 text-gray-500 text-xs max-w-32 truncate">{rule.comment || ''}</td>
                                                                                 <td className="p-3">
@@ -5469,7 +5482,15 @@
                                                                                     </button>
                                                                                 </td>
                                                                             </tr>
-                                                                        ))}
+                                                                            {problems.length > 0 && (
+                                                                                <tr className="bg-red-500/5" data-fw-invalid-why={rule.pos}>
+                                                                                    <td colSpan="11" className="px-3 pb-2 text-xs text-red-400">{t('fwRuleSkipped')} {problems.join('; ')}
+                                                                                        <div className="text-gray-400" data-fw-invalid-fix="">{t('fwRuleInvalidFix')}</div>
+                                                                                    </td>
+                                                                                </tr>
+                                                                            )}
+                                                                            </React.Fragment>
+                                                                        ); })}
                                                                     </tbody>
                                                                 </table>
                                                             </div>
@@ -5981,18 +6002,21 @@
                                                                                 <option value="tcp">TCP</option>
                                                                                 <option value="udp">UDP</option>
                                                                                 <option value="icmp">ICMP</option>
+                                                                                <option value="icmpv6">ICMPv6</option>
                                                                                 <option value="sctp">SCTP</option>
                                                                             </select>
                                                                         </div>
                                                                         <div>
-                                                                            <label className="text-sm text-gray-400 mb-1 block">Dest. Port</label>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">{fwIcmpTypes(newFwRule.proto) ? t('fwIcmpType') : 'Dest. Port'}</label>
                                                                             <input
                                                                                 type="text"
                                                                                 value={newFwRule.dport || ''}
                                                                                 onChange={e => setNewFwRule(p => ({...p, dport: e.target.value}))}
-                                                                                placeholder="e.g. 22, 80, 443"
+                                                                                placeholder={fwIcmpTypes(newFwRule.proto) ? t('fwIcmpTypePlaceholder') : 'e.g. 22, 80, 443'}
+                                                                                list={fwIcmpTypes(newFwRule.proto) ? 'vm-fw-icmp-types' : undefined}
                                                                                 className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                                             />
+                                                                            <FwIcmpTypeHint proto={newFwRule.proto} dport={newFwRule.dport} listId="vm-fw-icmp-types" />
                                                                         </div>
                                                                     </div>
                                                                     <div className="grid grid-cols-2 gap-4">
@@ -6052,7 +6076,7 @@
                                                                                 const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/rules`, {
                                                                                     method: 'POST',
                                                                                     headers: { 'Content-Type': 'application/json' },
-                                                                                    body: JSON.stringify(ruleData)
+                                                                                    body: JSON.stringify(fwIcmpTypeInBody(ruleData))
                                                                                 });
                                                                                 if (res?.ok) {
                                                                                     fetchFirewallData();
@@ -6073,7 +6097,8 @@
                                                                                 }
                                                                             } catch (e) { if (addToast) addToast('Connection error', 'error'); }
                                                                         }}
-                                                                        className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
+                                                                        disabled={!!fwIcmpTypeProblem(newFwRule.proto, newFwRule.dport)}
+                                                                        className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors disabled:opacity-50"
                                                                     >
                                                                         {t('add')}
                                                                     </button>

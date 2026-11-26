@@ -228,7 +228,7 @@
    [
     "node",
     "pve1",
-    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1; which sshpass >/dev/null 2>&1"
    ],
    [
     "node",
@@ -335,7 +335,7 @@
    [
     "node",
     "pve1",
-    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1; which sshpass >/dev/null 2>&1"
    ],
    [
     "node",
@@ -442,7 +442,7 @@
    [
     "node",
     "pve1",
-    "if command -v sshfs >/dev/null 2>&1; then echo PRESENT; else   DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true;   DEBIAN_FRONTEND=noninteractive apt-get install -y sshfs >/tmp/v2p-sshfs-install.log 2>&1;   if command -v sshfs >/dev/null 2>&1; then echo INSTALLED;   else echo FAILED; tail -5 /tmp/v2p-sshfs-install.log 2>/dev/null; fi; fi"
+    "command -v sshfs >/dev/null 2>&1 && echo PRESENT || echo MISSING"
    ],
    [
     "node",
@@ -648,7 +648,7 @@
    [
     "node",
     "pve1",
-    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1; which sshpass >/dev/null 2>&1"
    ],
    [
     "node",
@@ -775,7 +775,7 @@
    [
     "node",
     "pve1",
-    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1; which sshpass >/dev/null 2>&1"
    ],
    [
     "node",
@@ -1134,7 +1134,7 @@
    [
     "node",
     "pve1",
-    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1; which sshpass >/dev/null 2>&1"
    ],
    [
     "node",
@@ -1241,7 +1241,7 @@
    [
     "node",
     "pve1",
-    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1; which sshpass >/dev/null 2>&1"
    ],
    [
     "node",
@@ -1576,7 +1576,7 @@
    [
     "node",
     "pve1",
-    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1; which sshpass >/dev/null 2>&1"
    ],
    [
     "node",
@@ -1683,7 +1683,7 @@
    [
     "node",
     "pve1",
-    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1; which sshpass >/dev/null 2>&1"
    ],
    [
     "node",
@@ -2603,7 +2603,7 @@
    [
     "node",
     "pve1",
-    "ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o PreferredAuthentications=publickey,keyboard-interactive,password  root@esx1.lab 'grep -v \"pegaprox-v2p-fixed\" /etc/ssh/keys-root/authorized_keys > /etc/ssh/keys-root/authorized_keys.tmp 2>/dev/null && mv /etc/ssh/keys-root/authorized_keys.tmp /etc/ssh/keys-root/authorized_keys 2>/dev/null; grep -v \"pegaprox-v2p-fixed\" ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp 2>/dev/null && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys 2>/dev/null; echo CLEANED' 2>&1"
+    "ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o PreferredAuthentications=publickey,keyboard-interactive,password  root@esx1.lab 'LD=/tmp/pegaprox-v2p-keys.lock; LH=; LN=0; LB=; LS=-; LF=0; while [ $LN -lt 150 ]; do LN=$((LN+1)); LW=; LX=; LE=$(date +%s 2>/dev/null); case \"$LE\" in \"\"|*[!0-9]*) LE=0;; esac; LB=${LB:-$LE}; LT=o.$LE.$$; if mkdir \"$LD\" 2>/dev/null; then true 2>/dev/null > \"$LD/$LT\"; LW=1; else LO=$(ls \"$LD\" 2>/dev/null); [ \"$LO\" = \"$LS\" ] || { LS=$LO; LF=$LE; }; LA=${LO#o.}; LA=${LA%%.*}; case \"$LA\" in \"\"|0*|*[!0-9]*) LA=$LF;; esac; [ \"$LA\" -lt \"$LF\" ] || LA=$LF; [ $((LE-LA)) -gt 60 ] && LX=1; [ -z \"$LO\" ] && [ -n \"$(find \"$LD\" -maxdepth 0 -mmin +1 2>/dev/null)\" ] && LX=1; if [ -n \"$LX\" ]; then case \"$LO\" in \"\") rmdir \"$LD\" 2>/dev/null && continue;; o.*) mv \"$LD/$LO\" \"$LD/$LT\" 2>/dev/null && LW=1;; esac; fi; fi; if [ -n \"$LW\" ]; then [ \"$(ls \"$LD\" 2>/dev/null)\" = \"$LT\" ] && LH=1 && break; rm -f \"$LD/$LT\" 2>/dev/null; rmdir \"$LD\" 2>/dev/null; fi; [ $((LE-LB)) -gt 70 ] && break; sleep 0.5 2>/dev/null || { sleep 1; LN=$((LN+1)); }; done; if [ -n \"$LH\" ]; then for F in /etc/ssh/keys-root/authorized_keys ~/.ssh/authorized_keys; do [ -f \"$F\" ] || continue; grep -v \"pegaprox-v2p-fixed\" \"$F\" > \"$F.fixed\" 2>/dev/null; if [ $? -le 1 ]; then mv \"$F.fixed\" \"$F\" 2>/dev/null; fi; rm -f \"$F.fixed\" 2>/dev/null; done; rm \"$LD/$LT\" 2>/dev/null && rmdir \"$LD\" 2>/dev/null; else echo \"/tmp/pegaprox-v2p-keys.lock stays held by another run, the key files were not touched\"; fi; L=; for F in /etc/ssh/keys-root/authorized_keys ~/.ssh/authorized_keys; do grep -q \"pegaprox-v2p-fixed\" \"$F\" 2>/dev/null && L=1; done; [ -n \"$L\" ] || echo CLEANED' 2>&1"
    ],
    [
     "node",
@@ -2846,7 +2846,7 @@
    [
     "node",
     "pve1",
-    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1; which sshpass >/dev/null 2>&1"
    ],
    [
     "node",
@@ -2953,7 +2953,7 @@
    [
     "node",
     "pve1",
-    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1; which sshpass >/dev/null 2>&1"
    ],
    [
     "node",
@@ -3060,7 +3060,7 @@
    [
     "node",
     "pve1",
-    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1"
+    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1; which sshpass >/dev/null 2>&1"
    ],
    [
     "node",

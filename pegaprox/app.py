@@ -180,6 +180,28 @@ def create_app():
             if request.path.startswith('/api/ha/peer/'):
                 from pegaprox.api.ha import signed_member_call
                 peer_call = signed_member_call()
+            # MK Nov 2026 - the same for a federation member's signed call: a lease round
+            # and the sync come from one member address. Switched off (the default), no
+            # call is a member's and none is checked
+            if request.path.startswith('/api/federation/peer/'):
+                from pegaprox.core import federation as _fed_core
+                if _fed_core.enabled():
+                    if request.path in ('/api/federation/peer/relay',
+                                        '/api/federation/peer/relay/upload',
+                                        '/api/federation/peer/relay/stream'):
+                        # a relayed request is judged by its headers, under its own domain;
+                        # the budgets per sending site stand in for the address limit
+                        from pegaprox.core import federation_relay as _fed_relay
+                        peer_call = _fed_relay.header_verdict(request)[0] in ('member', 'busy')
+                    else:
+                        from pegaprox.api.federation import request_fed_peer
+                        peer_call = request_fed_peer()[0] == 'member'
+            # and a relayed request run here: the outer call was counted against its site's
+            # budgets, and the address it carries is the user's at that site, for the audit.
+            # Counted against it, a member could spend the window of any address here
+            from pegaprox.utils.auth import RELAY_ENVIRON
+            if request.environ.get(RELAY_ENVIRON):
+                peer_call = True
             if not peer_call and not any(request.path.startswith(p) for p in skip_paths):
                 # the portal_only hook below looks API tokens up only for a counted request
                 request.environ['pegaprox.rate_counted'] = True
@@ -430,6 +452,9 @@ def create_app():
         # background the sandbox changes nothing.
         if response.mimetype == 'image/svg+xml':
             csp += "; sandbox"
+        # MK Nov 2026 - so is an answer another site of the federation gave (linked mode)
+        elif request.environ.get('pegaprox.fed_relayed'):
+            csp += "; sandbox"
         response.headers['Content-Security-Policy'] = csp
 
         # LW: Mar 2026 - only trust X-Forwarded-Proto from trusted proxies
@@ -454,6 +479,11 @@ def create_app():
 
     # Register all API blueprints
     register_blueprints(app)
+    # MK Nov 2026 - linked mode: a cluster path with another site's cluster id goes to the
+    # relay route (core/federation_relay.py). A WSGI wrapper, not a request hook, installed
+    # inside the lease fast path below; with the federation off it moves no path
+    from pegaprox.core import federation_relay as _fed_relay
+    app.wsgi_app = _fed_relay.RemotePaths(app.wsgi_app)
 
     # MK Oct 2026 - portal_only on the routes require_auth does not guard. require_auth holds
     # the account on every route behind it, with the record it loads anyway; the rest find
@@ -662,6 +692,10 @@ def create_app():
         path = request.path
         if not path.startswith('/api/') or path.startswith('/api/ha/') or path in _STANDBY_WRITABLE:
             return None
+        # a federation member's call to this host is answered here, never forwarded: a
+        # standby answers 503 FED_STANDBY itself (api/federation._peer_or_refuse)
+        if path.startswith('/api/federation/peer/'):
+            return None
         if (request.method, rule) in _STANDBY_LOCAL_WRITES:
             return None
         from pegaprox.core import ha
@@ -796,8 +830,21 @@ def create_app():
     # call, and they answered 400 or 500 with the guard's own words. The caller hears what
     # the write gate says instead: 503 HA_NO_LEASE, try again. A 2xx for what did go out
     # and a 503 of the route's own stay as they are.
+    #
+    # MK Nov 2026 - the same for a write the federation refused at its exit: this
+    # instance holds no live lease on the enrolled cluster it went to. The route answered
+    # whatever its failed cluster call made of it; the caller hears 409 FED_NO_LEASE. One
+    # environ lookup, no federation call, when nothing was refused.
     @app.after_request
     def say_no_lease_after_a_refused_write(response):
+        if 400 <= response.status_code < 600:
+            from pegaprox.core.federation import FED_REFUSED_ENVIRON
+            refused = request.environ.get(FED_REFUSED_ENVIRON)
+            if refused:
+                from pegaprox.api.federation import lease_refusal
+                resp, status = lease_refusal(refused[0])
+                resp.status_code = status
+                return resp
         if 400 <= response.status_code < 600 and response.status_code != 503:
             from pegaprox.core import ha
             if request.environ.get(ha.GUARD_REFUSED_ENVIRON):
@@ -809,11 +856,17 @@ def create_app():
 
     # and the same for a refusal that no route caught on its way up
     from pegaprox.core.ha import NoLease
+    from pegaprox.core.federation import LeaseRefused
 
     @app.errorhandler(NoLease)
     def refused_at_the_exit(e):
         from pegaprox.api.ha import guard_refusal
         return guard_refusal()
+
+    @app.errorhandler(LeaseRefused)
+    def refused_by_the_federation(e):
+        from pegaprox.api.federation import lease_refusal
+        return lease_refusal(e.cluster_id)
 
     # the lease calls of automatic failover, answered before Flask where Flask would
     # answer them with 200 anyway (_LeaseFastPath). It takes the hooks as they are now,
@@ -1764,6 +1817,10 @@ def main(debug_mode=False):
                       f"version is installed")
             elif _r.get('action') == 'no-backend':
                 print(f"  ⚠ sqlcipher3 not installed - {_db_name} stays plain (field-level encryption still active)")
+            elif _r.get('action') == 'failed':
+                # the database is as it was and opens plain, the log has the reason
+                print(f"  ⚠ {_db_name} could not be encrypted and stays plain for now (see the [DBCRYPTO] "
+                      f"error in the log), the next start tries again")
     except RuntimeError as _e:
         # corrupt / unknown-key — refuse to start
         print(f"\n[FATAL] {_e}\n")
@@ -2605,6 +2662,52 @@ class _BodyDeadline:
             pass
 
 
+# MK Nov 2026 - a flask-sock route hands its connection back to pywsgi when it returns, and
+# simple-websocket's reader can still be waiting on it then (for the client's answer to our
+# close frame, say). pywsgi ends a connection by closing the raw descriptor under the gevent
+# socket, past the reader's watcher, and libev aborts the whole process when it meets that
+# watcher ("I/O watcher with invalid fd found in epoll_ctl"). So the handler waits for the
+# reader before the connection is pywsgi's again, and no request is read after a websocket.
+_WS_SERVER_ENVIRON = 'pegaprox.simple_websocket'
+_WS_SETTLE_TIMEOUT = 2.0
+
+
+def _note_websocket_servers():
+    """simple_websocket.Server puts itself in its request's environ. Idempotent."""
+    try:
+        import simple_websocket
+    except Exception:
+        return False
+    server = simple_websocket.Server
+    if getattr(server, '_pegaprox_noted', False):
+        return True
+    original_init = server.__init__
+
+    def _init(self, environ, *args, **kwargs):
+        original_init(self, environ, *args, **kwargs)
+        environ[_WS_SERVER_ENVIRON] = self
+
+    server.__init__ = _init
+    server._pegaprox_noted = True
+    return True
+
+
+def _settle_websocket(ws, timeout=_WS_SETTLE_TIMEOUT):
+    """Until simple-websocket's reader is done with the socket. A client that never answers
+    our close gets the socket closed by gevent, which hands the waiting reader an error
+    before the descriptor goes."""
+    reader = getattr(ws, 'thread', None)
+    if reader is None:
+        return
+    reader.join(timeout=timeout)
+    if reader.is_alive():
+        try:
+            ws.sock.close()
+        except Exception:
+            pass
+        reader.join(timeout=1.0)
+
+
 class _IdleTimeoutMixin:
     """Bound the idle wait for the next request line, the header read after it, the
     body of a request nobody has signed in for yet, and each write of the answer.
@@ -2636,6 +2739,15 @@ class _IdleTimeoutMixin:
             self.wsgi_input = clock
             env[BODY_DEADLINE_ENVIRON] = clock
         return env
+
+    def run_application(self):
+        try:
+            return super().run_application()
+        finally:
+            ws = (self.environ or {}).get(_WS_SERVER_ENVIRON)
+            if ws is not None:
+                self.close_connection = True
+                _settle_websocket(ws)
 
     def handle_one_response(self):
         try:
@@ -2779,6 +2891,8 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
         apply_sendall_patch()
     except Exception as _e:
         logging.warning(f"[ws-patch] could not make simple-websocket write whole frames: {_e}")
+    if not _note_websocket_servers():
+        logging.warning("[ws-patch] simple-websocket not found, a websocket's end is not waited for")
 
     # NS: Suppress noisy errors from bots/scanners/disconnects
     import logging as log_module

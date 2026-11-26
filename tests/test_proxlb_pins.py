@@ -601,7 +601,7 @@ def test_a_pin_on_a_node_the_ha_rule_forbids_does_not_block_the_drain(db):
     # instead of narrowing to A2 first and then finding nothing at all.
     guests = [_guest(node=A1, tags=f'{PIN_A1};plb_pin_pve-node-a02')]
     mgr = _manager(guests, maintenance=[A1])
-    mgr._evacuation_placement = lambda: ({30021: {I1}}, {})
+    mgr._evacuation_placement = lambda *a: ({30021: {I1}}, {})
     task = _drain(mgr, A1)
     assert mgr.migrated == [(30021, I1)]
     assert task.failed_vms == []
@@ -612,7 +612,7 @@ def test_a_strict_pin_on_a_node_the_ha_rule_forbids_still_stops(db):
     # the counterpart: strict never goes off-pin, and the failure names the pin
     guests = [_guest(node=A1, tags=f'{PIN_A1};plb_pin_pve-node-a02')]
     mgr = _manager(guests, maintenance=[A1], pins_strict=True)
-    mgr._evacuation_placement = lambda: ({30021: {I1}}, {})
+    mgr._evacuation_placement = lambda *a: ({30021: {I1}}, {})
     task = _drain(mgr, A1)
     assert mgr.migrated == []
     assert 'pinned to' in task.failed_vms[0]['error']

@@ -17,6 +17,7 @@ import time
 import pytest
 
 from test_corp_redesigned_guard_ui import DETERMINISTIC, RES_SNAPS, _GuardApp, _GuardServer, _corp_cluster
+from test_ha_ui import CLUSTER
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _BUNDLE_FILE = os.environ.get('PEGAPROX_CR_BUNDLE')
@@ -26,11 +27,15 @@ BUNDLE = open(_BUNDLE_FILE, encoding='utf-8').read() if _BUNDLE_FILE else None
 class _SnapServer(_GuardServer):
     """The guard fake with the two snapshot routes in memory and every body kept."""
 
-    def __init__(self, snaps=None, read=None, **kw):
+    def __init__(self, snaps=None, read=None, clusters=None, **kw):
         super().__init__(bundle=BUNDLE, **kw)
+        if clusters:
+            self.clusters = clusters        # each has its own rows in snaps (by cluster_id)
         self.snaps = copy.deepcopy(RES_SNAPS['snapshots'] if snaps is None else snaps)
         self.read = read                    # (status, body) instead of the list
         self.delete_answer = None
+        self.hold = False                   # a delete is answered by the test, when it likes
+        self.held = []
         self.reqs = []
 
     def handle(self, route):
@@ -42,7 +47,11 @@ class _SnapServer(_GuardServer):
             self.calls.append(('POST', path))
             if path.endswith('/overview'):
                 status, data = self.read or (200, {'snapshots': [s for s in self.snaps
-                                                                 if not body.get('date') or s['snapshot_date'][:10] < body['date']]})
+                                                                 if (not body.get('date') or s['snapshot_date'][:10] < body['date'])
+                                                                 and s.get('cluster_id') == body.get('cluster_id', s.get('cluster_id'))]})
+            elif self.hold:
+                self.held.append(route)
+                return None
             else:
                 gone = {(s['vmid'], s['snapshot_name']) for s in body.get('snapshots', [])}
                 self.snaps = [s for s in self.snaps if (s['vmid'], s['snapshot_name']) not in gone]
@@ -290,6 +299,54 @@ def test_runtime_classic_corporate_keeps_its_overview(open_app):
     assert app.errors == []
 
 
+@pytest.mark.parametrize('layout', ['corporate-redesigned', 'corporate'])
+def test_runtime_one_bulk_delete_at_a_time_and_the_list_read_whatever_came_back(open_app, layout):
+    """#1347: the server waits for each delete in Proxmox now, so its answer can take a minute.
+    Its button waits as well (a second click sent the same snapshots into the locks of the first),
+    and when a proxy stops waiting (504) the list is read again: what the server deleted by then is
+    gone, the rest stays selected to be sent again."""
+    app = open_app(layout=layout)
+    app.server.hold = True
+    page = app.page
+    if layout == 'corporate':
+        _corp_cluster(page)
+        page.locator('button', has_text=re.compile(r'^\s*Resources\s*$')).first.click()
+        page.locator('button', has_text='Snapshot').first.click()
+        page.get_by_text('before_php84').first.wait_for(timeout=8000)
+        page.locator('thead input[type="checkbox"]').first.check()
+        btn = page.locator('button', has_text='Delete selected').first
+    else:
+        page = _open_tab(app)
+        page.locator('[data-cr-snap-sel-all]').click()
+        btn = page.locator('[data-cr-snap-del-sel]')
+    btn = btn.element_handle()     # the same button while its text changes
+    deletes = lambda: [r for r in app.server.reqs if r[0].endswith('/delete')]
+    reads = lambda: [r for r in app.server.reqs if r[0].endswith('/overview')]
+    bar = lambda: btn.evaluate('b => b.parentElement.innerText').lower()   # classic says 'Selected'
+    assert '3 selected' in bar()
+    page.on('dialog', lambda d: d.accept())
+    btn.click()
+    assert _poll(lambda: app.server.held, page), 'the delete went out'
+    assert _poll(lambda: btn.evaluate('b => b.disabled'), page, 3), 'the button does not wait for the answer'
+    assert 'deleting' in btn.inner_text().lower()
+    btn.click(force=True)
+    page.wait_for_timeout(300)
+    assert len(deletes()) == 1, 'a second bulk delete went out while the first ran'
+    # the server deleted one of them before the proxy in front of it gave up
+    app.server.snaps = [s for s in app.server.snaps if s['snapshot_name'] != 'pre-upgrade']
+    before = len(reads())
+    app.server.held.pop().fulfill(status=504, body='<html><body><h1>504 Gateway Time-out</h1></body></html>',
+                                  headers={'Content-Type': 'text/html'})
+    page.get_by_text('Failed to delete selected snapshots (HTTP 504)').first.wait_for(timeout=5000)
+    assert _poll(lambda: len(reads()) == before + 1, page), 'the list was not read again'
+    page.get_by_text('pre-upgrade').first.wait_for(state='detached', timeout=5000)
+    assert _poll(lambda: '2 selected' in bar(), page), bar()
+    assert _poll(lambda: not btn.evaluate('b => b.disabled'), page, 3)
+    assert 'deleting' not in btn.inner_text().lower()
+    assert len(deletes()) == 1
+    assert app.errors == []
+
+
 @pytest.mark.parametrize('engine', ['chromium', 'firefox'])
 @pytest.mark.parametrize('size', [(1600, 1000), (1280, 900), (1024, 800)])
 def test_runtime_it_fits_without_sideways_scroll(open_app, engine, size):
@@ -322,3 +379,142 @@ def test_every_new_key_is_in_english_and_german_before_the_pinned_block():
             assert '\u2014' not in found[0] and '\u2013' not in found[0], (lang, k)
             assert 'preview' not in found[0].lower(), (lang, k)
             assert blocks[lang].index(f'                {k}: ') < marker, (lang, k)
+
+
+LAB = dict(CLUSTER, id='c2', name='Lab', display_name='Lab', host='10.0.0.2')
+LAB_SNAP = {'vmid': 300, 'vm_name': 'lab01', 'vm_type': 'qemu', 'node': 'pve1', 'snapshot_name': 'lab-baseline',
+            'snapshot_date': '2026-09-01 10:00', 'snapshot_ts': 1788256800, 'age': '59 days', 'cluster_id': 'c2'}
+
+
+def _snap_tab(page, layout, cluster, row):
+    """Opens the snapshot overview of `cluster` (by its tree name) and waits for `row`."""
+    page.locator('.corp-tree-item', has_text=cluster).first.click()
+    page.locator('.corp-tree-child', has_text='web01').first.wait_for(timeout=8000)
+    if layout == 'corporate':
+        page.locator('button', has_text=re.compile(r'^\s*Resources\s*$')).first.click()
+        page.locator('button', has_text='Snapshot').first.click()
+    else:
+        page.locator('[data-cr-tab="resources"]').first.click()
+        page.locator('.corp-tab-strip button', has_text='Snapshot').first.click()
+    page.get_by_text(row).first.wait_for(timeout=8000)
+
+
+@pytest.mark.parametrize('layout', ['corporate-redesigned', 'corporate'])
+def test_runtime_a_bulk_delete_answered_after_a_cluster_switch_stays_out_of_the_new_overview(open_app, layout):
+    """#1347: the answer of a bulk delete can take a minute. Read again for the cluster it was
+    sent in, that cluster's list landed in the overview of the cluster opened meanwhile, its
+    rows still selected after a failure, and the next Delete selected sent them to the first
+    cluster. The answer is still said; the list of the open cluster stays its own."""
+    app = open_app(layout=layout, clusters=[CLUSTER, LAB], snaps=RES_SNAPS['snapshots'] + [LAB_SNAP])
+    app.server.hold = True
+    page = app.page
+    _snap_tab(page, layout, 'Testi', 'before_php84')
+    if layout == 'corporate':
+        page.locator('thead input[type="checkbox"]').first.check()
+        btn = page.locator('button', has_text='Delete selected').first
+    else:
+        page.locator('[data-cr-snap-sel-all]').click()
+        btn = page.locator('[data-cr-snap-del-sel]')
+    page.on('dialog', lambda d: d.accept())
+    btn.click()
+    assert _poll(lambda: app.server.held, page), 'the delete went out'
+    _snap_tab(page, layout, 'Lab', 'lab-baseline')
+    reads = lambda: [r[1] for r in app.server.reqs if r[0].endswith('/overview')]
+    assert reads()[-1] == {'cluster_id': 'c2'}
+    before = len(reads())
+    app.server.held.pop().fulfill(status=504, body='<html><body><h1>504 Gateway Time-out</h1></body></html>',
+                                  headers={'Content-Type': 'text/html'})
+    page.get_by_text('Failed to delete selected snapshots (HTTP 504)').first.wait_for(timeout=5000)
+    page.wait_for_timeout(800)
+    assert reads()[before:] == [], f'the list of the first cluster was read again: {reads()[before:]}'
+    assert page.get_by_text('lab-baseline').count() >= 1
+    for name in ('pre-upgrade', 'before_php84', 'nightly'):
+        assert page.get_by_text(name).count() == 0, f'{name} of Testi in the overview of Lab'
+    # nothing of Testi is selected here, so Delete selected has nothing to send
+    assert page.locator('[data-cr-snap-bar]').count() == 0
+    assert page.locator('button', has_text='Delete selected').count() == 0
+    assert len([r for r in app.server.reqs if r[0].endswith('/delete')]) == 1
+
+
+def test_runtime_a_delete_still_running_in_proxmox_is_said_as_such(open_app):
+    """#1347: the server answers the deletes it started and did not see end under 'started'
+    (202 when none was seen gone). The toast says they still run in Proxmox, not that they
+    were deleted or failed; the one that failed stays selected, the started ones do not."""
+    app = open_app()
+    snaps = RES_SNAPS['snapshots']
+    started = [dict({k: snaps[0][k] for k in ('cluster_id', 'node', 'vmid', 'vm_type', 'snapshot_name')},
+                    state='running', task='UPID:pve1:00000001:00000001:6730AABB:qmdelsnapshot:101:root@pam:',
+                    why='its delete task still runs in Proxmox after 90s'),
+               dict({k: snaps[2][k] for k in ('cluster_id', 'node', 'vmid', 'vm_type', 'snapshot_name')},
+                    state='unread', task='UPID:pve1:00000002:00000001:6730AABB:qmdelsnapshot:100:root@pam:',
+                    why='its delete task was started, its status could not be read')]
+    app.server.delete_answer = (202, {'success': True, 'deleted': 0, 'started': started,
+                                      'errors': ['Failed to delete before_php84 of VM 102: snapshot is protected']})
+    page = _open_tab(app)
+    page.locator('[data-cr-snap-sel-all]').click()
+    page.once('dialog', lambda d: d.accept())
+    page.locator('[data-cr-snap-del-sel]').click()
+    note = ('1 snapshot delete(s) still running in Proxmox - check the task '
+            '1 snapshot delete(s) started in Proxmox, result not read - check the task')
+    page.get_by_text(note).first.wait_for(timeout=5000)
+    page.get_by_text('Failed to delete before_php84 of VM 102: snapshot is protected').first.wait_for(timeout=5000)
+    assert page.get_by_text('snapshot(s) deleted').count() == 0
+    assert page.get_by_text('Failed to delete selected snapshots').count() == 0
+    # the fake took all three off its list; what is drawn again keeps none of them selected but
+    # the failed one, which is gone too, so the bar goes
+    _need(page, '[data-cr-snap="empty"]', 'the list read again')
+    app.server.snaps = copy.deepcopy(snaps)
+    page.locator('[data-cr-snap-refresh]').click()
+    page.get_by_text('before_php84').first.wait_for(timeout=5000)
+    assert _poll(lambda: page.locator('[data-cr-snap-bar]').count() == 1 and '1 selected' in page.locator('[data-cr-snap-bar]').inner_text(), page)
+    assert page.locator('tr', has_text='before_php84').locator('[data-cr-snap-sel]').is_checked()
+    assert app.errors == []
+
+
+def test_runtime_one_delete_still_running_in_proxmox_is_not_said_deleted(open_app):
+    app = open_app()
+    snap = RES_SNAPS['snapshots'][0]
+    app.server.delete_answer = (202, {'success': True, 'deleted': 0, 'errors': None, 'started': [
+        dict(snap, state='running', task='UPID:pve1:00000001:00000001:6730AABB:qmdelsnapshot:101:root@pam:', why='')]})
+    page = _open_tab(app)
+    page.once('dialog', lambda d: d.accept())
+    page.locator('[data-cr-snap-del]').first.click()
+    page.get_by_text('1 snapshot delete(s) still running in Proxmox - check the task').first.wait_for(timeout=5000)
+    assert page.get_by_text('Snapshot deleted').count() == 0
+    assert app.errors == []
+
+
+def test_runtime_a_delete_proxmox_did_not_answer_is_not_said_to_have_started(open_app):
+    """#1347: a DELETE Proxmox did not answer comes back under 'started' as 'unanswered': all the
+    server has is a ReadTimeout, which a TLS handshake that hung before the DELETE went out
+    raises too. The toast says it was sent and may or may not have started, not that it was
+    started with its result not read; next to one the server did see start, each is counted
+    under its own line."""
+    app = open_app()
+    snaps = RES_SNAPS['snapshots']
+    started = [dict({k: snaps[0][k] for k in ('cluster_id', 'node', 'vmid', 'vm_type', 'snapshot_name')},
+                    state='unanswered', task=None,
+                    why='its delete was sent, no answer from Proxmox: it may or may not have started (Read timed out.)'),
+               dict({k: snaps[2][k] for k in ('cluster_id', 'node', 'vmid', 'vm_type', 'snapshot_name')},
+                    state='unread', task='UPID:pve1:00000002:00000001:6730AABB:qmdelsnapshot:100:root@pam:',
+                    why='its delete task was started, its status could not be read')]
+    app.server.delete_answer = (202, {'success': True, 'deleted': 0, 'errors': None, 'started': started})
+    page = _open_tab(app)
+    page.locator('[data-cr-snap-sel-all]').click()
+    page.once('dialog', lambda d: d.accept())
+    page.locator('[data-cr-snap-del-sel]').click()
+    note = ('1 snapshot delete(s) started in Proxmox, result not read - check the task '
+            '1 snapshot delete(s) sent, no answer from Proxmox: may or may not have started - check the tasks')
+    page.get_by_text(note).first.wait_for(timeout=5000)
+    assert page.get_by_text('2 snapshot delete(s) started in Proxmox').count() == 0
+    assert page.get_by_text('snapshot(s) deleted').count() == 0
+    assert app.errors == []
+
+    one = open_app()
+    one.server.delete_answer = (202, {'success': True, 'deleted': 0, 'errors': None, 'started': [started[0]]})
+    page = _open_tab(one)
+    page.once('dialog', lambda d: d.accept())
+    page.locator('[data-cr-snap-del]').first.click()
+    page.get_by_text('1 snapshot delete(s) sent, no answer from Proxmox: may or may not have started - check the tasks').first.wait_for(timeout=5000)
+    assert page.get_by_text('result not read').count() == 0 and page.get_by_text('Snapshot deleted').count() == 0
+    assert one.errors == []

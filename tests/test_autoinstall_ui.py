@@ -43,7 +43,7 @@ def cloud():
 @pytest.fixture(scope='module')
 def sidebar(dash):
     """The global block of the tree sidebar, from the zero-cluster card to the groups."""
-    start = dash.index('{clusters.length === 0 ? (')
+    start = dash.index('{allClusters.length === 0 ? (')
     end = dash.index('{/* Grouped Clusters */}', start)
     return dash[start:end]
 
@@ -51,7 +51,7 @@ def sidebar(dash):
 @pytest.fixture(scope='module')
 def tools(dash):
     """Corporate lists the global views in a Tools section of its own, at the top of the sidebar."""
-    start = dash.index('{isCorporate && clusters.length > 0 && (() => {')
+    start = dash.index('{isCorporate && allClusters.length > 0 && (() => {')
     return dash[start:dash.index('})()}', start)]
 
 

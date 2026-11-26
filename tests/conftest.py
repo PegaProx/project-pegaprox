@@ -39,6 +39,35 @@ from pegaprox.background import metrics_store as _metrics_store  # noqa: E402
 _metrics_store.start_backfill = lambda delay=60: None
 _metrics_store._check_every_save = True
 
+# The first import of pegaprox.api.settings builds a database: the module runs
+# load_ip_whitelist() at import, which calls get_db() with whatever the db
+# module's globals say - and until a fixture points them elsewhere that is
+# constants.CONFIG_DIR, the checkout's config/ next to a developer's live
+# instance (or PEGAPROX_CONFIG_DIR). The session's DEFAULTS live in a throwaway
+# dir from here on: a get_db() that runs before any per-test redirect builds a
+# database nobody misses. The per-test fixtures (db, _integration_app) re-point
+# these as before; they save what they find and restore it.
+import atexit as _atexit  # noqa: E402
+import tempfile as _tempfile  # noqa: E402
+import pegaprox.constants as _constants  # noqa: E402
+import pegaprox.core.db as _dbmod  # noqa: E402
+_BOOT_CONFIG_DIR = _tempfile.mkdtemp(prefix='pp_test_boot_')
+_dbmod.CONFIG_DIR = _BOOT_CONFIG_DIR
+_dbmod.DATABASE_FILE = os.path.join(_BOOT_CONFIG_DIR, 'pegaprox.db')
+_dbmod.KEY_FILE = os.path.join(_BOOT_CONFIG_DIR, '.pegaprox.key')
+# core/dbcrypto's heavy reads and core/keystore's legacy tier read these two
+# straight from the constants module at call time, not from the db module
+_constants.DATABASE_FILE = _dbmod.DATABASE_FILE
+_constants.KEY_FILE = _dbmod.KEY_FILE
+# the same for the federation's host-local lease file, which the module binds to the
+# config directory at import: every test gets a fresh one in its own tmp dir below
+# (_federation_forgotten); this is only the default nobody should land on
+import pegaprox.core.federation as _federation  # noqa: E402
+_federation.reset_for_tests(os.path.join(_BOOT_CONFIG_DIR, 'federation_leases.json'))
+_atexit.register(shutil.rmtree, _BOOT_CONFIG_DIR, True)
+_CHECKOUT_CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                'config')
+
 
 def _poll(done):
     import gevent
@@ -250,6 +279,22 @@ def _ha_state_out_of_the_checkout(tmp_path, monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _federation_forgotten(tmp_path):
+    """The federation's caches live as long as the process (the switch, the identity, the
+    owner table, the lease state) and its workers would outlive a test that switched it
+    on: each test starts from nothing, with a lease file in its own tmp dir. No test may
+    leave a federation file in the checkout's config/."""
+    names = ('federation_leases.json', 'federation_state.json')
+    before = {n for n in names if os.path.exists(os.path.join(_CHECKOUT_CONFIG, n))}
+    _federation.reset_for_tests(str(tmp_path / 'federation_leases.json'))
+    yield
+    _federation.reset_for_tests(os.path.join(_BOOT_CONFIG_DIR, 'federation_leases.json'))
+    for name in names:
+        if name not in before and os.path.exists(os.path.join(_CHECKOUT_CONFIG, name)):
+            pytest.fail(f'a test wrote config/{name} into the checkout')
+
+
+@pytest.fixture(autouse=True)
 def _node_history_forgotten():
     """What core/node_history.py knows of each node lives as long as the process, and the
     next test's cluster_1 is another cluster with another database."""
@@ -271,6 +316,30 @@ def _node_scopes_forgotten():
 
 
 @pytest.fixture(autouse=True)
+def _esxi_migrations_forgotten():
+    """The ESXi migrations and bulk runs live in process-wide registries. One a test left
+    'running' made the update, rollback and restart routes of every later test in the worker
+    answer 409: they wait until no migration runs."""
+    from pegaprox.api import vmware
+    from pegaprox.core import esxi_bulk
+    vmware._vmware_migrations.clear()
+    esxi_bulk.reset_for_tests()
+    yield
+    vmware._vmware_migrations.clear()
+    esxi_bulk.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _tunnel_versions_forgotten():
+    """The package versions of the nodes a remote migration compares are kept per cluster id
+    and node for minutes (core/migration_tunnel.py), and the next test's pve1 is another node."""
+    from pegaprox.core import migration_tunnel
+    migration_tunnel.reset_for_tests()
+    yield
+    migration_tunnel.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _history_reports_forgotten():
     """The power, cost and right-sizing reports are kept per cluster id for minutes
     (helpers.history_report), and the next test's cluster_1 has another history."""
@@ -286,6 +355,18 @@ def _reset_api_rate_window():
     try:
         import pegaprox.globals as ppglobals
         ppglobals.api_rate_window.reset()
+    except Exception:
+        pass
+
+
+def _reset_verify_password_window():
+    """Forget the re-auth attempts (/api/auth/verify-password allows five per client IP in
+    five minutes). They sit in the login attempt store for the life of the process, and two
+    test files that each ask a few times in one worker ran into the 429 of the other."""
+    try:
+        import pegaprox.globals as ppglobals
+        for key in [k for k in ppglobals.login_attempts_by_ip if str(k).startswith('verify_pw_')]:
+            ppglobals.login_attempts_by_ip.pop(key, None)
     except Exception:
         pass
 
@@ -513,6 +594,7 @@ def api(_integration_app, db):
     # (run 35697303667) while the same tree was green on a slower machine here. reset() is
     # already the method the unlock endpoints use.
     _reset_api_rate_window()
+    _reset_verify_password_window()
     _reset_guest_index()
 
     client = _integration_app.test_client()
@@ -545,6 +627,7 @@ def api(_integration_app, db):
         for _registry in ('pbs_managers', 'vmware_managers'):
             getattr(ppglobals, _registry, {}).clear()
         _reset_api_rate_window()
+        _reset_verify_password_window()
         _reset_guest_index()
 
 

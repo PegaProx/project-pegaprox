@@ -671,6 +671,13 @@ def join_active():
         return jsonify({'error': 'Enter the https:// address the active instance will use to reach this one'}), 400
     if ha.role() != ha.ROLE_STANDALONE or ha.members():
         return jsonify({'error': 'Only a standalone, unpaired instance can become a standby'}), 409
+    # MK Nov 2026 - as a standby this instance takes the active's federation identity with
+    # the sync, and its own would be gone while the other sites still count it
+    from pegaprox.core import federation as _fed
+    if _fed.enabled() and _fed.members():
+        return jsonify({'code': 'FED_MEMBER',
+                        'error': 'Leave the federation first: as a standby this instance takes '
+                                 'the active\'s federation identity'}), 409
     try:
         info = ha.decode_code(code)
     except ha.HaError as e:
@@ -783,6 +790,12 @@ def promote_standby():
     return jsonify({'success': True, 'epoch': new_epoch, 'restarting': True})
 
 
+def _unpair_refused(why):
+    # the federation's refusal has a code of its own, every other one is the group's mode
+    code = 'HA_FEDERATION' if why == ha.FED_UNPAIR_ERROR else 'HA_AUTO_MODE'
+    return jsonify({'code': code, 'error': why}), 409
+
+
 @bp.route('/api/ha/unpair', methods=['POST'])
 @require_auth(roles=[ROLE_ADMIN])
 def unpair_peer():
@@ -798,7 +811,11 @@ def unpair_peer():
     takes it out of the voter config first (left_through names it); without an answering
     leader that is 409 HA_AUTO_MODE, as it is on the leader itself (it hands its lead on
     first), on a member that holds a switch another instance started, and on one whose
-    only way out is Force leader (auto.way_out of the status, ha.unpair_refusal)."""
+    only way out is Force leader (auto.way_out of the status, ha.unpair_refusal).
+
+    An active that still has standbys while the federation is switched on gets 409
+    HA_FEDERATION: the standbys keep the group's federation identity, so the active would
+    act as that member next to them. Remove (or unpair) the standbys first."""
     denied = _refuse_confined_admin()
     if denied:
         return denied
@@ -823,7 +840,7 @@ def unpair_peer():
         why, said = ha.unpair_check()
         if why:
             # before any member is told: nobody leaves an automatic group by hand
-            return jsonify({'code': 'HA_AUTO_MODE', 'error': why}), 409
+            return _unpair_refused(why)
         denied = _refuse_without_reauth('unpairing')
         if denied:
             return denied
@@ -839,7 +856,7 @@ def unpair_peer():
     try:
         was = ha.unpair(said=said, leader_agreed=through is not None)
     except ha.AutoMode as e:
-        return jsonify({'code': 'HA_AUTO_MODE', 'error': str(e)}), 409
+        return _unpair_refused(str(e))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Unpairing failed')}), 500
     restarting = was == ha.ROLE_STANDBY

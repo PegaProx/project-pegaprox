@@ -44,7 +44,13 @@ if [ "$1" = "configure" ]; then
     systemctl enable pegaprox.service
     # the unit as this package ships it, ExecStartPre included, not the one of before the upgrade
     systemctl daemon-reload || true
-    systemctl restart pegaprox.service || true
+    # MK Nov 2026 - an upgrade ($2 is the version before it) is restarted by the debhelper
+    # part below (deb-systemd-invoke restart). Restarting here too made two restarts a few
+    # seconds apart, and the second one cut short the database encryption the first start
+    # of a new version can run. A first install still starts here.
+    if [ -z "$2" ]; then
+        systemctl restart pegaprox.service || true
+    fi
 
 fi
 

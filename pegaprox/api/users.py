@@ -23,6 +23,7 @@ from pegaprox.utils.auth import (
 )
 from pegaprox.utils.audit import log_audit, is_audit_pseudo_actor
 from pegaprox.utils.oidc import OIDC_AUTH_SOURCES, oidc_key_names_a_subject
+from pegaprox.api.federation import refuse_foreign, refuse_mirror_caller
 from pegaprox.utils.rbac import (
     invalidate_tenants_cache,
     load_custom_roles, save_custom_roles, get_custom_roles, invalidate_roles_cache,
@@ -34,7 +35,7 @@ from pegaprox.utils.rbac import (
     get_pool_membership_cache, invalidate_pool_cache, get_vm_pool_cached,
     DEFAULT_TENANT_ID, ROLE_TEMPLATES, acts_as_admin,
 )
-from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, check_cluster_access, safe_error, caller_acts_as_admin, find_user_key, ui_lock, ui_lock_holds, UI_LOCKED
+from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, check_cluster_access, safe_error, caller_acts_as_admin, find_user_key, unambiguous_account, ui_lock, ui_lock_holds, UI_LOCKED
 
 bp = Blueprint('users', __name__)
 
@@ -177,6 +178,30 @@ def _caller_can_manage_user(target_user):
     from pegaprox.utils.auth import build_authz_user
     caller = build_authz_user(request.session.get('user', ''), request.session)
     return all(has_permission(caller, p) for p in _account_reach(target_user))
+
+
+def _local_admin_count(users, enabled_only=True):
+    """The admins this instance can count on: its own accounts only. A mirror of a
+    federation member is not one - removing that member drops it, and an instance that
+    counted it could lose its last own admin first."""
+    return sum(1 for u in users.values()
+               if u.get('role') == ROLE_ADMIN and not u.get('fed_home')
+               and (u.get('enabled', True) or not enabled_only))
+
+
+def _federation_sites(users):
+    """{member id: site label} for the mirrors in `users`; asked only when one is there
+    and the federation runs."""
+    if not any(u.get('fed_home') for u in users.values()):
+        return {}
+    try:
+        from pegaprox.core import federation
+        if not federation.enabled():
+            return {}
+        return {iid: rec.get('site') or '' for iid, rec in federation.members().items()}
+    except Exception as e:
+        logging.warning(f"[FED] could not name the sites of the mirrored accounts: {e}")
+        return {}
 
 
 def _account_reach(target_user):
@@ -400,8 +425,9 @@ def update_user_preferences():
     })
 
 
-@bp.route('/api/users/<username>/2fa', methods=['DELETE'])
+@bp.route('/api/users/<path:username>/2fa', methods=['DELETE'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def admin_disable_2fa(username):
     """Admin: Disable 2FA for a user"""
     global users_db
@@ -411,6 +437,11 @@ def admin_disable_2fa(username):
     
     if username is None:
         return jsonify({'error': 'User not found'}), 404
+    
+    # Federation Phase 2: the home of a mirrored user owns its second factor
+    denied = refuse_foreign('users', (username,), f'User {username}')
+    if denied:
+        return denied
     
     user = users_db[username]
     _ct = _caller_tenant_or_none()
@@ -431,8 +462,9 @@ def admin_disable_2fa(username):
     return jsonify({'success': True, 'message': f'2FA for {username} disabled'})
 
 
-@bp.route('/api/users/<username>/oidc-binding', methods=['DELETE'])
+@bp.route('/api/users/<path:username>/oidc-binding', methods=['DELETE'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def reset_oidc_binding(username):
     """Admin: forget the identity provider subject an OIDC / Entra account is bound to.
 
@@ -446,11 +478,19 @@ def reset_oidc_binding(username):
     An account keyed on the part before the @ of an address (releases that cut the name
     there) is found by its sub too, and cannot be told from a provider username without
     an @: the admin is told in the confirmation to delete such an account instead.
+
+    With the federation on, a caller whose account is mirrored from another site resets
+    no binding here (403 FED_MIRROR_ADMIN), and a mirrored account is reset at its home
+    (409 FED_FOREIGN).
     """
     users_db = load_users()
     username = find_user_key(users_db, username)
     if username is None:
         return jsonify({'error': 'User not found'}), 404
+    # whoever signs in next under this name gets the account: not a mirrored admin's call
+    denied = refuse_foreign('users', (username,), f'User {username}')
+    if denied:
+        return denied
 
     user = users_db[username]
     _ct = _caller_tenant_or_none()
@@ -482,8 +522,9 @@ def reset_oidc_binding(username):
     return jsonify({'success': True})
 
 
-@bp.route('/api/users/<username>/password', methods=['PUT'])
+@bp.route('/api/users/<path:username>/password', methods=['PUT'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def admin_change_password(username):
     """Admin: Change password for any user
     
@@ -497,6 +538,11 @@ def admin_change_password(username):
     
     if username is None:
         return jsonify({'error': 'User not found'}), 404
+    
+    # Federation Phase 2: the home of a mirrored user owns its password
+    denied = refuse_foreign('users', (username,), f'User {username}')
+    if denied:
+        return denied
     
     data = request.get_json()
     new_password = data.get('password', '')
@@ -570,6 +616,7 @@ def get_users():
 
     # Return users without password info
     users_list = []
+    _sites = _federation_sites(users_db)
     for username, user in users_db.items():
         if _ct is not None and user.get('tenant_id', DEFAULT_TENANT_ID) != _ct:
             continue
@@ -594,6 +641,10 @@ def get_users():
             'permissions': user.get('permissions', []),  # LW: For permission display
             'portal_only': user.get('portal_only', False),
             'user_folder': user.get('user_folder', ''),
+            # a mirror of a federation member, and that member's site label when known:
+            # the home changes it, this instance refuses every edit
+            'fed_home': user.get('fed_home', ''),
+            'fed_site': _sites.get(user.get('fed_home', ''), ''),
         })
     
     return jsonify(users_list)
@@ -762,6 +813,9 @@ def reset_all_password_expiry():
     MK: This is useful after a security incident or when rotating passwords company-wide
     Can include admins too if the admin explicitly asks for it
     """
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     data = request.json or {}
     include_admins = data.get('include_admins', False)  # opt-in for admins
     
@@ -792,7 +846,8 @@ def reset_all_password_expiry():
             continue
         if not user.get('enabled', True):
             continue  # skip disabled users
-            
+        if user.get('fed_home'):
+            continue  # a mirror of a federation member: its home's policy holds
         user['password_changed_at'] = old_date
         reset_count += 1
     
@@ -1047,6 +1102,12 @@ def create_user():
         return jsonify({'error': f"The username '{username}' is reserved for entries PegaProx "
                                  f"writes itself - choose another"}), 400
     
+    # Federation Phase 2: the name may be a mirror of another member's user - saving
+    # over it would take the row as ours while the next sync still lists it there
+    denied = refuse_foreign('users', (username,), f'A user named {username}')
+    if denied:
+        return denied
+    
     # Validate password policy
     is_valid, error_msg = validate_password_policy(password)
     if not is_valid:
@@ -1131,8 +1192,12 @@ def create_user():
         }
     })
 
-@bp.route('/api/users/<username>', methods=['PUT'])
+# JB Nov 2026 (#1367) - path: the pre-#1141 OIDC keys carry a '/' from the sub. The rules with
+# a static tail (/password, /2fa, /permissions ...) still match first; unambiguous_account
+# refuses an address that names two accounts
+@bp.route('/api/users/<path:username>', methods=['PUT'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def update_user(username):
     """Update a user (admin only)"""
     global users_db
@@ -1142,6 +1207,11 @@ def update_user(username):
     
     if username is None:
         return jsonify({'error': 'User not found'}), 404
+    
+    # Federation Phase 2: a mirrored user is the home's to change
+    denied = refuse_foreign('users', (username,), f'User {username}')
+    if denied:
+        return denied
     
     data = request.get_json()
     user = users_db[username]
@@ -1177,7 +1247,7 @@ def update_user(username):
             return jsonify({'error': 'Access denied: target has privileges beyond your own'}), 403
         # Prevent last admin from losing admin role
         if user['role'] == ROLE_ADMIN and data['role'] != ROLE_ADMIN:
-            admin_count = sum(1 for u in users_db.values() if u['role'] == ROLE_ADMIN and u.get('enabled', True))
+            admin_count = _local_admin_count(users_db)
             if admin_count <= 1:
                 return jsonify({'error': 'Cannot remove admin role from last admin'}), 400
         user['role'] = data['role']
@@ -1215,7 +1285,7 @@ def update_user(username):
             return jsonify({'error': 'Access denied: target has privileges beyond your own'}), 403
         # Prevent disabling last admin
         if user['role'] == ROLE_ADMIN and not data['enabled']:
-            admin_count = sum(1 for u in users_db.values() if u['role'] == ROLE_ADMIN and u.get('enabled', True))
+            admin_count = _local_admin_count(users_db)
             if admin_count <= 1:
                 return jsonify({'error': 'Cannot disable last admin'}), 400
         # NS Aug 2026 (audit) — capture the enabled→disabled transition so we can drop live sessions
@@ -1297,8 +1367,9 @@ def update_user(username):
     
     return jsonify({'success': True})
 
-@bp.route('/api/users/<username>', methods=['DELETE'])
+@bp.route('/api/users/<path:username>', methods=['DELETE'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def delete_user(username):
     """Delete a user (admin only)"""
     global users_db
@@ -1313,6 +1384,11 @@ def delete_user(username):
     if username == request.session['user']:
         return jsonify({'error': 'Cannot delete your own account'}), 400
     
+    # Federation Phase 2: a mirrored user is the home's to delete
+    denied = refuse_foreign('users', (username,), f'User {username}')
+    if denied:
+        return denied
+    
     # Prevent deleting last admin
     user = users_db[username]
     _ct = _caller_tenant_or_none()
@@ -1323,7 +1399,7 @@ def delete_user(username):
     if not _caller_can_manage_user(user):
         return jsonify({'error': 'Access denied: target has privileges beyond your own'}), 403
     if user['role'] == ROLE_ADMIN:
-        admin_count = sum(1 for u in users_db.values() if u['role'] == ROLE_ADMIN)
+        admin_count = _local_admin_count(users_db, enabled_only=False)
         if admin_count <= 1:
             return jsonify({'error': 'Cannot delete last admin'}), 400
     
@@ -1516,6 +1592,11 @@ def create_tenant():
     MK: Improved to handle duplicate names by adding suffix
     """
     global tenants_db
+    # MK Nov 2026 - accounts, tenants and roles here are administered by this instance's
+    # own accounts, never by one mirrored from another federation member
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
 
     # NS Oct 2026 (#1060) - admin.tenants inside a tenant edits that tenant (update_tenant).
     # A new tenant names its clusters, which only a global admin assigns.
@@ -1581,6 +1662,9 @@ def create_tenant():
 def update_tenant(tenant_id):
     """Update tenant"""
     global tenants_db
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     
     tenants_db = load_tenants()
     
@@ -1675,6 +1759,9 @@ def get_tenant_quota(tenant_id):
 def delete_tenant(tenant_id):
     """Delete tenant"""
     global tenants_db
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
 
     # same as create_tenant: a tenant-scoped admin.tenants holder deleted any tenant that had
     # no accounts yet, another one's included (#1060)
@@ -1819,6 +1906,9 @@ def list_all_roles():
 @require_auth(perms=['admin.roles'])
 def create_custom_role():
     """Create a new custom role"""
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     data = request.json or {}
     
     role_id = data.get('id', '').lower().strip()
@@ -1828,7 +1918,7 @@ def create_custom_role():
     
     if not role_id:
         return jsonify({'error': 'Role ID required'}), 400
-    
+
     # cant use builtin names
     if role_id in BUILTIN_ROLES:
         return jsonify({'error': 'Cannot use builtin role name'}), 400
@@ -1914,14 +2004,17 @@ def create_custom_role():
 @require_auth(perms=['admin.roles'])
 def update_custom_role(role_id):
     """Update a custom role"""
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     if role_id in BUILTIN_ROLES:
         return jsonify({'error': 'Cannot modify builtin roles'}), 400
-    
+
     data = request.json or {}
     name = data.get('name')
     permissions = data.get('permissions')
     tenant_id = data.get('tenant_id')  # which tenant's role to update
-    
+
     # Tenant validation: non-admins can only update roles in their own tenant
     user = build_authz_user(request.session.get('user', ''), request.session)
     if not acts_as_admin(user):
@@ -1974,6 +2067,9 @@ def update_custom_role(role_id):
 @require_auth(perms=['admin.roles'])
 def delete_custom_role(role_id):
     """Delete a custom role"""
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     if role_id in BUILTIN_ROLES:
         return jsonify({'error': 'Cannot delete builtin roles'}), 400
     
@@ -2048,7 +2144,6 @@ def delete_custom_role(role_id):
     if not _saved:
         return jsonify({'error': 'Could not save the role - check the server logs',
                         'code': 'ROLE_WRITE_FAILED'}), 500
-    
     log_audit(request.session['user'], 'role.deleted', f"Deleted role: {role_id}")
     return jsonify({'success': True})
 
@@ -2076,6 +2171,9 @@ def get_role_templates():
 @require_auth(perms=['admin.roles'])
 def apply_role_template(template_id):
     """Create a new role from a template"""
+    denied = refuse_mirror_caller()
+    if denied:
+        return denied
     if template_id not in ROLE_TEMPLATES:
         return jsonify({'error': 'Template not found'}), 404
     

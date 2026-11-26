@@ -28,7 +28,7 @@ from pegaprox.utils.rbac import (
 )
 from pegaprox.utils.realtime import broadcast_sse, broadcast_update, push_immediate_update
 from pegaprox.core.config import load_config, save_config
-from pegaprox.core.manager import PegaProxManager, ha_cache_node_status
+from pegaprox.core.manager import PegaProxManager, ha_cache_node_status, management_token_form
 from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
 from pegaprox.utils.sanitization import bounded_list, validate_ssh_user, validate_host_address, dns_suffix
 from pegaprox.utils.sanitization import task_ref_ok
@@ -317,8 +317,13 @@ def export_cluster_config(cluster_id):
 
 # MK May 2026 (PVE 9.2) — rotate the auto-created API token without dropping
 # its ACL entries. The classic delete+recreate path resets all permissions;
-# the new /access/users/{user}/token/{id} POST in 9.2 regenerates the secret
-# in place. On pre-9.2 we fall back to delete+create + warn that ACLs reset.
+# PVE 9.2 regenerates the secret in place. On pre-9.2 we fall back to a new
+# token + warn that ACLs reset.
+# MK Nov 2026 - the in-place one is PUT .../token/{id} regenerate=1 (a POST there is a new
+# token, "Token already exists"). It goes through the manager's token ladder: 9.3 wants
+# Permissions.Modify for it over a token, else the account's password login does it. The
+# session takes the new secret at once. Pre-9.2 gets its new token before the old one,
+# which the session signs in with, is deleted.
 @bp.route('/api/clusters/<cluster_id>/api-token/rotate', methods=['POST'])
 @require_auth(perms=['cluster.config'])
 def rotate_cluster_api_token(cluster_id):
@@ -338,60 +343,132 @@ def rotate_cluster_api_token(cluster_id):
     try:
         token_user = mgr.config.api_token_user
         user_part, token_id = token_user.split('!', 1)
-        base = f"https://{mgr.host}:{mgr.api_port}/api2/json/access/users/{user_part}/token/{token_id}"
-
+        if user_part != mgr._token_owner():
+            return jsonify({'error': f'The stored API token {token_user} is not one of '
+                                     f'{mgr._token_owner()}: reconfigure the cluster'}), 409
         pve_ver = mgr.get_pve_version_tuple()
         new_secret = None
+        preserved = False
         # NS May 2026 — only try the 9.2 in-place regenerate when we KNOW the
-        # cluster is 9.2+. Pre-9.2 PVE doesn't reject POST on an existing
-        # token cleanly — it hangs / times out on some 9.1 builds. Falling
-        # back is cheaper than waiting for a 10s read timeout per attempt.
+        # cluster is 9.2+. Older PVE gets the new token below instead.
         if pve_ver is not None and pve_ver >= (9, 2):
-            try:
-                resp = mgr._api_post(base, data={}, timeout=8)
-                if resp.status_code == 200:
-                    data = resp.json().get('data') or {}
-                    new_secret = data.get('value') or data.get('secret')
-                    preserved = True
-                elif resp.status_code in (404, 405, 501):
-                    preserved = False  # fall through to delete+create
-                else:
-                    return upstream_failure(resp.status_code, parse_pve_error(resp.text))
-            except Exception as probe_err:
-                mgr.logger.warning(f"[token-rotate] in-place regenerate probe failed ({probe_err}); falling back")
-                preserved = False
-        else:
-            preserved = False
+            resp, why = mgr._token_request('PUT', token_id, {'regenerate': 1},
+                                           what='a new secret of its API token')
+            if resp is None:
+                return jsonify({'error': why}), 409
+            if resp.status_code == 200:
+                data = resp.json().get('data') or {}
+                new_secret = data.get('value')
+                preserved = True
+                if not new_secret:
+                    return jsonify({'error': 'Token regenerated but PVE did not return a secret'}), 502
+            elif not _lacks_regenerate(resp):
+                return upstream_failure(resp.status_code, parse_pve_error(resp.text))
 
-        if new_secret is None:
-            # Legacy path: delete + recreate. Warn caller ACLs are lost.
-            mgr._create_session().delete(base, timeout=10)
-            create_resp = mgr._api_post(base, data={})
-            if create_resp.status_code != 200:
-                return upstream_failure(create_resp.status_code, parse_pve_error(create_resp.text))
-            data = create_resp.json().get('data') or {}
-            new_secret = data.get('value') or data.get('secret')
-            preserved = False
+        new_user = token_user
+        if not preserved:
+            # Legacy path: a new token, then the old one goes. Warn caller ACLs are lost.
+            import random, string
+            new_name = 'pegaprox_' + ''.join(random.choices(string.digits, k=6))
+            form = management_token_form(*mgr.token_policy())
+            if form is None:
+                return jsonify({'error': 'The API token policy of this cluster requires privilege '
+                                         'separation, which leaves a new token of PegaProx '
+                                         'without any right'}), 409
+            create, why = mgr._token_request('POST', new_name, form, what='a new API token')
+            if create is None:
+                return jsonify({'error': why}), 409
+            if create.status_code != 200:
+                return upstream_failure(create.status_code, parse_pve_error(create.text))
+            data = create.json().get('data') or {}
+            new_secret = data.get('value')
+            new_user = data.get('full-tokenid') or f'{user_part}!{new_name}'
+            if not new_secret:
+                return jsonify({'error': 'Token created but PVE did not return a secret'}), 502
 
-        if not new_secret:
-            return jsonify({'error': 'Token regenerated but PVE did not return a secret'}), 502
-
-        # Persist the new secret in our DB so subsequent connects use it
+        # Persist the new secret in our DB so subsequent connects use it, and the session
+        # signs in with it from now on
+        on_it = getattr(mgr, '_api_token', None) and mgr._api_token.split('=', 1)[0] == token_user
+        mgr.config.api_token_user = new_user
         mgr.config.api_token_secret = new_secret
-        save_config()
+        if on_it:
+            mgr._api_token = f'{new_user}={new_secret}'
+        if not preserved:
+            # MK Nov 2026 (#1390) - its end kept as that of the first one is: the renewal goes
+            # by it, and the documented role may not read its own token
+            try:
+                mgr._hold_token_end(new_user, int((data.get('info') or {}).get('expire')
+                                                  or form.get('expire') or 0))
+            except (TypeError, ValueError):
+                pass
+        # MK Nov 2026 - PVE took the rotation from here on: what fails below goes with the
+        # success instead of a 500, and the audit entry is written either way
+        try:
+            saved = save_config() is not False
+            if saved:
+                # save_config logs a cluster row it could not write and goes on with the
+                # others: only the row read back says the next start signs in with the new token
+                row = get_db().get_cluster(cluster_id) or {}
+                saved = (row.get('api_token_user') == new_user
+                         and row.get('api_token_secret') == new_secret)
+                if not saved:
+                    logging.error(f"[token-rotate] the stored row of {mgr.config.name} does not "
+                                  f"hold the new token {new_user}")
+        except Exception as e:
+            logging.error(f"[token-rotate] the new secret of {token_user} was not stored: "
+                          f"{type(e).__name__}")
+            saved = False
+
+        dropped, kept = True, False
+        if not preserved and not saved:
+            # the stored login is still the old token: it stays on the cluster, or the next
+            # start signs in with a token PVE no longer has
+            dropped, kept = False, True
+        elif not preserved:
+            try:
+                gone, why = mgr._token_request('DELETE', token_id, what='deleting the old API token')
+            except Exception as e:
+                gone, why = None, f'no answer ({type(e).__name__})'
+            dropped = gone is not None and gone.status_code == 200
+            if not dropped:
+                logging.warning(f"[token-rotate] old API token {token_user} was not deleted: "
+                                f"{why or parse_pve_error(gone.text)} - delete it on the cluster")
 
         user = getattr(request, 'session', {}).get('user', 'system')
         log_audit(user, 'cluster.api_token_rotated',
-                  f"Rotated API token {token_user} (ACLs preserved={preserved})",
+                  f"Rotated API token {token_user}" + (f" to {new_user}" if new_user != token_user else '')
+                  + f" (ACLs preserved={preserved})" + ('' if saved else ', not stored'),
                   cluster=mgr.config.name)
-        return jsonify({
-            'success': True,
-            'acls_preserved': preserved,
-            'message': 'Token rotated; ACLs preserved' if preserved
-                       else 'Token rotated via delete+recreate; ACL entries on this token were lost (pre-PVE-9.2 cluster)',
-        })
+        message = 'Token rotated; ACLs preserved' if preserved else \
+            'Token rotated via a new token; ACL entries on the old token were lost (pre-PVE-9.2 cluster)'
+        if kept:
+            message += (f'. The old token {token_user} stays on the cluster, as PegaProx still has '
+                        f'it stored: delete it there once a rotation could be stored')
+        elif not dropped:
+            message += f'. The old token {token_user} is still on the cluster: delete it there'
+        out = {'success': True, 'acls_preserved': preserved}
+        if not saved:
+            out['warning'] = ('The new secret is in use, but PegaProx could not store it: after its '
+                              'next start it signs in with the token stored before. Rotate again '
+                              'once its database can be written.')
+            message += '. ' + out['warning']
+        out['message'] = message
+        return jsonify(out)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Token rotation failed')}), 500
+
+
+def _lacks_regenerate(resp):
+    """True when PVE answered a regenerate=1 with the parameter error of a release that
+    does not know it, or with no such method."""
+    if resp.status_code in (404, 405, 501):
+        return True
+    if resp.status_code != 400:
+        return False
+    try:
+        return 'regenerate' in ((resp.json() or {}).get('errors') or {})
+    except ValueError:
+        return False
 
 
 @bp.route('/api/clusters/<cluster_id>/reconfigure', methods=['POST'])
@@ -1199,14 +1276,20 @@ def delete_cluster(cluster_id):
         try:
             token_user = mgr.config.api_token_user  # e.g. root@pam!pegaprox
             user_part, token_id = token_user.split('!', 1)
-            url = f"https://{mgr.host}:{mgr.api_port}/api2/json/access/users/{user_part}/token/{token_id}"
-            resp = mgr._create_session().delete(url, timeout=10)
-            if resp.status_code == 200:
+            # MK Nov 2026 - the token cannot delete itself unless it holds User.Modify, and a
+            # refused revoke left it on PVE for good (no expire): the account's own login does
+            if user_part == mgr._token_owner():
+                resp, why = mgr._token_request('DELETE', token_id)
+            else:
+                url = f"https://{mgr.host}:{mgr.api_port}/api2/json/access/users/{user_part}/token/{token_id}"
+                resp, why = mgr._create_session().delete(url, timeout=10), None
+            if resp is not None and resp.status_code == 200:
                 logging.info(f"Revoked API token {token_user} on PVE")
             else:
-                logging.warning(f"Could not revoke API token {token_user}: HTTP {resp.status_code}")
+                logging.warning(f"Could not revoke API token {token_user}: "
+                                f"{why or f'HTTP {resp.status_code}'} - delete it on the cluster")
         except Exception as e:
-            logging.debug(f"Token revocation failed (non-critical): {e}")
+            logging.warning(f"Could not revoke API token on PVE ({type(e).__name__}) - delete it on the cluster")
 
     # Our cluster claim leaves the cluster with it (#625): once the cluster is gone
     # from PegaProx nobody could take the file out of /etc/pve/pegaprox any more.
@@ -1266,10 +1349,33 @@ def delete_cluster(cluster_id):
     # MK: Delete cluster and all related data from database
     try:
         db = get_db()
+        # who led the row, read before it goes (only while the federation is switched on)
+        _fed_owner = None
+        try:
+            from pegaprox.core import federation as _fed_core
+            if _fed_core.enabled():
+                _fed_owner = _fed_core.cluster_owner(cluster_id)
+        except Exception as e:
+            logging.warning(f"[FED] the owner of cluster {cluster_id} could not be read before "
+                            f"its delete, no record of it is kept: {e}")
+            _fed_owner = None
         # #779 (zobsg) — db.delete_cluster now sweeps EVERY cluster_id-keyed table (vm_acls,
         # affinity_rules, cluster_alerts, pool_permissions, node_maintenance, … ~20 of them), so the
         # per-table DELETEs that used to live here are gone — they only ever covered three of them.
         db.delete_cluster(cluster_id)
+
+        # the federation lease goes with the cluster - the voters hear it, so the next one
+        # to hold this id starts without waiting out an old promise - and an enrolled row
+        # stays on record as this instance's, so its vote backs no stale owner for the id.
+        # Only while the federation is switched on
+        try:
+            from pegaprox.core import federation as _fed_core
+            if _fed_core.enabled():
+                _fed_core.forget_deleted_cluster(cluster_id, _fed_owner)
+                _fed_core.drop_owner_cache()
+        except Exception as e:
+            logging.warning(f"[FED] the lease of deleted cluster {cluster_id} could not be given "
+                            f"back, the voters let it run out: {e}")
         # the node passwords went with it (cluster_node_credentials), and so does what this
         # process remembers of them (#1136)
         from pegaprox.core import node_creds
@@ -4783,6 +4889,11 @@ def create_proxmox_ha_group(cluster_id):
     
     if not group_name or not nodes:
         return jsonify({'error': 'group and nodes required'}), 400
+    # MK Nov 2026 - PVE 9.3 node-affinity rules can be negative: the nodes are the ones the
+    # guests avoid. positive is the default and is not sent, an older PVE does not know the key
+    affinity = str(data.get('affinity') or 'positive').strip().lower()
+    if affinity not in ('positive', 'negative'):
+        return jsonify({'error': 'affinity must be positive or negative'}), 400
     
     try:
         host, port = manager.host, manager.api_port
@@ -4801,12 +4912,17 @@ def create_proxmox_ha_group(cluster_id):
         }
         if data.get('restricted'):
             rules_payload['strict'] = 1
+        if affinity == 'negative':
+            rules_payload['affinity'] = 'negative'
         if data.get('comment'):
             rules_payload['comment'] = data['comment']
 
         rules_url = f"https://{host}:{port}/api2/json/cluster/ha/rules"
         resp = manager._api_post(rules_url, data=rules_payload)
 
+        if resp.status_code in (404, 501) and affinity == 'negative':
+            # a PVE 8 group only lists the nodes a guest goes to, it would read the other way round
+            return jsonify({'error': 'This Proxmox VE version has no negative node affinity'}), 400
         if resp.status_code in (404, 501):
             # PVE 8.x — legacy groups path
             legacy_url = f"https://{host}:{port}/api2/json/cluster/ha/groups"

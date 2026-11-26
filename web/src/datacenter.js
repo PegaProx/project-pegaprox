@@ -319,6 +319,89 @@
             );
         }
 
+        // LW Nov 2026 - Proxmox VE 9.3 keeps a stored firewall rule it no longer accepts (a list or a
+        // leading zero as ICMP type, a group name over 18 characters) and skips it: the rule list
+        // carries what is wrong per field as 'errors'. Such a rule is not applied, whatever its switch says.
+        const fwRuleProblems = (rule) => {
+            const errs = rule && rule.errors;
+            if (!errs || typeof errs !== 'object') return [];
+            return Object.entries(errs).map(([field, msg]) => `${field}: ${String(msg).trim()}`);
+        };
+
+        // with an ICMP protocol, Dest. Port holds one ICMP type: a name of the protocol's family
+        // (pve-firewall's $icmp_type_names and $icmpv6_type_names) or a number up to 255
+        const FW_ICMP_TYPES = ['any', 'echo-reply', 'destination-unreachable', 'network-unreachable', 'host-unreachable',
+            'protocol-unreachable', 'port-unreachable', 'fragmentation-needed', 'source-route-failed', 'network-unknown',
+            'host-unknown', 'network-prohibited', 'host-prohibited', 'TOS-network-unreachable', 'TOS-host-unreachable',
+            'communication-prohibited', 'host-precedence-violation', 'precedence-cutoff', 'source-quench', 'redirect',
+            'network-redirect', 'host-redirect', 'TOS-network-redirect', 'TOS-host-redirect', 'echo-request',
+            'router-advertisement', 'router-solicitation', 'time-exceeded', 'ttl-zero-during-transit',
+            'ttl-zero-during-reassembly', 'parameter-problem', 'ip-header-bad', 'required-option-missing',
+            'timestamp-request', 'timestamp-reply', 'address-mask-request', 'address-mask-reply'];
+        const FW_ICMPV6_TYPES = ['destination-unreachable', 'no-route', 'communication-prohibited', 'beyond-scope',
+            'address-unreachable', 'port-unreachable', 'failed-policy', 'reject-route', 'packet-too-big', 'time-exceeded',
+            'ttl-zero-during-transit', 'ttl-zero-during-reassembly', 'parameter-problem', 'bad-header',
+            'unknown-header-type', 'unknown-option', 'echo-request', 'echo-reply', 'router-solicitation',
+            'router-advertisement', 'neighbor-solicitation', 'neighbour-solicitation', 'neighbor-advertisement',
+            'neighbour-advertisement', 'redirect'];
+
+        // the protocol as pve-firewall compares it, case and all: 'ICMP' is no ICMP protocol to it
+        function fwIcmpTypes(proto) {
+            const p = String(proto || '').trim();
+            if (p === 'icmp') return FW_ICMP_TYPES;
+            return p === 'icmpv6' || p === 'ipv6-icmp' ? FW_ICMPV6_TYPES : null;
+        }
+
+        // a type name goes out as 'icmp-type', as the rule editor of Proxmox VE sends it (pve-firewall
+        // has it since 4.1-3, so every version we support); a number stays in dport, 'icmp-type' takes names only
+        function fwIcmpTypeInBody(body) {
+            const v = body.dport;
+            if (!fwIcmpTypes(body.proto) || !v || /^\d+$/.test(v)) return body;
+            const { dport, ...rest } = body;
+            return { ...rest, 'icmp-type': v };
+        }
+
+        // '' when dport is fine for the protocol, else the key of what PVE 9.3 refuses about it;
+        // older versions took the rest and then skipped the rule or matched another type
+        function fwIcmpTypeProblem(proto, dport) {
+            const types = fwIcmpTypes(proto);
+            const v = String(dport || '');
+            if (!types || !v.trim()) return '';
+            if (/^\d+$/.test(v)) {
+                if (parseInt(v, 10) > 255) return 'fwIcmpTypeNumber';
+                return /^0\d/.test(v) ? 'fwIcmpTypeLeadingZero' : '';
+            }
+            return types.includes(v) ? '' : 'fwIcmpTypeOne';
+        }
+
+        // what goes under Dest. Port while the protocol is an ICMP one, and the names to pick from
+        function FwIcmpTypeHint({ proto, dport, listId }) {
+            const { t } = useTranslation();
+            const types = fwIcmpTypes(proto);
+            if (!types) return null;
+            const problem = fwIcmpTypeProblem(proto, dport);
+            return (
+                <>
+                    <datalist id={listId}>{types.map(n => <option key={n} value={n} />)}</datalist>
+                    <p className={`text-xs mt-1 ${problem ? 'text-red-400' : 'text-gray-500'}`} data-fw-icmp-hint={problem || 'ok'}>
+                        {t(problem || 'fwIcmpTypeHint')}
+                    </p>
+                </>
+            );
+        }
+
+        // the badge of a rule PVE skips, the reasons and the way out on hover. PVE's update_rule checks
+        // the rule it would store, so switching it off fails too; deleting it does not check it
+        function FwRuleInvalidBadge({ problems }) {
+            const { t } = useTranslation();
+            return (
+                <span className="px-2 py-0.5 rounded text-xs font-medium bg-red-500/20 text-red-400 whitespace-nowrap"
+                    title={[...problems, t('fwRuleInvalidFix')].join('\n')} data-fw-invalid="">
+                    {t('fwRuleInvalid')}
+                </span>
+            );
+        }
+
         // Datacenter Tab Component
         function DatacenterTab({ clusterId, addToast, initialSection, onSectionShown, crDc }) {
             const { t } = useTranslation();
@@ -6431,7 +6514,9 @@
                                                     haGroups.map((grp, idx) => (
                                                         <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/30">
                                                             <td className="p-3 font-medium">{String(grp.group || '')}</td>
-                                                            <td className="p-3 font-mono text-sm">{String(grp.nodes || '-')}</td>
+                                                            <td className="p-3 font-mono text-sm" data-ha-group-nodes={grp.affinity === 'negative' ? 'negative' : 'positive'}>
+                                                                {grp.affinity === 'negative' ? t('haNotOnNodes').replace('{nodes}', String(grp.nodes || '-')) : String(grp.nodes || '-')}
+                                                            </td>
                                                             <td className="p-3">
                                                                 <span className={grp.restricted ? 'text-yellow-400' : 'text-gray-500'}>
                                                                     {grp.restricted ? 'Yes' : 'No'}
@@ -6531,7 +6616,7 @@
                                                         >
                                                             <option value="">-- None --</option>
                                                             {haGroups && Array.isArray(haGroups) && haGroups.map(g => (
-                                                                <option key={g.group} value={g.group}>{g.group}</option>
+                                                                <option key={g.group} value={g.group}>{g.group}{g.affinity === 'negative' ? ` (${t('haNotOnNodes').replace('{nodes}', g.nodes || '-')})` : ''}</option>
                                                             ))}
                                                         </select>
                                                     </div>
@@ -6647,9 +6732,17 @@
                                                     <input value={newHaGroup.group || ''} onChange={e => setNewHaGroup({...newHaGroup, group: e.target.value})} placeholder="e.g. production" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-sm text-gray-400 mb-1">Nodes (with priority)</label>
-                                                    <input value={newHaGroup.nodes || ''} onChange={e => setNewHaGroup({...newHaGroup, nodes: e.target.value})} placeholder="node1:1,node2:2,node3:1" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
-                                                    <span className="text-xs text-gray-500">Lower priority = preferred</span>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('haAffinity')}</label>
+                                                    <select value={newHaGroup.affinity || 'positive'} onChange={e => setNewHaGroup({...newHaGroup, affinity: e.target.value})}
+                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" data-ha-affinity>
+                                                        <option value="positive">{t('haAffinityPositive')}</option>
+                                                        <option value="negative">{t('haAffinityNegative')}</option>
+                                                    </select>
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm text-gray-400 mb-1">{newHaGroup.affinity === 'negative' ? t('nodes') : 'Nodes (with priority)'}</label>
+                                                    <input value={newHaGroup.nodes || ''} onChange={e => setNewHaGroup({...newHaGroup, nodes: e.target.value})} placeholder={newHaGroup.affinity === 'negative' ? 'node3' : 'node1:1,node2:2,node3:1'} className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm font-mono" />
+                                                    <span className="text-xs text-gray-500">{newHaGroup.affinity === 'negative' ? t('haAffinityNegativeHint') : 'Lower priority = preferred'}</span>
                                                 </div>
                                                 <div className="flex gap-6">
                                                     <label className="flex items-center gap-2 cursor-pointer">
@@ -6666,11 +6759,13 @@
                                                 <button onClick={() => setShowAddHaGroup(false)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-border rounded-lg text-sm">Cancel</button>
                                                 <button onClick={async () => {
                                                     if (!newHaGroup.group || !newHaGroup.nodes) { addToast('Enter group name and nodes', 'error'); return; }
+                                                    // positive is PVE's default: only a negative rule names its affinity, so older clusters get what they always got
+                                                    const { affinity, ...groupBody } = newHaGroup;
                                                     try {
                                                         var res = await authFetch(API_URL + '/clusters/' + clusterId + '/proxmox-ha/groups', { 
                                                             method: 'POST', 
                                                             headers: { 'Content-Type': 'application/json' }, 
-                                                            body: JSON.stringify(newHaGroup) 
+                                                            body: JSON.stringify(affinity === 'negative' ? { ...groupBody, affinity } : groupBody) 
                                                         });
                                                         if (res && res.ok) { 
                                                             addToast('Group created', 'success'); 
@@ -6833,8 +6928,9 @@
                                             <tbody>
                                                 {(!firewallRules || firewallRules.length === 0) ? (
                                                     <tr><td colSpan="11" className="p-8 text-center text-gray-500">{t('noFirewallRules')}</td></tr>
-                                                ) : (Array.isArray(firewallRules) ? firewallRules : []).map((rule, idx) => (
-                                                    <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
+                                                ) : (Array.isArray(firewallRules) ? firewallRules : []).map((rule, idx) => { const problems = fwRuleProblems(rule); return (
+                                                    <React.Fragment key={idx}>
+                                                    <tr className="border-t border-proxmox-border hover:bg-proxmox-dark/50" data-fw-rule={rule.pos}>
                                                         <td className="p-3 text-gray-400">{rule.pos}</td>
                                                         <td className="p-3">
                                                             <span className={`px-2 py-0.5 rounded text-xs ${
@@ -6856,7 +6952,7 @@
                                                         <td className="p-3 font-mono text-xs text-gray-300">{rule.source || '-'}</td>
                                                         <td className="p-3 font-mono text-xs text-gray-300">{rule.dest || '-'}</td>
                                                         <td className="p-3 text-gray-300">{rule.proto || '-'}</td>
-                                                        <td className="p-3 font-mono text-xs text-gray-300">{rule.dport || '-'}</td>
+                                                        <td className="p-3 font-mono text-xs text-gray-300">{rule.dport || rule['icmp-type'] || '-'}</td>
                                                         <td className="p-3">
                                                             <button
                                                                 onClick={async () => {
@@ -6871,13 +6967,17 @@
                                                                             setFirewallRules(prev => prev.map(r => 
                                                                                 r.pos === rule.pos ? { ...r, enable: rule.enable ? 0 : 1 } : r
                                                                             ));
+                                                                        } else {
+                                                                            const err = await res.json().catch(() => ({}));
+                                                                            addToast(PegaProxApiErrors.said(err, `${t('operationFailed')} (HTTP ${res.status})`), 'error');
                                                                         }
-                                                                    } catch(e) {}
+                                                                    } catch(e) { addToast(t('connectionError'), 'error'); }
                                                                 }}
-                                                                className={`w-8 h-5 rounded-full transition-colors ${rule.enable ? 'bg-green-500' : 'bg-gray-600'}`}
+                                                                className={`w-8 h-5 rounded-full transition-colors ${problems.length ? 'bg-red-500/80' : rule.enable ? 'bg-green-500' : 'bg-gray-600'}`}
                                                             >
                                                                 <div className={`w-4 h-4 rounded-full bg-white transition-transform ${rule.enable ? 'translate-x-3.5' : 'translate-x-0.5'}`}></div>
                                                             </button>
+                                                            {problems.length > 0 && <div className="mt-1"><FwRuleInvalidBadge problems={problems} /></div>}
                                                         </td>
                                                         <td className="p-3 text-gray-500 text-xs max-w-32 truncate">{rule.comment || ''}</td>
                                                         <td className="p-3">
@@ -6889,7 +6989,15 @@
                                                             </button>
                                                         </td>
                                                     </tr>
-                                                ))}
+                                                    {problems.length > 0 && (
+                                                        <tr className="bg-red-500/5" data-fw-invalid-why={rule.pos}>
+                                                            <td colSpan="11" className="px-3 pb-2 text-xs text-red-400">{t('fwRuleSkipped')} {problems.join('; ')}
+                                                                <div className="text-gray-400" data-fw-invalid-fix="">{t('fwRuleInvalidFix')}</div>
+                                                            </td>
+                                                        </tr>
+                                                    )}
+                                                    </React.Fragment>
+                                                ); })}
                                             </tbody>
                                         </table>
                                     </div>
@@ -6974,17 +7082,20 @@
                                                             <option value="tcp">TCP</option>
                                                             <option value="udp">UDP</option>
                                                             <option value="icmp">ICMP</option>
+                                                            <option value="icmpv6">ICMPv6</option>
                                                         </select>
                                                     </div>
                                                     <div>
-                                                        <label className="text-sm text-gray-400 mb-1 block">Dest. Port</label>
+                                                        <label className="text-sm text-gray-400 mb-1 block">{fwIcmpTypes(newRule.proto) ? t('fwIcmpType') : 'Dest. Port'}</label>
                                                         <input 
                                                             type="text"
                                                             value={newRule.dport || ''}
                                                             onChange={e => setNewRule(p => ({...p, dport: e.target.value}))}
-                                                            placeholder="e.g. 22, 80, 443"
+                                                            placeholder={fwIcmpTypes(newRule.proto) ? t('fwIcmpTypePlaceholder') : 'e.g. 22, 80, 443'}
+                                                            list={fwIcmpTypes(newRule.proto) ? 'dc-fw-icmp-types' : undefined}
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
                                                         />
+                                                        <FwIcmpTypeHint proto={newRule.proto} dport={newRule.dport} listId="dc-fw-icmp-types" />
                                                     </div>
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-4">
@@ -7043,7 +7154,7 @@
                                                                 method: 'POST',
                                                                 credentials: 'include',
                                                                 headers: { ...authHeaders, 'Content-Type': 'application/json' },
-                                                                body: JSON.stringify(newRule)
+                                                                body: JSON.stringify(fwIcmpTypeInBody(newRule))
                                                             });
                                                             if(res.ok) {
                                                                 // Refresh rules
@@ -7051,10 +7162,14 @@
                                                                 if(rulesRes.ok) setFirewallRules(await rulesRes.json());
                                                                 setShowAddRuleModal(false);
                                                                 setNewRule({ type: 'in', action: 'ACCEPT', enable: 1 });
+                                                            } else {
+                                                                const err = await res.json().catch(() => ({}));
+                                                                addToast(PegaProxApiErrors.said(err, `${t('operationFailed')} (HTTP ${res.status})`), 'error');
                                                             }
-                                                        } catch(e) {}
+                                                        } catch(e) { addToast(t('connectionError'), 'error'); }
                                                     }}
-                                                    className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
+                                                    disabled={!!fwIcmpTypeProblem(newRule.proto, newRule.dport)}
+                                                    className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors disabled:opacity-50"
                                                 >
                                                     {t('add')}
                                                 </button>

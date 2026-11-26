@@ -43,6 +43,9 @@ _LONE_SURROGATE = re.compile('[\ud800-\udfff]')
 # Defined here to avoid circular import: rbac imports from db
 DEFAULT_TENANT_ID = 'default'
 
+# how long a clusters.fed_owner column that could not be added is not tried again
+FED_OWNER_RETRY_SECONDS = 60
+
 # Options of a run started by hand that a rolling update schedule carries too, added in
 # place; a schedule saved before them gets the safe value of the default
 UPDATE_SCHEDULE_RUN_COLUMNS = (
@@ -835,7 +838,61 @@ class PegaProxDB:
                 ''')
         except Exception as e:
             logging.error(f"user_favorites migration failed, favorites stay unavailable: {e}")
-        
+
+        # MK Nov 2026 - federation Phase 2: identity federation between PegaProx
+        # instances: every row of users, api_tokens and webauthn_credentials says which
+        # instance it is homed at. '' is a local row, an instance id is a mirror of
+        # that member's row, and writes to a mirror are refused where they are made
+        # (the home decides). custom_roles keeps its fed_home column, always '':
+        # roles are mapped between the members, never copied.
+        # Each step on its own: one that fails (a locked database, a full disk) leaves the
+        # others done, and the reads of the clusters table cope without fed_owner
+        # (_clusters_have_fed_owner)
+        for table in ('users', 'custom_roles', 'api_tokens', 'webauthn_credentials'):
+            try:
+                cursor.execute(f"PRAGMA table_info({table})")
+                columns = [col[1] for col in cursor.fetchall()]
+                if columns and 'fed_home' not in columns:
+                    cursor.execute(
+                        f"ALTER TABLE {table} ADD COLUMN fed_home TEXT NOT NULL DEFAULT ''")
+            except Exception as e:
+                logging.error(f"federation migration of {table} failed, its rows stay "
+                              f"local: {e}")
+        # Phase 3: the federation's lease on a cluster - '' is a cluster this
+        # instance owns alone (no federation, no lease), an instance id is the
+        # member whose writes a majority of the federation backs
+        try:
+            self._clusters_have_fed_owner(cursor)
+        except Exception as e:
+            logging.error(f"federation migration of clusters failed, every cluster row "
+                          f"stays this instance's own: {e}")
+        try:
+            # the tenants and roles the members' accounts name, and what an admin here
+            # mapped each onto ('' = not mapped, the accounts naming it cannot sign in)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS federation_identity_map (
+                    home TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    home_value TEXT NOT NULL,
+                    local_value TEXT NOT NULL DEFAULT '',
+                    users INTEGER NOT NULL DEFAULT 0,
+                    mapped_by TEXT NOT NULL DEFAULT '',
+                    mapped_at INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (home, kind, home_value)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS federation_sync_state (
+                    peer TEXT PRIMARY KEY,
+                    etag TEXT NOT NULL DEFAULT '',
+                    pulled_at INTEGER NOT NULL DEFAULT 0,
+                    rows INTEGER NOT NULL DEFAULT 0
+                )
+            ''')
+        except Exception as e:
+            logging.error(f"federation identity tables could not be created, identities "
+                          f"stay local: {e}")
+
         # Scheduled actions table - NS Jan 2026
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS scheduled_actions (
@@ -1188,7 +1245,8 @@ class PegaProxDB:
                 last_used_at TEXT,
                 last_used_ip TEXT,
                 created_at TEXT NOT NULL,
-                revoked INTEGER DEFAULT 0
+                revoked INTEGER DEFAULT 0,
+                fed_home TEXT NOT NULL DEFAULT ''
             )
         ''')
         cursor.execute('''
@@ -1212,7 +1270,8 @@ class PegaProxDB:
                 user_handle BLOB NOT NULL,
                 created_at TEXT NOT NULL,
                 last_used_at TEXT,
-                last_used_ip TEXT
+                last_used_ip TEXT,
+                fed_home TEXT NOT NULL DEFAULT ''
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_webauthn_user ON webauthn_credentials(username)')
@@ -2846,7 +2905,12 @@ class PegaProxDB:
             except Exception as e:
                 # NS Mar 2026 - returning garbled aes256: data would be used as a password/secret downstream
                 raise RuntimeError(f"AES-256-GCM decryption failed: {e}")
-        
+
+        # MK Nov 2026 - a credential of a federation mirror, wrapped under another member's
+        # federation field key: opaque to this key, read as it is (not a Fernet token)
+        if data.startswith('fedk1:'):
+            return data
+
         # Try Fernet (legacy)
         if self.fernet:
             try:
@@ -3302,8 +3366,10 @@ class PegaProxDB:
                      migration_threshold, check_interval, auto_migrate, 
                      balance_containers, balance_local_disks, dry_run, enabled, 
                      ha_enabled, fallback_hosts, ssh_user, ssh_key_encrypted, 
-                     ssh_port, ha_settings, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ssh_port, ha_settings, created_at, updated_at,
+                     fed_owner)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    COALESCE((SELECT fed_owner FROM clusters WHERE id = ?), ''))
                 ''', (
                     cluster_id,
                     cluster.get('name', ''),
@@ -3324,7 +3390,8 @@ class PegaProxDB:
                     self._encrypt(cluster.get('ssh_key', '')),
                     cluster.get('ssh_port', 22),
                     self._encrypt(json.dumps(cluster.get('ha_settings', {}))),
-                    now, now
+                    now, now,
+                    cluster_id
                 ))
             except Exception as e:
                 logging.error(f"Failed to migrate cluster {cluster_id}: {e}")
@@ -4014,10 +4081,75 @@ class PegaProxDB:
     # CLUSTER OPERATIONS
     # ========================================
     
+    def _ha_settings_of(self, raw):
+        """The HA settings of a cluster row. A mirror of another member of the federation
+        holds them wrapped under that member's federation field key ('fedk1:'): not this
+        instance's to read, and read as none rather than breaking the read of every
+        cluster (with the federation switched off a mirror is read like any row)."""
+        value = self._decrypt(raw or '') or '{}'
+        if value.startswith('fedk1:'):
+            return {}
+        return json.loads(value)
+
+    def _clusters_have_fed_owner(self, cursor=None) -> bool:
+        """Whether the clusters table has its fed_owner column, added here when it is
+        missing (the migration in _init_db failed, a locked database). False when it
+        cannot be added: no row can be a federation's then, every row is this
+        instance's own."""
+        if getattr(self, '_fed_owner_ok', False):
+            return True
+        cursor = cursor or self.conn.cursor()
+        cursor.execute("PRAGMA table_info(clusters)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if columns and 'fed_owner' not in columns:
+            # MK Nov 2026 - an ALTER that failed is not tried again on every read of the
+            # clusters for a while: each try waited out the busy timeout of a locked
+            # database and committed inside a read. The look above still runs, a column
+            # added meanwhile counts at once
+            failed = getattr(self, '_fed_owner_failed', None)
+            if failed is not None and 0 <= time.monotonic() - failed < FED_OWNER_RETRY_SECONDS:
+                return False
+            try:
+                cursor.execute(
+                    "ALTER TABLE clusters ADD COLUMN fed_owner TEXT NOT NULL DEFAULT ''")
+                self.conn.commit()
+                columns.append('fed_owner')
+            except Exception as e:
+                self._fed_owner_failed = time.monotonic()
+                logging.error(f"clusters.fed_owner is missing and cannot be added (tried "
+                              f"again in {FED_OWNER_RETRY_SECONDS} s): {e}")
+                return False
+        self._fed_owner_ok = 'fed_owner' in columns
+        return self._fed_owner_ok
+
     def get_all_clusters(self) -> dict:
-        """Get all clusters (returns dict like legacy format)"""
+        """Get all clusters (returns dict like legacy format).
+
+        Rows mirrored from another member of the federation stay out: a mirror is
+        the copy an adoption opens, not a cluster this instance manages (its
+        credentials are wrapped under that member's federation field key).
+
+        MK Nov 2026 - with the federation switched off every row a federation owns
+        stays out as well, the enrolled ones of this instance included: nothing
+        fences their writes then, and another site may be adopting them right now
+        (PEGAPROX_FEDERATION=0 on a site that still takes part). An install that never
+        joined a federation has no such row and reads every row, as it always did."""
         cursor = self.conn.cursor()
-        cursor.execute('SELECT * FROM clusters')
+        from pegaprox.core import federation as _fed
+        if not self._clusters_have_fed_owner(cursor):
+            cursor.execute("SELECT * FROM clusters")
+        elif not _fed.enabled():
+            cursor.execute("SELECT * FROM clusters WHERE fed_owner = ''")
+        else:
+            try:
+                cursor.execute(
+                    "SELECT * FROM clusters WHERE fed_owner IN ('', ?)",
+                    (_fed.instance_id(),))
+            except Exception:
+                # fail closed: a federation state that cannot say who we are hides
+                # the mirrors (never lists them - their credentials are not ours to
+                # read), at the price of pausing the enrolled ones until it is fixed
+                cursor.execute("SELECT * FROM clusters WHERE fed_owner = ''")
         
         clusters = {}
         for row in cursor.fetchall():
@@ -4044,7 +4176,7 @@ class PegaProxDB:
                 'ssh_user': row['ssh_user'] or '',
                 'ssh_key': self._decrypt(row['ssh_key_encrypted'] or ''),
                 'ssh_port': row['ssh_port'] or 22,
-                'ha_settings': json.loads(self._decrypt(row['ha_settings'] or '') or '{}'),
+                'ha_settings': self._ha_settings_of(row['ha_settings']),
                 'excluded_nodes': json.loads(row['excluded_nodes'] or '[]'),
                 'smbios_autoconfig': json.loads(row['smbios_autoconfig'] or '{}'),
                 'api_token_user': row['api_token_user'] if 'api_token_user' in row.keys() else '',
@@ -4078,6 +4210,22 @@ class PegaProxDB:
         
         if not row:
             return None
+        # a mirror of another member's cluster is not this instance's to read; an
+        # identity that cannot say who we are hides mirrors the same way. Switched off,
+        # no row a federation owns is read (get_all_clusters says why), and the
+        # federation is asked nothing
+        from pegaprox.core import federation as _fed
+        owner = row['fed_owner'] if 'fed_owner' in row.keys() else ''
+        if not _fed.enabled():
+            if owner:
+                return None
+        else:
+            try:
+                if owner and owner != _fed.instance_id():
+                    return None
+            except Exception:
+                if owner:
+                    return None
         
         # NS: Auto-migrate encrypted fields to AES-256-GCM if needed - Jan 2026
         pass_encrypted = row['pass_encrypted']
@@ -4136,7 +4284,7 @@ class PegaProxDB:
             'ssh_user': row['ssh_user'] or '',
             'ssh_key': decrypted_ssh_key,
             'ssh_port': row['ssh_port'] or 22,
-            'ha_settings': json.loads(self._decrypt(row['ha_settings'] or '') or '{}'),
+            'ha_settings': self._ha_settings_of(row['ha_settings']),
             'excluded_nodes': json.loads(row['excluded_nodes'] or '[]'),
             'smbios_autoconfig': json.loads(row['smbios_autoconfig'] or '{}'),
             'api_token_user': row['api_token_user'] if 'api_token_user' in row.keys() else '',
@@ -4164,6 +4312,28 @@ class PegaProxDB:
         """Save or update cluster"""
         cursor = self.conn.cursor()
         now = datetime.now().isoformat()
+
+        # MK Nov 2026 - a row another member of the federation leads is its mirror here,
+        # written by the sync alone. A restore (get_cluster hides the mirror, so the row
+        # looks new) or a save racing the row's change into a mirror would keep the foreign
+        # owner and put this instance's ciphertext into credential columns that hold only
+        # empty or wrapped ('fedk1:') values. Switched off, no federation row is saved.
+        held_owner = ''
+        if self._clusters_have_fed_owner(cursor):
+            got = cursor.execute('SELECT fed_owner FROM clusters WHERE id = ?',
+                                 (cluster_id,)).fetchone()
+            held_owner = (got[0] if got is not None else '') or ''
+        if held_owner:
+            from pegaprox.core import federation as _fed
+            ours = False
+            if _fed.enabled():
+                try:
+                    ours = held_owner == _fed.instance_id()
+                except Exception:
+                    ours = False
+            if not ours:
+                raise ValueError(f'cluster {cluster_id} belongs to another member of the '
+                                 f'federation - not saved here')
 
         # MK: Mar 2026 - preserve group_id/display_name/sort_order that aren't in config data (#111)
         cursor.execute('SELECT group_id, display_name, sort_order, created_at, '
@@ -4209,10 +4379,10 @@ class PegaProxDB:
              node_ui_suffix,
              proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict,
              transfer_network,
-             created_at, updated_at)
+             created_at, updated_at, fed_owner)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?)
+                    ?, COALESCE((SELECT fed_owner FROM clusters WHERE id = ?), ''))
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -4271,7 +4441,8 @@ class PegaProxDB:
             1 if data.get('proxlb_pins_strict', existing['proxlb_pins_strict'] if existing else False) else 0,
             str(data.get('transfer_network', existing['transfer_network'] if existing else '') or '').strip(),
             existing['created_at'] if existing else now,
-            now
+            now,
+            cluster_id
         ))
         self.conn.commit()
     
@@ -4588,6 +4759,9 @@ class PegaProxDB:
                 'portal_only': bool(row_dict.get('portal_only', 0)),
                 'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
                 'user_folder': row_dict.get('user_folder', ''),
+                # read-only here: the member of the federation this account is a mirror
+                # of, '' for an account of this instance
+                'fed_home': row_dict.get('fed_home') or '',
             }
 
         return users
@@ -4658,13 +4832,62 @@ class PegaProxDB:
             'portal_only': bool(row_dict.get('portal_only', 0)),
             'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
             'user_folder': row_dict.get('user_folder', ''),
+            'fed_home': row_dict.get('fed_home') or '',
         }
+
+    # MK Nov 2026 - what a write here may change on a mirror of another federation member:
+    # the workbench, which does not travel. Never what the account is or may do, never its
+    # second factor, never what a directory derived (a mirror signs in at its home).
+    _MIRROR_LOCAL_USER_COLUMNS = ('last_login', 'theme', 'language', 'ui_layout',
+                                  'taskbar_auto_expand', 'avatar_mime', 'avatar_data',
+                                  'layout_chosen', 'sidebar_show_vmid', 'user_folder')
+
+    def _save_mirror_user(self, username: str, home: str, data: dict):
+        """save_user for a mirror while the federation runs: the workbench columns of the
+        row as it stands, nothing else. A row the sync deleted meanwhile stays deleted,
+        and a row homed elsewhere by now is not touched."""
+        values = {
+            'last_login': data.get('last_login'),
+            'theme': data.get('theme', ''),
+            'language': data.get('language', ''),
+            'ui_layout': data.get('ui_layout', 'modern'),
+            'taskbar_auto_expand': 1 if data.get('taskbar_auto_expand', True) else 0,
+            'avatar_mime': data.get('avatar_mime', ''),
+            'avatar_data': data.get('avatar_data', ''),
+            'layout_chosen': 1 if data.get('layout_chosen', False) else 0,
+            'sidebar_show_vmid': 1 if data.get('sidebar_show_vmid', False) else 0,
+            'user_folder': data.get('user_folder', ''),
+        }
+        cols = self._MIRROR_LOCAL_USER_COLUMNS
+        self.conn.execute(
+            f'UPDATE users SET {", ".join(f"{c} = ?" for c in cols)} '
+            f'WHERE username = ? AND fed_home = ?',
+            [values[c] for c in cols] + [username, home])
+        self.conn.commit()
 
     def save_user(self, username: str, data: dict):
         """Save or update user"""
         cursor = self.conn.cursor()
         now = datetime.now().isoformat()
-        
+
+        # MK Nov 2026 - a mirror of another federation member: every whole-table save (an
+        # LDAP or OIDC sign-in, a user created, an expiry reset) writes a snapshot taken a
+        # moment ago, and written whole it would undo what the sync changed since, or
+        # bring back as a LOCAL account a mirror the sync deleted. With the federation
+        # running such a save touches the workbench only. Switched off nothing syncs, and
+        # the row keeps its home as before (the login refuses it then), and the save asks
+        # no extra query: the cached switch first, the INSERT's COALESCE keeps fed_home.
+        from pegaprox.core import federation as _fed
+        if _fed.enabled():
+            home = data.get('fed_home') or ''
+            if not home:
+                row = cursor.execute('SELECT fed_home FROM users WHERE username = ?',
+                                     (username,)).fetchone()
+                home = (row[0] if row is not None else '') or ''
+            if home:
+                self._save_mirror_user(username, home, data)
+                return
+
         cursor.execute('''
             INSERT OR REPLACE INTO users
             (username, password_salt, password_hash, role, permissions, tenant,
@@ -4675,7 +4898,7 @@ class PegaProxDB:
              ldap_permissions, ldap_tenant, ldap_tenant_permissions,
              tenant_permissions, denied_permissions, oidc_sub, last_oidc_sync,
              layout_chosen, portal_only, sidebar_show_vmid, user_folder,
-             directory_groups)
+             directory_groups, fed_home)
             VALUES (?, ?, ?, ?, ?, ?,
                     COALESCE((SELECT created_at FROM users WHERE username = ?), ?),
                     ?, ?,
@@ -4685,7 +4908,8 @@ class PegaProxDB:
                     ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
-                    COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]'))
+                    COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]'),
+                    COALESCE((SELECT fed_home FROM users WHERE username = ?), ''))
         ''', (
             username,
             data.get('password_salt', ''),
@@ -4733,6 +4957,7 @@ class PegaProxDB:
              if 'groups' in data or data.get('auth_source', 'local') not in DIRECTORY_AUTH_SOURCES
              else None),
             username,
+            username,
         ))
         self.conn.commit()
     
@@ -4741,7 +4966,7 @@ class PegaProxDB:
         for username, data in users.items():
             self.save_user(username, data)
     
-    def purge_user_grants(self, username: str) -> dict:
+    def purge_user_grants(self, username: str, commit: bool = True) -> dict:
         """Drop every per-resource grant tied to this username. Returns what went.
 
         MK Sep 2026 - deleting an account revoked its sessions, its console tokens and
@@ -4752,6 +4977,10 @@ class PegaProxDB:
         old account held, with nothing in the UI to show for it.
 
         A `*` entry in an ACL is a wildcard, not this user, and is left alone.
+
+        MK Nov 2026 - commit=False leaves the statements in the caller's open transaction
+        (the federation drops a mirrored user inside its snapshot's one commit); the caller
+        commits and then calls invalidate_grant_caches() itself.
         """
         removed = {'vm_acls': 0, 'pool_permissions': 0}
         cursor = self.conn.cursor()
@@ -4793,19 +5022,26 @@ class PegaProxDB:
             except Exception as e:
                 logging.error(f"Failed to purge VM ACL {row['id']} for '{username}': {e}")
 
+        if not commit:
+            return removed
         self.conn.commit()
         if removed['vm_acls'] or removed['pool_permissions']:
             logging.info(f"purged grants for deleted user '{username}': "
                          f"{removed['vm_acls']} VM ACL(s), "
                          f"{removed['pool_permissions']} pool permission(s)")
-            # late import: utils.rbac imports this module, so it cannot be at the top
-            try:
-                from pegaprox.utils.rbac import invalidate_vm_acls_cache, invalidate_pool_cache
-                invalidate_vm_acls_cache()
-                invalidate_pool_cache()
-            except Exception as e:
-                logging.warning(f"could not invalidate the authz caches after the purge: {e}")
+            self.invalidate_grant_caches()
         return removed
+
+    @staticmethod
+    def invalidate_grant_caches():
+        """The VM ACL and pool caches after grants went."""
+        # late import: utils.rbac imports this module, so it cannot be at the top
+        try:
+            from pegaprox.utils.rbac import invalidate_vm_acls_cache, invalidate_pool_cache
+            invalidate_vm_acls_cache()
+            invalidate_pool_cache()
+        except Exception as e:
+            logging.warning(f"could not invalidate the authz caches after the purge: {e}")
 
     def purge_vm_grants(self, cluster_id: str, vmid) -> dict:
         """Drop every per-resource grant that pointed at one VM. Returns what went.
@@ -6367,6 +6603,32 @@ class PegaProxDB:
                                            new_aesgcm)})))
             except Exception as e:
                 stats['errors'].append(f"Server settings secrets: {e}")
+
+            # MK Nov 2026 - the federation identity in pegaprox_kv: its signing key, its own
+            # field key and the field keys of the other members are sealed under this key.
+            # Left behind, the instance could no longer sign a call nor open a mirror
+            try:
+                _fid = cursor.execute("SELECT v FROM pegaprox_kv WHERE k = 'federation_identity'").fetchone()
+            except Exception:
+                _fid = None        # no pegaprox_kv yet: nothing federated here
+            if _fid is not None:
+                try:
+                    _ident = json.loads(_fid['v'])
+
+                    def _reseal(_v):
+                        if isinstance(_v, str) and _v.startswith('aes256:'):
+                            return self._encrypt_with_key(self._decrypt_with_key(_v, old_aesgcm), new_aesgcm)
+                        return _v
+                    for _k in ('signing_key', 'field_key'):
+                        if _k in _ident:
+                            _ident[_k] = _reseal(_ident[_k])
+                    for _rec in (_ident.get('peer_keys') or {}).values():
+                        if isinstance(_rec, dict) and 'key' in _rec:
+                            _rec['key'] = _reseal(_rec['key'])
+                    cursor.execute("UPDATE pegaprox_kv SET v = ? WHERE k = 'federation_identity'",
+                                   (json.dumps(_ident, sort_keys=True, separators=(',', ':')),))
+                except Exception as e:
+                    stats['errors'].append(f"Federation identity: {e}")
 
             # 3b. Re-sign the audit log.
             # sec (audit): _audit_hmac signs with self.aes_key, so after a rotation every

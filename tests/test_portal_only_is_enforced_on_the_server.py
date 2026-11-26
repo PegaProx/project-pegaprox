@@ -198,6 +198,11 @@ def test_every_other_api_route_refuses_a_portal_account(world, db, credential, m
         headers = {'Authorization': f'Bearer {_token("cust")}'}
     client = world.app.test_client(use_cookies=False)
 
+    from pegaprox.api.federation import _OPEN_WHILE_OFF
+    from pegaprox.api.federation_relay import RELAY_ONLY_ENDPOINTS
+    from pegaprox.core import federation
+    monkeypatch.delenv(federation.ENV_SWITCH, raising=False)
+    assert federation.enabled() is False
     probes = _probes(world.app)
     asked = [p for p in probes if not _allowed(p[0], p[2])]
     wrong = []
@@ -206,6 +211,15 @@ def test_every_other_api_route_refuses_a_portal_account(world, db, credential, m
         if rule.endpoint in UNREAD:
             # reads no credential, says the same to anyone
             expected = (200, None)
+        elif (rule.endpoint.startswith(('federation.', 'federation_relay.'))
+              and rule.endpoint not in RELAY_ONLY_ENDPOINTS
+              and (rule.endpoint, method) not in _OPEN_WHILE_OFF
+              and getattr(world.app.view_functions.get(rule.endpoint), '_pp_auth',
+                          None) is not None):
+            # MK Nov 2026 - switched off (the default), a federation admin route answers
+            # before require_auth reads a credential, the same to anyone. The peer routes
+            # take no session, and the portal hook holds the account there first
+            expected = (404, 'FED_DISABLED')
         elif credential == 'api_token' and rule.endpoint in TOKENLESS_UNCOUNTED:
             # takes no API token at all: the token opens nothing there
             expected = (401, _code(r))

@@ -189,7 +189,7 @@ def test_the_maintenance_evacuation_takes_the_scsi_iso_out_before_it_moves_the_g
     m.get_best_target_node = lambda *a, **k: 'pve2'
     # the evacuation reads the node list itself before it asks for a target
     m.get_node_status = lambda: {'pve1': {'status': 'online', 'score': 1}, 'pve2': {'status': 'online', 'score': 1}}
-    m._evacuation_placement = lambda: ({}, {})
+    m._evacuation_placement = lambda *a: ({}, {})
     m._derive_proxlb_tag_rules = lambda *a, **k: {'rules': [], 'pins': {}}
     m._count_vms_on_node = lambda node: 0
     task = MaintenanceTask('pve1')

@@ -35,6 +35,7 @@ from pegaprox.utils.realtime import (
     push_immediate_update,
     hold_websocket,
 )
+from pegaprox.utils.audit import get_client_ip
 from pegaprox.utils.email import send_email
 from pegaprox.api.helpers import load_server_settings, get_connected_manager
 from pegaprox.models.permissions import ROLE_ADMIN
@@ -294,6 +295,8 @@ def _floor_by_token_role(user, token_role):
 
 # how often an open SSE stream re-reads its own account. One indexed read per client.
 SSE_REAUTHZ_INTERVAL = 30
+# a stream's selection of other sites' clusters and its feeds change together
+_fed_watch_lock = threading.Lock()
 
 # sec (audit): an SSE stream is an open response, so it holds a request-pool slot for as long
 # as it lives — the #777 idle-connection reaper cannot touch it, because it is not idle. There
@@ -326,7 +329,10 @@ def _stream_identity(username):
         stored = get_db().get_user(username)
     except Exception:
         stored = None
-    if not stored:
+    from pegaprox.utils.auth import mirror_switched_off
+    if not stored or mirror_switched_off(stored):
+        # a federation mirror with the federation off here signs in nowhere: the stream
+        # closes as it does for an account that is gone
         return None
     u = dict(stored)
     u['username'] = username
@@ -413,7 +419,8 @@ def validate_ws_token_api():
         _acct = _gdb().get_user(data.get('user'))
     except Exception:
         _acct = None
-    if _acct is not None and not _acct.get('enabled', True):
+    from pegaprox.utils.auth import mirror_switched_off
+    if _acct is not None and (not _acct.get('enabled', True) or mirror_switched_off(_acct)):
         logging.warning(f"[WS-TOKEN] user '{_sl(data.get('user'))}' is disabled")
         return jsonify({'error': 'Account disabled', 'code': 'ACCOUNT_DISABLED'}), 401
 
@@ -601,6 +608,11 @@ def sse_updates():
     # Get cluster subscription from query params
     clusters_param = request.args.get('clusters')
     requested_clusters = clusters_param.split(',') if clusters_param else None
+    # MK Nov 2026 - linked mode: the clusters of another site stream from there
+    # (core/federation_stream.py), and the scope below is this instance's own
+    from pegaprox.core import federation as _fed, federation_stream
+    requested_clusters, remote_clusters = (federation_stream.split_wanted(requested_clusters)
+                                           if _fed.enabled() else (requested_clusters, []))
 
     # MK: only let users subscribe to clusters they have access to
     if requested_clusters:
@@ -613,6 +625,9 @@ def sse_updates():
             if not subscribed_clusters:
                 logging.warning(f"[SSE] User {user} tried to subscribe to unauthorized clusters")
                 subscribed_clusters = allowed_clusters
+    elif remote_clusters:
+        # only other sites' clusters: none of this instance's
+        subscribed_clusters = []
     else:
         subscribed_clusters = allowed_clusters
 
@@ -649,6 +664,7 @@ def sse_updates():
     if not acts_as_admin(_ident or {}):
         _is_admin = False
 
+    _client_ip = get_client_ip()
     with sse_clients_lock:
         _supersede_oldest_streams(user)
         sse_clients[client_id] = {
@@ -665,7 +681,25 @@ def sse_updates():
             'auth_method': auth_method,
             # what it was opened under: ending that ends this stream (end_session_channels)
             'sid': _bound.get('sid'),
+            'remote': list(remote_clusters),
+            # what the feeds of other sites run as, also after a change of selection
+            'fed_cred': {'sid': _bound.get('sid'), 'token_id': _bound.get('token_id'),
+                         'token_role': _token_role, 'ip': _client_ip},
         }
+    if _fed.enabled() and remote_clusters:
+        _fed_principal = federation_stream.principal_for(
+            user, _bound.get('sid'), _bound.get('token_id'), _token_role, _client_ip)
+        if _fed_principal:
+            # MK Nov 2026 - under the lock of the subscription update and with the selection
+            # as it stands now: a change sent while the principal was looked up must not
+            # get the feeds of this older selection back
+            with _fed_watch_lock:
+                with sse_clients_lock:
+                    _now_remote = list((sse_clients.get(client_id) or {}).get('remote') or [])
+                if _now_remote:
+                    federation_stream.watch(client_id, _now_remote, _fed_principal)
+                else:
+                    federation_stream.unwatch(client_id)
 
     logging.info(f"[SSE] Client connected: {client_id} (user: {user}, auth: {auth_method}) - Total: {len(sse_clients)}")
 
@@ -755,6 +789,7 @@ def sse_updates():
                         logging.error(f"[SSE] cannot refresh cluster scope for "
                                       f"'{_sl(user)}': {_ce}")
                         _fresh_allowed = []          # unknown -> narrow, never widen
+                    _remote_left, _here_empty = False, False
                     with sse_clients_lock:
                         _ci = sse_clients.get(client_id)
                         if _ci is not None:
@@ -767,16 +802,43 @@ def sse_updates():
                                 logging.info(f"[SSE] '{_sl(user)}' lost access to "
                                              f"{len(_lost)} cluster(s) - stream narrowed")
                                 _ci['clusters'] = _now_allowed
-                            if _now_allowed is not None and not _now_allowed:
+                            if _now_allowed is not None and not _now_allowed \
+                                    and not _ci.get('remote'):
                                 logging.info(f"[SSE] closing stream for '{_sl(user)}' - "
                                              f"no cluster left in scope")
                                 return
+                            _remote_left = bool(_ci.get('remote'))
+                            _here_empty = _now_allowed is not None and not _now_allowed
+                    # MK Nov 2026 - the other sites' feeds: a relayed call asks for its
+                    # principal each time, a feed only when it connects. Asked again on this
+                    # tick, so a session whose home took its assertion back stops getting
+                    # their frames now, not when the leading site sees the assertion run out
+                    if _remote_left and _fed.enabled() and federation_stream.principal_for(
+                            user, _bound.get('sid'), _bound.get('token_id'), _token_role,
+                            _client_ip) is None:
+                        logging.info(f"[SSE] '{_sl(user)}' may no longer work on other "
+                                     f"sites' clusters - their feeds stopped")
+                        # MK Nov 2026 - selection and feeds go under the subscription lock
+                        # here too, and what is left of this site is read under it: an
+                        # update landing between the unwatch and the cleared selection
+                        # left its feeds running for a stream that showed no remote id
+                        with _fed_watch_lock:
+                            with sse_clients_lock:
+                                _ci = sse_clients.get(client_id)
+                                if _ci is not None:
+                                    _ci['remote'] = []
+                                    _here_empty = (_ci.get('clusters') is not None
+                                                   and not _ci.get('clusters'))
+                            federation_stream.unwatch(client_id)
+                        if _here_empty:
+                            return
         except GeneratorExit:
             pass
         finally:
             with sse_clients_lock:
                 if client_id in sse_clients:
                     del sse_clients[client_id]
+            federation_stream.unwatch(client_id)
             logging.info(f"[SSE] Client disconnected: {client_id} - Remaining clients: {len(sse_clients)}")
 
     response = Response(generate(), mimetype='text/event-stream')
@@ -808,6 +870,10 @@ def update_sse_subscription():
     if user_data is None:
         return jsonify({'error': 'Unauthorized', 'code': 'AUTH_REQUIRED'}), 401
     allowed = get_user_clusters(user_data)  # None = admin
+    # linked mode: another site's clusters stream from there
+    from pegaprox.core import federation as _fed, federation_stream
+    requested, remote = (federation_stream.split_wanted(requested) if _fed.enabled()
+                         else (requested, []))
 
     # filter requested against allowed
     if requested and len(requested) > 0:
@@ -816,6 +882,8 @@ def update_sse_subscription():
             new_sub = filtered if filtered else allowed
         else:
             new_sub = requested  # admin sees all
+    elif remote:
+        new_sub = []
     else:
         new_sub = allowed  # None = everything user can see
 
@@ -829,6 +897,24 @@ def update_sse_subscription():
             return jsonify({'error': 'Unauthorized'}), 403
         old_sub = client.get('clusters')
         client['clusters'] = new_sub
+        client['remote'] = list(remote)
+        cred = dict(client.get('fed_cred') or {})
+    # MK Nov 2026 - the feeds run as the credential the stream was opened with, not as
+    # whichever credential of the same account sent this
+    _fed_principal = None
+    if _fed.enabled() and remote and cred:
+        _fed_principal = federation_stream.principal_for(
+            username, cred.get('sid'), cred.get('token_id'), cred.get('token_role'),
+            cred.get('ip'))
+    # the selection as it stands and its feeds in one step: of two of these at once, the
+    # older must not bring its feeds back after the newer
+    with _fed_watch_lock:
+        with sse_clients_lock:
+            now = list((sse_clients.get(client_id) or {}).get('remote') or [])
+        if _fed.enabled() and _fed_principal and now:
+            federation_stream.watch(client_id, now, _fed_principal)
+        else:
+            federation_stream.unwatch(client_id)
 
     # R2 (regression fix): the IP/disk refresh loop is gated on watched-clusters
     # and only re-runs ~every 40s, so a freshly-selected cluster would show stale

@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from pegaprox.core.db import get_db
-from pegaprox.core import dbcrypto, ha, transfer_net
+from pegaprox.core import dbcrypto, ha, migration_tunnel, transfer_net
 from pegaprox.background import sr_boot_shots
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.audit import log_audit
@@ -544,6 +544,23 @@ def _target_vmid_exists(tgt_mgr, vmid):
     return False
 
 
+def _tunnel_refusal(src_mgr, tgt_mgr, vmid, vm_type):
+    """MK Nov 2026 - why Proxmox VE would refuse the move of vmid for the version of the
+    migration tunnel (a PVE 9.3 source into an older target cluster), or None. It refuses
+    in the task, after the target reserved the VMID, guest after guest; asked here before
+    the guest is marked or a token made (core/migration_tunnel.py)."""
+    try:
+        node = next((r.get('node') for r in src_mgr.get_vm_resources(max_age=5) or ()
+                     if isinstance(r, dict) and str(r.get('vmid')) == str(vmid)), None)
+    except Exception as e:
+        logger.debug(f"[SR] node of {vmid} not read for the tunnel check: {e}")
+        return None
+    if not isinstance(node, str) or not node:
+        return None
+    # the endpoint of _migrate_vm_cross_cluster names the host we talk to, not config.host
+    return migration_tunnel.refusal(src_mgr, node, vm_type, tgt_mgr, host=tgt_mgr.host)
+
+
 def _replicas_kept(plan):
     """{vmid: [(job id, replica VMID)]} of the replication jobs between the plan's clusters."""
     kept = {}
@@ -900,6 +917,10 @@ def execute_failover(plan_id, failover_type='planned', authorized_vmids=None, on
                            f"cannot reconcile an existing VMID - use Emergency Failover "
                            f"to start the replicated target instead.")
                     logger.warning(f"[SR] {_sl(vm_name)} ({vmid}): {err}")
+                if err is None and tgt_mgr:
+                    err = _tunnel_refusal(src_mgr, tgt_mgr, dr_vmid if going_home else vmid, vm_type)
+                    if err:
+                        logger.warning(f"[SR] {_sl(vm_name)} ({vmid}): {err}")
 
             # MK Oct 2026 (#625) - the mark goes in before the step and to the members at
             # once, so the confirm round below carries it: a leader gone right after the
@@ -1366,6 +1387,7 @@ def replay_failover_state():
 _last_fail_times = {}  # plan_id -> first_fail_timestamp
 _cooldowns = {}  # plan_id -> cooldown_until_timestamp
 _missing_source_logged = set()  # plan_ids we've already warned about, so the loop doesn't spam
+_held_logged = set()  # plan_ids held for a federation lease, said once as well
 
 
 def _heartbeat_check():
@@ -1385,6 +1407,21 @@ def _heartbeat_check():
         # respect cooldown
         if plan_id in _cooldowns and now < _cooldowns[plan_id]:
             continue
+
+        # the worker lease check: a cluster enrolled in the federation fails over only
+        # while this instance holds a live lease on it - the replicas an emergency
+        # failover starts write on the target site. Held, without an outage clock:
+        # the clock starts fresh where this instance may act again. Not asked while
+        # the federation is off
+        from pegaprox.core import federation as _fed
+        if _fed.enabled() and not _fed.worker_takes_writes_for(plan.get('target_cluster') or ''):
+            _last_fail_times.pop(plan_id, None)
+            if plan_id not in _held_logged:
+                _held_logged.add(plan_id)
+                logger.info(f"[SR] Auto-failover for '{_sl(plan['name'])}' held: this instance "
+                            f"holds no live lease on its target cluster")
+            continue
+        _held_logged.discard(plan_id)
 
         src_mgr = cluster_managers.get(plan['source_cluster'])
         if src_mgr is None:

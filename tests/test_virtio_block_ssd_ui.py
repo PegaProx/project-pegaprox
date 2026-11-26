@@ -109,6 +109,8 @@ class _DiskServer(_FakeServer):
         self.unused = unused or []
         self.extra.update({
             ('GET', '/api/hardware-options'): (200, OPTIONS),
+            # the dialogs read the options of the VM's own cluster since linked mode
+            ('GET', '/api/clusters/c1/hardware-options'): (200, OPTIONS),
             ('GET', f'{VM_URL}/passthrough'): (200, {'pci': [], 'usb': [], 'serial': []}),
             ('GET', '/api/clusters/c1/nodes'): (200, [{'node': 'pve1', 'status': 'online'}]),
             ('GET', f'{NODE}/storage'): (200, STORAGE),

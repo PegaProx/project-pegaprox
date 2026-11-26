@@ -337,6 +337,12 @@ def qdevice_bulk_setup(host_id):
             or not all(isinstance(c, str) and 0 < len(c) <= 128 for c in ids):
         return jsonify({'error': f'cluster_ids: a list of 1 to {qnetd.BULK_MAX} cluster ids'}), 400
     ids = list(dict.fromkeys(ids))
+    # MK Nov 2026 - a QDevice setup writes corosync on every cluster it names
+    from pegaprox.api.federation import refuse_unleased
+    for cid in ids:
+        refused = refuse_unleased(cid, f'cluster {cid}')
+        if refused:
+            return refused
     for cid in ids:
         _mgr, cerr = _cluster_or_error(cid)
         if cerr:

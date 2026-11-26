@@ -18,7 +18,9 @@ It reads only, and little: per cluster the guest list and node status the live v
 keeps, one storage list (/cluster/resources?type=storage, shared with the health score),
 the HA resources and rules and the replication jobs once each; per target node its
 network config (shared with the transfer network, core/transfer_net.py). Per guest only
-its config, a few at a time. A read that fails makes a warning, never a block.
+its config, a few at a time. A read that fails makes a warning, never a block. A remote
+migration reads the package versions of its source and target nodes as well, which
+refuse it only when they are known (core/migration_tunnel.py).
 
 The single guest's migrate check (api/vms.py migrate-check) and the DR drill's mapping
 checks (api/dr_drill.py) take their volume, bridge and storage rules from here.
@@ -195,23 +197,42 @@ def restricted_groups(groups):
             if isinstance(g, dict) and _on(g.get('restricted'))}
 
 
-def ha_node_limits(rules, groups, resources):
+def _negative(rule):
+    return str(rule.get('affinity') or '').strip().lower() == 'negative'
+
+
+def _rule_nodes(rule, all_nodes):
+    """The nodes a node-affinity rule puts its guests on, None when that is unknown. Since
+    PVE 9.3 a rule can be negative: its nodes are the ones to avoid and it means every other
+    node of the cluster, which needs all_nodes. PVE drops a negative rule that names them all."""
+    nodes = node_names(rule.get('nodes'))
+    if not _negative(rule):
+        return nodes
+    return (set(all_nodes or ()) - nodes) or None
+
+
+def ha_node_limits(rules, groups, resources, all_nodes=None):
     """{vmid: nodes} Proxmox HA lets a guest run on: strict PVE 9 node-affinity rules (the
     others are preferences) and the restricted PVE 8 groups of `groups` ({group: nodes}).
-    A guest missing from it is not limited. ha-manager refuses a target outside (#647)."""
+    A guest missing from it is not limited. ha-manager refuses a target outside (#647).
+    all_nodes: the nodes of the cluster, without them a negative rule limits nothing."""
     out = {}
 
+    # the guests of one rule share its set: a negative rule's is every other node
     def _restrict(sid, nodes):
         vmid = _sid_vmid(sid)
         if vmid is not None:
-            out[vmid] = out[vmid] & nodes if vmid in out else set(nodes)
+            out[vmid] = out[vmid] & nodes if vmid in out else nodes
 
     for rule in rules or []:
         if (isinstance(rule, dict) and str(rule.get('type') or '').lower() == 'node-affinity'
                 and _on(rule.get('strict')) and not _on(rule.get('disable'))):
+            nodes = _rule_nodes(rule, all_nodes)
+            if nodes is None:
+                continue
             for sid in str(rule.get('resources') or '').split(','):
                 if sid.strip():
-                    _restrict(sid, node_names(rule.get('nodes')))
+                    _restrict(sid, nodes)
     if groups:
         for res in resources or []:
             if isinstance(res, dict) and res.get('group') in groups:
@@ -219,17 +240,37 @@ def ha_node_limits(rules, groups, resources):
     return out
 
 
-def _ha_preferences(rules, groups, resources):
+def _ha_avoids(rules, all_nodes):
+    """{vmid: nodes} a strict negative node-affinity rule keeps a guest off, for the rules
+    ha_node_limits applies"""
+    out = {}
+    for rule in rules or []:
+        if (isinstance(rule, dict) and str(rule.get('type') or '').lower() == 'node-affinity'
+                and _negative(rule) and _on(rule.get('strict')) and not _on(rule.get('disable'))
+                and _rule_nodes(rule, all_nodes) is not None):
+            avoid = node_names(rule.get('nodes'))
+            for sid in str(rule.get('resources') or '').split(','):
+                vmid = _sid_vmid(sid) if sid.strip() else None
+                if vmid is not None:
+                    out[vmid] = avoid
+    return out
+
+
+def _ha_preferences(rules, groups, resources, all_nodes=None):
     """{vmid: (nodes, name)} of the nodes HA prefers for a guest and moves it back to while
     failback is on: a non-strict node-affinity rule, or an unrestricted PVE 8 group."""
     out = {}
     for rule in rules or []:
         if (isinstance(rule, dict) and str(rule.get('type') or '').lower() == 'node-affinity'
                 and not _on(rule.get('strict')) and not _on(rule.get('disable'))):
+            # a negative rule has no priorities: every node it does not name comes first
+            prefer = _rule_nodes(rule, all_nodes) if _negative(rule) else _top_nodes(rule.get('nodes'))
+            if prefer is None:
+                continue
             for sid in str(rule.get('resources') or '').split(','):
                 vmid = _sid_vmid(sid) if sid.strip() else None
                 if vmid is not None:
-                    out[vmid] = (_top_nodes(rule.get('nodes')), str(rule.get('rule') or ''))
+                    out[vmid] = (prefer, str(rule.get('rule') or ''))
     for res in resources or []:
         if not isinstance(res, dict) or not res.get('group'):
             continue
@@ -315,8 +356,9 @@ _cache = {}
 _cache_lock = threading.Lock()
 
 
-def _cached(mgr, cluster_id, key, read, ttl=READ_TTL):
-    """A cluster-wide read shared for ttl seconds; one that failed is not kept"""
+def _cached(mgr, cluster_id, key, read, ttl=READ_TTL, keep=None):
+    """A cluster-wide read shared for ttl seconds; one that failed, or that keep turns down,
+    is not kept"""
     k = (cluster_id or getattr(mgr, 'id', None) or '', id(mgr), key)
     now = time.time()
     with _cache_lock:
@@ -324,7 +366,7 @@ def _cached(mgr, cluster_id, key, read, ttl=READ_TTL):
     if hit and now - hit[0] < ttl:
         return hit[1]
     data = read()
-    if data is not None:
+    if data is not None and (keep is None or keep(data)):
         with _cache_lock:
             _cache[k] = (now, data)
             if len(_cache) > 512:
@@ -437,12 +479,22 @@ class _Side:
                 st, groups = _get(self.mgr, '/cluster/ha/groups')
                 groups = groups if st == 200 and isinstance(groups, list) else []
             by_group = {g.get('group'): g for g in groups if isinstance(g, dict)}
+            # MK Nov 2026 - a negative node-affinity rule means every node it does not name, only
+            # the node status knows them. Without it the rule is left out and the read not kept
+            negative = any(isinstance(r, dict) and str(r.get('type') or '').lower() == 'node-affinity'
+                           and _negative(r) and not _on(r.get('disable')) for r in rules)
+            every = self.nodes() if negative else None
             return {'managed': {_sid_vmid(r.get('sid')): r for r in resources if isinstance(r, dict)},
-                    'limits': ha_node_limits(rules, restricted_groups(groups), resources),
-                    'prefer': _ha_preferences(rules, by_group, resources),
-                    'affinity': _resource_affinity(rules)}
-        return self._once('ha', lambda: _cached(self.mgr, self.id, 'ha', read),
-                          f'the HA resources and rules of {self.name}')
+                    'limits': ha_node_limits(rules, restricted_groups(groups), resources, every),
+                    'prefer': _ha_preferences(rules, by_group, resources, every),
+                    'avoid': _ha_avoids(rules, every),
+                    'affinity': _resource_affinity(rules),
+                    'unapplied': negative and every is None}
+        got = self._once('ha', lambda: _cached(self.mgr, self.id, 'ha', read, keep=lambda d: not d['unapplied']),
+                         f'the HA resources and rules of {self.name}')
+        if got and got['unapplied']:
+            self.unread.add(f'the negative node-affinity rules of {self.name} (not applied without the node status)')
+        return got
 
     def replication(self):
         def read():
@@ -951,7 +1003,13 @@ def _intra_checks(side, sim, gv, t, online, with_local_disks, override=()):
     ha = side.ha()
     if ha:
         allowed = ha['limits'].get(gv.vmid)
-        if allowed is not None and t not in allowed:
+        avoided = ha['avoid'].get(gv.vmid) or ()
+        if allowed is not None and t in avoided:
+            # the nodes the rule names, not every other node of the cluster
+            gv.block('ha_node_rule', f"Proxmox HA keeps it off {', '.join(sorted(avoided))} (strict negative "
+                                     f"node affinity)", args={'avoided': ', '.join(sorted(avoided))},
+                     variant='avoid')
+        elif allowed is not None and t not in allowed:
             gv.block('ha_node_rule', f"Proxmox HA keeps it on {', '.join(sorted(allowed)) or 'no node'} "
                                      f"(strict node affinity or a restricted group)",
                      args={'nodes': ', '.join(sorted(allowed)) or 'no node'})
@@ -1346,6 +1404,13 @@ def _cross_checks(src, tgt, sim, gv, t, storage_map, target_storage, bridge_map,
     _busy_checks(gv)
     if delete_source and not may_delete:
         gv.block('needs_delete', 'Removing the source guest needs vm.delete on it', args={})
+    if gv.node:
+        # MK Nov 2026 - a PVE 9.3 source refuses an older target in the task, after the target
+        # reserved the VMID (core/migration_tunnel.py)
+        from pegaprox.core import migration_tunnel
+        why = migration_tunnel.refusal(src.mgr, gv.node, gv.kind, tgt.mgr, t)
+        if why:
+            gv.block('tunnel_too_old', why, args={'detail': why})
     live = bool(online)
     if gv.kind == 'qemu' and gv.cfg is not None:
         live, _gb_total, note = cross_online(gv.cfg, bool(online), bool(force_online))

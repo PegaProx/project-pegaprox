@@ -414,6 +414,11 @@ def _fetch_ha(mgr, out):
     got = False
     code, rows = _api_data(mgr, '/cluster/ha/rules')
     if code == 200 and isinstance(rows, list):
+        # MK Nov 2026 - PVE 9.3 fills in affinity=positive on every node-affinity rule. That is
+        # the default and no change of the rule; a negative one still shows
+        rows = [{k: v for k, v in r.items() if k != 'affinity'}
+                if isinstance(r, dict) and r.get('type') == 'node-affinity' and r.get('affinity') == 'positive'
+                else r for r in rows]
         out.append(('ha_rules', 'rules', _keyed(rows, 'rule', _HA_VOLATILE)))
         got = True
     elif code in (404, 501):

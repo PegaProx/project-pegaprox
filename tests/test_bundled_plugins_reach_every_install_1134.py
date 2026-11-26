@@ -292,7 +292,8 @@ def test_the_postinst_brings_the_plugins_on_install_and_on_upgrade(tmp_path):
     assert (live / 'status_page' / '__init__.py').read_text() == '# next release\n'
     assert (live / 'status_page' / 'config.json').read_text() == ADMIN_SETTINGS
     assert (live / 'my_plugin' / 'config.json').read_text() == '{"mine": true}'
-    assert calls.read_text().count('systemctl restart pegaprox.service') == 2
+    # the install starts it here, the upgrade is restarted by the debhelper part alone
+    assert calls.read_text().count('systemctl restart pegaprox.service') == 1
 
 
 @pytest.mark.skipif(not os.path.exists('/usr/bin/python3'), reason='the postinst calls /usr/bin/python3')

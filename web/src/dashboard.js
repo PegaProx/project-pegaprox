@@ -1621,6 +1621,92 @@
         // LW Oct 2026 - one row of the corporate sidebar's Tools section, same height and
         // icon column as the PBS rows. The icon gets its colour through currentColor here,
         // most of our icons ignore a style prop.
+        // LW Nov 2026 - linked mode: a cluster another site of the federation leads. It opens like
+        // one of this site's and every call goes to that site; renaming, grouping, re-configuring
+        // and deleting it happen there, so none of that is offered here
+        function RemoteClusterItem({ cluster, selected, expanded, onSelect, onToggle, onContextMenu, isCorporate, t }) {
+            const name = cluster.display_name || cluster.name;
+            const badge = <span className="text-[10px] px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 flex-shrink-0" title={cluster.fed.url}>{cluster.fed.site}</span>;
+            const there = fedSiteHref(cluster.fed.url, cluster.id);
+            const openThere = there && (
+                <a href={there} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} data-fed-open
+                    title={String(t('linkedOpenAtSite')).replace('{site}', cluster.fed.site)} aria-label={String(t('linkedOpenAtSite')).replace('{site}', cluster.fed.site)}
+                    className="flex-shrink-0 p-0.5 rounded text-gray-500 hover:text-blue-400">
+                    <Icons.ExternalLink className="w-3 h-3" />
+                </a>
+            );
+            // the name is the control that opens the cluster (keyboard, screen reader); the row
+            // around it opens it on a click as well
+            const select = (cls) => (
+                <button type="button" data-fed-select onClick={(e) => { e.stopPropagation(); onSelect(); }}
+                    aria-current={selected ? 'true' : undefined} className={`${cls} text-left bg-transparent border-0 p-0 cursor-pointer`}>
+                    {name}
+                </button>
+            );
+            if (isCorporate) {
+                return (
+                    <div onClick={onSelect} data-fed-cluster={cluster.id}
+                        onContextMenu={onContextMenu ? (e) => { e.preventDefault(); onContextMenu({ x: e.clientX, y: e.clientY }); } : undefined}
+                        className="corp-tree-item cursor-pointer flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5"
+                        style={selected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: 'var(--corp-text-secondary)'}}>
+                        <button type="button" onClick={(e) => { e.stopPropagation(); onToggle(); }} aria-expanded={expanded} aria-label={name}
+                            className="flex-shrink-0 p-0.5 hover:bg-white/10 rounded">
+                            {expanded ? <Icons.ChevronDown className="w-3 h-3" /> : <Icons.ChevronRight className="w-3 h-3" />}
+                        </button>
+                        <Icons.Database className="w-4 h-4 flex-shrink-0" style={{color: cluster.connected ? 'var(--corp-accent)' : 'var(--color-error)'}} />
+                        {select('truncate flex-1 font-medium text-inherit')}
+                        {badge}
+                        {openThere}
+                    </div>
+                );
+            }
+            return (
+                <div onClick={onSelect} data-fed-cluster={cluster.id}
+                    className={`p-3 rounded-xl cursor-pointer transition-all border ${selected ? 'bg-proxmox-orange/10 border-proxmox-orange/50' : 'bg-proxmox-card border-proxmox-border hover:border-proxmox-orange/30'}`}>
+                    <div className="flex items-center gap-2 min-w-0">
+                        <button type="button" onClick={(e) => { e.stopPropagation(); onToggle(); }} aria-expanded={expanded} aria-label={name}
+                            className="flex-shrink-0 p-0.5 hover:bg-white/10 rounded">
+                            {expanded ? <Icons.ChevronDown className="w-3 h-3" /> : <Icons.ChevronRight className="w-3 h-3" />}
+                        </button>
+                        <div className={`w-2 h-2 rounded-full flex-shrink-0 ${cluster.connected ? 'bg-green-500 status-online' : 'bg-red-500'}`} />
+                        {select('font-medium text-sm truncate flex-1 text-inherit')}
+                        {badge}
+                        {openThere}
+                    </div>
+                    {!cluster.connected && (
+                        <div className="flex gap-1 mt-2"><span className="text-[10px] bg-red-500/10 text-red-400 px-1.5 py-0.5 rounded">{t('offline')}</span></div>
+                    )}
+                </div>
+            );
+        }
+
+        // the line a site of the federation shows in the sidebar instead of its clusters
+        const LINKED_STATE_TEXT = {
+            unreachable: 'linkedState_unreachable', off: 'linkedState_off', unmapped: 'linkedState_unmapped',
+            syncing: 'linkedState_syncing', name_taken: 'linkedState_name_taken',
+            disabled_account: 'linkedState_disabled_account', mfa: 'linkedState_mfa', clock: 'linkedState_clock',
+            switching: 'linkedState_switching', old_release: 'linkedState_old_release',
+            refused: 'linkedState_refused', portal_only: 'linkedState_portal_only',
+        };
+        function fedSiteStateText(site, t) {
+            return String(t(LINKED_STATE_TEXT[site.state] || 'linkedState_refused')).replace('{site}', site.site);
+        }
+
+        // LW Nov 2026 - the address of another site, with the cluster to open there (?cluster=,
+        // which PegaProxDashboard reads on load). https only, as the HA links (haActiveHref)
+        function fedSiteHref(url, clusterId) {
+            try {
+                const u = new URL(url);
+                if (u.protocol !== 'https:') return null;
+                u.pathname = '/';
+                u.search = clusterId ? `?cluster=${encodeURIComponent(String(clusterId).split('~')[0])}` : '';
+                u.hash = '';
+                return u.toString();
+            } catch (e) {
+                return null;
+            }
+        }
+
         function CorpSidebarToolRow({ id, active, icon, label, onClick }) {
             return (
                 <button
@@ -2322,7 +2408,7 @@
             const checkItems = Object.fromEntries(((check && check.items) || []).map(it => [it.vm_id, it]));
             const bridges = (check && check.available && check.available.bridges) || [];
             const storages = (check && check.available && check.available.storages) || [];
-            const fullHere = !['sshfs_boot', 'snapshot_zero'].includes(form.transfer_mode);
+            const fullHere = form.transfer_mode !== 'sshfs_boot';
             const input = 'w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm';
             const small = 'px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-xs disabled:opacity-40';
             const tabs = [['settings', t('esxiBulkStepSettings')], ['guests', t('esxiBulkStepGuests')],
@@ -2414,7 +2500,7 @@
                                 <div className="grid grid-cols-2 gap-3">
                                     <div>
                                         <label className="text-xs text-gray-500 mb-1 block">{t('transferMode')}</label>
-                                        <select value={form.transfer_mode} onChange={e => set({transfer_mode: e.target.value, verify: form.verify === 'full' && ['sshfs_boot', 'snapshot_zero'].includes(e.target.value) ? 'sample' : form.verify})} className={input}>
+                                        <select value={form.transfer_mode} onChange={e => set({transfer_mode: e.target.value, verify: form.verify === 'full' && e.target.value === 'sshfs_boot' ? 'sample' : form.verify})} className={input}>
                                             {ESXI_BULK_MODES.map(([v, k]) => <option key={v} value={v}>{t(k)}</option>)}
                                         </select>
                                     </div>
@@ -14483,6 +14569,13 @@
             // what the account holds, the standby rule aside: only for a tab that just reads,
             // so a standby keeps showing it (#625); its buttons still ask can()
             const holds = (permission) => isAdmin || (Array.isArray(user?.permissions) && user.permissions.includes(permission));
+            // LW Nov 2026 - linked mode: what the site that leads the selected cluster lets the account
+            // do there (its row's fed), for the checks of the cluster view; can() for one of ours
+            const siteCan = (permission, cluster = selectedCluster) => {
+                const fed = cluster?.fed;
+                if (!fed) return can(permission);
+                return (!haReadOnly || haReadPermission(permission)) && (!!fed.admin || (fed.perms || []).includes(permission));
+            };
             // #625: the node HA parts of the HA settings write through routes that want
             // ha.config; with ha.view alone they show what is set and change nothing
             const haWrite = can('ha.config');
@@ -14493,6 +14586,19 @@
             // LW Nov 2026 - the redesign formats numbers and dates in the language drawn here (cr.js)
             if (isCorpRedesigned) crUiLocale(language);
             const [clusters, setClusters] = useState([]);
+            // LW Nov 2026 - linked mode: the clusters of the other sites of the federation, each site
+            // asked through this one (/api/federation/linked). Kept apart from `clusters`, which the
+            // pickers that write this site's data list; a lookup by id that opens a view asks both
+            const [remoteSites, setRemoteSites] = useState([]);
+            const [remoteHome, setRemoteHome] = useState(null);
+            const remoteClusters = useMemo(() => remoteSites.flatMap(s => s.state === 'ok'
+                ? (s.clusters || []).map(c => ({ ...c, display_name: c.name, fed: { iid: s.iid, site: s.site, url: s.url, perms: s.perms || [], admin: !!s.admin } }))
+                : []), [remoteSites]);
+            const allClusters = useMemo(() => remoteClusters.length ? clusters.concat(remoteClusters) : clusters,
+                [clusters, remoteClusters]);
+            // the overview's round over every cluster runs in a timer: it reads the remote rows from here
+            const remoteClustersRef = useRef([]);
+            remoteClustersRef.current = remoteClusters;
             const [clusterGroups, setClusterGroups] = useState([]); // NS Jan 2026 - for grouping
             const [collapsedGroups, setCollapsedGroups] = useState({}); // Track which groups are collapsed
             const [showGroupManager, setShowGroupManager] = useState(false); // Group management modal
@@ -14510,6 +14616,12 @@
             const [allClusterMetrics, setAllClusterMetrics] = useState({}); // LW: metrics cache for overview page
             const [topGuests, setTopGuests] = useState([]); // top vms for overview table
             const [allClusterGuests, setAllClusterGuests] = useState({}); // NS: Mar 2026 - per-cluster guests for topology
+            const allClusterGuestsRef = useRef({});
+            allClusterGuestsRef.current = allClusterGuests;
+            // the other sites' guests for the guest list, made again only when the overview read them
+            const remoteGuests = useMemo(() => remoteClusters.map(c => ({ cluster: c,
+                guests: (allClusterGuests[c.id] || []).filter(r => r.type === 'qemu' || r.type === 'lxc') })),
+                [remoteClusters, allClusterGuests]);
             const [knownNodes, setKnownNodes] = useState({}); // NS: Track all nodes ever seen to show offline ones
             const [clusterResources, setClusterResources] = useState([]);
             const [clusterDatastores, setClusterDatastores] = useState({ shared: [], local: {} }); // LW: Mar 2026 - sidebar datastore list
@@ -14716,7 +14828,7 @@
                 start_after:true,remove_source:false,transfer_mode:'vmkfstools_clone',bios:'auto',preserve_mac:true,
                 wait_for_confirmation:false, // #562 — hold before the final switchover until the operator confirms
                 // hardware overrides (#222)
-                ostype:'auto',scsihw:'auto',disk_bus:'auto',vga:'vmware',net_driver:'auto',
+                ostype:'auto',scsihw:'auto',disk_bus:'auto',vga:'std',net_driver:'auto',
                 sockets:0,cores_per_socket:0,memory:0,cpu_type:'host',
                 // advanced
                 disk_format:'raw',disk_cache:'none',disk_iothread:true,disk_discard:'on',disk_ssd:false,aio_mode:'',
@@ -15163,6 +15275,7 @@
             const [snapshotSortBy, setSnapshotSortBy] = useState('age'); // vmid, vm_name, node, snapshot_name, snapshot_date, age
             const [snapshotSortDir, setSnapshotSortDir] = useState('desc');
             const [selectedSnaps, setSelectedSnaps] = useState({}); // #696 — multi-select in the snapshot overview (key -> true)
+            const [snapsDeleting, setSnapsDeleting] = useState(false); // LW Nov 2026 (#1347) - a bulk delete of them is under way
             const [logEvents, setLogEvents] = useState([]);
             const [logEventsLoading, setLogEventsLoading] = useState(false);
             const [logEventsError, setLogEventsError] = useState('');
@@ -15377,6 +15490,25 @@
                 // First update the ref synchronously
                 selectedClusterRef.current = selectedCluster;
             }, [selectedCluster]);
+
+            // LW Nov 2026 - linked mode: another site opens one of this site's clusters here with
+            // ?cluster=<id> (fedSiteHref). Taken once, when the clusters have loaded, and dropped
+            // from the address so a reload keeps whatever is open then
+            const wantedClusterRef = useRef((() => {
+                try { return new URLSearchParams(window.location.search).get('cluster'); } catch (e) { return null; }
+            })());
+            useEffect(() => {
+                const want = wantedClusterRef.current;
+                if (!want || !clusters.length) return;
+                wantedClusterRef.current = null;
+                const found = allClusters.find(c => c.id === want);
+                if (found) setSelectedCluster(found);
+                try {
+                    const u = new URL(window.location.href);
+                    u.searchParams.delete('cluster');
+                    window.history.replaceState(window.history.state, '', u.toString());
+                } catch (e) {}
+            }, [clusters, allClusters]);
             
             useEffect(() => { expandedSidebarClustersRef.current = expandedSidebarClusters; }, [expandedSidebarClusters]);
             useEffect(() => { sidebarClusterDataRef.current = sidebarClusterData; }, [sidebarClusterData]);
@@ -15485,7 +15617,7 @@
             const openFavorite = (kind, f) => {
                 setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null);
                 if (kind === 'cluster') {
-                    const c = clusters.find(cl => cl.id === f);
+                    const c = allClusters.find(cl => cl.id === f);
                     if (c) setSelectedCluster(c);
                     return;
                 }
@@ -15501,7 +15633,7 @@
                 else toggleFavorite('vm', f.cluster_id, f.vmid, f.type === 'lxc' ? 'lxc' : 'qemu');
             };
             const renderFavoritesGroup = () => {
-                const byId = new Map(clusters.map(c => [c.id, c]));
+                const byId = new Map(allClusters.map(c => [c.id, c]));
                 const rows = [];
                 (favorites.clusters || []).forEach(cid => {
                     const c = byId.get(cid);
@@ -15691,11 +15823,11 @@
                                     key={`node-${nodeName}`}
                                     className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
                                     tabIndex={0}
-                                    onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }}
+                                    onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }}
                                     onContextMenu={(e) => { e.preventDefault(); setCtxMenu({type: 'node', target: {nodeName, clusterId, online: nodeOnline, maintenance: isMaint}, position: {x: e.clientX, y: e.clientY}}); }}
                                     role={crTree ? 'treeitem' : undefined} aria-level={crTree ? 2 : undefined} aria-selected={crTree ? isNodeSelected : undefined}
                                     onKeyDown={(e) => {
-                                        if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }
+                                        if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }
                                         else if (e.key === 'ArrowDown') treeNavDown(e);
                                         else if (e.key === 'ArrowUp') treeNavUp(e);
                                         else if (crTree) crTreeKey(e);
@@ -15729,7 +15861,7 @@
                         {/* LW Oct 2026 (#1137) - the QDevice right after the nodes, only where the cluster has one */}
                         {showNodes && qdeviceByCluster[clusterId]?.present && (!searchLower || 'qdevice'.includes(searchLower)) && (() => {
                             const isQSelected = selectedSidebarQdevice === clusterId;
-                            const openQ = () => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode(null); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setSelectedSidebarQdevice(clusterId); setActiveTab('overview'); };
+                            const openQ = () => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarNode(null); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setSelectedSidebarQdevice(clusterId); setActiveTab('overview'); };
                             return (
                                 <div
                                     key={`qdevice-${clusterId}`}
@@ -15762,11 +15894,11 @@
                                 <div
                                     key={`vm-${clusterId}-${vm.vmid}`}
                                     tabIndex={0}
-                                    onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
+                                    onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                     onContextMenu={(e) => { e.preventDefault(); setCtxMenu({type: 'vm', target: {...vm, _clusterId: clusterId}, position: {x: e.clientX, y: e.clientY}}); }}
                                     role={crTree ? 'treeitem' : undefined} aria-level={crTree ? 2 : undefined} aria-selected={crTree ? isVmSelected : undefined}
                                     onKeyDown={(e) => {
-                                        if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }
+                                        if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }
                                         else if (e.key === 'ArrowDown') treeNavDown(e);
                                         else if (e.key === 'ArrowUp') treeNavUp(e);
                                         else if (crTree) crTreeKey(e);
@@ -15865,10 +15997,10 @@
                         <div
                             key={`pvm-${clusterId}-${vm.vmid}`}
                             tabIndex={0}
-                            onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
+                            onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                             onContextMenu={(e) => { e.preventDefault(); setCtxMenu({type: 'vm', target: {...vm, _clusterId: clusterId}, position: {x: e.clientX, y: e.clientY}}); }}
                             onKeyDown={(e) => {
-                                if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }
+                                if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }
                                 else if (e.key === 'ArrowDown') treeNavDown(e);
                                 else if (e.key === 'ArrowUp') treeNavUp(e);
                             }}
@@ -16089,7 +16221,7 @@
                     return <CrDsTree clusterId={clusterId} shared={sharedStores} local={localByNode} skip={sharedNames}
                         picked={selectedSidebarDatastore} fail={crDsFail} onRetry={() => fetchClusterDatastores(clusterId)}
                         onOpen={(store, node) => {
-                            if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId));
+                            if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId));
                             setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId });
                             setSelectedSidebarVm(null); setSelectedSidebarNode(null);
                             setActiveTab('datastore');
@@ -16106,13 +16238,13 @@
                             key={`ds-${clusterId}-${store.storage}-${node || 's'}`}
                             tabIndex={0}
                             onClick={() => {
-                                if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId));
+                                if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId));
                                 setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId });
                                 setSelectedSidebarVm(null); setSelectedSidebarNode(null);
                                 setActiveTab('datastore');
                             }}
                             onKeyDown={(e) => {
-                                if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarNode(null); setActiveTab('datastore'); }
+                                if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId)); setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarNode(null); setActiveTab('datastore'); }
                             }}
                             className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
                             style={isStoreSelected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid #49afd9', color: '#e9ecef'} : {color: isActive ? '#adbbc4' : '#728b9a'}}
@@ -16240,7 +16372,7 @@
                                 tabIndex={0}
                                 onClick={() => {
                                     setExpandedSidebarNets(prev => ({ ...prev, [`${clusterId}:${net.name}`]: !prev[`${clusterId}:${net.name}`] }));
-                                    if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId));
+                                    if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId));
                                     setSelectedSidebarNetwork({ name: net.name, clusterId });
                                     setSelectedSidebarVm(null); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null);
                                 }}
@@ -16295,7 +16427,7 @@
                                                             tabIndex={0}
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
-                                                                if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId));
+                                                                if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(allClusters.find(c => c.id === clusterId));
                                                                 setSelectedSidebarVm({...vm, _clusterId: clusterId});
                                                                 setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setSelectedSidebarNetwork(null);
                                                                 setActiveTab('resources');
@@ -16372,7 +16504,9 @@
                     const response = await authFetch(`${API_URL}/global/search?q=${encodeURIComponent(query)}`);
                     if (response && response.ok) {
                         const data = await response.json();
-                        setGlobalSearchResults(data);
+                        const there = remoteSearchMatches(query);
+                        setGlobalSearchResults(there.length ? { ...data, results: (data.results || []).concat(there),
+                            count: (data.count || 0) + there.length } : data);
                         setGlobalSearchIndex(0);
                     } else if (response && response.status === 400) {
                         // LW Oct 2026 - a query the server cannot read: the dropdown says where
@@ -16388,6 +16522,26 @@
                 setGlobalSearchLoading(false);
             };
             
+            // LW Nov 2026 - linked mode: the server searches this site's clusters. The other sites'
+            // guests the overview reads (allClusterGuests) are matched here, by name or VMID; a
+            // query with a field (tag:, ip: ...) is this site's search syntax and stays there
+            const remoteSearchMatches = (query) => {
+                const q = String(query || '').trim().toLowerCase();
+                if (!q || q.includes(':')) return [];
+                const out = [];
+                for (const c of remoteClustersRef.current) {
+                    for (const r of (allClusterGuestsRef.current[c.id] || [])) {
+                        if (r.type !== 'qemu' && r.type !== 'lxc') continue;
+                        if (!String(r.name || '').toLowerCase().includes(q) && String(r.vmid) !== q) continue;
+                        out.push({ type: r.type === 'qemu' ? 'vm' : 'ct', cluster_id: c.id,
+                            cluster_name: `${c.display_name || c.name} (${c.fed.site})`, vmid: r.vmid, name: r.name,
+                            node: r.node, status: r.status, cpu: r.cpu, mem: r.mem, maxmem: r.maxmem, tags: r.tags || '' });
+                        if (out.length >= 25) return out;
+                    }
+                }
+                return out;
+            };
+
             // MK: debounce so we dont spam the API on every keystroke
             // claude helped rewrite the whole search dropdown, chatgpt did the keyboard nav
             const debouncedSearch = (query) => {
@@ -16465,7 +16619,7 @@
             // LW: jump to VM in the right cluster when clicking a search result
             // LW: Mar 2026 - navigate directly to VM detail instead of just selecting cluster
             const navigateToResult = (result) => {
-                const cluster = clusters.find(c => c.id === result.cluster_id);
+                const cluster = allClusters.find(c => c.id === result.cluster_id);
                 if (cluster) {
                     setSelectedCluster(cluster);
                     if (result.type === 'vm' || result.type === 'ct' || result.type === 'qemu' || result.type === 'lxc') {
@@ -16711,6 +16865,9 @@
             const fetchGlobalSnapshots = async (clusterId = null, filterDate = null) => {
                 setSnapshotsLoading(true);
                 setSnapshotsReadErr(null);
+                // LW Nov 2026 (#1347) - the answer for a cluster the user has left meanwhile is not drawn into
+                // the overview of the one now open (opening it reads its own list)
+                const elsewhere = () => clusterId && selectedClusterRef.current?.id !== clusterId;
                 try {
                     const body = {};
                     if (clusterId) body.cluster_id = clusterId;
@@ -16724,14 +16881,17 @@
                     });
                     if (res && res.ok) {
                         const data = await res.json();
+                        if (elsewhere()) return;
                         setGlobalSnapshots(data.snapshots ?? data ?? []);
                     } else {
                         const d = res ? await res.json().catch(() => null) : null;
+                        if (elsewhere()) return;
                         setSnapshotsReadErr({ why: [d && typeof d.error === 'string' ? d.error : '', res ? `HTTP ${res.status}` : ''].filter(Boolean).join(' - ') });
                         setGlobalSnapshots([]);
                     }
                 } catch (err) {
                     console.error('Snapshot fetch failed:', err);
+                    if (elsewhere()) return;
                     setSnapshotsReadErr({ why: err && err.message ? err.message : '' });
                     setGlobalSnapshots([]);
                 }
@@ -16750,14 +16910,34 @@
             // what a refused delete says: the reason per snapshot when the server lists them,
             // else its error (on a standby that is already the translated refusal, #625)
             const snapDeleteError = (data, fallback) => ((data && data.errors) || []).join('; ') || (data && data.error) || fallback;
+            // LW Nov 2026 (#1347) - the deletes the server started in Proxmox and did not see end (the task still
+            // ran when it had to answer, or could not be read): neither deleted nor failed, so a toast of their own.
+            // 'unanswered' ones got no answer from Proxmox at all and may or may not have started
+            const snapStartedNote = (started) => {
+                const running = started.filter(s => s.state === 'running').length;
+                const silent = started.filter(s => s.state === 'unanswered').length;
+                const unread = started.length - running - silent;
+                return [running ? t('snapDelStillRunning').replace('{n}', running) : '',
+                        unread ? t('snapDelResultUnread').replace('{n}', unread) : '',
+                        silent ? t('snapDelNoAnswer').replace('{n}', silent) : ''].filter(Boolean).join(' ');
+            };
+            const withoutSnaps = (sel, list) => { const n = { ...sel }; list.forEach(s => { delete n[snapKey(s)]; }); return n; };
 
             // #696 — bulk-delete the checked snapshots (backend /snapshots/delete already loops an array)
+            // LW Nov 2026 (#1347) - the server waits for each delete in Proxmox now, so the answer can take
+            // a minute. One bulk delete at a time: a second click sent the same snapshots into the locks of
+            // the first. The list is read again whatever came back, also when a proxy stopped waiting while
+            // the server went on; what did not go stays selected and can be sent again.
             const deleteSelectedSnapshots = async (clusterId) => {
+                if (snapsDeleting) return;
                 const chosen = (sortedSnapshots || []).filter(s => selectedSnaps[snapKey(s)]);
                 if (chosen.length === 0) return;
                 if (!window.confirm(`Delete ${chosen.length} selected snapshot(s)?`)) {
                     return;
                 }
+                setSnapsDeleting(true);
+                // LW Nov 2026 (#1347) - the answer can take a minute, long enough to open another cluster
+                const stillHere = () => selectedClusterRef.current?.id === clusterId;
                 try {
                     const res = await authFetch(`${API_URL}/snapshots/delete`, {
                         method: 'POST',
@@ -16765,18 +16945,30 @@
                         body: JSON.stringify({ snapshots: chosen.map(s => ({ ...s, cluster_id: s.cluster_id || clusterId })) })
                     });
                     const data = res ? await res.json().catch(() => ({})) : {};
+                    const started = Array.isArray(data.started) ? data.started : [];
                     if (!res || !res.ok) {
-                        addToast(snapDeleteError(data, 'Failed to delete selected snapshots'), 'error');
-                        return;
+                        addToast(snapDeleteError(data, res ? `Failed to delete selected snapshots (HTTP ${res.status})` : 'Failed to delete selected snapshots'), 'error');
+                    } else {
+                        if (data.deleted || !started.length) addToast(`${data.deleted ?? chosen.length} snapshot(s) deleted`, 'success');
+                        if (started.length) addToast(snapStartedNote(started), 'warning');
+                        if (data.errors && data.errors.length) {
+                            addToast(data.errors.join('; '), 'error');
+                            // the failed ones stay selected, what runs in Proxmox (or may) is not to be sent again
+                            if (started.length) setSelectedSnaps(prev => withoutSnaps(prev, started));
+                        } else if (stillHere()) setSelectedSnaps({});
                     }
-                    addToast(`${data.deleted ?? chosen.length} snapshot(s) deleted`, 'success');
-                    if (data.errors && data.errors.length) addToast(data.errors.join('; '), 'error');
-                    setSelectedSnaps({});
-                    await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
                 } catch (err) {
                     console.error('Bulk snapshot delete failed:', err);
                     addToast('Failed to delete selected snapshots', 'error');
+                } finally {
+                    setSnapsDeleting(false);
                 }
+                // another cluster open now: its overview gets neither this cluster's rows nor their selection
+                if (!stillHere()) {
+                    setSelectedSnaps(prev => withoutSnaps(prev, chosen));
+                    return;
+                }
+                await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
             };
 
             const deleteGlobalSnapshot = async (snap, clusterId) => {
@@ -16794,8 +16986,13 @@
                         addToast(snapDeleteError(data, 'Failed to delete snapshot'), 'error');
                         return;
                     }
-                    addToast('Snapshot deleted', 'success');
-                    await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
+                    // LW Nov 2026 (#1347) - the server waits for the delete in Proxmox; one still running there,
+                    // whose result it could not read, or that Proxmox did not answer, is said as such and not as deleted
+                    const data = await res.json().catch(() => ({}));
+                    const started = Array.isArray(data.started) ? data.started : [];
+                    if (started.length) addToast(snapStartedNote(started), 'warning');
+                    else addToast('Snapshot deleted', 'success');
+                    if (selectedClusterRef.current?.id === clusterId) await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
                 } catch (err) {
                     console.error('Snapshot delete failed:', err);
                     addToast('Failed to delete snapshot', 'error')
@@ -19586,7 +19783,7 @@
             // verify: full by default for a cold migration (offline copy, or a VM
             // that is off) where the mode can do it, the spot check otherwise; a pick wins
             const v2pVerifyFor = (form, plan) => {
-                const fullOk = !['sshfs_boot', 'snapshot_zero'].includes(form.transfer_mode);
+                const fullOk = form.transfer_mode !== 'sshfs_boot';
                 const cold = form.transfer_mode === 'offline' || plan?.source?.power_state === 'POWERED_OFF';
                 return form.verify || (cold && fullOk ? 'full' : 'sample');
             };
@@ -19786,7 +19983,7 @@
                 if (!xhmForm.source_cluster || !xhmForm.source_vmid || !xhmForm.target_cluster) return;
                 setXhmLoading(true);
                 try {
-                    const srcMgr = clusters.find(c => c.id === xhmForm.source_cluster);
+                    const srcMgr = allClusters.find(c => c.id === xhmForm.source_cluster);
                     const srcIsXcp = srcMgr && (srcMgr.type === 'xcpng' || srcMgr.cluster_type === 'xcpng');
                     const srcIsEsxi = srcMgr && (srcMgr.type === 'esxi' || srcMgr.cluster_type === 'esxi');
                     let url = `${API_URL}/xhm/plan?source_cluster=${xhmForm.source_cluster}&source_vmid=${xhmForm.source_vmid}&target_cluster=${xhmForm.target_cluster}`;
@@ -19942,6 +20139,7 @@
                 setKnownNodes({});               // rebuilt by fetchClusterMetrics
                 setNodeAlerts({});               // cluster-specific, must clear
                 setGlobalSnapshots([]);
+                setSelectedSnaps({});           // LW Nov 2026 (#1347) - its keys belong to the list just dropped
                 setClusterPools(cached?.pools || []);
                 setClusterDatastores(cached?.datastores || { shared: [], local: {} });
                 setClusterNetworks(cached?.networks || []);
@@ -20012,6 +20210,52 @@
                 return () => { gone = true; clearInterval(timer); };
             }, [selectedCluster?.id, haStandby, haReadOnly]);
 
+            // LW Nov 2026 - the other sites' clusters, every 30 s; an account of another site gets its
+            // home named instead. Only while the federation runs (#1372): off, the route answers 404
+            // and every look left a failed request in the browser's console. The flag comes with
+            // login and /auth/check, and while it is off that is what is read again every five
+            // minutes. A 404 here means it was switched off since: the flag is read at once
+            const { federationOn } = useAuth();
+            useEffect(() => {
+                if (!sessionId) return;
+                if (!federationOn) {
+                    setRemoteSites(prev => prev.length ? [] : prev); setRemoteHome(null);
+                    const h = setInterval(() => refreshHa?.(), 300000);
+                    return () => clearInterval(h);
+                }
+                let gone = false, timer = null;
+                const poll = async () => {
+                    let wait = 30000;
+                    try {
+                        const r = await authFetch(`${API_URL}/federation/linked`, { quiet: true });
+                        if (r && r.ok) {
+                            const d = await r.json();
+                            if (!gone) { setRemoteSites(Array.isArray(d.sites) ? d.sites : []); setRemoteHome(d.home || null); }
+                        } else {
+                            if (!gone) { setRemoteSites([]); setRemoteHome(null); }
+                            if (r && r.status === 404) {
+                                wait = 300000;
+                                if (!gone) refreshHa?.();
+                            }
+                        }
+                    } catch (e) { /* the next look tries again */ }
+                    if (!gone) timer = setTimeout(poll, wait);
+                };
+                poll();
+                return () => { gone = true; if (timer) clearTimeout(timer); };
+            }, [sessionId, federationOn]);
+            // a selected cluster of another site follows its row (its permissions there may have
+            // changed), and new remote clusters get their overview read at once, not 30 s later
+            const remoteIdsKey = remoteClusters.map(c => c.id).join(',');
+            useEffect(() => {
+                const sel = selectedClusterRef.current;
+                if (sel?.fed) {
+                    const row = remoteClusters.find(c => c.id === sel.id);
+                    if (row && JSON.stringify(row) !== JSON.stringify(sel)) setSelectedCluster(row);
+                }
+            }, [remoteClusters]);
+            useEffect(() => { if (remoteIdsKey) fetchClusters(); }, [remoteIdsKey]);
+
             const fetchClusters = async () => {
                 try {
                     const response = await authFetch(`${API_URL}/clusters`);
@@ -20027,13 +20271,15 @@
                         
                         // fetch status for all clusters (overview)
                         // LW Oct 2026 - an ESXi connection has no datacenter status to poll
-                        const connectedClusters = data.filter(c => c.connected && c.cluster_type !== 'esxi');
+                        // LW Nov 2026 - and the other sites' clusters, each read through its site
+                        const connectedClusters = data.filter(c => c.connected && c.cluster_type !== 'esxi')
+                            .concat(remoteClustersRef.current.filter(c => c.connected && c.cluster_type !== 'esxi'));
                         const allGuests = [];
                         
                         // NS #594 — this used to be a serial await-loop: one slow cluster
                         // stalled every cluster behind it and made the whole overview lag.
                         // Run the clusters concurrently (each still does its two reads in order).
-                        await Promise.allSettled(connectedClusters.map(async (cluster) => {
+                        const readOne = async (cluster) => {
                             // NS May 2026 — skip clusters that recently 503'd/timed out until cooldown
                             const failState = clusterFailureRef.current[cluster.id];
                             if (failState && failState.skip_until > Date.now()) {
@@ -20087,7 +20333,22 @@
                             } catch (e) {
                                 console.log(`Failed to fetch data for cluster ${cluster.id}:`, e);
                             }
-                        }));
+                        };
+                        // LW Nov 2026 - the other sites' clusters four at a time: each of their reads
+                        // goes through that site, whose slots this instance shares with every user
+                        const remoteTurns = { busy: 0, queue: [] };
+                        const remoteTurn = (fn) => new Promise(done => {
+                            const next = () => {
+                                if (remoteTurns.busy >= 4 || !remoteTurns.queue.length) return;
+                                remoteTurns.busy++;
+                                const [run, finish] = remoteTurns.queue.shift();
+                                run().finally(() => { remoteTurns.busy--; finish(); next(); });
+                            };
+                            remoteTurns.queue.push([fn, done]);
+                            next();
+                        });
+                        await Promise.allSettled(connectedClusters.map(cluster =>
+                            cluster.fed ? remoteTurn(() => readOne(cluster)) : readOne(cluster)));
                         
                         // sort by combined cpu+ram usage
                         const runningGuests = allGuests.filter(g => g.status === 'running');
@@ -21077,9 +21338,13 @@
             };
 
             const handleCrossClusterMigrate = async (migrationConfig) => {
+                // LW Nov 2026 - a migration to or from another site's cluster goes through the
+                // federation, which has the target's site make its token
+                const crossSite = [migrationConfig.source_cluster, migrationConfig.target_cluster]
+                    .some(id => String(id || '').includes('~'));
                 try {
                     const response = await authFetch(
-                        `${API_URL}/cross-cluster-migrate`,
+                        `${API_URL}/${crossSite ? 'federation/migrate' : 'cross-cluster-migrate'}`,
                         {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
@@ -21191,7 +21456,7 @@
                 if (!cId) return;
                 if (haConsolesElsewhere) { haRefusedRef.current?.(false, 'console'); return; }  // a forwarding standby too, unless it serves users (#625)
                 // NS: Feb 2026 - Use correct cluster's host for cross-cluster console
-                const cluster = clusters.find(c => c.id === cId) || selectedCluster;
+                const cluster = allClusters.find(c => c.id === cId) || selectedCluster;
                 const info = {
                     vmid: resource.vmid,
                     node: resource.node,
@@ -21260,6 +21525,28 @@
             // LW: Mar 2026 - build menu items for sidebar right-click
             // NS: kept this in dashboard so it has direct access to all the handlers
             const buildContextMenuItemsRaw = (type, target) => {
+                if (type === 'cluster' && target?.fed) {
+                    // LW Nov 2026 - linked mode: another site's cluster is renamed, grouped, checked,
+                    // re-configured and removed at its site; here it gets guests, a refresh and the way there
+                    const cluster = target;
+                    const createOn = (kind) => {
+                        if (selectedCluster?.id === cluster.id) { setShowCreateVm(kind); return; }
+                        setClusterMetrics({}); setClusterResources([]); setClusterDatastores({shared:[], local:{}});
+                        setSelectedCluster(cluster);
+                        setPendingCreateVm({ type: kind, clusterId: cluster.id });
+                    };
+                    const there = fedSiteHref(cluster.fed.url, cluster.id);
+                    return [
+                        { perm: 'vm.create', label: t('newVm') || 'New VM', icon: <Icons.Monitor className="w-3.5 h-3.5" />, onClick: () => createOn('qemu') },
+                        { perm: 'vm.create', label: t('newContainer') || 'New Container', icon: <Icons.Box className="w-3.5 h-3.5" />, onClick: () => createOn('lxc') },
+                        { separator: true },
+                        { label: t('refreshData') || 'Refresh', icon: <Icons.RefreshCw className="w-3.5 h-3.5" />, onClick: () => { fetchSidebarClusterData(cluster.id); if (selectedCluster?.id === cluster.id) { fetchClusterMetrics(cluster.id); fetchClusterResources(cluster.id); } } },
+                        ...(there ? [
+                            { separator: true },
+                            { perm: 'cluster.view', label: t('linkedOpenAtSite').replace('{site}', cluster.fed.site), icon: <Icons.ExternalLink className="w-3.5 h-3.5" />, onClick: () => window.open(there, '_blank', 'noopener,noreferrer'), here: true },
+                        ] : []),
+                    ];
+                }
                 if (type === 'cluster') {
                     const cluster = target;
                     return [
@@ -21299,11 +21586,11 @@
 
                 if (type === 'node') {
                     const { nodeName, clusterId, online, maintenance } = target;
-                    const selectCluster = () => { const c = clusters.find(cl => cl.id === clusterId); if (c && (!selectedCluster || selectedCluster.id !== clusterId)) setSelectedCluster(c); };
+                    const selectCluster = () => { const c = allClusters.find(cl => cl.id === clusterId); if (c && (!selectedCluster || selectedCluster.id !== clusterId)) setSelectedCluster(c); };
                     // NS May 2026 — open Create modal in node context; defer if cluster changes
                     const openCreateOnCluster = (vmType) => {
                         if (selectedCluster?.id === clusterId) { setShowCreateVm(vmType); return; }
-                        const c = clusters.find(cl => cl.id === clusterId);
+                        const c = allClusters.find(cl => cl.id === clusterId);
                         if (!c) return;
                         setClusterMetrics({}); setClusterResources([]); setClusterDatastores({shared:[], local:{}});
                         setSelectedCluster(c);
@@ -21319,7 +21606,7 @@
                             handleMaintenanceToggle(nodeName, !maintenance, undefined, clusterId);
                         }, disabled: !online },
                         ...(haConsolesElsewhere ? onActiveItems('node.shell', '', !online) : [
-                        { perm: 'node.shell', label: t('sshConsole') || 'SSH Console', icon: <Icons.Terminal className="w-3.5 h-3.5" />, onClick: () => { selectCluster(); const c = clusters.find(cl => cl.id === clusterId); if (c) { setConsoleInfo({ vmid: 0, node: nodeName, type: 'node', host: c.host }); setConsoleVm({ vmid: 0, node: nodeName, type: 'node', name: nodeName }); } }, disabled: !online, console: true },
+                        { perm: 'node.shell', label: t('sshConsole') || 'SSH Console', icon: <Icons.Terminal className="w-3.5 h-3.5" />, onClick: () => { selectCluster(); const c = allClusters.find(cl => cl.id === clusterId); if (c) { setConsoleInfo({ vmid: 0, node: nodeName, type: 'node', host: c.host }); setConsoleVm({ vmid: 0, node: nodeName, type: 'node', name: nodeName }); } }, disabled: !online, console: true },
                         ]),
                         { label: t('nodeGuestsMenu'), icon: <Icons.Layers />, submenu: [
                             { perm: 'vm.start', label: t('nodeGuestsStartAll'), icon: <Icons.PlayCircle />, onClick: () => setNodeGuests({ action: 'startall', clusterId, node: nodeName }), disabled: !online },
@@ -21365,7 +21652,7 @@
                     const isQemu = vm.type === 'qemu';
                     const cId = vm._clusterId;
                     const selectAndNav = () => {
-                        const c = clusters.find(cl => cl.id === cId);
+                        const c = allClusters.find(cl => cl.id === cId);
                         if (c && (!selectedCluster || selectedCluster.id !== cId)) setSelectedCluster(c);
                         setSelectedSidebarVm(vm);
                         setSelectedSidebarNode(null);
@@ -21430,7 +21717,7 @@
                     );
 
                     // cross-cluster only if multiple clusters
-                    if (clusters.length > 1) {
+                    if (allClusters.length > 1) {
                         items.push({ perm: 'vm.migrate', label: t('crossClusterMigrate') || 'Cross-Cluster', icon: <Icons.Globe className="w-3.5 h-3.5" />, onClick: () => {
                             if (isCorporate) { setDashCrossClusterVm(vm); }
                             else { selectAndNav(); setPendingVmAction({ vm, action: 'crossCluster' }); }
@@ -21521,11 +21808,19 @@
             // leader away too, while can() keeps only the reading permissions then.
             const menuAllows = (i) => !i.perm || (i.console ? holds(i.perm) : can(i.perm));
             const buildContextMenuItems = (type, target) => {
-                const kept = buildContextMenuItemsRaw(type, target).filter(menuAllows);
+                // LW Nov 2026 - linked mode: for another site's cluster, node, pool or guest an entry
+                // also asks what that site lets the account do there
+                const site = type === 'cluster' ? target?.fed
+                    : allClusters.find(c => c.id === (target?.clusterId || target?._clusterId))?.fed;
+                // there it is that site's to allow, not this one's (the account may hold nothing
+                // here); an entry that only leads to the site (here) is this site's
+                const siteAllows = (i) => i.here ? menuAllows(i) : (!i.perm || siteCan(i.perm, { fed: site }));
+                const raw = buildContextMenuItemsRaw(type, target);
+                const kept = site ? raw.filter(siteAllows) : raw.filter(menuAllows);
                 const out = [];
                 for (const item of kept) {
                     if (item.submenu) {
-                        const sub = item.submenu.filter(menuAllows);
+                        const sub = site ? item.submenu.filter(siteAllows) : item.submenu.filter(menuAllows);
                         if (!sub.length) continue;          // no children left, drop the parent
                         out.push({ ...item, submenu: sub });
                         continue;
@@ -21610,7 +21905,7 @@
                 return (
                     <div style={{ height: '100vh', overflow: 'hidden' }}>
                         <CloudShell
-                            clusters={clusters}
+                            clusters={allClusters}
                             selectedCluster={selectedCluster}
                             setSelectedCluster={setSelectedCluster}
                             clusterResources={clusterResources}
@@ -21642,7 +21937,7 @@
                             they surface over the cloud shell. The classic copies live in the main
                             return; the skins are mutually exclusive so only one set ever mounts. */}
                         {configVm && (configVm._clusterId || selectedCluster) && (
-                            <ConfigModal vm={configVm} clusterId={configVm._clusterId || selectedCluster.id} allClusters={clusters} dashboardAuthFetch={authFetch} onClose={handleCloseConfig} addToast={addToast} isCorporate={false} />
+                            <ConfigModal vm={configVm} clusterId={configVm._clusterId || selectedCluster.id} allClusters={allClusters} dashboardAuthFetch={authFetch} onClose={handleCloseConfig} addToast={addToast} isCorporate={false} />
                         )}
                         {cloudBulk && (
                             <GuestBulkActionModal action={cloudBulk.action} guests={cloudBulk.guests} authFetch={authFetch}
@@ -21665,8 +21960,8 @@
                         {dashDeleteVm && (
                             <DeleteVmModal vm={dashDeleteVm} clusterId={dashDeleteVm._clusterId || selectedCluster?.id} onDelete={handleDeleteVm} onClose={() => setDashDeleteVm(null)} />
                         )}
-                        {dashCrossClusterVm && clusters.length > 1 && (
-                            <CrossClusterMigrateModal vm={dashCrossClusterVm} sourceCluster={selectedCluster} clusters={clusters} onMigrate={handleCrossClusterMigrate} onClose={() => setDashCrossClusterVm(null)} />
+                        {dashCrossClusterVm && allClusters.length > 1 && (
+                            <CrossClusterMigrateModal vm={dashCrossClusterVm} sourceCluster={selectedCluster} clusters={allClusters} onMigrate={handleCrossClusterMigrate} onClose={() => setDashCrossClusterVm(null)} />
                         )}
                         {dashSnapshotVm && (
                             <CreateSnapshotModal isQemu={dashSnapshotVm.type === 'qemu'} loading={dashSnapshotLoading} onSubmit={handleDashSnapshotSubmit} onClose={() => setDashSnapshotVm(null)} />
@@ -22130,7 +22425,7 @@
             // the task center of the redesign: where a row leads (out of every global view into its
             // cluster) and the inventory it checks first. Lists are what the server let this user see
             const crIntoCluster = (cid) => {
-                const cl = clusters.find(c => c.id === cid);
+                const cl = allClusters.find(c => c.id === cid);
                 if (!cl) return null;
                 crLeaveServers();
                 setSidebarTopology(false); setSidebarWorldmap(false); setSidebarXHM(false);
@@ -22194,7 +22489,7 @@
                 // from the top of the page, where the tab bar and the section start
                 openBlueprints: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('templates'); window.scrollTo(0, 0); } },
                 openGuest: (cid, guest) => {
-                    const cl = clusters.find(c => c.id === cid);
+                    const cl = allClusters.find(c => c.id === cid);
                     if (!cl || !guest) return;
                     askGuestDetail(cl, guest);
                     crIntoCluster(cid);
@@ -22278,6 +22573,10 @@
                     { id: 'settings', labelKey: 'settings', icon: Icons.Settings },
                 ];
             })().filter(tab => {
+                // LW Nov 2026 - linked mode: site recovery, plugins and the cluster's settings are
+                // this site's own; for another site's cluster they live at that site
+                if (selectedCluster?.fed && (['site-recovery', 'plugins', 'settings'].includes(tab.id)
+                    || (typeof tab.id === 'string' && tab.id.startsWith('plugin:')))) return false;
                 // #390 - admin role always passes (matches backend has_permission shortcut).
                 if (tab.id === 'site-recovery') return can('site_recovery.view');
                 if (tab.id === 'plugins') return can('plugins.view');
@@ -22542,7 +22841,7 @@
                                 {isCorpRedesigned && crSidebarFolded && (
                                     <CrSidebarRail active={sidebarViewMode} onView={setSidebarViewMode} onExpand={() => crFoldSidebar(false)}
                                         // LW Nov 2026 - the Tools section of the unfolded sidebar, same conditions
-                                        tools={clusters.length > 0 ? [
+                                        tools={allClusters.length > 0 ? [
                                             { id: 'guests', show: true, active: sidebarGuests, label: t('allGuestsTitle'), onClick: openGuests, icon: Icons.Monitor },
                                             { id: 'topology', show: true, active: sidebarTopology, label: t('topologyView') || 'Topology', onClick: openTopology, icon: Icons.Network },
                                             { id: 'worldmap', show: true, active: sidebarWorldmap, label: t('worldMap') || 'World Map', onClick: openWorldmap, icon: Icons.Globe },
@@ -22667,7 +22966,7 @@
                                         </div>
                                     </div>
                                     
-                                    {clusters.length === 0 ? (
+                                    {allClusters.length === 0 ? (
                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center">
                                             <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-proxmox-dark flex items-center justify-center">
                                                 <Icons.Server />
@@ -22726,7 +23025,7 @@
                                                     {isCorporate ? (t('allClusters') || 'All Clusters') : (
                                                         <div>
                                                             <div className="text-sm font-medium">{t('allClusters') || 'All Clusters'}</div>
-                                                            <div className="text-xs text-gray-500">{clusters.length} {t('clusters').toLowerCase()}</div>
+                                                            <div className="text-xs text-gray-500">{allClusters.length} {t('clusters').toLowerCase()}</div>
                                                         </div>
                                                     )}
                                                 </span>
@@ -22962,11 +23261,49 @@
                                         </div>
                                     )}
 
+                                    {/* LW Nov 2026 - linked mode: one section per other site of the federation, its
+                                        clusters below its name. Not in classic Corporate, which stays as it is */}
+                                    {(!isCorporate || isCorpRedesigned) && remoteHome && (
+                                        <div className="text-xs text-gray-500 px-2 py-2" data-fed-home>
+                                            {String(t('linkedHome')).replace('{site}', remoteHome.site)}{' '}
+                                            <a href={remoteHome.url} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline break-all">{remoteHome.url}</a>
+                                        </div>
+                                    )}
+                                    {(!isCorporate || isCorpRedesigned) && remoteSites.map(site => (
+                                        <div key={site.iid} data-fed-site={site.iid} className={isCorporate ? 'space-y-0 pt-3' : 'space-y-1.5 pt-3'}>
+                                            <div className={`flex items-center gap-2 px-2 ${isCorporate ? 'py-0.5' : 'py-1.5'} text-gray-500`} title={site.url}>
+                                                <span className="flex" style={{zoom: 0.7}}><Icons.Globe /></span>
+                                                <span className="text-xs uppercase tracking-wider truncate flex-1">{site.site}</span>
+                                                {site.state === 'ok' && <span className="text-[10px]">{(site.clusters || []).length}</span>}
+                                                {fedSiteHref(site.url) && (
+                                                    <a href={fedSiteHref(site.url)} target="_blank" rel="noopener noreferrer" className="p-0.5 rounded hover:text-blue-400"
+                                                        title={String(t('linkedOpenAtSite')).replace('{site}', site.site)} aria-label={String(t('linkedOpenAtSite')).replace('{site}', site.site)}>
+                                                        <Icons.ExternalLink className="w-3 h-3" />
+                                                    </a>
+                                                )}
+                                            </div>
+                                            {site.state !== 'ok' && (
+                                                <div className="text-[11px] text-gray-500 px-2 pb-1" data-fed-site-state={site.state}>{fedSiteStateText(site, t)}</div>
+                                            )}
+                                            {remoteClusters.filter(c => c.fed.iid === site.iid).map(cluster => (
+                                                <React.Fragment key={cluster.id}>
+                                                    <RemoteClusterItem cluster={cluster} t={t} isCorporate={isCorporate}
+                                                        selected={selectedCluster?.id === cluster.id}
+                                                        expanded={!!expandedSidebarClusters[cluster.id]}
+                                                        onSelect={() => setSelectedCluster(cluster)}
+                                                        onToggle={() => toggleSidebarCluster(cluster.id)}
+                                                        onContextMenu={(position) => setCtxMenu({ type: 'cluster', target: cluster, position })} />
+                                                    {sidebarViewMode === 'datastores' ? renderDatastoreTree(cluster.id) : sidebarViewMode === 'pools' ? renderPoolTree(cluster.id) : sidebarViewMode === 'networks' ? renderNetworkTree(cluster.id) : renderInlineNodeTree(cluster.id)}
+                                                </React.Fragment>
+                                            ))}
+                                        </div>
+                                    ))}
+
                                     {/* LW Oct 2026 - corporate: the global views get a section of their own instead of
                                         hanging off All Clusters, under the clusters and above Backup Servers like the
                                         other sections. Same conditions as in Modern, so nothing here before the first
                                         cluster; the empty card has the auto-install link. */}
-                                    {isCorporate && clusters.length > 0 && (() => {
+                                    {isCorporate && allClusters.length > 0 && (() => {
                                         const tools = [
                                             { id: 'guests', show: true, active: sidebarGuests, label: t('allGuestsTitle'), onClick: openGuests,
                                               icon: <Icons.Monitor /> },
@@ -23249,12 +23586,12 @@
                                             <button key={item.id || i} className="corp-recent-item" onClick={() => {
                                                 if (item.type === 'node') {
                                                     const parts = item.id.split('-'); const cId = parts.slice(1, -1).join('-');
-                                                    const cl = clusters.find(c => c.id === cId);
+                                                    const cl = allClusters.find(c => c.id === cId);
                                                     if (cl) { setSelectedCluster(cl); setSelectedSidebarNode({ name: item.name, clusterId: cId }); setSelectedSidebarVm(null); setActiveTab('overview'); }
                                                 } else if (item.vmid) {
                                                     // find cluster from id
                                                     const cId = item.id.replace(`-${item.vmid}`, '');
-                                                    const cl = clusters.find(c => c.id === cId);
+                                                    const cl = allClusters.find(c => c.id === cId);
                                                     if (cl) { setSelectedCluster(cl); setActiveTab('resources'); setResourcesSubTab('management'); }
                                                 }
                                             }}>
@@ -23328,7 +23665,21 @@
                             <div className={`flex-1 min-w-0 ${isCorporate ? 'px-3 py-2' : ''}${isCorpRedesigned ? ' cr-main' : ''}`}
                                 id={isCorpRedesigned ? 'cr-main' : undefined} tabIndex={isCorpRedesigned ? -1 : undefined}>
                                 {selectedCluster ? (
+                                    <SiteAuthProvider fed={selectedCluster.fed}>
                                     <div key={selectedCluster?.id} className={isCorporate ? 'space-y-3 corp-content-fade' : 'space-y-6'}>
+                                        {selectedCluster.fed && (
+                                            <div className="flex items-center gap-2 flex-wrap text-xs text-gray-400" data-fed-view={selectedCluster.fed.iid}>
+                                                <span className="flex" style={{zoom: 0.7}}><Icons.Globe /></span>
+                                                <span>{String(t('linkedClusterOfSite')).replace('{site}', selectedCluster.fed.site)}</span>
+                                                {fedSiteHref(selectedCluster.fed.url, selectedCluster.id) && (
+                                                    <a href={fedSiteHref(selectedCluster.fed.url, selectedCluster.id)} target="_blank" rel="noopener noreferrer"
+                                                        className="inline-flex items-center gap-1 text-blue-400 hover:underline">
+                                                        {String(t('linkedOpenAtSite')).replace('{site}', selectedCluster.fed.site)}
+                                                        <Icons.ExternalLink className="w-3 h-3" />
+                                                    </a>
+                                                )}
+                                            </div>
+                                        )}
                                         {/* LW: Feb 2026 - tabs, underline in corporate vs pills in modern */}
                                         {isCorpRedesigned ? (
                                             <CrTabs id="cluster" active={activeTab} onChange={setActiveTab} label={clusterLabel(selectedCluster)}
@@ -23366,8 +23717,8 @@
                                             <CorporateNodeDetailView
                                                 node={selectedSidebarNode.name}
                                                 clusterId={selectedSidebarNode.clusterId}
-                                                clusterHost={selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster?.host : (clusters.find(c => c.id === selectedSidebarNode.clusterId)?.host || '')}
-                                                clusterName={clusterLabel(selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster : clusters.find(c => c.id === selectedSidebarNode.clusterId))}
+                                                clusterHost={selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster?.host : (allClusters.find(c => c.id === selectedSidebarNode.clusterId)?.host || '')}
+                                                clusterName={clusterLabel(selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster : allClusters.find(c => c.id === selectedSidebarNode.clusterId))}
                                                 clusterMetrics={selectedSidebarNode.clusterId === selectedCluster?.id ? clusterMetrics : (sidebarClusterData[selectedSidebarNode.clusterId]?.metrics || {})}
                                                 clusterResources={selectedSidebarNode.clusterId === selectedCluster?.id ? clusterResources : (sidebarClusterData[selectedSidebarNode.clusterId]?.resources || [])}
                                                 onBack={() => setSelectedSidebarNode(null)}
@@ -23377,14 +23728,14 @@
                                                 onStartUpdate={handleStartUpdate}
                                                 onSelectVm={(vm) => { setSelectedSidebarVm({...vm, _clusterId: selectedSidebarNode.clusterId}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                                 addToast={addToast}
-                                                crKind={isCorpRedesigned ? ((clusters.find(c => c.id === selectedSidebarNode.clusterId) || {}).cluster_type || 'proxmox') : undefined}
+                                                crKind={isCorpRedesigned ? ((allClusters.find(c => c.id === selectedSidebarNode.clusterId) || {}).cluster_type || 'proxmox') : undefined}
                                             />
                                             ) : isCorporate && selectedSidebarQdevice ? (
                                             <QdeviceDetail
                                                 corporate
                                                 q={qdeviceByCluster[selectedSidebarQdevice]}
                                                 clusterId={selectedSidebarQdevice}
-                                                clusterName={(clusters.find(c => c.id === selectedSidebarQdevice) || {}).display_name || (clusters.find(c => c.id === selectedSidebarQdevice) || {}).name || ''}
+                                                clusterName={(allClusters.find(c => c.id === selectedSidebarQdevice) || {}).display_name || (allClusters.find(c => c.id === selectedSidebarQdevice) || {}).name || ''}
                                                 onClose={() => setSelectedSidebarQdevice(null)}
                                                 onChanged={() => fetchQdevice(selectedSidebarQdevice)}
                                             />
@@ -23644,7 +23995,7 @@
                                                                     onMoveNode={(nodeName) => { setNodeToMoveDash(nodeName); setShowMoveNodeDash(true); }}
                                                                     isFavorite={isFavorite('node', selectedCluster.id, null, node)}
                                                                     onToggleFavorite={(nodeName) => toggleNodeFavorite(selectedCluster.id, nodeName)}
-                                                                    guestActions={[['startall', 'vm.start'], ['stopall', 'vm.stop'], ['migrateall', 'vm.migrate']].filter(([, perm]) => can(perm)).map(([a]) => a)}
+                                                                    guestActions={[['startall', 'vm.start'], ['stopall', 'vm.stop'], ['migrateall', 'vm.migrate']].filter(([, perm]) => siteCan(perm)).map(([a]) => a)}
                                                                     onGuestsAction={(nodeName, action) => setNodeGuests({ action, clusterId: selectedCluster.id, node: nodeName })}
                                                                 />
                                                             ))}
@@ -23769,7 +24120,7 @@
                                                             <QdeviceDetail
                                                                 q={qdeviceByCluster[qdeviceOpen]}
                                                                 clusterId={qdeviceOpen}
-                                                                clusterName={(clusters.find(c => c.id === qdeviceOpen) || {}).display_name || (clusters.find(c => c.id === qdeviceOpen) || {}).name || ''}
+                                                                clusterName={(allClusters.find(c => c.id === qdeviceOpen) || {}).display_name || (allClusters.find(c => c.id === qdeviceOpen) || {}).name || ''}
                                                                 onClose={() => setQdeviceOpen(null)}
                                                                 onChanged={() => fetchQdevice(qdeviceOpen)}
                                                             />
@@ -23908,8 +24259,8 @@
                                                     <CorporateVmDetailView
                                                         vm={selectedSidebarVm}
                                                         clusterId={selectedSidebarVm._clusterId || selectedCluster.id}
-                                                        clusterType={(clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster).cluster_type || 'proxmox'}
-                                                        clusterName={clusterLabel(clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster)}
+                                                        clusterType={(allClusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster).cluster_type || 'proxmox'}
+                                                        clusterName={clusterLabel(allClusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster)}
                                                         onAction={handleVmAction}
                                                         onOpenConsole={handleOpenConsole}
                                                         onOpenSpice={handleOpenSpice}
@@ -23921,14 +24272,14 @@
                                                         onForceStop={handleForceStop}
                                                         onDelete={(vm) => setDashDeleteVm(vm)}
                                                         onCrossClusterMigrate={(vm) => setDashCrossClusterVm(vm)}
-                                                        showCrossCluster={clusters.length > 1}
+                                                        showCrossCluster={allClusters.length > 1}
                                                         actionLoading={actionLoading}
                                                         onShowMetrics={(vm) => setCorpMetricsVm(vm)}
                                                         addToast={addToast}
                                                         authFetch={authFetch}
                                                         backupStatus={isCorpRedesigned ? vmsBackupStatus : undefined}
                                                         backupFor={isCorpRedesigned ? vmsBackupFor : undefined}
-                                                        crKind={isCorpRedesigned ? ((clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || {}).cluster_type || 'proxmox') : undefined}
+                                                        crKind={isCorpRedesigned ? ((allClusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || {}).cluster_type || 'proxmox') : undefined}
                                                         crNav={crTaskNav}
                                                         crOpen={isCorpRedesigned ? (what, cid) => {
                                                             // LW Oct 2026 - the module behind a line of the guest's health
@@ -24000,6 +24351,7 @@
                                                             resources={clusterResources} 
                                                             clusterId={selectedCluster.id}
                                                             clusters={clusters}
+                                                            migrateTargets={allClusters}
                                                             sourceCluster={selectedCluster}
                                                             onVmAction={handleVmAction}
                                                             onOpenConsole={handleOpenConsole}
@@ -24068,7 +24420,7 @@
                                                                 {t('createContainer')}
                                                             </button>
                                                             {/* LW Nov 2026 (#1220) - Corporate Redesigned: a guest from a blueprint, picked on Automation > Blueprints & Images */}
-                                                            {isCorpRedesigned && can('vm.create') && (
+                                                            {isCorpRedesigned && siteCan('vm.create') && (
                                                                 <button type="button" onClick={() => crTaskNav.openBlueprints(selectedCluster.id)}
                                                                     className="corp-vm-btn corp-vm-btn-ghost" data-cr-bp-nav="resources">
                                                                     <Icons.Template className="w-3 h-3" />
@@ -24076,7 +24428,7 @@
                                                                 </button>
                                                             )}
                                                             {/* LW Nov 2026 (#1220) - Modern: the same way to Automation > Blueprints & Templates */}
-                                                            {!isCorporate && can('vm.create') && (!selectedCluster.cluster_type || selectedCluster.cluster_type === 'proxmox') && (
+                                                            {!isCorporate && siteCan('vm.create') && (!selectedCluster.cluster_type || selectedCluster.cluster_type === 'proxmox') && (
                                                                 <button type="button" onClick={() => mdBpNav.openBlueprints(selectedCluster.id)} data-bp-nav="resources"
                                                                     className="flex items-center gap-2 px-4 py-2 bg-proxmox-darker rounded-lg bp-fg hover:bg-proxmox-hover border border-proxmox-border transition-colors whitespace-nowrap">
                                                                     <Icons.Template className="w-4 h-4" />
@@ -24109,7 +24461,7 @@
                                                             onFilter={() => applySnapshotFilter(selectedCluster.id)} onRefresh={() => fetchGlobalSnapshots(selectedCluster.id)}
                                                             canDelete={canDeleteSnaps} selected={selectedSnaps} onSelect={setSelectedSnaps} keyOf={snapKey}
                                                             onDelete={(snap) => deleteGlobalSnapshot(snap, selectedCluster.id)}
-                                                            onDeleteSelected={() => deleteSelectedSnapshots(selectedCluster.id)} nav={crTaskNav} />
+                                                            onDeleteSelected={() => deleteSelectedSnapshots(selectedCluster.id)} deleting={snapsDeleting} nav={crTaskNav} />
                                                     </CrBoundary>
                                                 )}
                                                 {resourcesSubTab === 'snapshots' && !isCorpRedesigned && (
@@ -24192,8 +24544,9 @@
                                                                     <span className="text-sm text-gray-200">{selCount} {t('selected') || 'selected'}</span>
                                                                     <button
                                                                         onClick={() => deleteSelectedSnapshots(selectedCluster.id)}
-                                                                        className="inline-flex items-center gap-1 rounded-lg bg-red-600 hover:bg-red-500 px-3 py-1.5 text-sm font-medium text-white">
-                                                                        <Icons.Trash className="w-4 h-4" /> {t('deleteSelected') || 'Delete selected'}
+                                                                        disabled={snapsDeleting} aria-busy={snapsDeleting ? 'true' : undefined}
+                                                                        className="inline-flex items-center gap-1 rounded-lg bg-red-600 hover:bg-red-500 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-60 disabled:cursor-wait">
+                                                                        <Icons.Trash className="w-4 h-4" /> {snapsDeleting ? t('crAffDeleting') : (t('deleteSelected') || 'Delete selected')}
                                                                     </button>
                                                                     <button onClick={() => setSelectedSnaps({})} className="text-sm text-gray-400 hover:text-white">
                                                                         {t('clear') || 'Clear'}
@@ -25168,7 +25521,7 @@
                                                         addToast={addToast}
                                                         t={t}
                                                         isAdmin={isAdmin}
-                                                        canSnapshot={can('vm.snapshot')}
+                                                        canSnapshot={siteCan('vm.snapshot')}
                                                     />
                                                 )}
 
@@ -25187,13 +25540,13 @@
                                                 {automationSubTab === 'templates' && isCorpRedesigned && selectedCluster?.id && (
                                                     <CrBoundary key={selectedCluster.id} id="blueprints">
                                                         <CrBlueprintsTab cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
-                                                            canRead={holds('vm.create')} canWrite={can('vm.create')} isAdmin={isAdmin} nav={crTaskNav} />
+                                                            canRead={holds('vm.create')} canWrite={siteCan('vm.create')} isAdmin={isAdmin} nav={crTaskNav} />
                                                     </CrBoundary>
                                                 )}
                                                 {/* LW Nov 2026 (#1220) - Modern: the blueprints above the library cards (blueprints.js) */}
                                                 {automationSubTab === 'templates' && !isCorporate && selectedCluster?.id && (
                                                     <Blueprints key={selectedCluster.id} cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
-                                                        canRead={holds('vm.create')} canWrite={can('vm.create')} nav={mdBpNav} />
+                                                        canRead={holds('vm.create')} canWrite={siteCan('vm.create')} nav={mdBpNav} />
                                                 )}
                                                 {/* NS May 2026 — Cloud-Init Template Library sub-tab */}
                                                 {automationSubTab === 'templates' && !isCorpRedesigned && (
@@ -27430,6 +27783,7 @@
                                             </div>
                                         )}
                                     </div>
+                                    </SiteAuthProvider>
                                 ) : selectedPBS ? (
                                     /* LW: Feb 2026 - PBS view */
                                     <div className={isCorporate ? 'space-y-4' : 'space-y-6'}>
@@ -27751,7 +28105,7 @@
                                                         <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">{t('pbsLinkedPveClusters') || 'Linked PVE Clusters'}</h2>
                                                         <div className="flex gap-2 flex-wrap">
                                                             {selectedPBS.linked_clusters.map(cid => {
-                                                                const cl = clusters.find(c => c.id === cid);
+                                                                const cl = allClusters.find(c => c.id === cid);
                                                                 return cl ? (
                                                                     <button key={cid} onClick={() => { setSelectedCluster(cl); setSelectedPBS(null); }} className="px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-sm text-gray-300 hover:text-white hover:border-proxmox-orange/30 transition-all flex items-center gap-2">
                                                                         <Icons.Server className="w-4 h-4 text-proxmox-orange" />{cl.display_name || cl.name}
@@ -28577,7 +28931,7 @@
                                                                 title: `PBS Report — ${pbsReportSubTab}`,
                                                                 subtitle: selectedPBS?.name,
                                                                 clusterName: pbsReportSubTab === 'gap' && pbsReportGapCluster
-                                                                    ? (clusters.find(c => c.id === pbsReportGapCluster)?.name || '')
+                                                                    ? (allClusters.find(c => c.id === pbsReportGapCluster)?.name || '')
                                                                     : '',
                                                                 filename: `pegaprox-pbs-${selectedPBS?.name}-${pbsReportSubTab}-${new Date().toISOString().slice(0,10)}.pdf`,
                                                                 content: blocks,
@@ -30049,22 +30403,22 @@
                                                                 )}
 
                                                                 {/* Transfer Mode — NS Apr 2026: added 'sshfs_boot' as recommended default
-                                                                    (live drive-mirror, ~30s downtime), 'snapshot_zero' for ESXi setups that
-                                                                    allow concurrent base-VMDK reads during snapshot. */}
+                                                                    (live drive-mirror, ~30s downtime). LW Nov 2026: 'snapshot_zero' is the
+                                                                    live clone plus change tracking rounds now. */}
                                                                 <div>
                                                                     <label className="text-xs text-gray-500 mb-1 block">{t('transferMode') || 'Transfer Mode'}</label>
                                                                     <select value={vmwareMigrateForm.transfer_mode} onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, transfer_mode: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
                                                                         <option value="vmkfstools_clone">{t('transferModeVmkClone') || 'Live Clone (recommended)'}</option>
                                                                         <option value="auto">{t('transferModeAuto') || 'Auto (Pre-Sync + Delta)'}</option>
                                                                         <option value="sshfs_boot">{t('transferModeSshfsBoot') || 'Live Mirror — Near-Zero Downtime'}</option>
-                                                                        <option value="snapshot_zero">{t('transferModeSnapshotZero') || 'Snapshot-Iterative — Zero Downtime (experimental)'}</option>
+                                                                        <option value="snapshot_zero">{t('transferModeSnapshotZero') || 'Snapshot-Iterative - short downtime (change tracking)'}</option>
                                                                         <option value="offline">{t('transferModeOffline') || 'Offline Copy (Full Downtime)'}</option>
                                                                     </select>
                                                                     <p className="text-xs text-gray-300 mt-1 leading-relaxed">
                                                                         {vmwareMigrateForm.transfer_mode === 'auto' && (t('transferModeAutoDesc') || 'Uses Live Clone. If the VM cannot be snapshotted or cloned, it copies the disks while the VM runs and carries over the changed blocks at the switchover (pre-sync + delta), and switches to Live Mirror if a disk is locked.')}
                                                                         {vmwareMigrateForm.transfer_mode === 'sshfs_boot' && (t('transferModeSshfsBootDesc') || 'QEMU drive-mirror live-pivots disks from SSHFS-mounted source to local LVM. ~30s real downtime. Multi-disk capable. Recommended for most workloads — limit to 1-2 concurrent VMs to keep mirror throughput high.')}
-                                                                        {vmwareMigrateForm.transfer_mode === 'vmkfstools_clone' && (t('transferModeVmkCloneDesc') || 'Snapshots the running VM, clones the frozen base disk at the vmkernel level on the ESXi host and imports it to Proxmox while the VM keeps running. At the switchover the source VM is stopped and every block changed since the snapshot is copied over. That reads each disk once on the ESXi host, so the downtime grows with disk size - for the shortest downtime on large disks use Live Mirror. Works where Live-Mirror / Snapshot-Iterative fail (no locked-base-disk problem). Supports all Proxmox storage types (Ceph/RBD, LVM, LVM-Thin, dir). Needs ESXi SSH enabled.')}
-                                                                        {vmwareMigrateForm.transfer_mode === 'snapshot_zero' && (t('transferModeSnapshotZeroDesc') || 'ESXi snapshot rotation — VM stays running through pre-sync + iterative delta sync, only ~10s downtime at cutover. ⚠️ May not work on your system (e.g. ESXi 6.x or VMFS6 with strict locking) — requires ESXi setup that releases base-VMDK lock after snapshot.')}
+                                                                        {vmwareMigrateForm.transfer_mode === 'vmkfstools_clone' && (t('transferModeVmkCloneDesc') || 'Snapshots the running VM, clones the frozen base disk at the vmkernel level on the ESXi host and imports it to Proxmox while the VM keeps running. At the switchover the source VM is stopped and every block changed since the snapshot is copied over. That reads each disk once on the ESXi host, so the downtime grows with disk size - for the shortest downtime on large disks use Live Mirror. Works where Live-Mirror fails (no locked-base-disk problem). Supports all Proxmox storage types (Ceph/RBD, LVM, LVM-Thin, dir). Needs ESXi SSH enabled.')}
+                                                                        {vmwareMigrateForm.transfer_mode === 'snapshot_zero' && (t('transferModeSnapshotZeroDesc') || 'Starts like Live Clone, then copies only what the guest wrote, as ESXi\'s change tracking names it: in rounds while the VM keeps running, and the rest at the switchover. The downtime follows how much the guest writes, not the disk size.')}
                                                                         {vmwareMigrateForm.transfer_mode === 'offline' && (t('transferModeOfflineDesc') || 'Stops ESXi VM, copies disks via SSH dd, then starts on Proxmox (full downtime ~ disk-size / network-speed)')}
                                                                     </p>
                                                                 </div>
@@ -30079,7 +30433,7 @@
                                                                         <option value="off">{t('v2pVerifyOff')}</option>
                                                                     </select>
                                                                     {v2pVerifyFor(vmwareMigrateForm, vmwareMigrationPlan) === 'full' && (
-                                                                        ['sshfs_boot', 'snapshot_zero'].includes(vmwareMigrateForm.transfer_mode)
+                                                                        vmwareMigrateForm.transfer_mode === 'sshfs_boot'
                                                                             ? <p className="text-xs text-red-400 mt-1">{t('v2pVerifyFullNotHere')}</p>
                                                                             : <p className="text-xs text-gray-400 mt-1 leading-relaxed">{t('v2pVerifyFullDesc')}</p>
                                                                     )}
@@ -30172,8 +30526,8 @@
                                                                     <div>
                                                                         <label className="text-xs text-gray-500 mb-1 block">VGA Display</label>
                                                                         <select value={vmwareMigrateForm.vga} onChange={e => setVmwareMigrateForm(f => ({...f, vga: e.target.value}))} className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white">
-                                                                            <option value="vmware">VMware SVGA (recommended)</option>
-                                                                            <option value="std">Standard VGA</option>
+                                                                            <option value="std">Standard VGA (recommended)</option>
+                                                                            <option value="vmware">SVGA (ESXi-compatible, may display distorted)</option>
                                                                             <option value="virtio">VirtIO GPU</option>
                                                                             <option value="virtio-gl">VirtIO-GPU (virgl)</option>
                                                                             <option value="qxl">QXL (SPICE)</option>
@@ -31080,7 +31434,7 @@
                                         <div className="p-2">
                                             <TopologyView
                                                 clusterName="PegaProx"
-                                                multiCluster={clusters.filter(c => c.connected).map(cluster => {
+                                                multiCluster={allClusters.filter(c => c.connected).map(cluster => {
                                                     const metrics = sidebarClusterData[cluster.id]?.metrics || {};
                                                     let nodes = Object.entries(metrics)
                                                         .filter(([k]) => k !== 'error' && k !== 'offline')
@@ -31128,7 +31482,7 @@
                                                 })}
                                                 isCorporate={true}
                                                 onVmClick={(vm) => {
-                                                    const cl = clusters.find(c => c.id === vm._clusterId);
+                                                    const cl = allClusters.find(c => c.id === vm._clusterId);
                                                     if (cl) {
                                                         setSelectedSidebarVm({...vm, _clusterId: cl.id});
                                                         setSelectedSidebarNode(null);
@@ -31139,7 +31493,7 @@
                                                     }
                                                 }}
                                                 onGuestOpen={isCorpRedesigned ? (vm) => {
-                                                    const cl = clusters.find(c => c.id === vm._clusterId);
+                                                    const cl = allClusters.find(c => c.id === vm._clusterId);
                                                     if (!cl) return;
                                                     setSelectedCluster(cl);
                                                     setSelectedSidebarVm({...vm, _clusterId: cl.id});
@@ -31151,7 +31505,7 @@
                                                     setSidebarTopology(false);
                                                 } : undefined}
                                                 onNodeClick={isCorpRedesigned ? (cid, name) => {
-                                                    const cl = clusters.find(c => c.id === cid);
+                                                    const cl = allClusters.find(c => c.id === cid);
                                                     if (!cl) return;
                                                     setSelectedCluster(cl);
                                                     setSelectedSidebarNode({ name, clusterId: cid });
@@ -31162,7 +31516,7 @@
                                                     setSidebarTopology(false);
                                                 } : undefined}
                                                 onClusterClick={isCorpRedesigned ? (cid) => {
-                                                    const cl = clusters.find(c => c.id === cid);
+                                                    const cl = allClusters.find(c => c.id === cid);
                                                     if (!cl) return;
                                                     setSelectedCluster(cl);
                                                     setActiveTab('overview');
@@ -31188,9 +31542,9 @@
                                             </div>
                                         )}
                                         <WorldMapView
-                                            clusters={clusters}
+                                            clusters={allClusters}
                                             onSelectCluster={(c) => {
-                                                const full = clusters.find(x => x.id === c.id);
+                                                const full = allClusters.find(x => x.id === c.id);
                                                 if (full) { setSelectedCluster(full); setSidebarWorldmap(false); }
                                             }}
                                             fetchClusters={fetchClusters}
@@ -31249,7 +31603,7 @@
                                                         }} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
                                                             <option value="">Select cluster...</option>
                                                             {clusters.filter(c => c.connected && c.id !== xhmForm.source_cluster).map(c => {
-                                                                const srcCluster = clusters.find(x => x.id === xhmForm.source_cluster);
+                                                                const srcCluster = allClusters.find(x => x.id === xhmForm.source_cluster);
                                                                 const getHvType = cl => cl?.type === 'xcpng' || cl?.cluster_type === 'xcpng' ? 'xcpng'
                                                                     : cl?.type === 'esxi' || cl?.cluster_type === 'esxi' ? 'esxi' : 'proxmox';
                                                                 const srcHv = getHvType(srcCluster);
@@ -31264,7 +31618,7 @@
                                                 </div>
 
                                                 {/* Source Node (only for PVE sources) */}
-                                                {xhmForm.source_cluster && (() => { const sc = clusters.find(c => c.id === xhmForm.source_cluster); return sc && sc.type !== 'xcpng' && sc.cluster_type !== 'xcpng' && sc.type !== 'esxi' && sc.cluster_type !== 'esxi'; })() && (
+                                                {xhmForm.source_cluster && (() => { const sc = allClusters.find(c => c.id === xhmForm.source_cluster); return sc && sc.type !== 'xcpng' && sc.cluster_type !== 'xcpng' && sc.type !== 'esxi' && sc.cluster_type !== 'esxi'; })() && (
                                                     <div className="mb-3">
                                                         <label className="text-xs text-gray-500 mb-1 block">Source Node</label>
                                                         <select value={xhmForm.source_node} onChange={e => setXhmForm({...xhmForm, source_node: e.target.value, source_vmid: ''})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
@@ -31310,7 +31664,7 @@
                                                 )}
 
                                                 {/* Analyze button */}
-                                                <button onClick={fetchXhmPlan} disabled={xhmLoading || !xhmForm.source_cluster || !xhmForm.source_vmid || !xhmForm.target_cluster || (!(clusters.find(c => c.id === xhmForm.source_cluster)?.type === 'xcpng' || clusters.find(c => c.id === xhmForm.source_cluster)?.cluster_type === 'xcpng') && !xhmForm.source_node)} className="w-full py-2.5 rounded-lg bg-purple-500 text-white font-medium hover:bg-purple-600 disabled:opacity-50 text-sm mb-4">
+                                                <button onClick={fetchXhmPlan} disabled={xhmLoading || !xhmForm.source_cluster || !xhmForm.source_vmid || !xhmForm.target_cluster || (!(allClusters.find(c => c.id === xhmForm.source_cluster)?.type === 'xcpng' || allClusters.find(c => c.id === xhmForm.source_cluster)?.cluster_type === 'xcpng') && !xhmForm.source_node)} className="w-full py-2.5 rounded-lg bg-purple-500 text-white font-medium hover:bg-purple-600 disabled:opacity-50 text-sm mb-4">
                                                     {xhmLoading ? 'Analyzing...' : (t('xhmAnalyze') || 'Analyze VM')}
                                                 </button>
 
@@ -31560,6 +31914,7 @@
                                 ) : sidebarGuests ? (
                                     <AllGuestsView
                                         clusters={clusters}
+                                        remoteGuests={remoteGuests}
                                         authFetch={authFetch}
                                         addToast={addToast}
                                         onBulkMigrate={handleBulkMigrate}
@@ -31574,7 +31929,7 @@
                                     />
                                 ) : (
                                     <AllClustersOverview
-                                        clusters={clusters}
+                                        clusters={allClusters}
                                         allMetrics={allClusterMetrics}
                                         clusterGroups={clusterGroups}
                                         topGuests={topGuests}
@@ -31963,7 +32318,7 @@
                         <ConfigModal
                             vm={configVm}
                             clusterId={configVm._clusterId || selectedCluster.id}
-                            allClusters={clusters}
+                            allClusters={allClusters}
                             dashboardAuthFetch={authFetch}
                             onClose={handleCloseConfig}
                             addToast={addToast}
@@ -32036,11 +32391,11 @@
                             onClose={() => setDashDeleteVm(null)}
                         />
                     )}
-                    {dashCrossClusterVm && clusters.length > 1 && (
+                    {dashCrossClusterVm && allClusters.length > 1 && (
                         <CrossClusterMigrateModal
                             vm={dashCrossClusterVm}
                             sourceCluster={selectedCluster}
-                            clusters={clusters}
+                            clusters={allClusters}
                             onMigrate={handleCrossClusterMigrate}
                             onClose={() => setDashCrossClusterVm(null)}
                         />
@@ -32668,7 +33023,7 @@
                             <div className="corp-status-bar-item">
                                 {selectedCluster
                                     ? <span>{selectedCluster.display_name || selectedCluster.name}</span>
-                                    : <span>{clusters.length} {t('clusters')}</span>
+                                    : <span>{allClusters.length} {t('clusters')}</span>
                                 }
                             </div>
                             {(() => {
@@ -33683,7 +34038,7 @@
                                 ? [['cr-blueprints', t('crBpNavDeploy'), 'Template']] : undefined}
                             onPickCluster={(c) => { setSelectedCluster(c); setActiveTab('overview'); setShowCommandPalette(false); }}
                             onPickVm={(vm) => {
-                                const c = clusters.find(cl => cl.id === vm._clusterId);
+                                const c = allClusters.find(cl => cl.id === vm._clusterId);
                                 if (c) setSelectedCluster(c);
                                 setActiveTab('resources');
                                 setResourcesSubTab('management');
@@ -33705,7 +34060,7 @@
                                 else if (id === 'cr-blueprints' && (crTaskNav || mdBpNav)) {
                                     // the open cluster, else the first Proxmox VE one (Modern too, #1220)
                                     const pve = (c) => !!c && (!c.cluster_type || c.cluster_type === 'proxmox');
-                                    const c = pve(selectedCluster) ? selectedCluster : clusters.find(pve);
+                                    const c = pve(selectedCluster) ? selectedCluster : allClusters.find(pve);
                                     if (c) (crTaskNav || mdBpNav).openBlueprints(c.id);
                                 }
                             }}
@@ -33767,7 +34122,7 @@
                                     || selectedCluster?.id
                                     || (selectedPBS?.linked_clusters || [])[0];
                         if (!cid) return null;
-                        const cluster = clusters.find(c => c.id === cid);
+                        const cluster = allClusters.find(c => c.id === cid);
                         return (
                             <BackupRestoreWizard
                                 clusterId={cid}
@@ -34651,10 +35006,13 @@
 
                 (async () => {
                     try {
-                        const resp = await fetch(`${API_URL}/clusters`, {
+                        // LW Nov 2026 - another site's cluster (linked mode) is in the list of the linked sites
+                        const remote = String(clusterId).includes('~');
+                        const resp = await fetch(remote ? `${API_URL}/federation/linked` : `${API_URL}/clusters`, {
                             credentials: 'include', headers: getAuthHeaders() });
                         if (!resp.ok) throw new Error(`clusters ${resp.status}`);
-                        const list = await resp.json();
+                        const got = await resp.json();
+                        const list = remote ? ((got && got.sites) || []).flatMap(s => s.clusters || []) : got;
                         const cluster = (Array.isArray(list) ? list : []).find(c => c.id === clusterId);
                         if (!cluster) throw new Error('noAccess');
                         if (cancelled) return;

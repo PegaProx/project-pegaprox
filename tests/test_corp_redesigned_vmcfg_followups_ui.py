@@ -356,8 +356,9 @@ def test_runtime_the_cpu_types_are_grouped_by_family(open_app):
     cpu_types = ['host', 'max', '486', 'Broadwell', 'custom-fleet', 'EPYC-Genoa', 'EPYC-Turin', 'GraniteRapids-v3',
                  'kvm64', 'Opteron_G5', 'phenom', 'qemu64', 'x86-64-v2-AES', 'x86-64-v3']
     app = _app(open_app)
-    app.server.routes[('GET', '/api/hardware-options')] = (200, {'cpu_types': cpu_types, 'network_models': [],
-                                                                 'scsi_controllers': [], 'machine_types': []})
+    options = (200, {'cpu_types': cpu_types, 'network_models': [], 'scsi_controllers': [], 'machine_types': []})
+    app.server.routes[('GET', '/api/hardware-options')] = options
+    app.server.routes[('GET', '/api/clusters/c1/hardware-options')] = options   # the VM's own cluster
     page = app.page
     _tab(page, 'Hardware', '[data-cr-vc-input="cputype"]')
     page.wait_for_function('''() => !!document.querySelector('[data-cr-vc-input="cputype"] option[value="custom-fleet"]')''',

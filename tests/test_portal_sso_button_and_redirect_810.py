@@ -32,11 +32,13 @@ OIDC_ON = {'oidc_enabled': True, 'oidc_provider': 'entra', 'oidc_client_id': 'pe
            'oidc_tenant_id': 'contoso-tenant', 'oidc_button_text': BUTTON,
            'oidc_redirect_uri': 'https://pegaprox.example/oidc/callback'}
 
-# what /api/auth/check answered before this change, signed in and not
+# what /api/auth/check answered before this change, signed in and not. federation_enabled
+# came later (#1372), in the 200 only: the dashboard asks for the linked sites by it
 CHECK_401_KEYS = {'authenticated', 'initialized', 'ldap_enabled', 'oidc_enabled',
                   'oidc_button_text', 'login_background', 'ha_role'}
 CHECK_200_KEYS = {'authenticated', 'session_id', 'user', 'password_expiry', 'requires_2fa_setup',
-                  'reverse_proxy_enabled', 'air_gap_mode', 'default_theme', 'ha'}
+                  'reverse_proxy_enabled', 'air_gap_mode', 'default_theme', 'ha',
+                  'federation_enabled'}
 CHECK_200_USER_KEYS = {'username', 'role', 'display_name', 'email', 'avatar_url', 'auth_source',
                        'tenant_id', 'permissions', 'theme', 'language', 'ui_layout',
                        'taskbar_auto_expand', 'sidebar_show_vmid', 'totp_enabled',

@@ -149,6 +149,26 @@ def _require_session():
     return session, None
 
 
+def _refuse_mirror(username, what):
+    # MK Nov 2026 - a mirror's passkeys are its home's: deleting the mirrored one here would
+    # let a key-only account in on the password alone until the next sync, and a key
+    # registered here would stay behind as a local credential of that name.
+    # These routes check the session, not the account: a mirror that counts as disabled
+    # (the federation switched off here) is refused as require_auth refuses it, and so is
+    # an account that cannot be read right now, since it may be one
+    from pegaprox.utils.auth import mirror_switched_off
+    try:
+        row = get_db().get_user(username)
+    except Exception as e:
+        logging.warning(f"[WebAuthn] could not read the account of {username}: {e}")
+        return jsonify({'error': f'This account cannot be read right now - try to {what} '
+                                 f'again in a moment'}), 503
+    if row and mirror_switched_off(row):
+        return jsonify({'error': 'Account is disabled', 'code': 'ACCOUNT_DISABLED'}), 401
+    from pegaprox.api.federation import refuse_own_mirror
+    return refuse_own_mirror(what, username=username)
+
+
 def _not_available():
     return jsonify({'error': 'WebAuthn is not available on this server (fido2 library missing)'}), 501
 
@@ -193,6 +213,9 @@ def register_begin():
     session, err = _require_session()
     if err: return err
     username = session['user']
+    refused = _refuse_mirror(username, 'register a security key')
+    if refused:
+        return refused
     _sweep_challenges()
 
     # Stable user_handle per user — stored separately so a user can have multiple keys
@@ -238,6 +261,9 @@ def register_finish():
     session, err = _require_session()
     if err: return err
     username = session['user']
+    refused = _refuse_mirror(username, 'register a security key')
+    if refused:
+        return refused
     _sweep_challenges()
 
     stash = _challenges.pop((username, 'register'), None)
@@ -464,6 +490,9 @@ def delete_credential(cred_id):
     session, err = _require_session()
     if err: return err
     username = session['user']
+    refused = _refuse_mirror(username, 'remove a security key')
+    if refused:
+        return refused
     db = get_db()
     # only allow owner-delete
     row = db.query_one('SELECT name FROM webauthn_credentials WHERE id = ? AND username = ?', (cred_id, username))

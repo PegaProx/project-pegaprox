@@ -69,6 +69,9 @@ GATES = [
     ('pegaprox/core/config.py', 'save_config', ['get_db', 'save_cluster'], []),
     ('pegaprox/core/manager.py', 'PegaProxManager._try_create_api_token',
      ['post', 'update_cluster', 'save_config'], []),
+    # the renewal of that token ahead of its end, from the IP refresh loop (#1390)
+    ('pegaprox/core/manager.py', 'PegaProxManager.renew_management_token',
+     ['token_policy', '_renew_management_token'], []),
     ('pegaprox/core/manager.py', 'PegaProxManager.stop_ha_monitor', ['Thread'], ['join']),
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_monitor_loop',
      ['_ha_check_nodes', '_ha_update_fallback_hosts'], []),
@@ -93,6 +96,7 @@ GATES = [
 TOP_GATED = {'run_cross_cluster_balance_check', 'recover_orphan_runs',
              'PegaProxManager.run_balance_check', 'PegaProxManager.start_ha_monitor',
              'save_config', 'PegaProxManager._try_create_api_token',
+             'PegaProxManager.renew_management_token',
              'PegaProxManager._ha_recovery_worker', 'XcpngManager.run_balance_check'}
 
 # per host, never behind the gate

@@ -1191,7 +1191,9 @@ def test_the_section_is_mounted_for_corporate_redesigned_only():
     assert len(mounts) == 1
     head = dash[dash.rindex('{automationSubTab', 0, mounts[0]):mounts[0]]
     assert "automationSubTab === 'templates' && isCorpRedesigned && selectedCluster?.id" in head
-    assert "canRead={holds('vm.create')} canWrite={can('vm.create')}" in dash
+    # on this mount, not on the Modern one that passes the same props
+    mount = dash[mounts[0]:dash.index('/>', mounts[0])]
+    assert "canRead={holds('vm.create')} canWrite={siteCan('vm.create')}" in mount
     page = _read('web', 'src', 'cr_images.js')
     assert len(re.findall(r'<CrBlueprints\b', page)) == 1
     assert 'canRead={canRead} canWrite={canWrite} nav={nav}' in page

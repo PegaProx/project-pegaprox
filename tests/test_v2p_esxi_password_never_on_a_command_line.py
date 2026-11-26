@@ -67,8 +67,6 @@ class _NoLibssh(farm.Node):
 
 
 def _run(monkeypatch, mode, key=None, boot=None):
-    if mode == 'snapshot_zero':
-        monkeypatch.setattr(v2p, '_snapshot_zero_v2p_delta_loop', lambda *a, **k: (True, 1, []))
     r = farm.Run(monkeypatch, mode=mode, ndisks=2, tpm=False, ssh_key=key)
     r.task.esxi_password = PASSWORD
     if boot:
@@ -92,7 +90,8 @@ COPIES = {'curl-0', 'ssh-0', 'curl-1', 'ssh-1'}
 # number of SSHFS mounts
 @pytest.mark.parametrize('mode,key,boot,files,mounts', [
     ('offline', None, None, COPIES, 1),
-    ('snapshot_zero', None, None, COPIES, 1),
+    # Snapshot-Iterative: the copies of the live clone, then the written areas of each disk
+    ('snapshot_zero', None, None, COPIES | {'runs-0', 'runs-1'}, 1),
     ('vmkfstools_clone', None, None, COPIES, 1),
     ('sshfs_boot', None, None, {'copy'}, 1),        # no key on ESXi: the copy scripts log in by password
     # the QEMU secret of the HTTPS boot; the run mounts the datastore again either way
@@ -109,6 +108,10 @@ def test_no_command_of_a_run_carries_the_esxi_password(monkeypatch, mode, key, b
     # on stdin it goes to sshfs, or into a new 0600 file in /run: as it is for sshpass,
     # QEMU and sshfs, in a curl config for curl
     fed = [(c, d) for c, d in rec.sent if d is not None]
+    # a list of areas to copy goes to a temp file over stdin as well, it holds no secret
+    lists = [(c, d) for c, d in fed if c.startswith('umask 077; f=$(mktemp /tmp/v2p-runs-')]
+    assert all(not any(f in d for f in FORMS) for _, d in lists)
+    fed = [e for e in fed if e not in lists]
     assert fed and {d for _, d in fed} <= {PASSWORD, v2p._curl_login_config('root', PASSWORD)}
     for cmd, _ in fed:
         assert cmd.startswith(SECRET_WRITE) or 'sshfs -o password_stdin' in cmd, cmd

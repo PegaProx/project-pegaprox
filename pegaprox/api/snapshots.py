@@ -330,19 +330,154 @@ def _snap_name(policy_id):
     return f"pegaprox-{safe}-{ts}"
 
 
-def _delete_done(mgr, node, res):
-    """(gone, why not) of one prune delete. PVE answers the DELETE with a task and takes
-    the guest's lock only inside it, so a delete sent while the one before still runs is
-    accepted and then fails in its task (VM is locked). Each task is waited for, and only
-    one that ended OK counts."""
+# MK Nov 2026 (#1347) - PVE answers a snapshot DELETE with a task and takes the guest's lock
+# only inside it, so a delete sent while the one before still runs is accepted and then fails
+# in its task ('VM is locked (snapshot-delete)'). Every delete here waits for its task before
+# the next one of the same guest goes out.
+SNAP_DELETE_WAIT = 600        # seconds one delete task may take before we stop waiting for it
+SNAP_DELETE_POLL = 0.25       # its second status read after this, then twice as long up to 2s
+# MK Nov 2026 - the bulk delete answers within its request. 90s stays below the 100s of
+# Cloudflare and the 300s Firefox wait for an answer; what was not started by then is said per
+# snapshot and can be sent again. Sixteen guests at a time, with the first status reads a
+# quarter second apart, take the 200 rows of the overview (one snapshot each, tasks of about
+# a second) in some 25s
+BULK_DELETE_SECONDS = 90      # a bulk delete request in all
+BULK_DELETE_GUESTS = 16       # guests whose snapshots are deleted at the same time
+_TASK_READ_BACKOFF = 5        # what PegaProxManager._wait_for_task sleeps after a status read failed
+
+
+def _read_seconds(mgr):
+    """How long one task status read of `mgr` may take (its api_timeout)."""
+    return float(getattr(mgr, 'api_timeout', 10) or 10)
+
+
+def _delete_done(mgr, node, res, deadline=None):
+    """('gone'|'failed'|'busy'|'unread'|'unanswered', why) of one snapshot delete, `res` being the
+    manager's answer to it. Only a task that ended OK is gone; a failed one says what PVE said.
+    'busy': the task still runs when we stop waiting, the guest keeps its lock and the next
+    delete of it would only fail. 'unread': PVE started its task and that could not be read, so
+    whether the snapshot went is not known. 'unanswered': no answer from Proxmox in time, the
+    DELETE may or may not have gone out (the manager cannot tell a late answer from a TLS
+    handshake that hung before it was sent), so it may or may not have started. A delete
+    without a task (XCP-ng deletes within the call) is gone once it was accepted. With `deadline` (a time.monotonic()
+    value) the answer is there by then, also when status reads are slow."""
     if not isinstance(res, dict):
-        return False, 'no answer'
+        return 'failed', 'no answer'
     if not res.get('success'):
-        return False, ' '.join(str(res.get('error') or 'refused').split())[:200]
+        said = ' '.join(str(res.get('error') or 'refused').split())[:200]
+        if res.get('unanswered'):
+            return 'unanswered', f'its delete was sent, no answer from Proxmox: it may or may not have started ({said})'
+        return 'failed', said
     upid = res.get('task')
-    if upid and hasattr(mgr, '_wait_for_task') and not mgr._wait_for_task(node, upid, timeout=600):
-        return False, f'the delete task did not end OK ({upid})'
-    return True, ''
+    if not upid or not hasattr(mgr, '_wait_for_task'):
+        return 'gone', ''
+    t0, wait, one_read = time.monotonic(), SNAP_DELETE_WAIT, 0
+    if deadline is not None:
+        # MK Nov 2026 - _wait_for_task can overrun its timeout by one status read plus its
+        # back-off after a read that failed, slow reads being the case where that happens. The
+        # wait ends early enough for that, and the one read below is only made if it fits too
+        one_read = _read_seconds(mgr)
+        wait = min(wait, deadline - t0 - one_read - _TASK_READ_BACKOFF)
+    if wait > 0 and mgr._wait_for_task(node, upid, timeout=wait, first_poll=SNAP_DELETE_POLL):
+        return 'gone', ''
+    if deadline is not None and deadline - time.monotonic() < one_read:
+        return 'unread', f'its delete task was started, its status was not read before the request had to answer ({upid})'
+    try:
+        st = mgr.get_task_status(node, upid) if hasattr(mgr, 'get_task_status') else None
+    except Exception:
+        st = None
+    if not isinstance(st, dict):
+        return 'unread', f'its delete task was started, its status could not be read ({upid})'
+    if st.get('status') == 'running':
+        return 'busy', f'its delete task still runs in Proxmox after {int(time.monotonic() - t0)}s ({upid})'
+    said = ' '.join(str(st.get('exitstatus') or '').split())[:200]
+    if said == 'OK' or said.startswith('WARNINGS'):
+        # the status could not be read while we waited, the task did end well
+        return 'gone', ''
+    return 'failed', said or f'the delete task did not end OK ({upid})'
+
+
+def delete_per_guest(guests, user=''):
+    """The deletes of a bulk request. `guests` holds one list of jobs per guest, a job being
+    {mgr, cluster_id, node, vmid, vm_type, name}. The snapshots of a guest go one after the
+    other, each once the task of the one before ended; up to BULK_DELETE_GUESTS guests at a
+    time. Everything is answered within BULK_DELETE_SECONDS, and nothing new starts once there
+    is no time left in them to wait for its task. A cluster whose deletes have no task (XCP-ng)
+    takes its guests one after the other. Each job comes back with 'state' (gone, failed, busy,
+    unread, unanswered, skipped, error), 'why' and its 'task', in the order the jobs were handed
+    in. busy and unread were started in Proxmox and not seen to end; unanswered got no answer
+    from Proxmox, it may or may not have gone out and started. After any of the three the
+    guest's next snapshots are not sent. `user` is named as the one who started each task."""
+    from pegaprox.api.helpers import register_task_user
+    from pegaprox.utils.concurrent import run_per_node
+    until = time.monotonic() + BULK_DELETE_SECONDS
+
+    def one_guest(jobs):
+        for n, job in enumerate(jobs):
+            left = until - time.monotonic()
+            # MK Nov 2026 - the wait for a task keeps a status read and the back-off after it free
+            # before the deadline (_delete_done); with no more than that left it would not wait at all
+            if hasattr(job['mgr'], '_wait_for_task'):
+                left -= _read_seconds(job['mgr']) + _TASK_READ_BACKOFF
+            if left <= 0:
+                job.update(state='skipped', why=f'not started, the request ran out of its {BULK_DELETE_SECONDS}s')
+                continue
+            # MK Nov 2026 - a delete still on its way when the request answers may or may not have
+            # reached Proxmox: sent and unanswered until its answer says otherwise
+            job.update(state='unanswered', task=None,
+                       why='its delete was on its way, no answer from Proxmox before the request ended: it may or may not have started')
+            try:
+                res = job['mgr'].delete_snapshot(job['node'], job['vmid'], job['vm_type'], job['name'])
+            except Exception as e:
+                job['state'], job['why'] = 'error', str(e)
+                continue
+            try:
+                job['task'] = res.get('task') if isinstance(res, dict) else None
+                if job['task']:
+                    # MK Nov 2026 - Proxmox answered with its task: started, till its end is read
+                    job.update(state='unread', why=f"its delete task was started, its status was "
+                                                   f"not read before the request ended ({job['task']})")
+                if user and job['task']:
+                    # out of the request's context here, the manager cannot name the user itself
+                    register_task_user(job['task'], user, job.get('cluster_id'))
+                job['state'], job['why'] = _delete_done(job['mgr'], job['node'], res, deadline=until)
+            except Exception as e:
+                # Proxmox took the delete, what became of it is not known here
+                job['state'], job['why'] = 'unread', f'its result could not be read: {e}'
+            if job['state'] in ('busy', 'unread', 'unanswered'):
+                # MK Nov 2026 - the guest's lock is held, or may be, by that task: the next delete
+                # of the guest would go into it
+                still = 'still runs' if job['state'] == 'busy' else 'may still run'
+                for later in jobs[n + 1:]:
+                    later.update(state='skipped', why=f"not started, the delete of {job['name']} {still}")
+                break
+
+    # MK Nov 2026 - a PVE guest gets a lane of its own. A cluster without delete tasks talks
+    # over one session that takes one call at a time (XCP-ng: one XML-RPC connection, two
+    # greenlets on it both fail with Request-sent / Idle), so its guests share one lane and go
+    # one after the other, as every delete went before
+    lanes = {}
+    for i, jobs in enumerate(guests):
+        if jobs:
+            mgr = jobs[0]['mgr']
+            lanes.setdefault(('guest', i) if hasattr(mgr, '_wait_for_task') else ('cluster', id(mgr)), []).append(jobs)
+    lanes = list(lanes.values())
+
+    def one_lane(i):
+        for jobs in lanes[i]:
+            one_guest(jobs)
+
+    # a pool of its own: a wait for a task holds none of the shared slots. carry() here and not
+    # only in run_per_node: that one carries while the HA lease is in force, and a refusal of the
+    # federation's exit is to be noted for this request also when it is not (409 FED_NO_LEASE)
+    run_per_node({i: ha.carry(one_lane) for i in range(len(lanes))}, max_concurrent=BULK_DELETE_GUESTS,
+                 timeout=BULK_DELETE_SECONDS + 60)
+    # copies: a lane still waiting for Proxmox after the timeout goes on writing into its jobs
+    out = [dict(job) for jobs in guests for job in jobs]
+    for job in out:
+        if 'state' not in job:
+            job.update(state='skipped', why='not started before the request ended', task=None)
+    return out
 
 
 def _prune(mgr, node, vmid, vm_type, policy, errors=None):
@@ -384,13 +519,9 @@ def _prune(mgr, node, vmid, vm_type, policy, errors=None):
     cutoff = 0
     if policy['retention_days'] > 0:
         cutoff = (datetime.now() - timedelta(days=policy['retention_days'])).timestamp()
+    doomed = [name for snap_t, name in owned if name not in keep_set and not (cutoff and snap_t >= cutoff)]
 
-    for snap_t, name in owned:
-        if name in keep_set:
-            continue
-        if cutoff and snap_t >= cutoff:
-            keep_set.add(name)
-            continue
+    for i, name in enumerate(doomed):
         # delete this snapshot: not from a leader that lost its lease (#625)
         if not ha.confirm_step(f'pruning {name} of {vmid}'):
             break
@@ -403,15 +534,23 @@ def _prune(mgr, node, vmid, vm_type, policy, errors=None):
                 res = {'success': resp.status_code == 200, 'error': f'HTTP {resp.status_code}'}
                 if res['success']:
                     res['task'] = (resp.json() or {}).get('data')
-            gone, why = _delete_done(mgr, node, res)
+            state, why = _delete_done(mgr, node, res)
         except Exception as e:
-            gone, why = False, str(e)
-        if gone:
+            state, why = 'failed', str(e)
+        if state == 'gone':
             pruned += 1
-        else:
-            logging.warning(f"[snap-sched] prune delete failed for {name}: {why}")
+            continue
+        logging.warning(f"[snap-sched] prune delete failed for {name}: {why}")
+        if errors is not None:
+            errors.append(f'{name}: {why}')
+        if state in ('busy', 'unread', 'unanswered'):
+            # the guest keeps its lock while that task runs (or may: its task could not be read, or
+            # PVE did not answer the DELETE and may or may not have started it), the next delete
+            # would only fail
+            still = 'still runs' if state == 'busy' else 'may still run'
             if errors is not None:
-                errors.append(f'{name}: {why}')
+                errors.extend(f'{later}: not started, the delete of {name} {still}' for later in doomed[i + 1:])
+            break
     return pruned
 
 

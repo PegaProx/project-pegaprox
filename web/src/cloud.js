@@ -575,7 +575,8 @@
                                 <select className="cloud-cluster-select" value={selId != null ? String(selId) : ''} onChange={onChange}>
                                     {safe.map(c => {
                                         const cid = c && (c.id != null ? c.id : c.name);
-                                        return <option key={String(cid)} value={String(cid)}>{(c && (c.display_name || c.name)) || 'cluster'}</option>;
+                                        // LW Nov 2026 - another site's cluster (linked mode) says where it is led
+                                        return <option key={String(cid)} value={String(cid)}>{((c && (c.display_name || c.name)) || 'cluster') + (c && c.fed ? ` (${c.fed.site})` : '')}</option>;
                                     })}
                                 </select>
                             </div>
@@ -1166,7 +1167,10 @@
                                             <span className="cloud-cluster-name"><Icons.Cloud /> {(c && (c.display_name || c.name)) || 'cluster'}</span>
                                             <CloudConnChip connected={!!(c && c.connected)} t={t} />
                                         </div>
+                                        {!(c && c.fed) && (
                                         <div className="cloud-cluster-host">{(c && c.host) || '—'}</div>
+                                        )}
+                                        {c && c.fed && <div className="cloud-cluster-host">{c.fed.site}</div>}
                                         <div className="cloud-cluster-badges">
                                             <span className="cloud-chip cloud-chip-soft">{cloudClusterTypeLabel(c && c.cluster_type)}</span>
                                             {dc?.cluster?.quorate === true && <span className="cloud-chip cloud-chip-soft">Quorate</span>}
@@ -1381,12 +1385,12 @@
         // #625: `acts` is false on a standby, and the pages show their changing buttons
         // only with it; a refusal that still comes back says why, in the user's language.
         // True again on a standby that forwards; the active out of reach says so too.
-        // A member that serves users names the leader in both.
+        // A member that serves users names the leader in both. onDone runs once the server took it.
         function useCloudMutate(reload) {
             const { getAuthHeaders, haReadOnly, haServing } = useAuth();
             const { t } = useTranslation();
             const [busy, setBusy] = React.useState('');
-            const run = React.useCallback((key, method, path, body, confirmMsg) => {
+            const run = React.useCallback((key, method, path, body, confirmMsg, onDone) => {
                 if (confirmMsg && !window.confirm(confirmMsg)) return;
                 setBusy(key);
                 const opts = { method, headers: Object.assign({}, getAuthHeaders(), { 'Content-Type': 'application/json' }) };
@@ -1395,8 +1399,8 @@
                     .then(r => r.ok ? r.json().catch(() => ({})) : r.json().catch(() => ({})).then(b => Promise.reject(
                         new Error(b && b.code === 'HA_STANDBY' ? (haServing ? t('pgHaServingRefused') : t('pgHaStandbyRefused'))
                             : b && b.code === 'HA_ACTIVE_UNREACHABLE' ? (haServing ? t('pgHaLeaderUnreachable') : t('pgHaActiveUnreachable'))
-                            : 'HTTP ' + r.status))))
-                    .then(() => { setBusy(''); if (reload) reload(); })
+                            : PegaProxApiErrors.said(b, 'HTTP ' + r.status)))))
+                    .then(() => { setBusy(''); if (onDone) onDone(); if (reload) reload(); })
                     .catch(e => { setBusy(''); window.alert('Action failed: ' + (e && e.message || e)); });
             }, [reload, t, haServing]);
             return { busy, run, acts: !haReadOnly };
@@ -1544,13 +1548,17 @@
                 if (!clusterId) { window.alert(t('cloud.noClusterSel') || 'No cluster selected.'); return; }
                 const body = { type: form.type, action: form.action, enable: 1 };
                 ['proto', 'dport', 'source', 'dest', 'comment'].forEach(k => { if (String(form[k]).trim()) body[k] = String(form[k]).trim(); });
+                // the hint under the field says why
+                if (fwIcmpTypeProblem(body.proto, body.dport)) return;
                 // Guard against an unconstrained ACCEPT rule (no proto/port/source/dest = allow-all).
                 const constrained = ['proto', 'dport', 'source', 'dest'].some(k => body[k]);
                 if (form.action === 'ACCEPT' && !constrained) {
                     if (!window.confirm(t('cloud.fwAllowAllWarn') || 'This ACCEPT rule matches ALL traffic (no protocol, port, source or destination set). Create this allow-all rule anyway?')) return;
                 }
-                mut.run('newrule', 'POST', `/api/clusters/${clusterId}/datacenter/firewall/rules`, body);
-                setShowNew(false); setForm({ type: 'in', action: 'ACCEPT', proto: '', dport: '', source: '', dest: '', comment: '' });
+                // LW Nov 2026 - the dialog and what was typed stay until Proxmox VE took the rule
+                mut.run('newrule', 'POST', `/api/clusters/${clusterId}/datacenter/firewall/rules`, fwIcmpTypeInBody(body), undefined, () => {
+                    setShowNew(false); setForm({ type: 'in', action: 'ACCEPT', proto: '', dport: '', source: '', dest: '', comment: '' });
+                });
             };
             return (
                 <div className="cloud-body">
@@ -1564,23 +1572,27 @@
                             {cloudHead({ icon: <Icons.Shield />, title: t('cloud.firewall') || 'Firewall', count: rules.length })}
                             <div className="cloud-table-scroll"><table className="cloud-table">
                                 <thead><tr><th>#</th><th>{t('cloud.colDir') || 'Dir'}</th><th>{t('cloud.colAction') || 'Action'}</th><th>{t('cloud.colProto') || 'Proto'}</th><th>{t('cloud.colPort') || 'Port'}</th><th>{t('cloud.colSource') || 'Source'}</th><th>{t('cloud.colDest') || 'Dest'}</th><th>{t('cloud.colComment') || 'Comment'}</th><th>{t('cloud.colState') || 'State'}</th><th style={{ textAlign: 'right' }}>{t('cloud.colActions') || ''}</th></tr></thead>
-                                <tbody>{rules.map((r, i) => (<tr className="cloud-table-row cloud-table-row-static" key={r.pos != null ? r.pos : i}>
+                                <tbody>{rules.map((r, i) => { const problems = fwRuleProblems(r); return (<tr className="cloud-table-row cloud-table-row-static" key={r.pos != null ? r.pos : i} data-fw-rule={r.pos}>
                                     <td className="cloud-cell-muted">{r.pos != null ? r.pos : i}</td>
                                     <td><span className="cloud-chip cloud-chip-soft">{(r.type || '').toUpperCase() || '—'}</span></td>
                                     <td>{actChip(r.action)}</td>
                                     <td className="cloud-table-mono">{r.proto || '—'}</td>
+                                    {r['icmp-type'] && !r.dport ? <td className="cloud-table-mono">{r['icmp-type']}</td> : (
                                     <td className="cloud-table-mono">{r.dport || '—'}</td>
+                                    )}
                                     <td className="cloud-table-mono">{r.source || '—'}</td>
                                     <td className="cloud-table-mono">{r.dest || '—'}</td>
-                                    <td className="cloud-cell-muted">{r.comment || ''}</td>
-                                    <td>{(Number(r.enable) === 1 || r.enable === true) ? <CloudConnChip connected={true} t={t} /> : <CloudConnChip connected={false} t={t} />}</td>
+                                    <td className="cloud-cell-muted">{r.comment || ''}{problems.length > 0 && <div className="text-xs text-red-400" data-fw-invalid-why={r.pos}>{t('fwRuleSkipped')} {problems.join('; ')}
+                                        <div className="cloud-cell-muted" data-fw-invalid-fix="">{t('fwRuleInvalidFix')}</div></div>}</td>
+                                    <td>{problems.length > 0 ? <span className="cloud-chip cloud-chip-err" title={[...problems, t('fwRuleInvalidFix')].join('\n')} data-fw-invalid="">{t('fwRuleInvalid')}</span>
+                                        : (Number(r.enable) === 1 || r.enable === true) ? <CloudConnChip connected={true} t={t} /> : <CloudConnChip connected={false} t={t} />}</td>
                                     <CloudRowActions>
                                         {mut.acts && (<>
                                         <CloudIconBtn icon="Power" title={(Number(r.enable) === 1 || r.enable === true) ? (t('disable') || 'Disable') : (t('enable') || 'Enable')} onClick={() => mut.run('t' + r.pos, 'PUT', `/api/clusters/${clusterId}/datacenter/firewall/rules/${r.pos}`, { enable: (Number(r.enable) === 1 || r.enable === true) ? 0 : 1 })} />
                                         <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + r.pos, 'DELETE', `/api/clusters/${clusterId}/datacenter/firewall/rules/${r.pos}`, undefined, (t('cloud.confirmDelRule') || 'Delete this firewall rule?'))} />
                                         </>)}
                                     </CloudRowActions>
-                                </tr>))}</tbody>
+                                </tr>); })}</tbody>
                             </table></div>
                         </div>
                     </CloudSectionState>
@@ -1592,7 +1604,11 @@
                             </div>
                             <div style={{ display: 'flex', gap: 10 }}>
                                 <CloudField label={t('cloud.colProto') || 'Protocol'}><input className="cloud-input" value={form.proto} onChange={e => setForm({ ...form, proto: e.target.value })} placeholder="tcp" /></CloudField>
-                                <CloudField label={t('cloud.colPort') || 'Dest port'}><input className="cloud-input" value={form.dport} onChange={e => setForm({ ...form, dport: e.target.value })} placeholder="22" /></CloudField>
+                                <CloudField label={fwIcmpTypes(form.proto) ? t('fwIcmpType') : (t('cloud.colPort') || 'Dest port')}>
+                                    <input className="cloud-input" value={form.dport} onChange={e => setForm({ ...form, dport: e.target.value })}
+                                        placeholder={fwIcmpTypes(form.proto) ? t('fwIcmpTypePlaceholder') : '22'} list={fwIcmpTypes(form.proto) ? 'cloud-fw-icmp-types' : undefined} />
+                                    <FwIcmpTypeHint proto={form.proto} dport={form.dport.trim()} listId="cloud-fw-icmp-types" />
+                                </CloudField>
                             </div>
                             <div style={{ display: 'flex', gap: 10 }}>
                                 <CloudField label={t('cloud.colSource') || 'Source'}><input className="cloud-input" value={form.source} onChange={e => setForm({ ...form, source: e.target.value })} placeholder="0.0.0.0/0" /></CloudField>
@@ -1809,14 +1825,13 @@
                 if (!vForm.vnet.trim() || !vForm.zone) return;
                 mut.run('addvnet', 'POST', `${base}/vnets`, { vnet: vForm.vnet.trim(), zone: vForm.zone }); setModal(null); setVForm({ vnet: '', zone: '' });
             };
-            const [sForm, setSForm] = React.useState({ vnet: '', subnet: '', gateway: '', dhcp: 'none', snat: false });
+            const [sForm, setSForm] = React.useState({ vnet: '', subnet: '', gateway: '', snat: false });
             const submitSubnet = () => {
                 if (!clusterId) { window.alert(t('cloud.noClusterSel') || 'No cluster selected.'); return; }
                 if (!sForm.vnet || !sForm.subnet.trim()) return;
                 const body = { subnet: sForm.subnet.trim(), snat: sForm.snat ? 1 : 0 };
                 if (sForm.gateway.trim()) body.gateway = sForm.gateway.trim();
-                if (sForm.dhcp && sForm.dhcp !== 'none') body.dhcp = sForm.dhcp;
-                mut.run('addsubnet', 'POST', `${base}/vnets/${sForm.vnet}/subnets`, body); setModal(null); setSForm({ vnet: '', subnet: '', gateway: '', dhcp: 'none', snat: false });
+                mut.run('addsubnet', 'POST', `${base}/vnets/${sForm.vnet}/subnets`, body); setModal(null); setSForm({ vnet: '', subnet: '', gateway: '', snat: false });
             };
             const kpis = [
                 { icon: 'Globe', value: zones.length, label: t('cloud.sdnZones') || 'Zones', accent: '#6366f1' },
@@ -1895,10 +1910,9 @@
                         <CloudModal title={t('cloud.addSubnet') || 'Add subnet'} onClose={() => setModal(null)} onSubmit={submitSubnet} submitLabel={t('create') || 'Create'} t={t}>
                             <CloudField label={t('cloud.sdnVnet') || 'VNet'}><select className="cloud-input" value={sForm.vnet} onChange={e => setSForm({ ...sForm, vnet: e.target.value })}><option value="">—</option>{vnets.map(v => <option key={v.vnet} value={v.vnet}>{v.vnet}</option>)}</select></CloudField>
                             <CloudField label={'CIDR'}><input className="cloud-input" value={sForm.subnet} onChange={e => setSForm({ ...sForm, subnet: e.target.value })} placeholder="10.0.10.0/24" /></CloudField>
-                            <div style={{ display: 'flex', gap: 10 }}>
-                                <CloudField label={t('cloud.colGateway') || 'Gateway'}><input className="cloud-input" value={sForm.gateway} onChange={e => setSForm({ ...sForm, gateway: e.target.value })} placeholder="10.0.10.1" /></CloudField>
-                                <CloudField label={'DHCP'}><select className="cloud-input" value={sForm.dhcp} onChange={e => setSForm({ ...sForm, dhcp: e.target.value })}>{['none', 'dnsmasq'].map(x => <option key={x} value={x}>{x}</option>)}</select></CloudField>
-                            </div>
+                            {/* JB Nov 2026 - no DHCP pick here: a PVE subnet has no dhcp property (dhcp=dnsmasq is the
+                                zone's) and refused the create with it; its range is dhcp-range */}
+                            <CloudField label={t('cloud.colGateway') || 'Gateway'}><input className="cloud-input" value={sForm.gateway} onChange={e => setSForm({ ...sForm, gateway: e.target.value })} placeholder="10.0.10.1" /></CloudField>
                             <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '.85rem', color: 'var(--cloud-text-secondary)' }}><input type="checkbox" checked={sForm.snat} onChange={e => setSForm({ ...sForm, snat: e.target.checked })} /> SNAT</label>
                         </CloudModal>
                     )}

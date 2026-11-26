@@ -200,6 +200,13 @@ def xhm_start():
         return jsonify({'error': 'Source cluster not found'}), 404
     if not tgt_mgr:
         return jsonify({'error': 'Target cluster not found'}), 404
+    # MK Nov 2026 - both ends write, and a run must not start where the federation's
+    # lease is missing: its writes would be refused at the exit half way
+    from pegaprox.api.federation import refuse_unleased
+    for _cid in (data['source_cluster'], data['target_cluster']):
+        refused = refuse_unleased(_cid, f'cluster {_cid}')
+        if refused:
+            return refused
 
     src_type = getattr(src_mgr, 'cluster_type', 'proxmox')
     tgt_type = getattr(tgt_mgr, 'cluster_type', 'proxmox')

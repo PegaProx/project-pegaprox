@@ -126,6 +126,10 @@ AES_KEY_FILE = os.path.join(CONFIG_DIR, '.pegaprox_aes256.key')
 KNOWN_HOSTS_FILE = os.path.join(CONFIG_DIR, '.ssh_known_hosts')
 # held by the one process that runs on this config directory (lock_config_dir)
 LOCK_FILE = os.path.join(CONFIG_DIR, '.pegaprox.lock')
+# MK Nov 2026 - the byte of LOCK_FILE Windows locks (_lock_config_dir_msvcrt): 1 GiB in, far
+# past the end of the file, so backup tools still read all of it. SQLite locks its
+# PENDING_BYTE there for the same reason. migrate_db._RUNNING_LOCK_BYTE is the same number
+CONFIG_LOCK_BYTE = 1 << 30
 # Lies next to the state file while this instance is in a group, and the database holds
 # the same fact as a local setting, so a restored database carries it along. With the
 # state file gone, either one keeps the instance passive (_load, check_markers_at_boot).
@@ -359,6 +363,9 @@ SYNC_TABLES = (
     # VM blueprints: a library image or a PVE template plus hardware and Cloud-Init, and
     # the template each cluster deploys one from (#1220)
     'vm_blueprints', 'blueprint_templates',
+    # which tenant and role of this instance a federation member's tenants and roles map
+    # onto: the group is one member, and a promoted standby keeps the admin's mapping
+    'federation_identity_map',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
@@ -376,6 +383,9 @@ LOCAL_TABLES = (
     'ha_change_journal', 'ha_cv_dirty',
     # the parts of this host's metrics snapshots and the guest rosters they share
     'metrics_part', 'metrics_roster',
+    # what this host last pulled from which federation member: a promoted standby pulls
+    # everything once, and an unchanged row writes nothing
+    'federation_sync_state',
 )
 
 # server_settings keys that describe this host, not the deployment
@@ -2600,6 +2610,12 @@ def accept_pairing(code_secret, standby_id, standby_url, standby_fp, standby_pub
     The standby sends its public key. Up to MAX_MEMBERS - 1 standbys; an instance
     that is a member already takes its old place again (it unpaired while we could
     not be told), and one we removed comes back with the new key it pairs with."""
+    st = _load()
+    if st['role'] != ROLE_STANDBY and not int(st.get('epoch') or 0):
+        # a standalone forms its group at epoch 1 and stays the acting host: no promotion
+        # for the federation's leases. Said before the lock, which the lease clock takes
+        # under the federation's own
+        _federation_epoch_kept(0, 1)
     with _lock:
         st = _load()
         if not pairing_code_ok(code_secret):
@@ -2859,6 +2875,13 @@ def unpair(said=(), leader_agreed=False):
     and the note about the broken file goes with it. Raises AutoMode where the group
     fails over automatically (unpair_refusal).
     """
+    st = _load()
+    if (st['role'] == ROLE_ACTIVE and int(st.get('epoch') or 0)
+            and not unpair_refusal(st, said=said, leader_agreed=leader_agreed)):
+        # the active stays the acting host, standalone at epoch 0: no promotion for the
+        # federation's leases either (said before the lock, as in accept_pairing; not for
+        # an unpair that is refused)
+        _federation_epoch_kept(int(st['epoch']), 0)
     with _lock:
         st = _load()
         why = unpair_refusal(st, said=said, leader_agreed=leader_agreed)
@@ -2882,6 +2905,8 @@ def unpair(said=(), leader_agreed=False):
     # now, not at the next boot: the route restarts only a former standby
     _note_member_in_db('')
     _drop_recovery_locks(st['instance_id'])
+    if was == ROLE_STANDBY:
+        _federation_left_group()
     return was
 
 
@@ -3426,15 +3451,17 @@ def lock_config_dir(path=None):
     """F1: hold an exclusive flock on LOCK_FILE for as long as this process runs. Two
     processes on one config directory share the database, the state file and the
     instance id, and both act. The descriptor is close-on-exec, so an execv restart
-    lets go of it and the new image takes it again.
+    lets go of it and the new image takes it again. Windows has no flock, there the
+    same file is locked with msvcrt (_lock_config_dir_msvcrt).
 
-    Raises HaError when another process holds it. Without flock (no fcntl, a
-    filesystem that has no locks) it warns and goes on; returns the descriptor or None."""
+    Raises HaError when another process holds it. On a filesystem that has no locks it
+    warns and goes on, without fcntl and msvcrt both it goes on as well; returns the
+    descriptor or None."""
     path = path or LOCK_FILE
     try:
         import fcntl
     except ImportError:
-        return None
+        return _lock_config_dir_msvcrt(path)
     try:
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     except OSError as e:
@@ -3461,6 +3488,56 @@ def lock_config_dir(path=None):
         pass
     _config_lock['fd'] = fd
     return fd
+
+
+# MK Nov 2026 - lock_config_dir returned None on Windows, so a second PegaProx, or a
+# --migrate-db next to the running one, shared no lock with it and ran anyway. Windows
+# locks one byte of the same file, as dbcrypto locks a conversion. A locked byte is closed
+# to every other handle there, reads too: with byte 0 robocopy, Explorer and zip could not
+# copy the file while PegaProx ran (robocopy retries for days). The byte is CONFIG_LOCK_BYTE,
+# past the end of the file, and the pid is at the start as with flock.
+def _lock_config_dir_msvcrt(path):
+    try:
+        import msvcrt
+    except ImportError:
+        return None
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_BINARY', 0), 0o600)
+    except OSError as e:
+        logging.warning(f"[HA] cannot open {path} ({e}) - running without the config directory lock")
+        return None
+    from pegaprox.core import dbcrypto
+    try:
+        dbcrypto._lock_first_byte(msvcrt, fd, path, wait=False, at=CONFIG_LOCK_BYTE)
+    except BlockingIOError:
+        holder = _pid_at_start(fd)
+        os.close(fd)
+        who = f'process {holder}' if holder.isdigit() else 'process'
+        raise HaError(f'Another PegaProx {who} runs on {os.path.dirname(os.path.abspath(path))} '
+                      '- one config directory takes one process')
+    except OSError as e:
+        os.close(fd)
+        logging.warning(f"[HA] cannot lock {path} ({e}) - running without the config directory lock")
+        return None
+    try:
+        os.ftruncate(fd, 0)
+        # back from the locked byte first, a write there would make the file 1 GiB long
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, f'{os.getpid()}\n'.encode())
+    except OSError:
+        pass
+    _config_lock['fd'] = fd
+    return fd
+
+
+def _pid_at_start(fd):
+    """The pid a Windows holder wrote at the start of the file, '' when there is none
+    (Windows has no os.pread)."""
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        return os.read(fd, 16).decode(errors='replace').strip()
+    except OSError:
+        return ''
 
 
 # --- snapshot ------------------------------------------------------------------
@@ -7411,6 +7488,9 @@ AUTO_REPAIR_ERROR = ('This instance holds a vote in a group that fails over auto
                      'pairing it again would take that vote and leave too few. Switch '
                      'automatic failover off on the leader first')
 AUTO_PENDING_ERROR = 'A switch to automatic failover is under way - try again once it is through'
+FED_UNPAIR_ERROR = ('This group is a member of a federation, and its standbys keep the federation '
+                    'identity: unpaired, this instance and the group would both act as that one '
+                    'member. Remove or unpair the standbys first')
 NO_LEASE_ERROR = ('No leader at the moment - changes and automation are paused until the '
                   'group has one again')
 # for a caller nobody has checked: nothing about who leads, or for how long not
@@ -7623,20 +7703,39 @@ def unpair_refusal(st=None, said=(), leader_agreed=False):
     which takes it out of the voter config first (unpair_needs_leader,
     leave_through_leader; then `leader_agreed`); the leader itself hands its lead on
     first. Nor does a member whose way out is Force leader (way_out_refusal, `said` as
-    there)."""
+    there).
+
+    MK Nov 2026 - nor an active that still has standbys while the federation runs
+    (FED_UNPAIR_ERROR, after the reasons above): they keep the group's federation
+    identity, which only a standby that leaves drops. Removing a standby from the active
+    stays open."""
     st = st or _load()
-    if (not ha_vote.AUTO_MODE_SHIPPED or st.get('broken') or st.get('removed')
-            or st['role'] == ROLE_STANDALONE):
+    if st.get('broken') or st.get('removed') or st['role'] == ROLE_STANDALONE:
         return ''
-    rec = st.get('lease')
-    held = rec.get('mode') if isinstance(rec, dict) else None
-    if held == ha_vote.MODE_AUTO or _lease_mode(st):
-        if st['role'] == ROLE_STANDBY and (st.get('group_mode') == ha_vote.MODE_MANUAL or leader_agreed):
-            return ''
-        return AUTO_LEAVE_LEADER_ERROR if st.get('leader') else AUTO_UNPAIR_ERROR
-    if held == ha_vote.MODE_PENDING and st['role'] == ROLE_ACTIVE:
-        return AUTO_PENDING_ERROR
-    return way_out_refusal(st, said)
+    if ha_vote.AUTO_MODE_SHIPPED:
+        rec = st.get('lease')
+        held = rec.get('mode') if isinstance(rec, dict) else None
+        if held == ha_vote.MODE_AUTO or _lease_mode(st):
+            if st['role'] == ROLE_STANDBY and (st.get('group_mode') == ha_vote.MODE_MANUAL
+                                               or leader_agreed):
+                return ''
+            return AUTO_LEAVE_LEADER_ERROR if st.get('leader') else AUTO_UNPAIR_ERROR
+        if held == ha_vote.MODE_PENDING and st['role'] == ROLE_ACTIVE:
+            return AUTO_PENDING_ERROR
+        why = way_out_refusal(st, said)
+        if why:
+            return why
+    return FED_UNPAIR_ERROR if _federation_keeps_group(st) else ''
+
+
+def _federation_keeps_group(st):
+    """An active with standbys while the federation is switched on, or while its view
+    still lists other members with the switch forced off (PEGAPROX_FEDERATION=0 on a
+    member): unpaired, it would act as the federation member its standbys still are."""
+    if st['role'] != ROLE_ACTIVE or not st.get('members'):
+        return False
+    from pegaprox.core import federation
+    return federation.enabled() or federation.view_has_members()
 
 
 def unpair_needs_leader(st=None):
@@ -12850,6 +12949,18 @@ def _in_request():
     return bool(_request_method())
 
 
+def in_read_request():
+    """True in a GET or HEAD this thread serves, or a fan-out of one. The federation's exit
+    guard lets SSH commands pass there, as guard() does."""
+    return _request_method() in _READ_METHODS
+
+
+def reading_now():
+    """True inside `with reading()` in this thread: the READ_SITES inventory serves the
+    federation's exit guard as well."""
+    return bool(getattr(_guard_tls, 'reading', 0))
+
+
 def _refusals():
     """The list a refusal at an exit goes into for the request this thread serves: the
     one carry() handed a fan-out of it, or the request's own. None outside a request."""
@@ -12969,7 +13080,8 @@ def carry(fn):
     A refusal in fn is noted for that request too. Once fn is done the worker has what
     it had before, so nothing fn confirmed serves its next task. fn itself where the
     lease is not in force."""
-    if not guard_on():
+    fed_refused = _federation_refusals()
+    if not guard_on() and fed_refused is None:
         return fn
     ctx = ([_request_method()] + [getattr(_guard_tls, k, d) for k, d in _CARRIED[1:-1]]
            + [_refusals()])
@@ -12979,12 +13091,65 @@ def carry(fn):
         saved = [getattr(_guard_tls, k, d) for k, d in _CARRIED]
         for (k, _d), v in zip(_CARRIED, ctx):
             setattr(_guard_tls, k, v)
+        fed_saved = _bind_federation_refusals(fed_refused) if fed_refused is not None else None
         try:
             return fn(*args, **kwargs)
         finally:
             for (k, _d), v in zip(_CARRIED, saved):
                 setattr(_guard_tls, k, v)
+            if fed_refused is not None:
+                _bind_federation_refusals(fed_saved)
     return run
+
+
+def _federation_refusals():
+    """Where the federation's exit guard notes a refusal for the request this thread
+    serves, so a fan-out notes it there too; None while the federation is off or outside
+    a request."""
+    try:
+        from pegaprox.core import federation
+        if not federation.enabled():
+            return None
+        return federation._refusal_list()
+    except Exception:
+        return None
+
+
+def _bind_federation_refusals(said):
+    from pegaprox.core import federation
+    return federation.bind_refusals(said)
+
+
+def _federation_epoch_kept(old, new):
+    """MK Nov 2026 - the epoch of this host is about to move while it stays the acting one
+    (it takes its first standby, or leaves its group as the active). The federation's
+    lease clock takes an epoch change for a promotion and holds every vote for 35 s unless
+    it hears this first. Called outside _lock: the lease clock reads the epoch under the
+    federation's lock. A notice for a move that then does not happen counts for nothing,
+    it matches that one move only. Never raises: without it the federation only holds
+    once more."""
+    try:
+        from pegaprox.core import federation
+        if not federation.enabled():
+            return
+        from pegaprox.core import federation_lease
+        federation_lease.note_epoch_kept(old, new)
+    except Exception as e:
+        logging.warning(f"[HA] could not tell the federation that this host stays acting: {e}")
+
+
+def _federation_left_group():
+    """MK Nov 2026 - a standby held its active's federation identity through the sync.
+    Standalone it would act as that same member next to the active, so what it inherited
+    goes (federation.forget_inherited). With the switch off as well: switched on later,
+    the identity would make it that member all the same. Never raises; a failure is
+    logged loudly."""
+    try:
+        from pegaprox.core import federation
+        federation.forget_inherited('this host left its HA group as a standby')
+    except Exception as e:
+        logging.error(f"[HA] the federation identity this former standby holds could not be "
+                      f"dropped - switch the federation off on it before it acts: {e}")
 
 
 def as_job(fn, what):

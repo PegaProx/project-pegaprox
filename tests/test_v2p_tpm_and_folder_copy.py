@@ -9,8 +9,9 @@
 # the storage does not list for the VMID, never frees or takes over a volume it did not make,
 # and the fixes work on the volume disk 0 was really copied to.
 #
-# The folder copies. Offline Copy, Live Mirror and Snapshot-Iterative copy the disk files of
-# the boot disk's folder. A disk on another datastore or in another folder was not there and
+# The folder copies. Offline Copy and Live Mirror copy the disk files of
+# the boot disk's folder (Snapshot-Iterative did too until it moved onto the live clone).
+# A disk on another datastore or in another folder was not there and
 # the guest came up without it; a VM running on its own snapshot (<disk>-000001.vmdk) got the
 # state its disk had before that snapshot. Those runs now stop before anything is touched and
 # point to Live Clone, which reads every disk from its own file. Auto stops only when its
@@ -98,8 +99,10 @@ class Clock:
 class Esxi:
     """The ESXi API side: power state, snapshots, the VM's disks."""
 
-    def __init__(self, log, disks, power='POWERED_ON', firmware='efi', tpm=True, clone_snap_fails=False):
+    def __init__(self, log, disks, power='POWERED_ON', firmware='efi', tpm=True, clone_snap_fails=False,
+                 tracking=False):
         self.log = log
+        self.tracking = tracking   # change tracking of the VM, Snapshot-Iterative switches it on
         self.host = 'esx1.lab'
         self.ssl_verify = False
         self.power = power
@@ -166,6 +169,28 @@ class Esxi:
     def delete_vm(self, vm_id):
         self.log.append(('esxi_api', 'delete_vm'))
         return {'data': 'ok'}
+
+    # change tracking, for Snapshot-Iterative: one 64 KiB area written at the start of each disk
+    def change_tracking_state(self, vm_id):
+        return {'data': {'supported': True, 'enabled': self.tracking,
+                         'disks': {d['key']: {'file': d['vmdk_file'], 'mode': 'persistent', 'raw': False}
+                                   for d in self.disks}}}
+
+    def set_change_tracking(self, vm_id, enabled):
+        self.log.append(('esxi_api', 'tracking', enabled))
+        self.tracking = enabled
+        return {'data': 'ok'}
+
+    def snapshot_disk_state(self, vm_id, name):
+        return {'data': {d['key']: {'file': d['vmdk_file'], 'change_id': f'52 aa/{self._n}'}
+                         for d in self.disks}}
+
+    def changed_disk_areas(self, vm_id, key, change_id, capacity, snapshot_name=None):
+        self.log.append(('esxi_api', 'changed_areas', key, change_id, snapshot_name, self.power))
+        return {'data': [(0, 64 * 1024)]}
+
+    def shutdown_guest(self, vm_id):
+        return {'error': 'the guest tools are not running'}
 
 
 class _Resp:
@@ -238,13 +263,19 @@ class Node:
         self.copied_from = {}   # target device path -> source flat basename
         self.freed = []
         self._n = 0
+        self.runs = ''
 
     def __call__(self, mgr, node, cmd, timeout=600, **kw):
         self.log.append(('node', node, cmd))
         m = re.match(r"umask 077; f=\$\(mktemp (/tmp/v2p-[a-z0-9-]+-)XXXXXXXXXX\)", cmd)
         if m:
             self._n += 1
+            if kw.get('stdin_data') is not None:
+                self.runs = kw['stdin_data']   # a list of areas to copy
             return 0, f"{m.group(1)}{self._n:010d}\n", ''
+        if 'bash /tmp/v2p-runs-' in cmd:
+            # the copy of written areas: every run arrives and matches on both sides
+            return 0, f"RUNS_MATCH {len(self.runs.splitlines())}\n", ''
         if 'command -v sshfs' in cmd:
             return 0, 'PRESENT\n', ''
         if 'df --output=avail' in cmd:
@@ -562,8 +593,6 @@ def test_an_alloc_answer_naming_another_volume_is_not_taken(monkeypatch):
                                 dict(mode='sshfs_boot', ndisks=2, ssh_key='/tmp/v2p-key-fixed')],
                          ids=lambda kw: kw['mode'])
 def test_a_migration_with_tpm_leaves_the_tpm_state_alone(monkeypatch, kw):
-    if kw['mode'] == 'snapshot_zero':
-        monkeypatch.setattr(v2p, '_snapshot_zero_v2p_delta_loop', lambda *a, **k: (True, 1, []))
     r = Run(monkeypatch, **kw).go()
     assert r.task.status == 'completed', r.task.error
     tpm = f'local-lvm:vm-{VMID}-disk-0'
@@ -620,7 +649,7 @@ def _nothing_touched(r):
     assert not [e for e in r.log if e[:2] in (('esxi_api', 'power'), ('esxi_api', 'snapshot'))]
 
 
-@pytest.mark.parametrize('mode', ['offline', 'sshfs_boot', 'snapshot_zero'])
+@pytest.mark.parametrize('mode', ['offline', 'sshfs_boot'])
 def test_a_folder_copy_that_would_leave_a_disk_out_is_refused_before_anything(monkeypatch, mode):
     r = _elsewhere(Run(monkeypatch, mode=mode)).go()
     assert r.task.status == 'failed'
@@ -732,5 +761,5 @@ def test_the_esxi_reader_reports_which_disk_runs_on_a_delta():
 def test_auto_says_its_vm_stays_and_the_folder_modes_say_nothing_was_touched():
     auto = v2p.folder_copy_refusal('auto', 'x')
     assert 'Proxmox VM of this run stays' in auto and 'not touched' not in auto
-    for mode in ('offline', 'sshfs_boot', 'snapshot_zero'):
+    for mode in ('offline', 'sshfs_boot'):
         assert 'the source VM was not touched' in v2p.folder_copy_refusal(mode, 'x')

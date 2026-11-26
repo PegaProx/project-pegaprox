@@ -192,37 +192,73 @@ posture for high-entropy raw keys.
 
 PegaProx 0.9.9.3+ **auto-encrypts on first boot** when:
 
-- `sqlcipher3` is importable (Linux x86_64 default), **and**
+- `sqlcipher3` is importable (see the platform matrix above), **and**
 - the master key resolves to a usable tier, **and**
 - the existing DB is in the `plain` state.
 
 The same four-step process runs in-process during startup, gated by an
-on-disk lock file (`<db>.migration.lock`, `flock(2)`) so a systemd
-restart-storm cannot double-migrate. Boot output:
+on-disk lock file (`<db>.migration.lock`, `flock(2)`, on Windows a lock on
+its first byte with `msvcrt.locking`) so a systemd restart-storm cannot
+double-migrate. Boot output:
 
 ```
-✓ DB auto-encrypted (8121 rows, 8.7s)
+✓ pegaprox.db auto-encrypted (8121 rows, 8.7s)
   backup: config/pegaprox.db.plain.bak.1778613855
 ```
 
-The plain backup is kept for a short rollback window only: every start
-shreds (overwrites, then deletes) plaintext backups older than one hour.
-Set `PEGAPROX_PLAIN_BACKUP_RETENTION_S` to change the window (`0` shreds
-them on the next start). Take your own copy of it first if you want a
-longer way back.
+The plain backup is kept for a short rollback window only. The copy is
+dated by the conversion, and the first start after the window shreds
+(overwrites, then deletes) it; the window is one hour by default. Set
+`PEGAPROX_PLAIN_BACKUP_RETENTION_S` to change it (`0` shreds the copy at the
+next start). A PegaProx that keeps running keeps the copy until its next
+start, so take your own copy of it if you want a longer way back, and
+treat that copy like the database itself.
+
+### Disk space, and a conversion that fails
+
+The conversion writes a plain copy and an encrypted copy of each database
+next to it. Plan for free space of about twice the size of `pegaprox.db`
+and `syslog.db` together.
+
+If the conversion fails on its way (a full disk, any OS or SQLite error),
+nothing is changed: the database is still the plain file it was, the
+failed attempt removes its encrypted copy (`<db>.encrypted.new`) and its
+plain copy, and PegaProx starts on the plain database as with the opt-out
+below. The log has one error, `[DBCRYPTO] could not encrypt <db> (...)`,
+with the cause; for a full disk it says how much space the conversion
+needs and how much is free. The next start tries again. A master key the
+key store refuses (a key file with loose permissions, one that cannot be
+read) is not such a failure: the start stops, and the message names the
+file and what is wrong with it (for loose permissions, the mode it needs).
+
+The conversion needs the database to itself. If another process has it
+open at the start (a sqlite3 shell, a backup job), or its `-wal` and
+`-shm` files cannot be written by the service user, the conversion fails
+the same way, with that as the cause, before anything is copied. A
+database file the service user cannot read at all, or a plain one that
+cannot be opened because the disk is full, stops the start with that
+reason; neither is reported as a wrong key or a damaged file.
 
 ### Opt-out
 
 Set `PEGAPROX_DISABLE_AUTO_ENCRYPT=1` in the service environment to skip
-the auto-encrypt step on boot. Useful for: taking your own backup first,
-running custom pre-flight checks, or staying on plain SQLite for a
-debugging window. With opt-out enabled, the field-level AES-256-GCM
-encryption still applies and you can run the manual CLI tool whenever
-you're ready.
+the auto-encrypt step on boot. A plain database then stays plain SQLite
+and PegaProx opens it without the key, at every start. A database that is
+already encrypted keeps opening with its key (one that does not open it
+still stops the start), and a database that does not exist yet is created
+encrypted as usual. Useful for: taking your own backup first, running
+custom pre-flight checks, or staying on plain SQLite for a debugging
+window. With opt-out enabled, the field-level AES-256-GCM encryption still
+applies and you can run the manual CLI tool whenever you're ready, with
+PegaProx stopped. A plain copy left by an earlier conversion is still
+shredded by the first start after its window.
 
 ### Manual / explicit path
 
-The `--migrate-db` CLI remains as the explicit / manual control:
+The `--migrate-db` CLI remains as the explicit / manual control. It works
+on a stopped PegaProx only: it refuses (exit code 7, nothing changed)
+while a PegaProx holds the lock of the config directory, and while any
+other process has the database open.
 
 ### Pre-flight
 
@@ -249,20 +285,23 @@ sudo -u pegaprox python3 pegaprox_multi_cluster.py --migrate-db --yes
 
 The four-step process:
 
-1. **Backup** - `config/pegaprox.db` → `config/pegaprox.db.plain.bak.<timestamp>`
-2. **Encrypt** - new file `config/pegaprox.db.enc` built via SQLite's
-   `ATTACH … KEY … AS encrypted; SELECT sqlcipher_export('encrypted');`
+1. **Backup** - `config/pegaprox.db` → `config/pegaprox.db.plain.bak.<timestamp>`,
+   mode 0600 and dated now
+2. **Encrypt** - new file `config/pegaprox.db.encrypted.new`, opened with the
+   key, the plain DB attached with an empty key and copied over with
+   `SELECT sqlcipher_export('main', 'plaintext');`
 3. **Verify** - every table's row count is compared between the plain
    backup and the encrypted target. Any mismatch aborts the migration
    *before* the swap.
-4. **Atomic swap** - `os.replace(pegaprox.db.enc, pegaprox.db)`. POSIX
+4. **Atomic swap** - `os.replace(pegaprox.db.encrypted.new, pegaprox.db)`. POSIX
    `rename(2)` is atomic on the same filesystem.
 
 The `.plain.bak.<timestamp>` file holds every stored credential in the
-clear, so it is not kept: the first start after the retention window
-(default one hour, `PEGAPROX_PLAIN_BACKUP_RETENTION_S`) shreds it. If you
-want it as a way back until you have checked the encrypted DB, copy it
-somewhere safe right after the migration and delete that copy yourself.
+clear, so it is not kept: the first start of PegaProx after the retention
+window (default one hour from the migration, `PEGAPROX_PLAIN_BACKUP_RETENTION_S`)
+shreds it. If you want it as a way back until you have checked the
+encrypted DB, copy it somewhere safe right after the migration and delete
+that copy yourself.
 
 ### Exit codes
 
@@ -273,6 +312,8 @@ somewhere safe right after the migration and delete that copy yourself.
 | 3 | Existing DB already encrypted with a **different** key (refuses to clobber) |
 | 4 | Source DB is corrupt - repair before retrying |
 | 5 | Row-count verification failed - encrypted DB *not* swapped in |
+| 6 | The DB is encrypted and the master key cannot be used (a key file with loose permissions, one that cannot be read) - the message names the file and what it needs |
+| 7 | Nothing was changed: PegaProx is running on the config directory, another process has the database open or wrote to it during the run, or the database cannot be opened here (no permission, a full disk) - the message says which |
 
 ---
 
@@ -297,8 +338,11 @@ nothing against backup theft.
 
 ### Lost master key, encrypted DB
 
-There is no path back. Restore from the most recent `.plain.bak.*`
-emitted by the migrator, or from a pre-migration full backup.
+There is no path back to the encrypted DB. A `.plain.bak.*` copy from the
+migration is a way back only while it exists: the first start after its
+retention window (one hour from the migration by default) shreds it, so
+this works within that window, or with a copy of it you took right after
+the migration. Otherwise restore a pre-migration full backup.
 
 ### Corrupted SQLCipher DB
 

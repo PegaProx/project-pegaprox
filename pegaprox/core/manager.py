@@ -16,6 +16,7 @@ import hashlib
 import ipaddress
 import subprocess
 import re
+import html
 import shlex
 from pegaprox.utils.ssh_security import cli_hostkey_opts  # secure host-key opts for subprocess ssh/scp
 from pegaprox.utils.sanitization import validate_snapshot_name, validate_hostname, validate_ssh_user, redact_secrets
@@ -46,6 +47,11 @@ class _NoHostnameCheckAdapter(HTTPAdapter):
         return super().init_poolmanager(*args, **kwargs)
 
 
+class LoginNotTaken(Exception):
+    """A password login PVE answered with neither a ticket nor a no (a 5xx while pveproxy
+    restarts): nothing to remember as refused."""
+
+
 class RedirectRefused(requests.exceptions.RequestException):
     """A Proxmox VE API answered with a redirect, which PegaProx does not follow."""
 
@@ -74,6 +80,218 @@ def _refuse_redirects(session):
         return resp
     session.request = no_redirects
     return session
+
+
+def _password_login(mgr, usr, pwd, what):
+    """A session of its own with a fresh password ticket of `usr` and its CSRF token, at
+    mgr.host. (session, None, 200), or (None, why, status) when PVE said no: a refused
+    login (401) or a partial ticket of a two-factor account. A login that got no such
+    answer raises, LoginNotTaken for another status. The caller closes the session."""
+    s = None
+    try:
+        s = requests.Session()
+        s.trust_env = False
+        _pool_kw = dict(pool_connections=2, pool_maxsize=4, pool_block=False, max_retries=0)
+        if mgr._ssl_verify:
+            _ca = ssl.get_default_verify_paths()
+            s.verify = _ca.cafile or _ca.openssl_cafile or True
+            s.mount('https://', HTTPAdapter(**_pool_kw))
+        else:
+            s.verify = False
+            s.mount('https://', _NoHostnameCheckAdapter(**_pool_kw))
+        # MK Nov 2026 - the same path check as the cached session, this one is a password login
+        from pegaprox.utils.sanitization import refuse_climbing_paths
+        refuse_climbing_paths(s)
+        _refuse_redirects(s)
+        ha_transport.guard_session(s, cluster_id=getattr(mgr, 'id', None))
+        # mgr.host is already IPv6-bracketed by the property, use it directly.
+        login_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/access/ticket"
+        # failed over to a node with a root password of its own: that one (#1136)
+        if node_creds.secrets_of(getattr(mgr, 'id', None)):
+            pwd = mgr.api_password_for(mgr.host) or pwd
+        resp = s.post(login_url, data={'username': usr, 'password': pwd}, timeout=10)
+        if resp.status_code != 200:
+            try: s.close()
+            except Exception: pass
+            said = f'{usr} password authentication failed (HTTP {resp.status_code})'
+            if resp.status_code == 401:
+                return None, said, 401
+            raise LoginNotTaken(said)
+        data = resp.json()['data']
+        if data.get('NeedTFA'):
+            try: s.close()
+            except Exception: pass
+            return None, (f'{usr} has two-factor authentication enabled, so a password '
+                          f'login cannot open the session Proxmox wants for {what}.'), 200
+        s.cookies.set('PVEAuthCookie', data['ticket'])
+        s.headers.update({'CSRFPreventionToken': data['CSRFPreventionToken']})
+        return s, None, 200
+    except BaseException:
+        if s is not None:
+            try: s.close()
+            except Exception: pass
+        raise
+
+
+# MK Nov 2026 - PVE 9.3 has a datacenter API token policy (datacenter.cfg 'token-policy'): it
+# can want an expire on every new token, cap its lifetime and want privilege separation, and
+# refuses a token that does not fit with a 500. PVE checks it against its own clock. GET
+# /cluster/options hands it out without Sys.Audit too; older PVE has no such key, and a
+# policy that cannot be read leaves our tokens as they were.
+TOKEN_POLICY_KEYS = ('require-expiry', 'max-lifetime', 'disallow-expiry-extension',
+                     'default-to-max-lifetime', 'allow-extension-on-regenerate',
+                     'require-privilege-separation')
+# an expire goes this far below the longest one the policy allows: our idea of PVE's clock
+# comes from a Date header, to the second
+TOKEN_EXPIRE_MARGIN = 120
+# the management token under a policy that wants an expire and names no lifetime
+MANAGEMENT_TOKEN_LIFETIME = 365 * 86400
+_MANAGEMENT_TOKEN_RE = re.compile(r'pegaprox_[0-9]{6}')
+_POLICY_WORDS = {'true': 1, 'yes': 1, 'on': 1, 'false': 0, 'no': 0, 'off': 0}
+
+
+def token_policy_of(resp):
+    """(policy, seconds PVE's clock runs ahead of ours) from an answer of GET
+    /cluster/options. The policy holds the keys PVE set, as numbers, {} for none."""
+    data = (resp.json() or {}).get('data')
+    raw = data.get('token-policy') if isinstance(data, dict) else None
+    if isinstance(raw, str):
+        raw = dict(part.split('=', 1) for part in raw.split(',') if '=' in part)
+    policy = {}
+    for key, value in (raw.items() if isinstance(raw, dict) else ()):
+        key = str(key).strip()
+        if isinstance(value, str):
+            value = _POLICY_WORDS.get(value.strip().lower(), value)
+        try:
+            if key in TOKEN_POLICY_KEYS:
+                policy[key] = int(value)
+        except (TypeError, ValueError):
+            pass
+    ahead = 0.0
+    try:
+        from email.utils import parsedate_to_datetime
+        ahead = parsedate_to_datetime(resp.headers['Date']).timestamp() - time.time()
+    except Exception:
+        pass
+    return policy, ahead
+
+
+def policy_expire(policy, ahead, wanted):
+    """`wanted` (an expire in seconds since the epoch, 0 for none) as `policy` lets a new
+    token have it: no later than its max-lifetime from now on PVE's clock."""
+    life = policy.get('max-lifetime') or 0
+    if life <= 0:
+        return int(wanted or 0)
+    latest = int(time.time() + ahead) + life - min(TOKEN_EXPIRE_MARGIN, life // 10)
+    return min(int(wanted), latest) if wanted else latest
+
+
+def management_token_expire(policy, ahead):
+    """The expire of the cluster's management token under `policy`: the longest lifetime
+    it allows, a year where it wants an expire and names no lifetime, else 0 (none)."""
+    expire = policy_expire(policy, ahead, 0)
+    if not expire and policy.get('require-expiry'):
+        expire = int(time.time() + ahead) + MANAGEMENT_TOKEN_LIFETIME
+    return expire
+
+
+def management_token_form(policy, ahead):
+    """The form the cluster's management token is made with (#110): the rights of the
+    account, an expire only where the policy wants one. None under a policy that wants
+    privilege separation, which leaves such a token without a single right."""
+    if policy.get('require-privilege-separation'):
+        return None
+    return {'privsep': '0', 'expire': str(management_token_expire(policy, ahead)),
+            'comment': 'PegaProx management token'}
+
+
+def _new_management_token_name():
+    import random, string
+    return 'pegaprox_' + ''.join(random.choices(string.digits, k=6))
+
+
+def _token_url(mgr, token_name):
+    """The URL of the API token `token_name` of the account of `mgr`'s cluster."""
+    from urllib.parse import quote
+    return (f"https://{mgr.host}:{mgr.api_port}/api2/json/access/users/"
+            f"{quote(mgr._token_owner(), safe='@')}/token/{quote(token_name, safe='')}")
+
+
+def _alert_out(alert, what):
+    """`alert` on both paths every other alert takes: the plugin hook (push and whatever
+    registered there) and the webhook channels, which the hook is not (#815). Never raises."""
+    try:
+        from pegaprox.globals import _notification_handlers
+        for handler in list(_notification_handlers):
+            try:
+                handler(alert)
+            except Exception as e:
+                logging.debug(f"[TOKEN] notification handler failed: {e}")
+    except Exception as e:
+        logging.warning(f"[TOKEN] could not hand the {what} alert on: {type(e).__name__}")
+    try:
+        from pegaprox.utils.webhooks import send_to_channels
+        send_to_channels(alert)
+    except Exception as e:
+        logging.warning(f"[TOKEN] webhook dispatch of the {what} alert failed: {type(e).__name__}")
+
+
+class _RenewalUnanswered(Exception):
+    """A step of the token renewal PVE said neither yes nor no to (_passes, or no answer)."""
+
+
+class _SecretLost(Exception):
+    """PVE renewed the secret of the token in place, and its answer with the new one never
+    came: the secret PegaProx has is dead."""
+
+
+def _passes(resp):
+    """True for an answer that says nothing about the request: pveproxy restarting, a proxy
+    timing out, a user.cfg lock or the quorum PVE did not get. Tried again soon."""
+    if resp.status_code in (502, 503, 504, 595, 596):
+        return True
+    text = _pve_message(getattr(resp, 'text', '')).lower()
+    return resp.status_code == 500 and any(s in text for s in (
+        'lock request timeout', 'got lock timeout', 'no quorum', 'cluster filesystem not online'))
+
+
+class _EndKept(Exception):
+    """PVE renewed the secret of the token in place and kept the end it had: the token has
+    the rights for it, the policy keeps the end where it was."""
+
+
+# MK Nov 2026 (#1390) - what is known of a cluster's management token beyond a restart: the
+# end it was made with (the documented role may not read its own token), whether an end
+# that could not be read was said already, and the names of new tokens whose POST got no
+# answer. One row of the synced table pegaprox_kv, so a promoted standby has it as well.
+MANAGEMENT_TOKEN_KV = 'management_token:'
+
+
+def _management_token_kept(cluster_id):
+    """The record kept of the management token of `cluster_id`, {} where there is none."""
+    try:
+        row = get_db().conn.execute('SELECT v FROM pegaprox_kv WHERE k = ?',
+                                    (MANAGEMENT_TOKEN_KV + str(cluster_id),)).fetchone()
+        rec = json.loads(row[0]) if row and row[0] else {}
+    except Exception:
+        # no pegaprox_kv yet, or a value that is no JSON
+        return {}
+    return rec if isinstance(rec, dict) else {}
+
+
+def _keep_management_token(cluster_id, rec):
+    """Writes `rec` as that record. False where the database did not take it."""
+    try:
+        conn = get_db().conn
+        conn.execute('CREATE TABLE IF NOT EXISTS pegaprox_kv (k TEXT PRIMARY KEY, v TEXT)')
+        conn.execute('INSERT OR REPLACE INTO pegaprox_kv (k, v) VALUES (?, ?)',
+                     (MANAGEMENT_TOKEN_KV + str(cluster_id), json.dumps(rec)))
+        conn.commit()
+        return True
+    except Exception as e:
+        logging.debug(f"[TOKEN] the record of the management token of {cluster_id} not "
+                      f"written: {type(e).__name__}")
+        return False
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -108,6 +326,7 @@ from pegaprox.utils.concurrent import GEVENT_PATCHED
 from pegaprox.core.db import get_db
 from pegaprox.core import ha  # PegaProx's own warm standby (#625), not PVE HA
 from pegaprox.core import ha_transport, ha_vote
+from pegaprox.core.federation import LeaseRefused
 from pegaprox.core import rolling_runs
 from pegaprox.core import node_creds
 from pegaprox.core import node_history
@@ -601,6 +820,10 @@ def drop_own_recovery_locks(instance_id):
 # no caller of migrate_vm (or stand-in for it) has to take a new argument.
 BALANCE_WHY = '_balance_why'
 MIGRATION_LOG_MAX = 200   # the in-memory list behind "last migrations"
+# #1387 - how long a node we took out of maintenance is not taken back from PVE's HA status,
+# and how long an evacuation with other nodes in the cluster waits for one of them to take guests
+MAINT_LEFT_GRACE = 120
+EVACUATION_TARGET_WAIT = 90
 
 
 def _node_load(node_status, node):
@@ -888,6 +1111,39 @@ def ct_root_credentials(ct_config):
         if keys is None and val and val.strip():
             keys = val
     return password or None, keys, None
+
+
+# MK Nov 2026 - what a refused pool delete names stays short: the toast showing it has no width
+# limit and is gone in three seconds, and one pool can hold hundreds of guests
+POOL_NAMES_SHOWN = 5
+_POOL_MEMBER_WORDS = (('vms', 'guests'), ('storage', 'storage'), ('network', 'VNets'))
+
+
+def _first_few(names, shown=POOL_NAMES_SHOWN):
+    """'a, b, c, d, e and 7 more'"""
+    names = [n for n in names if n]
+    head = ', '.join(names[:shown])
+    return head if len(names) <= shown else f'{head} and {len(names) - shown} more'
+
+
+def pool_members_text(drop):
+    """The members of a PUT /pools body by kind: 'guests 100, 200; storage local'."""
+    return '; '.join(f"{word} {_first_few(str(drop[k]).split(','))}"
+                     for k, word in _POOL_MEMBER_WORDS if drop.get(k))
+
+
+def pools_below(poolid, pools):
+    """The pools right below poolid in what GET /pools lists (nested pools, PVE 8.1+). One
+    listed only further down counts by the pool right below poolid on its way."""
+    if not isinstance(pools, list):
+        return []
+    prefix = f'{poolid}/'
+    below = set()
+    for p in pools:
+        pid = str(p.get('poolid') or '') if isinstance(p, dict) else ''
+        if pid.startswith(prefix) and len(pid) > len(prefix):
+            below.add(prefix + pid[len(prefix):].split('/', 1)[0])
+    return sorted(below)
 
 
 class PegaProxManager:
@@ -1206,8 +1462,9 @@ class PegaProxManager:
         from pegaprox.utils.sanitization import refuse_climbing_paths
         refuse_climbing_paths(session)
         _refuse_redirects(session)
-        # an automatic leader that lost its lease sends no change from here (#625)
-        ha_transport.guard_session(session)
+        # an automatic leader that lost its lease sends no change from here (#625), nor
+        # does an instance without the federation's lease on this cluster
+        ha_transport.guard_session(session, cluster_id=getattr(self, 'id', None))
 
         self._session_cache = session
         self._session_auth_key = auth_key
@@ -1328,6 +1585,37 @@ class PegaProxManager:
                 f"[AUTH] cluster '{self.config.name}' blocked for {backoff}s "
                 f"after {self._auth_failures} consecutive auth failures"
             )
+
+    def _auth_refused(self, session):
+        """PVE answered 401 to a request sent over `session`: the login is dropped and the
+        401 counted against the breaker (#444).
+        MK Nov 2026 - not so for a management token PegaProx made itself, which the API token
+        policy of the cluster (PVE 9.3) lets run out while we run. Its first 401 has
+        connect_to_proxmox log in with the password and make a new one right away, and a
+        password PVE refuses arms the breaker there as before. A request still out with it
+        while a connect runs, or once the session has left it, counts for nothing."""
+        sent = str((getattr(session, 'headers', None) or {}).get('Authorization') or '')
+        token_user = sent.split('=', 2)[1] if sent.startswith('PVEAPIToken=') else ''
+        if not token_user or not self._is_own_management_token(token_user):
+            self._ticket = None
+            self._csrf_token = None
+            self._register_auth_failure()
+            return
+        with self._auth_failure_lock:
+            current = sent == f"PVEAPIToken={getattr(self, '_api_token', None)}"
+            again = current and getattr(self, '_remint_tried', None) == token_user
+            remint = current and not again and not self._connect_lock.locked()
+            if remint:
+                self._remint_tried = token_user
+        if again:
+            self._ticket = None
+            self._csrf_token = None
+            self._register_auth_failure()
+        elif remint:
+            self.logger.warning(f"[AUTH] cluster '{self.config.name}': PVE no longer takes the API "
+                                f"token {token_user} PegaProx made for it - logging in with the "
+                                f"password to make a new one")
+            self.connect_to_proxmox()
 
     def _reset_auth_failures(self):
         with self._auth_failure_lock:
@@ -1460,9 +1748,7 @@ class PegaProxManager:
             # MK May 2026 (#444) — PVE rejected the ticket. Invalidate locally so the
             # next call has to re-login (which the circuit breaker will gate).
             if response.status_code == 401:
-                self._ticket = None
-                self._csrf_token = None
-                self._register_auth_failure()
+                self._auth_refused(session)
             return response
         except requests.exceptions.Timeout as e:
             # MK: Timeout != offline. Proxmox might just be slow (happens a lot with ZFS)
@@ -1491,9 +1777,7 @@ class PegaProxManager:
             self._auto_capture_upid(resp)  # MK May 2026 — bind PVE task to PegaProx user
             self._record_api_sample('POST', url, (time.monotonic() - t0) * 1000.0, resp.status_code)
             if resp.status_code == 401:
-                self._ticket = None
-                self._csrf_token = None
-                self._register_auth_failure()
+                self._auth_refused(sess)
             return resp
         except requests.exceptions.Timeout as e:
             # MK: Timeout does NOT mean cluster is offline
@@ -1521,9 +1805,7 @@ class PegaProxManager:
             self._auto_capture_upid(response)
             self._record_api_sample('PUT', url, (time.monotonic() - t0) * 1000.0, response.status_code)
             if response.status_code == 401:
-                self._ticket = None
-                self._csrf_token = None
-                self._register_auth_failure()
+                self._auth_refused(session)
             return response
         except requests.exceptions.Timeout as e:
             # MK: Timeout does NOT mean cluster is offline - operation might have succeeded
@@ -1677,6 +1959,9 @@ class PegaProxManager:
                 _stored_token = True
                 self._using_api_token = True
                 self._api_token = f"{self.config.api_token_user}={self.config.api_token_secret}"
+            # MK Nov 2026 - our own management token PVE answered 401 (ran out under the
+            # cluster's token policy, or was removed): replaced once the password login works
+            stale_token = None
 
             # MK May 2026 (#444) — track 401 across the host loop. If primary
             # returned 401 the fallbacks will too (same creds), no point hitting
@@ -1717,7 +2002,7 @@ class PegaProxManager:
                         session.mount('https://', _NoHostnameCheckAdapter())  # MK: #88
                     _refuse_redirects(session)
                     # the login passes in every role, the token it may mint needs the lease
-                    ha_transport.guard_session(session)
+                    ha_transport.guard_session(session, cluster_id=getattr(self, 'id', None))
 
                     if self._using_api_token:
                         # API Token auth - no ticket needed!
@@ -1765,6 +2050,9 @@ class PegaProxManager:
                             # NS: stored token got revoked on PVE? fall back to password
                             if _stored_token and resp.status_code in (401, 403):
                                 self.logger.info("Stored API token rejected, trying password auth")
+                                if resp.status_code == 401 and self._is_own_management_token(
+                                        self.config.api_token_user):
+                                    stale_token = self.config.api_token_user
                                 self._using_api_token = False
                                 self._api_token = None
                                 _stored_token = False
@@ -1802,6 +2090,17 @@ class PegaProxManager:
                                        "(Datacenter → Permissions → API Tokens), or temporarily disable "
                                        "two-factor authentication on the account to add it (PegaProx "
                                        "creates an API token automatically), then re-enable it.")
+                                if stale_token:
+                                    # the token that kept this account working is gone
+                                    msg = (f"Proxmox no longer takes the API token {stale_token} PegaProx "
+                                           f"made for this cluster: it has expired (an API token policy "
+                                           f"of the cluster gives new tokens an end) or was removed. "
+                                           f"{self.config.user} has two-factor authentication enabled, so "
+                                           f"PegaProx cannot log in to make a new one. Reconfigure the "
+                                           f"cluster with an API token of {self.config.user} as its login "
+                                           f"(user@realm!tokenid and its secret), or turn two-factor "
+                                           f"authentication off for {self.config.user} until PegaProx has "
+                                           f"connected and made a new token, then on again.")
                                 self.logger.warning(f"{host}: account requires 2FA (NeedTFA) — password auth cannot proceed")
                                 self._ticket = None
                                 self._csrf_token = None
@@ -1847,8 +2146,10 @@ class PegaProxManager:
                             # write it into a synced clusters row, where it stays - the standby
                             # polls with If-None-Match, so no sync replaces the row until the
                             # active changes something itself.
-                            if not self.config.api_token_user and ha.is_active():
-                                self._try_create_api_token(session, host)
+                            if (not self.config.api_token_user or stale_token) and ha.is_active():
+                                self._try_create_api_token(session, host, replaces=stale_token,
+                                                           login=(data['ticket'],
+                                                                  data['CSRFPreventionToken']))
 
                             self._reset_auth_failures()  # MK (#444)
                             self._clear_host_failure(host)  # MK May 2026 — host is warm again
@@ -1932,26 +2233,54 @@ class PegaProxManager:
         except Exception as e:
             self.logger.debug(f"Could not auto-discover fallback hosts: {e}")
 
-    def _try_create_api_token(self, session, host):
+    def _try_create_api_token(self, session, host, replaces=None, login=None):
         """Auto-create a PVE API token so REST auth survives 2FA being enabled later.
-        SSH keeps using the password regardless. - MK Mar 2026 (#110)"""
+        SSH keeps using the password regardless. - MK Mar 2026 (#110)
+        replaces: our own token PVE no longer takes, deleted after the new one is made.
+        login: (ticket, CSRF token) of the password login, else the manager's own."""
         # the caller asks too; this one holds for any other caller (#625)
         if not ha.is_active():
             return
+        base = f"https://{self._bracket_ipv6(host)}:{self.api_port}/api2/json"
+        # MK Nov 2026 - the login's own: a request still out with the dead token answers
+        # 401 meanwhile, and that empties self._ticket (_api_get)
+        ticket, csrf = login or (self._ticket, self._csrf_token)
+        if replaces:
+            # out of the config whether a new one comes or not
+            self.logger.warning(f"PVE no longer takes the API token {replaces} PegaProx made for this "
+                                f"cluster (expired or removed) - making a new one")
+            self.config.api_token_user = ''
+            self.config.api_token_secret = ''
         try:
             user = self.config.user  # e.g. root@pam
             import random, string
             suffix = ''.join(random.choices(string.digits, k=6))
             token_id = f'pegaprox_{suffix}'
-            url = f"https://{self._bracket_ipv6(host)}:{self.api_port}/api2/json/access/users/{user}/token/{token_id}"
+            url = f"{base}/access/users/{user}/token/{token_id}"
             # NS: need to set ticket cookie on login session, it only has it in the response not as a cookie
-            session.cookies.set('PVEAuthCookie', self._ticket)
-            headers = {'CSRFPreventionToken': self._csrf_token}
-            payload = {'privsep': '0', 'expire': '0', 'comment': 'PegaProx management token'}
+            session.cookies.set('PVEAuthCookie', ticket)
+            headers = {'CSRFPreventionToken': csrf}
+            # the token as the cluster's API token policy takes it (PVE 9.3)
+            policy, ahead = {}, 0.0
+            try:
+                r = session.get(f"{base}/cluster/options", timeout=10)
+                if r.status_code == 200:
+                    policy, ahead = token_policy_of(r)
+            except Exception as e:
+                self.logger.debug(f"Token policy unreadable ({type(e).__name__}), none assumed")
+            payload = management_token_form(policy, ahead)
 
-            resp = session.post(url, data=payload, headers=headers, timeout=10)
+            if payload is None:
+                self.logger.warning(
+                    f"Not creating an API token for {user}: the API token policy of this cluster wants "
+                    f"privilege separation, and such a token holds no right without ACLs of its own. "
+                    f"PegaProx stays on password logins, which two-factor authentication on {user} "
+                    f"would end")
+                resp = None
+            else:
+                resp = session.post(url, data=payload, headers=headers, timeout=10)
 
-            if resp.status_code == 200:
+            if resp is not None and resp.status_code == 200:
                 token_data = resp.json().get('data', {})
                 full_tokenid = token_data.get('full-tokenid', f'{user}!{token_id}')
                 secret = token_data.get('value', '')
@@ -1975,15 +2304,40 @@ class PegaProxManager:
                     except:
                         pass  # NS: non-critical, token still works in memory for this session
                     self.logger.info(f"Auto-created API token {full_tokenid} for 2FA safety")
+                    ends = int((token_data.get('info') or {}).get('expire') or payload.get('expire') or 0)
+                    # MK Nov 2026 (#1390) - kept for the renewal, also beyond a restart: a
+                    # token may not read its own end
+                    self._hold_token_end(full_tokenid, ends)
+                    if ends:
+                        self.logger.info(f"API token {full_tokenid} expires {datetime.fromtimestamp(ends)} "
+                                         f"under the API token policy of the cluster; PegaProx renews it "
+                                         f"before then")
                     save_config()
-            elif resp.status_code == 400:
-                # token already exists, try to use it (user might have created it manually)
-                self.logger.debug(f"API token '{token_id}' already exists for {user}")
-            else:
-                # 403 = no permission, 5xx = PVE issue - just continue with password
-                self.logger.debug(f"Could not create API token: HTTP {resp.status_code}")
+            elif resp is not None:
+                # 400 = a token of that name (made by hand?), 403 = no permission, 500 = PVE or its
+                # API token policy said no - the cluster goes on with the password
+                self.logger.warning(f"Could not create an API token for {user}: HTTP {resp.status_code} "
+                                    f"{_pve_message(getattr(resp, 'text', ''))} - PegaProx stays on password "
+                                    f"logins, which two-factor authentication on {user} would end")
         except Exception as e:
-            self.logger.debug(f"API token creation failed (non-critical): {e}")
+            self.logger.warning(f"API token creation failed (non-critical): {type(e).__name__}: {e}")
+        if not replaces:
+            return
+        if not self.config.api_token_user:
+            save_config()   # no new one: the dead one goes from the stored row as well
+        try:
+            old_user, old_id = replaces.split('!', 1)
+            gone = session.delete(f"{base}/access/users/{old_user}/token/{old_id}",
+                                  headers={'CSRFPreventionToken': csrf}, timeout=10)
+            if gone.status_code == 200:
+                self.logger.info(f"Deleted the old API token {replaces}")
+            else:
+                self.logger.warning(f"Could not delete the old API token {replaces}: "
+                                    f"{_pve_message(gone.text)} - delete it on the cluster if "
+                                    f"it is still there")
+        except Exception as e:
+            self.logger.warning(f"Could not delete the old API token {replaces} ({type(e).__name__}) - "
+                                f"delete it on the cluster if it is still there")
 
     def _get_api_url(self, path: str) -> str:
         host = self.host
@@ -2266,8 +2620,10 @@ class PegaProxManager:
                 except Exception:
                     ha_poll_ok = False
 
+                if ha_poll_ok:
+                    self._ha_caught_up(native_ha_nodes)
                 for nm in native_ha_nodes:
-                    if nm not in self.nodes_in_maintenance:
+                    if nm not in self.nodes_in_maintenance and not self._just_left_maintenance(nm):
                         from pegaprox.models.tasks import MaintenanceTask
                         t = MaintenanceTask(nm)
                         t.native_ha = True
@@ -3836,12 +4192,14 @@ class PegaProxManager:
 
     _GUEST_VOLUME_KEY = re.compile(r'^(?:scsi|virtio|ide|sata|unused|mp)\d+$|^(?:efidisk0|tpmstate0|rootfs)$')
 
-    def _evacuation_placement(self):
+    def _evacuation_placement(self, cluster_nodes=None):
         """MK Oct 2026 (#647) - where HA and storage.cfg let guests go, read once per
         evacuation. ha-manager refuses a target outside a strict node-affinity rule
         (exit 2) and the CRM quietly drops a move to a node without the guest's storage,
         and we used to pick such targets. Returns (vmid -> allowed nodes, storage ->
-        nodes it is limited to); a guest or storage missing from a map is unrestricted."""
+        nodes it is limited to); a guest or storage missing from a map is unrestricted.
+        cluster_nodes: every node of the cluster, a negative rule (PVE 9.3) allows the
+        ones it does not name; without them it is not applied."""
         from pegaprox.core.preflight import ha_node_limits, node_names, restricted_groups
         ha_nodes, storage_nodes = {}, {}
 
@@ -3862,7 +4220,8 @@ class PegaProxManager:
         # not migrated them yet); the migration preflight reads them the same way
         rules = _data('/cluster/ha/rules')
         groups = restricted_groups(_data('/cluster/ha/groups'))
-        ha_nodes = ha_node_limits(rules, groups, _data('/cluster/ha/resources') if groups else [])
+        ha_nodes = ha_node_limits(rules, groups, _data('/cluster/ha/resources') if groups else [],
+                                  cluster_nodes)
 
         for s in _data('/storage'):
             if s.get('nodes'):
@@ -4874,7 +5233,7 @@ class PegaProxManager:
                             entry.get('to_node'), why, status,
                             duration=(time.time() - started) if started else 0.0, note=note)
 
-    def _wait_for_task(self, node: str, task_id: str, timeout: int = 600) -> bool:
+    def _wait_for_task(self, node: str, task_id: str, timeout: int = 600, first_poll: float = 2) -> bool:
         """
         Wait for a Proxmox task to complete.
         
@@ -4883,10 +5242,14 @@ class PegaProxManager:
         
         Polling interval: 2s normally, 5s after errors (to avoid hammering a failing node)
         Default timeout: 10 minutes (should be enough for most migrations)
+        MK Nov 2026 - first_poll: the second read comes after that many seconds, each next one
+        after twice as long up to the 2s. For tasks that mostly end within a second and are
+        waited for one after the other (snapshot deletes, #1347)
         
         Returns True only if task completed with exitstatus 'OK'.
         """
         start_time = time.time()
+        pause = first_poll
         
         while time.time() - start_time < timeout:
             try:
@@ -4907,7 +5270,8 @@ class PegaProxManager:
                             self.logger.warning(f"Task {task_id} finished with exit status: {exit_status}")
                         return ok
                     
-                time.sleep(2)  # Poll every 2 seconds
+                time.sleep(pause)  # Poll every 2 seconds
+                pause = min(pause * 2, 2)
                 
             except Exception as e:
                 self.logger.error(f"Error checking task status: {e}")
@@ -5207,6 +5571,20 @@ class PegaProxManager:
         except Exception as e:
             self.logger.debug(f"[MAINT] Ceph flag unset failed for {node_name}: {e}")
 
+    def _just_left_maintenance(self, node_name):
+        """A node this instance took out of maintenance less than MAINT_LEFT_GRACE ago and that
+        PVE's HA status has not let go of yet (#1387). Maintenance switched on from outside in
+        that window is picked up once the window ends."""
+        left = (getattr(self, '_maint_left_at', None) or {}).get(node_name)
+        return left is not None and time.monotonic() - left < MAINT_LEFT_GRACE
+
+    def _ha_caught_up(self, native_ha_nodes):
+        """PVE no longer names these nodes: their grace from _just_left_maintenance ends."""
+        marks = getattr(self, '_maint_left_at', None)
+        if isinstance(marks, dict):
+            for nm in [n for n in marks if n not in native_ha_nodes]:
+                marks.pop(nm, None)
+
     def refresh_maintenance_status(self):
         """Force-refresh native HA maintenance state from PVE. Call before rolling update checks. (#141)"""
         try:
@@ -5225,8 +5603,10 @@ class PegaProxManager:
                         native_ha_nodes.add(node['node'])
 
             # sync into nodes_in_maintenance (only add externally detected ones)
+            if ha_poll_ok:
+                self._ha_caught_up(native_ha_nodes)
             for nm in native_ha_nodes:
-                if nm not in self.nodes_in_maintenance:
+                if nm not in self.nodes_in_maintenance and not self._just_left_maintenance(nm):
                     from pegaprox.models.tasks import MaintenanceTask
                     t = MaintenanceTask(nm)
                     t.native_ha = True
@@ -5392,10 +5772,57 @@ class PegaProxManager:
         else:
             self.logger.info(f"[MAINT] HA poll ({source}): no nodes in native maintenance")
 
+    # MK Nov 2026 - pve-manager 9.2 got PUT /nodes/{node}/maintenance (their bug 6144). It runs
+    # the same ha-manager crm-command we send over SSH, so it needs no SSH and no sudo and works
+    # on a token cluster. A node without it answers 501, a login without Sys.Modify on / a 403,
+    # an unreachable one nothing at all: the SSH ladder stays the way for all of them.
+    # ha-manager of PVE 9.3 refuses what the CRM would ignore: an enable while HA is disarmed or
+    # the node is not online, either mode for a node HA does not track. The API answers 500 with
+    # that reason, and SSH would run the same command and get the same answer.
+    _HA_MAINT_REFUSED = re.compile(r"cannot (?:enable|disable) maintenance mode for node [^\r\n]+")
+
+    def _ha_maintenance_via_api(self, node_name, mode):
+        """(taken, refused): taken when PVE took `mode` ('enable' or 'disable') for the node over
+        its own API, refused is the reason when ha-manager said no. Neither: SSH is next."""
+        from urllib.parse import quote
+        url = (f"https://{self.host}:{self.api_port}/api2/json/nodes/"
+               f"{quote(node_name, safe='')}/maintenance")
+        try:
+            r = self._api_put(url, data={'maintenance-mode': mode})
+        except Exception as e:
+            self.logger.info(f"[MAINT] PVE API maintenance {mode} for {node_name} not sent ({e}), trying SSH")
+            return False, None
+        if r.status_code == 200:
+            self.logger.info(f"[MAINT] PVE API took maintenance {mode} for {node_name}")
+            return True, None
+        why = (getattr(r, 'reason', '') or '')[:160]
+        said = why
+        try:
+            said += '\n' + str(r.json().get('message') or '')
+        except Exception:
+            pass
+        refused = self._HA_MAINT_REFUSED.search(said)
+        if refused:
+            # a node HA does not track runs no HA guest, so HA has nothing to do there: no fault
+            log = self.logger.info if 'not tracked by HA' in refused.group(0) else self.logger.warning
+            log(f"[MAINT] Proxmox HA refused maintenance {mode} for {node_name}: {refused.group(0)}")
+            return False, refused.group(0)[:200]
+        self.logger.info(f"[MAINT] PVE API maintenance {mode} for {node_name}: {r.status_code} {why}, trying SSH")
+        return False, None
+
     # NS feb 2026 - try ha-manager crm-command node-maintenance enable (#78)
     # returns True if proxmox takes over, False = we do our own evacuation
     def _try_native_ha_maintenance(self, node_name, task):
         try:
+            taken, refused = self._ha_maintenance_via_api(node_name, 'enable')
+            if taken:
+                task.native_ha = True
+                self.logger.info(f"[MAINT] native HA flag set for {node_name}")
+                return True
+            if refused:
+                task.native_ha_refused = refused
+                return False
+
             node_ip = self._get_node_ip(node_name)
             if not node_ip:
                 self.logger.warning(f"[MAINT] can't resolve {node_name} IP, custom evacuation")
@@ -5442,6 +5869,26 @@ class PegaProxManager:
         task.pending_vms = []
         task.current_vm = None
         return True
+
+    def _wait_for_evacuation_target(self, node_name, task, nodes):
+        """Up to EVACUATION_TARGET_WAIT seconds for another node to take guests from node_name
+        (#1387). The node status it read last, or None once the evacuation was called off."""
+        self.logger.info(f"[MAINT] No node takes guests from {node_name} right now, "
+                         f"waiting up to {EVACUATION_TARGET_WAIT}s for one")
+        waited = 0
+        while waited < EVACUATION_TARGET_WAIT:
+            time.sleep(5)
+            waited += 5
+            if self._evacuation_called_off(node_name, task):
+                return None
+            self._node_status_cache = None
+            fresh = self.get_node_status()
+            if node_name not in fresh:
+                continue   # a failed or partial read decides nothing
+            nodes = fresh
+            if self.get_best_target_node(exclude_nodes=[node_name], node_status=nodes) is not None:
+                break
+        return nodes
 
     def _evacuate_node(self, node_name: str, task: MaintenanceTask):
         # move all VMs off this node
@@ -5501,10 +5948,32 @@ class PegaProxManager:
                               f"nothing was moved off {node_name}")
                 self.logger.error(f"[MAINT] {task.error}")
                 return
+            if self.get_best_target_node(exclude_nodes=[node_name], node_status=nodes) is None \
+                    and [n for n in nodes if n != node_name]:
+                # #1387 - other nodes but none takes guests right now: one may have left
+                # maintenance a moment ago or still be booting. A drain that ends here is
+                # not done, the guests are still on the node, so it waits a little and
+                # then says so, and a rolling update pauses instead of installing.
+                nodes = self._wait_for_evacuation_target(node_name, task, nodes)
+                if nodes is None:
+                    return
+                if self.get_best_target_node(exclude_nodes=[node_name], node_status=nodes) is None:
+                    why = (f"no other node could take it (the others are offline, in maintenance "
+                           f"or excluded from balancing)")
+                    task.failed_vms = [{'vmid': vm.get('vmid'), 'name': vm.get('name', 'unnamed'),
+                                        'error': why} for vm in node_vms]
+                    task.pending_vms = []
+                    task.note = (f"{task.total_vms} guest(s) still on {node_name}: {why}. "
+                                 f"They stay running (a reboot will take them down).")
+                    self.logger.warning(f"[MAINT] {task.note}")
+                    self._evacuate_templates(node_name, task, templates)
+                    if not self._evacuation_called_off(node_name, task):
+                        task.status = 'completed_with_errors'
+                    return
             if self.get_best_target_node(exclude_nodes=[node_name], node_status=nodes) is None:
                 self.logger.warning(
                     f"[MAINT] No other online node to evacuate {task.total_vms} guest(s) from "
-                    f"{node_name} (single-node cluster or all peers offline) — skipping "
+                    f"{node_name} (single-node cluster) - skipping "
                     f"evacuation; guests stay running.")
                 task.migrated_vms = 0
                 task.pending_vms = []
@@ -5517,7 +5986,7 @@ class PegaProxManager:
 
             # Sort VMs by memory (smallest first for faster evacuation)
             node_vms.sort(key=lambda x: x.get('mem', 0))
-            placement = self._evacuation_placement()
+            placement = self._evacuation_placement(list(nodes))
 
             # JB Nov 2026 - a cancel or an exit of maintenance takes the task off the node. This thread went on moving every
             # guest off a node that was no longer in maintenance
@@ -5781,6 +6250,13 @@ class PegaProxManager:
                 get_db().remove_node_maintenance(self.id, node_name)   # #720 — drop persisted state
             except Exception:
                 pass
+            # #1387 - PVE's HA status goes on naming the node for a while, and the poll took it
+            # back as maintenance set from outside: the next node of a rolling update found no
+            # target and its guests stayed put. The cached node status said the same for 5 s.
+            if not isinstance(getattr(self, '_maint_left_at', None), dict):
+                self._maint_left_at = {}
+            self._maint_left_at[node_name] = time.monotonic()
+            self._node_status_cache = None
         self.logger.info(f"[OK] Exited maintenance mode for {node_name}")
 
         # #954 - the negative affinity rules this maintenance switched off go
@@ -5802,6 +6278,13 @@ class PegaProxManager:
     # run it on any other reachable node instead
     def _try_disable_native_ha_maintenance(self, node_name):
         try:
+            taken, refused = self._ha_maintenance_via_api(node_name, 'disable')
+            if taken:
+                return True
+            if refused:
+                # a node HA does not track has no flag to take off
+                return 'not tracked by HA' in refused
+
             ssh_user = node_login(self.config)
             prefix = "sudo " if ssh_user != 'root' else ""
             cmd = f"{prefix}ha-manager crm-command node-maintenance disable {node_name}"
@@ -6220,6 +6703,15 @@ class PegaProxManager:
                     continue
                 self.logger.warning("[HA] HA monitor ends - this PegaProx instance is a standby now")
                 break
+            # MK Nov 2026 - an enrolled cluster this instance holds no live federation lease
+            # on is the leading site's to watch and to fence: this tick checks nothing
+            from pegaprox.core import federation as _fed
+            if _fed.enabled() and not _fed.worker_takes_writes_for(self.id):
+                for _ in range(self._ha_interval()):
+                    if not self.ha_enabled or self.stop_event.is_set():
+                        break
+                    time.sleep(1)
+                continue
             try:
                 self._ha_check_nodes()
                 
@@ -6463,6 +6955,15 @@ class PegaProxManager:
                         return
             if not ha.is_active():
                 self.logger.warning(f"[HA] Recovery of {failed_node} dropped - this PegaProx instance stepped down")
+                return
+            # MK Nov 2026 - the wait above outlasts a federation lease: an enrolled cluster
+            # whose lease ran out meanwhile is the leading site's to recover
+            from pegaprox.core import federation as _fed
+            if _fed.enabled() and not _fed.worker_takes_writes_for(self.id):
+                self.logger.warning(f"[HA] Recovery of {failed_node} dropped - this instance holds "
+                                    "no live federation lease on the cluster any more")
+                # the node stays down: tried again once the lease is back here
+                self._ha_retry_recovery(failed_node)
                 return
 
             # before anything is done to the node: only from the quorate side of the
@@ -6842,6 +7343,9 @@ class PegaProxManager:
             
         except Exception as e:
             self.logger.error(f"[HA] Error in recovery worker: {e}")
+            if isinstance(e, LeaseRefused):
+                # the lease went in the middle of it: the node is tried again once it is back
+                self._ha_retry_recovery(failed_node)
         finally:
             # only a lock this worker took: after a failed acquire the lock is the
             # other instance's, and deleting it let both recover (#625)
@@ -7463,6 +7967,7 @@ class PegaProxManager:
         def step(name, done=False):
             ha.recovery_step(run, self.id, original_node, name, vmid=vmid, done=done)
 
+        config_moved = False
         try:
             # Force quorum first (for 2-node clusters)
             # Without quorum, pmxcfs is read-only - we can't do anything!
@@ -7629,6 +8134,16 @@ class PegaProxManager:
 
             return False
                     
+        except LeaseRefused:
+            # the lease went: the recovery worker marks the node to be tried again, and a
+            # guest already moved is not listed on the node any more. A journal run names it
+            # when the worker ends; without one it is named here
+            if config_moved and run is None:
+                self._ha_refuse('ha.recovery_refused',
+                                f"{vm_type}/{vmid} was moved to {target_node} and not started: the "
+                                "federation lease went right before its start - start it there from "
+                                "the site that leads the cluster now", node=original_node)
+            raise
         except Exception as e:
             self.logger.error(f"[HA] Error starting VM {vmid} on {target_node}: {e}")
             return False
@@ -7805,7 +8320,7 @@ class PegaProxManager:
         try:
             from pegaprox.utils.audit import log_audit
             log_audit('system', action, f"Cluster {self.config.name}: {details}", cluster=self.config.name,
-                      cluster_id=self.id)
+                      cluster_id=getattr(self, 'id', None))
         except Exception:
             pass
         try:
@@ -8070,10 +8585,12 @@ class PegaProxManager:
         env = {**os.environ, 'IPMITOOL_PASSWORD': password, 'IPMI_PASSWORD': password}
         try:
             # the answer to "off" is not the proof, the status after it is
-            node_cmd(base + ['power', 'off'], capture_output=True, timeout=30, env=env, host=str(host))
+            node_cmd(base + ['power', 'off'], capture_output=True, timeout=30, env=env, host=str(host),
+                     cluster_id=getattr(self, 'id', None))
             for _ in range(self.FENCE_VERIFY_READS):
                 status = node_cmd(base + ['power', 'status'], capture_output=True, text=True,
-                                  timeout=15, env=env, host=str(host), read=True)
+                                  timeout=15, env=env, host=str(host), read=True,
+                                  cluster_id=getattr(self, 'id', None))
                 if status.returncode == 0 and re.search(r'power is off', status.stdout or '', re.I):
                     self.__dict__.setdefault('_ha_verified_fences', {})[node] = time.monotonic()
                     self.logger.info(f"[HA] ✓ {node} is powered off (read back from its BMC)")
@@ -8703,7 +9220,7 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
                     # of -P on the argv, which is visible in `ps` to any local user during
                     # a fence.
                     env={**os.environ, 'IPMITOOL_PASSWORD': ipmi_pass, 'IPMI_PASSWORD': ipmi_pass},
-                    host=str(ipmi_host)
+                    host=str(ipmi_host), cluster_id=getattr(self, 'id', None)
                 )
                 
                 if result.returncode == 0:
@@ -8726,7 +9243,7 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
                     ['ssh', '-o', 'ConnectTimeout=5', '-o', f'StrictHostKeyChecking={_hkc}',
                      '-o', f'UserKnownHostsFile={_kh}', *self._ssh_port_args(),
                      '--', f'{ssh_user}@{ssh_host}', 'poweroff'],
-                    capture_output=True, timeout=15, host=str(ssh_host)
+                    capture_output=True, timeout=15, host=str(ssh_host), cluster_id=getattr(self, 'id', None)
                 )
                 
                 # SSH might fail if node is really dead, that's OK
@@ -8983,6 +9500,9 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
             
             return len(failed) == 0
             
+        except LeaseRefused:
+            # the federation lease went: the recovery worker marks the node to be tried again
+            raise
         except Exception as e:
             self.logger.error(f"[HA] Error stopping VMs via SSH: {e}")
             return False
@@ -11036,7 +11556,7 @@ echo "AGENT_INSTALLED_OK"
                 ['ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                  '-o', f'UserKnownHostsFile={_kh}',
                  '-o', 'BatchMode=yes', *self._ssh_port_args(), *login, command],
-                capture_output=True, text=True, timeout=timeout, host=host
+                capture_output=True, text=True, timeout=timeout, host=host, cluster_id=getattr(self, 'id', None)
             )
             if result.returncode == 0:
                 return result.stdout
@@ -11101,7 +11621,8 @@ echo "AGENT_INSTALLED_OK"
                     ['ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                      '-o', f'UserKnownHostsFile={_kh}',
                      '-i', key_file, *self._ssh_port_args(), *login, command],
-                    capture_output=True, text=True, timeout=timeout, host=host
+                    capture_output=True, text=True, timeout=timeout, host=host,
+                    cluster_id=getattr(self, 'id', None)
                 )
                 if result.returncode == 0:
                     return result.stdout
@@ -11161,7 +11682,8 @@ echo "AGENT_INSTALLED_OK"
                 ['sshpass', '-e', 'ssh', '-o', f'ConnectTimeout={ct}', '-o', f'StrictHostKeyChecking={_hkc}',
                  '-o', f'UserKnownHostsFile={_kh}',
                  *self._ssh_port_args(), *login, command],
-                capture_output=True, text=True, timeout=timeout, env=env, host=host
+                capture_output=True, text=True, timeout=timeout, env=env, host=host,
+                cluster_id=getattr(self, 'id', None)
             )
             if result.returncode == 0:
                 return result.stdout
@@ -11349,8 +11871,10 @@ echo "AGENT_INSTALLED_OK"
             target_real = os.path.realpath(poison_file)
             if os.path.commonpath([base_real, target_real]) != base_real:
                 raise Exception('poison pill path escaped base directory')
-            # a file on shared storage the node's agent acts on: an exit like any other (#625)
-            ha.guard(f'poison pill for {target_node}')
+            # a file on shared storage the node's agent acts on: an exit like any other
+            # (#625), and one that needs the federation's lease on this cluster as well
+            ha_transport.guard_write(f'poison pill for {target_node}',
+                                     cluster_id=getattr(self, 'id', None))
             with open(target_real, 'w') as f:
                 import json
                 json.dump(poison_data, f)
@@ -11360,6 +11884,8 @@ echo "AGENT_INSTALLED_OK"
             
             return True
             
+        except LeaseRefused:
+            raise
         except Exception as e:
             self.logger.error(f"[HA] Failed to write poison pill: {e}")
             return False
@@ -12204,7 +12730,8 @@ echo "AGENT_INSTALLED_OK"
             
             self.logger.info(f"[HA] Running: ssh {user}@{host} '{command}'")
             
-            result = node_cmd(ssh_cmd, capture_output=True, text=True, timeout=30, host=host, need=need)
+            result = node_cmd(ssh_cmd, capture_output=True, text=True, timeout=30, host=host, need=need,
+                              cluster_id=getattr(self, 'id', None))
 
             if result.returncode == 0:
                 self.logger.info(f"[HA] ✓ Command successful: {result.stdout.strip()}")
@@ -12345,7 +12872,7 @@ echo "AGENT_INSTALLED_OK"
             self.logger.info(f"[HA] Running: sshpass ssh {user}@{host} '{command}'")
             
             result = node_cmd(ssh_cmd, capture_output=True, text=True, timeout=30, env=env, host=host,
-                              need=need)
+                              need=need, cluster_id=getattr(self, 'id', None))
             
             if result.returncode == 0:
                 self.logger.info(f"[HA] ✓ Command successful: {result.stdout.strip()}")
@@ -12453,6 +12980,8 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"[HA] Manual fix: mv {source_path} {target_path}")
             return False
             
+        except LeaseRefused:
+            raise
         except Exception as e:
             self.logger.error(f"[HA] Error moving VM config: {e}")
             return False
@@ -12933,6 +13462,8 @@ echo "AGENT_INSTALLED_OK"
                         '_pve_rule_id': r.get('rule', ''),
                         '_pve_rule_resources': r.get('resources', ''),
                         '_pve_rule_disable': 1 if r.get('disable') else 0,
+                        # MK Nov 2026 - PVE 9.3: 'negative' means the nodes are the ones it avoids
+                        'affinity': r.get('affinity') or 'positive',
                     })
                 return groups
             if response.status_code not in (404, 501):
@@ -13768,7 +14299,8 @@ echo "AGENT_INSTALLED_OK"
 
                 # SUCCESS - release semaphore immediately, connection is established
                 # This allows new connections while this session runs
-                return ha_transport.guard_client(ssh, host, again=guard_asked)
+                return ha_transport.guard_client(ssh, host, again=guard_asked,
+                                                 cluster_id=getattr(self, 'id', None))
                 
             except paramiko.ssh_exception.AuthenticationException as e:
                 self.logger.error(f"SSH auth failed for {username}@{host}: {e}")
@@ -14080,7 +14612,7 @@ echo "AGENT_INSTALLED_OK"
                             # Get transport and open channel with PTY for sudo support
                             transport = ssh.get_transport()
                             # past exec_command, so asked here (#625)
-                            ha_transport.guard_ssh(node_ip, 'shutdown')
+                            ha_transport.guard_ssh(node_ip, 'shutdown', cluster_id=getattr(self, 'id', None))
                             channel = transport.open_session()
                             channel.get_pty()
                             channel.settimeout(10)
@@ -14122,8 +14654,8 @@ echo "AGENT_INSTALLED_OK"
                             task.add_output(f"Skipping reboot for node: {node_name}")
                             task.reboot_issued = False   # #715 — no reboot: RU must NOT wait for offline
 
-                    except ha.GuardRefused:
-                        # nothing was sent: no reboot to wait for (#625)
+                    except (ha.GuardRefused, LeaseRefused):
+                        # nothing was sent: no reboot to wait for (#625), and no reboot alert
                         raise
                     except Exception as e:
                         self.logger.info(f"Reboot command sent (connection closed as expected): {e}")
@@ -14530,6 +15062,14 @@ echo "AGENT_INSTALLED_OK"
             
             if delete_source:
                 data['delete'] = 1
+            else:
+                # MK Nov 2026 - since PVE 9.3 the copy takes the guest's uid along, and a target
+                # cluster that has the uid already (an earlier copy of it) refuses the move. A
+                # kept source is a second guest anyway: let it get a new uid there. Only nodes
+                # that know the parameter get it, older ones refuse it
+                from pegaprox.core import migration_tunnel
+                if migration_tunnel.takes_allow_new_uid(self, node, vm_type):
+                    data['allow-new-uid'] = 1
             
             if bwlimit:
                 data['bwlimit'] = bwlimit
@@ -14560,7 +15100,9 @@ echo "AGENT_INSTALLED_OK"
                 return self._unanswered_remote_migrate(node, vmid, vm_type, target_endpoint, sent,
                                                        int(time.monotonic() - sent))
             else:
-                error_msg = response.text
+                # Proxmox may say what it was handed: the secret of the target's token stays
+                # out of the log and of the answer
+                error_msg = re.sub(r'(PVEAPIToken=[^=\s,"]+=)[^\s,"]+', r'\1***', response.text or '')
                 self.logger.error(f"[ERROR] Remote migration failed: {error_msg}")
                 return {'success': False, 'error': error_msg}
                 
@@ -14685,20 +15227,844 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"Error getting fingerprint: {e}")
             return {'success': False, 'error': str(e)}
 
-    def create_api_token(self, token_name: str = 'pegaprox-migrate', expire: int = 0) -> Dict[str, Any]:
+    # MK Nov 2026 (#1389) - PVE makes and deletes an API token for the user itself, or for
+    # someone with User.Modify on its groups (a token without privilege separation made for
+    # another also wants Permissions.Modify on / and the realm). An API token never counts
+    # as its own user. On a cluster we talk to with a token (the one minted at the first
+    # connect, or one typed in as the login) the temporary token of a migration got a 403
+    # that way, unless the token holds those rights anyway, as root's does. The password
+    # login of the account itself is the way left, and a cluster without one is told so
+    # instead of handing its own token to the source.
+    # A login PVE refused is not sent again for TOKEN_LOGIN_HOLD while the stored password
+    # stays the same: a Site Recovery run asks once per guest, the balancer every interval,
+    # and each failed login counts on the realm's lockout and on a fail2ban of pveproxy.
+    # MK Nov 2026 (#1390) - what PegaProx starts by itself (paced: the renewal of the
+    # management token, the cross-cluster balancer, scheduled replication) counts every login
+    # that failed, refused or without an answer (a realm whose LDAP or AD server is slow or
+    # gone fails it in PVE's log all the same): the next one waits TOKEN_LOGIN_HOLD, and a
+    # third goes out only once the second is TOKEN_LOGIN_WINDOW (and a little) old. That is
+    # the findtime of the fail2ban jail for pveproxy in the Proxmox VE wiki (maxretry 3), so
+    # a directory that stays down does not get the address of PegaProx banned, which would
+    # cut the cluster off although its token needs no directory. fail2ban keeps the count
+    # of an address till its LAST failure is findtime old, and a failure that comes before
+    # that scales the count over findtime rather than dropping the old ones (adjustTime in
+    # its ticket.py): a third login once the first was two days old still made three. A
+    # login that works ends the wait.
+    TOKEN_LOGIN_HOLD = 1800
+    TOKEN_LOGIN_WINDOW = 2 * 86400
+    TOKEN_LOGIN_SLACK = 600
+
+    def _token_owner(self):
+        """The user@realm the API tokens of this cluster's account belong to. A login with
+        an API token keeps 'user@realm!tokenid' in config.user."""
+        return (getattr(self.config, 'user', '') or '').split('!', 1)[0]
+
+    def _is_own_management_token(self, token_user):
+        """True for the id of a token _try_create_api_token made for this cluster's account."""
+        owner, _, name = (token_user or '').partition('!')
+        return owner == self.config.user and bool(_MANAGEMENT_TOKEN_RE.fullmatch(name))
+
+    # the cluster's API token policy (token_policy_of) is read again after this
+    TOKEN_POLICY_TTL = 120
+
+    def token_policy(self):
+        """(policy, seconds PVE's clock runs ahead of ours) of this cluster: ({}, 0.0) for
+        none, and for a policy that cannot be read, which is not kept."""
+        held = getattr(self, '_token_policy_held', None)
+        if held and time.monotonic() - held[0] < self.TOKEN_POLICY_TTL:
+            return held[1], held[2]
+        try:
+            r = self._api_get(f"https://{self.host}:{self.api_port}/api2/json/cluster/options")
+            if r.status_code != 200:
+                raise ValueError(f"HTTP {r.status_code}")
+            policy, ahead = token_policy_of(r)
+        except Exception as e:
+            self.logger.debug(f"[TOKEN] datacenter options unreadable ({type(e).__name__}: {e}), "
+                              f"no API token policy assumed")
+            return {}, 0.0
+        self._token_policy_held = (time.monotonic(), policy, ahead)
+        return policy, ahead
+
+    def token_expire(self, wanted):
+        """The expire of a new temporary token that should end at `wanted`: no later than the
+        cluster's API token policy allows. PVE deletes no token when it runs out, and takes
+        the delete of one that has (drop_token_when_done) as before."""
+        policy, ahead = self.token_policy()
+        expire = policy_expire(policy, ahead, wanted)
+        if wanted and expire < int(wanted):
+            self.logger.warning(
+                f"[TOKEN] The API token policy of cluster '{self.config.name}' allows a token "
+                f"{policy.get('max-lifetime')}s at most: this migration token ends "
+                f"{datetime.fromtimestamp(expire)}, and a migration still running then loses its "
+                f"access to the cluster. It is deleted when its task ends, as before.")
+        return expire
+
+    # MK Nov 2026 (#1390) - the management token under an API token policy that gives it an
+    # end (PVE 9.3) was replaced only once PVE refused it, over a password login of the
+    # account: one with two-factor login, or a cluster without a stored password, lost its
+    # access with it. It is renewed ahead of its end now, from the IP refresh loop: over the
+    # password login where there is one, else over the token itself, which PVE takes from a
+    # token that may manage the tokens of its user (the Administrator role may). Nothing
+    # changes on a cluster without such a policy.
+    TOKEN_RENEW_EVERY = 300         # the end is looked at no more often than this
+    TOKEN_RENEW_AHEAD = 2 * 86400   # renewed this long before its end, a fifth of its lifetime where less
+    TOKEN_RENEW_RETRY = 6 * 3600    # a refused renewal is tried again after this, a quarter of the time left at most
+    TOKEN_RENEW_IDLE = 3600         # a token whose end is not known is looked at again after this
+
+    def renew_management_token(self):
+        """Renews the management token PegaProx made for this cluster once its end is near.
+        'renewed', 'refused' (said once, at WARNING and as an alert), 'lost' (a secret renewed
+        in place whose answer never came, said at once), or None: nothing to do, or no answer
+        this time."""
+        if not ha.is_active():
+            return None
+        now = time.monotonic()
+        last = getattr(self, '_token_renew_checked', None)
+        if last is not None and now - last < self.TOKEN_RENEW_EVERY:
+            return None
+        self._token_renew_checked = now
+        tid = getattr(self.config, 'api_token_user', '') or ''
+        # ours only: never a token typed in by hand, nor a login that is a token itself
+        if (not self.is_connected or '!' in (getattr(self.config, 'user', '') or '')
+                or not self._is_own_management_token(tid)
+                or (getattr(self, '_api_token', None) or '').split('=', 1)[0] != tid):
+            return None
+        # a new token is a write on the cluster
+        from pegaprox.core import federation as _fed
+        if _fed.enabled() and not _fed.worker_takes_writes_for(self.id):
+            return None
+        # MK Nov 2026 - a renewed token the row did not take is stored before anything else,
+        # whatever holds the next renewal back (the alert says every few minutes), and a new
+        # token whose POST got no answer is deleted before another one is made
+        pending = getattr(self, '_token_store_pending', None)
+        if pending or self._unanswered_tokens():
+            if not self._connect_lock.acquire(blocking=False):
+                return None
+            try:
+                if pending:
+                    return self._store_pending_token(tid)
+                self._drop_unanswered_tokens()
+            finally:
+                self._connect_lock.release()
+        held = getattr(self, '_token_renew_held', None)
+        if held and held[0] == tid and now < held[1]:
+            return None
+        ends = self._held_token_end(tid)
+        if ends == 0:
+            # made without an end: a policy set later gives the tokens made after it one
+            return None
+        policy, ahead = self.token_policy()
+        if ends is None and not (policy.get('require-expiry') or policy.get('max-lifetime')):
+            # PVE before 9.3, or no policy that ends a token, and a token made before PegaProx
+            # kept its end: asked again in an hour
+            self._token_renew_held = (tid, now + self.TOKEN_RENEW_IDLE)
+            return None
+        # MK Nov 2026 - an end that is known goes by itself: a policy relaxed after the token
+        # got it does not take it away. A policy that could not be read is no policy of none
+        if ends and not policy and not self._token_policy_read():
+            return None
+        # a connect may replace the token meanwhile; and while this holds the lock, the 401
+        # of a request sent with a secret PVE just renewed starts no connect (_auth_refused)
+        if not self._connect_lock.acquire(blocking=False):
+            return None
+        try:
+            return self._renew_management_token(tid, policy, ahead)
+        finally:
+            self._connect_lock.release()
+
+    def _token_renew_margin(self, policy):
+        """How long before its end a token under `policy` is renewed."""
+        life = policy.get('max-lifetime') or MANAGEMENT_TOKEN_LIFETIME
+        return min(self.TOKEN_RENEW_AHEAD, life // 5)
+
+    def _token_renew_due(self, policy, ahead, ends):
+        """True for an end (PVE's clock) within the margin of a token under `policy`."""
+        return ends - (time.time() + ahead) <= self._token_renew_margin(policy)
+
+    def _token_policy_read(self):
+        """True where token_policy() answered from a read of the cluster's options."""
+        held = getattr(self, '_token_policy_held', None)
+        return bool(held) and time.monotonic() - held[0] < self.TOKEN_POLICY_TTL
+
+    def _renew_management_token(self, tid, policy, ahead):
+        ends, why = self._management_token_end(tid, ahead=ahead)
+        if ends is None:
+            # the token may not read its own end, and no login of the account may either
+            if why:
+                self._token_end_unread(tid, why)
+            return None
+        if not ends or not self._token_renew_due(policy, ahead, ends):
+            return None
+        until = ends - ahead
+        self.logger.info(f"[TOKEN] cluster '{self.config.name}': the API token {tid} ends "
+                         f"{datetime.fromtimestamp(until)}, renewing it")
+        said, passing = [], []
+        for way in (self._renew_over_login, self._renew_over_token):
+            try:
+                done, why = way(tid, policy, ahead)
+            except _SecretLost as e:
+                return self._token_secret_lost(tid, str(e))
+            except _EndKept as e:
+                # the token may renew itself, so no privilege is missing
+                return self._token_renewal_refused(tid, until, [str(e)], privileges=False)
+            except _RenewalUnanswered as e:
+                passing.append(str(e))
+                continue
+            except LoginNotTaken as e:
+                # names the time the login goes out again, where it waits
+                passing.append(f"over the password login: {e}")
+                continue
+            except Exception as e:
+                passing.append(f"no answer ({type(e).__name__})")
+                continue
+            if done:
+                return 'renewed'
+            if why:
+                said.append(why)
+        if passing:
+            # no yes or no is no refusal: tried again in a quarter of an hour, not every five
+            # minutes, and said once half the margin has gone without a renewal
+            self._token_renew_held = (tid, time.monotonic() + 3 * self.TOKEN_RENEW_EVERY)
+            if until - time.time() > self._token_renew_margin(policy) / 2:
+                self.logger.debug(f"[TOKEN] renewing {tid}: {'; '.join(passing)} - trying again")
+                return None
+        return self._token_renewal_refused(tid, until, said, passing)
+
+    def _management_token_end(self, tid, held=True, ahead=0.0):
+        """(end, None) of our token `tid`, in seconds since the epoch on PVE's clock and 0
+        for none: read over the token, else the one kept (`held`), else once over a password
+        login. (None, why) where PVE refuses it to the token and there is no such login,
+        (None, None) for no answer. `ahead`: seconds PVE's clock runs ahead of ours."""
+        url = _token_url(self, tid.split('!', 1)[1])
+        known = self._held_token_end(tid) if held else None
+        # MK Nov 2026 - PVE refuses a token past its end with a 401. A kept end that has
+        # passed (a few minutes for the clocks) is taken only from such an answer: the token
+        # still working means its end was moved on the cluster (Expire in the GUI)
+        passed = bool(known) and known + self.TOKEN_RENEW_EVERY < time.time() + ahead
+        stale = None
+        try:
+            r = self._api_get(url)
+            if passed and r.status_code not in (200, 401):
+                if r.status_code != 403:
+                    # says nothing of whether PVE takes it
+                    return None, None
+                self._forget_token_end(tid)
+                was = datetime.fromtimestamp(known - ahead).strftime('%Y-%m-%d %H:%M')
+                stale = (f"the end PegaProx kept of it, {was}, has passed and Proxmox still "
+                         f"takes it, so it was moved on the cluster")
+                known = None
+            if r.status_code != 200 and known is not None:
+                return known, None
+            if r.status_code == 403:
+                # User.Modify on the groups of its user: a token without it may not read
+                # itself. MK Nov 2026 - asked of a password login once per token and stored
+                # password, not at every look: a two-factor account answers each login with
+                # a ticket that cannot read it
+                mark = (tid, self._password_mark())
+                sess = why = None
+                # no answer is no read, from the login or from the read over it: asked again
+                # once the login may go out again, the looks till then wait like after any
+                # answer that said nothing
+                quarter = (tid, time.monotonic() + 3 * self.TOKEN_RENEW_EVERY)
+                if getattr(self, '_token_end_login_tried', None) != mark:
+                    try:
+                        sess, why = self._account_login('reading when its API token ends', paced=True)
+                    except Exception:
+                        self._token_renew_held = quarter
+                        raise
+                    failed = getattr(self, '_token_login_failed', None)
+                    refused = bool(failed) and failed.get('mark') == mark[1] and failed.get('refused')
+                    if sess is None and not refused:
+                        # a ticket that cannot read it (two-factor), or no password: the same
+                        # answer at every look. MK Nov 2026 - a no can be a directory that is
+                        # down for a while (PVE says 401 for that too): asked again once the
+                        # paced login may go out
+                        self._token_end_login_tried = mark
+                if sess is None:
+                    if why:
+                        self.logger.debug(f"[TOKEN] the end of {tid} unread: {why}")
+                    if getattr(self, '_token_end_login_tried', None) == mark:
+                        unread = (f"Proxmox does not let the token read itself, and there is no "
+                                  f"password login of {self._token_owner()} to read it with")
+                    else:
+                        unread = (f"Proxmox does not let the token read itself, and the password "
+                                  f"login of {self._token_owner()} to read it with failed: {why}")
+                    return None, (f"{stale}; {unread}" if stale else unread)
+                try:
+                    r = sess.get(url, timeout=self.api_timeout)
+                except Exception:
+                    self._token_renew_held = quarter
+                    raise
+                finally:
+                    try: sess.close()
+                    except Exception: pass
+                if r.status_code != 200:
+                    self._token_renew_held = quarter
+                    return None, None
+            if r.status_code != 200:
+                return None, None
+            ends = int(((r.json() or {}).get('data') or {}).get('expire') or 0)
+        except Exception as e:
+            self.logger.debug(f"[TOKEN] the end of {tid} unread ({type(e).__name__})")
+            return (None if passed else known), None
+        self._hold_token_end(tid, ends)
+        return ends, None
+
+    def _held_token_end(self, tid):
+        """The end of our token `tid` that PegaProx knows from its making, its renewal or its
+        last read, also after a restart (pegaprox_kv). None where it is not known."""
+        held = getattr(self, '_token_end_held', None)
+        if held and held[0] == tid:
+            return held[1]
+        kept = _management_token_kept(self.id)
+        ends = kept.get('expire')
+        if kept.get('token') != tid or not isinstance(ends, int) or isinstance(ends, bool):
+            return None
+        self._token_end_held = (tid, ends)
+        return ends
+
+    def _hold_token_end(self, tid, ends):
+        """`ends` is the end of our token `tid`: kept in memory and in pegaprox_kv."""
+        self._token_end_held = (tid, ends)
+        kept = _management_token_kept(self.id)
+        if kept.get('token') != tid or kept.get('expire') != ends:
+            self._keep_token(tid, expire=ends)
+
+    def _forget_token_end(self, tid):
+        """The end kept of `tid` is none PVE goes by: from now on as unknown as for a token
+        made before PegaProx kept it, also after a restart."""
+        self._token_end_held = (tid, None)
+        self._keep_token(tid, expire=None)
+
+    def _keep_token(self, tid=None, **fields):
+        """Writes `fields` into the record kept of the management token. A record of another
+        token than `tid` starts over; the names of POSTs without an answer stay."""
+        kept = _management_token_kept(self.id)
+        if tid is not None and kept.get('token') != tid:
+            kept = {'token': tid, 'unanswered': kept.get('unanswered') or []}
+        kept.update(fields)
+        return _keep_management_token(self.id, kept)
+
+    def _password_mark(self):
+        """A digest of the password stored for the account, None for none: what tells a
+        login PVE refused from one with a new password."""
+        pwd = getattr(self.config, 'pass_', None) or getattr(self.config, 'password', None)
+        return hashlib.sha256(pwd.encode('utf-8', 'replace')).hexdigest() if pwd else None
+
+    def _token_end_unread(self, tid, why):
+        """MK Nov 2026 - an end neither the token nor a login of its account may read. Most
+        often there is none: every token made before an API token policy has none, and the
+        end of one made since is kept. Said once per token, at INFO and without an alert,
+        and looked at again in an hour, over the token only."""
+        self._token_renew_held = (tid, time.monotonic() + self.TOKEN_RENEW_IDLE)
+        kept = _management_token_kept(self.id)
+        if kept.get('token') == tid and kept.get('unread_said'):
+            self.logger.debug(f"[TOKEN] the end of {tid} is still unread: {why}")
+            return
+        self.logger.info(f"[TOKEN] cluster '{self.config.name}': PegaProx cannot read when its "
+                         f"API token {tid} ends ({why}). A token made before the cluster had an "
+                         f"API token policy does not end; one that does is renewed ahead of its "
+                         f"end once PegaProx can read it.")
+        self._keep_token(tid, unread_said=True)
+
+    def _unanswered_tokens(self):
+        """The names of new tokens PegaProx asked PVE for and got no answer about: PVE may
+        have made them. Read from pegaprox_kv once, a restart in between keeps them."""
+        names = getattr(self, '_token_unanswered', None)
+        if names is None:
+            kept = _management_token_kept(self.id).get('unanswered') or []
+            names = {n for n in kept if isinstance(n, str) and _MANAGEMENT_TOKEN_RE.fullmatch(n)}
+            self._token_unanswered = names
+        return names
+
+    def _token_posted(self, name, answered):
+        """`name` is asked for (answered False) or settled (True): a name that is not
+        settled is deleted at the next look, whether PVE made it or not."""
+        names = self._unanswered_tokens()
+        if (name in names) == (not answered):
+            return
+        (names.discard if answered else names.add)(name)
+        self._keep_token(unanswered=sorted(names))
+
+    def _drop_unanswered_tokens(self):
+        """MK Nov 2026 (#1390) - deletes the new tokens whose POST got no answer: a token PVE
+        made for it holds every right of the account, and the retry asks for another one.
+        One PVE never made answers that there is no such token."""
+        in_use = (getattr(self.config, 'api_token_user', '') or '').partition('!')[2]
+        for name in sorted(self._unanswered_tokens()):
+            if name == in_use:
+                # answered after all, or in use and not stored yet
+                continue
+            try:
+                r, why = self._token_request('DELETE', name, paced=True,
+                                             what='deleting an API token it got no answer for')
+            except Exception as e:
+                self.logger.debug(f"[TOKEN] deleting {name}: no answer ({type(e).__name__})")
+                continue
+            if r is not None and r.status_code != 200 and _passes(r):
+                continue
+            if r is not None and r.status_code == 200:
+                self.logger.info(f"[TOKEN] cluster '{self.config.name}': deleted the API token "
+                                 f"{name}, whose making got no answer")
+            elif r is None or 'no such token' not in _pve_message(r.text).lower():
+                self.logger.warning(f"[TOKEN] Could not delete the API token {name} of "
+                                    f"{self._token_owner()}, whose making got no answer: "
+                                    f"{why or _pve_message(r.text)} - delete it on the cluster "
+                                    f"if it is there")
+            self._token_posted(name, True)
+
+    def _renew_over_login(self, tid, policy, ahead):
+        """A new token over a password login of the account, as one PVE no longer takes is
+        replaced (_try_create_api_token). (True, None) once in use, else (False, why)."""
+        form = management_token_form(policy, ahead)
+        if form is None:
+            return False, ('the API token policy of the cluster requires privilege separation, '
+                           'which leaves a new token of PegaProx without any right')
+        sess, why = self._account_login('a new API token', paced=True)
+        if sess is None:
+            return False, why
+        try:
+            name = _new_management_token_name()
+            # MK Nov 2026 - noted before it goes out: one whose answer does not come may still
+            # make the token, and the next look deletes it
+            self._token_posted(name, False)
+            r = sess.post(_token_url(self, name), data=form, timeout=self.api_timeout)
+            if r.status_code != 200:
+                why = (f"over the password login Proxmox answered HTTP {r.status_code} "
+                       f"{_pve_message(r.text)}")
+                if _passes(r):
+                    raise _RenewalUnanswered(why)
+                self._token_posted(name, True)
+                return False, why
+            return self._take_new_token(tid, name, r, form, sess.delete, 'over the password login')
+        finally:
+            try: sess.close()
+            except Exception: pass
+
+    def _renew_over_token(self, tid, policy, ahead):
+        """Over the token itself, for an account with two-factor login or without a stored
+        password. PVE wants User.Modify on the groups of its user for it, and for a token
+        without privilege separation Permissions.Modify on / and Realm.AllocateUser on the
+        realm. A new token first: it is stored before the old one goes, so an answer that
+        never comes costs nothing. The secret renewed in place only where PVE refused that
+        and the policy lets a new secret move the end. (True, None) once in use, else
+        (False, why)."""
+        said = []
+        form = management_token_form(policy, ahead)
+        if form is None:
+            said.append('a new token would hold no right, as the API token policy of the cluster '
+                        'requires privilege separation')
+        else:
+            name = _new_management_token_name()
+            self._token_posted(name, False)
+            r = self._api_post(_token_url(self, name), data=form)
+            if r.status_code == 200:
+                return self._take_new_token(tid, name, r, form, self._api_delete,
+                                            'over the token itself')
+            why = f"Proxmox refused a new token: HTTP {r.status_code} {_pve_message(r.text)}"
+            if _passes(r):
+                raise _RenewalUnanswered(f"over the token itself {why}")
+            self._token_posted(name, True)
+            said.append(why)
+        if policy.get('allow-extension-on-regenerate'):
+            try:
+                done, why = self._renew_secret_in_place(tid, policy, ahead)
+            except _RenewalUnanswered as e:
+                raise _RenewalUnanswered('over the token itself ' + '; '.join([*said, str(e)])) from None
+            if done:
+                return True, None
+            said.append(why)
+        return False, 'over the token itself ' + '; '.join(said)
+
+    def _renew_secret_in_place(self, tid, policy, ahead):
+        """PUT regenerate=1 with a new end. MK Nov 2026 - PVE drops the old secret as it
+        carries the PUT out, so an answer that does not come back is asked of the secret we
+        have: one PVE takes no more raises _SecretLost, a new secret whose end PVE kept
+        _EndKept. (True, None), or (False, why)."""
+        expire = management_token_expire(policy, ahead)
+        data = unsure = None
+        try:
+            r = self._api_put(_token_url(self, tid.split('!', 1)[1]),
+                              data={'regenerate': 1, 'expire': expire})
+            if r.status_code == 200:
+                data = (r.json() or {}).get('data') or {}
+            else:
+                unsure = f"Proxmox refused a new secret: HTTP {r.status_code} {_pve_message(r.text)}"
+                if not _passes(r):
+                    return False, unsure
+        except Exception as e:
+            unsure = f"no answer to a new secret ({type(e).__name__})"
+        if data is not None:
+            # out of the try: an end PVE kept (_EndKept) is no answer that did not come
+            return self._take_renewed_secret(tid, data, expire, policy, ahead)
+        try:
+            alive = self._api_get(f"https://{self.host}:{self.api_port}/api2/json/version").status_code
+        except Exception:
+            alive = None
+        if alive == 401:
+            raise _SecretLost(unsure)
+        raise _RenewalUnanswered(unsure)
+
+    def _take_new_token(self, old, name, resp, form, drop, how):
+        """The cluster goes on with the token PVE just made (`resp`), which is stored before
+        `drop` deletes `old`: a row that could not be written keeps it, stored again at the
+        next looks, and the next start signs in with it while it lasts. (True, None), or
+        (False, why) for an answer without one."""
+        data = (resp.json() or {}).get('data') or {}
+        secret = data.get('value')
+        if not secret:
+            return False, f"Proxmox made a new token {how} but returned no secret"
+        new = data.get('full-tokenid') or f"{self._token_owner()}!{name}"
+        self.config.api_token_user, self.config.api_token_secret = new, secret
+        self._api_token = f"{new}={secret}"
+        self._using_api_token = True
+        self._ticket = self._csrf_token = None
+        self._hold_token_end(new, int((data.get('info') or {}).get('expire') or form.get('expire') or 0))
+        self._token_renewal_done()
+        stored = self._store_management_token(new, secret)
+        if not stored:
+            # its name stays noted: a restart before it is stored deletes it on PVE
+            self._token_store_pending = (new, secret, old)
+            self.logger.error(f"[TOKEN] cluster '{self.config.name}': the new API token {new} is in use "
+                              f"but could not be stored; PegaProx tries again every few minutes and "
+                              f"deletes the old token {old} once it is stored. Until then a restart "
+                              f"signs in with the old token while it lasts")
+        else:
+            self._token_posted(name, True)
+            self._drop_old_token(old, drop)
+        self.logger.info(f"[TOKEN] cluster '{self.config.name}': renewed the API token {old} as "
+                         f"{new} {how}")
+        self._token_renewal_audit(f"Renewed API token {old} to {new} before it ends ({how})", stored)
+        return True, None
+
+    def _drop_old_token(self, old, drop=None):
+        """Deletes `old`, the token a renewal replaced: over `drop`, a session that may, else
+        over the token in use and, where PVE refuses it that, a password login of the account.
+        MK Nov 2026 - a token stored only at a later look came from the password login, as its
+        token may delete no token, so a delete over it alone left the old one on PVE."""
+        name = old.split('!', 1)[1]
+        try:
+            if drop is None:
+                gone, why = self._token_request('DELETE', name, paced=True,
+                                                what='deleting the API token it renewed')
+            else:
+                gone, why = drop(_token_url(self, name), timeout=self.api_timeout), None
+            if gone is not None and gone.status_code != 200:
+                why = _pve_message(gone.text)
+        except LoginNotTaken as e:
+            why = str(e)
+        except Exception as e:
+            why = f"no answer ({type(e).__name__})"
+        if why:
+            self.logger.warning(f"[TOKEN] Could not delete the old API token {old}: {why} - "
+                                f"delete it on the cluster")
+
+    def _token_renewal_done(self):
+        """A new lifetime of the token: its next refusal is said again (MK Nov 2026)."""
+        self._token_renew_warned = set()
+        self._token_renew_held = None
+
+    def _store_pending_token(self, tid):
+        """Stores the renewed token `tid` the row did not take at its renewal, and deletes
+        the token it replaced once it is stored. None."""
+        new, secret, old = self._token_store_pending
+        if (new, secret) != (tid, getattr(self.config, 'api_token_secret', None)):
+            # a connect made another one meanwhile, and stored that
+            self._token_store_pending = None
+            return None
+        if not self._store_management_token(new, secret):
+            return None
+        self._token_store_pending = None
+        self._token_posted(new.partition('!')[2], True)
+        self.logger.info(f"[TOKEN] cluster '{self.config.name}': the renewed API token {new} is stored now")
+        if old:
+            self._drop_old_token(old)
+        return None
+
+    def _take_renewed_secret(self, tid, data, expire, policy, ahead):
+        """The new secret of `tid` PVE renewed in place (`data` of its answer): in use and
+        stored at once, PVE takes the old one no more. (True, None) once its end has moved
+        past the margin; _EndKept where it did not."""
+        secret = data.get('value')
+        if not secret:
+            return False, 'a new secret: Proxmox returned none'
+        self.config.api_token_secret = secret
+        self._api_token = f"{tid}={secret}"
+        stored = self._store_management_token(tid, secret)
+        if not stored:
+            # the row holds a secret PVE takes no more: stored again at the next looks, and
+            # said where the admin looks, as a restart before that loses the cluster
+            self._token_store_pending = (tid, secret, None)
+            self._token_unstored(tid)
+        ends = data.get('expire', (data.get('info') or {}).get('expire'))
+        if ends is None:
+            ends, _why = self._management_token_end(tid, held=False)
+        ends = int(expire if ends is None else ends or 0)
+        self._hold_token_end(tid, ends)
+        # a renewal that left the end where it was would come round again at the next look
+        moved = not ends or not self._token_renew_due(policy, ahead, ends)
+        self._token_renewal_audit(f"Renewed the secret of API token {tid} over the token itself"
+                                  + ('' if moved else ', its end unchanged'), stored)
+        if not moved:
+            raise _EndKept('Proxmox renewed the secret but kept the end it had')
+        self._token_renewal_done()
+        self.logger.info(f"[TOKEN] cluster '{self.config.name}': renewed the secret of the API token "
+                         f"{tid} over the token itself")
+        return True, None
+
+    def _store_management_token(self, tid, secret):
+        """True once the stored row of this cluster holds `tid` and `secret`. save_config
+        logs a row it could not write and goes on with the others, so the row is read back."""
+        try:
+            if save_config() is False:
+                return False
+            row = get_db().get_cluster(self.id) or {}
+            return row.get('api_token_user') == tid and row.get('api_token_secret') == secret
+        except Exception as e:
+            self.logger.error(f"[TOKEN] the renewed API token {tid} was not stored: {type(e).__name__}")
+            return False
+
+    def _token_renewal_audit(self, details, stored):
+        try:
+            from pegaprox.utils.audit import log_audit
+            log_audit('system', 'cluster.api_token_renewed',
+                      details + ('' if stored else ', not stored'),
+                      cluster=self.config.name, cluster_id=self.id)
+        except Exception as e:
+            self.logger.debug(f"[TOKEN] audit entry of the renewal not written: {type(e).__name__}")
+
+    def _token_renewal_refused(self, tid, until, said, passing=(), privileges=True):
+        """Nothing renewed `tid`, which ends at `until`: said at WARNING and as an alert on
+        the push and webhook paths while there is time to act, once per lifetime of the token
+        for a refusal and once for answers that said nothing (`passing`, whose retry the
+        caller holds). A refusal is tried again after TOKEN_RENEW_RETRY, MK Nov 2026 - a
+        quarter of the time left where that is less, so a token with hours left gets more
+        than one more try. `privileges` False: the token may renew itself, so the advice
+        leaves out the privileges."""
+        if not passing:
+            hold = min(self.TOKEN_RENEW_RETRY, max(self.TOKEN_RENEW_EVERY, (until - time.time()) // 4))
+            self._token_renew_held = (tid, time.monotonic() + hold)
+        why = '; '.join(s.strip().rstrip('.') for s in [*said, *passing] if s)
+        kind = (tid, 'passing' if passing else 'refused')
+        warned = getattr(self, '_token_renew_warned', None) or set()
+        if kind in warned:
+            self.logger.debug(f"[TOKEN] renewing {tid} did not work again: {why}")
+            return 'refused'
+        self._token_renew_warned = warned | {kind}
+        owner = self._token_owner()
+        # MK Nov 2026 - only an end PegaProx knows is said: one it cannot read is no refusal
+        # (_token_end_unread), and a policy relaxed since may not end a new token at all
+        head = (f"The API token {tid} PegaProx made for cluster '{self.config.name}' ends "
+                f"{datetime.fromtimestamp(until):%Y-%m-%d %H:%M}")
+        if passing:
+            # a lock or a restart of pveproxy: nothing the admin has to change
+            message = (f"{head}, and PegaProx could not renew it yet: {why}. PegaProx "
+                       f"tries again every {3 * self.TOKEN_RENEW_EVERY // 60} minutes.")
+        else:
+            grant = (f"let {owner} manage its own API tokens (User.Modify on its group, "
+                     f"Permissions.Modify on / and Realm.AllocateUser on its realm, as the "
+                     f"Administrator role has), " if privileges else '')
+            message = (f"{head}, and PegaProx cannot renew it: {why}. Before it ends, store the "
+                       f"password of {owner} in the cluster settings (an account without "
+                       f"two-factor login), {grant}or reconfigure the cluster with an API token "
+                       f"as its login.")
+        message += (f" Once the token has ended, the cluster loses its connection unless a "
+                    f"password login of {owner} works then.")
+        self.logger.warning(f"[TOKEN] {message}")
+        self._token_alert('warning', message, until)
+        return 'refused'
+
+    def _token_secret_lost(self, tid, why):
+        """PVE renewed the secret of `tid` in place and its answer never came (_SecretLost):
+        said at once, the cluster is cut off unless the password login replaces the token."""
+        self._token_renew_held = (tid, time.monotonic() + self.TOKEN_RENEW_RETRY)
+        owner = self._token_owner()
+        message = (f"Proxmox renewed the secret of the API token {tid} PegaProx made for cluster "
+                   f"'{self.config.name}', and its answer with the new secret never came ({why}). "
+                   f"Proxmox takes the secret PegaProx has no more, so the cluster loses its "
+                   f"connection unless a password login of {owner} works: store the password of "
+                   f"{owner} in the cluster settings (an account without two-factor login), or "
+                   f"reconfigure the cluster with an API token as its login.")
+        self.logger.error(f"[TOKEN] {message}")
+        self._token_alert('critical', message, None)
+        return 'lost'
+
+    def _token_unstored(self, tid):
+        """A secret PVE renewed in place is in use, and the row still holds the dead one."""
+        message = (f"The API token {tid} of cluster '{self.config.name}' has a new secret, which "
+                   f"PegaProx uses but could not store, and Proxmox takes the one before no more. "
+                   f"PegaProx tries to store it again every few minutes; a restart of PegaProx "
+                   f"before that loses the connection to the cluster. Look at the database of "
+                   f"PegaProx (free disk space, permissions).")
+        self.logger.error(f"[TOKEN] {message}")
+        self._token_alert('critical', message, None)
+
+    def _token_alert(self, severity, message, until):
+        # who sees every cluster gets it, the way the HA group's own alerts go: a cluster's
+        # credential is nothing a tenant or a pool grant can act on
+        _alert_out({'alert_name': 'API token renewal', 'severity': severity,
+                    'metric': 'api_token_renewal',
+                    'current_value': (datetime.fromtimestamp(until).isoformat(timespec='minutes')
+                                      if until else 'unknown'),
+                    'target_type': 'instance', 'target_name': self.config.name, 'cluster_id': '',
+                    'message': message, 'timestamp': datetime.now().isoformat()}, 'token renewal')
+
+    def _token_request(self, method, token_name, data=None,
+                       what='the temporary API token of a migration', paced=False):
+        """GET, POST, PUT or DELETE `token_name` of the cluster's account: over the session
+        we have, and once more over a password login of the account when PVE refused the
+        token we talk to it with. (response, None), or (None, why) when neither works. A
+        login that got no answer, or one that is no yes or no, raises. `what` is the work
+        a refusal names, `paced` as for _account_login."""
+        url = _token_url(self, token_name)
+        kw = {} if data is None else {'data': data}
+        # PUT: the new secret of a token (PVE 9.2), which 9.3 refuses a token without
+        # Permissions.Modify on / as well
+        call = {'GET': self._api_get, 'POST': self._api_post, 'PUT': self._api_put,
+                'DELETE': self._api_delete}[method]
+        response = call(url, **kw)
+        if response.status_code != 403 or not getattr(self, '_using_api_token', False):
+            return response, None
+        sess, why = self._account_login(what, paced=paced)
+        if sess is None:
+            return None, why
+        try:
+            return sess.request(method, url, timeout=self.api_timeout, **kw), None
+        finally:
+            try: sess.close()
+            except Exception: pass
+
+    def _account_login(self, what, paced=False):
+        """A session of a password login of the cluster's account, for `what` (the work a
+        refusal names): (session, None), or (None, why) where there is none to be had. A
+        login PVE refused is not sent again for TOKEN_LOGIN_HOLD while the stored password
+        stays the same. A login that got no answer, or one that is no yes or no, raises.
+        `paced`: a caller that comes round by itself (the renewal of the management token,
+        the balancer, scheduled replication). After a failed login it sends none for
+        TOKEN_LOGIN_HOLD, and after two none till the second is TOKEN_LOGIN_WINDOW old:
+        till then a refusal answers as before, and one without an answer raises
+        LoginNotTaken, saying when, without going out. The caller closes the session."""
+        owner = self._token_owner()
+        if '!' in (getattr(self.config, 'user', '') or ''):
+            return None, (f"Proxmox does not let an API token make or delete another one, and "
+                          f"this cluster signs in with the API token {self.config.user} only. "
+                          f"A cross-cluster migration needs a temporary token there: add the "
+                          f"cluster with the password of {owner} instead (PegaProx still makes "
+                          f"a token of its own for everything else).")
+        pwd = getattr(self.config, 'pass_', None) or getattr(self.config, 'password', None)
+        if not pwd:
+            return None, (f"Proxmox does not let an API token make, renew or delete the tokens "
+                          f"of its user, and this cluster has no password of {owner} stored for "
+                          f"{what}: add the password in the cluster settings.")
+        if not paced:
+            return self._account_login_now(what, owner, pwd, paced)
+        # MK Nov 2026 - one paced login at a time per cluster: the balancer, scheduled
+        # replication and the renewal can look at once, and each would pass the check below
+        # while the login before it is still on its way
+        lock = self.__dict__.get('_paced_login_lock') or \
+            self.__dict__.setdefault('_paced_login_lock', threading.RLock())
+        with lock:
+            return self._account_login_now(what, owner, pwd, paced)
+
+    def _account_login_now(self, what, owner, pwd, paced):
+        """_account_login once the account is known to have a password (`pwd`)."""
+        stored = self._password_mark()
+        held = getattr(self, '_token_login_refused', None)
+        if held and held[0] == stored and time.monotonic() - held[1] < self.TOKEN_LOGIN_HOLD:
+            return None, held[2]
+        failed = getattr(self, '_token_login_failed', None)
+        if paced and failed and failed['mark'] == stored:
+            left = self._token_login_waits(failed)
+            if left > 0:
+                when = (f"{failed['why']}; PegaProx tries the password login of {owner} again "
+                        f"{datetime.fromtimestamp(time.time() + left):%Y-%m-%d %H:%M} at the earliest")
+                if failed['refused']:
+                    return None, when
+                raise LoginNotTaken(when)
+        # no answer, or one that is not a no, raises: that is no refusal, a retry may work
+        try:
+            sess, why, status = _password_login(self, owner, pwd, what)
+        except Exception as e:
+            self._login_failed(stored, what, e)
+            raise
+        if sess is None:
+            if status == 401:
+                why += (" - the password stored for this cluster is wrong, or its realm asks "
+                        "for a second factor")
+                self._login_failed(stored, what, None, why)
+            else:
+                # a partial ticket of a two-factor account: the password was right
+                self._token_login_failed = None
+            self._token_login_refused = (stored, time.monotonic(), why)
+            return None, why
+        self._token_login_refused = self._token_login_failed = None
+        return sess, None
+
+    def _token_login_waits(self, failed):
+        """Seconds till a paced login may go out again after the failed ones in `failed`.
+        Two that fail2ban counts together (the second before the first was TOKEN_LOGIN_WINDOW
+        old) hold the next one back till fail2ban dropped them, the second being that old;
+        TOKEN_LOGIN_SLACK covers its clean-up, which runs every few seconds."""
+        at = failed['at']
+        gone = self.TOKEN_LOGIN_WINDOW + self.TOKEN_LOGIN_SLACK
+        if len(at) > 1 and at[-1] - at[-2] < gone:
+            return at[-1] + gone - time.monotonic()
+        return at[-1] + self.TOKEN_LOGIN_HOLD - time.monotonic()
+
+    def _login_failed(self, stored, what, e, refused=None):
+        """A password login (for `what`) failed: refused (`refused`, the why), or with
+        neither a yes nor a no (`e`). Noted against the stored password (`stored`) for the
+        paced logins (_account_login), the last two of them. One without an answer is said
+        once at INFO till a login works again."""
+        why = refused or (str(e) if isinstance(e, LoginNotTaken)
+                          else f"no answer within the time PegaProx waits ({type(e).__name__})")
+        before = getattr(self, '_token_login_failed', None)
+        if not before or before['mark'] != stored:
+            before = {'at': [], 'said': False}
+        self._token_login_failed = {
+            'mark': stored, 'at': before['at'][-1:] + [time.monotonic()], 'why': why,
+            'refused': bool(refused), 'said': before['said'] or not refused}
+        if refused or before['said']:
+            self.logger.debug(f"[TOKEN] the password login for {what} failed again: {why}")
+            return
+        self.logger.info(f"[TOKEN] cluster '{self.config.name}': a password login of "
+                         f"{self._token_owner()} for {what} got neither a yes nor a no ({why}). "
+                         f"Proxmox may count it as failed, on a lockout of the realm and on a "
+                         f"fail2ban of pveproxy alike, so what PegaProx starts by itself (the "
+                         f"renewal of its API token, the cross-cluster balancer, scheduled "
+                         f"replication) tries it again in {self.TOKEN_LOGIN_HOLD // 60} minutes at "
+                         f"the earliest, and once more only "
+                         f"{self.TOKEN_LOGIN_WINDOW // 86400} days after the second. A migration "
+                         f"started by hand logs in at once, and a login that works ends the wait.")
+
+    def create_api_token(self, token_name: str = 'pegaprox-migrate', expire: int = 0,
+                         paced: bool = False) -> Dict[str, Any]:
         # MK May 2026 (#413 layer 6, blackshocks bundle 20260530_220647):
         # if a prior Planned/Emergency failover crashed or its token cleanup
         # hadn't run yet, the same token_name is still on target → PVE returns
         # 400 "Token already exists" and the next failover bails before it ever
         # touches qmigrate. Pre-delete is the cleanest path — we'd issue the
         # delete on cleanup anyway, doing it up-front makes the create idempotent.
+        # MK Nov 2026 (#1390) - paced: a caller that comes round by itself (the balancer,
+        # scheduled replication), whose password logins wait after failed ones (_account_login)
         if not self.is_connected:
             if not self.connect_to_proxmox():
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
 
         host = self.host
-        user = self.config.user
-        url = f"https://{host}:{self.api_port}/api2/json/access/users/{user}/token/{token_name}"
+        owner = self._token_owner()
+        # MK Nov 2026 - the cluster's API token policy (PVE 9.3): an expire no later than it
+        # allows, and no token where it wants privilege separation, which this one goes
+        # without (PVE would refuse it with a 500)
+        policy, _ahead = self.token_policy()
+        if policy.get('require-privilege-separation'):
+            why = (f"The API token policy of this cluster requires privilege separation "
+                   f"(Datacenter > Options > API Token Policy), and the temporary token of a "
+                   f"cross-cluster migration has the rights of {owner} without it. Turn "
+                   f"'Require Privilege Separation' off there to move guests into this cluster.")
+            self.logger.warning(f"[create_api_token] {why}")
+            return {'success': False, 'error': why, 'refused': True}
+        expire = self.token_expire(expire)
 
         def _do_create():
             data = {
@@ -14708,25 +16074,33 @@ echo "AGENT_INSTALLED_OK"
                 'expire': int(expire or 0),
                 'comment': 'PegaProx temporary migration token'
             }
-            return self._api_post(url, data=data)
+            return self._token_request('POST', token_name, data, paced=paced)
 
         try:
-            response = _do_create()
+            response, why = _do_create()
 
             # Stale token from a previous run? Drop it and retry once.
-            if response.status_code != 200 and 'already exists' in (response.text or '').lower():
+            if response is not None and response.status_code != 200 \
+                    and 'already exists' in (response.text or '').lower():
                 self.logger.warning(f"[create_api_token] stale '{token_name}' on {host}, dropping + retry")
                 try:
-                    self._api_delete(url)
+                    self._token_request('DELETE', token_name, paced=paced)
                 except Exception as _e:
                     self.logger.debug(f"[create_api_token] pre-delete swallowed: {_e}")
-                response = _do_create()
+                response, why = _do_create()
+
+            if response is None:
+                self.logger.error(f"[ERROR] Failed to create API token: {why}")
+                return {'success': False, 'error': why, 'refused': True}
 
             if response.status_code == 200:
+                if paced:
+                    # its cleanup deletes it paced as well (delete_api_token)
+                    self.__dict__.setdefault('_paced_tokens', set()).add(token_name)
                 result = response.json()
                 token_data = result.get('data', {})
                 token_value = token_data.get('value', '')
-                full_token_id = token_data.get('full-tokenid', f"{user}!{token_name}")
+                full_token_id = token_data.get('full-tokenid', f"{owner}!{token_name}")
 
                 self.logger.info(f"[OK] Created API token: {full_token_id}")
                 return {
@@ -14736,7 +16110,7 @@ echo "AGENT_INSTALLED_OK"
                     'token_name': token_name
                 }
             else:
-                error_msg = response.text
+                error_msg = _pve_message(response.text, 300)
                 self.logger.error(f"[ERROR] Failed to create API token: {error_msg}")
                 return {'success': False, 'error': error_msg}
 
@@ -14744,21 +16118,26 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"[ERROR] Error creating API token: {e}")
             return {'success': False, 'error': str(e)}
 
-    def delete_api_token(self, token_name: str = 'pegaprox-migrate') -> Dict[str, Any]:
-        
+    def delete_api_token(self, token_name: str = 'pegaprox-migrate', paced=None) -> Dict[str, Any]:
+        # MK Nov 2026 (#1390) - a token made paced (the balancer, scheduled replication) is
+        # deleted paced too, from wherever its cleanup runs: the cleanup of a migration tries
+        # TOKEN_DELETE_TRIES times, each over a password login where the token is refused
+        if paced is None:
+            paced = token_name in (self.__dict__.get('_paced_tokens') or ())
         if not self.is_connected:
             if not self.connect_to_proxmox():
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
-            host = self.host
-            user = self.config.user
-            
-            url = f"https://{host}:{self.api_port}/api2/json/access/users/{user}/token/{token_name}"
-            response = self._api_delete(url)
+            owner = self._token_owner()
+            response, why = self._token_request('DELETE', token_name, paced=paced)
+            if response is None:
+                self.logger.warning(f"[WARN] Failed to delete API token: {why}")
+                return {'success': False, 'error': why}
             
             if response.status_code == 200:
-                self.logger.info(f"[OK] Deleted API token: {user}!{token_name}")
+                (self.__dict__.get('_paced_tokens') or set()).discard(token_name)
+                self.logger.info(f"[OK] Deleted API token: {owner}!{token_name}")
                 return {'success': True}
             else:
                 error_msg = response.text
@@ -15658,9 +17037,15 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': True, 'task': task_data.get('data')}
             else:
                 return {'success': False, 'error': response.text}
+        except requests.exceptions.ReadTimeout as e:
+            # MK Nov 2026 (#1347) - no answer from PVE in time. A busy pmxcfs can start the task and
+            # answer late, but urllib3 2.x raises the same ReadTimeout when the TLS handshake of a new
+            # pooled connection hangs, and then the DELETE itself never went out. So it may or may not
+            # have started: callers take this neither for a refusal nor for a started task
+            return {'success': False, 'error': str(e), 'unanswered': True}
         except Exception as e:
             return {'success': False, 'error': str(e)}
-    
+
     def rollback_snapshot(self, node: str, vmid: int, vm_type: str, snapname: str) -> Dict[str, Any]:
         # sec (audit CRIT): snapname and node are interpolated into the API path below, and
         # the route gates in front of us only ever check the vmid — so a name with dot-segments
@@ -15997,10 +17382,13 @@ echo "AGENT_INSTALLED_OK"
                 try:
                     host = self.host
                     thaw_url = f"https://{host}:{self.api_port}/api2/json/nodes/{node}/qemu/{vmid}/agent/fsfreeze-thaw"
+                    # the thaw passes the federation's fence even when the lease ran out
+                    # meanwhile (federation.guard_exit, kind 'thaw')
                     self._create_session().post(thaw_url, timeout=30)
                     self.logger.info(f"FS thawed for {vm_type}/{vmid}")
                 except Exception as e:
-                    self.logger.error(f"FS thaw failed for {vm_type}/{vmid}: {e}")
+                    self.logger.error(f"FS thaw failed for {vm_type}/{vmid} - its file systems may "
+                                      f"stay frozen until 'qm guest cmd {vmid} fsfreeze-thaw' runs: {e}")
 
         # Save to DB
         snap_id = str(uuid.uuid4())
@@ -16172,13 +17560,24 @@ echo "AGENT_INSTALLED_OK"
         vg_name = snap['vg_name']
         errors = []
 
+        # MK Nov 2026 - which snapshot LVs are still there, from one listing of the volume
+        # group: only a listing that worked says an LV is gone. No answer (no SSH, or the write
+        # gate refused the session) or a failed listing removes nothing and keeps the record,
+        # so no snapshot is left half removed for a rollback to trip over
+        lst_code, lst_out, lst_err = self._node_ssh_exec(
+            node, f"lvs --noheadings -o lv_name {shlex.quote(vg_name)}"
+        )
+        if lst_code != 0:
+            why = (lst_err or lst_out or 'the node could not be asked').strip()[:300]
+            self.logger.error(f"Efficient snapshot '{snap['snapname']}' kept: the LVs of "
+                              f"{vg_name} could not be listed: {why}")
+            return {'success': False, 'error': 'The snapshot is kept: its LVs could not be '
+                                               f'checked on the node: {why}'}
+        present = {line.strip() for line in (lst_out or '').splitlines() if line.strip()}
+
         for disk in snap['disks']:
             snap_lv = disk['snap_lv']
-            # Check if LV still exists before trying to remove
-            chk_code, chk_out, _ = self._node_ssh_exec(
-                node, f"lvs /dev/{shlex.quote(vg_name)}/{shlex.quote(snap_lv)} 2>/dev/null"
-            )
-            if chk_code != 0:
+            if snap_lv not in present:
                 # LV already gone (invalidated or manually removed)
                 continue
 
@@ -16584,46 +17983,12 @@ echo "AGENT_INSTALLED_OK"
             return None, ('This operation requires the cluster root@pam password '
                           f'(Proxmox rejects API tokens for {what}). '
                           'Add the password in the cluster settings.')
-        s = None
         try:
-            s = requests.Session()
-            s.trust_env = False
-            _pool_kw = dict(pool_connections=2, pool_maxsize=4, pool_block=False, max_retries=0)
-            if self._ssl_verify:
-                _ca = ssl.get_default_verify_paths()
-                s.verify = _ca.cafile or _ca.openssl_cafile or True
-                s.mount('https://', HTTPAdapter(**_pool_kw))
-            else:
-                s.verify = False
-                s.mount('https://', _NoHostnameCheckAdapter(**_pool_kw))
-            # MK Nov 2026 - the same path check as the cached session, this one is root@pam
-            from pegaprox.utils.sanitization import refuse_climbing_paths
-            refuse_climbing_paths(s)
-            _refuse_redirects(s)
-            ha_transport.guard_session(s)
-            # self.host is already IPv6-bracketed by the property — use it directly.
-            login_url = f"https://{self.host}:{self.api_port}/api2/json/access/ticket"
-            # failed over to a node with a root password of its own: that one (#1136)
-            if node_creds.secrets_of(getattr(self, 'id', None)):
-                pwd = self.api_password_for(self.host) or pwd
-            resp = s.post(login_url, data={'username': usr, 'password': pwd}, timeout=10)
-            if resp.status_code != 200:
-                try: s.close()
-                except Exception: pass
-                return None, f'root@pam password authentication failed (HTTP {resp.status_code})'
-            data = resp.json()['data']
-            if data.get('NeedTFA'):
-                try: s.close()
-                except Exception: pass
-                return None, ('root@pam has two-factor authentication enabled, so a password '
-                              f'login cannot open the session Proxmox wants for {what}.')
-            s.cookies.set('PVEAuthCookie', data['ticket'])
-            s.headers.update({'CSRFPreventionToken': data['CSRFPreventionToken']})
-            return s, None
+            session, why, _status = _password_login(self, usr, pwd, what)
+            return session, why
+        except LoginNotTaken as e:
+            return None, str(e)
         except Exception as e:
-            if s is not None:
-                try: s.close()
-                except Exception: pass
             self.logger.warning(f"[CEPH] privileged-session mint failed: {type(e).__name__}")
             return None, f'Could not mint root@pam session: {type(e).__name__}'
 
@@ -18335,20 +19700,76 @@ echo "AGENT_INSTALLED_OK"
             # ("pool 'X' is not empty (contains VM ...)") and the API surfaced that as a
             # bare 'PVE 500'. Un-pool any members first (the VMs themselves are untouched),
             # so deleting a pool works the way operators expect.
+            refused = taken = None
             try:
                 members = (self.get_pool_members(poolid) or {}).get('members', []) or []
                 member_ids = [str(m.get('vmid')) for m in members if m.get('vmid') is not None]
-                if member_ids:
-                    self._api_put(base, data={'vms': ','.join(member_ids), 'delete': 1})
+                # MK Nov 2026 - PVE 9.3 (fix #7294) has SDN VNets as members too, type 'network'
+                # with 'network' as the PUT takes it back ('vnet/<zone>/<vnet>[/<tag>|/*]'); one
+                # of them left the delete refused. Same PUT, so a refusal leaves the pool whole.
+                vnets = [m['network'] for m in members if m.get('type') == 'network' and m.get('network')]
+                # a storage member blocks the delete the same way ("contains storage 'X'"), on
+                # every PVE version; 'storage' is as old as pools, so any node takes it
+                stores = [m['storage'] for m in members if m.get('type') == 'storage' and m.get('storage')]
+                drop = {k: ','.join(v) for k, v in (('vms', member_ids), ('storage', stores),
+                                                    ('network', vnets)) if v}
+                if drop:
+                    # MK Nov 2026 - PVE refuses a pool with pools below it (nested pools, 8.1+)
+                    # before it looks at any member, so the PUT stripped the pool of its guests,
+                    # storage and VNets, and the access they give through it, for nothing
+                    below = pools_below(poolid, self.get_pools())
+                    if below:
+                        return {'success': False, 'error': html.escape(
+                            f"Pool '{poolid}' was not deleted: Proxmox VE deletes no pool that has "
+                            f"pools below it ({_first_few(below)}). Delete those first; its members "
+                            f"were left in it.", quote=False)}
+                    r = self._api_put(base, data={**drop, 'delete': 1})
+                    if r.status_code != 200:
+                        refused = (drop, r)
+                        self.logger.warning(f"delete_pool({poolid}): un-pooling the members failed: "
+                                            f"PVE {r.status_code}: {(r.text or '').strip()[:200]}")
+                    else:
+                        taken = drop
             except Exception as e:
                 self.logger.warning(f"delete_pool({poolid}): member cleanup failed: {e}")
             resp = self._api_delete(base)
             if resp.status_code == 200:
                 return {'success': True}
-            return {'success': False, 'error': f'PVE {resp.status_code}: {(resp.text or "").strip()[:200]}'}
+            if refused:
+                return {'success': False, 'error': self._pool_unpool_refusal(poolid, *refused)}
+            err = f'PVE {resp.status_code}: {(resp.text or "").strip()[:200]}'
+            if taken:
+                # they did leave the pool, and with them whatever access it gave: say so
+                err += html.escape(f" - its members had been taken out before the delete and are "
+                                   f"no longer in the pool ({pool_members_text(taken)})", quote=False)
+            return {'success': False, 'error': err}
         except Exception as e:
             self.logger.error(f"delete_pool({poolid}): {e}")
             return {'success': False, 'error': str(e)}
+
+    def _pool_unpool_refusal(self, poolid, drop, response):
+        """What delete_pool says when PVE refused to take the members out.
+
+        MK Nov 2026 - the delete then fails on the first member PVE finds, and its raw JSON
+        named one guest or storage. PVE writes the PUT in one go, so every member in it stayed:
+        name them all by kind, with PVE's reason (the quotes stay, they hold the names)."""
+        raw = (response.text or '').replace('\n', ' ').replace('\r', '')
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            errs = body.get('errors')
+            if isinstance(errs, dict) and errs:
+                said = '; '.join(f'{k}: {str(v).strip()}' for k, v in errs.items())
+            else:
+                said = str(body.get('message') or '').strip()
+        else:
+            said = '' if '<html' in raw.lower() else raw.strip()
+        msg = (f"Pool '{poolid}' was not deleted: Proxmox VE refused to take its members out "
+               f"({pool_members_text(drop)}), so they are all still in it. PVE {response.status_code}: "
+               f"{said[:300] or 'no reason given'}")
+        return html.escape(msg, quote=False)
 
     def _used_lxc_mp_slots(self, node: str, vmid: int) -> set:
         """Set of mountpoint slot indices already used by an LXC container ({0,1,…} for mp0/mp1/…)."""
@@ -19138,6 +20559,22 @@ echo "AGENT_INSTALLED_OK"
             self._pve_version_cache = None
             return None
     
+    # MK Nov 2026 - PVE 9.3 came as 9.2.x updates of pve-manager, so (9, 2) does not say what
+    # a node takes. Not cached: asked only where a call depends on it, for that one node.
+    def get_node_pve_version(self, node):
+        """(major, minor, patch) of pve-manager on `node`, e.g. (9, 2, 33). None on error."""
+        try:
+            resp = self._api_get(f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/version",
+                                 timeout=10)
+            if resp.status_code != 200:
+                return None
+            ver = str((resp.json().get('data') or {}).get('version') or '')
+        except Exception:
+            return None
+        # "9.2.33", PVE 7 and older wrote "7.4-3"
+        m = re.match(r'(\d+)\.(\d+)[.-](\d+)', ver)
+        return tuple(int(x) for x in m.groups()) if m else None
+
     def get_scsi_controllers(self) -> List[Dict]:
         
         return [
@@ -19411,6 +20848,42 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"Error getting network config: {e}")
             return unread(UnreadList, error=e)
     
+    # MK Nov 2026 - pve-manager 9.2.28 (PSA-2026-00077-1) refuses '${' and '<%' in the comments
+    # of an interface: with python3-mako installed ifupdown2 runs them as a template. PVE only
+    # says "value does not match the regex pattern", and the dialog sends the comment PVE
+    # holds on every save, so one written before blocks the interface for good. 9.2.38 refuses
+    # them in ovs_options too, which goes into the file even on an interface that is no OVS one.
+    _IFACE_TEMPLATE_TAG = re.compile(r'<%|\$\{')
+    _IFACE_TEMPLATE_FIELDS = {'comments': ('the comment', (9, 2, 28)), 'comments6': ('the comment', (9, 2, 28)),
+                              'ovs_options': ('the OVS options', (9, 2, 38))}
+
+    def _iface_template_refusal(self, node, config):
+        """The answer for template tags `node` refuses, None when it takes them or its version
+        cannot be read (then PVE decides, as before)."""
+        if not isinstance(config, dict):
+            return None
+        tagged = [k for k in self._IFACE_TEMPLATE_FIELDS
+                  if isinstance(config.get(k), str) and self._IFACE_TEMPLATE_TAG.search(config[k])]
+        if not tagged:
+            return None
+        ver = self.get_node_pve_version(node)
+        refused = [k for k in tagged if ver is not None and ver >= self._IFACE_TEMPLATE_FIELDS[k][1]]
+        if not refused:
+            return None
+        what = ' and '.join(dict.fromkeys(self._IFACE_TEMPLATE_FIELDS[k][0] for k in refused))
+        return {'success': False, 'status': 400,
+                'error': f"Proxmox VE on {node} (pve-manager {'.'.join(map(str, ver))}) refuses '${{' and "
+                         f"'<%' in {what} of an interface, as ifupdown2 can run them as a template. "
+                         f"Remove them ({', '.join(refused)}) and save again."}
+
+    def _iface_write_failure(self, response):
+        from pegaprox.api.helpers import pve_refusal, UPSTREAM_AUTH_STATUSES
+        # a 401 or 403 names its status in the answer already
+        text, errs = pve_refusal(response.text, '' if response.status_code in UPSTREAM_AUTH_STATUSES
+                                 else f'HTTP {response.status_code}')
+        return {'success': False, 'error': text, 'status': response.status_code,
+                **({'errors': errs} if errs else {})}
+
     def update_node_network(self, node: str, iface: str, config: Dict) -> Dict[str, Any]:
         
         if not self.is_connected:
@@ -19418,12 +20891,15 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect'}
         
         try:
+            refused = self._iface_template_refusal(node, config)
+            if refused:
+                return refused
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/network/{iface}"
             response = self._api_put(url, data=config)
             
             if response.status_code == 200:
                 return {'success': True, 'message': 'Network updated'}
-            return {'success': False, 'error': response.text}
+            return self._iface_write_failure(response)
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
@@ -19442,12 +20918,15 @@ echo "AGENT_INSTALLED_OK"
             }
             # Remove empty values
             data = {k: v for k, v in data.items() if v is not None and v != ''}
+            refused = self._iface_template_refusal(node, data)
+            if refused:
+                return refused
             
             response = self._api_post(url, data=data)
             
             if response.status_code == 200:
                 return {'success': True, 'message': f'Interface {iface} created'}
-            return {'success': False, 'error': response.text}
+            return self._iface_write_failure(response)
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
@@ -20679,6 +22158,12 @@ echo "AGENT_INSTALLED_OK"
         """
         # standby instance: no migrations from here (defence in depth, see start_ha_monitor)
         if not ha.is_active():
+            return
+        # the worker lease check: a cluster enrolled in the federation is balanced only
+        # while this instance holds a live lease on it - every move the balancer makes
+        # is a write on the cluster. Nothing is asked while the federation is off
+        from pegaprox.core import federation as _fed
+        if _fed.enabled() and not _fed.worker_takes_writes_for(self.id):
             return
         try:
             self.logger.info("=" * 60)
@@ -22808,6 +24293,12 @@ echo DONE""",
                         last_no_agent_clear = now
             except Exception as e:
                 self.logger.debug(f"[IP refresh loop] error: {e}")
+            # MK Nov 2026 (#1390) - looks every TOKEN_RENEW_EVERY at most, whatever the
+            # cluster's check interval
+            try:
+                self.renew_management_token()
+            except Exception as e:
+                self.logger.debug(f"[TOKEN] renewal check failed: {type(e).__name__}")
             # H4: jitter so 30 managers don't fire on the same wall-clock tick
             self.stop_event.wait(30 + random.uniform(0, 10))
 

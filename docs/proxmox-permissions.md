@@ -94,6 +94,56 @@ pveum aclmod / --users pegaprox@pve --roles PegaProx
 Add the cluster with `pegaprox@pve` and that password. PegaProx creates an API token of
 its own at the first login and keeps the password for what a token cannot do.
 
+Under an API token policy of the cluster (Proxmox VE 9.3, Datacenter > Options > API Token
+Policy) that token gets the longest lifetime the policy allows, a year where it only wants
+an expiry. PegaProx keeps that end with the token in its database, since the role above
+may not read its own token, and renews it before it ends: it looks at the end every five
+minutes, and once two days are left (a fifth of the lifetime where that is less) it logs in
+with the password, makes a new token, stores it and deletes the old one. It goes by the end
+of the token, not by the policy of the day: a token that got an end is renewed also after
+the policy was relaxed, and the new one then has none. Where there is no password
+login, for an account with two-factor login or a cluster without a stored password, the
+token renews itself: with a new token, stored before the old one is deleted. Only where
+Proxmox refuses that and the policy lets a new secret extend the end (*Allow Extension on
+Regenerate*) does it renew its secret in place, since Proxmox drops the old secret as it
+does so. Proxmox lets a token do either only where its account may manage its own tokens:
+`User.Modify` on the account's group, and for a token without privilege separation
+`Permissions.Modify` on `/` and `Realm.AllocateUser` on the realm, all of which the
+Administrator role has and the role above does not. When neither way works, PegaProx says
+so once per lifetime of the token, in the log at warning level and as an alert to the push
+notifications and the alert channels, with the time the token ends, and tries again six
+hours later, sooner as the end comes near. A user.cfg lock or a restart of pveproxy is
+tried again after a quarter of an hour and said only once half the time before the end is
+gone. A new secret whose answer never arrives, or one the database of PegaProx could not
+store (it tries again every few minutes, also while a refusal waits for its next try), is a
+critical alert at once. A new token whose answer never arrives may still have been made:
+PegaProx notes its name before it asks and deletes it at the next look, also after a
+restart. A token made by an older PegaProx has no kept end; PegaProx reads it over the
+token, or once over the password login. Where neither may read it, PegaProx says so once,
+in the log at info level and without an alert, since a token made before the cluster had a
+policy has no end at all. A kept end that has passed while Proxmox still takes the token,
+as after its *Expire* was changed on the cluster by hand, counts as one neither may read.
+What PegaProx starts by itself (the renewal, the cross-cluster balancer and scheduled
+replication into a cluster whose token may make no token) counts every password login that
+fails, refused or without an answer, as from a realm whose LDAP or AD server is slow or
+down: each counts on a lockout of the realm and on a fail2ban of pveproxy. The next one
+goes out after half an hour at the earliest, and a third only once the second is two days
+old, the time the fail2ban jail in the Proxmox VE wiki keeps a count for its three tries, so
+a directory that stays down does not get PegaProx's address banned. A migration started by
+hand logs in at once, and a login that works ends the wait, as does a new password stored
+for the cluster. Each renewal is in the audit log. A token typed in by hand, and
+a cluster added with a token as its login, are never renewed; a token without an end, as
+on a cluster that never had such a policy, sees no change. Should the
+token still run out, PegaProx logs in with the password right away, makes a new one and
+deletes the old one. An account with two-factor login cannot log in that way: the cluster
+then says its token has expired, and needs an API token as its login or two-factor login
+off for one connect. A policy that requires privilege separation gets
+no such token, since it would hold no right without ACLs of its own: PegaProx stays on
+password logins and logs a warning. *Rotate API Token* in the cluster settings gives the
+token a new secret in place on Proxmox VE 9.2 and later (over the password login where
+Proxmox refuses it to the token itself); before 9.2 it makes a new token and deletes the
+old one after.
+
 ## What no role gives
 
 - **SSH to the nodes**: node shell, rolling updates, SMBIOS auto configuration, custom
@@ -126,7 +176,11 @@ its own at the first login and keeps the password for what a token cannot do.
   `pegaprox-sr-<hex>` or `xcrepl-<job>-<number>` in `pveum user token list <user>`,
   created with an expiry eight days ahead. A token PegaProx did not get to delete, after a
   restart or a lost lease during the migration, stays listed there until it is deleted by
-  hand, and Proxmox refuses it once its expiry has passed.
+  hand, and Proxmox refuses it once its expiry has passed. Where the API token policy of the
+  target cluster allows a shorter lifetime, the token gets that one, and a migration still
+  running when it ends loses its access to the target; the log says so when the token is
+  made. A policy that requires privilege separation refuses these migrations into the
+  cluster up front: the token holds the rights of the account without it.
 
 ## What works with a connection
 

@@ -132,15 +132,17 @@ def test_a_former_leader_does_not_join_a_node(auto, seed, monkeypatch):
 
 def test_a_former_leader_does_not_rescan_a_storage(auto, seed, monkeypatch):
     """POST .../storage/<id>/rescan with deep_scan and pvresize: the SCSI rescan and the
-    pvresize go through a guarded client, the first command asks and is refused."""
+    pvresize go through a guarded client, the first command asks and is refused. The
+    client it connected is closed all the same."""
     from pegaprox.globals import cluster_managers
     import pegaprox.api.storage as storage_api
     import pegaprox.utils.ssh_security as sec
     from pegaprox import globals as _g
     _paused_leader_back(auto, seed)
-    sent = []
+    sent, closed = [], []
     monkeypatch.setattr(paramiko.SSHClient, 'connect', lambda self, *a, **k: None)
     monkeypatch.setattr(paramiko.SSHClient, 'exec_command', _recording(sent))
+    monkeypatch.setattr(paramiko.SSHClient, 'close', lambda self: closed.append(self))
     monkeypatch.setattr(sec, 'persist_host_keys', lambda c: None)
     m = _fake_manager()
 
@@ -168,6 +170,7 @@ def test_a_former_leader_does_not_rescan_a_storage(auto, seed, monkeypatch):
         said = {why for _a, why in ha._guard_said}
     assert sent == [], (r.status_code, r.data[:1400])
     assert asked and _ha.GUARD_UNCONFIRMED in said
+    assert len(closed) == 1
 
 
 def test_the_reboot_of_a_node_asks_before_its_shutdown_goes_out(auto, seed, monkeypatch):
