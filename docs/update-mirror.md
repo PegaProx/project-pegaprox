@@ -52,7 +52,8 @@ updater reads, when GitHub does not answer:
 - The in-app updater reads `version.json`, then `archive/main.tar.gz`, and compares the
   `version.json` inside the archive with it. Equal: it installs the archive, which is
   whole. Not equal and both from the mirror: it installs nothing and says the mirror is
-  between two releases (HTTP 503, try again later). Only when the archive cannot be
+  between two releases (HTTP 503, try again later). Installs older than 1.5.1 still fall
+  back to single files there, a mix of both releases. Only when the archive cannot be
   downloaded or unpacked does it take single files, by the list in `version.json`.
 - `update.sh` reads only the version number from `version.json`, then installs whatever
   archive it downloads (whole, of one release) and warns when its version differs. It too
