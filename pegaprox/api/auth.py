@@ -890,6 +890,16 @@ def _ha_banner(username='', session=None):
     return out
 
 
+def _federation_on():
+    """Whether the federation runs here, for the sign-in and the session check. The
+    dashboard asks /api/federation/linked only while it does: off, that route answers 404
+    to anyone, signed in or not, so the flag tells nobody anything new.
+
+    MK Nov 2026 (#1372)"""
+    from pegaprox.core import federation
+    return federation.enabled()
+
+
 @bp.route('/api/auth/login', methods=['POST'])
 def auth_login():
     """login endpoint - MK"""
@@ -1402,6 +1412,7 @@ def auth_login():
         'security_warning': 'DEFAULT_PASSWORD' if (user['role'] == ROLE_ADMIN and password == 'admin') else None,
         'requires_password_change': bool(user.get('force_password_change')),
         'ha': _ha_banner(username, active_sessions.get(session_id)),  # MK Sep 2026 (#625) - role, and on a standby where it follows
+        'federation_enabled': _federation_on(),
     })
     
     # Set session cookie with security flags
@@ -1671,6 +1682,7 @@ def auth_check():
         'air_gap_mode': settings.get('air_gap_mode', False),
         'default_theme': default_theme,
         'ha': _ha_banner(session['user'], session),
+        'federation_enabled': _federation_on(),
     })
 
 
