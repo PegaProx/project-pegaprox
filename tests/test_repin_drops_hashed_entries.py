@@ -31,3 +31,27 @@ def test_hashed_entries_are_removed(tmp_path, monkeypatch):
     hk.load(str(kh))
     assert hk.lookup('192.168.88.99') is not None
     assert hk.lookup('192.168.88.15') is None
+
+
+def test_malformed_hashed_tokens_are_left_alone(tmp_path, monkeypatch):
+    kh = tmp_path / 'known_hosts'
+    key = paramiko.RSAKey.generate(1024)
+    body = key.get_name() + ' ' + key.get_base64() + '\n'
+    lines = ['|1|!!notbase64!!|!!notbase64!! ' + body,      # malformed base64
+             '|1|c2FsdA== ' + body,                          # missing field
+             '|2|c2FsdA==|aGFzaA== ' + body]                 # unsupported version
+    kh.write_text(''.join(lines))
+    monkeypatch.setattr(ssh_security, '_KNOWN_HOSTS', str(kh))
+    assert ssh_security.remove_host_keys({'192.168.88.15'}) == 0
+    assert kh.read_text() == ''.join(lines)
+
+
+def test_comma_separated_hashed_aliases(tmp_path, monkeypatch):
+    kh = tmp_path / 'known_hosts'
+    key = paramiko.RSAKey.generate(1024)
+    other = _hashed('192.168.88.99', key).split(' ', 1)[0]
+    mine = _hashed('192.168.88.15', key).split(' ', 1)[0]
+    kh.write_text('%s,%s %s %s\n' % (other, mine, key.get_name(), key.get_base64()))
+    monkeypatch.setattr(ssh_security, '_KNOWN_HOSTS', str(kh))
+    assert ssh_security.remove_host_keys({'192.168.88.15'}) == 1
+    assert kh.read_text() == ''

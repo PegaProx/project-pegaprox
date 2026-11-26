@@ -785,10 +785,31 @@ def repin_cluster_host_keys(cluster_id):
                     hosts.add(ip)
         except Exception:
             pass
+        # A host another cluster also reaches keeps its pin unless the caller may act on
+        # every cluster that reaches it: dropping it re-learns the key for that cluster too.
+        from pegaprox.api.helpers import acting_user
+        from pegaprox.utils.rbac import get_user_clusters
+        mine = get_user_clusters(acting_user(), include_pools=False)
+        shared = {}
+        for _cid, _other in list(cluster_managers.items()):
+            if _cid == cluster_id:
+                continue
+            v = getattr(_other, 'host', None) or getattr(getattr(_other, 'config', None), 'host', None)
+            if v:
+                shared.setdefault(v, set()).add(_cid)
+        for (_cid, _node), val in list(_node_ip_cache.items()):
+            if _cid != cluster_id and val and val[0]:
+                shared.setdefault(val[0], set()).add(_cid)
+        kept = {h for h in hosts if mine is not None and not shared.get(h, set()) <= set(mine)}
+        hosts -= kept
         removed = remove_host_keys(hosts, ports=[getattr(mgr.config, 'ssh_port', 22) or 22])
         logging.info(f"[SSH] host-key re-pin for cluster {cluster_id}: dropped {removed} pin(s) "
                      f"across {len(hosts)} host(s) — next connect re-learns")
-        return jsonify({'success': True, 'removed': removed, 'hosts': len(hosts)})
+        log_audit(request.session['user'], 'cluster.ssh_host_keys_repinned',
+                  f"Re-pinned SSH host keys of {mgr.config.name}: {removed} pin(s) dropped"
+                  + (f", {len(kept)} shared host(s) kept" if kept else ''),
+                  cluster=mgr.config.name)
+        return jsonify({'success': True, 'removed': removed, 'hosts': len(hosts), 'kept': len(kept)})
     except Exception as e:
         logging.exception(f"host-key re-pin failed for {cluster_id}")
         return jsonify({'error': safe_error(e, 'Re-pin failed')}), 500
@@ -1335,7 +1356,7 @@ def delete_cluster(cluster_id):
                 still_pinned.add(val[0])
         hosts_to_clean -= still_pinned
 
-        n_removed = remove_host_keys(hosts_to_clean)
+        n_removed = remove_host_keys(hosts_to_clean, ports=[getattr(mgr.config, 'ssh_port', 22) or 22])
         if n_removed:
             logging.info(f"Removed {n_removed} SSH host-key pin(s) for deleted cluster {cluster_id}")
         if still_pinned:

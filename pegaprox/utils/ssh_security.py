@@ -361,17 +361,20 @@ def _hashed_token_matches(tok, names):
     OpenSSH's own ssh writes these on distributions that default to HashKnownHosts, and
     paramiko reads them, so such a pin enforces a key that a plain-text compare of the
     host field can never find."""
-    try:
-        import base64, hashlib, hmac
-        parts = tok.split('|')
-        if len(parts) != 4 or parts[1] != '1':
-            return False
-        salt = base64.b64decode(parts[2])
-        want = base64.b64decode(parts[3])
-        return any(hmac.compare_digest(hmac.new(salt, n.encode(), hashlib.sha1).digest(), want)
-                   for n in names)
-    except Exception:
-        return False
+    import base64, hashlib, hmac
+    for one in tok.split(','):
+        try:
+            parts = one.split('|')
+            if len(parts) != 4 or parts[1] != '1':
+                continue
+            salt = base64.b64decode(parts[2])
+            want = base64.b64decode(parts[3])
+            if any(hmac.compare_digest(hmac.new(salt, n.encode(), hashlib.sha1).digest(), want)
+                   for n in names):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def remove_host_keys(hostnames, ports=()):
