@@ -346,11 +346,12 @@ BULK_DELETE_GUESTS = 16       # guests whose snapshots are deleted at the same t
 
 
 def _delete_done(mgr, node, res, timeout=None):
-    """('gone'|'failed'|'busy', why) of one snapshot delete, `res` being the manager's answer
-    to it. Only a task that ended OK is gone; a failed one says what PVE said. 'busy': the
-    task still runs after `timeout`, the guest keeps its lock and the next delete of it
-    would only fail. A delete without a task (XCP-ng deletes within the call) is gone once
-    it was accepted."""
+    """('gone'|'failed'|'busy'|'unread', why) of one snapshot delete, `res` being the manager's
+    answer to it. Only a task that ended OK is gone; a failed one says what PVE said. 'busy':
+    the task still runs after `timeout`, the guest keeps its lock and the next delete of it
+    would only fail. 'unread': PVE took the delete and its task could not be read after the
+    wait, so whether the snapshot went is not known. A delete without a task (XCP-ng deletes
+    within the call) is gone once it was accepted."""
     if not isinstance(res, dict):
         return 'failed', 'no answer'
     if not res.get('success'):
@@ -365,7 +366,7 @@ def _delete_done(mgr, node, res, timeout=None):
     except Exception:
         st = None
     if not isinstance(st, dict):
-        return 'failed', f'the delete task did not end OK ({upid})'
+        return 'unread', f'its delete task was started, its status could not be read ({upid})'
     if st.get('status') == 'running':
         return 'busy', f'its delete task still runs in Proxmox after {int(timeout)}s ({upid})'
     said = ' '.join(str(st.get('exitstatus') or '').split())[:200]
@@ -380,9 +381,10 @@ def delete_per_guest(guests, user=''):
     {mgr, cluster_id, node, vmid, vm_type, name}. The snapshots of a guest go one after the
     other, each once the task of the one before ended; up to BULK_DELETE_GUESTS guests at a
     time, and nothing new starts after BULK_DELETE_SECONDS. A cluster whose deletes have no
-    task (XCP-ng) takes its guests one after the other. Each job gets 'state' (gone, failed,
-    busy, skipped, error) and 'why'; the jobs come back in the order they were handed in.
-    `user` is named as the one who started each task."""
+    task (XCP-ng) takes its guests one after the other. Each job comes back with 'state' (gone,
+    failed, busy, unread, skipped, error), 'why' and its 'task', in the order the jobs were
+    handed in; busy and unread were started in Proxmox and not seen to end. `user` is named
+    as the one who started each task."""
     from pegaprox.api.helpers import register_task_user
     from pegaprox.utils.concurrent import run_per_node
     until = time.monotonic() + BULK_DELETE_SECONDS
@@ -393,14 +395,23 @@ def delete_per_guest(guests, user=''):
             if left <= 0:
                 job.update(state='skipped', why=f'not started, the request ran out of its {BULK_DELETE_SECONDS}s')
                 continue
+            # MK Nov 2026 - a delete still on its way when the request answers may have reached
+            # Proxmox, so it counts as started and unread until its answer says otherwise
+            job.update(state='unread', why='no answer from Proxmox to its delete before the request ended', task=None)
             try:
                 res = job['mgr'].delete_snapshot(job['node'], job['vmid'], job['vm_type'], job['name'])
-                if user and isinstance(res, dict) and res.get('task'):
-                    # out of the request's context here, the manager cannot name the user itself
-                    register_task_user(res['task'], user, job.get('cluster_id'))
-                job['state'], job['why'] = _delete_done(job['mgr'], job['node'], res, min(SNAP_DELETE_WAIT, left))
             except Exception as e:
                 job['state'], job['why'] = 'error', str(e)
+                continue
+            try:
+                job['task'] = res.get('task') if isinstance(res, dict) else None
+                if user and job['task']:
+                    # out of the request's context here, the manager cannot name the user itself
+                    register_task_user(job['task'], user, job.get('cluster_id'))
+                job['state'], job['why'] = _delete_done(job['mgr'], job['node'], res, min(SNAP_DELETE_WAIT, left))
+            except Exception as e:
+                # Proxmox took the delete, what became of it is not known here
+                job['state'], job['why'] = 'unread', f'its result could not be read: {e}'
             if job['state'] == 'busy':
                 for later in jobs[n + 1:]:
                     later.update(state='skipped', why=f"not started, the delete of {job['name']} still runs")
@@ -426,10 +437,11 @@ def delete_per_guest(guests, user=''):
     # federation's exit is to be noted for this request also when it is not (409 FED_NO_LEASE)
     run_per_node({i: ha.carry(one_lane) for i in range(len(lanes))}, max_concurrent=BULK_DELETE_GUESTS,
                  timeout=BULK_DELETE_SECONDS + 60)
-    out = [job for jobs in guests for job in jobs]
+    # copies: a lane still waiting for Proxmox after the timeout goes on writing into its jobs
+    out = [dict(job) for jobs in guests for job in jobs]
     for job in out:
         if 'state' not in job:
-            job.update(state='failed', why='no answer from its delete before the request ended')
+            job.update(state='skipped', why='not started before the request ended', task=None)
     return out
 
 

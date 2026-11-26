@@ -8885,24 +8885,41 @@ def snapshots_overview_delete():
             logging.debug(f"Snapshot deletion failed: {e}")
 
     from pegaprox.api.snapshots import delete_per_guest
+    # MK Nov 2026 - a delete Proxmox took and we did not see end (its task still ran when the
+    # request had to answer, or could not be read) is neither deleted nor failed. Before #1347
+    # every delete Proxmox took went to the audit log, and one PegaProx started still does
+    started = []
     for job in delete_per_guest(list(guests.values()), user):
         if job['state'] == 'gone':
             deleted_count += 1
             log_audit(user, 'snapshot.deleted', f"{str(job['vm_type']).upper()} {job['vmid']} - snapshot '{job['name']}' deleted",
                       cluster=job['mgr'].config.name)
+        elif job['state'] in ('busy', 'unread'):
+            running = job['state'] == 'busy'
+            log_audit(user, 'snapshot.delete_started',
+                      f"{str(job['vm_type']).upper()} {job['vmid']} - snapshot '{job['name']}' delete started, "
+                      + ('still running in Proxmox' if running else 'result not read')
+                      + (f" ({job['task']})" if job.get('task') else ''),
+                      cluster=job['mgr'].config.name)
+            started.append({'cluster_id': job['cluster_id'], 'node': job['node'], 'vmid': job['vmid'],
+                            'vm_type': job['vm_type'], 'snapshot_name': job['name'],
+                            'state': 'running' if running else 'unread', 'task': job.get('task'), 'why': job['why']})
         elif job['state'] == 'error':
             errors.append(f"Error deleting snapshot: {job['why']}")
             logging.debug(f"Snapshot deletion failed: {job['why']}")
         else:
             errors.append(f"Failed to delete {job['name']} of VM {job['vmid']}: {job['why']}")
 
-    if deleted_count > 0:
+    if deleted_count > 0 or started:
+        # 202 when none was seen gone yet: Proxmox has the rest, the UI tells it from a failure
         return jsonify({
             'success': True,
-            'message': f'{deleted_count} snapshot(s) deleted',
+            'message': f'{deleted_count} snapshot(s) deleted'
+                       + (f', {len(started)} delete(s) started in Proxmox and not seen to end' if started else ''),
             'deleted': deleted_count,
+            'started': started,
             'errors': errors if errors else None
-        })
+        }), (200 if deleted_count else 202)
     else:
         return jsonify({
             'success': False,

@@ -180,9 +180,9 @@ def test_a_delete_that_still_runs_is_not_counted_and_the_next_of_that_guest_wait
     assert (100, 's2') not in pve.sent, 'the next delete went out while the guest was still locked'
     assert code == 200 and body['deleted'] == 1 == pve.gone(), body
     assert pve.snaps[101] == set()
-    assert len(body['errors']) == 2
-    assert body['errors'][0].startswith('Failed to delete s1 of VM 100: its delete task still runs in Proxmox')
-    assert body['errors'][1] == 'Failed to delete s2 of VM 100: not started, the delete of s1 still runs'
+    assert [(s['snapshot_name'], s['state']) for s in body['started']] == [('s1', 'running')]
+    assert body['started'][0]['why'].startswith('its delete task still runs in Proxmox')
+    assert body['errors'] == ['Failed to delete s2 of VM 100: not started, the delete of s1 still runs']
 
 
 def test_nothing_new_starts_once_the_request_ran_out_of_time(api, admin, monkeypatch):
@@ -191,9 +191,9 @@ def test_nothing_new_starts_once_the_request_ran_out_of_time(api, admin, monkeyp
     pve = api.set_manager(CID, _Pve({100: ['s1'], 101: ['s9']}, never={(100, 's1')}))
     code, body = _bulk(admin, (100, 's1'), (101, 's9'))
     assert pve.sent == [(100, 's1')]
-    assert code == 500 and pve.gone() == 0
-    assert body['errors'][0].startswith('Failed to delete s1 of VM 100: its delete task still runs in Proxmox')
-    assert body['errors'][1] == 'Failed to delete s9 of VM 101: not started, the request ran out of its 0.3s'
+    assert code == 202 and pve.gone() == 0
+    assert [(s['snapshot_name'], s['state']) for s in body['started']] == [('s1', 'running')]
+    assert body['errors'] == ['Failed to delete s9 of VM 101: not started, the request ran out of its 0.3s']
 
 
 def test_each_deleted_snapshot_is_in_the_audit_log_and_a_failed_one_is_not(api, admin, db):
@@ -485,6 +485,93 @@ def test_the_request_answers_before_a_proxy_gives_up_on_it(api, admin, monkeypat
     took = clock.now - started
     assert took < 100, f'the request took {took:.0f}s'
     assert pve.sent == [(100, 's1')]
-    assert code == 500 and pve.gone() == 0
-    assert body['errors'][0].startswith('Failed to delete s1 of VM 100: its delete task still runs in Proxmox')
-    assert body['errors'][1] == 'Failed to delete s2 of VM 100: not started, the delete of s1 still runs'
+    assert code == 202 and pve.gone() == 0
+    assert [(s['snapshot_name'], s['state']) for s in body['started']] == [('s1', 'running')]
+    assert body['errors'] == ['Failed to delete s2 of VM 100: not started, the delete of s1 still runs']
+
+
+# --- a delete Proxmox took and we did not see end ------------------------------------------
+# Before the bulk delete waited for its tasks, every delete Proxmox took was audited as
+# 'snapshot.deleted'. One still running when the request answers, or whose task cannot be
+# read, is neither deleted nor failed: it is in the audit log as started, and the answer says
+# so per snapshot instead of naming it among the failures.
+
+class _Blind(_Pve):
+    """_Pve whose task status cannot be read for the deletes in `blind` (the node stops
+    answering /tasks once the delete went out)."""
+
+    def __init__(self, snaps, blind=(), **kw):
+        super().__init__(snaps, **kw)
+        self.blind = set(blind)
+
+    def _api_get(self, url, **kw):
+        upid = url.split('/tasks/', 1)[1].rsplit('/status', 1)[0]
+        t = self.tasks[upid]
+        if (t['vmid'], t['name']) in self.blind:
+            return types.SimpleNamespace(status_code=595, json=lambda: {})
+        return super()._api_get(url, **kw)
+
+
+def _audit(db, action):
+    return [r['details'] for r in db.conn.execute(
+        'SELECT details FROM audit_log WHERE action=? ORDER BY id', (action,)).fetchall()]
+
+
+def test_a_delete_still_running_in_proxmox_is_audited_as_started_and_answered_as_such(api, admin, db, monkeypatch):
+    monkeypatch.setattr(sn, 'SNAP_DELETE_WAIT', 0.3, raising=False)
+    pve = api.set_manager(CID, _Pve({100: ['s1']}, never={(100, 's1')}))
+    code, body = _bulk(admin, (100, 's1'))
+    upid = next(iter(pve.tasks))
+    assert code == 202, (code, body)
+    assert body['success'] is True and body['deleted'] == 0 and not body['errors'], body
+    assert [{k: s[k] for k in ('cluster_id', 'node', 'vmid', 'vm_type', 'snapshot_name', 'state', 'task')}
+            for s in body['started']] == [
+        {'cluster_id': CID, 'node': 'pve1', 'vmid': 100, 'vm_type': 'qemu', 'snapshot_name': 's1',
+         'state': 'running', 'task': upid}]
+    assert _audit(db, 'snapshot.delete_started') == [
+        f"QEMU 100 - snapshot 's1' delete started, still running in Proxmox ({upid}) [cluster_1]"]
+    assert _audit(db, 'snapshot.deleted') == []
+
+
+def test_a_delete_whose_task_cannot_be_read_is_audited_as_started_with_its_result_not_read(api, admin, db, monkeypatch):
+    monkeypatch.setattr(sn, 'SNAP_DELETE_WAIT', 0.3, raising=False)
+    pve = api.set_manager(CID, _Blind({100: ['s1'], 101: ['s1']}, blind={(100, 's1')}))
+    code, body = _bulk(admin, (100, 's1'), (101, 's1'))
+    upid = next(u for u, t in pve.tasks.items() if t['vmid'] == 100)
+    assert code == 200 and body['deleted'] == 1 and not body['errors'], body
+    assert [(s['vmid'], s['state'], s['task']) for s in body['started']] == [(100, 'unread', upid)]
+    assert 'status could not be read' in body['started'][0]['why']
+    assert _audit(db, 'snapshot.delete_started') == [
+        f"QEMU 100 - snapshot 's1' delete started, result not read ({upid}) [cluster_1]"]
+    assert _audit(db, 'snapshot.deleted') == ["QEMU 101 - snapshot 's1' deleted [cluster_1]"]
+
+
+def test_a_delete_proxmox_refused_or_failed_stays_a_failure_and_is_not_audited(api, admin, db):
+    pve = api.set_manager(CID, _Pve({100: ['s1']}, fail={'s1': 'snapshot is protected'}))
+    code, body = _bulk(admin, (100, 's1'))
+    assert code == 500 and body['success'] is False and body['errors'] == ['Failed to delete s1 of VM 100: snapshot is protected']
+    assert pve.gone() == 0
+    assert _audit(db, 'snapshot.delete_started') == [] and _audit(db, 'snapshot.deleted') == []
+
+
+def test_a_delete_still_on_its_way_when_the_request_answers_counts_as_started(monkeypatch):
+    """The workers are not stopped when the request has to answer. A delete whose call to
+    Proxmox has not come back by then may have reached it: started, its result unread. The
+    snapshot after it in the same guest was not sent."""
+    import pegaprox.utils.concurrent as conc
+    real = conc.run_per_node
+    monkeypatch.setattr(conc, 'run_per_node', lambda fns, max_concurrent, timeout: real(fns, max_concurrent=max_concurrent, timeout=0.2))
+    monkeypatch.setattr(sn, 'BULK_DELETE_SECONDS', 0.1, raising=False)
+    sent = []
+
+    def delete(node, vmid, kind, name):
+        sent.append(name)
+        gevent.sleep(0.6)
+        return {'success': True}
+    m = types.SimpleNamespace(delete_snapshot=delete)
+    jobs = [[{'mgr': m, 'node': 'n', 'vmid': 1, 'vm_type': 'qemu', 'name': n} for n in ('a', 'b')]]
+    out = sn.delete_per_guest(jobs)
+    assert [(j['name'], j['state']) for j in out] == [('a', 'unread'), ('b', 'skipped')]
+    assert out[0]['why'] == 'no answer from Proxmox to its delete before the request ended'
+    gevent.sleep(0.8)
+    assert sent == ['a'], 'the worker started a delete after the request had answered'
