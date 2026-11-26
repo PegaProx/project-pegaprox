@@ -91,3 +91,16 @@ def test_every_place_that_carries_the_version_agrees_with_version_json():
     assert badge, 'no version badge in README.md'
     assert badge.group(1) == want, \
         f"README badge says {badge.group(1)}, version.json says {want}"
+
+    # MK Nov 2026 - the RPM spec sat at 0.6.6 until 1.5.1. RPM forbids '-' in Version, and
+    # '~' sorts a pre-release below its release the way deb-version.sh does it
+    spec = (_ROOT / 'packaging' / 'rpm' / 'pegaprox.spec').read_text(encoding='utf-8')
+    rpm_want = want.replace('-', '~')
+    v = re.search(r'^Version:\s*(\S+)', spec, re.M)
+    assert v, 'no Version in packaging/rpm/pegaprox.spec'
+    assert v.group(1) == rpm_want, \
+        f"packaging/rpm/pegaprox.spec says {v.group(1)}, version.json says {want}"
+    top = re.search(r'^%changelog\s*\n\*[^\n]*\s-\s*(\S+)\s*$', spec, re.M)
+    assert top, 'no %changelog entry in packaging/rpm/pegaprox.spec'
+    assert top.group(1).rsplit('-', 1)[0] == rpm_want, \
+        f"the newest %changelog entry of the spec is for {top.group(1)}, not {rpm_want}"
