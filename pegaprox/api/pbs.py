@@ -4643,12 +4643,26 @@ def restore_backup(cluster_id):
 
     # qmrestore or pct restore by the backup (pbs:backup/vm/100/... vs pbs:backup/ct/100/...);
     # a batch restore hands each of its backups through here too
-    from pegaprox.core.batch_restore import start_restore
+    from pegaprox.core.batch_restore import start_restore, identity_refusal_in_task, IDENTITY_MISMATCH
     try:
         got = start_restore(cm, volid, target_node, target_vmid, target_storage, mode == 'overwrite',
                             allow_identity_mismatch=body.get('allow_identity_mismatch') is True)
         _iwarn = {'identity_warning': got['identity_warning']} if got.get('identity_warning') else {}
         if 'upid' in got:
+            # MK Nov 2026 - over a guest that is there and without the override, PVE 9.3 may
+            # refuse it in the task: that comes back as 409 IDENTITY_MISMATCH with PVE's words,
+            # which the wizard turns into its hint to tick the box
+            refused = ''
+            if (mode == 'overwrite' and body.get('allow_identity_mismatch') is not True
+                    and guest_is_there(cluster_id, target_vmid)):
+                refused = identity_refusal_in_task(cm, target_node, got['upid'])
+            if refused:
+                log_audit(request.session.get('user', 'system'), 'backup.restore_refused',
+                          f"Restore of {volid} → {got['kind']}/{target_vmid} on {target_node} (mode={mode}) "
+                          f"refused by Proxmox VE: the backup belongs to another guest",
+                          cluster=cm.config.name)
+                return jsonify({'error': refused[:500], 'code': IDENTITY_MISMATCH, 'upid': got['upid'],
+                                'mode': mode, 'target_vmid': target_vmid}), 409
             log_audit(request.session.get('user', 'system'), 'backup.restored',
                       f"Restoring {volid} → {got['kind']}/{target_vmid} on {target_node} (mode={mode}"
                       f"{', allow-identity-mismatch' if got.get('identity_override') else ''})",

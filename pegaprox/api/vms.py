@@ -1958,6 +1958,20 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
             # the restored config replaces what the search index read under that id
             guest_index.drop(cluster_id, vm_type, target_vmid)
             user = getattr(request, 'session', {}).get('user', 'system')
+            # MK Nov 2026 - over the guest itself and without the override, PVE 9.3 may refuse
+            # it in the task: 409 IDENTITY_MISMATCH with PVE's words, the Backups tab shows its
+            # hint to tick the box (as POST /backup-restore)
+            if restore_params['force'] and data.get('allow_identity_mismatch') is not True:
+                from pegaprox.api.pbs import guest_is_there
+                from pegaprox.core.batch_restore import identity_refusal_in_task, IDENTITY_MISMATCH
+                refused = (identity_refusal_in_task(manager, node, task)
+                           if guest_is_there(cluster_id, target_vmid) else '')
+                if refused:
+                    log_audit(user, 'backup.restore_refused', f"Restore of {volid} to VMID {target_vmid} "
+                              f"refused by Proxmox VE: the backup belongs to another guest",
+                              cluster=manager.config.name)
+                    return jsonify({'error': refused[:500], 'code': IDENTITY_MISMATCH, 'task': task,
+                                    'vmid': target_vmid}), 409
             log_audit(user, 'backup.restored', f"Restored {volid} to VMID {target_vmid}"
                       + (' (allow-identity-mismatch)' if 'allow-identity-mismatch' in restore_params else ''),
                       cluster=manager.config.name)

@@ -67,6 +67,40 @@ def identity_refused(text):
     return 'backup belongs to another guest' in text or "use 'allow-identity-mismatch'" in text
 
 
+# MK Nov 2026 - the identity check runs in the restore task, not in the call that starts it: a
+# single restore answered 200 and PVE's refusal stood only in the task (a batch follows its
+# tasks and says it per row). The task ends with it early on, so a restore that may meet the
+# check is followed this long before it is answered; one still running by then is answered
+# as before.
+IDENTITY_WATCH_SECONDS = 8.0
+IDENTITY_WATCH_STEP = 1.0
+
+
+def identity_refusal_in_task(mgr, node, upid):
+    """PVE's words when the restore task `upid` on `node` ended within IDENTITY_WATCH_SECONDS
+    because the backup belongs to another guest, else ''. A node before 9.2.33 has no such
+    check and one whose version cannot be read may not: neither is waited for."""
+    if not isinstance(upid, str) or not upid.startswith('UPID:'):
+        return ''
+    try:
+        ver = mgr.get_node_pve_version(node)
+    except Exception:
+        ver = None
+    if not isinstance(ver, tuple) or ver < IDENTITY_OVERRIDE_PVE:
+        return ''
+    from pegaprox.core.bulk_migrate import task_state
+    deadline = time.monotonic() + IDENTITY_WATCH_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(IDENTITY_WATCH_STEP)
+        try:
+            st = task_state(mgr, upid)
+        except Exception:
+            st = None
+        if st is not None and st[0] != 'running':
+            return st[1] if st[0] == 'failed' and identity_refused(st[1]) else ''
+    return ''
+
+
 def start_restore(mgr, volid, node, vmid, storage, overwrite, allow_identity_mismatch=False):
     """Hand one restore to Proxmox (qmrestore or pct restore, by the backup): {'upid'} or
     {'error', 'status'} with what Proxmox said. Raises when Proxmox is not reached.
