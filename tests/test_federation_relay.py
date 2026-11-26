@@ -15,6 +15,7 @@ an unknown cluster like any other.
 MK Nov 2026
 """
 import base64
+import hashlib
 import json
 from unittest.mock import MagicMock
 
@@ -1239,6 +1240,54 @@ def test_a_console_server_without_a_matching_pin_is_not_spoken_to(monkeypatch):
         relay.open_console(rec, 'vnc', f'/api/clusters/{CID}/vms/n1/qemu/101/vncwebsocket',
                            'token=t', False)
     assert sent == ['closed']
+
+
+@pytest.mark.parametrize('pinned', [True, False], ids=['pins', 'ca'])
+def test_a_console_connection_asks_for_tls_1_2_at_least(monkeypatch, pinned):
+    """The console context to another site sets TLS 1.2 as its floor itself, with pins and
+    without: a Python build or a system policy whose default still lets TLS 1.0 through
+    does not decide what goes on the wire."""
+    import socket
+    import ssl
+    import warnings
+    import websocket
+    der = b'the-sites-cert'
+    floors = []
+    base = ssl.SSLContext
+
+    class Tls:
+        def getpeercert(self, binary_form=False):
+            return der
+
+        def close(self):
+            pass
+
+    class Raw:
+        def close(self):
+            pass
+
+    class LaxDefault(base):
+        # a default as older builds have it: TLS 1.0 and up
+        def __new__(cls, protocol=ssl.PROTOCOL_TLS_CLIENT, *args, **kwargs):
+            ctx = super().__new__(cls, protocol, *args, **kwargs)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', DeprecationWarning)
+                ctx.minimum_version = ssl.TLSVersion.TLSv1
+            return ctx
+
+    def wrap(self, sock, server_hostname=None):
+        floors.append(self.minimum_version)
+        return Tls()
+    monkeypatch.setattr(base, 'wrap_socket', wrap)
+    monkeypatch.setattr(ssl, 'SSLContext', LaxDefault)
+    monkeypatch.setattr(socket, 'create_connection', lambda *a, **k: Raw())
+    monkeypatch.setattr(websocket, 'create_connection', lambda *a, **k: 'ws')
+    monkeypatch.setattr(federation, '_url_ok', lambda url: True)
+    rec = {'url': 'https://b.example:5000',
+           'fingerprints': [hashlib.sha256(der).hexdigest()] if pinned else []}
+    assert relay.open_console(rec, 'vnc', f'/api/clusters/{CID}/vms/n1/qemu/101/vncwebsocket',
+                              'token=t', False) == 'ws'
+    assert floors and all(v >= ssl.TLSVersion.TLSv1_2 for v in floors), floors
 
 
 # --- what an adversarial review found -------------------------------------------------------------

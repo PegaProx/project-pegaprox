@@ -1232,6 +1232,8 @@ def open_console(rec, kind, path, query, reverse_proxy, timeout=10):
             ctx.verify_mode = ssl.CERT_NONE
         else:
             ctx = ssl.create_default_context()
+        # MK Nov 2026 - TLS 1.2 at least, whatever the build or the system policy allows
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         tls = ctx.wrap_socket(raw_sock, server_hostname=host)
         if pins and not _pins_match(tls.getpeercert(binary_form=True), pins):
             tls.close()
