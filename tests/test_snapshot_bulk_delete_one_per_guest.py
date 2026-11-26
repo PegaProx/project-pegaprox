@@ -23,6 +23,7 @@ import types
 
 import gevent
 import pytest
+import requests
 
 import pegaprox.core.manager as manager_mod
 from pegaprox.api import snapshots as sn
@@ -186,14 +187,18 @@ def test_a_delete_that_still_runs_is_not_counted_and_the_next_of_that_guest_wait
 
 
 def test_nothing_new_starts_once_the_request_ran_out_of_time(api, admin, monkeypatch):
-    monkeypatch.setattr(sn, 'BULK_DELETE_SECONDS', 0.3, raising=False)
+    """One guest at a time, the second behind a delete that does not end. Once that one is let
+    go there is no time left to wait for another task, so the second is not sent."""
+    clock = _Virtual()
+    monkeypatch.setattr(manager_mod, 'time', clock)
+    monkeypatch.setattr(sn, 'time', clock)
     monkeypatch.setattr(sn, 'BULK_DELETE_GUESTS', 1, raising=False)
     pve = api.set_manager(CID, _Pve({100: ['s1'], 101: ['s9']}, never={(100, 's1')}))
     code, body = _bulk(admin, (100, 's1'), (101, 's9'))
     assert pve.sent == [(100, 's1')]
     assert code == 202 and pve.gone() == 0
     assert [(s['snapshot_name'], s['state']) for s in body['started']] == [('s1', 'running')]
-    assert body['errors'] == ['Failed to delete s9 of VM 101: not started, the request ran out of its 0.3s']
+    assert body['errors'] == ['Failed to delete s9 of VM 101: not started, the request ran out of its 90s']
 
 
 def test_each_deleted_snapshot_is_in_the_audit_log_and_a_failed_one_is_not(api, admin, db):
@@ -483,7 +488,7 @@ def test_the_request_answers_before_a_proxy_gives_up_on_it(api, admin, monkeypat
     started = clock.now
     code, body = _bulk(admin, (100, 's1'), (100, 's2'))
     took = clock.now - started
-    assert took < 100, f'the request took {took:.0f}s'
+    assert took <= sn.BULK_DELETE_SECONDS, f'the request took {took:.0f}s'
     assert pve.sent == [(100, 's1')]
     assert code == 202 and pve.gone() == 0
     assert [(s['snapshot_name'], s['state']) for s in body['started']] == [('s1', 'running')]
@@ -607,3 +612,44 @@ def test_a_delete_still_on_its_way_when_the_request_answers_counts_as_started(mo
     assert out[0]['why'] == 'no answer from Proxmox to its delete before the request ended'
     gevent.sleep(0.8)
     assert sent == ['a'], 'the worker started a delete after the request had answered'
+
+# --- a slow node ------------------------------------------------------------------------------
+
+class _SlowReads(_Pve):
+    """_Pve on a node that answers task status reads only after the manager's timeout (slow
+    ZFS): each read costs `api_timeout` seconds of `clock` and ends in a ReadTimeout. Its
+    DELETE takes `took` seconds."""
+
+    api_timeout = 10
+
+    def __init__(self, snaps, clock, took, **kw):
+        super().__init__(snaps, **kw)
+        self.clock, self.took = clock, took
+
+    def delete_snapshot(self, node, vmid, vm_type, name):
+        self.clock.now += self.took
+        return super().delete_snapshot(node, vmid, vm_type, name)
+
+    def _api_get(self, url, **kw):
+        self.clock.now += self.api_timeout
+        raise requests.exceptions.ReadTimeout(f'Read timed out. (read timeout={self.api_timeout})')
+
+
+def test_slow_status_reads_do_not_carry_the_answer_past_the_bound_of_the_request(api, admin, db, monkeypatch):
+    """_wait_for_task runs past its timeout by a read and its 5s back-off when reads are slow,
+    and the read after it took another 10s: behind Cloudflare (100s) the browser got a 524
+    instead of the answer, while the server wrote its audit rows."""
+    clock = _Virtual()
+    monkeypatch.setattr(manager_mod, 'time', clock)
+    monkeypatch.setattr(sn, 'time', clock)
+    pve = api.set_manager(CID, _SlowReads({100: ['s1']}, clock, took=9))
+    started = clock.now
+    code, body = _bulk(admin, (100, 's1'))
+    took = clock.now - started
+    upid = next(iter(pve.tasks))
+    assert took <= sn.BULK_DELETE_SECONDS, f'the request took {took:.0f}s'
+    assert code == 202, (code, body)
+    assert [(s['snapshot_name'], s['state'], s['task']) for s in body['started']] == [('s1', 'unread', upid)]
+    assert _audit(db, 'snapshot.delete_started') == [
+        f"QEMU 100 - snapshot 's1' delete started, result not read ({upid}) [cluster_1]"]
+
