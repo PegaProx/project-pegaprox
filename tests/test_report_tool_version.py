@@ -100,7 +100,26 @@ def test_every_place_that_carries_the_version_agrees_with_version_json():
     assert v, 'no Version in packaging/rpm/pegaprox.spec'
     assert v.group(1) == rpm_want, \
         f"packaging/rpm/pegaprox.spec says {v.group(1)}, version.json says {want}"
-    top = re.search(r'^%changelog\s*\n\*[^\n]*\s-\s*(\S+)\s*$', spec, re.M)
+    top = _rpm_changelog_version(spec)
     assert top, 'no %changelog entry in packaging/rpm/pegaprox.spec'
-    assert top.group(1).rsplit('-', 1)[0] == rpm_want, \
-        f"the newest %changelog entry of the spec is for {top.group(1)}, not {rpm_want}"
+    assert top.rsplit('-', 1)[0] == rpm_want, \
+        f"the newest %changelog entry of the spec is for {top}, not {rpm_want}"
+
+
+def _rpm_changelog_version(spec):
+    """The version-release the newest %changelog entry of a spec names on its header line."""
+    # MK Nov 2026 - [ \t], not \s: \s takes the line break, and a first bullet of one word
+    # ('- Rebuild') was read as the version
+    top = re.search(r'^%changelog\s*\n\*[^\n]*[ \t]-[ \t]*(\S+)[ \t]*$', spec, re.M)
+    return top.group(1) if top else None
+
+
+@pytest.mark.parametrize('bullet', ['- Update to 1.5.1', '- Rebuild', '- Bugfixes',
+                                    '- Require python3-jwt >= 2.8.0'])
+def test_the_spec_changelog_version_comes_off_the_header_line(bullet):
+    spec = ('Version: 1.5.1\n\n%changelog\n'
+            '* Thu Nov 26 2026 A Packager <packager@example.com> - 1.5.1-1\n'
+            f'{bullet}\n\n'
+            '* Mon Feb 23 2026 A Packager <packager@example.com> - 0.6.6-1\n'
+            '- Initial RPM build\n')
+    assert _rpm_changelog_version(spec) == '1.5.1-1'
