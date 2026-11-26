@@ -618,6 +618,29 @@ def test_a_delete_still_on_its_way_when_the_request_answers_is_unanswered(monkey
     assert sent == ['a'], 'the worker started a delete after the request had answered'
 
 
+def test_a_delete_proxmox_answered_with_its_task_is_started_while_its_end_is_awaited(monkeypatch):
+    """#1347: Proxmox answered the DELETE with its task, and the wait for that task is still on
+    when the request has to answer. That delete started: it comes back unread with its task,
+    and never as one Proxmox did not answer."""
+    import pegaprox.utils.concurrent as conc
+    real = conc.run_per_node
+    monkeypatch.setattr(conc, 'run_per_node', lambda fns, max_concurrent, timeout: real(fns, max_concurrent=max_concurrent, timeout=0.2))
+    upid = 'UPID:n:0000A1B2:00C3D4E5:6789ABCD:qmdelsnapshot:1:root@pam:'
+
+    def wait(node, task, timeout=None, first_poll=None):
+        gevent.sleep(0.6)
+        return True
+    m = types.SimpleNamespace(delete_snapshot=lambda node, vmid, kind, name: {'success': True, 'task': upid},
+                              _wait_for_task=wait, api_timeout=0.01)
+    monkeypatch.setattr(sn, '_TASK_READ_BACKOFF', 0, raising=False)
+    jobs = [[{'mgr': m, 'node': 'n', 'vmid': 1, 'vm_type': 'qemu', 'name': n} for n in ('a', 'b')]]
+    out = sn.delete_per_guest(jobs)
+    assert [(j['name'], j['state'], j['task']) for j in out[:1]] == [('a', 'unread', upid)]
+    assert 'no answer' not in out[0]['why'] and upid in out[0]['why']
+    assert out[1]['state'] != 'unanswered'
+    gevent.sleep(0.8)
+
+
 # --- a slow node and a DELETE PVE did not answer in time --------------------------------------
 
 class _SlowReads(_Pve):

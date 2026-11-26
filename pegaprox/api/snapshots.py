@@ -356,10 +356,10 @@ def _delete_done(mgr, node, res, deadline=None):
     manager's answer to it. Only a task that ended OK is gone; a failed one says what PVE said.
     'busy': the task still runs when we stop waiting, the guest keeps its lock and the next
     delete of it would only fail. 'unread': PVE started its task and that could not be read, so
-    whether the snapshot went is not known. 'unanswered': the DELETE was sent and PVE did not
-    answer it in time, it may or may not have started (the manager cannot tell a late answer
-    from a TLS handshake that hung before the DELETE went out). A delete without a task (XCP-ng
-    deletes within the call) is gone once it was accepted. With `deadline` (a time.monotonic()
+    whether the snapshot went is not known. 'unanswered': no answer from Proxmox in time, the
+    DELETE may or may not have gone out (the manager cannot tell a late answer from a TLS
+    handshake that hung before it was sent), so it may or may not have started. A delete
+    without a task (XCP-ng deletes within the call) is gone once it was accepted. With `deadline` (a time.monotonic()
     value) the answer is there by then, also when status reads are slow."""
     if not isinstance(res, dict):
         return 'failed', 'no answer'
@@ -405,8 +405,8 @@ def delete_per_guest(guests, user=''):
     is no time left in them to wait for its task. A cluster whose deletes have no task (XCP-ng)
     takes its guests one after the other. Each job comes back with 'state' (gone, failed, busy,
     unread, unanswered, skipped, error), 'why' and its 'task', in the order the jobs were handed
-    in. busy and unread were started in Proxmox and not seen to end; unanswered was sent and
-    Proxmox did not answer it, so it may or may not have started. After any of the three the
+    in. busy and unread were started in Proxmox and not seen to end; unanswered got no answer
+    from Proxmox, it may or may not have gone out and started. After any of the three the
     guest's next snapshots are not sent. `user` is named as the one who started each task."""
     from pegaprox.api.helpers import register_task_user
     from pegaprox.utils.concurrent import run_per_node
@@ -433,6 +433,10 @@ def delete_per_guest(guests, user=''):
                 continue
             try:
                 job['task'] = res.get('task') if isinstance(res, dict) else None
+                if job['task']:
+                    # MK Nov 2026 - Proxmox answered with its task: started, till its end is read
+                    job.update(state='unread', why=f"its delete task was started, its status was "
+                                                   f"not read before the request ended ({job['task']})")
                 if user and job['task']:
                     # out of the request's context here, the manager cannot name the user itself
                     register_task_user(job['task'], user, job.get('cluster_id'))
