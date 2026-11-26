@@ -494,7 +494,9 @@ def test_the_request_answers_before_a_proxy_gives_up_on_it(api, admin, monkeypat
 # Before the bulk delete waited for its tasks, every delete Proxmox took was audited as
 # 'snapshot.deleted'. One still running when the request answers, or whose task cannot be
 # read, is neither deleted nor failed: it is in the audit log as started, and the answer says
-# so per snapshot instead of naming it among the failures.
+# so per snapshot instead of naming it among the failures. One whose task Proxmox ended with
+# an error is a failure, and in the audit log as failed; a DELETE Proxmox refused outright
+# started nothing there and is not.
 
 class _Blind(_Pve):
     """_Pve whose task status cannot be read for the deletes in `blind` (the node stops
@@ -546,12 +548,42 @@ def test_a_delete_whose_task_cannot_be_read_is_audited_as_started_with_its_resul
     assert _audit(db, 'snapshot.deleted') == ["QEMU 101 - snapshot 's1' deleted [cluster_1]"]
 
 
-def test_a_delete_proxmox_refused_or_failed_stays_a_failure_and_is_not_audited(api, admin, db):
-    pve = api.set_manager(CID, _Pve({100: ['s1']}, fail={'s1': 'snapshot is protected'}))
-    code, body = _bulk(admin, (100, 's1'))
-    assert code == 500 and body['success'] is False and body['errors'] == ['Failed to delete s1 of VM 100: snapshot is protected']
-    assert pve.gone() == 0
+def test_a_delete_whose_task_proxmox_ended_with_an_error_is_a_failure_and_audited_as_failed(api, admin, db):
+    """PVE took the delete and its task failed half way: AbstractConfig::snapshot_delete set
+    snapstate 'delete' and removed the snapshot of one disk before the second failed. Who
+    started that is in the audit log, as before #1347 every delete PVE took was."""
+    said = 'rbd error: error setting snapshot context: (2) No such file or directory'
+    pve = api.set_manager(CID, _Pve({100: ['pre-upgrade']}, fail={'pre-upgrade': said}))
+    code, body = _bulk(admin, (100, 'pre-upgrade'))
+    upid = next(iter(pve.tasks))
+    assert code == 500 and body['success'] is False
+    assert body['errors'] == [f'Failed to delete pre-upgrade of VM 100: {said}']
+    assert _audit(db, 'snapshot.delete_failed') == [
+        f"QEMU 100 - snapshot 'pre-upgrade' delete failed in Proxmox: {said} ({upid}) [cluster_1]"]
     assert _audit(db, 'snapshot.delete_started') == [] and _audit(db, 'snapshot.deleted') == []
+
+
+class _Refusing(_Pve):
+    """_Pve that refuses the DELETE of the snapshots in `refuse` itself, with no task."""
+
+    def __init__(self, snaps, refuse=(), **kw):
+        super().__init__(snaps, **kw)
+        self.refuse = set(refuse)
+
+    def delete_snapshot(self, node, vmid, vm_type, name):
+        if (int(vmid), name) in self.refuse:
+            return {'success': False, 'error': '{"data":null,"errors":{"snapname":"invalid format"}}'}
+        return super().delete_snapshot(node, vmid, vm_type, name)
+
+
+def test_a_delete_proxmox_refused_without_a_task_is_a_failure_and_not_audited(api, admin, db):
+    pve = api.set_manager(CID, _Refusing({100: ['s1']}, refuse={(100, 's1')}))
+    code, body = _bulk(admin, (100, 's1'))
+    assert code == 500 and body['success'] is False
+    assert body['errors'] == ['Failed to delete s1 of VM 100: {"data":null,"errors":{"snapname":"invalid format"}}']
+    assert pve.tasks == {} and pve.gone() == 0
+    assert _audit(db, 'snapshot.delete_failed') == [] and _audit(db, 'snapshot.delete_started') == []
+    assert _audit(db, 'snapshot.deleted') == []
 
 
 def test_a_delete_still_on_its_way_when_the_request_answers_counts_as_started(monkeypatch):

@@ -8909,6 +8909,14 @@ def snapshots_overview_delete():
             logging.debug(f"Snapshot deletion failed: {job['why']}")
         else:
             errors.append(f"Failed to delete {job['name']} of VM {job['vmid']}: {job['why']}")
+            if job['state'] == 'failed' and job.get('task'):
+                # MK Nov 2026 - Proxmox ran this delete and its task ended with an error. It may
+                # have removed some disk snapshots already (snapstate 'delete'), so it is audited
+                # too; a DELETE Proxmox refused outright started nothing
+                log_audit(user, 'snapshot.delete_failed',
+                          f"{str(job['vm_type']).upper()} {job['vmid']} - snapshot '{job['name']}' delete failed in Proxmox: "
+                          + job['why'] + ('' if job['task'] in job['why'] else f" ({job['task']})"),
+                          cluster=job['mgr'].config.name)
 
     if deleted_count > 0 or started:
         # 202 when none was seen gone yet: Proxmox has the rest, the UI tells it from a failure
