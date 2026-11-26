@@ -126,6 +126,10 @@ AES_KEY_FILE = os.path.join(CONFIG_DIR, '.pegaprox_aes256.key')
 KNOWN_HOSTS_FILE = os.path.join(CONFIG_DIR, '.ssh_known_hosts')
 # held by the one process that runs on this config directory (lock_config_dir)
 LOCK_FILE = os.path.join(CONFIG_DIR, '.pegaprox.lock')
+# MK Nov 2026 - the byte of LOCK_FILE Windows locks (_lock_config_dir_msvcrt): 1 GiB in, far
+# past the end of the file, so backup tools still read all of it. SQLite locks its
+# PENDING_BYTE there for the same reason. migrate_db._RUNNING_LOCK_BYTE is the same number
+CONFIG_LOCK_BYTE = 1 << 30
 # Lies next to the state file while this instance is in a group, and the database holds
 # the same fact as a local setting, so a restored database carries it along. With the
 # state file gone, either one keeps the instance passive (_load, check_markers_at_boot).
@@ -3488,8 +3492,10 @@ def lock_config_dir(path=None):
 
 # MK Nov 2026 - lock_config_dir returned None on Windows, so a second PegaProx, or a
 # --migrate-db next to the running one, shared no lock with it and ran anyway. Windows
-# gets byte 0 of the same file, locked as dbcrypto locks a conversion. A locked byte is
-# closed to every other handle there, reads too, so the pid goes after it.
+# locks one byte of the same file, as dbcrypto locks a conversion. A locked byte is closed
+# to every other handle there, reads too: with byte 0 robocopy, Explorer and zip could not
+# copy the file while PegaProx ran (robocopy retries for days). The byte is CONFIG_LOCK_BYTE,
+# past the end of the file, and the pid is at the start as with flock.
 def _lock_config_dir_msvcrt(path):
     try:
         import msvcrt
@@ -3502,9 +3508,9 @@ def _lock_config_dir_msvcrt(path):
         return None
     from pegaprox.core import dbcrypto
     try:
-        dbcrypto._lock_first_byte(msvcrt, fd, path, wait=False)
+        dbcrypto._lock_first_byte(msvcrt, fd, path, wait=False, at=CONFIG_LOCK_BYTE)
     except BlockingIOError:
-        holder = _pid_after_first_byte(fd)
+        holder = _pid_at_start(fd)
         os.close(fd)
         who = f'process {holder}' if holder.isdigit() else 'process'
         raise HaError(f'Another PegaProx {who} runs on {os.path.dirname(os.path.abspath(path))} '
@@ -3515,18 +3521,20 @@ def _lock_config_dir_msvcrt(path):
         return None
     try:
         os.ftruncate(fd, 0)
+        # back from the locked byte first, a write there would make the file 1 GiB long
         os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, f'\n{os.getpid()}\n'.encode())
+        os.write(fd, f'{os.getpid()}\n'.encode())
     except OSError:
         pass
     _config_lock['fd'] = fd
     return fd
 
 
-def _pid_after_first_byte(fd):
-    """The pid a Windows holder wrote behind the byte it locks, '' when there is none."""
+def _pid_at_start(fd):
+    """The pid a Windows holder wrote at the start of the file, '' when there is none
+    (Windows has no os.pread)."""
     try:
-        os.lseek(fd, 1, os.SEEK_SET)
+        os.lseek(fd, 0, os.SEEK_SET)
         return os.read(fd, 16).decode(errors='replace').strip()
     except OSError:
         return ''

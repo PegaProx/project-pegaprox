@@ -1155,11 +1155,15 @@ def _migration_lock(lock_path: str, db_path: str, wait: bool = True):
         os.close(fd)
 
 
-def _lock_first_byte(msvcrt, fd: int, db_path: str, wait: bool = True) -> bool:
+def _lock_first_byte(msvcrt, fd: int, db_path: str, wait: bool = True, at: int = 0) -> bool:
     """Lock byte 0 of `fd` with msvcrt, waiting as long as another process holds it. True
-    when it had to wait. With wait=False a held lock raises BlockingIOError."""
+    when it had to wait. With wait=False a held lock raises BlockingIOError.
+
+    MK Nov 2026 - `at` locks another byte instead. ha.lock_config_dir holds its lock for as
+    long as PegaProx runs, and Windows keeps a locked byte from every other handle, readers
+    too, so it locks one far past the end of its file (ha.CONFIG_LOCK_BYTE)."""
     busy = {errno.EACCES, getattr(errno, 'EDEADLOCK', errno.EDEADLK)}
-    os.lseek(fd, 0, os.SEEK_SET)
+    os.lseek(fd, at, os.SEEK_SET)
     try:
         msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
         return False
@@ -1170,7 +1174,7 @@ def _lock_first_byte(msvcrt, fd: int, db_path: str, wait: bool = True) -> bool:
             raise BlockingIOError(errno.EAGAIN, f'{db_path} is being converted by another process') from e
     _LOG.info("[DBCRYPTO] another process is encrypting %s, waiting for it", db_path)
     while True:
-        os.lseek(fd, 0, os.SEEK_SET)
+        os.lseek(fd, at, os.SEEK_SET)
         try:
             # LK_LOCK gives up after ten tries a second apart, a big database takes longer
             msvcrt.locking(fd, msvcrt.LK_LOCK, 1)

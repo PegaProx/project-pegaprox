@@ -119,6 +119,8 @@ STOP_FIRST_WINDOWS = "Stop PegaProx first (its service, or the PegaProx process)
 _WINDOWS = os.name == 'nt'
 # the lock file a running PegaProx holds in its config directory, ha.LOCK_FILE
 _RUNNING_LOCK = '.pegaprox.lock'
+# the byte of it a running PegaProx locks on Windows, ha.CONFIG_LOCK_BYTE
+_RUNNING_LOCK_BYTE = 1 << 30
 
 
 def _stop_first() -> str:
@@ -162,8 +164,8 @@ def _hold_config_dir(folder: str):
 
 
 # MK Nov 2026 - on Windows this returned None at once, and the conversion ran under a live
-# PegaProx. There ha.lock_config_dir locks byte 0 of the file with msvcrt, so this does too,
-# and reads and writes the pid behind that byte, the one other handles cannot touch.
+# PegaProx. There ha.lock_config_dir locks one byte of the file with msvcrt, past its end
+# so backup tools can still read it, and this locks the same one. The pid is at the start.
 def _hold_config_dir_msvcrt(folder: str):
     try:
         import msvcrt
@@ -175,10 +177,10 @@ def _hold_config_dir_msvcrt(folder: str):
         return None
     from pegaprox.core import dbcrypto
     try:
-        dbcrypto._lock_first_byte(msvcrt, fd, folder, wait=False)
+        dbcrypto._lock_first_byte(msvcrt, fd, folder, wait=False, at=_RUNNING_LOCK_BYTE)
     except BlockingIOError:
         try:
-            os.lseek(fd, 1, os.SEEK_SET)
+            os.lseek(fd, 0, os.SEEK_SET)
             holder = os.read(fd, 16).decode(errors='replace').strip()
         except OSError:
             holder = ''
@@ -191,7 +193,7 @@ def _hold_config_dir_msvcrt(folder: str):
     try:
         os.ftruncate(fd, 0)
         os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, f'\n{os.getpid()}\n'.encode())
+        os.write(fd, f'{os.getpid()}\n'.encode())
     except OSError:
         pass
     return fd
@@ -205,7 +207,7 @@ def _let_go(fd: int) -> None:
     except ImportError:
         with contextlib.suppress(ImportError, OSError):
             import msvcrt
-            os.lseek(fd, 0, os.SEEK_SET)
+            os.lseek(fd, _RUNNING_LOCK_BYTE, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
     os.close(fd)
 
