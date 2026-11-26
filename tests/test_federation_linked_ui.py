@@ -8,10 +8,16 @@ caller nothing says why; an account of another site is pointed to its home.
 Runs the built bundle in headless Chromium against the fake server of tests/test_ha_ui.py.
 Skips where Playwright is not installed.
 LW Nov 2026
+
+The sidebar asks for the linked sites only while the session check says the federation
+runs (#1372): off, the route answers 404, and every look left a failed request in the
+browser's console. The session check is what is read again then.
 """
+import json
+
 import pytest
 
-from test_ha_ui import CLUSTER, VM, browser, open_app  # noqa: F401
+from test_ha_ui import BASE, CLUSTER, VM, _App, _FakeServer, browser  # noqa: F401
 
 IID = 'b' * 32
 RID = f'pve-b~{IID}'
@@ -21,15 +27,65 @@ SITE = {'iid': IID, 'site': 'hamburg', 'url': 'https://b.example:5000', 'state':
                       'connected': True, 'nodes': 3, 'vms': 40}]}
 
 
+LINKED = '/api/federation/linked'
+
+
+class _FlagServer(_FakeServer):
+    """The HA fake, its session check with the federation flag the real one sends."""
+
+    def __init__(self, federation=True, **kw):
+        super().__init__(**kw)
+        self.federation = federation
+
+    def handle(self, route):
+        if route.request.url.split('?')[0] != BASE + '/api/auth/check':
+            return super().handle(route)
+        server = self
+
+        class Flagged:
+            request = route.request
+
+            def abort(self, *a, **kw):
+                return route.abort(*a, **kw)
+
+            def fulfill(self, status=200, body='', headers=None):
+                data = json.loads(body)
+                if data.get('authenticated'):
+                    data['federation_enabled'] = server.federation
+                return route.fulfill(status=status, body=json.dumps(data), headers=headers)
+        return super().handle(Flagged())
+
+
+@pytest.fixture
+def open_app(browser):
+    apps = []
+
+    def _open(clock=False, **kw):
+        app = _App(browser, _FlagServer(**kw), clock=clock)
+        apps.append(app)
+        return app
+    yield _open
+    for app in apps:
+        app.ctx.close()
+
+
 def _linked(sites, home=None):
-    return {('GET', '/api/federation/linked'): (200, {'home': home, 'sites': sites})}
+    return {('GET', LINKED): (200, {'home': home, 'sites': sites})}
+
+
+# what the real route answers while the federation is off
+_OFF = {('GET', LINKED): (404, {'code': 'FED_DISABLED', 'error': 'off'})}
 
 
 def _open(open_app, layout, sites=(SITE,), home=None, status=200):
-    extra = _linked(list(sites), home) if status == 200 else {
-        ('GET', '/api/federation/linked'): (status, {'code': 'FED_DISABLED', 'error': 'off'})}
-    app = open_app(role='standalone', layout=layout, clusters=[CLUSTER], resources=[VM], extra=extra)
+    extra = _linked(list(sites), home) if status == 200 else dict(_OFF)
+    app = open_app(role='standalone', layout=layout, clusters=[CLUSTER], resources=[VM], extra=extra,
+                   federation=status == 200)
     return app
+
+
+def _asked(app, path):
+    return app.server.calls.count(('GET', path))
 
 
 @pytest.mark.parametrize('layout', ['modern', 'corporate-redesigned'])
@@ -126,7 +182,80 @@ def test_runtime_with_the_federation_off_nothing_shows(open_app):
     assert not app.errors, app.errors
 
 
+def test_runtime_with_the_federation_off_the_linked_sites_are_never_asked(open_app):
+    """Off, no request goes to the route that would answer 404, not at load and not five
+    minutes on: then the session check is read again instead."""
+    app = open_app(clock=True, federation=False, role='standalone', layout='modern',
+                   clusters=[CLUSTER], resources=[VM], extra=dict(_OFF))
+    page = app.page
+    page.wait_for_timeout(1500)
+    assert _asked(app, LINKED) == 0, app.server.calls
+    checks = _asked(app, '/api/auth/check')
+    page.clock.run_for(301000)
+    page.wait_for_timeout(500)
+    assert _asked(app, '/api/auth/check') > checks
+    assert _asked(app, LINKED) == 0
+    assert page.locator('[data-fed-site], [data-fed-home]').count() == 0
+    assert not app.errors, app.errors
+
+
+def test_runtime_switched_on_meanwhile_the_sections_come(open_app):
+    """An admin switches the federation on while the page is open: the next session check
+    says so, and the linked sites are asked at once."""
+    app = open_app(clock=True, federation=False, role='standalone', layout='modern',
+                   clusters=[CLUSTER], resources=[VM], extra=_linked([SITE]))
+    page = app.page
+    page.wait_for_timeout(1500)
+    assert _asked(app, LINKED) == 0
+    app.server.federation = True
+    page.clock.run_for(301000)
+    page.locator(f'[data-fed-site="{IID}"]').wait_for(timeout=8000)
+    assert _asked(app, LINKED) >= 1
+    assert not app.errors, app.errors
+
+
+def test_runtime_switched_off_meanwhile_it_stops_asking(open_app):
+    """Switched off while the page is open: the next look gets the 404, the sections go and
+    the session check is read at once. After that the route is not asked again."""
+    app = open_app(clock=True, role='standalone', layout='modern', clusters=[CLUSTER],
+                   resources=[VM], extra=_linked([SITE]))
+    page = app.page
+    page.locator(f'[data-fed-site="{IID}"]').wait_for(timeout=8000)
+    app.server.federation = False
+    app.server.extra.update(_OFF)
+    checks = _asked(app, '/api/auth/check')
+    page.clock.run_for(31000)
+    page.wait_for_timeout(800)
+    assert page.locator('[data-fed-site]').count() == 0
+    assert _asked(app, '/api/auth/check') > checks
+    linked = _asked(app, LINKED)
+    page.clock.run_for(901000)
+    page.wait_for_timeout(500)
+    assert _asked(app, LINKED) == linked
+    assert not app.errors, app.errors
+
+
 # --- the source -------------------------------------------------------------------------------
+
+def test_the_linked_sites_wait_for_the_flag():
+    """The flag comes with the session check and the login, and is read again with the
+    session check; the dashboard's look at the linked sites returns before it asks while
+    the flag is off."""
+    ctx = _read('web', 'src', 'contexts.js')
+    check = ctx[ctx.index('const checkSession = async'):ctx.index('const login = async')]
+    login = ctx[ctx.index('const login = async'):ctx.index('const updatePreferences')]
+    again = ctx[ctx.index('const refreshHa = useCallback('):ctx.index('}, []);', ctx.index('const refreshHa = useCallback('))]
+    for part in (check, login, again):
+        assert 'setFederationOn(' in part and 'federation_enabled === true' in part
+    provider = ctx[ctx.index('<AuthContext.Provider value={{'):]
+    assert 'federationOn' in provider[:provider.index('}}>')]
+    dash = _read('web', 'src', 'dashboard.js')
+    ask = dash.index('authFetch(`${API_URL}/federation/linked`')
+    effect = dash[dash.rindex('useEffect(', 0, ask):]
+    effect = effect[:effect.index('}, [sessionId, federationOn]);')]
+    off = effect.index('if (!federationOn) {')
+    assert off < effect.index('authFetch(') and 'return () => clearInterval(h);' in effect[off:effect.index('const poll')]
+
 
 def _read(*parts):
     import os
