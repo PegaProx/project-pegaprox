@@ -15442,15 +15442,20 @@ echo "AGENT_INSTALLED_OK"
                 # a ticket that cannot read it
                 mark = (tid, self._password_mark())
                 sess = why = None
+                # no answer is no read, from the login or from the read over it: asked again
+                # once the login may go out again, the looks till then wait like after any
+                # answer that said nothing
+                quarter = (tid, time.monotonic() + 3 * self.TOKEN_RENEW_EVERY)
                 if getattr(self, '_token_end_login_tried', None) != mark:
                     try:
                         sess, why = self._account_login('reading when its API token ends', paced=True)
                     except Exception:
-                        # no answer is no read: asked again once the login may go out again,
-                        # the looks till then wait like after any answer that said nothing
-                        self._token_renew_held = (tid, time.monotonic() + 3 * self.TOKEN_RENEW_EVERY)
+                        self._token_renew_held = quarter
                         raise
-                    self._token_end_login_tried = mark
+                    if sess is None:
+                        # a no, a ticket that cannot read it (two-factor), or no password:
+                        # the same answer at every look
+                        self._token_end_login_tried = mark
                 if sess is None:
                     if why:
                         self.logger.debug(f"[TOKEN] the end of {tid} unread: {why}")
@@ -15459,9 +15464,15 @@ echo "AGENT_INSTALLED_OK"
                     return None, (f"{stale}; {unread}" if stale else unread)
                 try:
                     r = sess.get(url, timeout=self.api_timeout)
+                except Exception:
+                    self._token_renew_held = quarter
+                    raise
                 finally:
                     try: sess.close()
                     except Exception: pass
+                if r.status_code != 200:
+                    self._token_renew_held = quarter
+                    return None, None
             if r.status_code != 200:
                 return None, None
             ends = int(((r.json() or {}).get('data') or {}).get('expire') or 0)

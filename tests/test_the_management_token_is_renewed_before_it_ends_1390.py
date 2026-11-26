@@ -1083,6 +1083,20 @@ def _asking_for_a_login(cluster, fake, path):
     return cluster.restart(m), tid
 
 
+def _logins_over(m, fake, minutes, seconds, also=None):
+    """Passes of the IP refresh loop five minutes apart for `seconds`, `also(step)` called
+    at each: the times of the logins that went out."""
+    sent = []
+    for step in range(seconds // 300):
+        before = len(fake.logins())
+        _pass(m)
+        if also:
+            also(step)
+        sent += [minutes()] * (len(fake.logins()) - before)
+        minutes.ahead += 300
+    return sent
+
+
 @pytest.mark.parametrize('how', ['login-down', 'timeout'])
 @pytest.mark.parametrize('path', ['end-unknown', 'end-passed', 'new-token', 'unanswered-delete'])
 def test_a_password_login_without_an_answer_goes_out_once_per_hold(
@@ -1135,6 +1149,44 @@ def test_a_password_login_without_an_answer_goes_out_once_per_hold(
     else:
         assert f'{USER}!{LOST}' not in fake.tokens
         assert mgrmod._management_token_kept('c1389').get('unanswered') == []
+
+
+@pytest.mark.parametrize('how', ['timeout', 'busy'])
+def test_a_read_over_the_login_that_gets_no_answer_does_not_lose_the_end(
+        cluster, said, minutes, monkeypatch, how):
+    """The login answered with a ticket, and the read of the end over it got no answer (a
+    lossy link) or a 503: the login was taken as done, every look after it skipped the
+    login, said at INFO there was no password login to read the end with, and the end was
+    never read, so nothing renewed the token before it. Now the read is asked again a
+    quarter of an hour later; a login PVE takes counts on no fail2ban."""
+    fake = RenewPVE({USER: PASSWORD})
+    m, tid = _asking_for_a_login(cluster, fake, 'end-unknown')
+    said.listen(m)
+    real = mgrmod._password_login
+    lost = []
+
+    def first_read_lost(mgr, usr, pwd, what):
+        sess, why, status = real(mgr, usr, pwd, what)
+        if sess is not None and not lost:
+            lost.append(what)
+
+            def no_answer(url, **kw):
+                if how == 'timeout':
+                    raise mgrmod.requests.exceptions.ReadTimeout('Read timed out. (read timeout=15)')
+                return types.SimpleNamespace(status_code=503, text='', json=lambda: {})
+            sess.get = no_answer
+        return sess, why, status
+    monkeypatch.setattr(mgrmod, '_password_login', first_read_lost)
+    fake.seen.clear()
+
+    sent = _logins_over(m, fake, minutes, 2 * 3600)
+
+    assert lost == ['reading when its API token ends']
+    assert mgrmod._management_token_kept('c1389').get('expire') == fake.expires[tid]
+    # once more a quarter of an hour later, and the end it read needs no login after
+    assert len(sent) == 2 and 3 * m.TOKEN_RENEW_EVERY <= sent[1] - sent[0] <= 4 * m.TOKEN_RENEW_EVERY
+    assert not [s for s in said.at(logging.INFO) if '[TOKEN]' in s and 'cannot read' in s]
+    assert not [s for s in said.at(logging.INFO) if '[TOKEN]' in s and 'neither a yes nor a no' in s]
 
 
 def test_a_migration_logs_in_at_once_after_the_renewal_got_no_answer(cluster, said, minutes):
