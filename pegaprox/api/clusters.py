@@ -393,6 +393,14 @@ def rotate_cluster_api_token(cluster_id):
         mgr.config.api_token_secret = new_secret
         if on_it:
             mgr._api_token = f'{new_user}={new_secret}'
+        if not preserved:
+            # MK Nov 2026 (#1390) - its end kept as that of the first one is: the renewal goes
+            # by it, and the documented role may not read its own token
+            try:
+                mgr._hold_token_end(new_user, int((data.get('info') or {}).get('expire')
+                                                  or form.get('expire') or 0))
+            except (TypeError, ValueError):
+                pass
         # MK Nov 2026 - PVE took the rotation from here on: what fails below goes with the
         # success instead of a 500, and the audit entry is written either way
         try:

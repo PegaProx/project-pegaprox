@@ -96,9 +96,12 @@ its own at the first login and keeps the password for what a token cannot do.
 
 Under an API token policy of the cluster (Proxmox VE 9.3, Datacenter > Options > API Token
 Policy) that token gets the longest lifetime the policy allows, a year where it only wants
-an expiry. PegaProx renews it before it ends: it looks at the end every five minutes, and
-once two days are left (a fifth of the lifetime where that is less) it logs in with the
-password, makes a new token, stores it and deletes the old one. Where there is no password
+an expiry. PegaProx keeps that end with the token in its database, since the role above
+may not read its own token, and renews it before it ends: it looks at the end every five
+minutes, and once two days are left (a fifth of the lifetime where that is less) it logs in
+with the password, makes a new token, stores it and deletes the old one. It goes by the end
+of the token, not by the policy of the day: a token that got an end is renewed also after
+the policy was relaxed, and the new one then has none. Where there is no password
 login, for an account with two-factor login or a cluster without a stored password, the
 token renews itself: with a new token, stored before the old one is deleted. Only where
 Proxmox refuses that and the policy lets a new secret extend the end (*Allow Extension on
@@ -112,9 +115,15 @@ notifications and the alert channels, with the time the token ends, and tries ag
 hours later, sooner as the end comes near. A user.cfg lock or a restart of pveproxy is
 tried again after a quarter of an hour and said only once half the time before the end is
 gone. A new secret whose answer never arrives, or one the database of PegaProx could not
-store (it tries again every few minutes), is a critical alert at once. Each renewal is in
-the audit log. A token typed in by hand, and a cluster added with a token as
-its login, are never renewed; a cluster without such a policy sees no change. Should the
+store (it tries again every few minutes, also while a refusal waits for its next try), is a
+critical alert at once. A new token whose answer never arrives may still have been made:
+PegaProx notes its name before it asks and deletes it at the next look, also after a
+restart. A token made by an older PegaProx has no kept end; PegaProx reads it over the
+token, or once over the password login. Where neither may read it, PegaProx says so once,
+in the log at info level and without an alert, since a token made before the cluster had a
+policy has no end at all. Each renewal is in the audit log. A token typed in by hand, and
+a cluster added with a token as its login, are never renewed; a token without an end, as
+on a cluster that never had such a policy, sees no change. Should the
 token still run out, PegaProx logs in with the password right away, makes a new one and
 deletes the old one. An account with two-factor login cannot log in that way: the cluster
 then says its token has expired, and needs an API token as its login or two-factor login

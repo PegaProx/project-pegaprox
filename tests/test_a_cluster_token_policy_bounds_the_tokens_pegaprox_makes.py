@@ -466,6 +466,10 @@ def test_rotating_on_older_pve_makes_the_new_token_before_the_old_one_goes(pve, 
     assert made < gone
     assert fake.forms[new]['privsep'] == '0'
     assert m._api_get(f'https://127.0.0.1:{m.api_port}/api2/json/nodes').status_code == 200
+    # its end is kept as that of the first one, for the renewal (#1390)
+    import pegaprox.core.manager as mgrmod
+    kept = mgrmod._management_token_kept('c1389')
+    assert (kept['token'], kept['expire']) == (new, 0)
 
 
 def _audits(monkeypatch):
