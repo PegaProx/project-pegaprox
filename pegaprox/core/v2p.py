@@ -5795,7 +5795,10 @@ def _esxi_keys_locked(body, unlocked=''):
         # LE is now, LT the name of our file; no number from date means no clock to judge age by
         'LE=$(date +%s 2>/dev/null); case "$LE" in ""|*[!0-9]*) LE=0;; esac; '
         'LB=${LB:-$LE}; LT=o.$LE.$$; '
-        'if mkdir "$LD" 2>/dev/null; then { : > "$LD/$LT"; } 2>/dev/null; LW=1; '
+        # `true`, not `:`: a failed redirection on a special builtin ends dash and busybox ash
+        # whatever 2>/dev/null says, and the directory can be gone by now (another waiter's rmdir
+        # of an empty dead lock). The check below then finds no file of ours and we back off.
+        'if mkdir "$LD" 2>/dev/null; then true 2>/dev/null > "$LD/$LT"; LW=1; '
         'else LO=$(ls "$LD" 2>/dev/null); '
         # LF: since when the lock looked like this to us, LA: when its holder took it (the older
         # of the two, so a file with an odd name or a clock set back still ages)

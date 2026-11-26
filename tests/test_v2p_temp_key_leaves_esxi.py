@@ -13,7 +13,9 @@
 # waiters at the same dead lock, the first broke it and took a new one, the second's rmdir
 # removed that new one and both rewrote at once. And a dead holder's lock younger than the stale
 # age made every run wait ten seconds and rewrite without it. The holder's file in the lock now
-# changes hands with one rename, and the removal never rewrites without the lock.
+# changes hands with one rename, and the removal never rewrites without the lock. That file was
+# written with `:`, and when the lock was gone by then the failed redirection on that special
+# builtin ended the whole shell instead of letting it try again.
 #
 # The removal runs here in a real shell against real files, the way the ESXi shell runs it.
 
@@ -365,6 +367,70 @@ def test_a_fresh_lock_before_its_file_is_written_is_not_shared(dash_esxi, caplog
     old = time.time() - 300
     os.utime(e.lock, (old, old))
     e.env['ffff0000'] = {'SLOW_FIND': '0.5'}
+    e.env[KEY_ID] = {'SLOW_MKDIR': '1'}
+    _late_then_early(e, caplog)
+    assert e.keys.read_text() == ADMIN + '\n'
+    assert 'CLEANED' in e.outputs[KEY_ID] and 'CLEANED' in e.outputs['ffff0000']
+    assert 'temporary migration key' not in caplog.text
+    assert not e.lock.exists()
+
+
+def _lock_gone_after_the_first_mkdir(e):
+    """The first mkdir of the lock works and the directory is gone again before the shell puts
+    its file in it, as when the rmdir of a waiter that saw an empty dead lock lands in that gap."""
+    real = shutil.which('mkdir')
+    gone = e.root / 'lock-taken-away'
+    e.shim('mkdir', f'{real} "$@" || exit $?\n'
+                    f'case "$1" in *pegaprox-v2p-keys.lock) '
+                    f'[ -e {gone} ] || {{ touch {gone}; rmdir "$1"; }};; esac\n')
+    return gone
+
+
+def test_a_lock_gone_before_its_file_is_written_is_taken_again(dash_esxi, caplog):
+    """The file was written with `: >`. A failed redirection on that special builtin ends a dash
+    or busybox shell, 2>/dev/null or not, so a lock removed in that gap ended the whole removal:
+    no swap and no CLEANED, the key stayed authorized while the lock was free again. The shell
+    backs off like at any lock it lost and takes it again."""
+    e = dash_esxi
+    gone = _lock_gone_after_the_first_mkdir(e)
+    e.keys.write_text(ADMIN + '\n' + OURS + '\n')
+    with caplog.at_level(logging.WARNING):
+        e.clean()
+    assert gone.exists(), 'the lock was never taken away'
+    assert e.keys.read_text() == ADMIN + '\n'
+    assert 'CLEANED' in e.output
+    assert 'temporary migration key' not in caplog.text
+    assert not e.lock.exists()
+
+
+def test_a_deploy_whose_lock_goes_before_its_file_keeps_the_esxi_path(dash_esxi):
+    """The same gap ended the shell of Method A before its DEPLOYED, and the key went to
+    ~/.ssh instead, which the sshd of a stock ESXi does not read."""
+    e = dash_esxi
+    gone = _lock_gone_after_the_first_mkdir(e)
+    e.keys.write_text(ADMIN + '\n')
+    e.deploy()
+    assert gone.exists(), 'the lock was never taken away'
+    assert e.deployed and e.deployed[0]
+    lines = e.keys.read_text().splitlines()
+    assert len(lines) == 2 and lines[0] == ADMIN and 'pegaprox-v2p-' in lines[1], lines
+    assert not e.dot.exists()
+    assert not e.lock.exists()
+
+
+def test_a_waiter_whose_fresh_lock_is_removed_tries_again(dash_esxi, caplog):
+    """Two waiters at an empty dead lock. Ours breaks it, makes a new one and is slow to write
+    its file; the other one's find comes back late, its rmdir removes our new directory and its
+    next mkdir comes after our write. Our shell ended there and the key stayed authorized."""
+    e = dash_esxi
+    e.slow('find')
+    e.slow('mkdir')
+    e.slow('rmdir')
+    e.keys.write_text('\n'.join([ADMIN, OURS, OTHER_RUN]) + '\n')
+    e.lock.mkdir()
+    old = time.time() - 300
+    os.utime(e.lock, (old, old))
+    e.env['ffff0000'] = {'SLOW_FIND': '0.5', 'SLOW_RMDIR': '1.5'}
     e.env[KEY_ID] = {'SLOW_MKDIR': '1'}
     _late_then_early(e, caplog)
     assert e.keys.read_text() == ADMIN + '\n'
