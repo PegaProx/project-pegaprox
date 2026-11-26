@@ -10,6 +10,9 @@ pools). PVE writes that PUT in one go, so when it refuses, nothing left the pool
 names every member that stayed, by kind, with PVE's reason. A pool without storage gets the very
 PUT it got before.
 
+Every list of names in the answer stays short enough for a toast: a few per kind and how many
+more.
+
 MK Nov 2026
 """
 import json
@@ -116,8 +119,6 @@ def _manager(api, pve):
     for name in ('get_pools', 'get_pool_members', 'delete_pool', '_pool_unpool_refusal'):
         if hasattr(PegaProxManager, name):
             setattr(m, name, types.MethodType(getattr(PegaProxManager, name), m))
-    if hasattr(PegaProxManager, '_POOL_MEMBER_WORDS'):
-        m._POOL_MEMBER_WORDS = PegaProxManager._POOL_MEMBER_WORDS
     return api.set_manager(CID, m)
 
 
@@ -191,6 +192,18 @@ def test_a_delete_refused_for_another_reason_answers_as_before(api, admin):
     assert r.status_code == 400 and not pve.deleted
     err = r.get_json()['error']
     assert err.startswith('PVE 500: ') and "contains pool 'team/sub'" in err, err
+
+
+def test_a_refusal_for_a_big_pool_stays_short(api, admin):
+    """800 guests and a storage the account may not modify: the toast names a few of each."""
+    guests = [dict(VM, id=f'qemu/{v}', vmid=v, name=f'g{v}') for v in range(1000, 1800)]
+    pve = _PoolPve([*guests, LOCAL, NFS], storage_denied={'nfs1'})
+    _manager(api, pve)
+    r = _delete(admin)
+    assert r.status_code == 400 and not pve.deleted and len(pve.members) == 802
+    err = r.get_json()['error']
+    assert len(err) < 500 and '1005' not in err, len(err)
+    assert 'guests 1000, 1001, 1002, 1003, 1004 and 795 more; storage local, nfs1' in err, err
 
 
 def test_deleting_a_pool_still_needs_admin_users(api, seed):

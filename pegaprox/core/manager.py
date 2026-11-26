@@ -16,6 +16,7 @@ import hashlib
 import ipaddress
 import subprocess
 import re
+import html
 import shlex
 from pegaprox.utils.ssh_security import cli_hostkey_opts  # secure host-key opts for subprocess ssh/scp
 from pegaprox.utils.sanitization import validate_snapshot_name, validate_hostname, validate_ssh_user, redact_secrets
@@ -1014,6 +1015,25 @@ def ct_root_credentials(ct_config):
         if keys is None and val and val.strip():
             keys = val
     return password or None, keys, None
+
+
+# MK Nov 2026 - what a refused pool delete names stays short: the toast showing it has no width
+# limit and is gone in three seconds, and one pool can hold hundreds of guests
+POOL_NAMES_SHOWN = 5
+_POOL_MEMBER_WORDS = (('vms', 'guests'), ('storage', 'storage'), ('network', 'VNets'))
+
+
+def _first_few(names, shown=POOL_NAMES_SHOWN):
+    """'a, b, c, d, e and 7 more'"""
+    names = [n for n in names if n]
+    head = ', '.join(names[:shown])
+    return head if len(names) <= shown else f'{head} and {len(names) - shown} more'
+
+
+def pool_members_text(drop):
+    """The members of a PUT /pools body by kind: 'guests 100, 200; storage local'."""
+    return '; '.join(f"{word} {_first_few(str(drop[k]).split(','))}"
+                     for k, word in _POOL_MEMBER_WORDS if drop.get(k))
 
 
 class PegaProxManager:
@@ -18873,15 +18893,12 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"delete_pool({poolid}): {e}")
             return {'success': False, 'error': str(e)}
 
-    _POOL_MEMBER_WORDS = (('vms', 'guests'), ('storage', 'storage'), ('network', 'VNets'))
-
     def _pool_unpool_refusal(self, poolid, drop, response):
         """What delete_pool says when PVE refused to take the members out.
 
         MK Nov 2026 - the delete then fails on the first member PVE finds, and its raw JSON
         named one guest or storage. PVE writes the PUT in one go, so every member in it stayed:
         name them all by kind, with PVE's reason (the quotes stay, they hold the names)."""
-        import html
         raw = (response.text or '').replace('\n', ' ').replace('\r', '')
         try:
             body = json.loads(raw)
@@ -18895,10 +18912,8 @@ echo "AGENT_INSTALLED_OK"
                 said = str(body.get('message') or '').strip()
         else:
             said = '' if '<html' in raw.lower() else raw.strip()
-        kept = '; '.join(f"{word} {drop[k].replace(',', ', ')}"
-                         for k, word in self._POOL_MEMBER_WORDS if k in drop)
         msg = (f"Pool '{poolid}' was not deleted: Proxmox VE refused to take its members out "
-               f"({kept}), so they are all still in it. PVE {response.status_code}: "
+               f"({pool_members_text(drop)}), so they are all still in it. PVE {response.status_code}: "
                f"{said[:300] or 'no reason given'}")
         return html.escape(msg, quote=False)
 
