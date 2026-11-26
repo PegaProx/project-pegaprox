@@ -13,8 +13,12 @@ BuildRequires:  python3-devel
 # Runtime dependencies (system python packages)
 # NS Nov 2026 - one for every module PegaProx imports, the set debian/control depends on.
 # packaging/apt/deb_imports.py maps the modules, tests/test_rpm_spec_requires.py holds this
-# list to it. Names as in Fedora; on RHEL 9, EPEL has the ones the base lacks.
-Requires:       python3
+# list to it. Names as in Fedora. Built for current Fedora and for EL10, where EPEL 10 has the
+# ones the base lacks: python3 is 3.10 or newer there, python3-jwt 2.8.0 or newer. EL9 cannot
+# install it, its python3 is 3.9 and EPEL 9 has python3-jwt 2.4.0.
+# 3.10 at least: utils/vnc_crypto.py annotates with "bytes | None", which 3.9 cannot evaluate,
+# and 3.10 is the oldest Python the README names
+Requires:       python3 >= 3.10
 Requires:       python3-flask
 Requires:       python3-werkzeug
 Requires:       python3-requests
@@ -134,6 +138,9 @@ EOF
 %changelog
 * Thu Nov 26 2026 MrMasterbay <gamesucht1236@gmail.com> - 1.5.1-1
 - Update to 1.5.1
+- Built for EL10 and current Fedora, and python3 >= 3.10 required: EL9 can
+  no longer install this package, its python3 is 3.9 (PegaProx needs 3.10
+  or newer) and EPEL 9 has python3-jwt 2.4.0
 - Require python3-jwt >= 2.8.0 and python3-websocket-client, both imported at
   runtime (OIDC token verification, the console and linked mode); an older
   PyJWT has no lifespan and ssl_context for its JWKS client
