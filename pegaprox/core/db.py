@@ -43,6 +43,9 @@ _LONE_SURROGATE = re.compile('[\ud800-\udfff]')
 # Defined here to avoid circular import: rbac imports from db
 DEFAULT_TENANT_ID = 'default'
 
+# how long a clusters.fed_owner column that could not be added is not tried again
+FED_OWNER_RETRY_SECONDS = 60
+
 # Options of a run started by hand that a rolling update schedule carries too, added in
 # place; a schedule saved before them gets the safe value of the default
 UPDATE_SCHEDULE_RUN_COLUMNS = (
@@ -4099,13 +4102,22 @@ class PegaProxDB:
         cursor.execute("PRAGMA table_info(clusters)")
         columns = [col[1] for col in cursor.fetchall()]
         if columns and 'fed_owner' not in columns:
+            # MK Nov 2026 - an ALTER that failed is not tried again on every read of the
+            # clusters for a while: each try waited out the busy timeout of a locked
+            # database and committed inside a read. The look above still runs, a column
+            # added meanwhile counts at once
+            failed = getattr(self, '_fed_owner_failed', None)
+            if failed is not None and 0 <= time.monotonic() - failed < FED_OWNER_RETRY_SECONDS:
+                return False
             try:
                 cursor.execute(
                     "ALTER TABLE clusters ADD COLUMN fed_owner TEXT NOT NULL DEFAULT ''")
                 self.conn.commit()
                 columns.append('fed_owner')
             except Exception as e:
-                logging.error(f"clusters.fed_owner is missing and cannot be added: {e}")
+                self._fed_owner_failed = time.monotonic()
+                logging.error(f"clusters.fed_owner is missing and cannot be added (tried "
+                              f"again in {FED_OWNER_RETRY_SECONDS} s): {e}")
                 return False
         self._fed_owner_ok = 'fed_owner' in columns
         return self._fed_owner_ok

@@ -2008,3 +2008,69 @@ def test_a_fed_owner_column_that_cannot_be_added_leaves_every_row_local(tmp_path
             assert db.get_cluster('pve-old')['name'] == 'old'
     finally:
         db.conn.execute('PRAGMA query_only = OFF')
+
+
+def test_a_fed_owner_column_that_cannot_be_added_is_not_tried_at_every_read(tmp_path,
+                                                                            monkeypatch):
+    """The database takes no writes (locked): the ALTER waited out the busy timeout and
+    committed inside a read, at every read of the clusters. It is tried again after a
+    while only, the rows read as this instance's own meanwhile, and the column comes with
+    the first try once the database takes it."""
+    import types
+    from pegaprox.core import db as db_mod
+    monkeypatch.delenv(federation.ENV_SWITCH, raising=False)
+    wait = getattr(db_mod, 'FED_OWNER_RETRY_SECONDS', 60)
+    now = [5000.0]
+    clock_only = {k: getattr(db_mod.time, k) for k in dir(db_mod.time) if not k.startswith('_')}
+    monkeypatch.setattr(db_mod, 'time', types.SimpleNamespace(**dict(clock_only,
+                                                                     monotonic=lambda: now[0])))
+    a = Side(tmp_path, 'a')
+    db = _db_of(a)
+    _without_fed_owner(db)
+    alters = []
+    db.conn.set_trace_callback(
+        lambda sql: alters.append(sql) if sql.lstrip().upper().startswith('ALTER') else None)
+    db.conn.execute('PRAGMA query_only = ON')
+    try:
+        with at(a):
+            for _ in range(5):
+                assert 'pve-old' in db.get_all_clusters()
+            assert len(alters) == 1
+            now[0] += wait - 1
+            assert 'pve-old' in db.get_all_clusters()
+            assert len(alters) == 1
+            now[0] += 2
+            assert 'pve-old' in db.get_all_clusters()
+            assert len(alters) == 2
+    finally:
+        db.conn.execute('PRAGMA query_only = OFF')
+    now[0] += wait + 1
+    with at(a):
+        assert 'pve-old' in db.get_all_clusters()
+    db.conn.set_trace_callback(None)
+    assert len(alters) == 3
+    assert 'fed_owner' in [c[1] for c in db.conn.execute('PRAGMA table_info(clusters)')]
+
+
+def test_a_fed_owner_column_added_elsewhere_counts_while_the_retry_waits(tmp_path,
+                                                                         monkeypatch):
+    """The wait after a failed ALTER skips the ALTER, not the look at the table: a column
+    another connection added meanwhile counts at the next read, and a row a federation
+    owns stays out of this instance's clusters from then on."""
+    monkeypatch.delenv(federation.ENV_SWITCH, raising=False)
+    a = Side(tmp_path, 'a')
+    db = _db_of(a)
+    _without_fed_owner(db)
+    db.conn.execute('PRAGMA query_only = ON')
+    try:
+        with at(a):
+            assert 'pve-old' in db.get_all_clusters()
+    finally:
+        db.conn.execute('PRAGMA query_only = OFF')
+    db.conn.execute("ALTER TABLE clusters ADD COLUMN fed_owner TEXT NOT NULL DEFAULT ''")
+    db.conn.execute("INSERT INTO clusters (id, name, host, user, pass_encrypted, fed_owner) "
+                    "VALUES ('pve-theirs', 'theirs', 'h', 'u', '', ?)", ('f' * 32,))
+    db.conn.commit()
+    with at(a):
+        got = db.get_all_clusters()
+    assert 'pve-old' in got and 'pve-theirs' not in got
