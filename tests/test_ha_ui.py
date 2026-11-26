@@ -1958,9 +1958,55 @@ def test_the_snapshot_overview_deletes_only_for_who_may_and_reads_the_answer(das
     # failure (#1347: also not after an answer that deleted some and names the others)
     assert bulk.count('setSelectedSnaps({});') == 1
     ok = bulk.index('} else {', bulk.index('if (!res || !res.ok) {'))
-    assert ok < bulk.index("if (data.errors && data.errors.length) addToast(data.errors.join('; '), 'error');\n"
-                           "                        else setSelectedSnaps({});")
+    named = bulk.index("if (data.errors && data.errors.length) {\n"
+                       "                            addToast(data.errors.join('; '), 'error');", ok)
+    assert named < bulk.index('} else if (stillHere()) setSelectedSnaps({});', named)
     assert '`${data.deleted ?? chosen.length} snapshot(s) deleted`' in bulk
+
+
+def test_a_snapshot_delete_answered_after_a_cluster_switch_stays_out_of_the_new_overview(dash):
+    """#1347: the delete's answer can take a minute. Read again for the cluster it was sent
+    in, the list landed in the overview of the cluster opened meanwhile, with the rows still
+    selected, and the next Delete selected sent them to the first cluster."""
+    bulk = _block(dash, 'const deleteSelectedSnapshots = async (clusterId) => {', '\n            };')
+    assert 'const stillHere = () => selectedClusterRef.current?.id === clusterId;' in bulk
+    skip = bulk.index('if (!stillHere()) {\n'
+                      '                    setSelectedSnaps(prev => withoutSnaps(prev, chosen));\n'
+                      '                    return;\n'
+                      '                }')
+    assert skip > bulk.index('setSnapsDeleting(false);')
+    assert bulk.count('await fetchGlobalSnapshots(') == 1 and bulk.index('await fetchGlobalSnapshots(') > skip
+    one = _block(dash, 'const deleteGlobalSnapshot = async (snap, clusterId) => {', '\n            };')
+    assert one.count('fetchGlobalSnapshots(') == 1
+    assert 'if (selectedClusterRef.current?.id === clusterId) await fetchGlobalSnapshots(clusterId, ' in one
+    # a slow read of the list itself writes nothing once another cluster is open
+    read = _block(dash, 'const fetchGlobalSnapshots = async (clusterId = null, filterDate = null) => {', '\n            };')
+    assert 'const elsewhere = () => clusterId && selectedClusterRef.current?.id !== clusterId;' in read
+    for setter in ('setGlobalSnapshots(data.snapshots', 'setSnapshotsReadErr({ why: [d', 'setSnapshotsReadErr({ why: err'):
+        at = read.index(setter)
+        assert read.rindex('if (elsewhere()) return;', 0, at) > read.rindex('await ', 0, at), setter
+    # and a switch drops the selection with the list
+    assert 'setGlobalSnapshots([]);\n                setSelectedSnaps({});' in dash
+
+
+def test_a_snapshot_delete_still_running_in_proxmox_is_not_said_to_be_deleted_or_failed(dash):
+    """#1347: the server answers a delete it started and did not see end under 'started'
+    (202 when none was seen gone): the toast says it still runs in Proxmox."""
+    note = _block(dash, 'const snapStartedNote = (started) => {', '\n            };')
+    assert "t('snapDelStillRunning').replace('{n}', running)" in note
+    assert "t('snapDelResultUnread').replace('{n}', started.length - running)" in note
+    bulk = _block(dash, 'const deleteSelectedSnapshots = async (clusterId) => {', '\n            };')
+    assert "if (data.deleted || !started.length) addToast(`${data.deleted ?? chosen.length} snapshot(s) deleted`, 'success');" in bulk
+    assert "if (started.length) addToast(snapStartedNote(started), 'warning');" in bulk
+    assert 'if (started.length) setSelectedSnaps(prev => withoutSnaps(prev, started));' in bulk
+    one = _block(dash, 'const deleteGlobalSnapshot = async (snap, clusterId) => {', '\n            };')
+    assert ("if (started.length) addToast(snapStartedNote(started), 'warning');\n"
+            "                    else addToast('Snapshot deleted', 'success');") in one
+    blocks = _blocks()
+    for lang in LANGS:
+        for key in ('snapDelStillRunning', 'snapDelResultUnread'):
+            line = re.search(r'^ {16}' + key + r': "([^"]+)",$', blocks[lang], re.M)
+            assert line and '{n}' in line.group(1) and 'Proxmox' in line.group(1), (lang, key)
 
 
 def test_a_failed_action_puts_the_old_status_back(dash):
