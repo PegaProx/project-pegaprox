@@ -1736,6 +1736,10 @@ def _v2p_plan(mgr, vm_id, data, opts, vm_detail, inv=None, exp=None):
         inv, disks, nics, opts, data['target_storage'], data.get('network_bridge', 'vmbr0'),
         net_vlan_tag=data.get('net_vlan_tag'), transfer_mode=data.get('transfer_mode', 'auto'),
         needs_efi=needs_efi, needs_tpm=needs_tpm)
+    # MK Nov 2026 (#1253) - the wizard's review and each guest of a bulk check list these
+    fw_warn = _v2p.firmware_mismatch(vd, bios)
+    if fw_warn:
+        plan['warnings'].append(fw_warn)
     plan['target'] = {'cluster': data['target_cluster'], 'node': node, 'storage': data['target_storage']}
     plan['available'] = {
         'bridges': [{'name': n, 'kind': k} for n, k in sorted(inv['bridges'].items())],

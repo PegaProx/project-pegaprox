@@ -1418,6 +1418,12 @@ def _run_v2p_migration(task):
             bios = 'ovmf'; machine = 'q35'
         else:
             bios = 'seabios'; machine = 'pc'
+        # MK Nov 2026 - the dry run warns about a firmware the source does not boot with. An API
+        # call can start without one, so the run says it as well
+        _fv = full_vm.get('data') if isinstance(full_vm, dict) else None
+        _fw_warn = firmware_mismatch(_fv if isinstance(_fv, dict) else {'hardware': hw}, bios_override)
+        if _fw_warn:
+            _result_warning(task, _fw_warn)
         # persist for later stages (offline copy path post-processing)
         task._detected_bios = bios
         task._detected_machine = machine
@@ -6321,6 +6327,48 @@ def _resolved_bios(task):
     if override and override != 'auto':
         return override
     return getattr(task, '_detected_bios', 'seabios')
+
+
+# MK Nov 2026 (#1253) - a firmware picked by hand is applied as asked, also when the guest
+# boots with the other one on ESXi. The plan and the run say what that leads to
+_FIRMWARE_LABELS = {'seabios': 'Legacy BIOS (SeaBIOS)', 'ovmf': 'UEFI (OVMF)'}
+
+
+def source_firmware(vm_detail):
+    """'efi', 'bios' or None for the guest data get_vm answers with. A SOAP connection has it
+    in hardware.firmware, a REST one only in boot.type. None when neither says it: a guess
+    would warn about a guest that is fine."""
+    vd = vm_detail if isinstance(vm_detail, dict) else {}
+    hw = vd.get('hardware') if isinstance(vd.get('hardware'), dict) else {}
+    boot = vd.get('boot') if isinstance(vd.get('boot'), dict) else {}
+    fw = str(hw.get('firmware') or boot.get('type') or '').strip().lower()
+    return fw if fw in ('efi', 'bios') else None
+
+
+def firmware_mismatch(vm_detail, bios):
+    """The warning for a firmware the source does not boot with, or None. `bios` is the
+    request's value (auto, seabios, ovmf); Auto resolves as _run_v2p_migration resolves it,
+    from hardware.firmware alone."""
+    vd = vm_detail if isinstance(vm_detail, dict) else {}
+    src = source_firmware(vd)
+    if src is None:
+        return None
+    hw = vd.get('hardware') if isinstance(vd.get('hardware'), dict) else {}
+    auto = 'ovmf' if hw.get('firmware') == 'efi' else 'seabios'
+    asked = str(bios or 'auto')
+    picked = auto if asked == 'auto' else asked
+    want = 'ovmf' if src == 'efi' else 'seabios'
+    if picked == want or picked not in _FIRMWARE_LABELS:
+        return None
+    boots = 'UEFI' if src == 'efi' else 'legacy BIOS'
+    if asked == 'auto':
+        # only where the hardware details are missing and boot.type said it
+        return (f"Firmware: this guest boots with {boots} on ESXi, but its hardware details were not "
+                f"read, so Auto gives it {_FIRMWARE_LABELS[picked]}. It will most likely not boot on "
+                f"Proxmox: choose {_FIRMWARE_LABELS[want]}, which matches the source")
+    also = ' (what Auto picks)' if auto == want else ''
+    return (f"Firmware: this guest boots with {boots} on ESXi and {_FIRMWARE_LABELS[picked]} is chosen. "
+            f"It will most likely not boot on Proxmox; {_FIRMWARE_LABELS[want]}{also} matches the source")
 
 
 def _efidisk_pre_keys(task):
