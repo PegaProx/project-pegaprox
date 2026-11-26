@@ -23,7 +23,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-1.5.1-blue" alt="Version"/>
-  <img src="https://img.shields.io/badge/python-3.8+-green" alt="Python"/>
+  <img src="https://img.shields.io/badge/python-3.10+-green" alt="Python"/>
   <img src="https://img.shields.io/badge/license-AGPL--3.0--License-orange" alt="License"/>
 </p>
 
