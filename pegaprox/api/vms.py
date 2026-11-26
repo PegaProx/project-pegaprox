@@ -4963,13 +4963,9 @@ def get_next_vmid_api(cluster_id):
         _u = load_users().get(request.session.get('user', ''), {})
         _start, _end = tenant_vmid_range(_u.get('tenant_id') or DEFAULT_TENANT_ID)
         if _start:
-            _taken = set()
-            for _vm in (mgr.get_vm_resources() or []):
-                try:
-                    _taken.add(int(_vm.get('vmid')))
-                except (TypeError, ValueError):
-                    continue
-            _free = next((v for v in range(_start, _end + 1) if v not in _taken), None)
+            # the ESXi migration picks its automatic VMID with the same helper (#1339)
+            from pegaprox.core.target_vmid import free_ids
+            _free = next(free_ids(mgr.get_vm_resources() or [], _start, _end), None)
             if _free is not None:
                 return jsonify({'vmid': _free, 'range': [_start, _end]})
             return jsonify({'vmid': result['vmid'], 'range': [_start, _end],

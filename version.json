@@ -180,6 +180,7 @@
     "pegaprox/core/recovery.py",
     "pegaprox/core/redfish.py",
     "pegaprox/core/rolling_runs.py",
+    "pegaprox/core/target_vmid.py",
     "pegaprox/core/timeline.py",
     "pegaprox/core/transfer_net.py",
     "pegaprox/core/v2p.py",

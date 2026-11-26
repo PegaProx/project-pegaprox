@@ -1403,6 +1403,10 @@ def start_vmware_migration(vmware_id, vm_id):
       EFI and TPM state stay on target_storage.
     - verify: 'sample' (default), 'full' (every copied disk compared with its source before
       the target starts; Live Clone, Auto and Offline Copy only) or 'off'.
+    - target_vmid (#1339): the VMID of the new guest, 100 to 999999999. It has to be free on
+      the target cluster, inside the caller's tenant range and allowed by the cluster's next-id
+      setting. It is asked again right before the guest is created, and the migration fails
+      when it got taken meanwhile. Empty: the next free VMID, inside the caller's tenant range.
     - dry_run: true checks all of it against the target node and answers 200 with the
       resolved plan ({ok, errors, warnings, nics, disks, storages, available}); nothing is
       started and no ESXi password is needed.
@@ -1493,6 +1497,17 @@ def start_vmware_migration(vmware_id, vm_id):
             return _plan_err
     _skipped = {i for i, e in (_opts['disk_map'] or {}).items() if e['skip']}
 
+    # MK Nov 2026 - the VMID it lands under: a chosen one asked of the target now (the
+    # task asks once more before it creates the guest), else the tenant range the task keeps to
+    _pick, _vmid_err = _vmid_pick(_v2p_u, data['target_cluster'], data.get('target_vmid'))
+    if dry_run:
+        _plan.update(_vmid_view(_pick))
+        if _vmid_err:
+            _plan['errors'].append(_vmid_err[1])
+            _plan['ok'] = False
+    elif _vmid_err:
+        return jsonify({'error': _vmid_err[1]}), _vmid_err[0]
+
     # MK Oct 2026 - the guest lands on the target as a new one, sized as core/v2p.py builds
     # it (the wizard's sockets, cores and memory over what ESXi reports): the tenant quota
     # counts it like a create
@@ -1538,6 +1553,12 @@ def start_vmware_migration(vmware_id, vm_id):
                                           hold={'cluster_id': data['target_cluster']})
         if _qerr:
             return _qerr
+        # the chosen VMID is this migration's until it ends, no other one here gets it
+        from pegaprox.core import target_vmid as _tvmid
+        if _pick['vmid'] and _tvmid.claim(data['target_cluster'], _pick['vmid'], _holder,
+                                          _tvmid.until_over(_v2p_task, mid)):
+            return jsonify({'error': f"VMID {_pick['vmid']} is promised to another ESXi migration "
+                                     f"under way - choose another one"}), 409
 
         # NS: pass all NICs from ESXi to migration task so multi-NIC + MAC works
         if 'selected_nics' not in data and 'data' in vm_detail:
@@ -1547,6 +1568,7 @@ def start_vmware_migration(vmware_id, vm_id):
 
         task = V2PMigrationTask(mid, vmware_id, vm_id, data['target_cluster'],
                                 data['target_node'], data['target_storage'], vm_name, data)
+        _tvmid.bind(task, _pick['vmid'], _pick['start'], _pick['end'], _pick['strict'], _holder)
 
         with _migration_lock_v2p:
             _vmware_migrations[mid] = task
@@ -1563,12 +1585,17 @@ def start_vmware_migration(vmware_id, vm_id):
         if not _started:
             _never_ran(mid)
             _ebulk.let_go(vmware_id, vm_id, _holder)
+            # a VMID claimed above is free again now, not only once the unstarted grace ends
+            from pegaprox.core.target_vmid import release as _vmid_release
+            _vmid_release(_holder)
 
     _extra = ''
     if _opts['nic_map'] is not None or _opts['disk_map'] is not None or _opts['verify'] != 'sample':
         _extra = (f" (verify {_opts['verify']}, {len(_skipped)} disk(s) skipped, "
                   f"per-disk storage {'yes' if _opts['disk_map'] else 'no'}, "
                   f"per-NIC network {'yes' if _opts['nic_map'] else 'no'})")
+    if _pick['vmid']:
+        _extra += f" as VMID {_pick['vmid']}"
     log_audit(request.session.get('user', 'admin'), 'vmware.migration.started',
               f"V2P migration: {vm_name} @ {data.get('esxi_host', mgr.host)} -> "
               f"{data['target_cluster']}/{data['target_node']}/{data['target_storage']}{_extra}")
@@ -1626,6 +1653,12 @@ def _migrate_body_refusal(vmware_id, data, dry_run):
             _v2p._whole_number(data[_f], 0, _hi, _f)
         except ValueError as e:
             return str(e), None
+    # the VMID the guest lands under; whether it is free is asked later
+    from pegaprox.core import target_vmid as _tvmid
+    try:
+        _tvmid.parse(data.get('target_vmid'))
+    except ValueError as e:
+        return str(e), None
 
     # NS Oct 2026 (#1090) - root loop-mounts this on the node; empty = the default places
     from pegaprox.utils.sanitization import validate_node_iso_path
@@ -1748,6 +1781,78 @@ def _v2p_plan(mgr, vm_id, data, opts, vm_detail, inv=None, exp=None):
                      if st['active'] and 'images' in st['content']],
     }
     return plan, None
+
+
+def _vmid_pick(user, cluster_id, raw, mine=()):
+    """(pick, refusal) of the VMID a migration of `user` lands under on the cluster. pick:
+    {vmid, start, end, strict}, the chosen id (None: the next free one) and the caller's
+    tenant range the task keeps to. refusal: (status, message) or None. A chosen id is
+    asked of the target cluster here; mine are holders of it that are this request's own.
+    MK Nov 2026 (#1339)"""
+    from pegaprox.core import target_vmid as tvmid
+    from pegaprox.utils.rbac import TenantRangeUnknown
+    vmid = tvmid.parse(raw)
+    try:
+        start, end, strict = tvmid.caller_range(user)
+    except TenantRangeUnknown:
+        # not "no range": nothing the task could keep to is known, so nothing starts
+        return ({'vmid': vmid, 'start': 0, 'end': 0, 'strict': True},
+                (403, 'Cannot verify the tenant VMID range right now - check the server logs'))
+    pick = {'vmid': vmid, 'start': start, 'end': end, 'strict': strict}
+    if vmid is None:
+        return pick, None
+    return pick, tvmid.refusal(user, cluster_id, cluster_managers[cluster_id], vmid, mine)
+
+
+def _vmid_view(pick):
+    """What a dry run shows of it: the chosen id, or the range the next free one comes from"""
+    return {'target_vmid': pick['vmid'],
+            'vmid_range': [pick['start'], pick['end']] if pick['start'] else None}
+
+
+def _bulk_vmid_check(res, user, vmware_id, settings, vms):
+    """The chosen VMID of each guest of a bulk check asked of the target cluster, a few at a
+    time, into the guest's errors; res gets the tenant range the others are picked from."""
+    from pegaprox.core import target_vmid as tvmid
+    from pegaprox.utils.concurrent import run_per_node
+    cid = settings['target_cluster']
+    chosen = {vm_id: maps['target_vmid'] for vm_id, maps in vms if maps.get('target_vmid')}
+    pick, err = _vmid_pick(user, cid, None)
+    res.update(_vmid_view(pick))
+    if err:
+        res['errors'].append(err[1])
+    pve = cluster_managers[cid]
+
+    def _ask(vm_id):
+        return ('asked', tvmid.refusal(user, cid, pve, chosen[vm_id]))
+    # a guest the caller may not migrate gets no question asked about it
+    asks = {vm_id: _ask for vm_id in chosen
+            if not err and not _bulk_vm_refusal(user, vmware_id, vm_id, settings)}
+    got = run_per_node(asks, max_concurrent=_BULK_READERS, timeout=60) if asks else {}
+    for it in res['items']:
+        it['target_vmid'] = chosen.get(it['vm_id'])
+        if it['vm_id'] in asks:
+            answer = got.get(it['vm_id'])
+            # a question that broke off or timed out cleared nothing
+            why = answer[1] if isinstance(answer, tuple) else \
+                (502, f"The target cluster could not say whether VMID {chosen[it['vm_id']]} is free")
+            if why:
+                it['errors'].append(why[1])
+        it['ok'] = not it['errors']
+    res['ok'] = not res['errors'] and all(it['ok'] for it in res['items'])
+
+
+def _bulk_vmid_alive(run, item):
+    """alive() of a run's hold on the chosen VMID of one of its guests: while the run still has
+    that guest to start, and a short while before the run is registered at all"""
+    from pegaprox.core import esxi_bulk as ebulk
+    since = time.time()
+
+    def alive():
+        if ebulk.get(run.id) is not run:
+            return time.time() - since < 5
+        return run.state == 'running' and item['state'] in (ebulk.WAITING, ebulk.STARTING)
+    return alive
 
 
 def _migration_reachable(t):
@@ -1927,16 +2032,25 @@ def _bulk_vm_refusal(user, vmware_id, vm_id, settings):
 
 
 def _bulk_vms(raw):
-    """[(vm_id, {nic_map, disk_map})] of a bulk request. Raises ValueError."""
+    """[(vm_id, {nic_map, disk_map, target_vmid})] of a bulk request. Raises ValueError."""
     from pegaprox.core import esxi_bulk as ebulk
+    from pegaprox.core import target_vmid as tvmid
     if not isinstance(raw, list) or not 1 <= len(raw) <= ebulk.ITEMS_MAX:
         raise ValueError(f'vms is a list of 1 to {ebulk.ITEMS_MAX} guests')
     out, seen = [], set()
+    vmids = {}
     for row in raw:
         if isinstance(row, str):
             row = {'vm_id': row}
         if not isinstance(row, dict):
             raise ValueError('every vms entry is a VM id or {vm_id, nic_map, disk_map}')
+        # a guest's own VMID; one run never gives the same one twice
+        vmid = tvmid.parse(row.get('target_vmid'), 'vms: target_vmid')
+        if vmid is not None and vmid in vmids:
+            raise ValueError(f"vms gives VMID {vmid} to {vmids[vmid]} and {str(row.get('vm_id'))[:64]}")
+        if vmid is not None:
+            vmids[vmid] = str(row.get('vm_id'))[:64]
+        row = {k: v for k, v in row.items() if k != 'target_vmid'}
         extra = sorted(str(k)[:40] for k in row if k not in ('vm_id', 'nic_map', 'disk_map'))
         if extra:
             raise ValueError(f'vms: unknown field {extra[0]!r}')
@@ -1947,6 +2061,8 @@ def _bulk_vms(raw):
             raise ValueError(f'vms names {vm_id} twice')
         seen.add(vm_id)
         out.append((vm_id, {k: row[k] for k in ('nic_map', 'disk_map') if row.get(k) not in (None, [])}))
+        if vmid is not None:
+            out[-1][1]['target_vmid'] = vmid
     return out
 
 
@@ -2157,6 +2273,11 @@ def _bulk_start_item(app, run, item):
         if not plan['ok']:
             return {'state': 'failed', 'note': 'The plan no longer fits the target node: ' + '; '.join(plan['errors'])}
         skipped = {i for i, e in (opts['disk_map'] or {}).items() if e['skip']}
+        # MK Nov 2026 - its chosen VMID asked again (the run holds it since the submit),
+        # or the caller's tenant range as it stands now for the automatic one
+        pick, verr = _vmid_pick(user, s['target_cluster'], body.get('target_vmid'), mine=(run.holder,))
+        if verr:
+            return {'state': 'failed', 'note': verr[1]}
 
         # the run had the guest since the submit; its migration has it from here on, under the
         # same lock the single route takes a guest with
@@ -2185,8 +2306,13 @@ def _bulk_start_item(app, run, item):
             if nics:
                 body['selected_nics'] = nics
             body['esxi_password'] = pw
+            from pegaprox.core import target_vmid as tvmid
+            if pick['vmid'] and tvmid.claim(s['target_cluster'], pick['vmid'], holder,
+                                            tvmid.until_over(_v2p_task, mid), replaces=run.holder):
+                return {'state': 'failed', 'note': f"VMID {pick['vmid']} went to another ESXi migration"}
             task = V2PMigrationTask(mid, run.vmware_id, vm_id, s['target_cluster'], s['target_node'],
                                     s['target_storage'], vm_name, body)
+            tvmid.bind(task, pick['vmid'], pick['start'], pick['end'], pick['strict'], holder)
             with _migration_lock_v2p:
                 _vmware_migrations[mid] = task
             box['task'] = task
@@ -2199,6 +2325,8 @@ def _bulk_start_item(app, run, item):
                 box['dead'] = True
                 _never_ran(mid)
                 ebulk.let_go(run.vmware_id, vm_id, holder)
+                from pegaprox.core.target_vmid import release as _vmid_release
+                _vmid_release(holder)
         maps = item.get('_maps') or {}
         log_audit(run.user, 'vmware.migration.started',
                   f"V2P migration: {vm_name} @ {body.get('esxi_host')} -> {s['target_cluster']}/"
@@ -2247,6 +2375,10 @@ def start_vmware_bulk_migration(vmware_id):
     password and starts nothing. Without it, one guest that does not fit refuses the whole
     request (400, with the same items); otherwise the answer is the run (202, {run}), to
     follow with GET /api/vmware/bulk-migrate/<run_id>.
+
+    A guest's target_vmid in vms is its own VMID, checked as the single route checks it; no
+    two guests of a run get the same one. The others get the next free VMID each,
+    inside the caller's tenant range.
 
     Before each guest starts, the run asks all of it again. Each started guest is a normal
     migration in /api/vmware/migrations. The run lives in this process (a restart ends it),
@@ -2309,6 +2441,7 @@ def start_vmware_bulk_migration(vmware_id):
     res, rerr = _bulk_check(vmware_id, settings, vms, user)
     if rerr:
         return rerr
+    _bulk_vmid_check(res, user, vmware_id, settings, vms)
     res['width'] = width
     if dry_run:
         return jsonify({'dry_run': True, **res})
@@ -2322,10 +2455,19 @@ def start_vmware_bulk_migration(vmware_id):
     items = [ebulk.new_item(vm_id, it['name'], maps) for (vm_id, maps), it in zip(vms, res['items'])]
     run = ebulk.EsxiBulkRun(vmware_id, str(getattr(mgr, 'name', '') or vmware_id), me, request.session,
                             get_client_ip(), settings, width, items, pw)
+    # the chosen VMIDs are the run's till each guest's migration takes its own over
+    from pegaprox.core import target_vmid as tvmid
+    for it in items:
+        vmid = (it.get('_maps') or {}).get('target_vmid')
+        if vmid and tvmid.claim(target, vmid, run.holder, _bulk_vmid_alive(run, it)):
+            tvmid.release(run.holder)
+            return jsonify({'error': f'VMID {vmid} went to another ESXi migration since the check - '
+                                     f'choose another one'}), 409
     try:
         ebulk.register(run)
     except (ebulk.TooMany, ebulk.Taken) as e:
         # Taken: a guest went to another run or the single route since the check above
+        tvmid.release(run.holder)
         return jsonify({'error': str(e)}), 409
     names = [it['name'] or it['vm_id'] for it in items]
     try:

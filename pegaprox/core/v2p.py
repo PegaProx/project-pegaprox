@@ -1390,14 +1390,13 @@ def _run_v2p_migration(task):
             "DEBIAN_FRONTEND=noninteractive apt-get install -y sshpass >/dev/null 2>&1 || true",
             timeout=120)
         
-        # Get next VMID
-        try:
-            resp = pve_mgr._api_get(f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/cluster/nextid")
-            task.proxmox_vmid = int(resp.json().get('data', 100)) if resp.status_code == 200 else None
-            if not task.proxmox_vmid:
-                task.set_phase('failed', 'Cannot allocate Proxmox VMID'); return
-        except Exception as e:
-            task.set_phase('failed', f'Proxmox API error: {e}'); return
+        # MK Nov 2026 (#1339) - the VMID the caller chose, asked of Proxmox VE once more (minutes
+        # went by since the request), or the next free one inside their tenant range; a chosen
+        # id that got taken fails here, no other one is picked in its place
+        from pegaprox.core import target_vmid as _tvmid
+        task.proxmox_vmid, _vmid_err = _tvmid.allocate(pve_mgr, task)
+        if not task.proxmox_vmid:
+            task.set_phase('failed', _vmid_err or 'Cannot allocate Proxmox VMID'); return
         task.log(f"Allocated Proxmox VMID: {task.proxmox_vmid}")
         
         # Create Proxmox VM shell FIRST (qm importdisk requires existing VM)

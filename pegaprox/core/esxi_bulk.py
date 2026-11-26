@@ -120,8 +120,8 @@ class EsxiBulkRun:
 
 
 def new_item(vm_id, name='', maps=None):
-    """A guest of a run. maps: its own nic_map / disk_map, as the submit checked them."""
-    maps = {k: v for k, v in (maps or {}).items() if k in ('nic_map', 'disk_map') and v is not None}
+    """A guest of a run. maps: its own nic_map / disk_map / target_vmid, as the submit checked them."""
+    maps = {k: v for k, v in (maps or {}).items() if k in ('nic_map', 'disk_map', 'target_vmid') and v is not None}
     return {'vm_id': str(vm_id), 'name': str(name or '')[:200], 'state': WAITING, 'note': '',
             'migration_id': None, 'proxmox_vmid': None, 'phase': None, 'progress': 0,
             'began': None, 'ended': None,
