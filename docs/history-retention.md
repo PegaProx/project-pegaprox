@@ -1,11 +1,11 @@
 # History and how long it is kept
 
-PegaProx keeps two kinds of history in its database: the metrics snapshots behind Reports,
-Insights, Costs, Power and the node and guest charts, and the drift events of Config Drift
-Detection. Both are kept per instance (a PegaProx HA standby keeps its own and never syncs
-them). The settings below are environment variables of the PegaProx service: in the systemd
-unit (`Environment=` lines, then `systemctl daemon-reload` and a restart) or in the
-`environment:` section of the Docker container.
+PegaProx keeps three kinds of history in its database: the metrics snapshots behind Reports,
+Insights, Costs, Power and the node and guest charts, the drift events of Config Drift
+Detection, and the ESXi migrations with their logs. All are kept per instance (a PegaProx HA
+standby keeps its own and never syncs them). The settings below are environment variables of
+the PegaProx service: in the systemd unit (`Environment=` lines, then `systemctl
+daemon-reload` and a restart) or in the `environment:` section of the Docker container.
 
 ## Metrics history
 
@@ -76,6 +76,30 @@ The pruning runs when PegaProx starts and then once a day, in small chunks, and 
 to the log when it removed something. As with the metrics, the freed space is reused and the
 file does not shrink on its own. The first start after the update adds an index for it to the
 drift events before PegaProx serves: about a second for a few hundred thousand events, once.
+
+## ESXi migrations
+
+Every ESXi migration keeps its whole log. The Tasks & Events tab of the ESXi server shows it
+while the migration runs and after it ended, and **Download log** saves it as a text file. A
+migration and its log are written to the database when it starts, every few seconds while it
+runs and when it ends, so ended migrations and their logs are still there after a restart of
+PegaProx. A migration that was running when PegaProx stopped shows as `interrupted`, with a
+last line in its log that says so: check the source guest on ESXi and what was created on
+Proxmox before you start it again.
+
+| What | Kept |
+|---|---|
+| Lines per migration | 20,000. A longer log keeps its first 2,000 and its newest lines, with one line in between that says how many were left out. A single line is cut after 2,000 characters. |
+| Migrations | The newest 500 of the last 90 days. Older ones are removed whenever a migration ends. |
+
+These limits are fixed. A configuration backup does not include the migrations, and a standby
+of an HA group reads them from the active. The log never holds the ESXi password: PegaProx
+masks it, URL-encoded and in a Basic authorization header as well, before a line is stored or
+shown.
+
+Each line also goes to the PegaProx log at level INFO, marked `[V2P:<id>]`. At the default
+level (WARNING) these lines do not reach the journal; with `PEGAPROX_LOG_LEVEL=INFO` in the
+environment of the service they do, and `journalctl -u pegaprox | grep 'V2P:<id>'` finds them.
 
 ## The database and a power cut
 

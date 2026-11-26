@@ -788,6 +788,43 @@ class PegaProxDB:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_rolling_runs_cluster '
                        'ON rolling_update_runs(cluster_id, started_at)')
 
+        # MK Nov 2026 (#1278) - ESXi migrations and their whole log, kept past a restart
+        # (core/v2p_history.py). summary is what the task's to_dict() said at the last write;
+        # target_cluster, vmware_id and vm_id are what the routes check before they show a run.
+        # The log sits in chunks of 500 lines, so a write sends what is new. Per instance
+        # (core/ha.py LOCAL_TABLES).
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS v2p_migration_runs (
+                    id TEXT PRIMARY KEY,
+                    vmware_id TEXT NOT NULL DEFAULT '',
+                    vm_id TEXT NOT NULL DEFAULT '',
+                    vm_name TEXT NOT NULL DEFAULT '',
+                    target_cluster TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    phase TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '{}',
+                    log_total INTEGER NOT NULL DEFAULT 0,
+                    log_dropped INTEGER NOT NULL DEFAULT 0,
+                    started_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_v2p_runs_started '
+                           'ON v2p_migration_runs(started_at)')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS v2p_migration_log (
+                    run_id TEXT NOT NULL,
+                    chunk INTEGER NOT NULL,
+                    lines TEXT NOT NULL DEFAULT '[]',
+                    PRIMARY KEY (run_id, chunk)
+                )
+            ''')
+        except Exception as e:
+            logging.error(f"ESXi migration history tables could not be created, finished "
+                          f"migrations stay in memory only: {e}")
+
         # Server settings table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS server_settings (

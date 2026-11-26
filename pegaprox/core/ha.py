@@ -251,6 +251,8 @@ XCPNG_TASK_READS = frozenset((
 FORWARDED_READS = LEADER_ONLY_READS | XCPNG_TASK_READS | frozenset((
     '/api/vmware/migrations',
     '/api/vmware/migrations/<mid>',
+    # the whole log of one, from the process that runs it or the active's own table (#1278)
+    '/api/vmware/migrations/<mid>/log',
     '/api/xhm/migrations',
     '/api/xhm/migrations/<mid>',
     '/api/clusters/<cluster_id>/updates/status',
@@ -386,6 +388,9 @@ LOCAL_TABLES = (
     # what this host last pulled from which federation member: a promoted standby pulls
     # everything once, and an unchanged row writes nothing
     'federation_sync_state',
+    # the ESXi migrations this instance ran and their logs: a run lives in the process that
+    # started it, and a standby reads them from the active (#1278)
+    'v2p_migration_runs', 'v2p_migration_log',
 )
 
 # server_settings keys that describe this host, not the deployment

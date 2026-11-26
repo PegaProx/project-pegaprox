@@ -720,6 +720,9 @@ class V2PMigrationTask:
         msg = self._redact(msg)
         ts = datetime.now().strftime('%H:%M:%S')
         self.log_lines.append(f"[{ts}] {msg}")
+        # MK Nov 2026 (#1278) - the line cap, and the batched write of the run's history
+        from pegaprox.core import v2p_history
+        v2p_history.note_line(self)
         logging.info(f"[V2P:{self.id}] {msg}")
         # Stream log line via SSE (throttled -- batch every 1s)
         try:

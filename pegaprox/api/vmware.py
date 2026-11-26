@@ -1916,6 +1916,61 @@ def _migration_reachable(t):
     return True
 
 
+def _reach_checker():
+    """_migration_reachable for the stored runs of one request (#1278): the same two questions,
+    the cluster asked once per cluster and the guest once per guest, the caller built once. A
+    stored run without its cluster or its guest is left to an admin.
+    MK Nov 2026"""
+    clusters, guests, me = {}, {}, []
+
+    def visible(target_cluster, vmware_id, vm_id):
+        if not (target_cluster and vmware_id and vm_id):
+            return caller_acts_as_admin()
+        if target_cluster not in clusters:
+            clusters[target_cluster] = bool(check_cluster_access(target_cluster)[0])
+        if not clusters[target_cluster]:
+            return False
+        key = (vmware_id, str(vm_id))
+        if key not in guests:
+            try:
+                if not me:
+                    me.append(build_authz_user(request.session.get('user', ''), request.session))
+                guests[key] = bool(user_can_access_vmware_vm(me[0], vmware_id, str(vm_id),
+                                                             'vmware.vm.migrate'))
+            except Exception:
+                guests[key] = False
+        return guests[key]
+    return visible
+
+
+def _v2p_history_ready():
+    """Before the migrations are read, and when a job starts (#1278): rows a stop of PegaProx cut
+    off read as interrupted (once per process), and runs that ended a while ago leave the
+    registry for the table."""
+    from pegaprox.core import v2p_history
+    try:
+        with _migration_lock_v2p:
+            live = set(_vmware_migrations)
+        v2p_history.sweep_once(live)
+        v2p_history.evict(_vmware_migrations, _migration_lock_v2p)
+    except Exception as e:
+        logging.warning(f"[V2P] migration history housekeeping failed: {e}")
+
+
+def _stored_migration(mid):
+    """The stored row of a run this process does not hold, when the caller may see it, else None"""
+    from pegaprox.core import v2p_history
+    _v2p_history_ready()
+    try:
+        row = v2p_history.load(mid)
+    except Exception as e:
+        logging.warning(f"[V2P] stored migration {_sl(str(mid)[:64])} could not be read: {e}")
+        return None
+    if row is None or not _reach_checker()(row.get('target_cluster'), row.get('vmware_id'), row.get('vm_id')):
+        return None
+    return row
+
+
 # NS Aug 2026 (#654) — the route + auth decorators were stuck on the _migration_reachable helper
 # above (a copy-paste slip when the IDOR helper was inserted between them and this handler), so
 # GET /api/vmware/migrations called the helper with no args -> TypeError 500 and ESXi migration
@@ -1923,19 +1978,112 @@ def _migration_reachable(t):
 @bp.route('/api/vmware/migrations', methods=['GET'])
 @require_auth(perms=['vmware.vm.migrate'])
 def list_vmware_migrations():
-    """List all active and recent migrations"""
-    return jsonify([t.to_dict() for t in _vmware_migrations.values() if _migration_reachable(t)])
+    """List all active and recent migrations
+
+    The runs this instance holds (running, or ended a few minutes ago), newest first, then a
+    page of the stored ones the caller may see, newest first. Query: limit (stored runs, default
+    50, at most 500, 0 for none) and offset (stored runs to skip). The header X-History-More: 1
+    says older ones follow. A stored run carries its fields as of its last write, an empty log
+    and log_total; its whole log is at /api/vmware/migrations/{mid}/log.
+    """
+    # MK Nov 2026 (#1278) - stored runs and the page; the answer stays a list for old callers
+    from pegaprox.core import v2p_history
+    try:
+        limit = int(request.args.get('limit', v2p_history.PAGE_DEFAULT))
+        offset = int(request.args.get('offset', 0))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'limit and offset are whole numbers'}), 400
+    if not 0 <= limit <= v2p_history.PAGE_MAX or offset < 0:
+        return jsonify({'error': f'limit is 0 to {v2p_history.PAGE_MAX}, offset 0 or more'}), 400
+    _v2p_history_ready()
+    with _migration_lock_v2p:
+        live = list(_vmware_migrations.items())
+    out = [t.to_dict() for _, t in reversed(live) if _migration_reachable(t)]
+    more = False
+    if limit:
+        try:
+            rows, more = v2p_history.page({mid for mid, _ in live}, _reach_checker(), offset, limit)
+            out += [v2p_history.as_dict(r, with_log=False) for r in rows]
+        except Exception as e:
+            logging.warning(f"[V2P] the stored migrations could not be read: {e}")
+    resp = jsonify(out)
+    resp.headers['X-History-More'] = '1' if more else '0'
+    return resp
 
 
 @bp.route('/api/vmware/migrations/<mid>', methods=['GET'])
 @require_auth(perms=['vmware.vm.migrate'])
 def get_vmware_migration_status(mid):
-    """Get detailed status of a specific migration"""
-    if mid not in _vmware_migrations:
+    """Get detailed status of a specific migration, a stored one too"""
+    task = _vmware_migrations.get(mid)
+    if task is None:
+        row = _stored_migration(mid)
+        if row is None:
+            return jsonify({'error': 'Migration not found'}), 404
+        from pegaprox.core import v2p_history
+        return jsonify(v2p_history.as_dict(row))
+    if not _migration_reachable(task):
         return jsonify({'error': 'Migration not found'}), 404
-    if not _migration_reachable(_vmware_migrations[mid]):
-        return jsonify({'error': 'Migration not found'}), 404
-    return jsonify(_vmware_migrations[mid].to_dict())
+    return jsonify(task.to_dict())
+
+
+@bp.route('/api/vmware/migrations/<mid>/log', methods=['GET'])
+@require_auth(perms=['vmware.vm.migrate'])
+def get_vmware_migration_log(mid):
+    """The whole log of a migration, running or ended
+
+    Query: offset (the first line wanted, counted from the start of the run; the answer's next
+    is where the next read starts) and limit (lines, at most 5000). download=1 answers the whole
+    log as a plain-text file instead.
+
+    JSON: {id, offset, lines, next, total, dropped, status, running}. A log over 20000 lines
+    keeps its first 2000 and its newest lines; where lines were left out, one line says how
+    many. running stays true until the job has written its last line.
+    """
+    # MK Nov 2026 (#1278)
+    from pegaprox.core import v2p_history
+    try:
+        offset = int(request.args.get('offset', 0))
+        limit = int(request.args.get('limit', v2p_history.READ_MAX_LINES))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'offset and limit are whole numbers'}), 400
+    if offset < 0 or not 1 <= limit <= v2p_history.READ_MAX_LINES:
+        return jsonify({'error': f'offset is 0 or more, limit 1 to {v2p_history.READ_MAX_LINES}'}), 400
+    task, row = _vmware_migrations.get(mid), None
+    if task is not None:
+        if not _migration_reachable(task):
+            return jsonify({'error': 'Migration not found'}), 404
+    else:
+        row = _stored_migration(mid)
+        if row is None:
+            return jsonify({'error': 'Migration not found'}), 404
+    try:
+        if request.args.get('download') in ('1', 'true'):
+            info = task.to_dict() if task is not None else v2p_history.as_dict(row)
+            lines = v2p_history.whole_live(task) if task is not None else v2p_history.whole_stored(row)
+            return _log_download(mid, info if isinstance(info, dict) else {}, lines)
+        got = v2p_history.read_live(task, offset, limit) if task is not None else \
+            v2p_history.read_stored(row, offset, limit)
+    except Exception as e:
+        logging.warning(f"[V2P] log of migration {_sl(str(mid)[:64])} could not be read: {e}")
+        return jsonify({'error': 'The log could not be read'}), 500
+    return jsonify({'id': mid, 'offset': offset, **got})
+
+
+def _log_download(mid, info, lines):
+    from flask import Response
+    safe = lambda v: re.sub(r'[^A-Za-z0-9._-]+', '_', str(v or ''))[:60].strip('._') or 'run'
+    # a name from ESXi with a line break in it stays on its header line
+    one = lambda k, dflt='?': ' '.join(str(info.get(k) or '').split()) or dflt
+    head = [f"# ESXi migration {safe(mid)}: {one('vm_name', one('vm_id'))} "
+            f"({one('vmware_id')}/{one('vm_id')}) -> {one('target_cluster')}/{one('target_node')}/"
+            f"{one('target_storage')}",
+            f"# status {one('status')}, phase {one('phase')}, started {one('started_at')}, "
+            f"ended {one('completed_at', '-')}"]
+    name = f"esxi-migration-{safe(info.get('vm_name') or info.get('vm_id'))}-{safe(mid)}.log"
+    return Response('\n'.join(head + [str(x) for x in lines]) + '\n', mimetype='text/plain',
+                    headers={'Content-Disposition': f'attachment; filename="{name}"',
+                             'Cache-Control': 'no-store'})
 
 
 @bp.route('/api/vmware/migrations/<mid>/confirm-cutover', methods=['POST'])
@@ -2041,10 +2189,15 @@ def _run_held(task, holder):
     """The migration job of one guest. However it ends, the guest is free for another job
     once it returns."""
     from pegaprox.core import esxi_bulk as ebulk
+    from pegaprox.core import v2p_history
     try:
+        # MK Nov 2026 (#1278) - its row is written as the job starts and once more when it returns
+        _v2p_history_ready()
+        v2p_history.track(task)
         _run_v2p_migration(task)
     finally:
         ebulk.let_go(task.vmware_id, task.vm_id, holder)
+        v2p_history.finish(task)
 
 
 def _never_ran(mid):
@@ -2055,6 +2208,17 @@ def _never_ran(mid):
     if t is not None and getattr(t, 'status', '') == 'running':
         t.status, t.phase = 'failed', 'failed'
         t.error = 'The migration could not be started'
+        # MK Nov 2026 - no job writes its row or lets it leave the registry, so both happen here.
+        # Runs in a finally before the guest is let go: it must not raise
+        try:
+            from datetime import datetime
+            from pegaprox.core import v2p_history
+            if not getattr(t, 'completed_at', None):
+                t.completed_at = datetime.now()
+            v2p_history.track(t)
+            v2p_history.finish(t)
+        except Exception as e:
+            logging.warning(f"[V2P] migration {_sl(str(mid)[:64])} that never started was not saved: {e}")
 
 
 def _answer_error(resp, default='The check failed'):
