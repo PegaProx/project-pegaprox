@@ -3694,7 +3694,7 @@
             // fetch user permissions
             const fetchUserPermissions = async (username) => {
                 try {
-                    const r = await fetch(`${API_URL}/users/${username}/permissions`, { credentials: 'include', headers: getAuthHeaders() });
+                    const r = await fetch(`${API_URL}/users/${encodeURIComponent(username)}/permissions`, { credentials: 'include', headers: getAuthHeaders() });
                     if(r.ok) setUserPermissions(await r.json());
                 } catch(e) {}
             };
@@ -4383,7 +4383,7 @@
                 }
                 
                 try {
-                    const response = await fetch(`${API_URL}/users/${username}/password`, {
+                    const response = await fetch(`${API_URL}/users/${encodeURIComponent(username)}/password`, {
                         method: 'PUT',
                         credentials: 'include',
                         headers: {
@@ -4419,7 +4419,7 @@
                 if (!confirm(`${t('disable2FA')} für ${username}?`)) return;
                 
                 try {
-                    const response = await fetch(`${API_URL}/users/${username}/2fa`, {
+                    const response = await fetch(`${API_URL}/users/${encodeURIComponent(username)}/2fa`, {
                         method: 'DELETE',
                         credentials: 'include',  // MK: Fix - need cookies for session auth
                         headers: getAuthHeaders()
@@ -6228,7 +6228,7 @@
                                                         <button
                                                             onClick={async () => {
                                                                 try {
-                                                                    const r = await fetch(`${API_URL}/users/${selectedUser}/permissions`, {
+                                                                    const r = await fetch(`${API_URL}/users/${encodeURIComponent(selectedUser)}/permissions`, {
                                                                         method: 'PUT',
                                                                         credentials: 'include',
                                                                         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
@@ -6240,6 +6240,10 @@
                                                                     if(r.ok) {
                                                                         addToast('Permissions saved', 'success');
                                                                         fetchUserPermissions(selectedUser);
+                                                                    } else {
+                                                                        // LW Nov 2026 - a refusal (409 for a name that reads two ways, 403) said nothing
+                                                                        const d = await r.json().catch(() => ({}));
+                                                                        addToast(d.error || t('saveFailed'), 'error');
                                                                     }
                                                                 } catch(e) {}
                                                             }}
