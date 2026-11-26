@@ -32,6 +32,7 @@ BRIDGES = [{'iface': 'vmbr0', 'source': 'local'}, {'iface': 'vmbr1', 'source': '
            {'iface': 'vnet1', 'source': 'sdn', 'zone': 'zone1'}]
 WRITES = {('PUT', NET0): OK, ('PUT', f'{NET0}/link'): OK, ('DELETE', NET0): OK, ('DELETE', f'{VM}/disks/scsi0'): OK,
           ('PUT', f'{VM}/cdrom'): OK, ('GET', '/api/hardware-options'): (200, HW_OPTS),
+          ('GET', '/api/clusters/c1/hardware-options'): (200, HW_OPTS),
           ('GET', '/api/clusters/c1/nodes/pve1/networks'): (200, BRIDGES)}
 
 
