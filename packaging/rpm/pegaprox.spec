@@ -1,4 +1,4 @@
-Version:        0.6.6
+Version:        1.5.1
 Name:		pegaprox
 Release:        1%{?dist}
 Summary:        Multi-cluster Proxmox VE management dashboard
@@ -11,17 +11,32 @@ BuildArch:      noarch
 BuildRequires:  python3-devel
 
 # Runtime dependencies (system python packages)
+# NS Nov 2026 - one for every module PegaProx imports, the set debian/control depends on.
+# packaging/apt/deb_imports.py maps the modules, tests/test_rpm_spec_requires.py holds this
+# list to it. Names as in Fedora; on RHEL 9, EPEL has the ones the base lacks.
 Requires:       python3
 Requires:       python3-flask
-Requires:       python3-flask-cors
+Requires:       python3-werkzeug
 Requires:       python3-requests
+Requires:       python3-requests-toolbelt
+Requires:       python3-urllib3
+Requires:       python3-dns
 Requires:       python3-cryptography
 Requires:       python3-argon2-cffi
+Requires:       python3-jwt
 Requires:       python3-pyotp
-Requires:       python3-qrcode
 Requires:       python3-pyOpenSSL
+Requires:       python3-pillow
+Requires:       python3-ldap3
+Requires:       python3-websocket-client
+Requires:       python3-greenlet
+Requires:       python3-defusedxml
+Requires:       python3-pyvmomi
+Requires:       sqlcipher
 
 #Custom Build Python Package
+# gevent-websocket, XenAPI and sqlcipher3 are in neither Fedora nor EPEL; the apt repo builds
+# the last two (and flask-sock) from PyPI the same way (packaging/apt/build-python-debs.py)
 Requires:       python3-backports-zstd
 Requires:       python3-flask-compress
 Requires:       python3-flask-cors
@@ -30,6 +45,9 @@ Requires:       python3-qrcode
 Requires:       python3-simple-websocket
 Requires:       python3-wsproto
 Requires:       python3-pypng
+Requires:       python3-gevent-websocket
+Requires:       python3-xenapi
+Requires:       python3-sqlcipher3
 
 # Optional (if available in EPEL)
 Requires:       python3-gevent
@@ -109,5 +127,16 @@ EOF
 %systemd_postun_with_restart pegaprox.service
 
 %changelog
+* Thu Nov 26 2026 MrMasterbay <gamesucht1236@gmail.com> - 1.5.1-1
+- Update to 1.5.1
+- Require python3-jwt and python3-websocket-client, both imported at runtime
+  (OIDC token verification, the console and linked mode)
+- Require every other module PegaProx imports, the same set as debian/control:
+  python3-werkzeug, python3-requests-toolbelt, python3-urllib3, python3-dns,
+  python3-greenlet, python3-pillow, python3-ldap3, python3-defusedxml,
+  python3-pyvmomi, sqlcipher and the locally built python3-gevent-websocket,
+  python3-xenapi and python3-sqlcipher3
+- Name python3-flask-cors and python3-qrcode once
+
 * Mon Feb 23 2026 Zakir Hossain <zakirpcs@gmail.com> - 0.6.6-1
 - Initial RPM build for RHEL 9
