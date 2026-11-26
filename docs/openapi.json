@@ -999,7 +999,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "path"
             }
           }
         ],
@@ -1045,7 +1046,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "path"
             }
           }
         ],
@@ -1091,7 +1093,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "path"
             }
           }
         ],
@@ -7471,7 +7474,7 @@
           }
         },
         "summary": "Restore a VM from backup",
-        "description": "MK: Can restore to same VMID (overwrite) or new VMID\n\nBody: {volid, target_vmid?, storage?, start?, allow_identity_mismatch?}.\nallow_identity_mismatch (default false): over the same VMID, overwrite a guest the backup\nis not of. Proxmox VE 9.3 refuses that in the restore task without it ('backup belongs\nto another guest'); a node before 9.2.33 has no such check and is not sent the option.\nAsked for and not sent, the answer says why in identity_warning.",
+        "description": "MK: Can restore to same VMID (overwrite) or new VMID\n\nBody: {volid, target_vmid?, storage?, start?, allow_identity_mismatch?}.\nallow_identity_mismatch (default false): over the same VMID, overwrite a guest the backup\nis not of. Proxmox VE 9.3 refuses that in the restore task without it ('backup belongs\nto another guest'); a node before 9.2.33 has no such check and is not sent the option.\nAsked for and not sent, the answer says why in identity_warning. Over a guest that is\nthere and without the option, the task is followed for a few seconds: refused for this\nreason, the answer is 409 with code IDENTITY_MISMATCH, PVE's words and the task, and the\nrestore can be sent again with allow_identity_mismatch.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -24798,7 +24801,7 @@
           }
         },
         "summary": "Restore a backup. Three modes: - mode='new': qmrestore into a new VMID (target_vmid) - mode='overwrite': qmrestore into an existing VMID (force) - mode='test': like the verify pipeline but skip auto-cleanup; user keeps the test VM",
-        "description": "Body: {volid, target_node, target_vmid, mode, target_storage?, allow_identity_mismatch?}\nallow_identity_mismatch (default false): with 'overwrite', overwrite a guest the backup\nis not of. Proxmox VE 9.3 refuses that in the restore task without it ('backup belongs\nto another guest'); a node before 9.2.33 has no such check and is not sent the option.\nAsked for and not sent, the answer says why in identity_warning.",
+        "description": "Body: {volid, target_node, target_vmid, mode, target_storage?, allow_identity_mismatch?}\nallow_identity_mismatch (default false): with 'overwrite', overwrite a guest the backup\nis not of. Proxmox VE 9.3 refuses that in the restore task without it ('backup belongs\nto another guest'); a node before 9.2.33 has no such check and is not sent the option.\nAsked for and not sent, the answer says why in identity_warning. Over a guest that is\nthere and without the option, the task is followed for a few seconds: refused for this\nreason, the answer is 409 with code IDENTITY_MISMATCH, PVE's words and the task (upid),\nand the restore can be sent again with allow_identity_mismatch.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -38074,7 +38077,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "path"
             }
           }
         ],
@@ -38119,7 +38123,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "path"
             }
           }
         ],
@@ -38162,7 +38167,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "path"
             }
           }
         ],
@@ -38217,7 +38223,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "path"
             }
           },
           {

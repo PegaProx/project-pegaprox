@@ -4574,7 +4574,10 @@ def restore_backup(cluster_id):
     allow_identity_mismatch (default false): with 'overwrite', overwrite a guest the backup
     is not of. Proxmox VE 9.3 refuses that in the restore task without it ('backup belongs
     to another guest'); a node before 9.2.33 has no such check and is not sent the option.
-    Asked for and not sent, the answer says why in identity_warning.
+    Asked for and not sent, the answer says why in identity_warning. Over a guest that is
+    there and without the option, the task is followed for a few seconds: refused for this
+    reason, the answer is 409 with code IDENTITY_MISMATCH, PVE's words and the task (upid),
+    and the restore can be sent again with allow_identity_mismatch.
     """
     # MK: restore is destructive (qmrestore into a VMID) — gate on cluster access, not just vm.backup
     ok, err = check_cluster_access(cluster_id)
