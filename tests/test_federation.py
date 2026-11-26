@@ -1362,6 +1362,69 @@ def test_a_host_that_became_active_holds(tmp_path, clock, monkeypatch):
     assert _ask(b, c, ['ha1'])[1]['votes']['ha1']['granted'] is True
 
 
+@pytest.mark.parametrize('announced', [False, True], ids=['promoted-again', 'epoch-kept'])
+def test_the_write_gate_sees_a_moved_ha_epoch_before_the_next_round(tmp_path, clock,
+                                                                     monkeypatch, announced):
+    """A host demoted and promoted again inside one lease span, without a restart: the
+    lease it holds is one of its old role, and no round or vote ran since to take the new
+    HA epoch. The gate refuses that lease right away and the hold starts there. An epoch
+    move ha.py announced (an active that takes its first standby, note_epoch_kept) is no
+    promotion: the lease stays and nobody holds."""
+    a, b, c = _three(tmp_path)
+    _enroll(a, 'pve-a')
+    assert _writes(a, 'pve-a') is True
+    base = fl._ha_epoch()
+    moved = {'to': base}
+    monkeypatch.setattr(fl, '_ha_epoch',
+                        lambda: moved['to'] if federation._runtime['lease_file'] == a.lease_file
+                        else base)
+    if announced:
+        with at(a):
+            fl.note_epoch_kept(base, base + 1)
+        moved['to'] = base + 1
+    else:
+        # standby under the new active's epoch, then acting again above it
+        moved['to'] = base + 2
+    clock.advance(1)
+    assert _writes(a, 'pve-a') is announced
+    with at(a):
+        st = federation._lease_state()
+        assert (fl.hold_left(st) > 0) is not announced
+        assert st['clock'] == fl._clock_mark() and st.get('epoch_kept') is None
+    # the check went to disk: a restart now holds no second time for the same move
+    with open(a.lease_file, encoding='utf-8') as fh:
+        assert json.load(fh)['clock']['ha_epoch'] == moved['to']
+    if not announced:
+        assert _ask(a, b, ['pve-b'])[1]['votes']['pve-b']['reason'] == 'hold'
+        clock.advance(fl.LEASE_SECONDS + fl.LEASE_SKEW + 1)
+        with at(a):
+            assert fl.lease_round()['pve-a']['held'] is True
+        assert _writes(a, 'pve-a') is True
+
+
+def test_the_gate_refuses_a_moved_epoch_when_the_lease_file_takes_no_write(tmp_path, clock,
+                                                                           monkeypatch):
+    """The clock check the gate starts cannot be saved (a full disk): the gate refuses all
+    the same and raises nothing, the hold runs in memory, and the file keeps the old mark,
+    so the next load holds again."""
+    a, b, c = _three(tmp_path)
+    _enroll(a, 'pve-a')
+    base = fl._ha_epoch()
+    monkeypatch.setattr(fl, '_ha_epoch',
+                        lambda: base + 2 if federation._runtime['lease_file'] == a.lease_file
+                        else base)
+
+    def full(st):
+        raise OSError(28, 'No space left on device')
+    monkeypatch.setattr(federation, '_save_leases', full)
+    assert _writes(a, 'pve-a') is False
+    with at(a):
+        assert fl.hold_left() > 0
+        assert fl.holds('pve-a') is False
+    with open(a.lease_file, encoding='utf-8') as fh:
+        assert json.load(fh)['clock']['ha_epoch'] == base
+
+
 @pytest.mark.parametrize('gap', [0.5, 0.0], ids=['same-second', 'same-instant'])
 @pytest.mark.parametrize('kind,boot', [('monotonic', 'boot-1'), ('boottime', '')],
                          ids=['no-boot-clock', 'no-boot-id'])

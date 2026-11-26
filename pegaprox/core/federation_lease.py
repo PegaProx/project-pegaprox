@@ -289,20 +289,36 @@ def cluster_owner(cluster_id):
 def takes_writes_for(cluster_id):
     """The gate every write on a cluster goes through. No owner: this instance's own, no
     lease asked. Another member's: never. Ours: while this instance holds a live lease
-    that it did not release. No database query and no file read on the way."""
+    that it did not release, taken under the clock mark in force now (holds). No database
+    query and no file read on the way; a moved mark writes the lease file once."""
     owner = _owner_map().get(cluster_id)
     if not owner:
         return True
     if owner != fed.instance_id():
         return False
-    rec = (fed._lease_state().get('my_leases') or {}).get(cluster_id)
-    return bool(rec and not rec.get('released') and _lease_now() < (rec.get('expires') or 0))
+    return holds(cluster_id)
 
 
 def holds(cluster_id):
     """Whether this instance holds a live, unreleased lease on `cluster_id` (the members
     lock included)."""
-    rec = (fed._lease_state().get('my_leases') or {}).get(cluster_id)
+    st = fed._lease_state()
+    if (st.get('clock') or {}) != _clock_mark():
+        # MK Nov 2026 - the HA epoch or the boot moved since the last clock check, with no
+        # restart (a host demoted and promoted again inside one lease span) and no round
+        # since: the check runs now, so a lease of the old role closes and the hold starts
+        # here, or an epoch move ha.py announced (note_epoch_kept) keeps it
+        try:
+            fed._mutate_leases(check_clock)
+        except Exception as e:
+            # the state in memory took the check, the file still says the old mark and
+            # its next load holds again
+            fed._say_once('clock-recheck', f'[FED] the lease file could not take the new '
+                                           f'clock mark: {e}')
+        st = fed._lease_state()
+        if (st.get('clock') or {}) != _clock_mark():
+            return False
+    rec = (st.get('my_leases') or {}).get(cluster_id)
     return bool(rec and not rec.get('released') and _lease_now() < (rec.get('expires') or 0))
 
 
