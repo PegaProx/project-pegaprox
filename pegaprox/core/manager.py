@@ -17030,8 +17030,10 @@ echo "AGENT_INSTALLED_OK"
             else:
                 return {'success': False, 'error': response.text}
         except requests.exceptions.ReadTimeout as e:
-            # MK Nov 2026 (#1347) - the DELETE went out and PVE did not answer in time (busy pmxcfs).
-            # It may well have started the task anyway, so callers must not take this for a refusal
+            # MK Nov 2026 (#1347) - no answer from PVE in time. A busy pmxcfs can start the task and
+            # answer late, but urllib3 2.x raises the same ReadTimeout when the TLS handshake of a new
+            # pooled connection hangs, and then the DELETE itself never went out. So it may or may not
+            # have started: callers take this neither for a refusal nor for a started task
             return {'success': False, 'error': str(e), 'unanswered': True}
         except Exception as e:
             return {'success': False, 'error': str(e)}

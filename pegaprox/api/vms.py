@@ -8887,13 +8887,23 @@ def snapshots_overview_delete():
     from pegaprox.api.snapshots import delete_per_guest
     # MK Nov 2026 - a delete Proxmox took and we did not see end (its task still ran when the
     # request had to answer, or could not be read) is neither deleted nor failed. Before #1347
-    # every delete Proxmox took went to the audit log, and one PegaProx started still does
+    # every delete Proxmox took went to the audit log, and one PegaProx started still does. A
+    # DELETE Proxmox did not answer may or may not have started: audited as sent, and answered
+    # under 'started' too (state 'unanswered'), its guest held back the same way
     started = []
     for job in delete_per_guest(list(guests.values()), user):
         if job['state'] == 'gone':
             deleted_count += 1
             log_audit(user, 'snapshot.deleted', f"{str(job['vm_type']).upper()} {job['vmid']} - snapshot '{job['name']}' deleted",
                       cluster=job['mgr'].config.name)
+        elif job['state'] == 'unanswered':
+            log_audit(user, 'snapshot.delete_sent',
+                      f"{str(job['vm_type']).upper()} {job['vmid']} - snapshot '{job['name']}' delete sent, "
+                      "no answer from Proxmox: it may or may not have started",
+                      cluster=job['mgr'].config.name)
+            started.append({'cluster_id': job['cluster_id'], 'node': job['node'], 'vmid': job['vmid'],
+                            'vm_type': job['vm_type'], 'snapshot_name': job['name'],
+                            'state': 'unanswered', 'task': None, 'why': job['why']})
         elif job['state'] in ('busy', 'unread'):
             running = job['state'] == 'busy'
             log_audit(user, 'snapshot.delete_started',
@@ -8919,11 +8929,15 @@ def snapshots_overview_delete():
                           cluster=job['mgr'].config.name)
 
     if deleted_count > 0 or started:
-        # 202 when none was seen gone yet: Proxmox has the rest, the UI tells it from a failure
+        # 202 when none was seen gone yet: Proxmox has the rest, or may have, the UI tells it from a failure
+        unanswered = sum(1 for s in started if s['state'] == 'unanswered')
         return jsonify({
             'success': True,
             'message': f'{deleted_count} snapshot(s) deleted'
-                       + (f', {len(started)} delete(s) started in Proxmox and not seen to end' if started else ''),
+                       + (f', {len(started) - unanswered} delete(s) started in Proxmox and not seen to end'
+                          if len(started) > unanswered else '')
+                       + (f', {unanswered} delete(s) sent with no answer from Proxmox, they may or may not have started'
+                          if unanswered else ''),
             'deleted': deleted_count,
             'started': started,
             'errors': errors if errors else None

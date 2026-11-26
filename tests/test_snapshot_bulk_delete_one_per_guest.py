@@ -501,7 +501,8 @@ def test_the_request_answers_before_a_proxy_gives_up_on_it(api, admin, monkeypat
 # read, is neither deleted nor failed: it is in the audit log as started, and the answer says
 # so per snapshot instead of naming it among the failures. One whose task Proxmox ended with
 # an error is a failure, and in the audit log as failed; a DELETE Proxmox refused outright
-# started nothing there and is not.
+# started nothing there and is not. A DELETE Proxmox did not answer may or may not have
+# started (further down): in the audit log as sent, never as started.
 
 class _Blind(_Pve):
     """_Pve whose task status cannot be read for the deletes in `blind` (the node stops
@@ -593,10 +594,10 @@ def test_a_delete_proxmox_refused_without_a_task_is_a_failure_and_not_audited(ap
     assert _audit(db, 'snapshot.deleted') == []
 
 
-def test_a_delete_still_on_its_way_when_the_request_answers_counts_as_started(monkeypatch):
+def test_a_delete_still_on_its_way_when_the_request_answers_is_unanswered(monkeypatch):
     """The workers are not stopped when the request has to answer. A delete whose call to
-    Proxmox has not come back by then may have reached it: started, its result unread. The
-    snapshot after it in the same guest was not sent."""
+    Proxmox has not come back by then may or may not have reached it: unanswered, not
+    started. The snapshot after it in the same guest was not sent."""
     import pegaprox.utils.concurrent as conc
     real = conc.run_per_node
     monkeypatch.setattr(conc, 'run_per_node', lambda fns, max_concurrent, timeout: real(fns, max_concurrent=max_concurrent, timeout=0.2))
@@ -610,8 +611,9 @@ def test_a_delete_still_on_its_way_when_the_request_answers_counts_as_started(mo
     m = types.SimpleNamespace(delete_snapshot=delete)
     jobs = [[{'mgr': m, 'node': 'n', 'vmid': 1, 'vm_type': 'qemu', 'name': n} for n in ('a', 'b')]]
     out = sn.delete_per_guest(jobs)
-    assert [(j['name'], j['state']) for j in out] == [('a', 'unread'), ('b', 'skipped')]
-    assert out[0]['why'] == 'no answer from Proxmox to its delete before the request ended'
+    assert [(j['name'], j['state']) for j in out] == [('a', 'unanswered'), ('b', 'skipped')]
+    assert out[0]['why'] == ('its delete was on its way, no answer from Proxmox before the request ended: '
+                             'it may or may not have started')
     gevent.sleep(0.8)
     assert sent == ['a'], 'the worker started a delete after the request had answered'
 
@@ -668,9 +670,11 @@ def _raise(exc):
     return call
 
 
-def test_the_manager_tells_a_delete_pve_did_not_answer_from_one_that_never_went_out():
-    """A ReadTimeout comes after the DELETE went out: PVE may have started the task. A connect
-    timeout or a refused connection sent nothing."""
+def test_the_manager_tells_a_delete_pve_did_not_answer_from_one_that_could_not_connect():
+    """A ReadTimeout is no answer in time, and no proof the DELETE went out either (urllib3
+    raises it also for a TLS handshake that hung, see below): it may or may not have started,
+    so it is unanswered and not a refusal. A connect timeout or a refused connection sent
+    nothing and stays a failure."""
     res = PegaProxManager.delete_snapshot(_manager(_raise(requests.exceptions.ReadTimeout('Read timed out.'))),
                                           'pve1', 100, 'qemu', 's1')
     assert res['success'] is False and res.get('unanswered') is True, res
@@ -697,15 +701,22 @@ class _NoAnswer(_Pve):
         return types.SimpleNamespace(status_code=200, text='', json=lambda: {'data': upid})
 
 
-def test_a_delete_pve_did_not_answer_in_time_is_started_and_the_guest_waits(api, admin, db):
+NOT_ANSWERED = 'its delete was sent, no answer from Proxmox: it may or may not have started'
+SENT_AUDIT = "QEMU 100 - snapshot 's1' delete sent, no answer from Proxmox: it may or may not have started [cluster_1]"
+
+
+def test_a_delete_pve_did_not_answer_in_time_is_sent_unanswered_and_the_guest_waits(api, admin, db):
     pve = api.set_manager(CID, _NoAnswer({100: ['s1', 's2'], 101: ['s1']}, slow={(100, 's1')}))
     code, body = _bulk(admin, (100, 's1'), (100, 's2'), (101, 's1'))
     assert pve.collisions == [] and (100, 's2') not in pve.sent, 'the next delete went into the lock of the unanswered one'
     assert code == 200 and body['deleted'] == 1 and pve.snaps[101] == set(), body
-    assert [(s['vmid'], s['snapshot_name'], s['state'], s['task']) for s in body['started']] == [(100, 's1', 'unread', None)]
-    assert body['started'][0]['why'].startswith('its delete was sent, Proxmox did not answer it in time')
+    assert [(s['vmid'], s['snapshot_name'], s['state'], s['task']) for s in body['started']] == [(100, 's1', 'unanswered', None)]
+    assert body['started'][0]['why'].startswith(NOT_ANSWERED)
     assert body['errors'] == ['Failed to delete s2 of VM 100: not started, the delete of s1 may still run']
-    assert _audit(db, 'snapshot.delete_started') == ["QEMU 100 - snapshot 's1' delete started, result not read [cluster_1]"]
+    assert body['message'] == ('1 snapshot(s) deleted, 1 delete(s) sent with no answer from Proxmox, '
+                               'they may or may not have started')
+    assert _audit(db, 'snapshot.delete_sent') == [SENT_AUDIT]
+    assert _audit(db, 'snapshot.delete_started') == []
 
 
 class _OwnedNoAnswer(_NoAnswer, _Owned):
@@ -719,5 +730,93 @@ def test_the_prune_stops_at_a_guest_whose_delete_pve_did_not_answer(_lease):
     pruned = sn._prune(pve, 'pve1', 100, 'qemu', {'id': PID, 'retention_count': 1, 'retention_days': 0}, errors)
     assert pve.sent == [(100, names[1])], 'the prune went on into the lock of the unanswered delete'
     assert pruned == 0
-    assert errors[0].startswith(f'{names[1]}: its delete was sent, Proxmox did not answer it in time')
+    assert errors[0].startswith(f'{names[1]}: {NOT_ANSWERED}')
     assert errors[1:] == [f'{n}: not started, the delete of {names[1]} may still run' for n in names[2:]]
+
+
+# --- a ReadTimeout before the DELETE went out -----------------------------------------------
+# urllib3 2.x does the TLS handshake of a new pooled connection under the read timeout and
+# raises ReadTimeoutError when it hangs, which requests raises as ReadTimeout: the same
+# exception as a DELETE PVE did not answer, while here only the ClientHello was sent. So the
+# bulk delete may not call it started. It still holds the guest's next snapshots back: from
+# the exception alone the two cases cannot be told apart.
+
+@pytest.fixture
+def mute_tls():
+    """A listener on 127.0.0.1 that takes the connection and the ClientHello and never answers
+    the TLS handshake. Yields (port, what it received)."""
+    import socket
+    srv = socket.socket()
+    srv.bind(('127.0.0.1', 0))
+    srv.listen(4)
+    got, conns = [], []
+
+    def serve():
+        while True:
+            try:
+                c, _ = srv.accept()
+                conns.append(c)
+                got.append(c.recv(65536))
+            except OSError:
+                return
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    yield srv.getsockname()[1], got
+    srv.close()
+    for c in conns:
+        c.close()
+
+
+class _MuteTls(_NoAnswer):
+    """_NoAnswer whose DELETE of the snapshots in `mute` goes to `port` with requests, where the
+    TLS handshake never ends: the fake PVE never sees it."""
+
+    def __init__(self, snaps, port, mute=(), **kw):
+        super().__init__(snaps, **kw)
+        self.port, self.mute = port, set(mute)
+
+    def _api_delete(self, url, **kw):
+        node, kind, vmid, _, name = url.split('/')[-5:]
+        if (int(vmid), name) in self.mute:
+            return requests.Session().delete(f'https://127.0.0.1:{self.port}/api2/json/nodes/{node}/{kind}/{vmid}'
+                                             f'/snapshot/{name}', timeout=0.5)
+        return super()._api_delete(url, **kw)
+
+
+def test_a_read_timeout_of_the_tls_handshake_is_raised_before_the_delete_went_out(mute_tls):
+    port, got = mute_tls
+    with pytest.raises(requests.exceptions.ReadTimeout):
+        requests.Session().delete(f'https://127.0.0.1:{port}/api2/json/nodes/pve1/qemu/100/snapshot/s1', timeout=0.5)
+    # one TLS record, a handshake (0x16) holding a ClientHello (0x01): no request went out
+    assert len(got) == 1 and got[0][0] == 0x16 and got[0][5] == 0x01, got
+
+
+def test_a_delete_that_hung_in_the_tls_handshake_is_not_audited_as_started(api, admin, db, mute_tls):
+    port, got = mute_tls
+    pve = api.set_manager(CID, _MuteTls({100: ['s1', 's2'], 101: ['s1']}, port, mute={(100, 's1')}))
+    code, body = _bulk(admin, (100, 's1'), (100, 's2'), (101, 's1'))
+    assert len(got) == 1 and got[0][0] == 0x16, 'the DELETE did not hang in the TLS handshake'
+    assert (100, 's1') not in pve.sent and 's1' in pve.snaps[100], 'PVE got the DELETE after all'
+    # what PVE may still be doing cannot be told from the exception: the guest's next snapshot waits
+    assert (100, 's2') not in pve.sent and pve.snaps[100] == {'s1', 's2'}, 'the next delete of the guest went out'
+    assert body['errors'] == ['Failed to delete s2 of VM 100: not started, the delete of s1 may still run']
+    assert code == 200 and body['deleted'] == 1 and pve.snaps[101] == set(), body
+    assert [(s['vmid'], s['snapshot_name'], s['state'], s['task']) for s in body['started']] == [(100, 's1', 'unanswered', None)]
+    assert body['started'][0]['why'].startswith(NOT_ANSWERED)
+    assert 'started in Proxmox' not in body['message'], body['message']
+    assert _audit(db, 'snapshot.delete_started') == []
+    assert _audit(db, 'snapshot.delete_sent') == [SENT_AUDIT]
+
+
+def test_the_prune_does_not_call_a_delete_that_hung_in_the_tls_handshake_started(_lease, mute_tls):
+    port, got = mute_tls
+    names = [f'{PREFIX}{i}' for i in range(3)]
+
+    class Pve(_MuteTls, _Owned):
+        pass
+    pve = Pve({100: names}, port, mute={(100, names[1])})
+    errors = []
+    pruned = sn._prune(pve, 'pve1', 100, 'qemu', {'id': PID, 'retention_count': 1, 'retention_days': 0}, errors)
+    assert pruned == 0 and pve.sent == [] and len(got) == 1
+    assert errors[0].startswith(f'{names[1]}: {NOT_ANSWERED}') and 'started it' not in errors[0]
+    assert errors[1:] == [f'{names[2]}: not started, the delete of {names[1]} may still run']
