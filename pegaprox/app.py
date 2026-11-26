@@ -2662,6 +2662,52 @@ class _BodyDeadline:
             pass
 
 
+# MK Nov 2026 - a flask-sock route hands its connection back to pywsgi when it returns, and
+# simple-websocket's reader can still be waiting on it then (for the client's answer to our
+# close frame, say). pywsgi ends a connection by closing the raw descriptor under the gevent
+# socket, past the reader's watcher, and libev aborts the whole process when it meets that
+# watcher ("I/O watcher with invalid fd found in epoll_ctl"). So the handler waits for the
+# reader before the connection is pywsgi's again, and no request is read after a websocket.
+_WS_SERVER_ENVIRON = 'pegaprox.simple_websocket'
+_WS_SETTLE_TIMEOUT = 2.0
+
+
+def _note_websocket_servers():
+    """simple_websocket.Server puts itself in its request's environ. Idempotent."""
+    try:
+        import simple_websocket
+    except Exception:
+        return False
+    server = simple_websocket.Server
+    if getattr(server, '_pegaprox_noted', False):
+        return True
+    original_init = server.__init__
+
+    def _init(self, environ, *args, **kwargs):
+        original_init(self, environ, *args, **kwargs)
+        environ[_WS_SERVER_ENVIRON] = self
+
+    server.__init__ = _init
+    server._pegaprox_noted = True
+    return True
+
+
+def _settle_websocket(ws, timeout=_WS_SETTLE_TIMEOUT):
+    """Until simple-websocket's reader is done with the socket. A client that never answers
+    our close gets the socket closed by gevent, which hands the waiting reader an error
+    before the descriptor goes."""
+    reader = getattr(ws, 'thread', None)
+    if reader is None:
+        return
+    reader.join(timeout=timeout)
+    if reader.is_alive():
+        try:
+            ws.sock.close()
+        except Exception:
+            pass
+        reader.join(timeout=1.0)
+
+
 class _IdleTimeoutMixin:
     """Bound the idle wait for the next request line, the header read after it, the
     body of a request nobody has signed in for yet, and each write of the answer.
@@ -2693,6 +2739,15 @@ class _IdleTimeoutMixin:
             self.wsgi_input = clock
             env[BODY_DEADLINE_ENVIRON] = clock
         return env
+
+    def run_application(self):
+        try:
+            return super().run_application()
+        finally:
+            ws = (self.environ or {}).get(_WS_SERVER_ENVIRON)
+            if ws is not None:
+                self.close_connection = True
+                _settle_websocket(ws)
 
     def handle_one_response(self):
         try:
@@ -2836,6 +2891,8 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
         apply_sendall_patch()
     except Exception as _e:
         logging.warning(f"[ws-patch] could not make simple-websocket write whole frames: {_e}")
+    if not _note_websocket_servers():
+        logging.warning("[ws-patch] simple-websocket not found, a websocket's end is not waited for")
 
     # NS: Suppress noisy errors from bots/scanners/disconnects
     import logging as log_module
