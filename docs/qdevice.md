@@ -187,7 +187,7 @@ Run it from a copy only root can write instead, taken from the release you run:
 
 ```sh
 d=$(mktemp -d)
-git clone --depth 1 --branch v1.5.0 https://github.com/PegaProx/project-pegaprox.git "$d/src"
+git clone --depth 1 --branch v1.5.1 https://github.com/PegaProx/project-pegaprox.git "$d/src"
 # the same files as in /opt/PegaProx? Any difference: find out why before going on
 cmp "$d/src/packaging/qnetd/pegaprox-qnetd-helper" /opt/PegaProx/packaging/qnetd/pegaprox-qnetd-helper
 sh "$d/src/packaging/qnetd/install.sh"
