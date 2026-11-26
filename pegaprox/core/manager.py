@@ -15242,12 +15242,17 @@ echo "AGENT_INSTALLED_OK"
     # management token, the cross-cluster balancer, scheduled replication) counts every login
     # that failed, refused or without an answer (a realm whose LDAP or AD server is slow or
     # gone fails it in PVE's log all the same): the next one waits TOKEN_LOGIN_HOLD, and a
-    # third goes out only once the first is TOKEN_LOGIN_WINDOW old. That is the findtime of
-    # the fail2ban jail for pveproxy in the Proxmox VE wiki (maxretry 3), so a directory that
-    # stays down does not get the address of PegaProx banned, which would cut the cluster
-    # off although its token needs no directory. A login that works ends the wait.
+    # third goes out only once the second is TOKEN_LOGIN_WINDOW (and a little) old. That is
+    # the findtime of the fail2ban jail for pveproxy in the Proxmox VE wiki (maxretry 3), so
+    # a directory that stays down does not get the address of PegaProx banned, which would
+    # cut the cluster off although its token needs no directory. fail2ban keeps the count
+    # of an address till its LAST failure is findtime old, and a failure that comes before
+    # that scales the count over findtime rather than dropping the old ones (adjustTime in
+    # its ticket.py): a third login once the first was two days old still made three. A
+    # login that works ends the wait.
     TOKEN_LOGIN_HOLD = 1800
     TOKEN_LOGIN_WINDOW = 2 * 86400
+    TOKEN_LOGIN_SLACK = 600
 
     def _token_owner(self):
         """The user@realm the API tokens of this cluster's account belong to. A login with
@@ -15936,7 +15941,7 @@ echo "AGENT_INSTALLED_OK"
         stays the same. A login that got no answer, or one that is no yes or no, raises.
         `paced`: a caller that comes round by itself (the renewal of the management token,
         the balancer, scheduled replication). After a failed login it sends none for
-        TOKEN_LOGIN_HOLD, and after two none till the first is TOKEN_LOGIN_WINDOW old:
+        TOKEN_LOGIN_HOLD, and after two none till the second is TOKEN_LOGIN_WINDOW old:
         till then a refusal answers as before, and one without an answer raises
         LoginNotTaken, saying when, without going out. The caller closes the session."""
         owner = self._token_owner()
@@ -15996,12 +16001,15 @@ echo "AGENT_INSTALLED_OK"
         return sess, None
 
     def _token_login_waits(self, failed):
-        """Seconds till a paced login may go out again after the failed ones in `failed`."""
+        """Seconds till a paced login may go out again after the failed ones in `failed`.
+        Two that fail2ban counts together (the second before the first was TOKEN_LOGIN_WINDOW
+        old) hold the next one back till fail2ban dropped them, the second being that old;
+        TOKEN_LOGIN_SLACK covers its clean-up, which runs every few seconds."""
         at = failed['at']
-        until = at[-1] + self.TOKEN_LOGIN_HOLD
-        if len(at) > 1:
-            until = max(until, at[-2] + self.TOKEN_LOGIN_WINDOW)
-        return until - time.monotonic()
+        gone = self.TOKEN_LOGIN_WINDOW + self.TOKEN_LOGIN_SLACK
+        if len(at) > 1 and at[-1] - at[-2] < gone:
+            return at[-1] + gone - time.monotonic()
+        return at[-1] + self.TOKEN_LOGIN_HOLD - time.monotonic()
 
     def _login_failed(self, stored, what, e, refused=None):
         """A password login (for `what`) failed: refused (`refused`, the why), or with
@@ -16026,7 +16034,7 @@ echo "AGENT_INSTALLED_OK"
                          f"renewal of its API token, the cross-cluster balancer, scheduled "
                          f"replication) tries it again in {self.TOKEN_LOGIN_HOLD // 60} minutes at "
                          f"the earliest, and once more only "
-                         f"{self.TOKEN_LOGIN_WINDOW // 86400} days after the first. A migration "
+                         f"{self.TOKEN_LOGIN_WINDOW // 86400} days after the second. A migration "
                          f"started by hand logs in at once, and a login that works ends the wait.")
 
     def create_api_token(self, token_name: str = 'pegaprox-migrate', expire: int = 0,
@@ -16058,9 +16066,6 @@ echo "AGENT_INSTALLED_OK"
             return {'success': False, 'error': why, 'refused': True}
         expire = self.token_expire(expire)
 
-        if paced:
-            self.__dict__.setdefault('_paced_tokens', set()).add(token_name)
-
         def _do_create():
             data = {
                 'privsep': 0,  # No privilege separation - token has same permissions as user
@@ -16089,6 +16094,9 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': why, 'refused': True}
 
             if response.status_code == 200:
+                if paced:
+                    # its cleanup deletes it paced as well (delete_api_token)
+                    self.__dict__.setdefault('_paced_tokens', set()).add(token_name)
                 result = response.json()
                 token_data = result.get('data', {})
                 token_value = token_data.get('value', '')

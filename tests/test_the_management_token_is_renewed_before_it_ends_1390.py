@@ -1089,14 +1089,40 @@ def _asking_for_a_login(cluster, fake, path):
 
 
 def _jailed(sent, maxretry=3, findtime=2 * DAY):
-    """True where `maxretry` of the failed logins at `sent` fall within `findtime`: the
-    fail2ban jail for pveproxy in the Proxmox VE wiki (maxretry 3, findtime 2 days) bans
-    the address of PegaProx then, and the cluster is cut off for an hour."""
-    return any(b - a < findtime for a, b in zip(sent, sent[maxretry - 1:]))
+    """True where the fail2ban jail for pveproxy in the Proxmox VE wiki (maxretry 3,
+    findtime 2 days) bans the address of PegaProx for the failed logins at `sent`, and the
+    cluster is cut off for an hour. Counted the way fail2ban counts (failmanager.py and
+    ticket.py, 0.11 to 1.1), which is no window sliding over the failures: the count of an
+    address is dropped once its last failure is findtime old, and a failure before that
+    scales the count to the findtime since the first and adds one (adjustTime)."""
+    first = last = None
+    count = 0
+    for at in sent:
+        if last is None or at - last >= findtime:
+            first, count = at, 1
+        else:
+            if first < at - findtime:
+                count = int(round(count / float(at - first) * findtime))
+                first = at - findtime
+            count += 1
+        last = at
+        if count >= maxretry:
+            return True
+    return False
 
 
-# past the fourth login of a directory that stays down: two, and two more two days later
-LONG = 2 * DAY + 3600
+def test_the_jail_counts_the_way_fail2ban_does():
+    """A third failure once the first is two days old still bans; once the last is, not."""
+    hour = 3600
+    assert _jailed([0, hour // 2, 2 * DAY])
+    assert _jailed([0, hour, 2 * DAY + hour // 2])
+    assert not _jailed([0, hour // 2, 2 * DAY + hour, 2 * DAY + 2 * hour, 4 * DAY + 3 * hour])
+    assert _jailed([0, hour, 2 * hour])
+
+
+# past the fourth login of a directory that stays down: two, and two more once the second
+# is two days old
+LONG = 2 * DAY + 2 * 3600
 
 
 def _logins_over(m, fake, minutes, seconds, also=None):

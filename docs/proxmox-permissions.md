@@ -127,9 +127,9 @@ What PegaProx starts by itself (the renewal, the cross-cluster balancer and sche
 replication into a cluster whose token may make no token) counts every password login that
 fails, refused or without an answer, as from a realm whose LDAP or AD server is slow or
 down: each counts on a lockout of the realm and on a fail2ban of pveproxy. The next one
-goes out after half an hour at the earliest, and a third only two days after the first,
-the time the fail2ban jail in the Proxmox VE wiki looks back on for its three tries, so a
-directory that stays down does not get PegaProx's address banned. A migration started by
+goes out after half an hour at the earliest, and a third only once the second is two days
+old, the time the fail2ban jail in the Proxmox VE wiki keeps a count for its three tries, so
+a directory that stays down does not get PegaProx's address banned. A migration started by
 hand logs in at once, and a login that works ends the wait, as does a new password stored
 for the cluster. Each renewal is in the audit log. A token typed in by hand, and
 a cluster added with a token as its login, are never renewed; a token without an end, as
