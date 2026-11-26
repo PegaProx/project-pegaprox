@@ -2879,16 +2879,17 @@ def start_backup_verification(cluster_id):
     except (ValueError, TypeError):
         return jsonify({'error': 'vmid must be a number'}), 400
     _volid = str(data.get('backup_volid') or '')
-    _is_lxc = '/ct/' in _volid or _volid.endswith('.lxc.tar') or 'vzdump-lxc' in _volid
+    from pegaprox.api.helpers import backup_volid_guest
+    _src = backup_volid_guest(_volid)
+    _is_lxc = bool(_src and _src[1] == 'lxc')
     if not user_can_access_vm(build_authz_user(request.session.get('user', ''), request.session),
                               cluster_id, _vmid, 'vm.backup', 'lxc' if _is_lxc else 'qemu'):
         return jsonify({'error': 'Access denied: you do not have permission for this VM'}), 403
-    import re as _re
-    _m = _re.search(r'/(?:vm|ct)/(\d+)/', _volid) or _re.search(r'-(?:qemu|lxc)-(\d+)-', _volid)
     # fail closed: a non-empty volid whose owning id we can't parse (unrecognised format) must
     # be rejected, not silently trusted — otherwise a scoped user passes their own vmid but a
-    # foreign archive in an odd format and the bind is skipped.
-    if _volid and (not _m or int(_m.group(1)) != _vmid):
+    # foreign archive in an odd format and the bind is skipped. MK Nov 2026 - the whole volid
+    # has the shape of a backup, a path with /ct/<id>/ somewhere in it is none
+    if _volid and (not _src or _src[0] != _vmid):
         return jsonify({'error': 'Access denied: backup_volid does not belong to the given VM'}), 403
     # MK Oct 2026 - the number, not the text: "100" and " 100" each passed the one-at-a-time
     # check of the guest, and each started a copy of it
@@ -4699,11 +4700,9 @@ def _restore_refusal(cluster_id, user, volid, target_node, target_vmid, mode, no
     # vm.backup holder scoped to their own VM could otherwise restore/boot ANOTHER VM's backup and
     # read its contents. Resolve the backup's owning VMID from the volid and require access to it.
     if not acts_as_admin(user):
-        _sm = _re.search(r'/(?:vm|ct)/(\d+)/', volid) or _re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', volid)
-        _src_vmid = int(_sm.group(1)) if _sm else None
-        _src_is_lxc = '/ct/' in volid or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid or volid.endswith('.lxc.tar')
-        if _src_vmid is None or not user_can_access_vm(user, cluster_id, _src_vmid,
-                                                       'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
+        from pegaprox.api.helpers import backup_volid_guest
+        _src = backup_volid_guest(volid)
+        if _src is None or not user_can_access_vm(user, cluster_id, _src[0], 'vm.backup', _src[1]):
             return jsonify({'error': 'Permission denied for source backup'}), 403
 
     # MK Sep 2026 - mode='new' creates a guest, so it has to respect the same boundaries the

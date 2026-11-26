@@ -1883,12 +1883,9 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
     _authz_user = build_authz_user(request.session.get('user', ''), request.session)
     from pegaprox.utils.rbac import acts_as_admin
     if not acts_as_admin(_authz_user):
-        import re as _re
-        _sm = _re.search(r'/(?:vm|ct)/(\d+)/', volid) or _re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', volid)
-        _src_vmid = int(_sm.group(1)) if _sm else None
-        _src_is_lxc = '/ct/' in volid or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid or volid.endswith('.lxc.tar')
-        if _src_vmid is None or not user_can_access_vm(_authz_user, cluster_id, _src_vmid,
-                                                       'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
+        from pegaprox.api.helpers import backup_volid_guest
+        _src = backup_volid_guest(volid)
+        if _src is None or not user_can_access_vm(_authz_user, cluster_id, _src[0], 'vm.backup', _src[1]):
             return jsonify({'error': 'Permission denied for source backup'}), 403
         # another VMID makes this a new guest, which keeps to what the PBS twin asks of one
         # (restore_backup, mode 'new'): the tenant's VMID range, and for a confined caller a
@@ -2331,12 +2328,9 @@ def delete_vm_backup(cluster_id, node, vm_type, vmid, volid):
     _authz_user = build_authz_user(request.session.get('user', ''), request.session)
     from pegaprox.utils.rbac import acts_as_admin
     if not acts_as_admin(_authz_user):
-        import re as _re
-        _sm = _re.search(r'/(?:vm|ct)/(\d+)/', volid) or _re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', volid)
-        _src_vmid = int(_sm.group(1)) if _sm else None
-        _src_is_lxc = '/ct/' in volid or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid or volid.endswith('.lxc.tar')
-        if _src_vmid is None or not user_can_access_vm(_authz_user, cluster_id, _src_vmid,
-                                                       'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
+        from pegaprox.api.helpers import backup_volid_guest
+        _src = backup_volid_guest(volid)
+        if _src is None or not user_can_access_vm(_authz_user, cluster_id, _src[0], 'vm.backup', _src[1]):
             return jsonify({'error': 'Permission denied for source backup'}), 403
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -6598,6 +6592,9 @@ def update_vm_config_api(cluster_id, node, vm_type, vmid):
             pinned = _pin_out_of_reach(manager, cluster_id, node, vmid, vm_type, user, config_updates)
             if pinned:
                 return pinned
+            foreign = _foreign_volume(manager, cluster_id, node, vmid, vm_type, user, config_updates)
+            if foreign:
+                return foreign
 
     # MK Oct 2026 - more cores, memory or a new volume grow the tenant like a create does
     _grow = (_xcp_config_growth if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng'
@@ -7286,15 +7283,123 @@ _QEMU_DRIVE_KEY_RE = re.compile(r'(?:ide|sata|scsi|virtio|unused)[0-9]+|efidisk0
 _LXC_VOLUME_KEY_RE = re.compile(r'rootfs|mp[0-9]+|unused[0-9]+')
 
 
-def _on_host_path(value, volume_key):
-    """Whether a drive or mount point names a path of the host rather than a volume"""
-    for i, part in enumerate(str(value or '').split(',')):
+def _drive_volumes(value):
+    """(key, volume) for every volume a drive or mount point string names. PVE takes a part
+    without '=' as the volume wherever it stands, not only first, file= and volume= are the
+    same key to it, and import-from= is what a new disk gets copied from. MK Nov 2026"""
+    out = []
+    for part in str(value if value is not None else '').split(','):
         key, sep, val = part.partition('=')
         if not sep:
-            key, val = (volume_key if i == 0 else ''), part
-        if key in (volume_key, 'import-from') and val.strip().startswith('/'):
-            return True
-    return False
+            if part.strip():
+                out.append(('volume', part.strip()))
+        elif key.strip().lower() in ('file', 'volume', 'import-from'):
+            out.append((key.strip().lower(), val.strip()))
+    return out
+
+
+def _on_host_path(value):
+    """Whether a drive or mount point names a path of the host rather than a volume"""
+    return any(vol.startswith('/') for _key, vol in _drive_volumes(value))
+
+
+# a new volume (store:size, a bare size for the default storage, store:cloudinit), and the
+# shared content a drive may name: an ISO, or an import image as the source of a new disk
+_NEW_VOLUME_RE = re.compile(r'(?:[^:\s,/]+:)?(?:[0-9]+(?:\.[0-9]+)?|cloudinit)')
+_ISO_VOLUME_RE = re.compile(r'[^:\s,/]+:iso/[^/\s]+')
+_IMPORT_VOLUME_RE = re.compile(r'[^:\s,/]+:import/[^/\s]+')
+_VMID_SEG = r'[1-9][0-9]*'
+
+
+def _volume_owner(volid):
+    """The guest a volume id belongs to, read the way PVE reads it, else None.
+
+    vm-/base-/subvol-<id>-... at the root of a block storage, a linked clone
+    base-99-disk-0/vm-100-disk-1 by the name it ends in, <id>/<file> on a directory storage
+    and its linked clone 99/base-99-disk-0.qcow2/100/<file> by the second number. Anything
+    else (a raw LUN, a name of the admin's choosing, a path with dots) has no owner here.
+    Stricter than the attribution of delete_datastore_content on purpose: that one lets an
+    unattributed volume through, this one refuses it."""
+    m = re.fullmatch(r'[^:\s,/]+:(\S+)', str(volid or ''))
+    if not m:
+        return None
+    parts = m.group(1).split('/')
+    if any(p in ('', '.', '..') for p in parts):
+        return None
+    name = re.compile(r'(?:vm|base|subvol|basevol)-(' + _VMID_SEG + r')-[^/\s]+')
+    if len(parts) == 1:
+        hit = name.fullmatch(parts[0])
+        return int(hit.group(1)) if hit else None
+    if len(parts) == 2:
+        if re.fullmatch(_VMID_SEG, parts[0]):
+            return int(parts[0])
+        if re.fullmatch(r'(?:base|basevol)-[0-9]+-[^/\s]+', parts[0]):
+            hit = name.fullmatch(parts[1])
+            return int(hit.group(1)) if hit else None
+        return None
+    if (len(parts) == 4 and re.fullmatch(_VMID_SEG, parts[0]) and re.fullmatch(_VMID_SEG, parts[2])
+            and parts[1].startswith('base-')):
+        return int(parts[2])
+    return None
+
+
+def _as_cd(key, value):
+    """Whether a QEMU drive is a CD-ROM: the cdrom key, or media=cdrom in its options"""
+    if key == 'cdrom':
+        return True
+    return any(k.strip().lower() == 'media' and v.strip().lower() == 'cdrom'
+               for k, sep, v in (p.partition('=') for p in str(value or '').split(',')) if sep)
+
+
+def _foreign_volume(manager, cluster_id, node, vmid, vm_type, user, updates):
+    """The refusal for a drive or mount point that names a volume of a guest this confined
+    caller cannot configure, else None.
+
+    PegaProx talks to PVE on its own account, which may use every volume of every guest, so
+    PVE's own check (Datastore.Allocate on the storage) never stops a tenant from attaching
+    another tenant's disk to their own guest, or copying it with import-from, and reading or
+    overwriting it from there. Allowed: a new volume, an empty or host CD drive, an ISO, an
+    import image as a copy source, a volume of this guest or of another guest the caller may
+    configure, and a volume the guest has in its config already (a disk an admin shared with
+    it, a raw LUN). Anything else is refused, an owner we cannot read included. MK Nov 2026"""
+    key_re = _QEMU_DRIVE_KEY_RE if vm_type == 'qemu' else _LXC_VOLUME_KEY_RE
+    current = None
+    for key, value in updates.items():
+        key = str(key)
+        if not (key_re.fullmatch(key) or (vm_type == 'qemu' and key == 'vmstate')):
+            continue
+        for how, vol in _drive_volumes(value):
+            if not vol or vol.startswith('/') or vol == 'none' or _NEW_VOLUME_RE.fullmatch(vol):
+                continue        # a host path is the root-only check's
+            # an ISO only as a CD, read-only: as a disk the guest writes into what everyone installs from
+            if vm_type == 'qemu' and (vol == 'cdrom' or (_ISO_VOLUME_RE.fullmatch(vol) and _as_cd(key, value))):
+                continue
+            if how == 'import-from' and _IMPORT_VOLUME_RE.fullmatch(vol):
+                continue
+            owner = _volume_owner(vol)
+            if owner is not None and (owner == int(vmid)
+                                      or user_can_access_vm(user, cluster_id, owner, 'vm.config')):
+                continue
+            if current is None:
+                try:
+                    res = manager.get_vm_config(node, vmid, vm_type) or {}
+                except Exception as e:
+                    res = {'success': False, 'error': str(e)}
+                if not res.get('success'):
+                    logging.error(f"[CONFIG] cannot read {vm_type}/{vmid} to check {key}: {res.get('error')}")
+                    return jsonify({'error': f'Cannot read the config of {vmid} to check {key} - '
+                                             'check the server logs'}), 503
+                cfg = res.get('config') or {}
+                raw = cfg.get('raw') if isinstance(cfg.get('raw'), dict) else cfg
+                current = {v for k, val in raw.items()
+                           if key_re.fullmatch(str(k)) or (vm_type == 'qemu' and k == 'vmstate')
+                           for _h, v in _drive_volumes(val)}
+            if vol in current:
+                continue
+            whose = f'belongs to guest {owner}' if owner is not None else 'is no volume of a guest of yours'
+            return jsonify({'error': f'Access denied: {vol} in {key} {whose}',
+                            'code': 'FOREIGN_VOLUME'}), 403
+    return None
 
 
 def _tag_pins(tags):
@@ -7358,14 +7463,14 @@ def _root_only_config_key(manager, node, vmid, vm_type, updates):
             elif re.fullmatch(r'serial[0-9]+', key):
                 if value != 'socket':
                     return key
-            elif _QEMU_DRIVE_KEY_RE.fullmatch(key) and _on_host_path(value, 'file'):
+            elif _QEMU_DRIVE_KEY_RE.fullmatch(key) and _on_host_path(value):
                 return key
         return None
     for key in list(updates) + deleted:
         if key == 'hookscript' or re.fullmatch(r'dev[0-9]+', str(key)):
             return key
     for key, value in updates.items():
-        if _LXC_VOLUME_KEY_RE.fullmatch(str(key)) and _on_host_path(value, 'volume'):
+        if _LXC_VOLUME_KEY_RE.fullmatch(str(key)) and _on_host_path(value):
             return key
     if 'features' in updates or 'features' in deleted:
         rows, _resp = _lxc_pending(manager, node, vmid)
@@ -8164,7 +8269,25 @@ def move_disk_api(cluster_id, node, vm_type, vmid, disk_id):
     
     if not target_storage:
         return jsonify({'error': 'Target storage required'}), 400
-    
+
+    # MK Nov 2026 - PVE frees the source after the copy whoever owns it, so a disk an admin
+    # shared into a confined caller's guest would be gone from the guest it belongs to
+    if (delete_original and getattr(manager, 'cluster_type', 'proxmox') != 'xcpng'
+            and caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id)):
+        try:
+            res = manager.get_vm_config(node, vmid, vm_type) or {}
+        except Exception as e:
+            res = {'success': False, 'error': str(e)}
+        if not res.get('success'):
+            logging.error(f"[DISK] cannot read {vm_type}/{vmid} before moving {disk_id}: {res.get('error')}")
+            return jsonify({'error': f'Cannot read the config of {vmid} - check the server logs'}), 503
+        cfg = res.get('config') or {}
+        raw = cfg.get('raw') if isinstance(cfg.get('raw'), dict) else cfg
+        vols = [v for how, v in _drive_volumes(raw.get(disk_id)) if how != 'import-from']
+        if vols and _volume_owner(vols[0]) != int(vmid):
+            return jsonify({'error': f'{vols[0]} is no volume of {vmid}: move it with delete off, '
+                                     'the original stays where it is', 'code': 'FOREIGN_VOLUME'}), 403
+
     result = manager.move_disk(node, vmid, vm_type, disk_id, target_storage, delete_original)
     
     if result['success']:
@@ -8205,12 +8328,23 @@ def set_cdrom_api(cluster_id, node, vmid):
             return jsonify({'error': 'drive names a CD-ROM drive: ide, sata or scsi and its number'}), 400
         if iso_path and not (isinstance(iso_path, str) and ',' not in iso_path):
             return jsonify({'error': 'iso is one volume id'}), 400
-        if iso_path and caller_is_scoped(build_authz_user(request.session.get('user', ''),
-                                                          request.session), cluster_id):
+        _cd_user = build_authz_user(request.session.get('user', ''), request.session)
+        if iso_path and caller_is_scoped(_cd_user, cluster_id):
             root_key = _root_only_config_key(manager, node, vmid, 'qemu',
                                              {drive: f'{iso_path},media=cdrom'})
             if root_key:
                 return _confined_root_refusal('mounting a file of the host')
+            # the ISO field takes any volume id, another tenant's disk as well
+            foreign = _foreign_volume(manager, cluster_id, node, vmid, 'qemu', _cd_user,
+                                      {drive: f'{iso_path},media=cdrom'})
+            if foreign:
+                return foreign
+    elif iso_path and caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session),
+                                       cluster_id):
+        # MK Nov 2026 - XAPI puts any VDI into a CD drive, another tenant's disk as well
+        if manager.vdi_on_iso_sr(str(iso_path)) is not True:
+            return jsonify({'error': 'Access denied: that is no ISO of an ISO storage',
+                            'code': 'FOREIGN_VOLUME'}), 403
 
     result = manager.set_cdrom(node, vmid, iso_path, drive)
     
@@ -8669,8 +8803,11 @@ def delete_efficient_snapshot_api(cluster_id, node, vm_type, vmid, snap_id):
     denied = _xapi_refusal(cluster_id, user, 'vm.snapshot')
     if denied: return denied
 
+    snap = _own_efficient_snapshot(cluster_id, vmid, snap_id)
+    if not snap:
+        return jsonify({'error': 'Snapshot not found'}), 404
     mgr = cluster_managers[cluster_id]
-    result = mgr.delete_efficient_snapshot(node, vmid, snap_id)
+    result = mgr.delete_efficient_snapshot(snap.get('node') or node, vmid, snap_id)
 
     if result['success']:
         usr = getattr(request, 'session', {}).get('user', 'system')
@@ -8697,8 +8834,11 @@ def rollback_efficient_snapshot_api(cluster_id, node, vm_type, vmid, snap_id):
     denied = _xapi_refusal(cluster_id, user, 'vm.snapshot')
     if denied: return denied
 
+    snap = _own_efficient_snapshot(cluster_id, vmid, snap_id)
+    if not snap:
+        return jsonify({'error': 'Snapshot not found'}), 404
     mgr = cluster_managers[cluster_id]
-    result = mgr.rollback_efficient_snapshot(node, vmid, vm_type, snap_id)
+    result = mgr.rollback_efficient_snapshot(snap.get('node') or node, vmid, vm_type, snap_id)
 
     if result['success']:
         usr = getattr(request, 'session', {}).get('user', 'system')
@@ -8708,6 +8848,19 @@ def rollback_efficient_snapshot_api(cluster_id, node, vm_type, vmid, snap_id):
         return jsonify({'message': result.get('message', 'Rollback gestartet')})
     else:
         return jsonify({'error': result['error']}), 500
+
+
+def _own_efficient_snapshot(cluster_id, vmid, snap_id):
+    """The record of an efficient snapshot of this guest, else None. MK Nov 2026 - the id
+    alone named a snapshot of any guest, merged or removed on the node in the URL"""
+    try:
+        snap = get_db().get_efficient_snapshot(snap_id)
+    except Exception as e:
+        logging.error(f"[SNAP] cannot read efficient snapshot {snap_id}: {e}")
+        return None
+    if not snap or snap.get('cluster_id') != cluster_id or str(snap.get('vmid')) != str(vmid):
+        return None
+    return snap
 
 
 # ==================== SNAPSHOT OVERVIEW API @gyptazy ====================
@@ -9990,7 +10143,7 @@ def _build_incremental_replica_vm(target_mgr, target_node, tgt_vmid, src_cfg, re
                                 f"carried to replica {tgt_vmid}")
                 continue
             # NS Oct 2026 - root-only as well: TPM state on a device of the target host
-            if k == 'tpmstate0' and _on_host_path(src_cfg[k], 'file'):
+            if k == 'tpmstate0' and _on_host_path(src_cfg[k]):
                 logging.warning(f"[XCINCR] job {job.get('id')}: the source's TPM state is on a host "
                                 f"path, not carried to replica {tgt_vmid}")
                 continue

@@ -191,7 +191,11 @@ OTHER = 'local%253Abackup%252Fvzdump-qemu-200-2026_01_01-00_00_00.vma.zst'
 def test_a_backup_delete_with_a_storage_that_is_no_name_sends_nothing(api, seed, pve, volid):
     c = _backup_user(api, seed)
     r = c.delete('/api/clusters/cluster_1/vms/n1/qemu/100/backups/' + volid)
-    _refused(r, 'Invalid storage name')
+    # MK Nov 2026 - for a confined caller none of these is a backup volume id at all, so the
+    # source check refuses it before the storage name is read; an admin skips that check
+    assert r.status_code == 403 and r.get_json() == {'error': 'Permission denied for source backup'}, r.data
+    admin = api.as_user(seed.user('root', role='admin'))
+    _refused(admin.delete('/api/clusters/cluster_1/vms/n1/qemu/100/backups/' + volid), 'Invalid storage name')
     assert pve.rec.sent == []
     # counterproof: the caller's own backups, a vzdump file and a PBS snapshot, still go
     for own in (f'local:{OWN}', 'pbs-store.1:backup/vm/100/2026-11-01T00:00:00Z'):

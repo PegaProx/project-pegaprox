@@ -643,6 +643,27 @@ def check_cluster_access(cluster_id):
     return True, None
 
 
+_BACKUP_VOLID_RES = (
+    re.compile(r'[A-Za-z][A-Za-z0-9_.-]*:backup/(vm|ct)/([1-9][0-9]*)/[^/\s]+'),
+    re.compile(r'[A-Za-z][A-Za-z0-9_.-]*:backup/vzdump-(qemu|lxc|openvz)-([1-9][0-9]*)-[^/\s]+'),
+)
+
+
+def backup_volid_guest(volid):
+    """(vmid, 'qemu' or 'lxc') of the guest a backup was taken of, or None when `volid` is not
+    a backup volume id of either shape PVE hands out: storage:backup/(vm|ct)/<id>/<time> of a
+    backup server, storage:backup/vzdump-<type>-<id>-... of a file storage.
+
+    MK Nov 2026 - the restore, verify and delete routes found the id anywhere in the string, so
+    a path of the host with /ct/<own id>/ in it passed as a backup of the caller's own guest,
+    and PVE restores a path as root when PegaProx signs in with root@pam's password."""
+    for rx in _BACKUP_VOLID_RES:
+        m = rx.fullmatch(str(volid or ''))
+        if m:
+            return int(m.group(2)), ('qemu' if m.group(1) in ('vm', 'qemu') else 'lxc')
+    return None
+
+
 def caller_is_scoped(user, cluster_id):
     """True when this caller is confined to specific resources in `cluster_id`.
 

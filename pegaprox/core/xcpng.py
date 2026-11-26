@@ -4865,6 +4865,19 @@ echo DONE""",
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
+    def vdi_on_iso_sr(self, uuid):
+        """True when the VDI with this uuid sits on an ISO SR, False when not, None when it
+        cannot be read. MK Nov 2026"""
+        api = self._api()
+        if not api:
+            return None
+        try:
+            vdi_ref = api.VDI.get_by_uuid(uuid)
+            return api.SR.get_type(api.VDI.get_SR(vdi_ref)) == 'iso'
+        except Exception as e:
+            self.logger.warning(f"vdi_on_iso_sr {uuid}: {e}")
+            return None
+
     def get_iso_list(self, node, storage=None):
         """List ISOs on ISO-type SRs."""
         api = self._api()
