@@ -6099,6 +6099,13 @@ class PegaProxManager:
             # #78: verify node is actually empty — PVE HA or parallel migrations
             # might still be running. Give them up to 5 min to finish.
             remaining = self._count_vms_on_node(node_name)
+            # #1394 - the guests still here are the ones whose move just failed (a container
+            # with a bind mount, say) and no HA manager is moving them: the wait below could
+            # only keep the node in 'evacuating' for five minutes on their account
+            if remaining > 0 and self._only_failed_guests_left(node_name, task, remaining):
+                self.logger.info(f"[MAINT] {remaining} guest(s) left on {node_name} failed to move, "
+                                 f"not waiting for them")
+                remaining = 0
             if remaining != 0:  # -1 = API error, also warrants a recheck
                 if remaining > 0:
                     self.logger.info(f"[MAINT] {remaining} VMs still on {node_name} after evacuation loop, waiting...")
@@ -6172,6 +6179,22 @@ class PegaProxManager:
             task.status = 'failed'
             task.error = str(e)
     
+    def _only_failed_guests_left(self, node_name, task, remaining):
+        """Whether the `remaining` running guests still on the node are all ones whose move
+        already failed and that are not on their way elsewhere (no HA state, no migrate lock).
+        A list that names fewer or more guests than were counted proves nothing."""
+        known = {f.get('vmid') for f in task.failed_vms}
+        try:
+            vms = self.get_vm_resources()
+        except Exception:
+            return False
+        if getattr(vms, 'unavailable', False):
+            return False
+        left = [v for v in vms if v.get('node') == node_name and v.get('status') == 'running'
+                and v.get('type') in ('qemu', 'lxc')]
+        return len(left) == remaining and all(v.get('vmid') in known and not v.get('hastate')
+                                  and 'migrate' not in str(v.get('lock') or '') for v in left)
+
     def _note_guests_left(self, node_name, task, remaining):
         known = {f.get('vmid') for f in task.failed_vms}
         if remaining == 0:

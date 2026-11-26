@@ -133,7 +133,8 @@ def test_an_unread_list_after_the_wait_is_no_proof_once_a_failed_move_lands(mgr)
     # web could not be moved and a second guest is counted on the node. The read that would name
     # it is unread, then the CRM finishes the move of web: the second guest is still there
     other = dict(GUEST, vmid=101, name='db')
-    reads = iter([[dict(GUEST)], [dict(GUEST)], UnreadList(), [dict(GUEST, node='n2'), other]])
+    # (the third read is the check whether only failed guests are left: one named, two counted, so no)
+    reads = iter([[dict(GUEST)], [dict(GUEST)], [dict(GUEST)], UnreadList(), [dict(GUEST, node='n2'), other]])
     mgr.get_vm_resources = lambda *a, **k: next(reads)
     mgr._count_vms_on_node = lambda node: 2
     mgr.migrate_vm = MagicMock(return_value=False)
