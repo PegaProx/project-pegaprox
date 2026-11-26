@@ -355,8 +355,31 @@ def _known_hosts_token_host(tok):
     return tok
 
 
-def remove_host_keys(hostnames):
+def _hashed_token_matches(tok, names):
+    """True when a hashed known_hosts token (``|1|salt|hmac``) is one of ``names``.
+
+    OpenSSH's own ssh writes these on distributions that default to HashKnownHosts, and
+    paramiko reads them, so such a pin enforces a key that a plain-text compare of the
+    host field can never find."""
+    try:
+        import base64, hashlib, hmac
+        parts = tok.split('|')
+        if len(parts) != 4 or parts[1] != '1':
+            return False
+        salt = base64.b64decode(parts[2])
+        want = base64.b64decode(parts[3])
+        return any(hmac.compare_digest(hmac.new(salt, n.encode(), hashlib.sha1).digest(), want)
+                   for n in names)
+    except Exception:
+        return False
+
+
+def remove_host_keys(hostnames, ports=()):
     """Drop known_hosts entries for the given hosts/IPs.
+
+    Hashed entries (``|1|salt|hash``) are matched too, for the bare host and for
+    ``[host]:port`` with each of ``ports`` (a hash cannot be read back to its port).
+
 
     Call this when a cluster or node is REMOVED from PegaProx so that re-adding it
     later works cleanly: if the box was reinstalled in the meantime it presents a
@@ -368,6 +391,15 @@ def remove_host_keys(hostnames):
     if not targets or not os.path.exists(_KNOWN_HOSTS):
         return 0
     removed = 0
+    _ports = {22}
+    for p in (ports or ()):
+        try:
+            _ports.add(int(p))
+        except (TypeError, ValueError):
+            pass
+    hashed_names = set(targets)
+    for t in targets:
+        hashed_names.update('[%s]:%d' % (t, p) for p in _ports if p != 22)
     try:
         with _persist_lock:
             with open(_KNOWN_HOSTS) as f:
@@ -378,6 +410,12 @@ def remove_host_keys(hostnames):
                     kept.append(ln)
                     continue
                 first = ln.split(None, 1)[0]
+                if first.startswith('|1|'):
+                    if _hashed_token_matches(first, hashed_names):
+                        removed += 1
+                    else:
+                        kept.append(ln)
+                    continue
                 hosts_in_line = [_known_hosts_token_host(h) for h in first.split(',')]
                 if any(h in targets for h in hosts_in_line):
                     removed += 1

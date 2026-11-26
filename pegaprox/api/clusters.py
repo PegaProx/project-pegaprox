@@ -785,7 +785,7 @@ def repin_cluster_host_keys(cluster_id):
                     hosts.add(ip)
         except Exception:
             pass
-        removed = remove_host_keys(hosts)
+        removed = remove_host_keys(hosts, ports=[getattr(mgr.config, 'ssh_port', 22) or 22])
         logging.info(f"[SSH] host-key re-pin for cluster {cluster_id}: dropped {removed} pin(s) "
                      f"across {len(hosts)} host(s) — next connect re-learns")
         return jsonify({'success': True, 'removed': removed, 'hosts': len(hosts)})

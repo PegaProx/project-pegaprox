@@ -24,7 +24,7 @@ def test_repin_admin_clears_pins_200(api, seed, monkeypatch):
 
     captured = {}
 
-    def fake_remove(hosts):
+    def fake_remove(hosts, ports=()):
         captured['hosts'] = set(hosts)
         return 3
 
