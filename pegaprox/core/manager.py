@@ -15233,10 +15233,16 @@ echo "AGENT_INSTALLED_OK"
     # A login PVE refused is not sent again for TOKEN_LOGIN_HOLD while the stored password
     # stays the same: a Site Recovery run asks once per guest, the balancer every interval,
     # and each failed login counts on the realm's lockout and on a fail2ban of pveproxy.
-    # MK Nov 2026 (#1390) - for the renewal of the management token (paced) a login that got
-    # no yes or no waits as long: a realm whose LDAP or AD server is slow or gone fails it in
-    # PVE's log all the same, and the renewal looks every five minutes.
+    # MK Nov 2026 (#1390) - what PegaProx starts by itself (paced: the renewal of the
+    # management token, the cross-cluster balancer, scheduled replication) counts every login
+    # that failed, refused or without an answer (a realm whose LDAP or AD server is slow or
+    # gone fails it in PVE's log all the same): the next one waits TOKEN_LOGIN_HOLD, and a
+    # third goes out only once the first is TOKEN_LOGIN_WINDOW old. That is the findtime of
+    # the fail2ban jail for pveproxy in the Proxmox VE wiki (maxretry 3), so a directory that
+    # stays down does not get the address of PegaProx banned, which would cut the cluster
+    # off although its token needs no directory. A login that works ends the wait.
     TOKEN_LOGIN_HOLD = 1800
+    TOKEN_LOGIN_WINDOW = 2 * 86400
 
     def _token_owner(self):
         """The user@realm the API tokens of this cluster's account belong to. A login with
@@ -15393,6 +15399,10 @@ echo "AGENT_INSTALLED_OK"
                 return self._token_renewal_refused(tid, until, [str(e)], privileges=False)
             except _RenewalUnanswered as e:
                 passing.append(str(e))
+                continue
+            except LoginNotTaken as e:
+                # names the time the login goes out again, where it waits
+                passing.append(f"over the password login: {e}")
                 continue
             except Exception as e:
                 passing.append(f"no answer ({type(e).__name__})")
@@ -15723,6 +15733,8 @@ echo "AGENT_INSTALLED_OK"
                 gone, why = drop(_token_url(self, name), timeout=self.api_timeout), None
             if gone is not None and gone.status_code != 200:
                 why = _pve_message(gone.text)
+        except LoginNotTaken as e:
+            why = str(e)
         except Exception as e:
             why = f"no answer ({type(e).__name__})"
         if why:
@@ -15909,9 +15921,11 @@ echo "AGENT_INSTALLED_OK"
         refusal names): (session, None), or (None, why) where there is none to be had. A
         login PVE refused is not sent again for TOKEN_LOGIN_HOLD while the stored password
         stays the same. A login that got no answer, or one that is no yes or no, raises.
-        `paced`: a caller that comes round by itself every few minutes (the renewal of the
-        management token), for which such a login waits TOKEN_LOGIN_HOLD as well, and raises
-        LoginNotTaken till then without going out. The caller closes the session."""
+        `paced`: a caller that comes round by itself (the renewal of the management token,
+        the balancer, scheduled replication). After a failed login it sends none for
+        TOKEN_LOGIN_HOLD, and after two none till the first is TOKEN_LOGIN_WINDOW old:
+        till then a refusal answers as before, and one without an answer raises
+        LoginNotTaken, saying when, without going out. The caller closes the session."""
         owner = self._token_owner()
         if '!' in (getattr(self.config, 'user', '') or ''):
             return None, (f"Proxmox does not let an API token make or delete another one, and "
@@ -15928,51 +15942,78 @@ echo "AGENT_INSTALLED_OK"
         held = getattr(self, '_token_login_refused', None)
         if held and held[0] == stored and time.monotonic() - held[1] < self.TOKEN_LOGIN_HOLD:
             return None, held[2]
-        quiet = getattr(self, '_token_login_unanswered', None)
-        if paced and quiet and quiet[0] == stored and time.monotonic() - quiet[1] < self.TOKEN_LOGIN_HOLD:
-            raise LoginNotTaken(quiet[2])
+        failed = getattr(self, '_token_login_failed', None)
+        if paced and failed and failed['mark'] == stored:
+            left = self._token_login_waits(failed)
+            if left > 0:
+                when = (f"{failed['why']}; PegaProx tries the password login of {owner} again "
+                        f"{datetime.fromtimestamp(time.time() + left):%Y-%m-%d %H:%M} at the earliest")
+                if failed['refused']:
+                    return None, when
+                raise LoginNotTaken(when)
         # no answer, or one that is not a no, raises: that is no refusal, a retry may work
         try:
             sess, why, status = _password_login(self, owner, pwd, what)
         except Exception as e:
-            if paced:
-                self._login_unanswered(stored, what, e)
+            self._login_failed(stored, what, e)
             raise
-        # an answer, yes or no: whatever kept the login from one is over
-        self._token_login_unanswered = None
         if sess is None:
             if status == 401:
                 why += (" - the password stored for this cluster is wrong, or its realm asks "
                         "for a second factor")
+                self._login_failed(stored, what, None, why)
+            else:
+                # a partial ticket of a two-factor account: the password was right
+                self._token_login_failed = None
             self._token_login_refused = (stored, time.monotonic(), why)
             return None, why
-        self._token_login_refused = None
+        self._token_login_refused = self._token_login_failed = None
         return sess, None
 
-    def _login_unanswered(self, stored, what, e):
-        """A paced password login (for `what`) got neither a yes nor a no (`e`): not sent
-        again for TOKEN_LOGIN_HOLD while the stored password (`stored`) stays the same, and
-        said once at INFO until a login gets an answer again."""
-        why = (str(e) if isinstance(e, LoginNotTaken)
-               else f"no answer within the time PegaProx waits ({type(e).__name__})")
-        before = getattr(self, '_token_login_unanswered', None)
-        self._token_login_unanswered = (stored, time.monotonic(), why)
-        if before is not None:
-            self.logger.debug(f"[TOKEN] the password login for {what} got no answer again: {why}")
+    def _token_login_waits(self, failed):
+        """Seconds till a paced login may go out again after the failed ones in `failed`."""
+        at = failed['at']
+        until = at[-1] + self.TOKEN_LOGIN_HOLD
+        if len(at) > 1:
+            until = max(until, at[-2] + self.TOKEN_LOGIN_WINDOW)
+        return until - time.monotonic()
+
+    def _login_failed(self, stored, what, e, refused=None):
+        """A password login (for `what`) failed: refused (`refused`, the why), or with
+        neither a yes nor a no (`e`). Noted against the stored password (`stored`) for the
+        paced logins (_account_login), the last two of them. One without an answer is said
+        once at INFO till a login works again."""
+        why = refused or (str(e) if isinstance(e, LoginNotTaken)
+                          else f"no answer within the time PegaProx waits ({type(e).__name__})")
+        before = getattr(self, '_token_login_failed', None)
+        if not before or before['mark'] != stored:
+            before = {'at': [], 'said': False}
+        self._token_login_failed = {
+            'mark': stored, 'at': before['at'][-1:] + [time.monotonic()], 'why': why,
+            'refused': bool(refused), 'said': before['said'] or not refused}
+        if refused or before['said']:
+            self.logger.debug(f"[TOKEN] the password login for {what} failed again: {why}")
             return
         self.logger.info(f"[TOKEN] cluster '{self.config.name}': a password login of "
                          f"{self._token_owner()} for {what} got neither a yes nor a no ({why}). "
-                         f"PegaProx sends it again in {self.TOKEN_LOGIN_HOLD // 60} minutes at the "
-                         f"earliest, as Proxmox counts each login that fails, on a lockout of the "
-                         f"realm and on a fail2ban of pveproxy alike.")
+                         f"Proxmox may count it as failed, on a lockout of the realm and on a "
+                         f"fail2ban of pveproxy alike, so what PegaProx starts by itself (the "
+                         f"renewal of its API token, the cross-cluster balancer, scheduled "
+                         f"replication) tries it again in {self.TOKEN_LOGIN_HOLD // 60} minutes at "
+                         f"the earliest, and once more only "
+                         f"{self.TOKEN_LOGIN_WINDOW // 86400} days after the first. A migration "
+                         f"started by hand logs in at once, and a login that works ends the wait.")
 
-    def create_api_token(self, token_name: str = 'pegaprox-migrate', expire: int = 0) -> Dict[str, Any]:
+    def create_api_token(self, token_name: str = 'pegaprox-migrate', expire: int = 0,
+                         paced: bool = False) -> Dict[str, Any]:
         # MK May 2026 (#413 layer 6, blackshocks bundle 20260530_220647):
         # if a prior Planned/Emergency failover crashed or its token cleanup
         # hadn't run yet, the same token_name is still on target → PVE returns
         # 400 "Token already exists" and the next failover bails before it ever
         # touches qmigrate. Pre-delete is the cleanest path — we'd issue the
         # delete on cleanup anyway, doing it up-front makes the create idempotent.
+        # MK Nov 2026 (#1390) - paced: a caller that comes round by itself (the balancer,
+        # scheduled replication), whose password logins wait after failed ones (_account_login)
         if not self.is_connected:
             if not self.connect_to_proxmox():
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
@@ -16000,7 +16041,7 @@ echo "AGENT_INSTALLED_OK"
                 'expire': int(expire or 0),
                 'comment': 'PegaProx temporary migration token'
             }
-            return self._token_request('POST', token_name, data)
+            return self._token_request('POST', token_name, data, paced=paced)
 
         try:
             response, why = _do_create()
@@ -16010,7 +16051,7 @@ echo "AGENT_INSTALLED_OK"
                     and 'already exists' in (response.text or '').lower():
                 self.logger.warning(f"[create_api_token] stale '{token_name}' on {host}, dropping + retry")
                 try:
-                    self._token_request('DELETE', token_name)
+                    self._token_request('DELETE', token_name, paced=paced)
                 except Exception as _e:
                     self.logger.debug(f"[create_api_token] pre-delete swallowed: {_e}")
                 response, why = _do_create()

@@ -10,6 +10,7 @@ this just decides *when* to call it based on the schedule field.
 
 import time
 import logging
+import functools
 import threading
 from datetime import datetime
 
@@ -167,7 +168,10 @@ def _xcrepl_loop():
 
                         # NS: same-cluster uses local replication (no remote-migrate)
                         is_local = job.get('source_cluster') == job.get('target_cluster')
-                        handler = _execute_local_replication if is_local else _execute_replication
+                        # MK Nov 2026 - a scheduled run makes its token paced, its password
+                        # login waits after failed ones; a run started by hand does not
+                        handler = (_execute_local_replication if is_local
+                                   else functools.partial(_execute_replication, paced=True))
                         logger.info(f"[XCREPL] Scheduling {'local' if is_local else 'cross-cluster'} job {job['id']} (VM {job['vmid']})")
                         # an automatic leader that lost its lease starts no job (#625)
                         if not ha.confirm_step(f"replication job {job['id']}"):

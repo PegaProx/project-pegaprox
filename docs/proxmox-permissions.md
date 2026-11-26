@@ -123,10 +123,15 @@ token, or once over the password login. Where neither may read it, PegaProx says
 in the log at info level and without an alert, since a token made before the cluster had a
 policy has no end at all. A kept end that has passed while Proxmox still takes the token,
 as after its *Expire* was changed on the cluster by hand, counts as one neither may read.
-A password login of the renewal that gets no answer, as from a realm whose LDAP or AD
-server is slow or down, goes out again after half an hour at the earliest, like one
-Proxmox refused: each one that fails counts on a lockout of the realm and on a fail2ban of
-pveproxy. Each renewal is in the audit log. A token typed in by hand, and
+What PegaProx starts by itself (the renewal, the cross-cluster balancer and scheduled
+replication into a cluster whose token may make no token) counts every password login that
+fails, refused or without an answer, as from a realm whose LDAP or AD server is slow or
+down: each counts on a lockout of the realm and on a fail2ban of pveproxy. The next one
+goes out after half an hour at the earliest, and a third only two days after the first,
+the time the fail2ban jail in the Proxmox VE wiki looks back on for its three tries, so a
+directory that stays down does not get PegaProx's address banned. A migration started by
+hand logs in at once, and a login that works ends the wait, as does a new password stored
+for the cluster. Each renewal is in the audit log. A token typed in by hand, and
 a cluster added with a token as its login, are never renewed; a token without an end, as
 on a cluster that never had such a policy, sees no change. Should the
 token still run out, PegaProx logs in with the password right away, makes a new one and

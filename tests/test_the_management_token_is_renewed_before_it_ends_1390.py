@@ -23,6 +23,11 @@ PegaProx kept it, which most often has none) is said once at INFO, without an al
 the two-factor login is not tried at every look. A new token whose POST got no answer is
 deleted at the next look, also after a restart.
 
+The password logins all this needs on a token that may make no token count with those of
+the balancer and of scheduled replication: one that failed, refused or without an answer,
+holds the next back half an hour, and a third goes out only once the first is two days
+old, so the fail2ban jail for pveproxy in the Proxmox VE wiki never sees three.
+
 Real requests: an HTTPS endpoint on loopback keeps PVE's rules for the token paths, the
 policy (assert_token_policy) and what a token of the Administrator role may do.
 
@@ -1083,6 +1088,17 @@ def _asking_for_a_login(cluster, fake, path):
     return cluster.restart(m), tid
 
 
+def _jailed(sent, maxretry=3, findtime=2 * DAY):
+    """True where `maxretry` of the failed logins at `sent` fall within `findtime`: the
+    fail2ban jail for pveproxy in the Proxmox VE wiki (maxretry 3, findtime 2 days) bans
+    the address of PegaProx then, and the cluster is cut off for an hour."""
+    return any(b - a < findtime for a, b in zip(sent, sent[maxretry - 1:]))
+
+
+# past the fourth login of a directory that stays down: two, and two more two days later
+LONG = 2 * DAY + 3600
+
+
 def _logins_over(m, fake, minutes, seconds, also=None):
     """Passes of the IP refresh loop five minutes apart for `seconds`, `also(step)` called
     at each: the times of the logins that went out."""
@@ -1099,43 +1115,41 @@ def _logins_over(m, fake, minutes, seconds, also=None):
 
 @pytest.mark.parametrize('how', ['login-down', 'timeout'])
 @pytest.mark.parametrize('path', ['end-unknown', 'end-passed', 'new-token', 'unanswered-delete'])
-def test_a_password_login_without_an_answer_goes_out_once_per_hold(
+def test_a_password_login_without_an_answer_never_gets_pegaprox_banned(
         cluster, said, minutes, monkeypatch, path, how):
     """The login that reads an end the token may not read was to go out once per token and
     password, but only a login that got a yes or a no counted. A realm whose directory does
     not answer in time, or pveproxy restarting, left every look sending another one, five
-    minutes apart, 288 a day: each fails in PVE's log, and a fail2ban of pveproxy (maxretry
-    3) bans the address of PegaProx, although the token itself needs no directory. A new
-    token over the login and the delete of a token whose making got no answer did the same.
-    Such a login now waits like a refused one, and what it was for is done once the login
-    answers again."""
+    minutes apart, 288 a day: each fails in PVE's log, and the fail2ban jail for pveproxy
+    in the Proxmox VE wiki (maxretry 3, findtime 2 days) bans the address of PegaProx,
+    although the token itself needs no directory. Waiting half an hour after each, as after
+    a refusal, still banned it after an hour and every hour after the ban. A new token over
+    the login and the delete of a token whose making got no answer did the same. Now the
+    second goes out after half an hour, and a third only once the first is two days old;
+    what it was for is done once the login answers again."""
     fake = RenewPVE({USER: PASSWORD})
     m, tid = _asking_for_a_login(cluster, fake, path)
     said.listen(m)
     back = _login_without_answer(fake, monkeypatch, how)
     fake.seen.clear()
 
-    sent = []
-    for _ in range(12):
-        before = len(fake.logins())
-        _pass(m)
-        sent += [minutes()] * (len(fake.logins()) - before)
-        minutes.ahead += 300
+    sent = _logins_over(m, fake, minutes, LONG)
 
-    # tried, and once more after the hold, never sooner
-    gaps = [b - a for a, b in zip(sent, sent[1:])]
-    assert len(sent) == 2 and all(g >= m.TOKEN_LOGIN_HOLD for g in gaps), gaps
+    # a short outage is tried again soon, a long one never three times within the two days
+    assert len(sent) == 4, sent
+    assert m.TOKEN_LOGIN_HOLD <= sent[1] - sent[0] <= m.TOKEN_LOGIN_HOLD + 300
+    assert not _jailed(sent), sent
     if path != 'unanswered-delete':
         # the looks in between wait a quarter of an hour
-        assert len(fake.calls('GET')) <= 4
+        assert len(fake.calls('GET')) <= LONG // (3 * m.TOKEN_RENEW_EVERY) + 2
     [told] = [s for s in said.at(logging.INFO) if '[TOKEN]' in s and 'neither a yes nor a no' in s]
-    assert USER in told and PASSWORD not in told
+    assert USER in told and PASSWORD not in told and '2 days' in told
     assert said.alerts == [] and not [s for s in said.at(logging.WARNING) if '[TOKEN]' in s]
     assert m.config.api_token_user == tid and _works(m)
 
-    # the login answers again: what it was for is done at the next look after the hold
+    # the login answers again: what it was for is done at the first look it may go out
     back()
-    minutes.ahead += m.TOKEN_LOGIN_HOLD
+    minutes.ahead += m.TOKEN_LOGIN_WINDOW
     fake.seen.clear()
     _pass(m)
 
@@ -1149,6 +1163,97 @@ def test_a_password_login_without_an_answer_goes_out_once_per_hold(
     else:
         assert f'{USER}!{LOST}' not in fake.tokens
         assert mgrmod._management_token_kept('c1389').get('unanswered') == []
+
+
+@pytest.mark.parametrize('path', ['end-unknown', 'end-passed', 'new-token', 'unanswered-delete'])
+def test_a_short_outage_is_tried_again_after_half_an_hour(cluster, said, minutes, monkeypatch, path):
+    """One login without an answer, and the directory is back before the next: the next
+    goes out half an hour later and does what the first was for."""
+    fake = RenewPVE({USER: PASSWORD})
+    m, tid = _asking_for_a_login(cluster, fake, path)
+    back = _login_without_answer(fake, monkeypatch, 'timeout')
+    fake.seen.clear()
+    _pass(m)
+    assert len(fake.logins()) == 1
+    back()
+
+    sent = _logins_over(m, fake, minutes, 2 * 3600)
+
+    assert len(sent) == 1 and len(fake.logins()) == 2
+    if path in ('end-unknown', 'end-passed'):
+        assert mgrmod._management_token_kept('c1389').get('expire') == fake.expires[tid]
+    elif path == 'new-token':
+        assert m.config.api_token_user != tid and _works(m)
+    else:
+        assert f'{USER}!{LOST}' not in fake.tokens
+
+
+def test_everything_pegaprox_starts_by_itself_shares_the_two_days(cluster, said, minutes, monkeypatch):
+    """The end unknown, a token whose making got no answer, and the cross-cluster balancer
+    making a migration token into this cluster every ten minutes (a scheduled replication
+    makes it the same way), while the realm's directory does not answer: each would have
+    paced itself and still sent three a day between them. Counted together, the jail of
+    the wiki sees no third within two days."""
+    fake = RenewPVE({USER: PASSWORD})
+    m, tid = _asking_for_a_login(cluster, fake, 'end-unknown')
+    fake.tokens[f'{USER}!{LOST}'] = 'its-secret'
+    kept = mgrmod._management_token_kept('c1389')
+    assert mgrmod._keep_management_token('c1389', {**kept, 'unanswered': [LOST]})
+    m = said.listen(cluster.restart(m))
+    back = _login_without_answer(fake, monkeypatch, 'timeout')
+    fake.seen.clear()
+    tried = []
+
+    def balancer(step):
+        if step % 2 == 0:
+            tried.append(m.create_api_token(f'xclb-{step}', paced=True))
+
+    sent = _logins_over(m, fake, minutes, LONG, also=balancer)
+
+    assert len(sent) == 4 and not _jailed(sent), sent
+    assert not any(t['success'] for t in tried)
+    # what the balancer was told two hours in names the time the login goes out again
+    assert 'at the earliest' in tried[12]['error'] and PASSWORD not in tried[12]['error']
+
+    back()
+    minutes.ahead += m.TOKEN_LOGIN_WINDOW
+    _pass(m)
+    assert m.create_api_token('xclb-back', paced=True)['success']
+    assert f'{USER}!{LOST}' not in fake.tokens
+    assert mgrmod._management_token_kept('c1389').get('expire') == fake.expires[tid]
+
+
+def test_a_refused_login_of_the_balancer_never_gets_pegaprox_banned(cluster, said, minutes):
+    """The password changed on the cluster and not in PegaProx: a refusal waited half an
+    hour for every caller, so the balancer sent a failing login every half hour, banned by
+    the jail of the wiki after an hour. Counted with the logins without an answer now; a
+    migration by hand still hears the refusal at once and logs in again after half an
+    hour, as before."""
+    fake = RenewPVE({USER: PASSWORD})
+    m = cluster.make(fake)
+    fake.users[USER] = 'changed-on-the-cluster'
+    fake.seen.clear()
+    tried = []
+
+    def balancer(step):
+        if step % 2 == 0:
+            tried.append(m.create_api_token(f'xclb-{step}', paced=True))
+
+    sent = _logins_over(m, fake, minutes, LONG, also=balancer)
+
+    assert len(sent) == 4 and not _jailed(sent), sent
+    assert all(t['success'] is False and t.get('refused') for t in tried)
+    # two hours in: past the half hour of the refusal, waiting for the two days
+    assert 'is wrong' in tried[0]['error'] and 'at the earliest' in tried[12]['error']
+
+    # a migration by hand goes by the half hour only
+    fake.seen.clear()
+    assert m.create_api_token('mig-by-hand')['success'] is False
+    assert len(fake.logins()) == 1
+
+    # and the password typed in again on our side ends the wait at once
+    m.config.pass_ = 'changed-on-the-cluster'
+    assert m.create_api_token('xclb-new-password', paced=True)['success']
 
 
 @pytest.mark.parametrize('how', ['timeout', 'busy'])

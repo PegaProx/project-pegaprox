@@ -180,7 +180,9 @@ def run_cross_cluster_balance_check(group):
     # clusters and a guest still moving can be picked again, and a token of the same name
     # is replaced, which revoked the one a running migration authenticates with
     token_name = f"xclb-{group_id[:8]}-{vmid}-{uuid.uuid4().hex[:6]}"
-    token = lo_mgr.create_api_token(token_name, expire=transfer_net.token_expiry())
+    # MK Nov 2026 - paced: a target that makes it over a password login of its account sent
+    # one at every interval while its directory was down, each a failed login on PVE's side
+    token = lo_mgr.create_api_token(token_name, expire=transfer_net.token_expiry(), paced=True)
     if not token.get('success'):
         logger.error(f"[XCLB] Token creation failed on {lo_cid}: {token.get('error')}")
         return

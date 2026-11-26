@@ -10193,9 +10193,10 @@ def _execute_replication_incremental(job):
                 pass
 
 
-def _execute_replication(job):
+def _execute_replication(job, paced=False):
     """
-    Run a single cross-cluster replication cycle for one job.
+    Run a single cross-cluster replication cycle for one job. `paced`: a run of the
+    scheduler, whose token is made as create_api_token(paced=True) makes it.
 
     Steps: snapshot source VM -> clone from snapshot -> remote-migrate clone
     to target cluster -> cleanup snapshot + clone on source.
@@ -10426,7 +10427,7 @@ def _execute_replication(job):
         # remote-migrate clone to target cluster
         # same token/fingerprint flow as cross_cluster_lb.py
         token_name = f"xcrepl-{job_id}-{int(time.time()) % 100000}"
-        token = target_mgr.create_api_token(token_name, expire=transfer_net.token_expiry())
+        token = target_mgr.create_api_token(token_name, expire=transfer_net.token_expiry(), paced=paced)
         if not token.get('success'):
             _cleanup_clone_and_snap(source_mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
             _update_repl_status(db, job_id, 'error', f'Token creation failed: {token.get("error")}')
