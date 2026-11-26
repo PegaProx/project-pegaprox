@@ -18842,6 +18842,7 @@ echo "AGENT_INSTALLED_OK"
             # ("pool 'X' is not empty (contains VM ...)") and the API surfaced that as a
             # bare 'PVE 500'. Un-pool any members first (the VMs themselves are untouched),
             # so deleting a pool works the way operators expect.
+            refused = None
             try:
                 members = (self.get_pool_members(poolid) or {}).get('members', []) or []
                 member_ids = [str(m.get('vmid')) for m in members if m.get('vmid') is not None]
@@ -18849,10 +18850,15 @@ echo "AGENT_INSTALLED_OK"
                 # with 'network' as the PUT takes it back ('vnet/<zone>/<vnet>[/<tag>|/*]'); one
                 # of them left the delete refused. Same PUT, so a refusal leaves the pool whole.
                 vnets = [m['network'] for m in members if m.get('type') == 'network' and m.get('network')]
-                drop = {k: ','.join(v) for k, v in (('vms', member_ids), ('network', vnets)) if v}
+                # a storage member blocks the delete the same way ("contains storage 'X'"), on
+                # every PVE version; 'storage' is as old as pools, so any node takes it
+                stores = [m['storage'] for m in members if m.get('type') == 'storage' and m.get('storage')]
+                drop = {k: ','.join(v) for k, v in (('vms', member_ids), ('storage', stores),
+                                                    ('network', vnets)) if v}
                 if drop:
                     r = self._api_put(base, data={**drop, 'delete': 1})
                     if r.status_code != 200:
+                        refused = (drop, r)
                         self.logger.warning(f"delete_pool({poolid}): un-pooling the members failed: "
                                             f"PVE {r.status_code}: {(r.text or '').strip()[:200]}")
             except Exception as e:
@@ -18860,10 +18866,41 @@ echo "AGENT_INSTALLED_OK"
             resp = self._api_delete(base)
             if resp.status_code == 200:
                 return {'success': True}
+            if refused:
+                return {'success': False, 'error': self._pool_unpool_refusal(poolid, *refused)}
             return {'success': False, 'error': f'PVE {resp.status_code}: {(resp.text or "").strip()[:200]}'}
         except Exception as e:
             self.logger.error(f"delete_pool({poolid}): {e}")
             return {'success': False, 'error': str(e)}
+
+    _POOL_MEMBER_WORDS = (('vms', 'guests'), ('storage', 'storage'), ('network', 'VNets'))
+
+    def _pool_unpool_refusal(self, poolid, drop, response):
+        """What delete_pool says when PVE refused to take the members out.
+
+        MK Nov 2026 - the delete then fails on the first member PVE finds, and its raw JSON
+        named one guest or storage. PVE writes the PUT in one go, so every member in it stayed:
+        name them all by kind, with PVE's reason (the quotes stay, they hold the names)."""
+        import html
+        raw = (response.text or '').replace('\n', ' ').replace('\r', '')
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            errs = body.get('errors')
+            if isinstance(errs, dict) and errs:
+                said = '; '.join(f'{k}: {str(v).strip()}' for k, v in errs.items())
+            else:
+                said = str(body.get('message') or '').strip()
+        else:
+            said = '' if '<html' in raw.lower() else raw.strip()
+        kept = '; '.join(f"{word} {drop[k].replace(',', ', ')}"
+                         for k, word in self._POOL_MEMBER_WORDS if k in drop)
+        msg = (f"Pool '{poolid}' was not deleted: Proxmox VE refused to take its members out "
+               f"({kept}), so they are all still in it. PVE {response.status_code}: "
+               f"{said[:300] or 'no reason given'}")
+        return html.escape(msg, quote=False)
 
     def _used_lxc_mp_slots(self, node: str, vmid: int) -> set:
         """Set of mountpoint slot indices already used by an LXC container ({0,1,…} for mp0/mp1/…)."""
