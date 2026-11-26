@@ -9,8 +9,9 @@ refused (utils/oidc.py).
 test_debian_depends_cover_imports.py holds debian/control to every import. This file holds
 the spec to debian/control: each Depends entry has its Fedora name in DEB_TO_RPM or a reason
 in DEB_ONLY or DEB_TOOLS, and each name there is a Requires line of the spec. The other way
-round, the spec requires nothing outside those names and RPM_ONLY, and its python3-jwt floor
-is a PyJWT whose PyJWKClient takes every keyword utils/oidc.py hands it.
+round, the spec requires nothing outside those names and RPM_ONLY, its python3-jwt floor
+is a PyJWT whose PyJWKClient takes every keyword utils/oidc.py hands it, and its python3
+floor is a Python the shipped code runs on (3.10 since utils/vnc_crypto.py, not EL9's 3.9).
 
 MK Nov 2026
 """
@@ -96,6 +97,8 @@ PYJWKCLIENT_SINCE = {
     'timeout': (2, 7, 0),
     'ssl_context': (2, 8, 0),
 }
+
+README = os.path.join(ROOT, 'README.md')
 
 _DAYS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
 _MONTHS = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
@@ -313,6 +316,107 @@ def test_the_pyjwt_floor_takes_every_keyword_the_jwks_client_is_given():
 ])
 def test_requires_floor_parsing(line, want):
     assert requires_floor(f'Name: x\n{line}\n', 'python3-jwt') == want
+
+
+class _EvaluatedAnnotations(ast.NodeVisitor):
+    """The annotations Python evaluates when no 'from __future__ import annotations' defers
+    them: those of a signature (when the def runs) and those at module and class level.
+    The annotation of a local variable is never evaluated."""
+
+    def __init__(self):
+        self.found = []
+        self._in_function = 0
+
+    def _signature(self, node):
+        a = node.args
+        for arg in a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg]:
+            if arg is not None and arg.annotation is not None:
+                self.found.append(arg.annotation)
+        if node.returns is not None:
+            self.found.append(node.returns)
+        self._in_function += 1
+        self.generic_visit(node)
+        self._in_function -= 1
+
+    visit_FunctionDef = visit_AsyncFunctionDef = _signature
+
+    def visit_AnnAssign(self, node):
+        if not self._in_function:
+            self.found.append(node.annotation)
+        self.generic_visit(node)
+
+
+def _needs_python_310(src, where='<src>'):
+    """Locations in src that Python 3.9 cannot run: syntax it does not parse (match, ...)
+    and an evaluated annotation with X | Y, a TypeError on 3.9 when it is evaluated."""
+    try:
+        ast.parse(src, feature_version=(3, 9))
+    except SyntaxError as e:
+        return [f'{where}:{e.lineno} (syntax)']
+    tree = ast.parse(src)
+    if any(isinstance(n, ast.ImportFrom) and n.module == '__future__'
+           and any(a.name == 'annotations' for a in n.names) for n in tree.body):
+        return []
+    v = _EvaluatedAnnotations()
+    v.visit(tree)
+    return [f'{where}:{ann.lineno}' for ann in v.found
+            if any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.BitOr) for n in ast.walk(ann))]
+
+
+def python_needed():
+    """((major, minor, 0), [locations]) of the oldest Python the shipped code runs on."""
+    found = []
+    for rel in _sources():
+        with open(os.path.join(ROOT, rel), encoding='utf-8') as fh:
+            found += _needs_python_310(fh.read(), rel)
+    return ((3, 10, 0) if found else (3, 0, 0)), found
+
+
+def test_the_python3_floor_is_a_python_the_code_runs_on():
+    """RHEL 9's python3 is 3.9, and the spec required python3 with no version.
+    utils/vnc_crypto.py has 'bytes | None' in its signatures, a TypeError the moment 3.9
+    imports it, so the stable console mode fails there. The floor keeps EL9 out on its own,
+    whatever the python3-jwt floor becomes."""
+    need, where = python_needed()
+    assert any(loc.startswith('pegaprox/utils/vnc_crypto.py:') for loc in where), where
+    floor = requires_floor(_read(SPEC), 'python3')
+    want = '.'.join(map(str, need[:2]))
+    assert floor is not None, (f'packaging/rpm/pegaprox.spec requires python3 with no floor, '
+                               f'{where} need {want}: Requires: python3 >= {want}')
+    assert floor >= need, (f'packaging/rpm/pegaprox.spec holds python3 to '
+                           f'{".".join(map(str, floor[:2]))}, {where} need {want}')
+
+
+def test_the_python3_floor_is_not_below_the_readme():
+    m = re.search(r'^- Python (\d+)\.(\d+) to \d+\.\d+', _read(README), re.M)
+    assert m, 'README.md names no supported Python range under Requirements'
+    floor = requires_floor(_read(SPEC), 'python3')
+    assert floor is not None and floor >= (int(m.group(1)), int(m.group(2)), 0), \
+        f'README.md supports Python from {m.group(1)}.{m.group(2)} on, the spec requires {floor}'
+
+
+@pytest.mark.parametrize('src,needs', [
+    ('def f(x) -> bytes | None:\n    pass\n', True),
+    ('def f(x: int | None = None):\n    pass\n', True),
+    ('async def f(*a: int | str):\n    pass\n', True),
+    ('def outer():\n    def inner(x: int | None):\n        pass\n', True),
+    ('timeout: float | None = None\n', True),
+    ('class A:\n    x: int | None = None\n', True),
+    ('match x:\n    case 1:\n        pass\n', True),
+    ('from __future__ import annotations\ndef f(x) -> bytes | None:\n    pass\n', False),
+    ('def f(x: "bytes | None"):\n    pass\n', False),
+    ('def f():\n    y: int | None = None\n', False),
+    ('flags = A | B\n', False),
+    ('from typing import Optional\ndef f(x) -> Optional[bytes]:\n    pass\n', False),
+])
+def test_the_python_310_scan(src, needs):
+    assert bool(_needs_python_310(src)) is needs
+
+
+def test_requires_floor_reads_python3_apart_from_its_modules():
+    assert requires_floor('Requires: python3-jwt >= 2.8.0\nRequires: python3\n', 'python3') is None
+    assert requires_floor('Requires: python3-jwt >= 2.8.0\nRequires: python3 >= 3.10\n',
+                          'python3') == (3, 10, 0)
 
 
 def test_pyjwt_and_websocket_client_are_required():
