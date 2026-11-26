@@ -5650,12 +5650,15 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
     deployed = False
     
     # Method A: ESXi standard path /etc/ssh/keys-<username>/authorized_keys
+    # MK Nov 2026 - each append waits for the lock of the key removal (see _esxi_keys_locked): a
+    # removal of another run moving its filtered copy over the file took a key added meanwhile with it
     deploy_cmd_a = (
         f"mkdir -p /etc/ssh/keys-{shlex.quote(esxi_user)} 2>/dev/null; "
-        f"echo {shlex.quote(pub)} >> /etc/ssh/keys-{shlex.quote(esxi_user)}/authorized_keys; "
-        f"echo DEPLOYED"
+        + _esxi_keys_locked(
+            f"echo {shlex.quote(pub)} >> /etc/ssh/keys-{shlex.quote(esxi_user)}/authorized_keys; ") +
+        "echo DEPLOYED"
     )
-    rc_a, out_a, _ = _ssh_exec(esxi_host, esxi_user, esxi_pass, deploy_cmd_a, timeout=15)
+    rc_a, out_a, _ = _ssh_exec(esxi_host, esxi_user, esxi_pass, deploy_cmd_a, timeout=30)
     if 'DEPLOYED' in str(out_a or ''):
         deployed = True
         logging.info(f"[V2P] Key deployed via ESXi keys-{esxi_user} path (paramiko)")
@@ -5666,10 +5669,11 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
     if not deployed:
         deploy_cmd_b = (
             f"mkdir -p ~/.ssh 2>/dev/null; chmod 700 ~/.ssh 2>/dev/null; "
-            f"echo {shlex.quote(pub)} >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys 2>/dev/null; "
-            f"echo DEPLOYED"
+            + _esxi_keys_locked(f"echo {shlex.quote(pub)} >> ~/.ssh/authorized_keys; ") +
+            "chmod 600 ~/.ssh/authorized_keys 2>/dev/null; "
+            "echo DEPLOYED"
         )
-        rc_b, out_b, _ = _ssh_exec(esxi_host, esxi_user, esxi_pass, deploy_cmd_b, timeout=15)
+        rc_b, out_b, _ = _ssh_exec(esxi_host, esxi_user, esxi_pass, deploy_cmd_b, timeout=30)
         if 'DEPLOYED' in str(out_b or ''):
             deployed = True
             logging.info("[V2P] Key deployed via ~/.ssh/authorized_keys (paramiko)")
@@ -5680,11 +5684,12 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
     if not deployed:
         deploy_cmd_c = (
             f"mkdir -p /etc/ssh/keys-{shlex.quote(esxi_user)} ~/.ssh 2>/dev/null; "
-            f"echo {shlex.quote(pub)} >> /etc/ssh/keys-{shlex.quote(esxi_user)}/authorized_keys 2>/dev/null; "
-            f"echo {shlex.quote(pub)} >> ~/.ssh/authorized_keys 2>/dev/null; "
-            f"echo DEPLOYED"
+            + _esxi_keys_locked(
+                f"echo {shlex.quote(pub)} >> /etc/ssh/keys-{shlex.quote(esxi_user)}/authorized_keys 2>/dev/null; "
+                f"echo {shlex.quote(pub)} >> ~/.ssh/authorized_keys 2>/dev/null; ") +
+            "echo DEPLOYED"
         )
-        rc_c, out_c, _ = _ssh_exec(esxi_host, esxi_user, esxi_pass, deploy_cmd_c, timeout=15)
+        rc_c, out_c, _ = _ssh_exec(esxi_host, esxi_user, esxi_pass, deploy_cmd_c, timeout=30)
         if 'DEPLOYED' in str(out_c or ''):
             deployed = True
             logging.info("[V2P] Key deployed via both paths (paramiko)")
@@ -5742,6 +5747,28 @@ def _qemu_open_reason(output):
     return reason[:300] if sep and reason else output[-300:]
 
 
+# MK Nov 2026 - the key removal reads authorized_keys and moves a filtered copy over it. A bulk
+# run migrates up to five VMs of one host at once, and a second removal (or a key added) between
+# the read and the move of the first one came back or got lost. mkdir is atomic in busybox ash
+# too, so a directory is the lock. A holder gives it back within milliseconds, so the wait is
+# short; one older than a minute was left by a dead shell and is taken over. After the wait the
+# change runs without the lock, a temporary key left authorized on ESXi is worse.
+_ESXI_KEYS_LOCK = '/tmp/pegaprox-v2p-keys.lock'
+
+
+def _esxi_keys_locked(body):
+    """body (shell, ends with '; ') run on ESXi with the lock on the authorized_keys files held."""
+    return (
+        f'LD={_ESXI_KEYS_LOCK}; LH=; LN=0; '
+        'while [ $LN -lt 20 ]; do LN=$((LN+1)); '
+        'if mkdir "$LD" 2>/dev/null; then LH=1; break; fi; '
+        '[ -n "$(find "$LD" -maxdepth 0 -mmin +1 2>/dev/null)" ] && rmdir "$LD" 2>/dev/null && continue; '
+        'sleep 0.5 2>/dev/null || sleep 1; done; '
+        + body +
+        '[ -z "$LH" ] || rmdir "$LD" 2>/dev/null; '
+    )
+
+
 def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
     """Remove temporary SSH key from Proxmox and ESXi."""
     if not key_path:
@@ -5773,16 +5800,22 @@ def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
     # only one in the file. The `&& mv` skipped the swap then: the key stayed authorized on ESXi,
     # its filtered copy stayed next to it, and CLEANED was echoed anyway. 0 and 1 both mean the
     # file was read. CLEANED now means our key is in neither file any more.
-    _rc_rm, _out_rm, _err_rm = _pve_node_exec(pve_mgr, node,
-        f"ssh -i {key_path} {ESXI_SSH_OPTS} "
-        f"{esxi_user}@{esxi_host} "
-        f"'L=; for F in /etc/ssh/keys-{esxi_user}/authorized_keys ~/.ssh/authorized_keys; do "
+    # MK Nov 2026 - the swap runs under the lock, the check once the lock is given back: CLEANED
+    # is what the files hold after we are done with them
+    _files = f"/etc/ssh/keys-{esxi_user}/authorized_keys ~/.ssh/authorized_keys"
+    _swap = _esxi_keys_locked(
+        f"for F in {_files}; do "
         f"[ -f \"$F\" ] || continue; "
         f"grep -v \"pegaprox-v2p-{key_id}\" \"$F\" > \"$F.{key_id}\" 2>/dev/null; "
         f"if [ $? -le 1 ]; then mv \"$F.{key_id}\" \"$F\" 2>/dev/null; fi; "
         f"rm -f \"$F.{key_id}\" 2>/dev/null; "
+        f"done; ")
+    _rc_rm, _out_rm, _err_rm = _pve_node_exec(pve_mgr, node,
+        f"ssh -i {key_path} {ESXI_SSH_OPTS} "
+        f"{esxi_user}@{esxi_host} "
+        f"'{_swap}L=; for F in {_files}; do "
         f"grep -q \"pegaprox-v2p-{key_id}\" \"$F\" 2>/dev/null && L=1; "
-        f"done; [ -n \"$L\" ] || echo CLEANED' 2>&1", timeout=10)
+        f"done; [ -n \"$L\" ] || echo CLEANED' 2>&1", timeout=30)
     if _rc_rm != 0 or 'CLEANED' not in (_out_rm or ''):
         logging.warning(
             f"[V2P] could not remove the temporary migration key from {esxi_host} "
