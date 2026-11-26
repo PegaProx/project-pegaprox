@@ -1086,6 +1086,77 @@ def _write_node_script(pve_mgr, node, body, tag, timeout=15):
     return path if rc == 0 and _NODE_SCRIPT_RE.fullmatch(path) else None
 
 
+def _package_installs_allowed(task):
+    """allow_package_install of the run, true unless it was turned off (#1252)."""
+    cfg = getattr(task, 'config', None)
+    v = cfg.get('allow_package_install', True) if isinstance(cfg, dict) else True
+    if isinstance(v, str):
+        return v.strip().lower() not in ('false', '0', 'off', 'no')
+    return v is None or bool(v)
+
+
+def _ensure_node_packages(pve_mgr, task, feature, install=True, trust_apt=False, timeout=240, prefix=''):
+    """(ok, missing) for the packages of one v2p_packages feature on the target node.
+
+    MK Nov 2026 (#1252) - every apt-get of a migration goes through here: one call checks,
+    installs what is missing when the run may (and the caller wants it installed) and
+    checks again. ok is False for a package that is still missing; trust_apt counts an
+    apt-get that went through as enough, where the old caller did."""
+    from pegaprox.core import v2p_packages as pk
+    names = pk.packages_of(feature)
+    allowed = install and _package_installs_allowed(task)
+    node = task.target_node
+    rc, out, _err = _pve_node_exec(pve_mgr, node, pk.ensure_script(feature, install=allowed),
+                                   timeout=timeout if allowed else 20)
+    verdict, named, said = pk.parse_ensure(rc, out, names)
+    if verdict == 'INSTALLED':
+        task.log(f"{prefix}Installed {' '.join(named)} on {node} (one-time), for "
+                 f"{pk.NODE_PACKAGES[feature]['purpose']}")
+    elif verdict in ('FAILED', 'UNVERIFIED'):
+        task.log(f"{prefix}apt-get could not install {' '.join(named)} on {node}: {said[-600:] or 'no output'}")
+    elif verdict in ('MISSING', 'UNKNOWN') and install and not allowed:
+        noted = getattr(task, '_packages_not_installed', None)
+        if not isinstance(noted, set):
+            noted = task._packages_not_installed = set()
+        if feature not in noted:
+            noted.add(feature)
+            task.log(f"{prefix}{' '.join(named)} is not installed on {node} and installing packages "
+                     f"is turned off for this migration ({pk.NODE_PACKAGES[feature]['purpose']})")
+    elif verdict == 'UNKNOWN':
+        task.log(f"{prefix}Could not check {' '.join(names)} on {node}: {said or f'exit code {rc}'}")
+    ok = verdict in ('PRESENT', 'INSTALLED') or (trust_apt and verdict == 'UNVERIFIED')
+    return ok, ([] if ok else named)
+
+
+def _node_packages_refusal(pve_mgr, task):
+    """Why a run that may not install packages cannot go on, None when it can. Asked once
+    in the planning step, before the first apt-get would run and before ESXi or Proxmox
+    is touched. A probe that gives no answer stops the run too: unknown is not "present"."""
+    if _package_installs_allowed(task):
+        return None
+    from pegaprox.core import v2p_packages as pk
+    node = task.target_node
+    virtio = bool(getattr(task, 'install_virtio_drivers', False))
+    boot_type = ''
+    if virtio and task.transfer_mode != 'sshfs_boot':
+        boot_type = _pve_storage_type(pve_mgr, node, task.disk_target(0))
+    plan = pk.package_plan(task.transfer_mode, virtio, boot_type)
+    rep = pk.package_report(_pve_node_exec, pve_mgr, node, plan, allow_install=False)
+    if not rep['checked']:
+        return (f"Cannot check the packages on target node {node} ({rep['error']}), and this migration "
+                f"may not install any. Nothing was changed on ESXi or Proxmox; start it again once "
+                f"the node answers, or allow package installs.")
+    if rep['missing_needed']:
+        return pk.missing_message(node, [(it['package'], it['feature']) for it in rep['items']
+                                         if it['needed'] and not it['installed']])
+    if rep['missing']:
+        task.log(f"Not installed on {node}, and this migration installs nothing: {' '.join(rep['missing'])}. "
+                 f"The copies take another way where they would use them.")
+    else:
+        task.log(f"Packages on {node}: everything this migration uses is installed")
+    return None
+
+
 def _run_v2p_migration(task):
     """Execute VMware -> Proxmox migration via SSHFS + qm importdisk.
     
@@ -1343,6 +1414,12 @@ def _run_v2p_migration(task):
                     f"migration again. Nothing was copied, the source VM was not touched.")
                 return
 
+        # MK Nov 2026 (#1252) - a run that may not install packages stops here when the node
+        # lacks one it needs: before the first apt-get below, and before ESXi or Proxmox changed
+        _pkg_refusal = _node_packages_refusal(pve_mgr, task)
+        if _pkg_refusal:
+            task.set_phase('failed', _pkg_refusal); return
+
         # Verify sshfs on Proxmox node (auto-install + re-verify).
         # NS Apr 2026 — old check looked for the substring "sshfs" in apt-get output,
         # which matched even when install silently failed (lock held, mirror down).
@@ -1351,44 +1428,29 @@ def _run_v2p_migration(task):
         # MK Nov 2026 - Live Clone and Snapshot-Iterative copy over HTTPS or ssh, the SSHFS mount
         # is only their last way out. A node without sshfs and without a repository to fetch it
         # from stopped them here, after minutes of apt. They look for it and go on without.
-        sshfs_optional = task.transfer_mode in ('vmkfstools_clone', 'snapshot_zero')
+        from pegaprox.core.v2p_packages import SSHFS_OPTIONAL_MODES
+        sshfs_optional = task.transfer_mode in SSHFS_OPTIONAL_MODES
         use_sshfs = True
-        if sshfs_optional:
-            rc, out, _ = _pve_node_exec(pve_mgr, task.target_node,
-                "command -v sshfs >/dev/null 2>&1 && echo PRESENT || echo MISSING", timeout=15)
-        else:
-            rc, out, _ = _pve_node_exec(pve_mgr, task.target_node,
-                "if command -v sshfs >/dev/null 2>&1; then echo PRESENT; else "
-                "  DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true; "
-                "  DEBIAN_FRONTEND=noninteractive apt-get install -y sshfs >/tmp/v2p-sshfs-install.log 2>&1; "
-                "  if command -v sshfs >/dev/null 2>&1; then echo INSTALLED; "
-                "  else echo FAILED; tail -5 /tmp/v2p-sshfs-install.log 2>/dev/null; fi; "
-                "fi",
-                timeout=180)
-        verdict = ''
-        for line in reversed(str(out or '').splitlines()):
-            line = line.strip()
-            if line in ('PRESENT', 'INSTALLED', 'FAILED', 'MISSING'):
-                verdict = line; break
-        if verdict == 'PRESENT':
-            task.log("sshfs OK (already installed)")
-        elif verdict == 'INSTALLED':
-            task.log("sshfs auto-installed on target node ✓")
+        sshfs_ok, _ = _ensure_node_packages(pve_mgr, task, 'sshfs', install=not sshfs_optional)
+        if sshfs_ok:
+            task.log("sshfs OK")
         elif sshfs_optional:
             use_sshfs = False
             task.log(f"sshfs is not installed on {task.target_node}: the copies go over HTTPS or ssh, "
                      f"without the SSHFS fallback")
+        elif not _package_installs_allowed(task):
+            task.set_phase('failed',
+                f'sshfs is not installed on {task.target_node} and this migration may not install it. '
+                f'Run apt-get install sshfs on the node, or allow package installs.')
+            return
         else:
             task.set_phase('failed',
-                f'sshfs not available on {task.target_node} and auto-install failed. '
-                f'Run manually: apt install sshfs\nInstaller tail: {out[-300:]}')
+                f'sshfs not available on {task.target_node} and auto-install failed (the log above '
+                f'has the apt-get output). Run manually: apt-get install sshfs')
             return
 
         # Also ensure sshpass is available (needed for SCP fallback). Best-effort.
-        _pve_node_exec(pve_mgr, task.target_node,
-            "command -v sshpass >/dev/null 2>&1 || "
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y sshpass >/dev/null 2>&1 || true",
-            timeout=120)
+        _ensure_node_packages(pve_mgr, task, 'sshpass', timeout=120)
         
         # MK Nov 2026 (#1339) - the VMID the caller chose, asked of Proxmox VE once more (minutes
         # went by since the request), or the next free one inside their tenant range; a chosen
@@ -3174,39 +3236,22 @@ def _inject_virtio_drivers(pve_mgr, task):
     # hivexsh went the other way: used, never installed, and its failure swallowed by
     # 2>/dev/null — so VER_BUILD came back empty, the build table matched nothing and
     # every guest silently got the w11 driver variant with INJECTION_OK on top.
-    rc, _, _ = _pve_node_exec(pve_mgr, node,
-        "python3 -c 'import hivex' 2>/dev/null && command -v ntfs-3g >/dev/null "
-        "&& command -v ntfsfix >/dev/null",
-        timeout=10)
-    if rc != 0:
-        task.log("[VirtIO] Installing python3-hivex / ntfs-3g / libhivex-bin (one-time)...")
-        rc_apt, out_apt, _ = _pve_node_exec(pve_mgr, node,
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
-            "python3-hivex ntfs-3g libhivex-bin 2>&1 | tail -25",
-            timeout=180)
-        if rc_apt != 0:
-            # tail -5 used to cut the reason off — an apt refusal on PVE is several
-            # lines of hook output and the operator got "✗ apt install failed:" with
-            # nothing after the colon.
-            task.log(f"[VirtIO] ✗ apt install failed: {str(out_apt or '').strip()[-600:]}")
-            return _virtio_not_injected(task, "python3-hivex / ntfs-3g could not be installed on the node")
+    # MK Nov 2026 (#1252) - checked and installed through _ensure_node_packages ('virtio' and
+    # 'virtio_build' in v2p_packages), which keeps the last 25 lines of a failed apt-get
+    ok_tools, missing_tools = _ensure_node_packages(pve_mgr, task, 'virtio', trust_apt=True, prefix='[VirtIO] ')
+    if not ok_tools:
+        why = ('could not be installed on the node' if _package_installs_allowed(task) else
+               'are not installed on the node, and this migration may not install packages')
+        return _virtio_not_injected(task, f"{' / '.join(missing_tools)} {why}")
 
     # hivexsh is checked separately and is NOT fatal. It only feeds the version probe,
     # and the script falls back to a driver variant without it — which for a Windows 11
     # guest is even the right one. Making it a hard requirement would abort migrations
     # on air-gapped nodes that worked before. Try to fetch it, then let the script say
     # NO_HIVEXSH and pick a fallback if it is still missing.
-    rc_hv, _, _ = _pve_node_exec(pve_mgr, node, "command -v hivexsh >/dev/null", timeout=10)
-    if rc_hv != 0:
-        task.log("[VirtIO] hivexsh missing — installing libhivex-bin for the version probe...")
-        rc_hv2, out_hv, _ = _pve_node_exec(pve_mgr, node,
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
-            "libhivex-bin 2>&1 | tail -25",
-            timeout=180)
-        if rc_hv2 != 0:
-            task.log("[VirtIO] ! libhivex-bin not installed — the guest's Windows build "
-                     "can't be read, so the driver variant is a guess: "
-                     f"{str(out_hv or '').strip()[-300:]}")
+    if not _ensure_node_packages(pve_mgr, task, 'virtio_build', prefix='[VirtIO] ')[0]:
+        task.log("[VirtIO] ! libhivex-bin not installed - the guest's Windows build "
+                 "can't be read, so the driver variant is a guess")
 
     # 2) Locate ISO. User-set path wins.
     iso_candidates = []
@@ -3255,6 +3300,8 @@ def _inject_virtio_drivers(pve_mgr, task):
         krbd_opts = {} if vol_path.startswith('rbd:') else \
             _ceph_storage_opts(pve_mgr, node, task.target_storage)
         rbd_map = ' '.join(shlex.quote(a) for a in _rbd_map_args(vol_path, krbd_opts))
+        # the rbd CLI, installed by the script itself until #1252; the script only says so now
+        _ensure_node_packages(pve_mgr, task, 'rbd', prefix='[VirtIO] ')
 
     drivers_arg = ' '.join(_VIRTIO_DRIVERS)
     script = (
@@ -3300,8 +3347,7 @@ def _inject_virtio_drivers(pve_mgr, task):
         # image PVE has mapped is used as it is, and that map stays; only a map made here
         # is undone by cleanup.
         "  rbd)\n"
-        "    command -v rbd >/dev/null || { echo 'rbd cli missing — apt install ceph-common'; "
-        "      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ceph-common >/dev/null 2>&1; }\n"
+        "    command -v rbd >/dev/null || echo 'rbd cli missing - ceph-common is not installed'\n"
         "    if [ -b \"$VOL\" ]; then\n"
         "      BLK=\"$VOL\"\n"
         "    else\n"
@@ -4125,10 +4171,7 @@ def _area_copy_login(pve_mgr, task, esxi_host, esxi_user, esxi_pass):
     held = getattr(task, '_area_login', None)
     if held:
         return held
-    rc, _o, _e = _pve_node_exec(pve_mgr, task.target_node,
-        "command -v sshpass >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y sshpass "
-        ">/dev/null 2>&1; command -v sshpass >/dev/null 2>&1", timeout=120)
-    if rc == 0:
+    if _ensure_node_packages(pve_mgr, task, 'sshpass', timeout=120)[0]:
         held = ('password', None)
     else:
         key = _setup_temp_ssh_key(pve_mgr, task.target_node, esxi_host, esxi_user, esxi_pass)
@@ -6065,12 +6108,11 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
     
     task.log(f"ESXi tools: lz4={esxi_lz4}, gzip={esxi_gzip}, pigz={esxi_pigz}")
     
-    # Proxmox: ensure tools installed
-    _pve_node_exec(pve_mgr, task.target_node,
-        "which lz4 >/dev/null 2>&1 || apt-get install -y lz4 2>&1 | tail -1", timeout=20)
-    _pve_node_exec(pve_mgr, task.target_node,
-        "which mbuffer >/dev/null 2>&1 || apt-get install -y mbuffer 2>&1 | tail -1", timeout=20)
-    
+    # MK Nov 2026 (#1252) - the node needs lz4 only to unpack what an lz4 on ESXi packed;
+    # without it the copy takes gzip or none. mbuffer was installed here and never used.
+    if esxi_lz4 and not _ensure_node_packages(pve_mgr, task, 'lz4', timeout=120)[0]:
+        esxi_lz4 = False
+
     # Compression strategy: lz4 > pigz > gzip-1 > none
     if esxi_lz4:
         esxi_compress = "lz4 -1 -"
@@ -6433,11 +6475,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     task.log("=== NEAR-ZERO DOWNTIME: QEMU SSH boot + live mirror ===")
     
     # Ensure sshpass available
-    rc_sp, _, _ = _pve_node_exec(pve_mgr, task.target_node, "which sshpass 2>/dev/null", timeout=5)
-    if rc_sp != 0:
-        task.log("Installing sshpass...")
-        _pve_node_exec(pve_mgr, task.target_node, "apt-get install -y sshpass 2>&1 | tail -1", timeout=30)
-    
+    _ensure_node_packages(pve_mgr, task, 'sshpass', timeout=60)
+
     task.log("Deploying SSH key to ESXi...")
     key_path = _setup_temp_ssh_key(pve_mgr, task.target_node, esxi_host, esxi_user, esxi_pass)
     ssh_tunnel_port = None
@@ -7081,7 +7120,9 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             task.log(f"VM start API error: {e}")
     else:
         task.log("No remote boot method available (QEMU-SSH/SSHFS/NBD all failed)")
-        task.log("Hint: install sshfs and qemu-utils (apt install sshfs qemu-utils) for more transfer options")
+        # MK Nov 2026 - this hint used to suggest qemu-utils, which conflicts with pve-qemu-kvm (#520)
+        task.log("Hint: sshfs and sshpass on the node give more transfer options "
+                 "(apt-get install --no-install-recommends sshfs sshpass); qemu-img comes with pve-qemu-kvm")
     
     if not vm_running_on_ssh:
         task.log("Switching to offline mode: copy first, then start VM")
@@ -7784,7 +7825,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 _pve_node_exec(pve_mgr, task.target_node,
                     f"fuser -k {sock} 2>/dev/null; rm -f {sock}", timeout=5)
         _cleanup_temp_ssh_key(pve_mgr, task.target_node, key_path, esxi_host, esxi_user)
-        task.set_phase('failed', 'Disk copy to local storage failed. Check logs above for details. Ensure qemu-utils, sshfs and sshpass are installed on the Proxmox node.')
+        task.set_phase('failed', 'Disk copy to local storage failed. Check logs above for details. Ensure sshfs and sshpass are installed on the Proxmox node (qemu-img comes with pve-qemu-kvm).')
         return
     
     _cleanup_copy_isolation(pve_mgr, task.target_node, bg_iso)
@@ -8655,10 +8696,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
         if not dl_success:
             task.log(f"  SSH dd pipe ({flat_size_gb:.1f} GB)...")
             if not ssh_key:
-                rc_sp2, _o, _e = _pve_node_exec(pve_mgr, task.target_node,
-                    "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1; "
-                    "which sshpass >/dev/null 2>&1", timeout=30)
-                if rc_sp2 != 0:
+                if not _ensure_node_packages(pve_mgr, task, 'sshpass', timeout=60)[0]:
                     ssh_key = _setup_temp_ssh_key(pve_mgr, task.target_node, esxi_host, esxi_user, esxi_pass)
 
             dd_log2 = f"/tmp/v2p-{task.id}-sshdd-{disk_index}.log"

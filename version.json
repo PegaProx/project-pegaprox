@@ -184,6 +184,7 @@
     "pegaprox/core/timeline.py",
     "pegaprox/core/transfer_net.py",
     "pegaprox/core/v2p.py",
+    "pegaprox/core/v2p_packages.py",
     "pegaprox/core/vmware.py",
     "pegaprox/core/whatif.py",
     "pegaprox/core/xcpng.py",

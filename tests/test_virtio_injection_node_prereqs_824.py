@@ -62,34 +62,25 @@ def _injection_node_script():
 
 
 def _node_commands():
-    """Every command string _inject_virtio_drivers hands to _pve_node_exec.
+    """Every command _inject_virtio_drivers has the node run for its tools.
 
-    Deliberately the ARGUMENTS, not the surrounding source text: the comments there
+    Deliberately the commands, not the surrounding source text: the comments there
     explain what was removed and why, and a test that greps the region would keep
     failing on its own explanation. What matters is what gets run on the node.
+
+    MK Nov 2026 (#1252) - the checks and installs moved to v2p._ensure_node_packages: the
+    features the injection asks for are read from its calls, and their node commands are
+    built the way the helper builds them, once with installs allowed and once without.
     """
+    from pegaprox.core import v2p_packages
     tree = ast.parse(_SRC)
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == '_inject_virtio_drivers')
-    cmds = []
-    for node in ast.walk(fn):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id == '_pve_node_exec'):
-            continue
-        for arg in node.args[1:]:
-            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                cmds.append(arg.value)
-            elif isinstance(arg, ast.BinOp):
-                parts = []
-                stack = [arg]
-                while stack:
-                    n = stack.pop()
-                    if isinstance(n, ast.Constant) and isinstance(n.value, str):
-                        parts.append(n.value)
-                    elif isinstance(n, ast.BinOp):
-                        stack += [n.right, n.left]
-                if parts:
-                    cmds.append(''.join(reversed(parts)))
+    features = [node.args[2].value for node in ast.walk(fn)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == '_ensure_node_packages'
+                and len(node.args) > 2 and isinstance(node.args[2], ast.Constant)]
+    cmds = [v2p_packages.ensure_script(f, install=allowed) for f in features for allowed in (True, False)]
     assert cmds, "no node commands recovered"
     return cmds
 
@@ -102,7 +93,7 @@ def _apt_install_cmds():
 
 def _required_tool_probe():
     """The probe whose failure is fatal — it decides whether the injection runs at all."""
-    hits = [c for c in _node_commands() if "import hivex" in c]
+    hits = [c for c in _node_commands() if "import hivex" in c and 'apt-get' not in c]
     assert len(hits) == 1, f"expected exactly one required-tool probe, got {len(hits)}"
     return hits[0]
 

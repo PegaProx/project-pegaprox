@@ -715,7 +715,9 @@ def test_a_disk_copy_on_a_node_without_sshpass_logs_in_with_a_key(monkeypatch):
     real = r.node
 
     def node(mgr, n, cmd, timeout=600, **kw):
-        if cmd.startswith('which sshpass') or cmd == 'command -v sshpass >/dev/null 2>&1':
+        # the check, and the one of the package helper (#1252) that would install it
+        if cmd == 'command -v sshpass >/dev/null 2>&1' or \
+                cmd.startswith('command -v sshpass >/dev/null 2>&1 && echo PRESENT'):
             real.log.append(('node', n, cmd))
             return 1, '', ''
         if cmd.startswith('ssh -i ') and '| dd of=' in cmd:

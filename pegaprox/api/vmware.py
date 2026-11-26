@@ -1369,7 +1369,7 @@ def get_vmware_migration_plan(vmware_id, vm_id):
         'estimated_downtime_seconds': max(10, int(vm_data.get('total_disk_gb', 10) * 0.3)),
         'requirements': [
             'SSH must be enabled on ESXi host',
-            'sshfs must be installed on target Proxmox node (apt install sshfs)',
+            'sshfs on the target Proxmox node; the review step lists every package the chosen options need there',
             'ESXi root password is required for SSHFS access',
             'Sufficient temp space on Proxmox node for disk conversion',
         ],
@@ -1407,9 +1407,14 @@ def start_vmware_migration(vmware_id, vm_id):
       the target cluster, inside the caller's tenant range and allowed by the cluster's next-id
       setting. It is asked again right before the guest is created, and the migration fails
       when it got taken meanwhile. Empty: the next free VMID, inside the caller's tenant range.
+    - allow_package_install (#1252): default true. False installs nothing on the target node;
+      a run that misses a package it needs stops before it changes anything and names them.
     - dry_run: true checks all of it against the target node and answers 200 with the
-      resolved plan ({ok, errors, warnings, nics, disks, storages, available}); nothing is
-      started and no ESXi password is needed.
+      resolved plan ({ok, errors, warnings, nics, disks, storages, available, node_packages});
+      nothing is started and no ESXi password is needed. node_packages lists what the options
+      may install on the target node and which of it is missing (one SSH call to that node;
+      checked false when it could not be asked). check_packages: false leaves that call out
+      (node_packages null), for a dry run that only wants the node's bridges and storages.
     """
     if vmware_id not in vmware_managers:
         return jsonify({'error': 'VMware server not found'}), 404
@@ -1533,6 +1538,15 @@ def start_vmware_migration(vmware_id, vm_id):
             _plan['ok'] = False
         if _qwarn:
             _plan['warnings'].append(str(_qwarn.get('message') or 'Tenant quota exceeded (warning only)'))
+        # MK Nov 2026 (#1252) - what the options may install on the target node, and what of it is missing.
+        # The wizard's inventory read (bridges and storages on a target change) has no use for it.
+        _plan['node_packages'], _perr, _pwarn = _v2p_node_packages(data, _plan) \
+            if data.get('check_packages') is not False else (None, None, None)
+        if _perr:
+            _plan['errors'].append(_perr)
+            _plan['ok'] = False
+        if _pwarn:
+            _plan['warnings'].append(_pwarn)
         return jsonify({'dry_run': True, 'vm_name': vm_name, **_plan})
     if _plan is not None and not _plan['ok']:
         return jsonify({'error': 'The migration plan does not fit the target node: '
@@ -1715,7 +1729,35 @@ def _migrate_body_refusal(vmware_id, data, dry_run):
         if _opts['verify'] == 'full' else None
     if _full_refusal and not dry_run:
         return _full_refusal, None
+    # MK Nov 2026 (#1252) - false: nothing is installed on the target node, and a run that
+    # misses a package it needs stops before it changes anything
+    if 'allow_package_install' in data and not isinstance(data['allow_package_install'], bool):
+        return 'allow_package_install must be true or false', None
     return None, _opts
+
+
+def _v2p_node_packages(data, plan=None):
+    """(report, error, warning): what the options of a migrate request may install on its
+    target node and which of it the node has, with one SSH call to that one node
+    (v2p_packages.package_report); the error when the run would stop on it, the warning
+    when the node could not be asked. The plan, when there is one, tells the storage type
+    of the boot disk; a bulk check hands in the disks of all its guests, and one boot disk
+    on rbd among them is enough for the rbd CLI."""
+    from pegaprox.core import v2p_packages as pk
+    virtio = bool(data.get('install_virtio_drivers'))
+    boot_type = ''
+    if virtio and plan:
+        types_of = {s.get('storage'): str(s.get('type') or '').lower()
+                    for s in (plan.get('available') or {}).get('storages') or []}
+        boots = [types_of.get(d.get('storage') or data.get('target_storage'), '')
+                 for d in plan.get('disks') or [] if d.get('boot')] \
+            or [types_of.get(data.get('target_storage'), '')]
+        boot_type = 'rbd' if 'rbd' in boots else boots[0]
+    report = pk.package_report(_v2p._pve_node_exec, cluster_managers.get(data['target_cluster']),
+                               str(data['target_node']),
+                               pk.package_plan(data.get('transfer_mode') or 'auto', virtio, boot_type),
+                               allow_install=data.get('allow_package_install', True) is not False)
+    return (report,) + pk.report_problem(report)
 
 
 def _v2p_footprint(vm_detail, data, skipped):
@@ -1958,9 +2000,10 @@ def cancel_vmware_cutover(mid):
 # is not here refuses the request instead of being dropped without a word
 _BULK_COMMON = ('target_cluster', 'target_node', 'target_storage', 'network_bridge', 'net_vlan_tag',
                 'transfer_mode', 'verify', 'start_after', 'remove_source', 'wait_for_confirmation',
-                'confirmation_timeout', 'esxi_user', 'preserve_mac', 'bios', 'disk_format')
+                'confirmation_timeout', 'esxi_user', 'preserve_mac', 'bios', 'disk_format',
+                'allow_package_install')
 _BULK_KEYS = frozenset(_BULK_COMMON + ('vms', 'width', 'dry_run', 'esxi_password'))
-_BULK_FLAGS = ('start_after', 'remove_source', 'wait_for_confirmation', 'preserve_mac')
+_BULK_FLAGS = ('start_after', 'remove_source', 'wait_for_confirmation', 'preserve_mac', 'allow_package_install')
 _BULK_MODES = ('vmkfstools_clone', 'auto', 'sshfs_boot', 'snapshot_zero', 'offline')
 # what ESXi calls a guest: vm-42 over REST, a plain number on a lone host over SOAP
 _ESXI_VM_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}')
@@ -2217,12 +2260,22 @@ def _bulk_check(vmware_id, settings, vms, user):
         errors.append(_answer_error(qerr, 'Tenant quota exceeded'))
     if qwarn:
         warnings.append(str(qwarn.get('message') or 'Tenant quota exceeded (warning only)'))
+    # MK Nov 2026 (#1252) - every guest shares the transfer mode and the node: the packages are
+    # asked once for the run, not once per guest. The boot disks of all guests decide rbd.
+    packages, perr, pwarn = _v2p_node_packages(settings, {
+        'disks': [d for it in items for d in it['disks']],
+        'available': {'storages': [{'storage': n, 'type': st.get('type')} for n, st in inv['storages'].items()]},
+    }) if todo else (None, None, None)
+    if perr:
+        errors.append(perr)
+    if pwarn:
+        warnings.append(pwarn)
 
     for it in items:
         it.pop('_footprint', None)
         it['ok'] = not it['errors']
     return {'ok': not errors and all(it['ok'] for it in items), 'errors': errors, 'warnings': warnings,
-            'items': items, 'storages': storages,
+            'items': items, 'storages': storages, 'node_packages': packages,
             'target': {'cluster': settings['target_cluster'], 'node': node, 'storage': settings['target_storage']},
             'available': {
                 'bridges': [{'name': n, 'kind': k} for n, k in sorted(inv['bridges'].items())],
@@ -2366,12 +2419,13 @@ def start_vmware_bulk_migration(vmware_id):
     shares: target_cluster, target_node, target_storage (required), network_bridge,
     net_vlan_tag, transfer_mode, verify, start_after, remove_source (needs vmware.vm.manage
     on each guest), wait_for_confirmation, confirmation_timeout, esxi_user, preserve_mac,
-    bios, disk_format. Any other key is refused.
+    bios, disk_format, allow_package_install (#1252, default true). Any other key is refused.
 
     Each guest is checked like a dry run of POST .../vms/<vm_id>/migrate: the caller may
     migrate it, no other migration has it, its NICs and disks fit the target node, and the
     guests together fit the storages and the tenant quota. dry_run: true answers 200 with
-    that check ({ok, errors, warnings, items: one per guest, storages, available}), needs no
+    that check ({ok, errors, warnings, items: one per guest, storages, available,
+    node_packages: what the run may install on the target node, asked once}), needs no
     password and starts nothing. Without it, one guest that does not fit refuses the whole
     request (400, with the same items); otherwise the answer is the run (202, {run}), to
     follow with GET /api/vmware/bulk-migrate/<run_id>.

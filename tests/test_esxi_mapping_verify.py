@@ -438,7 +438,8 @@ class Run:
 # at the volume disk 0 was copied to (tests/test_esxi_followups.py). Then the tool probes
 # that say which tool is missing and the reachability probe of the ESXi host, the ESXi
 # password in a file on the node instead of on a command line, the drive options of every
-# attach, and the EFI disk a live pivot gives a guest left on Auto firmware.
+# attach, and the EFI disk a live pivot gives a guest left on Auto firmware. Then the package
+# checks and installs of the node behind one helper (#1252): only those steps changed.
 LEGACY_SCENARIOS = {
     'offline': dict(mode='offline'),
     'vmkfstools_clone': dict(mode='vmkfstools_clone'),
@@ -1200,8 +1201,9 @@ def test_runtime_the_wizard_maps_nics_and_disks_reviews_and_starts_what_it_revie
     _pick_target(page)
     # the dry run without maps fills the bridge lists with what the node has
     page.locator('option', has_text='dmz10 (vnet)').first.wait_for(state='attached', timeout=5000)
+    # (#1252) this read leaves out the package check of the review, one SSH call per target change
     assert _migrate_bodies(app)[0] == {'target_cluster': 'c1', 'target_node': 'pve1',
-                                       'target_storage': 'local-lvm', 'dry_run': True}
+                                       'target_storage': 'local-lvm', 'dry_run': True, 'check_packages': False}
     nic_selects = page.locator('select', has=page.locator('option', has_text='dmz10 (vnet)'))
     assert nic_selects.count() == 2
     nic_selects.nth(0).select_option('vmbr1')
