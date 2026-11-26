@@ -9690,14 +9690,24 @@ def _next_id_refusal(mgr, vmid):
     guest outside its lower/upper range, and with 'unique' also one whose VMID was used
     before (pve-guest-common GuestID.pm, "guest ID N was used before"). Removing the old
     replica records its VMID as used, so the copy that follows under it is refused and
-    the target has no replica at all. Options that cannot be read refuse nothing."""
+    the target has no replica at all. Every caller removes a replica next, so options that
+    cannot be read refuse as well (a Proxmox VE without the option answers them without
+    it); the next run asks again."""
+    name = getattr(getattr(mgr, 'config', None), 'name', None) or 'The cluster'
     try:
         r = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/options")
-        opts = (r.json().get('data') or {}) if r.status_code == 200 else {}
+        unread = None if r.status_code == 200 else f'HTTP {r.status_code}'
+        opts = (r.json().get('data') or {}) if unread is None else {}
     except Exception as e:
-        logging.debug(f"[REPL] datacenter options unreadable: {e}")
-        return None
-    nid = opts.get('next-id') if isinstance(opts, dict) else None
+        unread = f'no answer ({type(e).__name__})'
+    if unread is not None or not isinstance(opts, dict):
+        logging.warning(f"[REPL] datacenter options of {name} unreadable ({unread or 'no object'}), "
+                        f"replica {vmid} kept")
+        return (f"The datacenter options of {name} could not be read ({unread or 'no object'}), so "
+                f"whether its next-id setting lets a new guest take VMID {vmid} again is not known. "
+                f"Nothing was removed - the next run tries again (the PegaProx account needs "
+                f"Sys.Audit on /).")
+    nid = opts.get('next-id')
     if isinstance(nid, str):
         # a property string where the option comes unparsed
         nid = dict(p.strip().split('=', 1) for p in nid.split(',') if '=' in p)
@@ -9712,7 +9722,6 @@ def _next_id_refusal(mgr, vmid):
         lower, upper = int(nid.get('lower') or 100), int(nid.get('upper') or 1000000)
     except (TypeError, ValueError):
         lower, upper = 100, 1000000
-    name = getattr(getattr(mgr, 'config', None), 'name', None) or 'The cluster'
     if not lower <= int(vmid) < upper:
         return (f"{name} enforces its datacenter option next-id: no new guest outside {lower} to "
                 f"{upper - 1}, so a replica removed at VMID {vmid} could not be created again. Nothing "

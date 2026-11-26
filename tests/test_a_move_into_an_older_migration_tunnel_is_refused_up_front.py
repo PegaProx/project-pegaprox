@@ -274,8 +274,9 @@ class _Side(_Cluster):
 
     def _api_get(self, url, params=None, **kw):
         path = url.split('/api2/json', 1)[1]
-        if path == '/cluster/options' and self.options is not None:
-            return _R(200, self.options)
+        if path == '/cluster/options':
+            # a cluster answers its datacenter options; None is one without next-id
+            return _R(200, self.options if self.options is not None else {})
         got = _answer(path, self.packages, self.node)
         return got if got is not None else super()._api_get(url, params=params, **kw)
 

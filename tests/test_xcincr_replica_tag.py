@@ -46,6 +46,8 @@ class FakeMgr:
             return _R(200, [{'vmid': v, 'node': self.node, 'type': 'qemu'} for v in self.vms_here])
         if url.endswith('/cluster/status'):
             return _R(200, [{'type': 'node', 'name': self.node, 'ip': self.ip}])
+        if url.endswith('/cluster/options'):
+            return _R(200, {})   # the datacenter options, without a next-id setting
         if url.endswith('/api2/json/storage'):
             return _R(200, [{'storage': s, 'type': t} for s, t in self.storages.items()])
         for vmid, cfg in self.configs.items():

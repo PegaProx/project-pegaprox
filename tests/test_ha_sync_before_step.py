@@ -203,6 +203,8 @@ class _Cluster:
             return _R(200, [{'node': self.node, 'status': 'online'}])
         if path == '/cluster/nextid':
             return _R(200, '9100')
+        if path == '/cluster/options':
+            return _R(200, {})   # no next-id setting
         if path == '/storage':
             return _R(200, [{'storage': 'fast', 'type': 'lvmthin'}])
         if path.endswith('/config'):

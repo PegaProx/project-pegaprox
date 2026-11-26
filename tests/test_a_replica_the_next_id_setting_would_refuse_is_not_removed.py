@@ -10,8 +10,10 @@ run removes it before a reseed and creates the replica again. Under such a setti
 replica was gone and the new one refused, and the job had no copy at all from then on.
 
 Now each of them reads the option (GET /cluster/options) before it removes anything and
-ends the run with an error that says why. Without the setting, or where it cannot be read
-(an older Proxmox VE has no such option), the runs replace their replica as before.
+ends the run with an error that says why. Without the setting (an older Proxmox VE has no
+such option) the runs replace their replica as before. Options that cannot be read keep the
+replica too: the run cannot tell whether the copy would be let back, and the next run asks
+again (a scan of the release pull request found that the unread case removed it).
 """
 import pytest
 
@@ -32,7 +34,7 @@ class _Options:
         assert url.endswith('/cluster/options'), url
         if isinstance(self.answer, Exception):
             raise self.answer
-        return _R(200, self.answer) if isinstance(self.answer, dict) else _R(self.answer)
+        return _R(200, self.answer) if isinstance(self.answer, (dict, list)) else _R(self.answer)
 
 
 @pytest.mark.parametrize('options, vmid, refused', [
@@ -44,14 +46,17 @@ class _Options:
     ({'next-id': {'unique': 1}}, 5000, None),
     ({'next-id': {'unique': 1, 'enforce': 0}}, 5000, None),
     ({}, 5000, None),
-    (403, 5000, None),
-    (ConnectionError('gone'), 5000, None),
+    (403, 5000, 'could not be read (HTTP 403)'),
+    (ConnectionError('gone'), 5000, 'could not be read (no answer (ConnectionError))'),
+    (['not', 'an', 'object'], 5000, 'could not be read (no object)'),
 ], ids=['unique', 'as a string', 'below the range', 'at the upper end', 'in the range', 'unique alone',
-        'not enforced', 'not set', 'unread', 'no answer'])
+        'not enforced', 'not set', 'unread', 'no answer', 'not an object'])
 def test_the_setting_is_read_as_proxmox_ve_applies_it(options, vmid, refused):
     why = vms._next_id_refusal(_Options(options), vmid)
     if refused is None:
         assert why is None
+    elif 'could not be read' in refused:
+        assert refused in why and 'Nothing was removed' in why and 'the next run tries again' in why
     else:
         assert refused in why and 'Nothing was removed' in why and why.startswith('dr enforces')
 
