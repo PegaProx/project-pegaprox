@@ -1161,6 +1161,8 @@
                                     {/* NS: force/exit buttons - only when NOT yet acknowledged */}
                                     {!haReadOnly && !metrics.maintenance_acknowledged && (maintenanceTask.status === 'completed_with_errors' || (maintenanceTask.failed_vms && maintenanceTask.failed_vms.length > 0)) && (
                                         <div className="mt-1.5 flex items-center gap-2">
+                                            {/* LW Nov 2026 - only once the evacuation is over, before that the acknowledgement unlocked nothing (#1394) */}
+                                            {maintenanceTask.status === 'completed_with_errors' && (
                                             <button onClick={(e) => { e.stopPropagation();
                                                 if (confirm(t('forceMaintenanceWarning') || 'Proceeding may stop remaining VMs. Continue?')) {
                                                     fetch(`${API_URL}/clusters/${clusterId}/nodes/${name}/maintenance/acknowledge`, { method: 'POST', credentials: 'include', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' } }).catch(() => {});
@@ -1168,6 +1170,7 @@
                                             }} className="px-2 py-0.5 text-[11px] font-medium" style={{background: 'rgba(239,192,6,0.15)', color: '#efc006', border: '1px solid rgba(239,192,6,0.3)'}}>
                                                 <Icons.AlertTriangle className="w-2.5 h-2.5 inline mr-1" />{t('proceedAnyway')}
                                             </button>
+                                            )}
                                             <button onClick={(e) => { e.stopPropagation(); onMaintenanceToggle && onMaintenanceToggle(name, false); }}
                                                 className="px-2 py-0.5 text-[11px] font-medium" style={{background: 'rgba(96,181,21,0.1)', color: '#60b515', border: '1px solid rgba(96,181,21,0.3)'}}>
                                                 {t('exitMaintenance')}
