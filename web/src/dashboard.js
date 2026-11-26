@@ -20165,10 +20165,19 @@
                 return () => { gone = true; clearInterval(timer); };
             }, [selectedCluster?.id, haStandby, haReadOnly]);
 
-            // LW Nov 2026 - the other sites' clusters, every 30 s. Off (404), the next look is in five
-            // minutes and the sections go; an account of another site gets its home named instead
+            // LW Nov 2026 - the other sites' clusters, every 30 s; an account of another site gets its
+            // home named instead. Only while the federation runs (#1372): off, the route answers 404
+            // and every look left a failed request in the browser's console. The flag comes with
+            // login and /auth/check, and while it is off that is what is read again every five
+            // minutes. A 404 here means it was switched off since: the flag is read at once
+            const { federationOn } = useAuth();
             useEffect(() => {
                 if (!sessionId) return;
+                if (!federationOn) {
+                    setRemoteSites(prev => prev.length ? [] : prev); setRemoteHome(null);
+                    const h = setInterval(() => refreshHa?.(), 300000);
+                    return () => clearInterval(h);
+                }
                 let gone = false, timer = null;
                 const poll = async () => {
                     let wait = 30000;
@@ -20179,14 +20188,17 @@
                             if (!gone) { setRemoteSites(Array.isArray(d.sites) ? d.sites : []); setRemoteHome(d.home || null); }
                         } else {
                             if (!gone) { setRemoteSites([]); setRemoteHome(null); }
-                            if (r && r.status === 404) wait = 300000;
+                            if (r && r.status === 404) {
+                                wait = 300000;
+                                if (!gone) refreshHa?.();
+                            }
                         }
                     } catch (e) { /* the next look tries again */ }
                     if (!gone) timer = setTimeout(poll, wait);
                 };
                 poll();
                 return () => { gone = true; if (timer) clearTimeout(timer); };
-            }, [sessionId]);
+            }, [sessionId, federationOn]);
             // a selected cluster of another site follows its row (its permissions there may have
             // changed), and new remote clusters get their overview read at once, not 30 s later
             const remoteIdsKey = remoteClusters.map(c => c.id).join(',');
