@@ -96,10 +96,24 @@ its own at the first login and keeps the password for what a token cannot do.
 
 Under an API token policy of the cluster (Proxmox VE 9.3, Datacenter > Options > API Token
 Policy) that token gets the longest lifetime the policy allows, a year where it only wants
-an expiry. Once Proxmox refuses it, PegaProx logs in with the password right away, makes a
-new one and deletes the old one. An account with two-factor login cannot log in
-that way: the cluster then says its token has expired, and needs an API token as its login
-or two-factor login off for one connect. A policy that requires privilege separation gets
+an expiry. PegaProx renews it before it ends: it looks at the end every five minutes, and
+once two days are left (a fifth of the lifetime where that is less) it logs in with the
+password, makes a new token, stores it and deletes the old one. Where there is no password
+login, for an account with two-factor login or a cluster without a stored password, the
+token renews itself: with a new secret in place where the policy lets that extend the end
+(*Allow Extension on Regenerate*), else with a new token, stored before the old one is
+deleted. Proxmox lets a token do that only where its account may manage its own tokens:
+`User.Modify` on the account's group, and for a token without privilege separation
+`Permissions.Modify` on `/` and `Realm.AllocateUser` on the realm, all of which the
+Administrator role has and the role above does not. When neither way works, PegaProx says
+so once, in the log at warning level and as an alert to the push notifications and the
+alert channels, with the time the token ends, and tries again only hours later. Each
+renewal is in the audit log. A token typed in by hand, and a cluster added with a token as
+its login, are never renewed; a cluster without such a policy sees no change. Should the
+token still run out, PegaProx logs in with the password right away, makes a new one and
+deletes the old one. An account with two-factor login cannot log in that way: the cluster
+then says its token has expired, and needs an API token as its login or two-factor login
+off for one connect. A policy that requires privilege separation gets
 no such token, since it would hold no right without ACLs of its own: PegaProx stays on
 password logins and logs a warning. *Rotate API Token* in the cluster settings gives the
 token a new secret in place on Proxmox VE 9.2 and later (over the password login where
