@@ -690,7 +690,16 @@ def sse_updates():
         _fed_principal = federation_stream.principal_for(
             user, _bound.get('sid'), _bound.get('token_id'), _token_role, _client_ip)
         if _fed_principal:
-            federation_stream.watch(client_id, remote_clusters, _fed_principal)
+            # MK Nov 2026 - under the lock of the subscription update and with the selection
+            # as it stands now: a change sent while the principal was looked up must not
+            # get the feeds of this older selection back
+            with _fed_watch_lock:
+                with sse_clients_lock:
+                    _now_remote = list((sse_clients.get(client_id) or {}).get('remote') or [])
+                if _now_remote:
+                    federation_stream.watch(client_id, _now_remote, _fed_principal)
+                else:
+                    federation_stream.unwatch(client_id)
 
     logging.info(f"[SSE] Client connected: {client_id} (user: {user}, auth: {auth_method}) - Total: {len(sse_clients)}")
 
