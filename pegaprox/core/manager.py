@@ -17029,9 +17029,13 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': True, 'task': task_data.get('data')}
             else:
                 return {'success': False, 'error': response.text}
+        except requests.exceptions.ReadTimeout as e:
+            # MK Nov 2026 (#1347) - the DELETE went out and PVE did not answer in time (busy pmxcfs).
+            # It may well have started the task anyway, so callers must not take this for a refusal
+            return {'success': False, 'error': str(e), 'unanswered': True}
         except Exception as e:
             return {'success': False, 'error': str(e)}
-    
+
     def rollback_snapshot(self, node: str, vmid: int, vm_type: str, snapname: str) -> Dict[str, Any]:
         # sec (audit CRIT): snapname and node are interpolated into the API path below, and
         # the route gates in front of us only ever check the vmid — so a name with dot-segments

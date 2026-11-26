@@ -542,10 +542,12 @@ def test_a_delete_still_running_in_proxmox_is_audited_as_started_and_answered_as
 
 def test_a_delete_whose_task_cannot_be_read_is_audited_as_started_with_its_result_not_read(api, admin, db, monkeypatch):
     monkeypatch.setattr(sn, 'SNAP_DELETE_WAIT', 0.3, raising=False)
-    pve = api.set_manager(CID, _Blind({100: ['s1'], 101: ['s1']}, blind={(100, 's1')}))
-    code, body = _bulk(admin, (100, 's1'), (101, 's1'))
+    pve = api.set_manager(CID, _Blind({100: ['s1', 's2'], 101: ['s1']}, blind={(100, 's1')}))
+    code, body = _bulk(admin, (100, 's1'), (100, 's2'), (101, 's1'))
     upid = next(u for u, t in pve.tasks.items() if t['vmid'] == 100)
-    assert code == 200 and body['deleted'] == 1 and not body['errors'], body
+    assert (100, 's2') not in pve.sent, 'the next delete of the guest went out while its lock may still be held'
+    assert code == 200 and body['deleted'] == 1, body
+    assert body['errors'] == ['Failed to delete s2 of VM 100: not started, the delete of s1 may still run']
     assert [(s['vmid'], s['state'], s['task']) for s in body['started']] == [(100, 'unread', upid)]
     assert 'status could not be read' in body['started'][0]['why']
     assert _audit(db, 'snapshot.delete_started') == [
@@ -613,7 +615,8 @@ def test_a_delete_still_on_its_way_when_the_request_answers_counts_as_started(mo
     gevent.sleep(0.8)
     assert sent == ['a'], 'the worker started a delete after the request had answered'
 
-# --- a slow node ------------------------------------------------------------------------------
+
+# --- a slow node and a DELETE PVE did not answer in time --------------------------------------
 
 class _SlowReads(_Pve):
     """_Pve on a node that answers task status reads only after the manager's timeout (slow
@@ -653,3 +656,68 @@ def test_slow_status_reads_do_not_carry_the_answer_past_the_bound_of_the_request
     assert _audit(db, 'snapshot.delete_started') == [
         f"QEMU 100 - snapshot 's1' delete started, result not read ({upid}) [cluster_1]"]
 
+
+def _manager(api_delete):
+    # what PegaProxManager.delete_snapshot reads of its manager
+    return types.SimpleNamespace(host='10.0.0.1', api_port=8006, is_connected=True, _api_delete=api_delete)
+
+
+def _raise(exc):
+    def call(url, **kw):
+        raise exc
+    return call
+
+
+def test_the_manager_tells_a_delete_pve_did_not_answer_from_one_that_never_went_out():
+    """A ReadTimeout comes after the DELETE went out: PVE may have started the task. A connect
+    timeout or a refused connection sent nothing."""
+    res = PegaProxManager.delete_snapshot(_manager(_raise(requests.exceptions.ReadTimeout('Read timed out.'))),
+                                          'pve1', 100, 'qemu', 's1')
+    assert res['success'] is False and res.get('unanswered') is True, res
+    for exc in (requests.exceptions.ConnectTimeout('Connect timed out'), requests.exceptions.ConnectionError('refused')):
+        res = PegaProxManager.delete_snapshot(_manager(_raise(exc)), 'pve1', 100, 'qemu', 's1')
+        assert res['success'] is False and not res.get('unanswered'), res
+
+
+class _NoAnswer(_Pve):
+    """_Pve behind the manager's own DELETE. For the snapshots in `slow` PVE starts the task
+    but answers after the manager's timeout (busy pmxcfs), so requests raises ReadTimeout."""
+
+    delete_snapshot = PegaProxManager.delete_snapshot
+
+    def __init__(self, snaps, slow=(), **kw):
+        super().__init__(snaps, **kw)
+        self.slow = set(slow)
+
+    def _api_delete(self, url, **kw):
+        node, kind, vmid, _, name = url.split('/')[-5:]
+        upid = _Pve.delete_snapshot(self, node, int(vmid), kind, name)['task']
+        if (int(vmid), name) in self.slow:
+            raise requests.exceptions.ReadTimeout('Read timed out. (read timeout=10)')
+        return types.SimpleNamespace(status_code=200, text='', json=lambda: {'data': upid})
+
+
+def test_a_delete_pve_did_not_answer_in_time_is_started_and_the_guest_waits(api, admin, db):
+    pve = api.set_manager(CID, _NoAnswer({100: ['s1', 's2'], 101: ['s1']}, slow={(100, 's1')}))
+    code, body = _bulk(admin, (100, 's1'), (100, 's2'), (101, 's1'))
+    assert pve.collisions == [] and (100, 's2') not in pve.sent, 'the next delete went into the lock of the unanswered one'
+    assert code == 200 and body['deleted'] == 1 and pve.snaps[101] == set(), body
+    assert [(s['vmid'], s['snapshot_name'], s['state'], s['task']) for s in body['started']] == [(100, 's1', 'unread', None)]
+    assert body['started'][0]['why'].startswith('its delete was sent, Proxmox did not answer it in time')
+    assert body['errors'] == ['Failed to delete s2 of VM 100: not started, the delete of s1 may still run']
+    assert _audit(db, 'snapshot.delete_started') == ["QEMU 100 - snapshot 's1' delete started, result not read [cluster_1]"]
+
+
+class _OwnedNoAnswer(_NoAnswer, _Owned):
+    pass
+
+
+def test_the_prune_stops_at_a_guest_whose_delete_pve_did_not_answer(_lease):
+    names = [f'{PREFIX}{i}' for i in range(4)]
+    pve = _OwnedNoAnswer({100: names}, slow={(100, names[1])})
+    errors = []
+    pruned = sn._prune(pve, 'pve1', 100, 'qemu', {'id': PID, 'retention_count': 1, 'retention_days': 0}, errors)
+    assert pve.sent == [(100, names[1])], 'the prune went on into the lock of the unanswered delete'
+    assert pruned == 0
+    assert errors[0].startswith(f'{names[1]}: its delete was sent, Proxmox did not answer it in time')
+    assert errors[1:] == [f'{n}: not started, the delete of {names[1]} may still run' for n in names[2:]]

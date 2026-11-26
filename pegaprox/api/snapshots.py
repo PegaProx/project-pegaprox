@@ -355,14 +355,17 @@ def _delete_done(mgr, node, res, deadline=None):
     """('gone'|'failed'|'busy'|'unread', why) of one snapshot delete, `res` being the manager's
     answer to it. Only a task that ended OK is gone; a failed one says what PVE said. 'busy':
     the task still runs when we stop waiting, the guest keeps its lock and the next delete of
-    it would only fail. 'unread': PVE took the delete and its task could not be read, so
-    whether the snapshot went is not known. A delete without a task (XCP-ng deletes within
-    the call) is gone once it was accepted. With `deadline` (a time.monotonic() value) the
-    answer is there by then, also when status reads are slow."""
+    it would only fail. 'unread': the delete went to PVE and what became of it is not known,
+    its task could not be read or PVE did not answer the DELETE in time. A delete without a
+    task (XCP-ng deletes within the call) is gone once it was accepted. With `deadline` (a
+    time.monotonic() value) the answer is there by then, also when status reads are slow."""
     if not isinstance(res, dict):
         return 'failed', 'no answer'
     if not res.get('success'):
-        return 'failed', ' '.join(str(res.get('error') or 'refused').split())[:200]
+        said = ' '.join(str(res.get('error') or 'refused').split())[:200]
+        if res.get('unanswered'):
+            return 'unread', f'its delete was sent, Proxmox did not answer it in time and may have started it ({said})'
+        return 'failed', said
     upid = res.get('task')
     if not upid or not hasattr(mgr, '_wait_for_task'):
         return 'gone', ''
@@ -400,8 +403,8 @@ def delete_per_guest(guests, user=''):
     is no time left in them to wait for its task. A cluster whose deletes have no task (XCP-ng)
     takes its guests one after the other. Each job comes back with 'state' (gone, failed, busy,
     unread, skipped, error), 'why' and its 'task', in the order the jobs were handed in; busy
-    and unread were started in Proxmox and not seen to end. `user` is named as the one who
-    started each task."""
+    and unread were started in Proxmox and not seen to end, and the guest's next snapshots are
+    then not sent. `user` is named as the one who started each task."""
     from pegaprox.api.helpers import register_task_user
     from pegaprox.utils.concurrent import run_per_node
     until = time.monotonic() + BULK_DELETE_SECONDS
@@ -433,9 +436,12 @@ def delete_per_guest(guests, user=''):
             except Exception as e:
                 # Proxmox took the delete, what became of it is not known here
                 job['state'], job['why'] = 'unread', f'its result could not be read: {e}'
-            if job['state'] == 'busy':
+            if job['state'] in ('busy', 'unread'):
+                # MK Nov 2026 - the guest's lock is held, or may be, by that task: the next delete
+                # of the guest would go into it
+                still = 'still runs' if job['state'] == 'busy' else 'may still run'
                 for later in jobs[n + 1:]:
-                    later.update(state='skipped', why=f"not started, the delete of {job['name']} still runs")
+                    later.update(state='skipped', why=f"not started, the delete of {job['name']} {still}")
                 break
 
     # MK Nov 2026 - a PVE guest gets a lane of its own. A cluster without delete tasks talks
@@ -529,10 +535,12 @@ def _prune(mgr, node, vmid, vm_type, policy, errors=None):
         logging.warning(f"[snap-sched] prune delete failed for {name}: {why}")
         if errors is not None:
             errors.append(f'{name}: {why}')
-        if state == 'busy':
-            # the guest keeps its lock while that task runs, the next delete would only fail
+        if state in ('busy', 'unread'):
+            # the guest keeps its lock while that task runs (or may: PVE did not answer the DELETE
+            # in time, or its task could not be read), the next delete would only fail
+            still = 'still runs' if state == 'busy' else 'may still run'
             if errors is not None:
-                errors.extend(f'{later}: not started, the delete of {name} still runs' for later in doomed[i + 1:])
+                errors.extend(f'{later}: not started, the delete of {name} {still}' for later in doomed[i + 1:])
             break
     return pruned
 
