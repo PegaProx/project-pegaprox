@@ -2348,8 +2348,17 @@ def _run_v2p_migration(task):
                     _si_restore_tracking()
                 if task.remove_source and target_running:
                     task.log("Deleting source VM on ESXi (remove_source=true)")
-                    try: vmware_mgr.delete_vm(task.vm_id)
-                    except Exception as _e: task.log(f"  delete_vm failed: {_e}")
+                    # MK Nov 2026 - the manager answers a refusal with {'error': ...}, it does not
+                    # raise. A source that stays gets its change tracking setting back
+                    try:
+                        _del = vmware_mgr.delete_vm(task.vm_id)
+                        _del_err = _del.get('error') if isinstance(_del, dict) else None
+                    except Exception as _e:
+                        _del_err = str(_e) or type(_e).__name__
+                    if _del_err:
+                        _result_warning(task, f"Remove source VM: ESXi did not delete the source VM "
+                                              f"({str(_del_err)[:200]}). It stays there, delete it by hand.")
+                        _si_restore_tracking()
                 elif task.remove_source:
                     task.log("remove_source is set, but the target VM was not started here - the source VM "
                              "stays on ESXi, delete it there once the target runs")
@@ -2360,8 +2369,15 @@ def _run_v2p_migration(task):
                 return
             except V2PCutoverCancelled:
                 # the hold comes before the source is touched. The outer handler marks the run
-                # cancelled and drops the clone snapshot, the clones go here
+                # cancelled, the clones go here
+                # MK Nov 2026 - and our snapshots, before change tracking is switched back, as on
+                # the failure path: ESXi puts the reconfigure off or refuses it while one is there.
+                # They leave the outer handler's list, so nothing is removed twice
                 _vc_cleanup_clones()
+                _res = _vc_drop_clone_snap()
+                if isinstance(_res, dict) and _res.get('error'):
+                    task.log(f"  Clone snapshot not removed ({_res['error']}), check _pegaprox_clone_snap on ESXi")
+                task._extra_snapshots[:] = [s for s in task._extra_snapshots if s not in _OUR_SNAPS]
                 _si_restore_tracking()
                 raise
             except _VmkFallback:

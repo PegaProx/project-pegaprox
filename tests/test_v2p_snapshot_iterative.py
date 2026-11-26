@@ -552,6 +552,76 @@ def test_tracking_is_switched_back_once_esxi_is_done_with_the_snapshot(monkeypat
     assert r.esxi.tracking is False
 
 
+def _tracking_refused_while_a_snapshot_is_there(r):
+    real = r.esxi.set_change_tracking
+
+    def tracking(vm_id, enabled):
+        r.esxi._tick()
+        if r.esxi.snaps:
+            r.events.append(('tracking_refused', enabled))
+            return {'error': 'Another task is already in progress.'}
+        return real(vm_id, enabled)
+    r.esxi.set_change_tracking = tracking
+
+
+def test_a_cancel_removes_the_snapshot_before_tracking_goes_back(monkeypatch):
+    """A cancel at the hold switched change tracking off while the clone snapshot was still
+    there, which ESXi puts off or refuses; the snapshot went only afterwards, and the source
+    kept tracking on."""
+    r = Run(monkeypatch, cancel=True)
+    _tracking_refused_while_a_snapshot_is_there(r)
+    r.go()
+    assert r.task.status == 'cancelled', r.task.error
+    assert r.esxi.snaps == [] and r.esxi.tracking is False
+    assert r.kinds('tracking_refused') == []
+    removes = [e[1] for e in r.kinds('remove_snapshot')]
+    assert removes and len(removes) == len(set(removes)), removes
+    assert r.kinds('power') == [] and r.esxi.power == 'POWERED_ON'
+
+
+def test_a_cancel_sends_one_remove_even_when_esxi_is_still_at_it(monkeypatch):
+    """The remove times out while ESXi still merges: the cancel handler of the run must not send
+    a second one for the same snapshot."""
+    r = Run(monkeypatch, cancel=True, esxi_kw={'consolidation': 'later'}).go()
+    assert r.task.status == 'cancelled', r.task.error
+    removes = [e[1] for e in r.kinds('remove_snapshot')]
+    assert len(removes) == 1, removes
+
+
+def _delete_refused(r):
+    def delete(vm_id):
+        r.events.append(('delete_vm',))
+        return {'error': 'The attempted operation cannot be performed in the current state.'}
+    r.esxi.delete_vm = delete
+
+
+def _delete_raises(r):
+    def delete(vm_id):
+        r.events.append(('delete_vm',))
+        raise ConnectionError('session expired')
+    r.esxi.delete_vm = delete
+
+
+@pytest.mark.parametrize('fail', [_delete_refused, _delete_raises], ids=['refused', 'raises'])
+def test_a_source_esxi_does_not_delete_gets_its_tracking_back(monkeypatch, fail):
+    """remove_source and a running target skipped switching tracking back, the VM was to go.
+    ESXi did not delete it, so it stayed with change tracking on."""
+    r = Run(monkeypatch, remove_source=True)
+    fail(r)
+    r.go()
+    assert r.task.status == 'completed', r.task.error
+    assert r.esxi.tracking is False
+    assert r.idx(lambda e: e == ('delete_vm',))[0] < r.idx(lambda e: e == ('tracking', False))[0]
+    assert any('did not delete the source VM' in w for w in r.task.warnings), r.task.log_lines
+
+
+def test_a_deleted_source_is_not_reconfigured(monkeypatch):
+    r = Run(monkeypatch, remove_source=True).go()
+    assert r.task.status == 'completed', r.task.error
+    assert ('delete_vm',) in r.events and ('tracking', False) not in r.events
+    assert not getattr(r.task, 'warnings', None)
+
+
 def test_a_hanging_area_copy_is_ended_with_its_budget(monkeypatch, tmp_path):
     ac = AreaCopy(monkeypatch, tmp_path)
     ok, why = ac.go()
