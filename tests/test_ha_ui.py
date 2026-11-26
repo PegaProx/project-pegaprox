@@ -1954,7 +1954,12 @@ def test_the_snapshot_overview_deletes_only_for_who_may_and_reads_the_answer(das
         assert fail < body.index("'success')")
         assert 'snapDeleteError(data, ' in body[fail:body.index("'success')")]
     bulk = _block(dash, 'const deleteSelectedSnapshots = async (clusterId) => {', '\n            };')
-    assert bulk.index('return;\n', bulk.index('if (!res || !res.ok) {')) < bulk.index('setSelectedSnaps({});')
+    # the selection stays for a retry: cleared only on the path of an answer that names no
+    # failure (#1347: also not after an answer that deleted some and names the others)
+    assert bulk.count('setSelectedSnaps({});') == 1
+    ok = bulk.index('} else {', bulk.index('if (!res || !res.ok) {'))
+    assert ok < bulk.index("if (data.errors && data.errors.length) addToast(data.errors.join('; '), 'error');\n"
+                           "                        else setSelectedSnaps({});")
     assert '`${data.deleted ?? chosen.length} snapshot(s) deleted`' in bulk
 
 

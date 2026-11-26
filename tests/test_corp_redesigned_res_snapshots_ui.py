@@ -31,6 +31,8 @@ class _SnapServer(_GuardServer):
         self.snaps = copy.deepcopy(RES_SNAPS['snapshots'] if snaps is None else snaps)
         self.read = read                    # (status, body) instead of the list
         self.delete_answer = None
+        self.hold = False                   # a delete is answered by the test, when it likes
+        self.held = []
         self.reqs = []
 
     def handle(self, route):
@@ -43,6 +45,9 @@ class _SnapServer(_GuardServer):
             if path.endswith('/overview'):
                 status, data = self.read or (200, {'snapshots': [s for s in self.snaps
                                                                  if not body.get('date') or s['snapshot_date'][:10] < body['date']]})
+            elif self.hold:
+                self.held.append(route)
+                return None
             else:
                 gone = {(s['vmid'], s['snapshot_name']) for s in body.get('snapshots', [])}
                 self.snaps = [s for s in self.snaps if (s['vmid'], s['snapshot_name']) not in gone]
@@ -287,6 +292,54 @@ def test_runtime_classic_corporate_keeps_its_overview(open_app):
     page.get_by_text('before_php84').first.wait_for(timeout=8000)
     assert page.locator('.corp-snap-overview').count() == 1
     assert page.locator('[data-cr-snap]').count() == 0
+    assert app.errors == []
+
+
+@pytest.mark.parametrize('layout', ['corporate-redesigned', 'corporate'])
+def test_runtime_one_bulk_delete_at_a_time_and_the_list_read_whatever_came_back(open_app, layout):
+    """#1347: the server waits for each delete in Proxmox now, so its answer can take a minute.
+    Its button waits as well (a second click sent the same snapshots into the locks of the first),
+    and when a proxy stops waiting (504) the list is read again: what the server deleted by then is
+    gone, the rest stays selected to be sent again."""
+    app = open_app(layout=layout)
+    app.server.hold = True
+    page = app.page
+    if layout == 'corporate':
+        _corp_cluster(page)
+        page.locator('button', has_text=re.compile(r'^\s*Resources\s*$')).first.click()
+        page.locator('button', has_text='Snapshot').first.click()
+        page.get_by_text('before_php84').first.wait_for(timeout=8000)
+        page.locator('thead input[type="checkbox"]').first.check()
+        btn = page.locator('button', has_text='Delete selected').first
+    else:
+        page = _open_tab(app)
+        page.locator('[data-cr-snap-sel-all]').click()
+        btn = page.locator('[data-cr-snap-del-sel]')
+    btn = btn.element_handle()     # the same button while its text changes
+    deletes = lambda: [r for r in app.server.reqs if r[0].endswith('/delete')]
+    reads = lambda: [r for r in app.server.reqs if r[0].endswith('/overview')]
+    bar = lambda: btn.evaluate('b => b.parentElement.innerText').lower()   # classic says 'Selected'
+    assert '3 selected' in bar()
+    page.on('dialog', lambda d: d.accept())
+    btn.click()
+    assert _poll(lambda: app.server.held, page), 'the delete went out'
+    assert _poll(lambda: btn.evaluate('b => b.disabled'), page, 3), 'the button does not wait for the answer'
+    assert 'deleting' in btn.inner_text().lower()
+    btn.click(force=True)
+    page.wait_for_timeout(300)
+    assert len(deletes()) == 1, 'a second bulk delete went out while the first ran'
+    # the server deleted one of them before the proxy in front of it gave up
+    app.server.snaps = [s for s in app.server.snaps if s['snapshot_name'] != 'pre-upgrade']
+    before = len(reads())
+    app.server.held.pop().fulfill(status=504, body='<html><body><h1>504 Gateway Time-out</h1></body></html>',
+                                  headers={'Content-Type': 'text/html'})
+    page.get_by_text('Failed to delete selected snapshots (HTTP 504)').first.wait_for(timeout=5000)
+    assert _poll(lambda: len(reads()) == before + 1, page), 'the list was not read again'
+    page.get_by_text('pre-upgrade').first.wait_for(state='detached', timeout=5000)
+    assert _poll(lambda: '2 selected' in bar(), page), bar()
+    assert _poll(lambda: not btn.evaluate('b => b.disabled'), page, 3)
+    assert 'deleting' not in btn.inner_text().lower()
+    assert len(deletes()) == 1
     assert app.errors == []
 
 
