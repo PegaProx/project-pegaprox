@@ -6443,6 +6443,21 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 _set(node=(node_name, {'in_maintenance': False}))
             else:
                 _log(f"⚠ {node_name} maintenance exit failed (will retry at end of run)")
+            if exited and not is_xcpng and idx < total - 1:
+                # #1387 - Proxmox HA lets go of the node a little after the exit, and until then
+                # it takes no guests: the next node's evacuation would have nowhere to send them
+                ha_waited = 0
+                while ha_waited < 120 and _status() == 'running':
+                    try:
+                        held_by_ha = node_name in mgr._get_native_ha_maintenance_nodes()
+                    except Exception:
+                        held_by_ha = False
+                    if not held_by_ha:
+                        break
+                    if ha_waited == 0:
+                        _log(f"  → waiting for Proxmox HA to take {node_name} out of maintenance")
+                    time.sleep(5)
+                    ha_waited += 5
             _log(f"  → Ceph (if present): noout + norebalance cleared for {node_name}")
 
         if todo('ceph'):

@@ -723,6 +723,10 @@ def drop_own_recovery_locks(instance_id):
 # no caller of migrate_vm (or stand-in for it) has to take a new argument.
 BALANCE_WHY = '_balance_why'
 MIGRATION_LOG_MAX = 200   # the in-memory list behind "last migrations"
+# #1387 - how long a node we took out of maintenance is not taken back from PVE's HA status,
+# and how long an evacuation with other nodes in the cluster waits for one of them to take guests
+MAINT_LEFT_GRACE = 120
+EVACUATION_TARGET_WAIT = 90
 
 
 def _node_load(node_status, node):
@@ -2483,8 +2487,10 @@ class PegaProxManager:
                 except Exception:
                     ha_poll_ok = False
 
+                if ha_poll_ok:
+                    self._ha_caught_up(native_ha_nodes)
                 for nm in native_ha_nodes:
-                    if nm not in self.nodes_in_maintenance:
+                    if nm not in self.nodes_in_maintenance and not self._just_left_maintenance(nm):
                         from pegaprox.models.tasks import MaintenanceTask
                         t = MaintenanceTask(nm)
                         t.native_ha = True
@@ -5427,6 +5433,20 @@ class PegaProxManager:
         except Exception as e:
             self.logger.debug(f"[MAINT] Ceph flag unset failed for {node_name}: {e}")
 
+    def _just_left_maintenance(self, node_name):
+        """A node this instance took out of maintenance less than MAINT_LEFT_GRACE ago and that
+        PVE's HA status has not let go of yet (#1387). Maintenance switched on from outside in
+        that window is picked up once the window ends."""
+        left = (getattr(self, '_maint_left_at', None) or {}).get(node_name)
+        return left is not None and time.monotonic() - left < MAINT_LEFT_GRACE
+
+    def _ha_caught_up(self, native_ha_nodes):
+        """PVE no longer names these nodes: their grace from _just_left_maintenance ends."""
+        marks = getattr(self, '_maint_left_at', None)
+        if isinstance(marks, dict):
+            for nm in [n for n in marks if n not in native_ha_nodes]:
+                marks.pop(nm, None)
+
     def refresh_maintenance_status(self):
         """Force-refresh native HA maintenance state from PVE. Call before rolling update checks. (#141)"""
         try:
@@ -5445,8 +5465,10 @@ class PegaProxManager:
                         native_ha_nodes.add(node['node'])
 
             # sync into nodes_in_maintenance (only add externally detected ones)
+            if ha_poll_ok:
+                self._ha_caught_up(native_ha_nodes)
             for nm in native_ha_nodes:
-                if nm not in self.nodes_in_maintenance:
+                if nm not in self.nodes_in_maintenance and not self._just_left_maintenance(nm):
                     from pegaprox.models.tasks import MaintenanceTask
                     t = MaintenanceTask(nm)
                     t.native_ha = True
@@ -5710,6 +5732,26 @@ class PegaProxManager:
         task.current_vm = None
         return True
 
+    def _wait_for_evacuation_target(self, node_name, task, nodes):
+        """Up to EVACUATION_TARGET_WAIT seconds for another node to take guests from node_name
+        (#1387). The node status it read last, or None once the evacuation was called off."""
+        self.logger.info(f"[MAINT] No node takes guests from {node_name} right now, "
+                         f"waiting up to {EVACUATION_TARGET_WAIT}s for one")
+        waited = 0
+        while waited < EVACUATION_TARGET_WAIT:
+            time.sleep(5)
+            waited += 5
+            if self._evacuation_called_off(node_name, task):
+                return None
+            self._node_status_cache = None
+            fresh = self.get_node_status()
+            if node_name not in fresh:
+                continue   # a failed or partial read decides nothing
+            nodes = fresh
+            if self.get_best_target_node(exclude_nodes=[node_name], node_status=nodes) is not None:
+                break
+        return nodes
+
     def _evacuate_node(self, node_name: str, task: MaintenanceTask):
         # move all VMs off this node
         # a caller that registered the task itself, not through enter_maintenance_mode
@@ -5768,10 +5810,32 @@ class PegaProxManager:
                               f"nothing was moved off {node_name}")
                 self.logger.error(f"[MAINT] {task.error}")
                 return
+            if self.get_best_target_node(exclude_nodes=[node_name], node_status=nodes) is None \
+                    and [n for n in nodes if n != node_name]:
+                # #1387 - other nodes but none takes guests right now: one may have left
+                # maintenance a moment ago or still be booting. A drain that ends here is
+                # not done, the guests are still on the node, so it waits a little and
+                # then says so, and a rolling update pauses instead of installing.
+                nodes = self._wait_for_evacuation_target(node_name, task, nodes)
+                if nodes is None:
+                    return
+                if self.get_best_target_node(exclude_nodes=[node_name], node_status=nodes) is None:
+                    why = (f"no other node could take it (the others are offline, in maintenance "
+                           f"or excluded from balancing)")
+                    task.failed_vms = [{'vmid': vm.get('vmid'), 'name': vm.get('name', 'unnamed'),
+                                        'error': why} for vm in node_vms]
+                    task.pending_vms = []
+                    task.note = (f"{task.total_vms} guest(s) still on {node_name}: {why}. "
+                                 f"They stay running (a reboot will take them down).")
+                    self.logger.warning(f"[MAINT] {task.note}")
+                    self._evacuate_templates(node_name, task, templates)
+                    if not self._evacuation_called_off(node_name, task):
+                        task.status = 'completed_with_errors'
+                    return
             if self.get_best_target_node(exclude_nodes=[node_name], node_status=nodes) is None:
                 self.logger.warning(
                     f"[MAINT] No other online node to evacuate {task.total_vms} guest(s) from "
-                    f"{node_name} (single-node cluster or all peers offline) — skipping "
+                    f"{node_name} (single-node cluster) - skipping "
                     f"evacuation; guests stay running.")
                 task.migrated_vms = 0
                 task.pending_vms = []
@@ -6048,6 +6112,13 @@ class PegaProxManager:
                 get_db().remove_node_maintenance(self.id, node_name)   # #720 — drop persisted state
             except Exception:
                 pass
+            # #1387 - PVE's HA status goes on naming the node for a while, and the poll took it
+            # back as maintenance set from outside: the next node of a rolling update found no
+            # target and its guests stayed put. The cached node status said the same for 5 s.
+            if not isinstance(getattr(self, '_maint_left_at', None), dict):
+                self._maint_left_at = {}
+            self._maint_left_at[node_name] = time.monotonic()
+            self._node_status_cache = None
         self.logger.info(f"[OK] Exited maintenance mode for {node_name}")
 
         # #954 - the negative affinity rules this maintenance switched off go
