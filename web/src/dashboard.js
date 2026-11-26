@@ -2236,6 +2236,9 @@
             });
             const [password, setPassword] = React.useState('');
             const [rows, setRows] = React.useState({});
+            // LW Nov 2026 (#1339) - a guest's own VMID, empty = the next free one
+            const [vmids, setVmids] = React.useState({});
+            const [vmidFrom, setVmidFrom] = React.useState('');
             const [openGuest, setOpenGuest] = React.useState(null);
             const [check, setCheck] = React.useState(null);
             const [checkKey, setCheckKey] = React.useState('');
@@ -2306,10 +2309,20 @@
                 }
                 return out;
             };
+            const vmidOf = (id) => {
+                const v = String(vmids[id] ?? '').trim();
+                return v === '' ? {} : {target_vmid: /^[0-9]+$/.test(v) ? Number(v) : v};
+            };
+            // numbers the guests one after the other from the given VMID; the check says which are taken
+            const fillVmids = () => {
+                const from = parseInt(vmidFrom, 10);
+                if (!Number.isFinite(from) || from < 100) return;
+                setVmids(Object.fromEntries(guests.map((g, i) => [g.id, String(from + i)])));
+            };
             const buildBody = (dryRun) => {
                 const body = {...form, width: Number(form.width) || 1,
                     vms: guests.map(g => {
-                        const m = mapsOf(g.id);
+                        const m = {...mapsOf(g.id), ...vmidOf(g.id)};
                         return Object.keys(m).length ? {vm_id: g.id, ...m} : g.id;
                     })};
                 if (String(form.net_vlan_tag ?? '').trim() === '') delete body.net_vlan_tag;
@@ -2558,6 +2571,13 @@
                         {step === 'guests' && (
                             <div className="space-y-2">
                                 <p className="text-xs text-gray-500">{t('esxiBulkGuestsIntro')}</p>
+                                <div className="flex flex-wrap items-center gap-2 text-xs text-gray-400">
+                                    <span>{t('esxiBulkVmidFrom')}</span>
+                                    <input type="text" inputMode="numeric" value={vmidFrom} onChange={e => setVmidFrom(e.target.value.trim())}
+                                        placeholder="100" className={`w-28 ${small}`} data-esxi-bulk-vmid-from />
+                                    <button onClick={fillVmids} disabled={!/^[0-9]+$/.test(vmidFrom) || Number(vmidFrom) < 100}
+                                        className="px-2 py-1 rounded bg-proxmox-dark border border-proxmox-border text-gray-300 disabled:opacity-40">{t('esxiBulkVmidFill')}</button>
+                                </div>
                                 {guests.map(g => {
                                     const it = checkItems[g.id] || {};
                                     const r = rows[g.id];
@@ -2569,11 +2589,17 @@
                                                 <Icons.ChevronRight className="w-3.5 h-3.5 text-gray-500" style={open ? {transform: 'rotate(90deg)'} : {}} />
                                                 <span className="text-sm text-white truncate min-w-0">{it.name || g.name || g.id}</span>
                                                 {own && <span className="text-xs text-emerald-400">{t('esxiBulkOwnChoices')}</span>}
+                                                {vmidOf(g.id).target_vmid !== undefined && <span className="text-xs text-emerald-400 font-mono">{t('v2pTargetVmid')}: {vmids[g.id]}</span>}
                                                 <span className="ml-auto">{guestLine(g)}</span>
                                             </button>
                                             {open && (
                                                 <div className="p-2 pt-0 space-y-2">
                                                     {(it.errors || []).map((e, i) => <div key={i} className="text-xs text-red-400">- {e}</div>)}
+                                                    <div className="flex flex-wrap items-center gap-2 text-xs text-gray-300">
+                                                        <span className="text-gray-500">{t('v2pTargetVmid')}</span>
+                                                        <input type="text" inputMode="numeric" value={vmids[g.id] ?? ''} onChange={e => setVmids(prev => ({...prev, [g.id]: e.target.value.trim()}))}
+                                                            placeholder={t('v2pTargetVmidAuto')} className={`w-32 ${small}`} data-esxi-bulk-vmid={g.id} />
+                                                    </div>
                                                     {r && r.nics.length > 0 && (
                                                         <div>
                                                             <div className="text-xs text-gray-500 mb-1">{t('v2pNetworkPerNic')}</div>
@@ -2672,6 +2698,9 @@
                                                     </div>
                                                     {(it.errors || []).map((e, i) => <div key={i} className="text-red-300">- {e}</div>)}
                                                     {(it.warnings || []).map((w, i) => <div key={i} className="text-yellow-300">- {w}</div>)}
+                                                    {it.target_vmid !== undefined && (
+                                                        <div className="text-gray-400 mt-1">{t('v2pTargetVmid')}: <span className="font-mono">{it.target_vmid || (check.vmid_range ? `${t('v2pTargetVmidAuto')} (${check.vmid_range[0]}-${check.vmid_range[1]})` : t('v2pTargetVmidAuto'))}</span></div>
+                                                    )}
                                                     {(it.nics || []).length > 0 && (
                                                         <div className="text-gray-400 mt-1">{t('v2pReviewNics')}: {it.nics.map(n => n.skip ? `${n.net} ${t('v2pSkipped')}` : `${n.net} ${n.bridge}${n.vlan ? ` tag ${n.vlan}` : ''}`).join(', ')}</div>
                                                     )}
@@ -19857,6 +19886,10 @@
                 })();
                 return () => { gone = true; };
             }, [showVmwareMigrate, vmwareSelectedVm, vmwareMigrateForm.target_cluster, vmwareMigrateForm.target_node, vmwareMigrateForm.target_storage]);
+            // a VMID typed for one guest never carries over to the next run of the wizard
+            useEffect(() => {
+                if (showVmwareMigrate) setVmwareMigrateForm(f => (f.target_vmid ? {...f, target_vmid: ''} : f));
+            }, [showVmwareMigrate, vmwareSelectedVm]);
 
             // Start the ESXi migration - only from the review step, with the body it checked
             const startVmwareMigration = async (vmId) => {
@@ -30318,6 +30351,18 @@
                                                                     </div>
                                                                 )}
                                                                 
+                                                                {/* LW Nov 2026 (#1339) - the VMID the guest lands under, empty = the next free one */}
+                                                                {vmwareMigrateForm.target_cluster && (
+                                                                    <div>
+                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('v2pTargetVmid')}</label>
+                                                                        <input type="text" inputMode="numeric" value={vmwareMigrateForm.target_vmid ?? ''}
+                                                                            onChange={e => setVmwareMigrateForm({...vmwareMigrateForm, target_vmid: e.target.value.trim()})}
+                                                                            placeholder={t('v2pTargetVmidAuto')} data-v2p-target-vmid
+                                                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                        <p className="text-[11px] text-gray-500 mt-1">{t('v2pTargetVmidHint')}</p>
+                                                                    </div>
+                                                                )}
+
                                                                 {/* ESXi SSH User (#602: hosters like LiquidWeb don't hand out root — the
                                                                     backend already honours esxi_user, this just exposes it in the wizard) */}
                                                                 <div>
@@ -30787,6 +30832,9 @@
                                                                             )}
                                                                             {rv.verify && (
                                                                                 <div className="text-xs text-gray-400">{t('v2pVerify')}: <span className="text-gray-200">{rv.verify === 'full' ? t('v2pVerifyFull') : rv.verify === 'off' ? t('v2pVerifyOff') : t('v2pVerifySample')}</span></div>
+                                                                            )}
+                                                                            {rv.target_vmid !== undefined && (
+                                                                                <div className="text-xs text-gray-400" data-v2p-review-vmid>{t('v2pTargetVmid')}: <span className="text-gray-200 font-mono">{rv.target_vmid || (rv.vmid_range ? `${t('v2pTargetVmidAuto')} (${rv.vmid_range[0]}-${rv.vmid_range[1]})` : t('v2pTargetVmidAuto'))}</span></div>
                                                                             )}
                                                                         </div>
                                                                     )}
