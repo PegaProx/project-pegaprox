@@ -16865,6 +16865,9 @@
             const fetchGlobalSnapshots = async (clusterId = null, filterDate = null) => {
                 setSnapshotsLoading(true);
                 setSnapshotsReadErr(null);
+                // LW Nov 2026 (#1347) - the answer for a cluster the user has left meanwhile is not drawn into
+                // the overview of the one now open (opening it reads its own list)
+                const elsewhere = () => clusterId && selectedClusterRef.current?.id !== clusterId;
                 try {
                     const body = {};
                     if (clusterId) body.cluster_id = clusterId;
@@ -16878,14 +16881,17 @@
                     });
                     if (res && res.ok) {
                         const data = await res.json();
+                        if (elsewhere()) return;
                         setGlobalSnapshots(data.snapshots ?? data ?? []);
                     } else {
                         const d = res ? await res.json().catch(() => null) : null;
+                        if (elsewhere()) return;
                         setSnapshotsReadErr({ why: [d && typeof d.error === 'string' ? d.error : '', res ? `HTTP ${res.status}` : ''].filter(Boolean).join(' - ') });
                         setGlobalSnapshots([]);
                     }
                 } catch (err) {
                     console.error('Snapshot fetch failed:', err);
+                    if (elsewhere()) return;
                     setSnapshotsReadErr({ why: err && err.message ? err.message : '' });
                     setGlobalSnapshots([]);
                 }
@@ -16904,6 +16910,14 @@
             // what a refused delete says: the reason per snapshot when the server lists them,
             // else its error (on a standby that is already the translated refusal, #625)
             const snapDeleteError = (data, fallback) => ((data && data.errors) || []).join('; ') || (data && data.error) || fallback;
+            // LW Nov 2026 (#1347) - the deletes the server started in Proxmox and did not see end (the task still
+            // ran when it had to answer, or could not be read): neither deleted nor failed, so a toast of their own
+            const snapStartedNote = (started) => {
+                const running = started.filter(s => s.state === 'running').length;
+                return [running ? t('snapDelStillRunning').replace('{n}', running) : '',
+                        started.length > running ? t('snapDelResultUnread').replace('{n}', started.length - running) : ''].filter(Boolean).join(' ');
+            };
+            const withoutSnaps = (sel, list) => { const n = { ...sel }; list.forEach(s => { delete n[snapKey(s)]; }); return n; };
 
             // #696 — bulk-delete the checked snapshots (backend /snapshots/delete already loops an array)
             // LW Nov 2026 (#1347) - the server waits for each delete in Proxmox now, so the answer can take
@@ -16918,6 +16932,8 @@
                     return;
                 }
                 setSnapsDeleting(true);
+                // LW Nov 2026 (#1347) - the answer can take a minute, long enough to open another cluster
+                const stillHere = () => selectedClusterRef.current?.id === clusterId;
                 try {
                     const res = await authFetch(`${API_URL}/snapshots/delete`, {
                         method: 'POST',
@@ -16925,18 +16941,28 @@
                         body: JSON.stringify({ snapshots: chosen.map(s => ({ ...s, cluster_id: s.cluster_id || clusterId })) })
                     });
                     const data = res ? await res.json().catch(() => ({})) : {};
+                    const started = Array.isArray(data.started) ? data.started : [];
                     if (!res || !res.ok) {
                         addToast(snapDeleteError(data, res ? `Failed to delete selected snapshots (HTTP ${res.status})` : 'Failed to delete selected snapshots'), 'error');
                     } else {
-                        addToast(`${data.deleted ?? chosen.length} snapshot(s) deleted`, 'success');
-                        if (data.errors && data.errors.length) addToast(data.errors.join('; '), 'error');
-                        else setSelectedSnaps({});
+                        if (data.deleted || !started.length) addToast(`${data.deleted ?? chosen.length} snapshot(s) deleted`, 'success');
+                        if (started.length) addToast(snapStartedNote(started), 'warning');
+                        if (data.errors && data.errors.length) {
+                            addToast(data.errors.join('; '), 'error');
+                            // the failed ones stay selected, what runs in Proxmox is not to be sent again
+                            if (started.length) setSelectedSnaps(prev => withoutSnaps(prev, started));
+                        } else if (stillHere()) setSelectedSnaps({});
                     }
                 } catch (err) {
                     console.error('Bulk snapshot delete failed:', err);
                     addToast('Failed to delete selected snapshots', 'error');
                 } finally {
                     setSnapsDeleting(false);
+                }
+                // another cluster open now: its overview gets neither this cluster's rows nor their selection
+                if (!stillHere()) {
+                    setSelectedSnaps(prev => withoutSnaps(prev, chosen));
+                    return;
                 }
                 await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
             };
@@ -16956,8 +16982,13 @@
                         addToast(snapDeleteError(data, 'Failed to delete snapshot'), 'error');
                         return;
                     }
-                    addToast('Snapshot deleted', 'success');
-                    await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
+                    // LW Nov 2026 (#1347) - the server waits for the delete in Proxmox; one still running there,
+                    // or whose result it could not read, is said as such and not as deleted
+                    const data = await res.json().catch(() => ({}));
+                    const started = Array.isArray(data.started) ? data.started : [];
+                    if (started.length) addToast(snapStartedNote(started), 'warning');
+                    else addToast('Snapshot deleted', 'success');
+                    if (selectedClusterRef.current?.id === clusterId) await fetchGlobalSnapshots(clusterId, snapshotFilterDate || null);
                 } catch (err) {
                     console.error('Snapshot delete failed:', err);
                     addToast('Failed to delete snapshot', 'error')
@@ -20104,6 +20135,7 @@
                 setKnownNodes({});               // rebuilt by fetchClusterMetrics
                 setNodeAlerts({});               // cluster-specific, must clear
                 setGlobalSnapshots([]);
+                setSelectedSnaps({});           // LW Nov 2026 (#1347) - its keys belong to the list just dropped
                 setClusterPools(cached?.pools || []);
                 setClusterDatastores(cached?.datastores || { shared: [], local: {} });
                 setClusterNetworks(cached?.networks || []);
