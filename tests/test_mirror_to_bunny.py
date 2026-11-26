@@ -6,8 +6,9 @@ archive is the same bytes for the same commit and both updaters take it, the sin
 go up first and then the archive's .sha256, the archive and version.json, so at no moment
 but the last step does the zone serve an archive of another release than its version.json,
 a failed upload holds back version.json and every delete, the in-app updater takes nothing
-from a zone between two releases, a dry run writes nothing, the zone password shows up nowhere, certificates are checked, and
-the workflow keeps the secret in one step of a main-only job. The zone is a fake of the
+from a zone between two releases and keeps no backup of the install it left alone, a dry
+run writes nothing, the zone password shows up nowhere, certificates are checked, and the
+workflow keeps the secret in one step of a main-only job. The zone is a fake of the
 Bunny storage API on 127.0.0.1 behind TLS. The workflow is read as text, CI has no PyYAML.
 
 NS Nov 2026
@@ -898,6 +899,65 @@ def test_a_stale_archive_next_to_githubs_version_json_still_goes_to_githubs_file
     assert json.loads((install / 'version.json').read_text())['version'] == '9.9.10'
 
 
+def rollback_list(client):
+    """The backups the rollback dialog offers."""
+    r = client.post('/api/pegaprox/update/rollback', json={})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    return [b['name'] for b in r.get_json()['backups']]
+
+
+@pytest.mark.parametrize('case, status, kept', [
+    ('between', 503, 0),    # the mirror between two releases, nothing installed
+    ('stale', 200, 1),      # a stale GitHub archive, GitHub's single files instead
+    ('crash', 500, 1),      # the install itself fails
+])
+def test_only_the_update_refused_for_a_mirror_between_releases_drops_its_backup(
+        api, seed, repo, tmp_path, monkeypatch, case, status, kept):
+    """Every update first copies the install to config/backups (~60 MB on a real one), and
+    the rollback dialog lists the copy. A refusal for a mirror between two releases touches
+    nothing and gets retried every few minutes until the sync is through, so its copy goes
+    again. Any other failure may have written files and keeps its copy."""
+    import pegaprox.api.settings as settings
+    old = mirror.build_tree(repo, tmp_path / 'old')
+    commit(repo, {'pegaprox_multi_cluster.py': NEXT_ENTRY, 'version.json': manifest('9.9.10')})
+    new = mirror.build_tree(repo, tmp_path / 'new')
+
+    def get(url, *a, **kw):
+        if case == 'between':
+            # GitHub is down, the mirror serves version.json of 9.9.9 and the archive of 9.9.10
+            if url == settings.MIRROR_VERSION_URL:
+                return _Resp(200, old.read(mirror.MANIFEST))
+            if url == settings.MIRROR_ARCHIVE_URL:
+                return _Resp(200, new.read(mirror.ARCHIVE))
+            raise settings.requests.ConnectionError('GitHub is down in this test')
+        # GitHub answers, its CDN still with the archive from before the push
+        if url == GH_ARCHIVE:
+            return _Resp(200, old.read(mirror.ARCHIVE))
+        if url.startswith(settings.GITHUB_RAW_URL + '/'):
+            p = new.out / url[len(settings.GITHUB_RAW_URL) + 1:]
+            return _Resp(200, p.read_bytes()) if p.is_file() else _Resp(404)
+        return _Resp(404)
+
+    def read_only(*a):
+        raise OSError(30, 'Read-only file system')
+
+    admin = api.as_user(seed.user('root', role='admin'))
+    with monkeypatch.context() as mp:
+        in_app_updater(mp, settings, tmp_path, get)
+        if case == 'crash':
+            mp.setattr(settings, '_update_target', read_only)
+        r = admin.post('/api/pegaprox/update', json={})
+        assert r.status_code == status, r.get_data(as_text=True)
+        listed = rollback_list(admin)
+    backups = tmp_path / 'config' / 'backups'
+    on_disk = sorted(os.listdir(backups))
+    assert len(on_disk) == kept and listed == on_disk, (on_disk, listed)
+    if kept:
+        # a copy of the install as it was before
+        assert (backups / on_disk[0] / 'pegaprox_multi_cluster.py').read_text() == OLD_ENTRY
+        assert (backups / on_disk[0] / 'version.json').read_text() == OLD_MANIFEST
+
+
 def test_passing_errors_are_retried_and_others_are_not(zone, repo):
     zone.faults[('GET', '')] = [502]
     zone.faults[('PUT', 'web/index.html')] = [503, 'reset']
@@ -1323,6 +1383,16 @@ def test_the_doc_says_how_it_works():
         assert must in doc, must
     minute = re.search(r"- cron: '(\d+) ", WORKFLOW).group(1)
     assert f':{minute}' in doc
+
+
+def test_the_doc_says_installs_before_1_5_1_still_take_single_files_there():
+    """The 503 for a mirror between two releases came with 1.5.1. A 1.5.0 updater still falls
+    back to the single files of such a mirror, and the doc must not tell its admins otherwise."""
+    doc = (ROOT / 'docs' / 'update-mirror.md').read_text(encoding='utf-8')
+    halfway = doc.split('## Halfway through a sync\n', 1)[1].split('\n## ', 1)[0]
+    in_app = ' '.join(halfway.split('- The in-app updater', 1)[1].split('\n- ', 1)[0].split())
+    assert 'HTTP 503' in in_app
+    assert 'Installs older than 1.5.1 still fall back to single files there' in in_app, in_app
 
 
 def test_the_doc_says_how_to_set_up_the_environment():

@@ -837,7 +837,14 @@ def perform_pegaprox_update():
             logging.info(f"Archive update: {len(downloaded_files)} files installed, {len(failed_files)} failed")
 
         except _MirrorBetweenReleases as between:
-            # nothing of the install was touched yet, only the backup above was written
+            # nothing of the install was touched yet, only the backup above was written.
+            # MK Nov 2026 - drop it: a retry every few minutes during a sync left ~60 MB and
+            # a rollback entry per try, of an install that never changed. Every other
+            # failure below may have written files and keeps its backup
+            try:
+                shutil.rmtree(backup_path)
+            except OSError as rm_err:
+                logging.warning(f"[update] could not remove the unused backup {backup_path}: {rm_err}")
             logging.warning(f"[update] {between}, nothing installed")
             return jsonify({
                 'error': f'{between}. Nothing was installed, try again in a few minutes.',
