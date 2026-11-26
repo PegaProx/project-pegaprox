@@ -1036,6 +1036,20 @@ def pool_members_text(drop):
                      for k, word in _POOL_MEMBER_WORDS if drop.get(k))
 
 
+def pools_below(poolid, pools):
+    """The pools right below poolid in what GET /pools lists (nested pools, PVE 8.1+). One
+    listed only further down counts by the pool right below poolid on its way."""
+    if not isinstance(pools, list):
+        return []
+    prefix = f'{poolid}/'
+    below = set()
+    for p in pools:
+        pid = str(p.get('poolid') or '') if isinstance(p, dict) else ''
+        if pid.startswith(prefix) and len(pid) > len(prefix):
+            below.add(prefix + pid[len(prefix):].split('/', 1)[0])
+    return sorted(below)
+
+
 class PegaProxManager:
     """
     main cluster manager - NS
@@ -18862,7 +18876,7 @@ echo "AGENT_INSTALLED_OK"
             # ("pool 'X' is not empty (contains VM ...)") and the API surfaced that as a
             # bare 'PVE 500'. Un-pool any members first (the VMs themselves are untouched),
             # so deleting a pool works the way operators expect.
-            refused = None
+            refused = taken = None
             try:
                 members = (self.get_pool_members(poolid) or {}).get('members', []) or []
                 member_ids = [str(m.get('vmid')) for m in members if m.get('vmid') is not None]
@@ -18876,11 +18890,22 @@ echo "AGENT_INSTALLED_OK"
                 drop = {k: ','.join(v) for k, v in (('vms', member_ids), ('storage', stores),
                                                     ('network', vnets)) if v}
                 if drop:
+                    # MK Nov 2026 - PVE refuses a pool with pools below it (nested pools, 8.1+)
+                    # before it looks at any member, so the PUT stripped the pool of its guests,
+                    # storage and VNets, and the access they give through it, for nothing
+                    below = pools_below(poolid, self.get_pools())
+                    if below:
+                        return {'success': False, 'error': html.escape(
+                            f"Pool '{poolid}' was not deleted: Proxmox VE deletes no pool that has "
+                            f"pools below it ({_first_few(below)}). Delete those first; its members "
+                            f"were left in it.", quote=False)}
                     r = self._api_put(base, data={**drop, 'delete': 1})
                     if r.status_code != 200:
                         refused = (drop, r)
                         self.logger.warning(f"delete_pool({poolid}): un-pooling the members failed: "
                                             f"PVE {r.status_code}: {(r.text or '').strip()[:200]}")
+                    else:
+                        taken = drop
             except Exception as e:
                 self.logger.warning(f"delete_pool({poolid}): member cleanup failed: {e}")
             resp = self._api_delete(base)
@@ -18888,7 +18913,12 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': True}
             if refused:
                 return {'success': False, 'error': self._pool_unpool_refusal(poolid, *refused)}
-            return {'success': False, 'error': f'PVE {resp.status_code}: {(resp.text or "").strip()[:200]}'}
+            err = f'PVE {resp.status_code}: {(resp.text or "").strip()[:200]}'
+            if taken:
+                # they did leave the pool, and with them whatever access it gave: say so
+                err += html.escape(f" - its members had been taken out before the delete and are "
+                                   f"no longer in the pool ({pool_members_text(taken)})", quote=False)
+            return {'success': False, 'error': err}
         except Exception as e:
             self.logger.error(f"delete_pool({poolid}): {e}")
             return {'success': False, 'error': str(e)}

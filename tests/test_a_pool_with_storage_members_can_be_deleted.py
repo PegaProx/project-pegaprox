@@ -10,8 +10,10 @@ pools). PVE writes that PUT in one go, so when it refuses, nothing left the pool
 names every member that stayed, by kind, with PVE's reason. A pool without storage gets the very
 PUT it got before.
 
-Every list of names in the answer stays short enough for a toast: a few per kind and how many
-more.
+A pool with pools below it (nested pools, PVE 8.1+) is refused by PVE before any member counts,
+so it keeps all of them: no PUT, and an answer naming the pools below. Should the delete still
+fail after the members went out, the answer says they are out. Every list of names stays short
+enough for a toast, a few per kind and how many more.
 
 MK Nov 2026
 """
@@ -49,17 +51,19 @@ class _PoolPve:
     """/pools as Pool.pm answers it, for one pool. Its update checks every member first and
     writes user.cfg once at the end, so a refused PUT changes nothing."""
 
-    def __init__(self, members, storage_denied=(), subpools=(), put_answer=None):
+    def __init__(self, members, storage_denied=(), subpools=(), put_answer=None, listed=None):
         self.members = [dict(m) for m in members]
         self.storage_denied = set(storage_denied)
         self.subpools = list(subpools)
         self.put_answer = put_answer
+        # what GET /pools shows: every pool the account may audit, nested ones by their full id
+        self.listed = [POOL, *self.subpools] if listed is None else list(listed)
         self.puts, self.deleted = [], False
 
     def get(self, url, **kw):
         path = url.split('/api2/json', 1)[1]
         if path == '/pools':
-            return _Resp(200, {'data': [{'poolid': POOL}]})
+            return _Resp(200, {'data': [{'poolid': p} for p in self.listed]})
         if path == f'/pools/{POOL}' and not self.deleted:
             return _Resp(200, {'data': {'poolid': POOL, 'members': self.members}})
         return _Resp(500, {'data': None, 'message': f"pool '{POOL}' does not exist\n"})
@@ -184,14 +188,60 @@ def test_a_refusal_with_reasons_per_field_names_the_field(api, admin):
     assert "PVE 400: storage: invalid format - storage ID 'x y' contains illegal characters" in err, err
 
 
-def test_a_delete_refused_for_another_reason_answers_as_before(api, admin):
-    """The members went out, the delete fails on a pool below this one: PVE's answer as it was."""
-    pve = _PoolPve([VM, LOCAL], subpools=['team/sub'])
+def test_a_pool_with_pools_below_it_keeps_every_member(api, admin):
+    """PVE refuses such a pool before it looks at a member. Taking guests and storage out first
+    only stripped the pool of them, and of the access an ACL on the pool gave to them."""
+    pve = _PoolPve([VM, CT, LOCAL, NFS, VNET], subpools=['team/sub', 'team/sub/deep', 'team/b'])
     _manager(api, pve)
     r = _delete(admin)
     assert r.status_code == 400 and not pve.deleted
+    assert pve.puts == [] and pve.members == [VM, CT, LOCAL, NFS, VNET]
+    err = r.get_json()['error']
+    assert "Pool 'team' was not deleted" in err and 'team/b, team/sub' in err, err
+    assert 'team/sub/deep' not in err and '{' not in err, err
+
+
+def test_a_pool_seen_only_further_down_still_counts():
+    """An account may audit a pool deeper down and not the one between: the one right below
+    the pool is named. Pools that only share the start of the name are not below it."""
+    from pegaprox.core.manager import pools_below
+    listed = [{'poolid': p} for p in ('team', 'team2', 'team-old', 'teamx/sub', 'team/a/b/c', 'team/z')]
+    assert pools_below('team', listed) == ['team/a', 'team/z']
+    assert pools_below('team2', listed) == []
+    assert pools_below('team', {'data': []}) == [] and pools_below('team', None) == []
+
+
+def test_a_pool_named_like_the_start_of_another_is_deleted(api, admin):
+    pve = _PoolPve([VM, LOCAL], listed=[POOL, 'team2', 'team-old/sub'])
+    _manager(api, pve)
+    r = _delete(admin)
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert pve.deleted and pve.puts == [{'vms': '100', 'storage': 'local', 'delete': 1}]
+
+
+def test_a_pool_list_that_cannot_be_read_leaves_the_delete_as_it_was(api, admin):
+    class _NoList(_PoolPve):
+        def get(self, url, **kw):
+            if url.endswith('/api2/json/pools'):
+                return _Resp(500, {'data': None, 'message': 'proxy loop\n'})
+            return super().get(url, **kw)
+
+    pve = _NoList([VM, LOCAL])
+    _manager(api, pve)
+    assert _delete(admin).status_code == 200
+    assert pve.deleted and pve.puts == [{'vms': '100', 'storage': 'local', 'delete': 1}]
+
+
+def test_a_delete_that_fails_after_the_members_went_out_says_they_are_out(api, admin):
+    """The pool below is one the PVE account may not see, so nothing could tell beforehand:
+    PVE's answer as it was, and the members that left the pool by name."""
+    pve = _PoolPve([VM, LOCAL], subpools=['team/sub'], listed=[POOL])
+    _manager(api, pve)
+    r = _delete(admin)
+    assert r.status_code == 400 and not pve.deleted and pve.members == []
     err = r.get_json()['error']
     assert err.startswith('PVE 500: ') and "contains pool 'team/sub'" in err, err
+    assert 'no longer in the pool (guests 100; storage local)' in err, err
 
 
 def test_a_refusal_for_a_big_pool_stays_short(api, admin):
