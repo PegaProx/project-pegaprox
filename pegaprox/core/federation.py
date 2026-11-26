@@ -162,6 +162,9 @@ FED_REFUSED_ENVIRON = 'pegaprox.fed_refused'
 _lock = threading.RLock()
 _sessions_lock = threading.Lock()
 _PROCESS_STARTED = time.time()
+# MK Nov 2026 - which process this is, for the lease clock mark: two starts in the same
+# second must not look like one process (federation_lease._clock_mark)
+_PROCESS_TOKEN = secrets.token_hex(8)
 
 
 class FederationError(Exception):

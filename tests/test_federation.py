@@ -1362,6 +1362,39 @@ def test_a_host_that_became_active_holds(tmp_path, clock, monkeypatch):
     assert _ask(b, c, ['ha1'])[1]['votes']['ha1']['granted'] is True
 
 
+@pytest.mark.parametrize('gap', [0.5, 0.0], ids=['same-second', 'same-instant'])
+@pytest.mark.parametrize('kind,boot', [('monotonic', 'boot-1'), ('boottime', '')],
+                         ids=['no-boot-clock', 'no-boot-id'])
+def test_two_starts_within_one_second_both_hold(monkeypatch, kind, boot, gap):
+    """Without the boot clock or a boot id the clock mark carries the process. It carried
+    the start in whole seconds, so a process that started within the same second as the
+    one before took the old mark for its own and skipped the hold. Every process has a
+    mark of its own now, and keeps it for as long as it runs."""
+    from pegaprox.core import ha_vote
+    monkeypatch.setattr(fl, '_clock_kind', lambda: kind)
+    monkeypatch.setattr(ha_vote, 'read_boot_id', lambda: boot)
+    federation._runtime['boot_id'] = None
+    monkeypatch.setattr(federation, '_PROCESS_STARTED', 1767225600.25)
+    st = {'clock': fl._clock_mark(), 'my_leases': {'pve1': {'expires': 1e12}}, 'promises': {}}
+    assert fl.check_clock(st) is False
+    # the next process, as a restart brings it: a start of its own, a token of its own
+    monkeypatch.setattr(federation, '_PROCESS_STARTED', 1767225600.25 + gap)
+    monkeypatch.setattr(federation, '_PROCESS_TOKEN', secrets.token_hex(8), raising=False)
+    assert fl.check_clock(st) is True
+    assert st['my_leases']['pve1']['expires'] == 0
+
+
+def test_a_process_mark_an_older_build_saved_holds_once(monkeypatch):
+    """The whole-second mark an older build kept in the lease file is no mark of this
+    process: the first start after the update holds once, and only once."""
+    monkeypatch.setattr(fl, '_clock_kind', lambda: 'monotonic')
+    old = dict(fl._clock_mark(), process=int(federation._PROCESS_STARTED))
+    st = {'clock': old, 'my_leases': {'pve1': {'expires': 1e12}}, 'promises': {}}
+    assert fl.check_clock(st) is True
+    assert st['my_leases']['pve1']['expires'] == 0
+    assert fl.check_clock(st) is False
+
+
 def test_a_release_survives_a_restart(tmp_path, clock):
     a, b, c = _three(tmp_path)
     _enroll(a, 'pve-rel', password='rel')

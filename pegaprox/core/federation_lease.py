@@ -160,7 +160,11 @@ def _clock_mark():
     process start, so every start holds."""
     mark = {'boot_id': _boot_id(), 'ha_epoch': _ha_epoch(), 'kind': _clock_kind()}
     if mark['kind'] != 'boottime' or not mark['boot_id']:
-        mark['process'] = int(fed._PROCESS_STARTED)
+        # MK Nov 2026 - the start to the microsecond and the token of this process: the
+        # whole second it once was let a start within the same second skip its hold. The
+        # int an older build saved never matches this, so the first start after an update
+        # holds once
+        mark['process'] = f'{fed._PROCESS_STARTED:.6f}-{fed._PROCESS_TOKEN}'
     return mark
 
 
