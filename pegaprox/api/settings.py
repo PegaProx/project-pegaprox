@@ -462,6 +462,16 @@ def _refuse_restart_while_migrating(data, what):
                     'migrations_running': busy}), 409
 
 
+class _MirrorBetweenReleases(RuntimeError):
+    """The version.json and the archive of updates.pegaprox.com are of two releases.
+
+    MK Nov 2026 - the zone cannot switch all its files at once: during a sync, after a
+    failed one, or while its pull zone still caches some files and not others, it serves
+    one release's archive next to the other's version.json. The single files from it are
+    then half one release and half the other, and nothing on them says which, so the
+    updater stops instead of falling back to them."""
+
+
 @bp.route('/api/pegaprox/check-update', methods=['GET'])
 @require_auth(perms=['update.manage'])
 def check_pegaprox_update():
@@ -668,6 +678,7 @@ def perform_pegaprox_update():
             return jsonify({'error': 'Invalid version data from server'}), 500
 
         new_version = remote_version.get('version', '0.0')
+        version_from_mirror = version_url == MIRROR_VERSION_URL
 
         # Version check
         # MK 2026-06-07: never SKIP on version-equality. A prior interrupted/partial update
@@ -735,11 +746,13 @@ def perform_pegaprox_update():
             import tempfile
 
             resp = None
+            archive_url = None
             for aurl in archive_urls:
                 logging.info(f"Trying archive: {aurl}")
                 try:
                     resp = requests.get(aurl, timeout=120, stream=True)
                     if resp.status_code == 200:
+                        archive_url = aurl
                         break
                 except requests.RequestException:
                     continue
@@ -780,6 +793,12 @@ def perform_pegaprox_update():
                 except (OSError, ValueError) as _ve:
                     raise RuntimeError(f"archive version.json unreadable ({_ve}) — treating as stale")
                 if new_version and _arch_ver and _arch_ver != new_version:
+                    # a stale GitHub archive falls back to GitHub's raw files. With version.json
+                    # and the archive both from the mirror, its single files are of two releases
+                    if version_from_mirror and archive_url == MIRROR_ARCHIVE_URL:
+                        raise _MirrorBetweenReleases(
+                            f"{MIRROR_RAW_URL} is between two releases: its version.json says "
+                            f"{str(new_version)[:40]!r}, its archive holds {str(_arch_ver)[:40]!r}")
                     raise RuntimeError(
                         f"stale archive: tarball is {_arch_ver}, expected {new_version}")
 
@@ -817,6 +836,14 @@ def perform_pegaprox_update():
             update_method = 'archive'
             logging.info(f"Archive update: {len(downloaded_files)} files installed, {len(failed_files)} failed")
 
+        except _MirrorBetweenReleases as between:
+            # nothing of the install was touched yet, only the backup above was written
+            logging.warning(f"[update] {between}, nothing installed")
+            return jsonify({
+                'error': f'{between}. Nothing was installed, try again in a few minutes.',
+                'hint': 'GitHub did not answer, and the update mirror is in the middle of a '
+                        'sync or its cache still holds files of the release before',
+            }), 503
         except Exception as archive_err:
             logging.warning(f"Archive download failed ({archive_err}), trying individual files...")
 

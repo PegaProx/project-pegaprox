@@ -2,9 +2,11 @@
 """The update mirror: .github/scripts/mirror_to_bunny.py and .github/workflows/mirror.yml.
 
 What is pinned here: the zone gets what the lftp cron put there and nothing else, the
-archive is the same bytes for the same commit and both updaters take it, version.json and
-the archive's .sha256 go up last, a failed upload holds back version.json and every delete,
-a dry run writes nothing, the zone password shows up nowhere, certificates are checked, and
+archive is the same bytes for the same commit and both updaters take it, the single files
+go up first and then the archive's .sha256, the archive and version.json, so at no moment
+but the last step does the zone serve an archive of another release than its version.json,
+a failed upload holds back version.json and every delete, the in-app updater takes nothing
+from a zone between two releases, a dry run writes nothing, the zone password shows up nowhere, certificates are checked, and
 the workflow keeps the secret in one step of a main-only job. The zone is a fake of the
 Bunny storage API on 127.0.0.1 behind TLS. The workflow is read as text, CI has no PyYAML.
 
@@ -449,6 +451,7 @@ class FakeZone:
         self.files = {}
         self.dirs = set()
         self.events = []          # (start|done, method, path)
+        self.states = []          # (method, path, the files right after that write)
         self.faults = {}          # (method, path) -> [status, 'reset' or (status, Location), ...]
         self.keys_seen = []
         self.no_checksum = set()
@@ -557,6 +560,7 @@ def _handler(zone):
                 zone.files[rel] = body
                 # Bunny keeps a directory when its last file goes
                 zone.dirs |= _parents(rel)
+                zone.states.append(('PUT', rel, dict(zone.files)))
             self._done('PUT', rel)
             self._send(201, b'{"HttpCode":201,"Message":"File uploaded."}')
 
@@ -573,6 +577,7 @@ def _handler(zone):
                     zone.dirs = {x for x in zone.dirs if x != d and not x.startswith(d + '/')}
                 else:
                     hit = zone.files.pop(rel, None) is not None
+                zone.states.append(('DELETE', rel, dict(zone.files)))
             self._done('DELETE', rel)
             self._send(200 if hit else 404, b'{}')
     return H
@@ -638,14 +643,19 @@ def test_a_first_sync_fills_the_zone_and_puts_the_manifest_last(zone, repo, tmp_
     starts = zone.ops('PUT')
     ev = zone.events
     at = {(k, p): i for i, (k, m, p) in enumerate(ev) if m == 'PUT'}
-    others = [p for _, p in starts if p not in mirror.LAST]
-    assert others and mirror.ARCHIVE in others
-    # the .sha256 starts once every other upload is done, version.json after the .sha256
-    assert all(at[('start', mirror.ARCHIVE_SUM)] > at[('done', p)] for p in others)
-    assert at[('start', mirror.MANIFEST)] > at[('done', mirror.ARCHIVE_SUM)]
-    assert [p for _, p in starts][-2:] == list(mirror.LAST)
-    # counterproof: in plain sorted order version.json would not come last
+    tail = [mirror.ARCHIVE_SUM, mirror.ARCHIVE, mirror.MANIFEST]
+    singles = [p for _, p in starts if p not in tail]
+    assert singles
+    # the .sha256 starts once every single file is done, then the archive, then version.json,
+    # each once the one before is done
+    assert all(at[('start', mirror.ARCHIVE_SUM)] > at[('done', p)] for p in singles)
+    assert at[('start', mirror.ARCHIVE)] > at[('done', mirror.ARCHIVE_SUM)]
+    assert at[('start', mirror.MANIFEST)] > at[('done', mirror.ARCHIVE)]
+    assert [p for _, p in starts][-3:] == tail
+    # counterproof: in plain sorted order version.json would not come last, and the archive
+    # would go up among the first
     assert sorted(ZONE_FILES)[-1] != mirror.MANIFEST
+    assert sorted(ZONE_FILES)[0] == mirror.ARCHIVE
 
 
 def test_a_second_sync_uploads_nothing_and_a_changed_file_goes_up_again(zone, repo, tmp_path):
@@ -718,6 +728,174 @@ def test_a_failed_upload_holds_back_the_manifest_and_every_delete(zone, repo, tm
     code, out, err = run(zone, repo)
     assert code == 0, out + err
     assert zone.files == expected_zone(repo, tmp_path)
+
+
+# ---------------------------------------------------------------------------------------
+# a zone between two releases (#1390): Bunny cannot switch many files at once
+
+def archive_version(blob):
+    """The version in the version.json inside an archive of the zone."""
+    with tarfile.open(fileobj=io.BytesIO(blob), mode='r:gz') as tar:
+        return json.loads(tar.extractfile(f'{mirror.ARCHIVE_TOP}/version.json').read())['version']
+
+
+def manifest(version, files=None):
+    doc = {'version': version, 'update_archive': GH_ARCHIVE}
+    if files is not None:
+        doc['update_files'] = sorted(files)
+    return json.dumps(doc) + '\n'
+
+
+NEXT_ENTRY = '# the entry point of 9.9.10\n'
+
+
+def test_at_no_moment_but_the_last_step_does_the_zone_serve_two_releases(zone, repo):
+    """What a reader of the zone sees after every write of a sync: every file its
+    version.json lists is there, and the archive is of the release version.json names, but
+    in the one state right before version.json goes up (two uploads never land at once).
+    The in-app updater reads exactly that pair and drops to single files when they differ.
+    Deletes wait for version.json."""
+    one = set(RELEASE) - {'plugins/.gitkeep'}
+    commit(repo, {'version.json': manifest('9.9.9', one)})
+    assert run(zone, repo)[0] == 0
+    two = (one - {'plugins/hello/__init__.py'}) | {'pegaprox/new.py'}
+    commit(repo, {'pegaprox/new.py': '# new in 9.9.10\n', 'web/index.html': '<html>page two</html>\n',
+                  'pegaprox_multi_cluster.py': NEXT_ENTRY, 'version.json': manifest('9.9.10', two)},
+           remove=['plugins/hello/__init__.py'])
+    zone.states.clear()
+    code, out, err = run(zone, repo)
+    assert code == 0, out + err
+    writes = [(m, p) for m, p, _ in zone.states]
+    assert ('PUT', 'pegaprox/new.py') in writes and ('DELETE', 'plugins/hello/__init__.py') in writes
+    apart = []
+    for i, (method, rel, files) in enumerate(zone.states):
+        listed = json.loads(files[mirror.MANIFEST])
+        missing = [f for f in listed['update_files'] if f not in files]
+        assert not missing, (method, rel, missing)
+        if archive_version(files[mirror.ARCHIVE]) != listed['version']:
+            apart.append(((method, rel), writes[i + 1] if i + 1 < len(writes) else None))
+    assert apart == [(('PUT', mirror.ARCHIVE), ('PUT', mirror.MANIFEST))], apart
+    first_delete = min(i for i, (m, _) in enumerate(writes) if m == 'DELETE')
+    assert writes.index(('PUT', mirror.MANIFEST)) < first_delete
+
+
+@pytest.mark.parametrize('failing', ['web/index.html', mirror.ARCHIVE_SUM, mirror.ARCHIVE])
+def test_a_run_that_fails_before_version_json_leaves_the_archive_of_that_version(zone, repo, failing):
+    """What a failed run leaves stays until the next run, up to an hour: the archive is still
+    the one version.json announces, so the in-app updater takes it whole."""
+    assert run(zone, repo)[0] == 0
+    release_two(repo)
+    zone.faults[('PUT', failing)] = [500] * (mirror.RETRIES + 1)
+    code, out, err = run(zone, repo)
+    assert code == 1 and f'FAILED {failing}:' in out, out + err
+    assert json.loads(zone.files[mirror.MANIFEST])['version'] == '9.9.9'
+    assert archive_version(zone.files[mirror.ARCHIVE]) == '9.9.9'
+    # counterproof: the next run goes through, and both are of the next release
+    assert run(zone, repo)[0] == 0
+    assert json.loads(zone.files[mirror.MANIFEST])['version'] == '9.9.10'
+    assert archive_version(zone.files[mirror.ARCHIVE]) == '9.9.10'
+
+
+OLD_ENTRY = '# the old entry point\n'
+OLD_MANIFEST = manifest('9.9.8')
+
+
+def in_app_updater(mp, settings, tmp_path, get):
+    """An install the in-app updater writes into, with requests.get answered by get. Patches
+    subprocess.run (no pip, a failed crypto preflight, so nothing restarts), so no git call
+    of the mirror script while mp is active."""
+    install = tmp_path / 'opt-pegaprox'
+    if not install.exists():
+        (install / 'pegaprox' / 'api').mkdir(parents=True)
+        (install / 'plugins').mkdir()
+        (install / 'pegaprox_multi_cluster.py').write_text(OLD_ENTRY)
+        (install / 'version.json').write_text(OLD_MANIFEST)
+    mp.setattr(settings, '__file__', str(install / 'pegaprox' / 'api' / 'settings.py'))
+    mp.setattr(settings, 'PLUGINS_DIR', str(install / 'plugins'))
+    mp.setattr(settings, 'CONFIG_DIR', str(tmp_path / 'config'))
+    mp.setattr(settings, '_detect_install_method', lambda d: 'source')
+    mp.setattr(settings.requests, 'get', get)
+    mp.setattr(settings.subprocess, 'run', lambda *a, **kw: types.SimpleNamespace(
+        returncode=1, stdout='', stderr='not in a test'))
+    return install
+
+
+def github_down(settings, files):
+    """requests.get with GitHub unreachable and updates.pegaprox.com serving files."""
+    def get(url, *a, **kw):
+        if url.startswith(('https://github.com/', 'https://raw.githubusercontent.com/', 'https://api.github.com/')):
+            raise settings.requests.ConnectionError('GitHub is down in this test')
+        if url.startswith(settings.MIRROR_RAW_URL + '/'):
+            data = files.get(url[len(settings.MIRROR_RAW_URL) + 1:])
+            return _Resp(200, data) if data is not None else _Resp(404)
+        return _Resp(404)
+    return get
+
+
+def test_the_in_app_updater_installs_nothing_from_a_zone_between_two_releases(
+        api, seed, zone, repo, tmp_path, monkeypatch):
+    """The state no upload order avoids, here for an hour: the run's version.json upload
+    failed after the archive went up. The single files are of the new release, version.json
+    of the old one, and the updater used to fall back to them, a mix it did not notice (the
+    version.json it installed matched the one it had read)."""
+    import pegaprox.api.settings as settings
+    assert run(zone, repo)[0] == 0
+    commit(repo, {'pegaprox_multi_cluster.py': NEXT_ENTRY, 'version.json': manifest('9.9.10')})
+    zone.faults[('PUT', mirror.MANIFEST)] = [500] * (mirror.RETRIES + 1)
+    assert run(zone, repo)[0] == 1
+    assert archive_version(zone.files[mirror.ARCHIVE]) == '9.9.10'
+    assert json.loads(zone.files[mirror.MANIFEST])['version'] == '9.9.9'
+    assert zone.files['pegaprox_multi_cluster.py'] == NEXT_ENTRY.encode()
+    admin = api.as_user(seed.user('root', role='admin'))
+    with monkeypatch.context() as mp:
+        install = in_app_updater(mp, settings, tmp_path, github_down(settings, zone.files))
+        r = admin.post('/api/pegaprox/update', json={})
+    # neither the new entry point nor the old version.json
+    assert (install / 'pegaprox_multi_cluster.py').read_text() == OLD_ENTRY
+    assert (install / 'version.json').read_text() == OLD_MANIFEST
+    assert r.status_code == 503, r.get_data(as_text=True)
+    assert 'between two releases' in r.get_json()['error']
+    # counterproof: once the next run is through, the same updater takes the archive
+    assert run(zone, repo)[0] == 0
+    with monkeypatch.context() as mp:
+        in_app_updater(mp, settings, tmp_path, github_down(settings, zone.files))
+        r = admin.post('/api/pegaprox/update', json={})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert r.get_json()['update_method'] == 'archive' and not r.get_json()['files_failed']
+    assert (install / 'pegaprox_multi_cluster.py').read_text() == NEXT_ENTRY
+    assert json.loads((install / 'version.json').read_text())['version'] == '9.9.10'
+
+
+@pytest.mark.parametrize('archive_from', ['github', 'mirror'])
+def test_a_stale_archive_next_to_githubs_version_json_still_goes_to_githubs_files(
+        api, seed, repo, tmp_path, monkeypatch, archive_from):
+    """The stale archive check was made for GitHub, whose CDN hands out the old archive for
+    minutes after a push; its raw files are the fallback. With version.json from GitHub that
+    stays as it was, whichever archive came back."""
+    import pegaprox.api.settings as settings
+    stale = mirror.build_tree(repo, tmp_path / 'old').read(mirror.ARCHIVE)
+    commit(repo, {'pegaprox_multi_cluster.py': NEXT_ENTRY, 'version.json': manifest('9.9.10')})
+    new = mirror.build_tree(repo, tmp_path / 'new')
+
+    def get(url, *a, **kw):
+        if url == GH_ARCHIVE:
+            if archive_from == 'mirror':
+                raise settings.requests.ConnectionError('only the archive of GitHub is down')
+            return _Resp(200, stale)
+        if url == settings.MIRROR_ARCHIVE_URL:
+            return _Resp(200, stale)
+        if url.startswith(settings.GITHUB_RAW_URL + '/'):
+            p = new.out / url[len(settings.GITHUB_RAW_URL) + 1:]
+            return _Resp(200, p.read_bytes()) if p.is_file() else _Resp(404)
+        return _Resp(404)
+
+    with monkeypatch.context() as mp:
+        install = in_app_updater(mp, settings, tmp_path, get)
+        r = api.as_user(seed.user('root', role='admin')).post('/api/pegaprox/update', json={})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert r.get_json()['update_method'] == 'individual' and not r.get_json()['files_failed']
+    assert (install / 'pegaprox_multi_cluster.py').read_text() == NEXT_ENTRY
+    assert json.loads((install / 'version.json').read_text())['version'] == '9.9.10'
 
 
 def test_passing_errors_are_retried_and_others_are_not(zone, repo):
