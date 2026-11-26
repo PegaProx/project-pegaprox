@@ -1854,7 +1854,7 @@
                         setShowRestoreBackup(null);
                     } else if (response) {
                         const err = await response.json();
-                        if (restoreRefusedOtherGuest(err.error)) setRestoreIdentity(r => ({ ...r, refused: true }));
+                        if (restoreRefusedOtherGuest(err.error, err.code)) setRestoreIdentity(r => ({ ...r, refused: true }));
                         addToast(err.error || 'Restore failed', 'error');
                     }
                 } catch (error) {
