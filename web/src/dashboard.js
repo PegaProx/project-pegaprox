@@ -23719,6 +23719,7 @@
                                                 clusterId={selectedSidebarNode.clusterId}
                                                 clusterHost={selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster?.host : (allClusters.find(c => c.id === selectedSidebarNode.clusterId)?.host || '')}
                                                 clusterName={clusterLabel(selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster : allClusters.find(c => c.id === selectedSidebarNode.clusterId))}
+                                                nodeUiSuffix={(selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster : allClusters.find(c => c.id === selectedSidebarNode.clusterId))?.node_ui_suffix || ''}
                                                 clusterMetrics={selectedSidebarNode.clusterId === selectedCluster?.id ? clusterMetrics : (sidebarClusterData[selectedSidebarNode.clusterId]?.metrics || {})}
                                                 clusterResources={selectedSidebarNode.clusterId === selectedCluster?.id ? clusterResources : (sidebarClusterData[selectedSidebarNode.clusterId]?.resources || [])}
                                                 onBack={() => setSelectedSidebarNode(null)}

@@ -13,9 +13,10 @@
             return `${proto}//${window.location.host}/api/federation/console?${q}`;
         }
 
-        function getNodeProxmoxUrl(nodeIp = '', nodeName = '') {
-            if (!nodeIp || !nodeName) return null;
-            return `https://${nodeIp.trim()}:8006/#v1:0:=${encodeURIComponent(`node/${nodeName}`)}:4:=aptrepositories:=contentIso:::9::`;
+        // JB Nov 2026 (#1381) - the cluster's node suffix wins over the address, as on the node cards
+        function getNodeProxmoxUrl(nodeIp = '', nodeName = '', nodeUiSuffix = '') {
+            if (!nodeName || (!(nodeIp || '').trim() && !(nodeUiSuffix || '').trim())) return null;
+            return getProxmoxObjectUrl({ kind: 'node', name: nodeName, node_ip: nodeIp, node_ui_suffix: nodeUiSuffix });
         }
 
         // LW Oct 2026 (#1163) - the DNS read keeps why it failed. Mapped to {} like the other
@@ -7327,7 +7328,7 @@
             );
         }
 
-        function CorporateNodeDetailView({ node, clusterId, clusterHost, clusterName, clusterMetrics, clusterResources, onBack, onOpenNodeConfig, onMaintenanceToggle, onNodeAction, onStartUpdate, onSelectVm, addToast, crKind }) {
+        function CorporateNodeDetailView({ node, clusterId, clusterHost, clusterName, nodeUiSuffix, clusterMetrics, clusterResources, onBack, onOpenNodeConfig, onMaintenanceToggle, onNodeAction, onStartUpdate, onSelectVm, addToast, crKind }) {
             const { t } = useTranslation();
             const { getAuthHeaders, reverseProxyEnabled, haReadOnly, haConsolesElsewhere } = useAuth();
             const { isCorpRedesigned } = useLayout();
@@ -7406,7 +7407,7 @@
             const metrics = clusterMetrics?.[node] || {};
             const nodeOnline = metrics.status !== 'offline';
             const isMaint = metrics.maintenance_mode;
-            const proxmoxUrl = getNodeProxmoxUrl(nodeIp, node);
+            const proxmoxUrl = getNodeProxmoxUrl(nodeIp, node, nodeUiSuffix);
 
             const authFetch = async (url, opts = {}) => {
                 try { return await fetch(url, { ...opts, credentials: 'include', headers: { ...opts.headers, ...getAuthHeaders() } }); }
