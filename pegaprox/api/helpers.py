@@ -2,6 +2,7 @@
 """shared helpers for all api routes - split from monolith dec 2025, NS"""
 
 import os
+import re
 import json
 import threading
 import time
@@ -543,6 +544,72 @@ def find_user_key(users, name):
         return name
     lowered = name.lower()
     return lowered if lowered in users else None
+
+
+# MK Nov 2026 (#1367) - what follows the account name in each route under /api/users/, by
+# method. The keys of the old OIDC accounts carry a '/' from the sub, so the name is a path
+# and /api/users/x/2fa reads as "the second factor of x" and as "the account x/2fa" alike.
+# tests/test_user_name_with_slash_1367.py holds this table against the url_map.
+ACCOUNT_ROUTE_TAILS = {
+    'GET': ('/vm-access', '/permissions'),
+    'PUT': ('', '/password', '/permissions'),
+    'DELETE': ('', '/2fa', '/oidc-binding', '/tenant-permissions/<tenant_id>'),
+}
+# the converters werkzeug matches with: path is [^/].*?, a plain variable one segment
+_ACCOUNT_ROUTE_PATTERNS = {
+    method: [re.compile('([^/].*?)' + '[^/]+'.join(re.escape(p) for p in re.split(r'<[^>]+>', tail)))
+             for tail in tails]
+    for method, tails in ACCOUNT_ROUTE_TAILS.items()
+}
+
+
+def account_route_readings(method, path):
+    """Every account name the address `path` can stand for under `method`, one per route
+    that matches it."""
+    prefix = '/api/users/'
+    if not path.startswith(prefix):
+        return []
+    rest = path[len(prefix):]
+    found = (p.fullmatch(rest) for p in _ACCOUNT_ROUTE_PATTERNS.get('GET' if method == 'HEAD' else method, ()))
+    return [m.group(1) for m in found if m]
+
+
+def unambiguous_account(view):
+    """For a route that takes an account name under /api/users/ (below require_auth): a
+    request whose address also names another account the caller can see is refused with
+    409, and nothing happens to either account.
+
+    werkzeug answers DELETE /api/users/x/2fa with the 2FA route of x, also when it was sent
+    to delete the account x/2fa: x would lose its second factor instead. Nothing in the
+    request tells the two apart (the server decodes %2F before routing), so neither is
+    done. Only accounts in the caller's own tenant count for a tenant-scoped caller: it
+    cannot have meant another one, and a 409 must not tell it which names exist elsewhere."""
+    import functools
+
+    @functools.wraps(view)
+    def guarded(*args, **kwargs):
+        from flask import request, jsonify
+        routed = kwargs.get('username')
+        others = [n for n in account_route_readings(request.method, request.path) if n != routed]
+        if not others:
+            return view(*args, **kwargs)
+        from pegaprox.utils.auth import load_users
+        from pegaprox.utils.rbac import DEFAULT_TENANT_ID
+        users = load_users()
+        routed_key = find_user_key(users, routed)
+        keys = {find_user_key(users, n) for n in others} - {None, routed_key}
+        if keys and not caller_acts_as_admin():
+            tenant = (users.get(request.session.get('user', '')) or {}).get('tenant_id', DEFAULT_TENANT_ID)
+            keys = {k for k in keys if users[k].get('tenant_id', DEFAULT_TENANT_ID) == tenant}
+        if keys:
+            other = sorted(keys)[0]
+            return jsonify({'error': f"This address also names the account '{other}', so it is not clear "
+                                     f"which account is meant. Nothing was changed.",
+                            'code': 'ACCOUNT_AMBIGUOUS', 'account': other}), 409
+        return view(*args, **kwargs)
+
+    guarded._pp_account_route = True
+    return guarded
 
 
 def check_cluster_access(cluster_id):

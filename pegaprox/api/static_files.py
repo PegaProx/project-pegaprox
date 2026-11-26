@@ -23,7 +23,7 @@ from pegaprox.utils.rbac import (
     get_user_effective_role, get_role_permissions_for_user,
     DEFAULT_TENANT_ID, acts_as_admin, get_acting_role,
 )
-from pegaprox.api.helpers import check_cluster_access, safe_error, parse_pve_error, caller_acts_as_admin, find_user_key
+from pegaprox.api.helpers import check_cluster_access, safe_error, parse_pve_error, caller_acts_as_admin, find_user_key, unambiguous_account
 
 bp = Blueprint('static_files', __name__)
 
@@ -397,8 +397,9 @@ def check_pool_permission(cluster_id: str, vmid: int, vm_type: str, required_per
     return required_perm in pool_perms
 
 
-@bp.route('/api/users/<username>/vm-access', methods=['GET'])
+@bp.route('/api/users/<path:username>/vm-access', methods=['GET'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def get_user_vm_access(username):
     """Get all VMs a user has explicit access to"""
     users = load_users()
@@ -430,8 +431,9 @@ def get_user_vm_access(username):
 
 # ==================== PER-TENANT USER PERMISSIONS ====================
 
-@bp.route('/api/users/<username>/permissions', methods=['GET'])
+@bp.route('/api/users/<path:username>/permissions', methods=['GET'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def get_user_perms(username):
     """Get effective permissions for a user"""
     users = load_users()
@@ -535,8 +537,9 @@ def _permission_list(value):
     return None
 
 
-@bp.route('/api/users/<username>/permissions', methods=['PUT'])
+@bp.route('/api/users/<path:username>/permissions', methods=['PUT'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def set_user_perms(username):
     """Set user-specific permissions (global or per-tenant)"""
     global users_db
@@ -645,8 +648,9 @@ def set_user_perms(username):
     })
 
 
-@bp.route('/api/users/<username>/tenant-permissions/<tenant_id>', methods=['DELETE'])
+@bp.route('/api/users/<path:username>/tenant-permissions/<tenant_id>', methods=['DELETE'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def remove_user_tenant_perms(username, tenant_id):
     """Remove tenant-specific permissions for a user (revert to global)"""
     global users_db

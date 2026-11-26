@@ -4,6 +4,9 @@ The old OIDC accounts are keyed oidc_<first 12 chars of the sub>, and a sub can 
 and '+'. The list put the name into the URL as it is, the server answered an HTML 404, and
 the toast said only "Error deleting user". The runtime part drives web/index.html in
 headless Chromium against the real app (the _RealBackend of test_forced_2fa_ui.py).
+
+The password reset and the 2FA clear in the same row put the name in as it is, too, so
+the slashes became path segments of another route.
 """
 import pytest
 
@@ -14,23 +17,23 @@ SLASHED = 'oidc_50g1L/K/o9+R'
 ENCODED = '/api/users/oidc_50g1L%2FK%2Fo9%2BR'
 
 
-def _seed(db):
+def _seed(db, **slashed):
     from pegaprox.utils.auth import hash_password
     salt, pw_hash = hash_password('C0rrect!horse9')
     base = {'password_salt': salt, 'password_hash': pw_hash, 'enabled': True, 'language': 'en',
             'layout_chosen': True, 'tenant_id': 'default', 'ui_layout': 'modern'}
     db.save_user('root', dict(base, role='admin', auth_source='local'))
-    db.save_user(SLASHED, dict(base, role='admin', auth_source='entra', oidc_sub='50g1L/K/o9+R-rest',
-                               password_salt='', password_hash=''))
+    db.save_user(SLASHED, dict(dict(base, role='admin', auth_source='entra', oidc_sub='50g1L/K/o9+R-rest',
+                                    password_salt='', password_hash=''), **slashed))
     user = db.get_user('root')
     user['username'] = 'root'
     return user
 
 
 @pytest.fixture
-def users_tab(api, db, browser):  # noqa: F811
+def users_tab(api, db, browser, request):  # noqa: F811
     backend = _RealBackend(api.app)
-    backend.sid = api.as_user(_seed(db)).session_id
+    backend.sid = api.as_user(_seed(db, **getattr(request, 'param', {}))).session_id
     ctx = browser.new_context(viewport={'width': 1600, 'height': 1000})
     ctx.add_init_script("""try {
         localStorage.setItem('pegaprox_sponsor_v2:root', String(Date.now() + 1e10));
@@ -73,4 +76,27 @@ def test_runtime_the_account_is_disabled_and_deleted(users_tab, db):
     assert _sent(backend, 'DELETE') == [(ENCODED, 200)]
     assert db.get_user(SLASHED) is None
     page.wait_for_function(f'() => !document.body.innerText.includes({SLASHED!r})', timeout=5000)
+    assert not errors, errors
+
+
+# an old sign-in an admin switched to local, with a second factor
+@pytest.mark.parametrize('users_tab', [dict(auth_source='local', totp_enabled=True,
+                                            totp_secret='JBSWY3DPEHPK3PXP')], indirect=True)
+def test_runtime_the_account_gets_a_new_password_and_loses_its_2fa(users_tab, db):
+    page, backend, errors = users_tab
+    row = page.locator('tr', has_text=SLASHED).first
+    before = db.get_user(SLASHED)['password_hash']
+
+    row.get_by_title('Reset Password').click()
+    row.get_by_placeholder('New Password').fill('Corr3ct-Horse-Battery!')
+    row.get_by_title('Save').click()
+    page.get_by_text('Password changed successfully').first.wait_for(timeout=5000)
+    assert _sent(backend, 'PUT') == [(ENCODED + '/password', 200)]
+    assert db.get_user(SLASHED)['password_hash'] != before
+
+    page.once('dialog', lambda d: d.accept())
+    page.locator('tr', has_text=SLASHED).first.get_by_title('Disable 2FA').click()
+    page.get_by_text('2FA disabled').first.wait_for(timeout=5000)
+    assert _sent(backend, 'DELETE') == [(ENCODED + '/2fa', 200)]
+    assert not db.get_user(SLASHED)['totp_enabled']
     assert not errors, errors

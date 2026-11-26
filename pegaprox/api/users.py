@@ -35,7 +35,7 @@ from pegaprox.utils.rbac import (
     get_pool_membership_cache, invalidate_pool_cache, get_vm_pool_cached,
     DEFAULT_TENANT_ID, ROLE_TEMPLATES, acts_as_admin,
 )
-from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, check_cluster_access, safe_error, caller_acts_as_admin, find_user_key, ui_lock, ui_lock_holds, UI_LOCKED
+from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, check_cluster_access, safe_error, caller_acts_as_admin, find_user_key, unambiguous_account, ui_lock, ui_lock_holds, UI_LOCKED
 
 bp = Blueprint('users', __name__)
 
@@ -425,8 +425,9 @@ def update_user_preferences():
     })
 
 
-@bp.route('/api/users/<username>/2fa', methods=['DELETE'])
+@bp.route('/api/users/<path:username>/2fa', methods=['DELETE'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def admin_disable_2fa(username):
     """Admin: Disable 2FA for a user"""
     global users_db
@@ -461,8 +462,9 @@ def admin_disable_2fa(username):
     return jsonify({'success': True, 'message': f'2FA for {username} disabled'})
 
 
-@bp.route('/api/users/<username>/oidc-binding', methods=['DELETE'])
+@bp.route('/api/users/<path:username>/oidc-binding', methods=['DELETE'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def reset_oidc_binding(username):
     """Admin: forget the identity provider subject an OIDC / Entra account is bound to.
 
@@ -520,8 +522,9 @@ def reset_oidc_binding(username):
     return jsonify({'success': True})
 
 
-@bp.route('/api/users/<username>/password', methods=['PUT'])
+@bp.route('/api/users/<path:username>/password', methods=['PUT'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def admin_change_password(username):
     """Admin: Change password for any user
     
@@ -1190,9 +1193,11 @@ def create_user():
     })
 
 # JB Nov 2026 (#1367) - path: the pre-#1141 OIDC keys carry a '/' from the sub. The rules with
-# a static tail (/password, /2fa, /permissions ...) still match first
+# a static tail (/password, /2fa, /permissions ...) still match first; unambiguous_account
+# refuses an address that names two accounts
 @bp.route('/api/users/<path:username>', methods=['PUT'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def update_user(username):
     """Update a user (admin only)"""
     global users_db
@@ -1364,6 +1369,7 @@ def update_user(username):
 
 @bp.route('/api/users/<path:username>', methods=['DELETE'])
 @require_auth(perms=['admin.users'])
+@unambiguous_account
 def delete_user(username):
     """Delete a user (admin only)"""
     global users_db
