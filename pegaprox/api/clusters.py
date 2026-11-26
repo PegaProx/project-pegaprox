@@ -397,6 +397,15 @@ def rotate_cluster_api_token(cluster_id):
         # success instead of a 500, and the audit entry is written either way
         try:
             saved = save_config() is not False
+            if saved:
+                # save_config logs a cluster row it could not write and goes on with the
+                # others: only the row read back says the next start signs in with the new token
+                row = get_db().get_cluster(cluster_id) or {}
+                saved = (row.get('api_token_user') == new_user
+                         and row.get('api_token_secret') == new_secret)
+                if not saved:
+                    logging.error(f"[token-rotate] the stored row of {mgr.config.name} does not "
+                                  f"hold the new token {new_user}")
         except Exception as e:
             logging.error(f"[token-rotate] the new secret of {token_user} was not stored: "
                           f"{type(e).__name__}")

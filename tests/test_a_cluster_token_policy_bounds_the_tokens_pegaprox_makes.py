@@ -553,6 +553,32 @@ def test_a_new_token_that_could_not_be_stored_leaves_the_old_one_on_pve(pve, api
     assert action == 'cluster.api_token_rotated' and 'not stored' in details
 
 
+def test_a_save_that_left_this_cluster_out_keeps_the_old_token_as_well(pve, api, seed, monkeypatch):
+    """save_config writes cluster by cluster, logs a row it could not write and answers True
+    for the rest. The rotation went by that True and deleted the old token while the row
+    still held it (a scan of the release pull request). The row read back decides now."""
+    from pegaprox.api import clusters
+    from pegaprox.core import config
+    audits = _audits(monkeypatch)
+    fake = PolicyPVE({USER: PASSWORD}, release='9.1', regenerate=False)
+    m = _connect(fake, pve)
+    api.set_manager('c1389', m)
+    old = m.config.api_token_user
+    old_secret = fake.tokens[old]
+    assert config.save_config() is True   # the row holds the old token
+    monkeypatch.setattr(clusters, 'save_config', lambda: True)   # and this save writes nothing
+
+    r = _rotate(api, seed, m)
+
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert fake.tokens.get(old) == old_secret
+    assert not [c for c in fake.token_calls() if c[0] == 'DELETE']
+    body = r.get_json()
+    assert 'could not store' in body['warning'] and f'The old token {old} stays on the cluster' in body['message']
+    (action, details), = audits
+    assert action == 'cluster.api_token_rotated' and 'not stored' in details
+
+
 # --- how the policy is read ------------------------------------------------------------------
 
 class _Options:
