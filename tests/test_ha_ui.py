@@ -1994,7 +1994,7 @@ def test_a_snapshot_delete_still_running_in_proxmox_is_not_said_to_be_deleted_or
     (202 when none was seen gone): the toast says it still runs in Proxmox."""
     note = _block(dash, 'const snapStartedNote = (started) => {', '\n            };')
     assert "t('snapDelStillRunning').replace('{n}', running)" in note
-    assert "t('snapDelResultUnread').replace('{n}', started.length - running)" in note
+    assert "t('snapDelResultUnread').replace('{n}', unread)" in note
     bulk = _block(dash, 'const deleteSelectedSnapshots = async (clusterId) => {', '\n            };')
     assert "if (data.deleted || !started.length) addToast(`${data.deleted ?? chosen.length} snapshot(s) deleted`, 'success');" in bulk
     assert "if (started.length) addToast(snapStartedNote(started), 'warning');" in bulk
@@ -2004,9 +2004,30 @@ def test_a_snapshot_delete_still_running_in_proxmox_is_not_said_to_be_deleted_or
             "                    else addToast('Snapshot deleted', 'success');") in one
     blocks = _blocks()
     for lang in LANGS:
-        for key in ('snapDelStillRunning', 'snapDelResultUnread'):
+        for key in ('snapDelStillRunning', 'snapDelResultUnread', 'snapDelNoAnswer'):
             line = re.search(r'^ {16}' + key + r': "([^"]+)",$', blocks[lang], re.M)
             assert line and '{n}' in line.group(1) and 'Proxmox' in line.group(1), (lang, key)
+
+
+def test_a_snapshot_delete_proxmox_did_not_answer_is_not_said_to_have_started(dash):
+    """#1347: a DELETE Proxmox did not answer comes back under 'started' as 'unanswered'. A
+    ReadTimeout is all the server has of it, and urllib3 raises that also for a TLS handshake
+    that hung before the DELETE went out: it may or may not have started, and the toast said
+    'started in Proxmox, result not read' of it."""
+    note = _block(dash, 'const snapStartedNote = (started) => {', '\n            };')
+    assert "const silent = started.filter(s => s.state === 'unanswered').length;" in note
+    assert 'const unread = started.length - running - silent;' in note
+    assert "silent ? t('snapDelNoAnswer').replace('{n}', silent) : ''" in note
+    # the 'started' toast counts only the deletes the server saw start
+    assert "t('snapDelResultUnread').replace('{n}', unread)" in note and 'started.length - running)' not in note
+    blocks = _blocks()
+    en = re.search(r'^ {16}snapDelNoAnswer: "([^"]+)",$', blocks['en'], re.M).group(1)
+    assert 'no answer from Proxmox' in en and 'may or may not have started' in en and 'started in' not in en, en
+    for lang in LANGS:
+        said = {key: re.search(r'^ {16}' + key + r': "([^"]+)",$', blocks[lang], re.M).group(1)
+                for key in ('snapDelResultUnread', 'snapDelNoAnswer')}
+        assert said['snapDelNoAnswer'] != said['snapDelResultUnread'], lang
+        assert said['snapDelNoAnswer'].count('{n}') == 1, lang
 
 
 def test_a_failed_action_puts_the_old_status_back(dash):

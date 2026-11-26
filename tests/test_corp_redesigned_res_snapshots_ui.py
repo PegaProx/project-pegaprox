@@ -482,3 +482,39 @@ def test_runtime_one_delete_still_running_in_proxmox_is_not_said_deleted(open_ap
     page.get_by_text('1 snapshot delete(s) still running in Proxmox - check the task').first.wait_for(timeout=5000)
     assert page.get_by_text('Snapshot deleted').count() == 0
     assert app.errors == []
+
+
+def test_runtime_a_delete_proxmox_did_not_answer_is_not_said_to_have_started(open_app):
+    """#1347: a DELETE Proxmox did not answer comes back under 'started' as 'unanswered': all the
+    server has is a ReadTimeout, which a TLS handshake that hung before the DELETE went out
+    raises too. The toast says it was sent and may or may not have started, not that it was
+    started with its result not read; next to one the server did see start, each is counted
+    under its own line."""
+    app = open_app()
+    snaps = RES_SNAPS['snapshots']
+    started = [dict({k: snaps[0][k] for k in ('cluster_id', 'node', 'vmid', 'vm_type', 'snapshot_name')},
+                    state='unanswered', task=None,
+                    why='its delete was sent, no answer from Proxmox: it may or may not have started (Read timed out.)'),
+               dict({k: snaps[2][k] for k in ('cluster_id', 'node', 'vmid', 'vm_type', 'snapshot_name')},
+                    state='unread', task='UPID:pve1:00000002:00000001:6730AABB:qmdelsnapshot:100:root@pam:',
+                    why='its delete task was started, its status could not be read')]
+    app.server.delete_answer = (202, {'success': True, 'deleted': 0, 'errors': None, 'started': started})
+    page = _open_tab(app)
+    page.locator('[data-cr-snap-sel-all]').click()
+    page.once('dialog', lambda d: d.accept())
+    page.locator('[data-cr-snap-del-sel]').click()
+    note = ('1 snapshot delete(s) started in Proxmox, result not read - check the task '
+            '1 snapshot delete(s) sent, no answer from Proxmox: may or may not have started - check the tasks')
+    page.get_by_text(note).first.wait_for(timeout=5000)
+    assert page.get_by_text('2 snapshot delete(s) started in Proxmox').count() == 0
+    assert page.get_by_text('snapshot(s) deleted').count() == 0
+    assert app.errors == []
+
+    one = open_app()
+    one.server.delete_answer = (202, {'success': True, 'deleted': 0, 'errors': None, 'started': [started[0]]})
+    page = _open_tab(one)
+    page.once('dialog', lambda d: d.accept())
+    page.locator('[data-cr-snap-del]').first.click()
+    page.get_by_text('1 snapshot delete(s) sent, no answer from Proxmox: may or may not have started - check the tasks').first.wait_for(timeout=5000)
+    assert page.get_by_text('result not read').count() == 0 and page.get_by_text('Snapshot deleted').count() == 0
+    assert one.errors == []
