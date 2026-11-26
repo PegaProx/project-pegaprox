@@ -335,8 +335,14 @@ def _snap_name(policy_id):
 # in its task ('VM is locked (snapshot-delete)'). Every delete here waits for its task before
 # the next one of the same guest goes out.
 SNAP_DELETE_WAIT = 600        # seconds one delete task may take before we stop waiting for it
-BULK_DELETE_SECONDS = 600     # a bulk delete request in all; a forwarding standby waits 900
-BULK_DELETE_GUESTS = 4        # guests whose snapshots are deleted at the same time
+SNAP_DELETE_POLL = 0.25       # its second status read after this, then twice as long up to 2s
+# MK Nov 2026 - the bulk delete answers within its request. 90s stays below the 100s of
+# Cloudflare and the 300s Firefox wait for an answer; what was not started by then is said per
+# snapshot and can be sent again. Sixteen guests at a time, with the first status reads a
+# quarter second apart, take the 200 rows of the overview (one snapshot each, tasks of about
+# a second) in some 25s
+BULK_DELETE_SECONDS = 90      # a bulk delete request in all
+BULK_DELETE_GUESTS = 16       # guests whose snapshots are deleted at the same time
 
 
 def _delete_done(mgr, node, res, timeout=None):
@@ -351,7 +357,8 @@ def _delete_done(mgr, node, res, timeout=None):
         return 'failed', ' '.join(str(res.get('error') or 'refused').split())[:200]
     timeout = SNAP_DELETE_WAIT if timeout is None else timeout
     upid = res.get('task')
-    if not upid or not hasattr(mgr, '_wait_for_task') or mgr._wait_for_task(node, upid, timeout=timeout):
+    if not upid or not hasattr(mgr, '_wait_for_task') or mgr._wait_for_task(
+            node, upid, timeout=timeout, first_poll=SNAP_DELETE_POLL):
         return 'gone', ''
     try:
         st = mgr.get_task_status(node, upid) if hasattr(mgr, 'get_task_status') else None
@@ -372,15 +379,15 @@ def delete_per_guest(guests, user=''):
     """The deletes of a bulk request. `guests` holds one list of jobs per guest, a job being
     {mgr, cluster_id, node, vmid, vm_type, name}. The snapshots of a guest go one after the
     other, each once the task of the one before ended; up to BULK_DELETE_GUESTS guests at a
-    time, and nothing new starts after BULK_DELETE_SECONDS. Each job gets 'state' (gone,
-    failed, busy, skipped, error) and 'why'; the jobs come back in the order they were
-    handed in. `user` is named as the one who started each task."""
+    time, and nothing new starts after BULK_DELETE_SECONDS. A cluster whose deletes have no
+    task (XCP-ng) takes its guests one after the other. Each job gets 'state' (gone, failed,
+    busy, skipped, error) and 'why'; the jobs come back in the order they were handed in.
+    `user` is named as the one who started each task."""
     from pegaprox.api.helpers import register_task_user
     from pegaprox.utils.concurrent import run_per_node
     until = time.monotonic() + BULK_DELETE_SECONDS
 
-    def one_guest(i):
-        jobs = guests[i]
+    def one_guest(jobs):
         for n, job in enumerate(jobs):
             left = until - time.monotonic()
             if left <= 0:
@@ -399,8 +406,25 @@ def delete_per_guest(guests, user=''):
                     later.update(state='skipped', why=f"not started, the delete of {job['name']} still runs")
                 break
 
-    # a pool of its own: a wait of minutes holds none of the shared slots
-    run_per_node({i: one_guest for i in range(len(guests))}, max_concurrent=BULK_DELETE_GUESTS,
+    # MK Nov 2026 - a PVE guest gets a lane of its own. A cluster without delete tasks talks
+    # over one session that takes one call at a time (XCP-ng: one XML-RPC connection, two
+    # greenlets on it both fail with Request-sent / Idle), so its guests share one lane and go
+    # one after the other, as every delete went before
+    lanes = {}
+    for i, jobs in enumerate(guests):
+        if jobs:
+            mgr = jobs[0]['mgr']
+            lanes.setdefault(('guest', i) if hasattr(mgr, '_wait_for_task') else ('cluster', id(mgr)), []).append(jobs)
+    lanes = list(lanes.values())
+
+    def one_lane(i):
+        for jobs in lanes[i]:
+            one_guest(jobs)
+
+    # a pool of its own: a wait for a task holds none of the shared slots. carry() here and not
+    # only in run_per_node: that one carries while the HA lease is in force, and a refusal of the
+    # federation's exit is to be noted for this request also when it is not (409 FED_NO_LEASE)
+    run_per_node({i: ha.carry(one_lane) for i in range(len(lanes))}, max_concurrent=BULK_DELETE_GUESTS,
                  timeout=BULK_DELETE_SECONDS + 60)
     out = [job for jobs in guests for job in jobs]
     for job in out:

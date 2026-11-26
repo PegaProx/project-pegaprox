@@ -287,3 +287,204 @@ def test_the_prune_stops_at_a_guest_whose_delete_still_runs(_lease, monkeypatch)
     assert pruned == 0
     assert errors[0].startswith(f'{names[1]}: its delete task still runs in Proxmox')
     assert errors[1:] == [f'{n}: not started, the delete of {names[1]} still runs' for n in names[2:]]
+
+
+# --- an XCP-ng pool, the federation's exit and the time a request takes -------------------
+
+class _OneCallPool:
+    """An XCP-ng pool as XcpngManager talks to it: every call goes over the one XML-RPC
+    connection of its session, and a call that comes while another is still on it breaks
+    both (http.client says Request-sent to the one, Idle to the other). A delete runs
+    within the call, there is no task to wait for."""
+
+    cluster_type = 'xcpng'
+    is_connected = True
+
+    def __init__(self, snaps):
+        self.snaps = {str(vmid): set(names) for vmid, names in snaps.items()}
+        self.config = types.SimpleNamespace(name='xcp')
+        self.on_the_line = None
+        self.broken = []
+
+    def delete_snapshot(self, node, vmid, vm_type='qemu', snapname=''):
+        if self.on_the_line is not None:
+            self.broken.append((vmid, snapname))
+            self.on_the_line = None
+            return {'error': 'Request-sent'}
+        me = self.on_the_line = (vmid, snapname)
+        gevent.sleep(0.005)             # the round trip to the pool
+        if self.on_the_line != me:
+            return {'error': 'Idle'}
+        self.on_the_line = None
+        self.snaps[str(vmid)].discard(snapname)
+        return {'success': True}
+
+
+def test_the_guests_of_an_xcp_ng_pool_go_one_after_the_other(api, admin):
+    pool = api.set_manager(CID, _OneCallPool({'u1': ['a', 'b'], 'u2': ['a', 'b'], 'u3': ['a', 'b']}))
+    code, body = _bulk(admin, ('u1', 'a'), ('u2', 'a'), ('u3', 'a'), ('u1', 'b'), ('u2', 'b'), ('u3', 'b'))
+    assert pool.broken == [], f'calls came while another was on the session: {pool.broken}'
+    assert code == 200 and body['deleted'] == 6, body
+    assert not body['errors']
+    assert all(not left for left in pool.snaps.values())
+
+
+def test_an_xcp_ng_session_of_the_real_xenapi_takes_every_delete(monkeypatch):
+    """The same with XenAPI.Session itself, talking to a pool on this host."""
+    XenAPI = pytest.importorskip('XenAPI')
+    from socketserver import ThreadingMixIn
+    from xmlrpc.server import SimpleXMLRPCServer
+    import pegaprox.core.xcpng as xcpng_mod
+    from pegaprox.core.xcpng import XcpngManager
+
+    snaps = {f'OpaqueRef:vm-{u}': {f'OpaqueRef:s-{u}-{n}': n for n in ('a', 'b')} for u in ('u1', 'u2', 'u3')}
+
+    class Xapi:
+        def _dispatch(self, method, params):
+            time.sleep(0.01)
+            ok = lambda v: {'Status': 'Success', 'Value': v}
+            if method == 'session.login_with_password':
+                return ok('OpaqueRef:sess')
+            if method == 'VM.get_by_uuid':
+                return ok(f'OpaqueRef:vm-{params[1]}')
+            if method == 'VM.get_snapshots':
+                return ok(list(snaps[params[1]]))
+            for vm in snaps.values():
+                if params[-1] in vm:
+                    if method == 'VM.get_name_label':
+                        return ok(vm[params[-1]])
+                    if method == 'VM.destroy':
+                        vm.pop(params[-1])
+                        return ok('')
+            return {'Status': 'Failure', 'ErrorDescription': ['UNKNOWN', method]}
+
+    class Server(ThreadingMixIn, SimpleXMLRPCServer):
+        daemon_threads = True
+
+    srv = Server(('127.0.0.1', 0), logRequests=False, allow_none=True)
+    srv.register_instance(Xapi())
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        m = XcpngManager.__new__(XcpngManager)
+        m.id, m.stop_event, m.is_connected = 'xcp1', threading.Event(), True
+        m._last_keepalive = time.time() + 3600
+        m.logger = logging.getLogger('xcp-test')
+        m._session = XenAPI.Session(f'http://127.0.0.1:{srv.server_address[1]}/')
+        m._session.xenapi.login_with_password('root', 'pw', '1.0', 'PegaProx')
+        monkeypatch.setattr(xcpng_mod, 'get_db', lambda: types.SimpleNamespace(xcpng_resolve_vmid=lambda cid, vmid: str(vmid)))
+        jobs = [[{'mgr': m, 'cluster_id': 'xcp1', 'node': 'h1', 'vmid': u, 'vm_type': 'qemu', 'name': n} for n in ('a', 'b')]
+                for u in ('u1', 'u2', 'u3')]
+        out = sn.delete_per_guest(jobs)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert [(j['vmid'], j['name'], j['state'], j['why']) for j in out] == [
+        (u, n, 'gone', '') for u in ('u1', 'u2', 'u3') for n in ('a', 'b')]
+    assert all(not vm for vm in snaps.values())
+
+
+class _Fenced(_Pve):
+    """_Pve behind the federation's exit: the transport asks guard_exit before the DELETE
+    leaves, and the manager answers a refusal as a failed delete."""
+
+    def delete_snapshot(self, node, vmid, vm_type, name):
+        from pegaprox.core import federation
+        try:
+            federation.guard_exit(CID, f'DELETE /nodes/{node}/{vm_type}/{vmid}/snapshot/{name}')
+        except federation.LeaseRefused as e:
+            return {'success': False, 'error': str(e)}
+        return super().delete_snapshot(node, vmid, vm_type, name)
+
+
+def test_a_delete_the_federation_refuses_is_its_409_also_while_ha_is_off(api, admin, monkeypatch):
+    """The deletes run in workers of their own. Without the request's note of the refusal the
+    caller heard a 500 of the route instead of FED_NO_LEASE."""
+    from pegaprox.core import federation
+    monkeypatch.setattr(federation, 'enabled', lambda: True)
+    monkeypatch.setattr(federation, 'dr_enabled', lambda: True)
+    monkeypatch.setattr(federation, 'takes_writes_for', lambda cid: False)
+    assert ha.guard_on() is False
+    pve = api.set_manager(CID, _Fenced({100: ['s1'], 101: ['s1']}))
+    code, body = _bulk(admin, (100, 's1'), (101, 's1'))
+    assert pve.sent == []
+    assert code == 409 and body.get('code') == 'FED_NO_LEASE', (code, body)
+
+
+class _Virtual:
+    """A clock that moves only when somebody sleeps on it: the time a wait would take,
+    without taking it. One guest at a time sleeps on it in these tests."""
+
+    def __init__(self):
+        self.now = 1_000_000.0
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def time(self):
+        return self.now
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+        gevent.sleep(0)
+
+
+class _Timed(_Pve):
+    """_Pve whose delete tasks take `dur` seconds of `clock` instead of a number of reads."""
+
+    def __init__(self, snaps, clock, dur):
+        super().__init__(snaps, reads=0)
+        self.clock, self.dur = clock, dur
+
+    def delete_snapshot(self, node, vmid, vm_type, name):
+        res = super().delete_snapshot(node, vmid, vm_type, name)
+        self.tasks[res['task']]['ends'] = self.clock.now + self.dur
+        return res
+
+    def _api_get(self, url, **kw):
+        t = self.tasks[url.split('/tasks/', 1)[1].rsplit('/status', 1)[0]]
+        if t['holds']:
+            t['left'] = 1 if self.clock.now < t['ends'] else 0
+        return super()._api_get(url, **kw)
+
+
+def test_a_delete_task_of_half_a_second_is_seen_ended_within_a_second(monkeypatch):
+    """The snapshots of a guest go one after the other, so the time between the end of a
+    task and our next look at it is paid once per snapshot. With a status read every 2s
+    a guest of thirty snapshots took a minute whatever PVE needed."""
+    clock = _Virtual()
+    monkeypatch.setattr(manager_mod, 'time', clock)
+    pve = _Timed({100: ['s1']}, clock, 0.5)
+    res = pve.delete_snapshot('pve1', 100, 'qemu', 's1')
+    sent = clock.now
+    assert sn._delete_done(pve, 'pve1', res) == ('gone', '')
+    assert clock.now - sent <= 1.0, f'the end of a 0.5s task was seen {clock.now - sent:.2f}s after it was sent'
+
+
+def test_sixteen_guests_have_their_delete_running_side_by_side(api, admin):
+    """The overview lists up to 200 snapshots, of as many guests: four at a time and a wait
+    of seconds each made that minutes."""
+    pve = api.set_manager(CID, _Pve({100 + i: ['s1'] for i in range(16)}))
+    code, body = _bulk(admin, *[(100 + i, 's1') for i in range(16)])
+    assert code == 200 and body['deleted'] == 16 == pve.gone(), body
+    assert pve.peak == 16, f'only {pve.peak} guests had their delete running at the same time'
+
+
+def test_the_request_answers_before_a_proxy_gives_up_on_it(api, admin, monkeypatch):
+    """A delete task that does not end is not waited for longer than the request may take:
+    Cloudflare answers 524 after 100s, Firefox gives up after 300s, and the UI then said
+    'Failed' while the server went on."""
+    clock = _Virtual()
+    monkeypatch.setattr(manager_mod, 'time', clock)
+    monkeypatch.setattr(sn, 'time', clock)
+    pve = api.set_manager(CID, _Pve({100: ['s1', 's2']}, never={(100, 's1')}))
+    started = clock.now
+    code, body = _bulk(admin, (100, 's1'), (100, 's2'))
+    took = clock.now - started
+    assert took < 100, f'the request took {took:.0f}s'
+    assert pve.sent == [(100, 's1')]
+    assert code == 500 and pve.gone() == 0
+    assert body['errors'][0].startswith('Failed to delete s1 of VM 100: its delete task still runs in Proxmox')
+    assert body['errors'][1] == 'Failed to delete s2 of VM 100: not started, the delete of s1 still runs'

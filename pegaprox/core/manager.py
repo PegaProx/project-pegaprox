@@ -5233,7 +5233,7 @@ class PegaProxManager:
                             entry.get('to_node'), why, status,
                             duration=(time.time() - started) if started else 0.0, note=note)
 
-    def _wait_for_task(self, node: str, task_id: str, timeout: int = 600) -> bool:
+    def _wait_for_task(self, node: str, task_id: str, timeout: int = 600, first_poll: float = 2) -> bool:
         """
         Wait for a Proxmox task to complete.
         
@@ -5242,10 +5242,14 @@ class PegaProxManager:
         
         Polling interval: 2s normally, 5s after errors (to avoid hammering a failing node)
         Default timeout: 10 minutes (should be enough for most migrations)
+        MK Nov 2026 - first_poll: the second read comes after that many seconds, each next one
+        after twice as long up to the 2s. For tasks that mostly end within a second and are
+        waited for one after the other (snapshot deletes, #1347)
         
         Returns True only if task completed with exitstatus 'OK'.
         """
         start_time = time.time()
+        pause = first_poll
         
         while time.time() - start_time < timeout:
             try:
@@ -5266,7 +5270,8 @@ class PegaProxManager:
                             self.logger.warning(f"Task {task_id} finished with exit status: {exit_status}")
                         return ok
                     
-                time.sleep(2)  # Poll every 2 seconds
+                time.sleep(pause)  # Poll every 2 seconds
+                pause = min(pause * 2, 2)
                 
             except Exception as e:
                 self.logger.error(f"Error checking task status: {e}")

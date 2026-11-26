@@ -51,7 +51,7 @@ class _Guest:
             self.running = upid
         return {'success': True, 'task': upid}
 
-    def _wait_for_task(self, node, upid, timeout=600):
+    def _wait_for_task(self, node, upid, timeout=600, first_poll=2):
         name, status = self.tasks[upid]
         if self.running == upid:
             self.settle()
