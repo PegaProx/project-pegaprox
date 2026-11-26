@@ -3447,15 +3447,17 @@ def lock_config_dir(path=None):
     """F1: hold an exclusive flock on LOCK_FILE for as long as this process runs. Two
     processes on one config directory share the database, the state file and the
     instance id, and both act. The descriptor is close-on-exec, so an execv restart
-    lets go of it and the new image takes it again.
+    lets go of it and the new image takes it again. Windows has no flock, there the
+    same file is locked with msvcrt (_lock_config_dir_msvcrt).
 
-    Raises HaError when another process holds it. Without flock (no fcntl, a
-    filesystem that has no locks) it warns and goes on; returns the descriptor or None."""
+    Raises HaError when another process holds it. On a filesystem that has no locks it
+    warns and goes on, without fcntl and msvcrt both it goes on as well; returns the
+    descriptor or None."""
     path = path or LOCK_FILE
     try:
         import fcntl
     except ImportError:
-        return None
+        return _lock_config_dir_msvcrt(path)
     try:
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     except OSError as e:
@@ -3482,6 +3484,52 @@ def lock_config_dir(path=None):
         pass
     _config_lock['fd'] = fd
     return fd
+
+
+# MK Nov 2026 - lock_config_dir returned None on Windows, so a second PegaProx, or a
+# --migrate-db next to the running one, shared no lock with it and ran anyway. Windows
+# gets byte 0 of the same file, locked as dbcrypto locks a conversion. A locked byte is
+# closed to every other handle there, reads too, so the pid goes after it.
+def _lock_config_dir_msvcrt(path):
+    try:
+        import msvcrt
+    except ImportError:
+        return None
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_BINARY', 0), 0o600)
+    except OSError as e:
+        logging.warning(f"[HA] cannot open {path} ({e}) - running without the config directory lock")
+        return None
+    from pegaprox.core import dbcrypto
+    try:
+        dbcrypto._lock_first_byte(msvcrt, fd, path, wait=False)
+    except BlockingIOError:
+        holder = _pid_after_first_byte(fd)
+        os.close(fd)
+        who = f'process {holder}' if holder.isdigit() else 'process'
+        raise HaError(f'Another PegaProx {who} runs on {os.path.dirname(os.path.abspath(path))} '
+                      '- one config directory takes one process')
+    except OSError as e:
+        os.close(fd)
+        logging.warning(f"[HA] cannot lock {path} ({e}) - running without the config directory lock")
+        return None
+    try:
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, f'\n{os.getpid()}\n'.encode())
+    except OSError:
+        pass
+    _config_lock['fd'] = fd
+    return fd
+
+
+def _pid_after_first_byte(fd):
+    """The pid a Windows holder wrote behind the byte it locks, '' when there is none."""
+    try:
+        os.lseek(fd, 1, os.SEEK_SET)
+        return os.read(fd, 16).decode(errors='replace').strip()
+    except OSError:
+        return ''
 
 
 # --- snapshot ------------------------------------------------------------------

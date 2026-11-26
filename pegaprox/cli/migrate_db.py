@@ -104,29 +104,36 @@ def main(argv: List[str]) -> int:
         held = _hold_config_dir(os.path.dirname(os.path.abspath(db_path)))
     except RuntimeError as e:
         print(f"\n[BLOCKED] {e}. Nothing was changed.")
-        print(f"          {STOP_FIRST}")
+        print(f"          {_stop_first()}")
         return 7
     try:
         return _migrate(args, db_path, dbcrypto)
     finally:
         if held is not None:
-            os.close(held)
+            _let_go(held)
 
 
 STOP_FIRST = "Stop PegaProx first (sudo systemctl stop pegaprox), then run this again."
+# MK Nov 2026 - there is no systemctl on Windows
+STOP_FIRST_WINDOWS = "Stop PegaProx first (its service, or the PegaProx process), then run this again."
+_WINDOWS = os.name == 'nt'
 # the lock file a running PegaProx holds in its config directory, ha.LOCK_FILE
 _RUNNING_LOCK = '.pegaprox.lock'
+
+
+def _stop_first() -> str:
+    return STOP_FIRST_WINDOWS if _WINDOWS else STOP_FIRST
 
 
 def _hold_config_dir(folder: str):
     """Take the lock a running PegaProx holds on `folder` for the rest of this run, so none
     starts on it meanwhile either. Returns the descriptor, or None where there is no such
-    lock to take (Windows, no lock file yet, a filesystem without flock). Raises
-    RuntimeError naming the process that holds it."""
+    lock to take (no lock file yet, a filesystem without locks, neither fcntl nor msvcrt).
+    Raises RuntimeError naming the process that holds it."""
     try:
         import fcntl
     except ImportError:
-        return None
+        return _hold_config_dir_msvcrt(folder)
     try:
         # never created here: run as root it would be a file the service cannot open
         fd = os.open(os.path.join(folder, _RUNNING_LOCK), os.O_RDWR)
@@ -152,6 +159,55 @@ def _hold_config_dir(folder: str):
     except OSError:
         pass
     return fd
+
+
+# MK Nov 2026 - on Windows this returned None at once, and the conversion ran under a live
+# PegaProx. There ha.lock_config_dir locks byte 0 of the file with msvcrt, so this does too,
+# and reads and writes the pid behind that byte, the one other handles cannot touch.
+def _hold_config_dir_msvcrt(folder: str):
+    try:
+        import msvcrt
+    except ImportError:
+        return None
+    try:
+        fd = os.open(os.path.join(folder, _RUNNING_LOCK), os.O_RDWR | getattr(os, 'O_BINARY', 0))
+    except OSError:
+        return None
+    from pegaprox.core import dbcrypto
+    try:
+        dbcrypto._lock_first_byte(msvcrt, fd, folder, wait=False)
+    except BlockingIOError:
+        try:
+            os.lseek(fd, 1, os.SEEK_SET)
+            holder = os.read(fd, 16).decode(errors='replace').strip()
+        except OSError:
+            holder = ''
+        os.close(fd)
+        who = f" (process {holder})" if holder.isdigit() else ''
+        raise RuntimeError(f"PegaProx{who} is running on {folder}")
+    except OSError:
+        os.close(fd)
+        return None
+    try:
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, f'\n{os.getpid()}\n'.encode())
+    except OSError:
+        pass
+    return fd
+
+
+def _let_go(fd: int) -> None:
+    """Closes what _hold_config_dir returned. A closed handle lets go of an msvcrt lock only
+    when Windows gets round to it, so that one is undone first, as dbcrypto does."""
+    try:
+        import fcntl  # noqa: F401
+    except ImportError:
+        with contextlib.suppress(ImportError, OSError):
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    os.close(fd)
 
 
 def _migrate(args, db_path: str, dbcrypto) -> int:
@@ -224,8 +280,9 @@ def _migrate(args, db_path: str, dbcrypto) -> int:
             print("Cancelled.")
             return 0
 
-    # the lock of the conversion at a start as well: a PegaProx without the directory lock
-    # (Windows) that starts now waits for this run and then finds the database encrypted
+    # the lock of the conversion at a start as well: a PegaProx that starts now without the
+    # directory lock (it could not open or lock the file) waits for this run and then finds
+    # the database encrypted
     stack = contextlib.ExitStack()
     try:
         stack.enter_context(dbcrypto._migration_lock(f"{db_path}.migration.lock", db_path, wait=False))
@@ -238,7 +295,7 @@ def _migrate(args, db_path: str, dbcrypto) -> int:
             mark = dbcrypto.plain_alone(db_path)
         except dbcrypto.InUse as e:
             print(f"\n[BLOCKED] {e}. Nothing was changed.")
-            print(f"          {STOP_FIRST}")
+            print(f"          {_stop_first()}")
             return 7
         return _convert(db_path, backup_path, new_path, mk, mark, dbcrypto)
 
@@ -279,7 +336,7 @@ def _convert(db_path: str, backup_path: str, new_path: str, mk, mark, dbcrypto) 
         stuck = dbcrypto._remove_files([backup_path] + dbcrypto._sqlite_files(new_path))
         print(f"\n[ABORT] {db_path} is untouched, and the encrypted candidate and the plain copy "
               f"are removed{' except ' + ', '.join(stuck) if stuck else ''}.")
-        print(f"        {STOP_FIRST}")
+        print(f"        {_stop_first()}")
         return 7
     os.replace(new_path, db_path)
     os.chmod(db_path, 0o600)
