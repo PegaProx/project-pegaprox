@@ -2886,6 +2886,113 @@
             );
         }
 
+        // LW Nov 2026 - the whole log of one ESXi migration (#1278). Read in pieces from the server
+        // while the panel is open: every 3 s while the job runs, once for one that ended. The
+        // detail's last lines stand in until the first piece is there, and for a server that has
+        // no log route. Lines go in blocks of 500 so a new line renders one block, not all of them
+        const ESXI_LOG_BLOCK = 500;
+        const esxiLogLineClass = (line) => /^\.\.\. \d+ lines left out/.test(line) ? 'text-yellow-300'
+            : line.includes('FAIL') || line.includes('ERROR') ? 'text-red-400'
+            : line.includes('Phase:') ? 'text-emerald-400 font-bold'
+            : line.includes('===') ? 'text-blue-400' : 'text-gray-500';
+        const EsxiLogBlock = React.memo(function EsxiLogBlock({ lines }) {
+            return lines.map((line, i) => <div key={i} className={esxiLogLineClass(line)}>{line}</div>);
+        });
+        function esxiLogAppend(blocks, add) {
+            const out = blocks.slice();
+            let i = 0;
+            while (i < add.length) {
+                const last = out[out.length - 1];
+                const room = last ? ESXI_LOG_BLOCK - last.length : 0;
+                if (room > 0) {
+                    out[out.length - 1] = last.concat(add.slice(i, i + room));
+                    i += room;
+                } else {
+                    out.push(add.slice(i, i + ESXI_LOG_BLOCK));
+                    i += ESXI_LOG_BLOCK;
+                }
+            }
+            return out;
+        }
+
+        function EsxiMigrationLog({ mid, running, fallback, authFetch, t }) {
+            const [blocks, setBlocks] = React.useState(null);
+            const [total, setTotal] = React.useState(0);
+            const [busy, setBusy] = React.useState(false);
+            const [failed, setFailed] = React.useState(false);
+            const [tried, setTried] = React.useState(false);
+            const box = React.useRef(null);
+            const stick = React.useRef(true);
+            const runningRef = React.useRef(running);
+            runningRef.current = running;
+            React.useEffect(() => {
+                let live = true, timer = null, next = 0;
+                const load = async () => {
+                    let got = [], d = null, ok = false, rounds = 0;
+                    do {
+                        const r = await authFetch(`${API_URL}/vmware/migrations/${encodeURIComponent(mid)}/log?offset=${next}`);
+                        d = r && r.ok ? await r.json().catch(() => null) : null;
+                        if (!live) return;
+                        if (!d || !Array.isArray(d.lines)) { d = null; break; }
+                        ok = true;
+                        got = got.concat(d.lines);
+                        next = d.next;
+                        rounds++;
+                    } while (d.next < d.total && rounds < 4);
+                    if (ok) {
+                        setBlocks(prev => got.length ? esxiLogAppend(prev || [], got) : (prev || []));
+                        if (d) setTotal(d.total);
+                    }
+                    setTried(true);
+                    // a failed read is tried again only while the run still goes on
+                    if (d ? (d.running || d.next < d.total) : runningRef.current) {
+                        timer = setTimeout(load, d ? 3000 : 10000);
+                    }
+                };
+                load();
+                return () => { live = false; clearTimeout(timer); };
+            }, [mid]);
+            React.useEffect(() => {
+                if (stick.current && box.current) box.current.scrollTop = box.current.scrollHeight;
+            }, [blocks]);
+            const download = async () => {
+                setBusy(true);
+                setFailed(false);
+                try {
+                    const r = await authFetch(`${API_URL}/vmware/migrations/${encodeURIComponent(mid)}/log?download=1`);
+                    if (!r || !r.ok) throw new Error('download');
+                    const blob = await r.blob();
+                    const named = /filename="([^"]+)"/.exec(r.headers.get('Content-Disposition') || '');
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = named ? named[1] : `esxi-migration-${mid}.log`;
+                    document.body.appendChild(a);
+                    a.click();
+                    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 150);
+                } catch (e) {
+                    setFailed(true);
+                } finally {
+                    setBusy(false);
+                }
+            };
+            return (
+                <div data-v2p-log>
+                    <div className="px-3 py-2 border-b border-proxmox-border/50 flex items-center gap-3 text-xs text-gray-500">
+                        <span>{blocks ? t('v2pLogLines').replace('{n}', total) : tried ? '' : t('v2pLogLoading')}</span>
+                        {failed && <span className="text-red-400">{t('v2pLogDownloadFailed')}</span>}
+                        <button onClick={download} disabled={busy} className="ml-auto flex items-center gap-1.5 px-2 py-1 rounded bg-proxmox-dark text-gray-300 hover:text-white disabled:opacity-50">
+                            <Icons.Download /> {t('v2pLogDownload')}
+                        </button>
+                    </div>
+                    <div ref={box} onScroll={e => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}
+                         className="p-3 bg-black/30 max-h-96 overflow-y-auto font-mono text-xs leading-relaxed">
+                        {blocks ? blocks.map((b, i) => <EsxiLogBlock key={i} lines={b} />)
+                            : (fallback || []).map((line, i) => <div key={i} className={esxiLogLineClass(line)}>{line}</div>)}
+                    </div>
+                </div>
+            );
+        }
+
         // NS: Mar 2026 - Topology View redesign (#142)
         // SVG bezier connectors, donut gauges, card elevation
         // MK: added diagram view with pan/zoom + export capability
@@ -14951,6 +15058,9 @@
             const [vmwareError, setVmwareError] = useState(null);
             const [vmwareSelectedMigration, setVmwareSelectedMigration] = useState(null);
             const [vmwareMigrationDetail, setVmwareMigrationDetail] = useState(null);
+            // LW Nov 2026 (#1278) - how many stored migrations the list asks for, and whether older ones follow
+            const vmwareHistoryLimit = useRef(50);
+            const [vmwareMigrationsMore, setVmwareMigrationsMore] = useState(false);
             const [showVmwareRename, setShowVmwareRename] = useState(false);
             const [vmwareSearch, setVmwareSearch] = useState('');
             const [vmwareFilter, setVmwareFilter] = useState('all'); // all, running, stopped
@@ -19992,13 +20102,21 @@
             // List VMware Migrations
             const fetchVmwareMigrations = async () => {
                 try {
-                    const resp = await authFetch(`${API_URL}/vmware/migrations`);
+                    const resp = await authFetch(`${API_URL}/vmware/migrations?limit=${vmwareHistoryLimit.current}`);
                     if (resp?.ok) {
                         const data = await resp.json();
                         setVmwareMigrations(Array.isArray(data) ? data : []);
+                        setVmwareMigrationsMore(resp.headers.get('X-History-More') === '1');
                     }
                 } catch(e) {}
             };
+            const showOlderVmwareMigrations = () => {
+                vmwareHistoryLimit.current = Math.min(vmwareHistoryLimit.current + 50, 500);
+                fetchVmwareMigrations();
+            };
+            // the migrations a VM's Migration tab lists: what runs, and what ran of this VM
+            const vmwareMigrationOfVm = (m) => m.status === 'running'
+                || (String(m.vm_id) === String(vmwareSelectedVm) && m.vmware_id === selectedVMware?.id);
             
             // VMware Events/Tasks
             const fetchVmwareEvents = async () => {
@@ -30216,11 +30334,11 @@
                                                                     </div>
                                                                     
                                                                     {/* Active Migrations */}
-                                                                    {vmwareMigrations.length > 0 && (
+                                                                    {vmwareMigrations.some(vmwareMigrationOfVm) && (
                                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                             <h3 className="text-sm font-semibold text-gray-400 uppercase mb-3">Active Migrations</h3>
                                                                             <div className="space-y-2">
-                                                                                {vmwareMigrations.map(m => (
+                                                                                {vmwareMigrations.filter(vmwareMigrationOfVm).map(m => (
                                                                                     <div key={m.id} className="p-3 bg-proxmox-dark rounded-lg">
                                                                                         <div className="flex items-center justify-between mb-2">
                                                                                             <span className="text-sm text-white font-medium">{m.vm_name || m.id}</span>
@@ -31382,14 +31500,14 @@
                                                                          onClick={() => setVmwareSelectedMigration(vmwareSelectedMigration === m.id ? null : m.id)}>
                                                                         <div className="flex items-center justify-between mb-2">
                                                                             <div className="flex items-center gap-3">
-                                                                                <div className={`w-2.5 h-2.5 rounded-full ${isAwaiting ? 'bg-amber-400 animate-pulse' : isActive ? 'bg-blue-400 animate-pulse' : m.status === 'completed' ? 'bg-green-400' : m.status === 'failed' ? 'bg-red-400' : 'bg-gray-500'}`} />
+                                                                                <div className={`w-2.5 h-2.5 rounded-full ${isAwaiting ? 'bg-amber-400 animate-pulse' : isActive ? 'bg-blue-400 animate-pulse' : m.status === 'completed' ? 'bg-green-400' : m.status === 'failed' ? 'bg-red-400' : m.status === 'interrupted' ? 'bg-yellow-400' : 'bg-gray-500'}`} />
                                                                                 <span className="text-sm font-medium text-white">{m.vm_name || m.vm_id}</span>
                                                                                 <span className={`text-xs px-1.5 py-0.5 rounded ${isAwaiting ? 'bg-amber-500/20 text-amber-300' : 'bg-proxmox-dark text-gray-400'}`}>{phaseLabel[m.phase] || m.phase}</span>
                                                                             </div>
                                                                             <div className="flex items-center gap-3">
                                                                                 {m.total_downtime_seconds != null && <span className="text-xs text-gray-500">{t('downtime')}: {m.total_downtime_seconds}s</span>}
                                                                                 {(m.warnings || []).length > 0 && <span data-v2p-warnings title={m.warnings.join('\n')} className="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-500/20 text-yellow-300 flex items-center gap-1"><Icons.AlertTriangle className="w-3 h-3" />{t('migrationWarnings')}: {m.warnings.length}</span>}
-                                                                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${m.status === 'completed' ? 'bg-green-500/20 text-green-400' : m.status === 'failed' ? 'bg-red-500/20 text-red-400' : m.status === 'cancelled' ? 'bg-gray-500/20 text-gray-400' : 'bg-blue-500/20 text-blue-400'}`}>{m.status}</span>
+                                                                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${m.status === 'completed' ? 'bg-green-500/20 text-green-400' : m.status === 'failed' ? 'bg-red-500/20 text-red-400' : m.status === 'cancelled' ? 'bg-gray-500/20 text-gray-400' : m.status === 'interrupted' ? 'bg-yellow-500/20 text-yellow-300' : 'bg-blue-500/20 text-blue-400'}`}>{m.status}</span>
                                                                             </div>
                                                                         </div>
                                                                         <div className="flex items-center gap-3 mb-1">
@@ -31438,6 +31556,11 @@
                                                             })}
                                                         </div>
                                                     ) : <div className="p-8 text-center text-gray-600 text-sm">{t('noMigrationsYetHint')}</div>}
+                                                    {vmwareMigrationsMore && (
+                                                        <button data-v2p-older onClick={showOlderVmwareMigrations} className="w-full p-3 border-t border-proxmox-border/50 text-xs text-gray-400 hover:text-white hover:bg-proxmox-hover/30">
+                                                            {t('v2pHistoryOlder')}
+                                                        </button>
+                                                    )}
                                                 </div>
                                                 
                                                 {/* Migration Log Viewer */}
@@ -31461,11 +31584,8 @@
                                                                 ))}
                                                             </div>
                                                         )}
-                                                        <div className="p-3 bg-black/30 max-h-60 overflow-y-auto font-mono text-xs leading-relaxed">
-                                                            {(vmwareMigrationDetail.log || []).map((line, i) => (
-                                                                <div key={i} className={line.includes('FAIL') || line.includes('ERROR') ? 'text-red-400' : line.includes('Phase:') ? 'text-emerald-400 font-bold' : line.includes('===') ? 'text-blue-400' : 'text-gray-500'}>{line}</div>
-                                                            ))}
-                                                        </div>
+                                                        <EsxiMigrationLog key={vmwareSelectedMigration} mid={vmwareSelectedMigration} running={vmwareMigrationDetail.status === 'running'}
+                                                                          fallback={vmwareMigrationDetail.log} authFetch={authFetch} t={t} />
                                                         {vmwareMigrationDetail.error && <div className="p-3 bg-red-500/10 border-t border-red-500/20 text-red-400 text-xs">{t('error')}: {vmwareMigrationDetail.error}</div>}
                                                         {vmwareMigrationDetail.status === 'completed' && <div className="p-3 bg-green-500/10 border-t border-green-500/20 text-green-400 text-xs">✓ {t('migrationCompleted')} VMID: {vmwareMigrationDetail.proxmox_vmid}{vmwareMigrationDetail.total_downtime_seconds ? ` - ${t('downtime')}: ${vmwareMigrationDetail.total_downtime_seconds}s` : ''}</div>}
                                                         {/* LW Nov 2026 - what the run left undone, e.g. VirtIO drivers not injected (#1245) */}
