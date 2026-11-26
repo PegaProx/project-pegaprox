@@ -8833,7 +8833,10 @@ def snapshots_overview_delete():
     
     deleted_count = 0
     errors = []
-    result = {'success': False}
+    # MK Nov 2026 (#1347) - what passes the checks is deleted below, per guest one snapshot after
+    # the other: sent all at once, the second delete of a guest died on the lock of the first in
+    # PVE, and its accepted task counted as deleted here
+    guests = {}
 
     for snapshot in snapshots:
         try:
@@ -8874,17 +8877,24 @@ def snapshots_overview_delete():
                 errors.append(f"Permission denied: {_missing} for VM {vmid}")
                 continue
 
-            result = mgr.delete_snapshot(node, vmid, vm_type, snapname)
-            
-            if result.get('success'):
-                deleted_count += 1
-                log_audit(user, 'snapshot.deleted', f"{vm_type.upper()} {vmid} - snapshot '{snapname}' deleted", cluster=mgr.config.name)
-            else:
-                errors.append(f"Failed to delete {snapname}: {result.get('error', 'Unknown error')}")
-                
+            guests.setdefault((cluster_id, str(vmid)), []).append(
+                {'mgr': mgr, 'cluster_id': cluster_id, 'node': node, 'vmid': vmid, 'vm_type': vm_type, 'name': snapname})
+
         except Exception as e:
             errors.append(f"Error deleting snapshot: {e}")
             logging.debug(f"Snapshot deletion failed: {e}")
+
+    from pegaprox.api.snapshots import delete_per_guest
+    for job in delete_per_guest(list(guests.values()), user):
+        if job['state'] == 'gone':
+            deleted_count += 1
+            log_audit(user, 'snapshot.deleted', f"{str(job['vm_type']).upper()} {job['vmid']} - snapshot '{job['name']}' deleted",
+                      cluster=job['mgr'].config.name)
+        elif job['state'] == 'error':
+            errors.append(f"Error deleting snapshot: {job['why']}")
+            logging.debug(f"Snapshot deletion failed: {job['why']}")
+        else:
+            errors.append(f"Failed to delete {job['name']} of VM {job['vmid']}: {job['why']}")
 
     if deleted_count > 0:
         return jsonify({

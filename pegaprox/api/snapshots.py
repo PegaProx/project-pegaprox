@@ -330,19 +330,83 @@ def _snap_name(policy_id):
     return f"pegaprox-{safe}-{ts}"
 
 
-def _delete_done(mgr, node, res):
-    """(gone, why not) of one prune delete. PVE answers the DELETE with a task and takes
-    the guest's lock only inside it, so a delete sent while the one before still runs is
-    accepted and then fails in its task (VM is locked). Each task is waited for, and only
-    one that ended OK counts."""
+# MK Nov 2026 (#1347) - PVE answers a snapshot DELETE with a task and takes the guest's lock
+# only inside it, so a delete sent while the one before still runs is accepted and then fails
+# in its task ('VM is locked (snapshot-delete)'). Every delete here waits for its task before
+# the next one of the same guest goes out.
+SNAP_DELETE_WAIT = 600        # seconds one delete task may take before we stop waiting for it
+BULK_DELETE_SECONDS = 600     # a bulk delete request in all; a forwarding standby waits 900
+BULK_DELETE_GUESTS = 4        # guests whose snapshots are deleted at the same time
+
+
+def _delete_done(mgr, node, res, timeout=None):
+    """('gone'|'failed'|'busy', why) of one snapshot delete, `res` being the manager's answer
+    to it. Only a task that ended OK is gone; a failed one says what PVE said. 'busy': the
+    task still runs after `timeout`, the guest keeps its lock and the next delete of it
+    would only fail. A delete without a task (XCP-ng deletes within the call) is gone once
+    it was accepted."""
     if not isinstance(res, dict):
-        return False, 'no answer'
+        return 'failed', 'no answer'
     if not res.get('success'):
-        return False, ' '.join(str(res.get('error') or 'refused').split())[:200]
+        return 'failed', ' '.join(str(res.get('error') or 'refused').split())[:200]
+    timeout = SNAP_DELETE_WAIT if timeout is None else timeout
     upid = res.get('task')
-    if upid and hasattr(mgr, '_wait_for_task') and not mgr._wait_for_task(node, upid, timeout=600):
-        return False, f'the delete task did not end OK ({upid})'
-    return True, ''
+    if not upid or not hasattr(mgr, '_wait_for_task') or mgr._wait_for_task(node, upid, timeout=timeout):
+        return 'gone', ''
+    try:
+        st = mgr.get_task_status(node, upid) if hasattr(mgr, 'get_task_status') else None
+    except Exception:
+        st = None
+    if not isinstance(st, dict):
+        return 'failed', f'the delete task did not end OK ({upid})'
+    if st.get('status') == 'running':
+        return 'busy', f'its delete task still runs in Proxmox after {int(timeout)}s ({upid})'
+    said = ' '.join(str(st.get('exitstatus') or '').split())[:200]
+    if said == 'OK' or said.startswith('WARNINGS'):
+        # the status could not be read while we waited, the task did end well
+        return 'gone', ''
+    return 'failed', said or f'the delete task did not end OK ({upid})'
+
+
+def delete_per_guest(guests, user=''):
+    """The deletes of a bulk request. `guests` holds one list of jobs per guest, a job being
+    {mgr, cluster_id, node, vmid, vm_type, name}. The snapshots of a guest go one after the
+    other, each once the task of the one before ended; up to BULK_DELETE_GUESTS guests at a
+    time, and nothing new starts after BULK_DELETE_SECONDS. Each job gets 'state' (gone,
+    failed, busy, skipped, error) and 'why'; the jobs come back in the order they were
+    handed in. `user` is named as the one who started each task."""
+    from pegaprox.api.helpers import register_task_user
+    from pegaprox.utils.concurrent import run_per_node
+    until = time.monotonic() + BULK_DELETE_SECONDS
+
+    def one_guest(i):
+        jobs = guests[i]
+        for n, job in enumerate(jobs):
+            left = until - time.monotonic()
+            if left <= 0:
+                job.update(state='skipped', why=f'not started, the request ran out of its {BULK_DELETE_SECONDS}s')
+                continue
+            try:
+                res = job['mgr'].delete_snapshot(job['node'], job['vmid'], job['vm_type'], job['name'])
+                if user and isinstance(res, dict) and res.get('task'):
+                    # out of the request's context here, the manager cannot name the user itself
+                    register_task_user(res['task'], user, job.get('cluster_id'))
+                job['state'], job['why'] = _delete_done(job['mgr'], job['node'], res, min(SNAP_DELETE_WAIT, left))
+            except Exception as e:
+                job['state'], job['why'] = 'error', str(e)
+            if job['state'] == 'busy':
+                for later in jobs[n + 1:]:
+                    later.update(state='skipped', why=f"not started, the delete of {job['name']} still runs")
+                break
+
+    # a pool of its own: a wait of minutes holds none of the shared slots
+    run_per_node({i: one_guest for i in range(len(guests))}, max_concurrent=BULK_DELETE_GUESTS,
+                 timeout=BULK_DELETE_SECONDS + 60)
+    out = [job for jobs in guests for job in jobs]
+    for job in out:
+        if 'state' not in job:
+            job.update(state='failed', why='no answer from its delete before the request ended')
+    return out
 
 
 def _prune(mgr, node, vmid, vm_type, policy, errors=None):
@@ -384,13 +448,9 @@ def _prune(mgr, node, vmid, vm_type, policy, errors=None):
     cutoff = 0
     if policy['retention_days'] > 0:
         cutoff = (datetime.now() - timedelta(days=policy['retention_days'])).timestamp()
+    doomed = [name for snap_t, name in owned if name not in keep_set and not (cutoff and snap_t >= cutoff)]
 
-    for snap_t, name in owned:
-        if name in keep_set:
-            continue
-        if cutoff and snap_t >= cutoff:
-            keep_set.add(name)
-            continue
+    for i, name in enumerate(doomed):
         # delete this snapshot: not from a leader that lost its lease (#625)
         if not ha.confirm_step(f'pruning {name} of {vmid}'):
             break
@@ -403,15 +463,20 @@ def _prune(mgr, node, vmid, vm_type, policy, errors=None):
                 res = {'success': resp.status_code == 200, 'error': f'HTTP {resp.status_code}'}
                 if res['success']:
                     res['task'] = (resp.json() or {}).get('data')
-            gone, why = _delete_done(mgr, node, res)
+            state, why = _delete_done(mgr, node, res)
         except Exception as e:
-            gone, why = False, str(e)
-        if gone:
+            state, why = 'failed', str(e)
+        if state == 'gone':
             pruned += 1
-        else:
-            logging.warning(f"[snap-sched] prune delete failed for {name}: {why}")
+            continue
+        logging.warning(f"[snap-sched] prune delete failed for {name}: {why}")
+        if errors is not None:
+            errors.append(f'{name}: {why}')
+        if state == 'busy':
+            # the guest keeps its lock while that task runs, the next delete would only fail
             if errors is not None:
-                errors.append(f'{name}: {why}')
+                errors.extend(f'{later}: not started, the delete of {name} still runs' for later in doomed[i + 1:])
+            break
     return pruned
 
 
