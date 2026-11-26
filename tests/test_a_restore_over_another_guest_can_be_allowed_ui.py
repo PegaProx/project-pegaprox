@@ -176,7 +176,7 @@ def test_the_pbs_wizard_sends_it_only_in_overwrite_mode():
     wizard = src[src.index('function BackupRestoreWizard('):src.index('window.PegaProxBackupRestoreWizard = BackupRestoreWizard')]
     assert "if (mode === 'overwrite' && otherGuest) body.allow_identity_mismatch = true;" in wizard
     assert ("{mode === 'overwrite' && (\n                                <RestoreOtherGuestOption checked={otherGuest} "
-            "onChange={setOtherGuest} refused={restoreRefusedOtherGuest(error)} />") in wizard
+            "onChange={setOtherGuest} refused={restoreRefusedOtherGuest(error, errorCode)} />") in wizard
 
 
 def _blocks():
