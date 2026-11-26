@@ -402,8 +402,12 @@ def rotate_cluster_api_token(cluster_id):
                           f"{type(e).__name__}")
             saved = False
 
-        dropped = True
-        if not preserved:
+        dropped, kept = True, False
+        if not preserved and not saved:
+            # the stored login is still the old token: it stays on the cluster, or the next
+            # start signs in with a token PVE no longer has
+            dropped, kept = False, True
+        elif not preserved:
             try:
                 gone, why = mgr._token_request('DELETE', token_id, what='deleting the old API token')
             except Exception as e:
@@ -420,7 +424,10 @@ def rotate_cluster_api_token(cluster_id):
                   cluster=mgr.config.name)
         message = 'Token rotated; ACLs preserved' if preserved else \
             'Token rotated via a new token; ACL entries on the old token were lost (pre-PVE-9.2 cluster)'
-        if not dropped:
+        if kept:
+            message += (f'. The old token {token_user} stays on the cluster, as PegaProx still has '
+                        f'it stored: delete it there once a rotation could be stored')
+        elif not dropped:
             message += f'. The old token {token_user} is still on the cluster: delete it there'
         out = {'success': True, 'acls_preserved': preserved}
         if not saved:
