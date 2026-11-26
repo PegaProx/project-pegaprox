@@ -15233,6 +15233,9 @@ echo "AGENT_INSTALLED_OK"
     # A login PVE refused is not sent again for TOKEN_LOGIN_HOLD while the stored password
     # stays the same: a Site Recovery run asks once per guest, the balancer every interval,
     # and each failed login counts on the realm's lockout and on a fail2ban of pveproxy.
+    # MK Nov 2026 (#1390) - for the renewal of the management token (paced) a login that got
+    # no yes or no waits as long: a realm whose LDAP or AD server is slow or gone fails it in
+    # PVE's log all the same, and the renewal looks every five minutes.
     TOKEN_LOGIN_HOLD = 1800
 
     def _token_owner(self):
@@ -15440,7 +15443,13 @@ echo "AGENT_INSTALLED_OK"
                 mark = (tid, self._password_mark())
                 sess = why = None
                 if getattr(self, '_token_end_login_tried', None) != mark:
-                    sess, why = self._account_login('reading when its API token ends')
+                    try:
+                        sess, why = self._account_login('reading when its API token ends', paced=True)
+                    except Exception:
+                        # no answer is no read: asked again once the login may go out again,
+                        # the looks till then wait like after any answer that said nothing
+                        self._token_renew_held = (tid, time.monotonic() + 3 * self.TOKEN_RENEW_EVERY)
+                        raise
                     self._token_end_login_tried = mark
                 if sess is None:
                     if why:
@@ -15548,7 +15557,7 @@ echo "AGENT_INSTALLED_OK"
                 # answered after all, or in use and not stored yet
                 continue
             try:
-                r, why = self._token_request('DELETE', name,
+                r, why = self._token_request('DELETE', name, paced=True,
                                              what='deleting an API token it got no answer for')
             except Exception as e:
                 self.logger.debug(f"[TOKEN] deleting {name}: no answer ({type(e).__name__})")
@@ -15572,7 +15581,7 @@ echo "AGENT_INSTALLED_OK"
         if form is None:
             return False, ('the API token policy of the cluster requires privilege separation, '
                            'which leaves a new token of PegaProx without any right')
-        sess, why = self._account_login('a new API token')
+        sess, why = self._account_login('a new API token', paced=True)
         if sess is None:
             return False, why
         try:
@@ -15697,7 +15706,8 @@ echo "AGENT_INSTALLED_OK"
         name = old.split('!', 1)[1]
         try:
             if drop is None:
-                gone, why = self._token_request('DELETE', name, what='deleting the API token it renewed')
+                gone, why = self._token_request('DELETE', name, paced=True,
+                                                what='deleting the API token it renewed')
             else:
                 gone, why = drop(_token_url(self, name), timeout=self.api_timeout), None
             if gone is not None and gone.status_code != 200:
@@ -15859,12 +15869,12 @@ echo "AGENT_INSTALLED_OK"
                     'message': message, 'timestamp': datetime.now().isoformat()}, 'token renewal')
 
     def _token_request(self, method, token_name, data=None,
-                       what='the temporary API token of a migration'):
+                       what='the temporary API token of a migration', paced=False):
         """GET, POST, PUT or DELETE `token_name` of the cluster's account: over the session
         we have, and once more over a password login of the account when PVE refused the
         token we talk to it with. (response, None), or (None, why) when neither works. A
         login that got no answer, or one that is no yes or no, raises. `what` is the work
-        a refusal names."""
+        a refusal names, `paced` as for _account_login."""
         url = _token_url(self, token_name)
         kw = {} if data is None else {'data': data}
         # PUT: the new secret of a token (PVE 9.2), which 9.3 refuses a token without
@@ -15874,7 +15884,7 @@ echo "AGENT_INSTALLED_OK"
         response = call(url, **kw)
         if response.status_code != 403 or not getattr(self, '_using_api_token', False):
             return response, None
-        sess, why = self._account_login(what)
+        sess, why = self._account_login(what, paced=paced)
         if sess is None:
             return None, why
         try:
@@ -15883,12 +15893,14 @@ echo "AGENT_INSTALLED_OK"
             try: sess.close()
             except Exception: pass
 
-    def _account_login(self, what):
+    def _account_login(self, what, paced=False):
         """A session of a password login of the cluster's account, for `what` (the work a
         refusal names): (session, None), or (None, why) where there is none to be had. A
         login PVE refused is not sent again for TOKEN_LOGIN_HOLD while the stored password
         stays the same. A login that got no answer, or one that is no yes or no, raises.
-        The caller closes the session."""
+        `paced`: a caller that comes round by itself every few minutes (the renewal of the
+        management token), for which such a login waits TOKEN_LOGIN_HOLD as well, and raises
+        LoginNotTaken till then without going out. The caller closes the session."""
         owner = self._token_owner()
         if '!' in (getattr(self.config, 'user', '') or ''):
             return None, (f"Proxmox does not let an API token make or delete another one, and "
@@ -15905,8 +15917,18 @@ echo "AGENT_INSTALLED_OK"
         held = getattr(self, '_token_login_refused', None)
         if held and held[0] == stored and time.monotonic() - held[1] < self.TOKEN_LOGIN_HOLD:
             return None, held[2]
+        quiet = getattr(self, '_token_login_unanswered', None)
+        if paced and quiet and quiet[0] == stored and time.monotonic() - quiet[1] < self.TOKEN_LOGIN_HOLD:
+            raise LoginNotTaken(quiet[2])
         # no answer, or one that is not a no, raises: that is no refusal, a retry may work
-        sess, why, status = _password_login(self, owner, pwd, what)
+        try:
+            sess, why, status = _password_login(self, owner, pwd, what)
+        except Exception as e:
+            if paced:
+                self._login_unanswered(stored, what, e)
+            raise
+        # an answer, yes or no: whatever kept the login from one is over
+        self._token_login_unanswered = None
         if sess is None:
             if status == 401:
                 why += (" - the password stored for this cluster is wrong, or its realm asks "
@@ -15915,6 +15937,23 @@ echo "AGENT_INSTALLED_OK"
             return None, why
         self._token_login_refused = None
         return sess, None
+
+    def _login_unanswered(self, stored, what, e):
+        """A paced password login (for `what`) got neither a yes nor a no (`e`): not sent
+        again for TOKEN_LOGIN_HOLD while the stored password (`stored`) stays the same, and
+        said once at INFO until a login gets an answer again."""
+        why = (str(e) if isinstance(e, LoginNotTaken)
+               else f"no answer within the time PegaProx waits ({type(e).__name__})")
+        before = getattr(self, '_token_login_unanswered', None)
+        self._token_login_unanswered = (stored, time.monotonic(), why)
+        if before is not None:
+            self.logger.debug(f"[TOKEN] the password login for {what} got no answer again: {why}")
+            return
+        self.logger.info(f"[TOKEN] cluster '{self.config.name}': a password login of "
+                         f"{self._token_owner()} for {what} got neither a yes nor a no ({why}). "
+                         f"PegaProx sends it again in {self.TOKEN_LOGIN_HOLD // 60} minutes at the "
+                         f"earliest, as Proxmox counts each login that fails, on a lockout of the "
+                         f"realm and on a fail2ban of pveproxy alike.")
 
     def create_api_token(self, token_name: str = 'pegaprox-migrate', expire: int = 0) -> Dict[str, Any]:
         # MK May 2026 (#413 layer 6, blackshocks bundle 20260530_220647):

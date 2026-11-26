@@ -30,6 +30,7 @@ MK Nov 2026
 """
 import logging
 import time
+import types
 import uuid
 
 import pytest
@@ -1013,6 +1014,148 @@ def test_a_refusal_close_to_the_end_is_tried_again_before_it(cluster, said):
     assert len(said.alerts) == 1
     _tid, until = m._token_renew_held
     assert until - time.monotonic() <= (fake.expires[tid] - time.time()) / 4 + 1
+
+
+# --- a password login without an answer -----------------------------------------------------
+
+_real_monotonic = time.monotonic
+
+
+class _Minutes:
+    """The monotonic clock of the manager, moved on by hand: the looks of the IP refresh
+    loop come five minutes apart without the test waiting for them."""
+
+    def __init__(self):
+        self.ahead = 0
+
+    def __call__(self):
+        return _real_monotonic() + self.ahead
+
+
+@pytest.fixture
+def minutes(monkeypatch):
+    clock = _Minutes()
+    monkeypatch.setattr(mgrmod, 'time', types.SimpleNamespace(**{**vars(time), 'monotonic': clock}))
+    return clock
+
+
+def _login_without_answer(fake, monkeypatch, how):
+    """The password login gets neither a yes nor a no. 'login-down': pveproxy answers 503,
+    as while it restarts. 'timeout': the login reaches PVE and its answer does not come
+    back within the ten seconds PegaProx waits, as from a realm whose LDAP or AD server is
+    slow or gone. Returns what brings the login back."""
+    if how == 'login-down':
+        fake.login_down = True
+        return lambda: setattr(fake, 'login_down', False)
+    real = mgrmod._password_login
+
+    def answer_lost(mgr, usr, pwd, what):
+        sess, _why, _status = real(mgr, usr, pwd, what)
+        if sess is not None:
+            sess.close()
+        raise mgrmod.requests.exceptions.ReadTimeout('Read timed out. (read timeout=10)')
+    monkeypatch.setattr(mgrmod, '_password_login', answer_lost)
+    return lambda: monkeypatch.setattr(mgrmod, '_password_login', real)
+
+
+LOST = 'pegaprox_999999'
+
+
+def _asking_for_a_login(cluster, fake, path):
+    """The documented role, whose token may neither read nor make a token, at the point
+    where `path` wants a password login of the account: (manager after a restart, token)."""
+    m = cluster.make(fake)
+    tid = m.config.api_token_user
+    if path == 'end-unknown':
+        # made by a PegaProx that kept no end of it: read once over the login
+        _end_not_kept()
+    elif path == 'end-passed':
+        # its end moved on the cluster by hand: the kept end passed and PVE still takes it
+        fake.expires[tid] = int(time.time()) + 20 * DAY
+        _kept_end(tid, int(time.time()) - 3600)
+    elif path == 'new-token':
+        _near(fake, tid, 36 * 3600)
+    else:
+        # a new token whose making got no answer, deleted over the login
+        fake.tokens[f'{USER}!{LOST}'] = 'its-secret'
+        kept = mgrmod._management_token_kept('c1389')
+        assert mgrmod._keep_management_token('c1389', {**kept, 'unanswered': [LOST]})
+    return cluster.restart(m), tid
+
+
+@pytest.mark.parametrize('how', ['login-down', 'timeout'])
+@pytest.mark.parametrize('path', ['end-unknown', 'end-passed', 'new-token', 'unanswered-delete'])
+def test_a_password_login_without_an_answer_goes_out_once_per_hold(
+        cluster, said, minutes, monkeypatch, path, how):
+    """The login that reads an end the token may not read was to go out once per token and
+    password, but only a login that got a yes or a no counted. A realm whose directory does
+    not answer in time, or pveproxy restarting, left every look sending another one, five
+    minutes apart, 288 a day: each fails in PVE's log, and a fail2ban of pveproxy (maxretry
+    3) bans the address of PegaProx, although the token itself needs no directory. A new
+    token over the login and the delete of a token whose making got no answer did the same.
+    Such a login now waits like a refused one, and what it was for is done once the login
+    answers again."""
+    fake = RenewPVE({USER: PASSWORD})
+    m, tid = _asking_for_a_login(cluster, fake, path)
+    said.listen(m)
+    back = _login_without_answer(fake, monkeypatch, how)
+    fake.seen.clear()
+
+    sent = []
+    for _ in range(12):
+        before = len(fake.logins())
+        _pass(m)
+        sent += [minutes()] * (len(fake.logins()) - before)
+        minutes.ahead += 300
+
+    # tried, and once more after the hold, never sooner
+    gaps = [b - a for a, b in zip(sent, sent[1:])]
+    assert len(sent) == 2 and all(g >= m.TOKEN_LOGIN_HOLD for g in gaps), gaps
+    if path != 'unanswered-delete':
+        # the looks in between wait a quarter of an hour
+        assert len(fake.calls('GET')) <= 4
+    [told] = [s for s in said.at(logging.INFO) if '[TOKEN]' in s and 'neither a yes nor a no' in s]
+    assert USER in told and PASSWORD not in told
+    assert said.alerts == [] and not [s for s in said.at(logging.WARNING) if '[TOKEN]' in s]
+    assert m.config.api_token_user == tid and _works(m)
+
+    # the login answers again: what it was for is done at the next look after the hold
+    back()
+    minutes.ahead += m.TOKEN_LOGIN_HOLD
+    fake.seen.clear()
+    _pass(m)
+
+    assert len(fake.logins()) == 1
+    if path in ('end-unknown', 'end-passed'):
+        # an outage did not lose the end
+        assert mgrmod._management_token_kept('c1389').get('expire') == fake.expires[tid]
+    elif path == 'new-token':
+        new = m.config.api_token_user
+        assert new != tid and _tokens_of(fake) == {new} and _works(m)
+    else:
+        assert f'{USER}!{LOST}' not in fake.tokens
+        assert mgrmod._management_token_kept('c1389').get('unanswered') == []
+
+
+def test_a_migration_logs_in_at_once_after_the_renewal_got_no_answer(cluster, said, minutes):
+    """Only the looks of the renewal wait: a migration tries the login right away, as
+    before, and a login that answers lets the renewal read the end at its next look."""
+    fake = RenewPVE({USER: PASSWORD})
+    m, tid = _asking_for_a_login(cluster, fake, 'end-unknown')
+    fake.login_down = True
+    fake.seen.clear()
+    _pass(m)
+    assert len(fake.logins()) == 1
+
+    fake.login_down = False
+    got = m.create_api_token('mig-1390')
+    assert got['success'], got
+    assert len(fake.logins()) == 2
+
+    minutes.ahead += 3 * m.TOKEN_RENEW_EVERY
+    _pass(m)
+    assert len(fake.logins()) == 3
+    assert mgrmod._management_token_kept('c1389').get('expire') == fake.expires[tid]
 
 
 # --- the loop -------------------------------------------------------------------------------
