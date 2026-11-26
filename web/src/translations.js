@@ -11099,9 +11099,10 @@
                 restoreAllowOtherGuestHint: 'Proxmox VE 9.3 stellt ein Backup nicht über einem Gast wieder her, von dem es nicht stammt. Ankreuzen, um den Gast trotzdem zu überschreiben; er behält seine eigene Identität.',
                 restoreOtherGuestRefused: 'Proxmox VE hat abgelehnt: Dieses Backup gehört zu einem anderen Gast. Das Kästchen ankreuzen und erneut wiederherstellen, um den Gast trotzdem zu überschreiben.',
                 restoreOtherGuestBatch: 'Manche Backups gehören zu einem anderen Gast als dem, den sie ersetzen würden. Diese erneut mit „Wiederherstellen des Backups eines anderen Gasts erlauben" wiederherstellen.',
-                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end
+                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end, and ones it did not answer
                 snapDelStillRunning: "{n} Snapshot-Löschung(en) laufen noch in Proxmox - bitte den Task prüfen",
                 snapDelResultUnread: "{n} Snapshot-Löschung(en) in Proxmox gestartet, Ergebnis nicht gelesen - bitte den Task prüfen",
+                snapDelNoAnswer: "{n} Snapshot-Löschung(en) gesendet, keine Antwort von Proxmox: vielleicht gestartet, vielleicht nicht - bitte die Tasks prüfen",
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Zurzeit kein Leader - Änderungen und Automatisierung pausieren. Konsolen funktionieren weiter.',
                 haTakeover: 'Leader {leader} übernimmt - Änderungen gehen in {n} s weiter.',
@@ -22735,9 +22736,10 @@
                 restoreAllowOtherGuestHint: 'Proxmox VE 9.3 refuses to restore a backup over a guest it was not taken from. Tick this to overwrite the guest anyway; it keeps its own identity.',
                 restoreOtherGuestRefused: 'Proxmox VE refused: this backup belongs to another guest. Tick the box and restore again to overwrite the guest anyway.',
                 restoreOtherGuestBatch: 'Some backups belong to another guest than the one they would replace. Restore those again with "Allow restoring a backup of another guest" ticked.',
-                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end
+                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end, and ones it did not answer
                 snapDelStillRunning: "{n} snapshot delete(s) still running in Proxmox - check the task",
                 snapDelResultUnread: "{n} snapshot delete(s) started in Proxmox, result not read - check the task",
+                snapDelNoAnswer: "{n} snapshot delete(s) sent, no answer from Proxmox: may or may not have started - check the tasks",
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'No leader at the moment - changes and automation are paused. Consoles keep working.',
                 haTakeover: 'Leader {leader} is taking over - changes resume in {n} s.',
@@ -34154,9 +34156,10 @@
                 restoreAllowOtherGuestHint: 'Proxmox VE 9.3 拒绝把备份恢复到并非其来源的客户机上。勾选此项可仍然覆盖该客户机；它会保留自己的身份标识。',
                 restoreOtherGuestRefused: 'Proxmox VE 已拒绝：此备份属于另一台客户机。勾选此框并再次恢复，即可仍然覆盖该客户机。',
                 restoreOtherGuestBatch: '部分备份属于另一台客户机，而不是它们要替换的那台。请勾选“允许恢复其他客户机的备份”后再次恢复这些备份。',
-                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end
+                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end, and ones it did not answer
                 snapDelStillRunning: "{n} 个快照删除仍在 Proxmox 中运行 - 请查看任务",
                 snapDelResultUnread: "{n} 个快照删除已在 Proxmox 中启动，未能读取结果 - 请查看任务",
+                snapDelNoAnswer: "{n} 个快照删除已发送，Proxmox 没有应答：可能已启动，也可能没有 - 请查看任务",
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: '当前没有主实例 - 更改和自动化已暂停。控制台仍可继续使用。',
                 haTakeover: '主实例 {leader} 正在接管 - 更改将在 {n} 秒后恢复。',
@@ -45570,9 +45573,10 @@
                 restoreAllowOtherGuestHint: 'Proxmox VE 9.3 nie przywraca kopii zapasowej na gościa, z którego nie pochodzi. Zaznacz, aby mimo to nadpisać gościa; zachowa on własną tożsamość.',
                 restoreOtherGuestRefused: 'Proxmox VE odmówił: ta kopia zapasowa należy do innego gościa. Zaznacz pole i przywróć ponownie, aby mimo to nadpisać gościa.',
                 restoreOtherGuestBatch: 'Niektóre kopie zapasowe należą do innego gościa niż ten, którego by zastąpiły. Przywróć je ponownie z zaznaczonym polem „Zezwól na przywrócenie kopii zapasowej innego gościa".',
-                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end
+                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end, and ones it did not answer
                 snapDelStillRunning: "Usuwanie migawek ({n}) nadal trwa w Proxmox - sprawdź zadanie",
                 snapDelResultUnread: "Usuwanie migawek ({n}) uruchomiono w Proxmox, wyniku nie odczytano - sprawdź zadanie",
+                snapDelNoAnswer: "Usuwanie migawek ({n}) wysłano, brak odpowiedzi z Proxmox: mogło się rozpocząć lub nie - sprawdź zadania",
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Obecnie brak lidera - zmiany i automatyzacja są wstrzymane. Konsole działają dalej.',
                 haTakeover: 'Lider {leader} przejmuje - zmiany wrócą za {n} s.',
@@ -57183,9 +57187,10 @@
                 restoreAllowOtherGuestHint: 'Proxmox VE 9.3 refuse de restaurer une sauvegarde sur un invité dont elle ne provient pas. Cochez ceci pour écraser l\'invité quand même ; il garde sa propre identité.',
                 restoreOtherGuestRefused: 'Proxmox VE a refusé : cette sauvegarde appartient à un autre invité. Cochez la case et restaurez à nouveau pour écraser l\'invité quand même.',
                 restoreOtherGuestBatch: 'Certaines sauvegardes appartiennent à un autre invité que celui qu\'elles remplaceraient. Restaurez-les à nouveau avec « Autoriser la restauration de la sauvegarde d\'un autre invité » coché.',
-                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end
+                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end, and ones it did not answer
                 snapDelStillRunning: "Suppression de points de restauration ({n}) toujours en cours dans Proxmox - vérifiez la tâche",
                 snapDelResultUnread: "Suppression de points de restauration ({n}) lancée dans Proxmox, résultat non lu - vérifiez la tâche",
+                snapDelNoAnswer: "Suppression de points de restauration ({n}) envoyée, aucune réponse de Proxmox : peut-être lancée, peut-être pas - vérifiez les tâches",
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Aucun leader pour le moment - les modifications et l\'automatisation sont en pause. Les consoles continuent de fonctionner.',
                 haTakeover: 'Le leader {leader} prend le relais - les modifications reprennent dans {n} s.',
@@ -68822,9 +68827,10 @@
                 restoreAllowOtherGuestHint: 'Proxmox VE 9.3 se niega a restaurar un respaldo sobre un invitado del que no procede. Márcalo para sobrescribir el invitado de todos modos; conserva su propia identidad.',
                 restoreOtherGuestRefused: 'Proxmox VE lo rechazó: este respaldo pertenece a otro invitado. Marca la casilla y restaura de nuevo para sobrescribir el invitado de todos modos.',
                 restoreOtherGuestBatch: 'Algunos respaldos pertenecen a otro invitado distinto del que reemplazarían. Restáuralos de nuevo con «Permitir restaurar el respaldo de otro invitado» marcado.',
-                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end
+                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end, and ones it did not answer
                 snapDelStillRunning: "Eliminación de instantáneas ({n}) aún en curso en Proxmox - revise la tarea",
                 snapDelResultUnread: "Eliminación de instantáneas ({n}) iniciada en Proxmox, resultado no leído - revise la tarea",
+                snapDelNoAnswer: "Eliminación de instantáneas ({n}) enviada, sin respuesta de Proxmox: puede que se haya iniciado o no - revise las tareas",
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Ahora mismo no hay líder - los cambios y la automatización están en pausa. Las consolas siguen funcionando.',
                 haTakeover: 'El líder {leader} está tomando el relevo - los cambios se reanudan en {n} s.',
@@ -80440,9 +80446,10 @@
                 restoreAllowOtherGuestHint: 'O Proxmox VE 9.3 recusa restaurar um backup sobre um convidado de onde ele não veio. Marque isto para substituir o convidado mesmo assim; ele mantém a sua própria identidade.',
                 restoreOtherGuestRefused: 'O Proxmox VE recusou: este backup pertence a outro convidado. Marque a caixa e restaure de novo para substituir o convidado mesmo assim.',
                 restoreOtherGuestBatch: 'Alguns backups pertencem a outro convidado que não o que substituiriam. Restaure-os de novo com "Permitir restaurar o backup de outro convidado" marcado.',
-                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end
+                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end, and ones it did not answer
                 snapDelStillRunning: "Exclusão de snapshots ({n}) ainda em execução no Proxmox - verifique a tarefa",
                 snapDelResultUnread: "Exclusão de snapshots ({n}) iniciada no Proxmox, resultado não lido - verifique a tarefa",
+                snapDelNoAnswer: "Exclusão de snapshots ({n}) enviada, sem resposta do Proxmox: pode ter sido iniciada ou não - verifique as tarefas",
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Sem líder no momento - alterações e automação estão pausadas. Os consoles continuam funcionando.',
                 haTakeover: 'O líder {leader} está assumindo - as alterações voltam em {n} s.',
@@ -92044,9 +92051,10 @@
                 restoreAllowOtherGuestHint: 'Proxmox VE 9.3은 백업을 그 출처가 아닌 게스트 위에 복원하는 것을 거부합니다. 그래도 게스트를 덮어쓰려면 체크하세요. 게스트는 자신의 ID를 유지합니다.',
                 restoreOtherGuestRefused: 'Proxmox VE가 거부했습니다: 이 백업은 다른 게스트의 것입니다. 상자를 체크하고 다시 복원하면 그래도 게스트를 덮어씁니다.',
                 restoreOtherGuestBatch: '일부 백업은 대체할 게스트가 아닌 다른 게스트의 것입니다. "다른 게스트의 백업 복원 허용"을 체크하고 다시 복원하세요.',
-                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end
+                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end, and ones it did not answer
                 snapDelStillRunning: "스냅샷 삭제 {n}개가 아직 Proxmox에서 실행 중입니다 - 작업을 확인하세요",
                 snapDelResultUnread: "스냅샷 삭제 {n}개가 Proxmox에서 시작되었으나 결과를 읽지 못했습니다 - 작업을 확인하세요",
+                snapDelNoAnswer: "스냅샷 삭제 {n}개를 보냈으나 Proxmox가 응답하지 않았습니다: 시작되었을 수도, 아닐 수도 있습니다 - 작업을 확인하세요",
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: '현재 리더 없음 - 변경과 자동화가 일시 중지됨. 콘솔은 계속 작동합니다.',
                 haTakeover: '리더 {leader}이(가) 넘겨받는 중 - {n}초 후 변경이 재개됩니다.',
@@ -103638,9 +103646,10 @@
                 restoreAllowOtherGuestHint: 'Proxmox VE 9.3 rifiuta di ripristinare un backup su un guest da cui non proviene. Spunta per sovrascrivere comunque il guest; mantiene la propria identità.',
                 restoreOtherGuestRefused: 'Proxmox VE ha rifiutato: questo backup appartiene a un altro guest. Spunta la casella e ripristina di nuovo per sovrascrivere comunque il guest.',
                 restoreOtherGuestBatch: 'Alcuni backup appartengono a un guest diverso da quello che sostituirebbero. Ripristinali di nuovo con "Consenti il ripristino del backup di un altro guest" spuntato.',
-                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end
+                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end, and ones it did not answer
                 snapDelStillRunning: "Eliminazione di snapshot ({n}) ancora in corso in Proxmox - controlla l'attività",
                 snapDelResultUnread: "Eliminazione di snapshot ({n}) avviata in Proxmox, risultato non letto - controlla l'attività",
+                snapDelNoAnswer: "Eliminazione di snapshot ({n}) inviata, nessuna risposta da Proxmox: potrebbe essere avviata o no - controlla le attività",
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Al momento nessun leader - modifiche e automazione sono in pausa. Le console continuano a funzionare.',
                 haTakeover: 'Il leader {leader} sta subentrando - le modifiche riprendono tra {n} s.',
@@ -115104,9 +115113,10 @@
                 restoreAllowOtherGuestHint: 'Proxmox VE 9.3 не восстанавливает резервную копию поверх гостя, с которого она не снята. Отметьте, чтобы всё равно перезаписать гостя; он сохранит свою идентичность.',
                 restoreOtherGuestRefused: 'Proxmox VE отказал: эта резервная копия принадлежит другому гостю. Отметьте поле и восстановите снова, чтобы всё равно перезаписать гостя.',
                 restoreOtherGuestBatch: 'Некоторые резервные копии принадлежат другому гостю, а не тому, которого они заменили бы. Восстановите их снова с отмеченным «Разрешить восстановление резервной копии другого гостя».',
-                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end
+                // LW Nov 2026 (#1347) - snapshot deletes started in Proxmox and not seen to end, and ones it did not answer
                 snapDelStillRunning: "Удаление снапшотов ({n}) ещё выполняется в Proxmox - проверьте задачу",
                 snapDelResultUnread: "Удаление снапшотов ({n}) запущено в Proxmox, результат не прочитан - проверьте задачу",
+                snapDelNoAnswer: "Удаление снапшотов ({n}) отправлено, Proxmox не ответил: оно могло начаться, а могло и нет - проверьте задачи",
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Сейчас нет лидера: изменения и автоматизация приостановлены. Консоли продолжают работать.',
                 haTakeover: 'Лидер {leader} принимает управление: изменения возобновятся через {n} с.',

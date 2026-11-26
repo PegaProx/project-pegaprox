@@ -16911,11 +16911,15 @@
             // else its error (on a standby that is already the translated refusal, #625)
             const snapDeleteError = (data, fallback) => ((data && data.errors) || []).join('; ') || (data && data.error) || fallback;
             // LW Nov 2026 (#1347) - the deletes the server started in Proxmox and did not see end (the task still
-            // ran when it had to answer, or could not be read): neither deleted nor failed, so a toast of their own
+            // ran when it had to answer, or could not be read): neither deleted nor failed, so a toast of their own.
+            // 'unanswered' ones got no answer from Proxmox at all and may or may not have started
             const snapStartedNote = (started) => {
                 const running = started.filter(s => s.state === 'running').length;
+                const silent = started.filter(s => s.state === 'unanswered').length;
+                const unread = started.length - running - silent;
                 return [running ? t('snapDelStillRunning').replace('{n}', running) : '',
-                        started.length > running ? t('snapDelResultUnread').replace('{n}', started.length - running) : ''].filter(Boolean).join(' ');
+                        unread ? t('snapDelResultUnread').replace('{n}', unread) : '',
+                        silent ? t('snapDelNoAnswer').replace('{n}', silent) : ''].filter(Boolean).join(' ');
             };
             const withoutSnaps = (sel, list) => { const n = { ...sel }; list.forEach(s => { delete n[snapKey(s)]; }); return n; };
 
@@ -16949,7 +16953,7 @@
                         if (started.length) addToast(snapStartedNote(started), 'warning');
                         if (data.errors && data.errors.length) {
                             addToast(data.errors.join('; '), 'error');
-                            // the failed ones stay selected, what runs in Proxmox is not to be sent again
+                            // the failed ones stay selected, what runs in Proxmox (or may) is not to be sent again
                             if (started.length) setSelectedSnaps(prev => withoutSnaps(prev, started));
                         } else if (stillHere()) setSelectedSnaps({});
                     }
@@ -16983,7 +16987,7 @@
                         return;
                     }
                     // LW Nov 2026 (#1347) - the server waits for the delete in Proxmox; one still running there,
-                    // or whose result it could not read, is said as such and not as deleted
+                    // whose result it could not read, or that Proxmox did not answer, is said as such and not as deleted
                     const data = await res.json().catch(() => ({}));
                     const started = Array.isArray(data.started) ? data.started : [];
                     if (started.length) addToast(snapStartedNote(started), 'warning');
