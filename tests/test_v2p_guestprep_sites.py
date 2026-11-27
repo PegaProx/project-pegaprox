@@ -20,15 +20,15 @@ def _block(start, end, text=RUN):
 
 def test_every_stop_of_the_source_asks_the_in_guest_preparation_first():
     assert RUN.count('_source_off_for_cutover(vmware_mgr, pve_mgr, task)') == 5
-    mirror = _block("if task.transfer_mode == 'sshfs_boot':", "vmware_mgr.vm_power_action(task.vm_id, 'stop')")
+    mirror = _block("if task.transfer_mode == 'sshfs_boot':", "_stop_source(vmware_mgr, task")
     assert 'is_running and _source_off_for_cutover' in mirror
     clone = _block("=== SWITCHOVER: stopping the source VM on ESXi", "vmware_mgr.vm_power_action(task.vm_id, 'stop')")
     assert "src_state == 'POWERED_ON' and _source_off_for_cutover" in clone
-    offline = _block('=== TRANSFER MODE: Offline Copy ===', "vmware_mgr.vm_power_action(task.vm_id, 'stop')")
+    offline = _block('=== TRANSFER MODE: Offline Copy ===', "_stop_source(vmware_mgr, task")
     assert 'is_running and _source_off_for_cutover' in offline
-    fallback = _block('Pre-sync failed (VMDK locked) - switching to QEMU SSH boot', "vmware_mgr.vm_power_action(task.vm_id, 'stop')")
+    fallback = _block('Pre-sync failed (VMDK locked) - switching to QEMU SSH boot', "_stop_source(vmware_mgr, task")
     assert 'if not _source_off_for_cutover' in fallback
-    delta = _block('=== DELTA SYNC: DOWNTIME STARTS ===', "vmware_mgr.vm_power_action(task.vm_id, 'stop')")
+    delta = _block('=== DELTA SYNC: DOWNTIME STARTS ===', "_stop_source(vmware_mgr, task")
     assert 'if _source_off_for_cutover' in delta
 
 

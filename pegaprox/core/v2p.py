@@ -2076,13 +2076,7 @@ def _run_v2p_migration(task):
                 except: pass
             elif is_running:
                 task.log("Stopping VMware VM...")
-                vmware_mgr.vm_power_action(task.vm_id, 'stop')
-                for attempt in range(15):
-                    time.sleep(2)
-                    vm_check = vmware_mgr.get_vm(task.vm_id)
-                    if 'data' in vm_check and vm_check['data'].get('power_state') == 'POWERED_OFF':
-                        task.log(f"VM stopped after {(attempt+1)*2}s"); break
-                else:
+                if not _stop_source(vmware_mgr, task, wait=30):
                     task.log("Force stopping...")
                     vmware_mgr.vm_power_action(task.vm_id, 'reset')
                     time.sleep(2)
@@ -2490,9 +2484,10 @@ def _run_v2p_migration(task):
                     # MK Nov 2026 - a guest prepared in ESXi shuts itself down after its stage 2
                     if src_state == 'POWERED_ON' and _source_off_for_cutover(vmware_mgr, pve_mgr, task):
                         src_stopped = True
-                    # Snapshot-Iterative lets the guest shut down first, so what it holds in memory
-                    # reaches the disk that the switchover copies
-                    elif _iterative and src_state == 'POWERED_ON' and _shut_down_guest(vmware_mgr, task):
+                    # the guest shuts down first, so what it holds in memory reaches the disk that
+                    # the switchover copies (MK Nov 2026: Live Clone and Auto too, not only
+                    # Snapshot-Iterative)
+                    elif src_state == 'POWERED_ON' and _shut_down_guest(vmware_mgr, task):
                         src_stopped = True
                     else:
                         vmware_mgr.vm_power_action(task.vm_id, 'stop')
@@ -2737,13 +2732,7 @@ def _run_v2p_migration(task):
                 except: pass
             elif is_running:
                 task.log("Stopping VMware VM...")
-                vmware_mgr.vm_power_action(task.vm_id, 'stop')
-                for attempt in range(15):
-                    time.sleep(2)
-                    vm_check = vmware_mgr.get_vm(task.vm_id)
-                    if 'data' in vm_check and vm_check['data'].get('power_state') == 'POWERED_OFF':
-                        task.log(f"VM stopped after {(attempt+1)*2}s"); break
-                else:
+                if not _stop_source(vmware_mgr, task, wait=30):
                     task.log("Force stopping...")
                     vmware_mgr.vm_power_action(task.vm_id, 'reset')
                     time.sleep(2)
@@ -2934,13 +2923,7 @@ def _run_v2p_migration(task):
                 # stop the source on ESXi (MK Nov 2026 - a guest prepared in ESXi shuts itself down)
                 if not _source_off_for_cutover(vmware_mgr, pve_mgr, task):
                     task.log("Stopping the source VM on ESXi...")
-                    vmware_mgr.vm_power_action(task.vm_id, 'stop')
-                    for attempt in range(15):
-                        time.sleep(2)
-                        vm_check = vmware_mgr.get_vm(task.vm_id)
-                        if 'data' in vm_check and vm_check['data'].get('power_state') == 'POWERED_OFF':
-                            task.log(f"VM stopped after {(attempt+1)*2}s"); break
-                    else:
+                    if not _stop_source(vmware_mgr, task, wait=30):
                         task.log("Force stopping...")
                         vmware_mgr.vm_power_action(task.vm_id, 'reset')
                         time.sleep(2)
@@ -3038,13 +3021,7 @@ def _run_v2p_migration(task):
                 task.log("VM powered off by the Windows preparation")
             else:
                 task.log("Stopping the source VM on ESXi...")
-                vmware_mgr.vm_power_action(task.vm_id, 'stop')
-                for attempt in range(30):
-                    time.sleep(2)
-                    vm_check = vmware_mgr.get_vm(task.vm_id)
-                    if 'data' in vm_check and vm_check['data'].get('power_state') == 'POWERED_OFF':
-                        task.log(f"VM powered off after {(attempt+1)*2}s"); break
-                else:
+                if not _stop_source(vmware_mgr, task, wait=60):
                     task.log("WARNING: VM may not be fully stopped yet")
         
             # Delete migration snapshot (consolidates delta back into base VMDK)
@@ -4736,6 +4713,24 @@ def _carry_over_changes(pve_mgr, vmware_mgr, task, esxi, i, key, change_id, src_
         return True
     _result_warning(task, f"Disk {i}: copying the written areas failed ({why}), every block was compared "
                           f"instead, which made the downtime longer")
+    return False
+
+
+def _stop_source(vmware_mgr, task, wait=30):
+    """Stop the running source VM for the copy or the switchover: its guest shuts down first,
+    so what it holds in memory reaches the disk the copy reads, and the power-off comes only
+    where its guest tools cannot take that or it does not finish. True once the VM is off.
+
+    MK Nov 2026 - the offline copy, Live Clone, Auto and the Live Mirror fallback powered the
+    source off, a pulled plug: a real Windows guest went off 2 s after the request, and the
+    copy held what a crash would have left. Only Snapshot-Iterative shut its guest down."""
+    if _shut_down_guest(vmware_mgr, task):
+        task.log("  The guest shut down")
+        return True
+    vmware_mgr.vm_power_action(task.vm_id, 'stop')
+    if _wait_power_state(vmware_mgr, task.vm_id, 'POWERED_OFF', wait, poll=2):
+        task.log("  Source VM powered off")
+        return True
     return False
 
 
