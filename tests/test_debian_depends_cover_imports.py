@@ -49,7 +49,8 @@ def _sources():
 
 def _imports_in(tree, where):
     """(module, location) for every absolute import, including those of a script kept in a
-    string constant (vms.py writes the SSH WebSocket server out of one and runs it)."""
+    string constant (vms.py wrote the SSH WebSocket server out of one and ran it until the
+    consoles moved to the main port; a script written out like that needs its modules too)."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -136,7 +137,9 @@ def test_the_scan_sees_lazy_imports_and_the_generated_script():
     # inside a method of the XCP-ng manager, not at module level
     assert any(loc.startswith('pegaprox/core/xcpng.py:') for loc in imports['defusedxml'])
     assert any(loc.startswith('pegaprox/api/vms.py:') for loc in imports['requests_toolbelt'])
-    assert any('(generated script)' in loc for loc in imports['websockets'])
+    held = 'SCRIPT = """#!/usr/bin/env python3\nimport websockets\n"""\n'
+    assert [loc for mod, loc in _imports_in(ast.parse(held), 'x.py') if mod == 'websockets'] == [
+        'x.py:1 (generated script):2']
 
 
 def test_the_optional_list_names_only_modules_still_imported():

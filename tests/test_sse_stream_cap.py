@@ -44,18 +44,18 @@ def test_streams_under_the_cap_are_untouched(registry):
 
 
 def test_the_oldest_stream_is_superseded_at_the_cap(registry):
-    for i in range(rt.MAX_SSE_STREAMS_PER_USER):
+    for i in range(rt.MAX_SSE_STREAMS_PER_SESSION):
         _register('alice', i, f'2026-09-06T10:{i:02d}:00')
 
     rt._supersede_oldest_streams('alice')          # about to register one more
 
-    assert len(registry) == rt.MAX_SSE_STREAMS_PER_USER - 1
+    assert len(registry) == rt.MAX_SSE_STREAMS_PER_SESSION - 1
     assert 'alice-0' not in registry, 'the oldest stream should have gone first'
-    assert f'alice-{rt.MAX_SSE_STREAMS_PER_USER - 1}' in registry
+    assert f'alice-{rt.MAX_SSE_STREAMS_PER_SESSION - 1}' in registry
 
 
 def test_one_user_cannot_evict_another(registry):
-    for i in range(rt.MAX_SSE_STREAMS_PER_USER + 5):
+    for i in range(rt.MAX_SSE_STREAMS_PER_SESSION + 5):
         _register('alice', i, f'2026-09-06T10:{i:02d}:00')
     _register('bob', 0, '2026-09-06T09:00:00')     # older than every one of alice's
 

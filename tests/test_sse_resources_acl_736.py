@@ -28,10 +28,10 @@ def test_scoped_frame_keeps_only_authorized(monkeypatch):
     monkeypatch.setattr('pegaprox.core.db.get_db',
                         lambda: _fake_db({'bob': {'role': 'viewer', 'username': 'bob'}}))
 
-    def only_vm1(user, cluster_id, vmid, permission='vm.view', vm_type=None):
+    def only_vm1(user, cluster_id, permission='vm.view'):
         assert user['username'] == 'bob' and cluster_id == 'cl1' and permission == 'vm.view'
-        return vmid == 1
-    monkeypatch.setattr('pegaprox.utils.rbac.user_can_access_vm', only_vm1)
+        return lambda vmid, vm_type=None: vmid == 1
+    monkeypatch.setattr('pegaprox.utils.rbac.user_vm_access', only_vm1)
     resources = [{'vmid': 1, 'type': 'qemu'}, {'vmid': 2, 'type': 'lxc'}]
     data = json.loads(rt._filtered_resources_frame(resources, 'cl1', 'bob', 'ts'))['data']
     assert [r['vmid'] for r in data] == [1]
@@ -60,8 +60,8 @@ def test_no_load_users_in_sse_hot_path():
 def test_broadcast_filters_scoped_client_but_not_admin(monkeypatch):
     monkeypatch.setattr('pegaprox.core.db.get_db',
                         lambda: _fake_db({'bob': {'role': 'viewer', 'username': 'bob'}}))
-    monkeypatch.setattr('pegaprox.utils.rbac.user_can_access_vm',
-                        lambda user, cid, vmid, permission='vm.view', vm_type=None: vmid == 1)
+    monkeypatch.setattr('pegaprox.utils.rbac.user_vm_access',
+                        lambda user, cid, permission='vm.view': lambda vmid, vm_type=None: vmid == 1)
     admin_q, bob_q = queue.Queue(), queue.Queue()
     saved = dict(rt.sse_clients)
     rt.sse_clients.clear()
@@ -88,8 +88,8 @@ def test_broadcast_filters_default_tenant_scoped_user_with_subscribed_none(monke
     # SKIPPED filtering and streamed the FULL cluster inventory to her ~1x/sec. She must be filtered.
     monkeypatch.setattr('pegaprox.core.db.get_db',
                         lambda: _fake_db({'eve': {'role': 'viewer', 'username': 'eve'}}))
-    monkeypatch.setattr('pegaprox.utils.rbac.user_can_access_vm',
-                        lambda user, cid, vmid, permission='vm.view', vm_type=None: vmid == 1)
+    monkeypatch.setattr('pegaprox.utils.rbac.user_vm_access',
+                        lambda user, cid, permission='vm.view': lambda vmid, vm_type=None: vmid == 1)
     eve_q = queue.Queue()
     saved = dict(rt.sse_clients)
     rt.sse_clients.clear()
@@ -109,8 +109,8 @@ def test_broadcast_missing_is_admin_flag_fails_closed(monkeypatch):
     # treated as NON-admin and filtered, never leaked to.
     monkeypatch.setattr('pegaprox.core.db.get_db',
                         lambda: _fake_db({'mallory': {'role': 'viewer', 'username': 'mallory'}}))
-    monkeypatch.setattr('pegaprox.utils.rbac.user_can_access_vm',
-                        lambda user, cid, vmid, permission='vm.view', vm_type=None: vmid == 1)
+    monkeypatch.setattr('pegaprox.utils.rbac.user_vm_access',
+                        lambda user, cid, permission='vm.view': lambda vmid, vm_type=None: vmid == 1)
     q = queue.Queue()
     saved = dict(rt.sse_clients)
     rt.sse_clients.clear()

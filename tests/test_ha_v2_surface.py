@@ -5,9 +5,10 @@ cluster. In v2 it connects read-only, so everything that is not a read is closed
 the handler itself, not only by the write block, which never sees a GET or a
 WebSocket upgrade:
 
-  * every console path - the GET routes, the three VNC WebSocket handlers, the node
-    shell, the SSH server's validate and cluster-creds calls - answers the standby
-    refusal before it looks for a manager, with a ws token and with the old ?session=;
+  * every console path - the GET routes, the VNC, VM terminal and node shell sockets,
+    the ws token validate call - answers the standby refusal before it looks for a
+    manager, with a ws token and with the old ?session=; the plain HTTP route on the
+    VNC path opens nothing anywhere;
   * POST /api/ws/token is shut (every caller opens a console), the two POST reads the
     live UI needs are open;
   * GETs with a side effect: the efficient-snapshot refresh is ignored, the VAPID key
@@ -18,11 +19,7 @@ Every refusal has its counterproof: the same call on an active instance gets pas
 gate and does look the cluster up. The managers are fakes and the cluster registry
 records every lookup, so "before any cluster_managers lookup" is checked as such.
 """
-import ast
-import asyncio
-import inspect
 import json
-import textwrap
 import types
 
 import pytest
@@ -136,7 +133,7 @@ def test_the_console_routes_work_as_before_where_the_instance_acts(ha_env, seed,
 # --- the WebSocket paths ------------------------------------------------------------------
 
 class _SyncWS:
-    """What flask-sock and geventwebsocket hand a handler, as far as they are used."""
+    """What flask-sock hands a handler, as far as it is used."""
 
     def __init__(self):
         self.sent, self.closed = [], None
@@ -149,23 +146,6 @@ class _SyncWS:
 
     def close(self, *args, **kwargs):
         self.closed = (args, kwargs)
-
-
-class _AsyncWS:
-    """The websockets server connection the standalone handlers get."""
-
-    def __init__(self, path):
-        self.request = types.SimpleNamespace(path=path)
-        self.sent, self.closed = [], None
-
-    async def send(self, data):
-        self.sent.append(data)
-
-    async def recv(self):
-        raise ConnectionError('the test does not talk back')
-
-    async def close(self, code=1000, reason=''):
-        self.closed = (code, reason)
 
 
 def _sock_handler(app, rule):
@@ -184,8 +164,15 @@ def _auth_query(kind, admin):
     return f'token={create_ws_token("root", "admin")}'
 
 
+def _closed_with(message):
+    return ((), {'reason': 1008, 'message': message})
+
+
 @pytest.mark.parametrize('auth', ['token', 'session'])
 def test_the_main_port_vnc_socket(ha_env, seed, monkeypatch, auth):
+    """The one VNC socket, on the main port and on the legacy console port alike. RFB runs
+    on it, so a refusal is the reason of the close, not a frame."""
+    from pegaprox.utils.realtime import ws_tokens
     api = ha_env.api
     admin = _admin(api, seed)
     reg = _registry(monkeypatch)
@@ -194,11 +181,14 @@ def test_the_main_port_vnc_socket(ha_env, seed, monkeypatch, auth):
 
     _standby_of_active(ha_env)
     ws = _SyncWS()
-    with api.app.test_request_context(f'{path}?{_auth_query(auth, admin)}'):
+    query = _auth_query(auth, admin)
+    with api.app.test_request_context(f'{path}?{query}'):
         handler(ws, CID, 'n1', 'qemu', 100)
-    assert ws.sent == [STANDBY_ANSWER['error']]
-    assert ws.closed == ((), {'reason': 1008, 'message': STANDBY_ANSWER['error']})
+    assert ws.sent == []
+    assert ws.closed == _closed_with(STANDBY_ANSWER['error'])
     assert reg.asked == []
+    if auth == 'token':
+        assert query[len('token='):] in ws_tokens, 'a standby spent the token'
 
     for role, be in _roles(ha_env):
         be()
@@ -206,12 +196,14 @@ def test_the_main_port_vnc_socket(ha_env, seed, monkeypatch, auth):
         with api.app.test_request_context(f'{path}?{_auth_query(auth, admin)}'):
             handler(ws, CID, 'n1', 'qemu', 100)
         assert reg.asked and reg.asked[-1] == CID, role     # it went looking: not found
-        assert STANDBY_ANSWER['error'] not in ws.sent
+        assert ws.closed == _closed_with('Cluster not found'), (role, ws.closed)
 
 
-def test_the_gevent_vnc_socket(ha_env, seed, monkeypatch):
-    """The HTTP route in front of handle_vnc_websocket, with the upgraded socket in the
-    environ the way geventwebsocket puts it there. It takes only ?session=."""
+def test_the_plain_route_on_the_vnc_path_opens_nothing(ha_env, seed, monkeypatch):
+    """The HTTP route in front of the VNC path ran the geventwebsocket console when the
+    upgraded socket sat in the environ. That console is gone: the route checks who asks
+    and answers 426, on a standby as on an acting instance, and touches neither a
+    socket in the environ nor the cluster registry."""
     api = ha_env.api
     admin = _admin(api, seed)
     reg = _registry(monkeypatch)
@@ -219,57 +211,18 @@ def test_the_gevent_vnc_socket(ha_env, seed, monkeypatch):
     url = f'{VM}/vncwebsocket?session={admin.session_id}'
 
     _standby_of_active(ha_env)
-    ws = _SyncWS()
-    r = client.get(url, base_url='http://localhost', environ_base={'wsgi.websocket': ws})
-    assert r.status_code == 200
-    assert ws.closed == ((1008, STANDBY_ANSWER['error']), {})
-    assert reg.asked == []
-
-    for role, be in _roles(ha_env):
+    for role, be in (('standby', lambda: None),) + _roles(ha_env):
         be()
         ws = _SyncWS()
-        client.get(url, base_url='http://localhost', environ_base={'wsgi.websocket': ws})
-        assert reg.asked and reg.asked[-1] == CID, role
-        assert ws.closed is None, role
+        r = client.get(url, base_url='http://localhost', environ_base={'wsgi.websocket': ws})
+        assert r.status_code == 426, (role, r.status_code, r.data)
+        assert (ws.sent, ws.closed) == ([], None), role
+        assert reg.asked == [], role
 
 
-def _standalone_vnc_handler(reg):
-    """vnc_handler lives inside start_vnc_websocket_server, which binds a port. Compile
-    the nested coroutine on its own against the module's names instead; the paths
-    tested here return before anything from the enclosing function is read."""
-    import pegaprox.api.vms as vms
-    outer = ast.parse(textwrap.dedent(inspect.getsource(vms.start_vnc_websocket_server))).body[0]
-    inner = next(n for n in ast.walk(outer)
-                 if isinstance(n, ast.AsyncFunctionDef) and n.name == 'vnc_handler')
-    ns = dict(vms.__dict__, cluster_managers=reg)
-    exec(compile(ast.Module(body=[inner], type_ignores=[]), vms.__file__, 'exec'), ns)
-    return ns['vnc_handler']
-
-
-@pytest.mark.parametrize('auth', ['token', 'session'])
-def test_the_standalone_vnc_server(ha_env, seed, monkeypatch, auth):
-    api = ha_env.api
-    admin = _admin(api, seed)
-    reg = _registry(monkeypatch)
-    handler = _standalone_vnc_handler(reg)
-    path = f'{VM}/vncwebsocket'
-
-    _standby_of_active(ha_env)
-    ws = _AsyncWS(f'{path}?{_auth_query(auth, admin)}')
-    asyncio.run(handler(ws))
-    assert ws.closed == (1008, STANDBY_ANSWER['error'])
-    assert reg.asked == []
-
-    for role, be in _roles(ha_env):
-        be()
-        ws = _AsyncWS(f'{path}?{_auth_query(auth, admin)}')
-        asyncio.run(handler(ws))
-        assert ws.closed == (1002, 'Cluster not found'), (role, ws.closed)
-        assert reg.asked and reg.asked[-1] == CID, role
-
-
-def test_the_legacy_node_shell_socket(ha_env, seed, monkeypatch):
-    """/shellws on the main port, here with ?session= (it takes ?token= first, #1143)."""
+def test_the_node_shell_socket(ha_env, seed, monkeypatch):
+    """/shellws, the only node shell since the SSH server on port+2 is gone; here with
+    ?session= (it takes ?token= first, #1143)."""
     api = ha_env.api
     admin = _admin(api, seed)
     reg = _registry(monkeypatch)
@@ -302,8 +255,9 @@ def test_the_legacy_node_shell_socket(ha_env, seed, monkeypatch):
             assert reg.asked and reg.asked[-1] == CID, role
 
 
-def test_the_ws_token_validation_the_ssh_server_asks(ha_env, seed, monkeypatch):
-    """GET /api/ws/token/validate: the node shell and the VM terminal of the SSH server."""
+def test_the_ws_token_validation(ha_env, seed, monkeypatch):
+    """GET /api/ws/token/validate, which the SSH server on port+2 asked for its node shell
+    and VM terminal. That server is gone, the route stays and keeps its gate."""
     from pegaprox.utils.realtime import create_ws_token
     api = ha_env.api
     _admin(api, seed)
@@ -327,100 +281,74 @@ def test_the_ws_token_validation_the_ssh_server_asks(ha_env, seed, monkeypatch):
         assert reg.asked and reg.asked[-1] == CID, role
 
 
-def test_the_cluster_creds_route_of_the_legacy_shell(ha_env, seed, monkeypatch):
-    """GET /api/internal/cluster-creds: node addresses and a PVE ticket for a shell."""
+def test_no_route_hands_out_cluster_credentials(ha_env):
+    """GET /api/internal/cluster-creds gave the SSH server on port+2 the node addresses and a
+    PVE ticket for a shell, and refused on a standby. With the server gone the route is too:
+    nothing answers it on any role, so there is no gate left to forget."""
+    api = ha_env.api
+    assert not [r.rule for r in api.app.url_map.iter_rules() if 'cluster-creds' in r.rule]
+    _standby_of_active(ha_env)
+    for role, be in (('standby', lambda: None),) + _roles(ha_env):
+        be()
+        r = api.app.test_client().get(f'/api/internal/cluster-creds/{CID}',
+                                      base_url='http://localhost')
+        assert r.status_code == 404, (role, r.status_code)
+
+
+# --- the VM terminal socket --------------------------------------------------------------
+
+TERM = f'{VM}/termwebsocket'
+TERM_RULE = '/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/termwebsocket'
+TERM_PARAMS = 'ticket=PVEVNC:x&port=5900&host=192.0.2.10&user=root@pam'
+
+
+def _terminal(api, query):
+    handler = _sock_handler(api.app, TERM_RULE)
+    ws = _SyncWS()
+    with api.app.test_request_context(f'{TERM}?{query}&{TERM_PARAMS}'):
+        handler(ws, CID, 'n1', 'qemu', 100)
+    return [json.loads(m) for m in ws.sent], ws.closed
+
+
+@pytest.mark.parametrize('auth', ['token', 'session'])
+def test_the_vm_terminal_socket(ha_env, seed, monkeypatch, auth):
+    """The terminal moved from the SSH server on port+2, which passed the standby answer
+    of the validate call on, to the main port, where it refuses itself: before the token
+    is spent and before the cluster lookup."""
+    from pegaprox.utils.realtime import ws_tokens
     api = ha_env.api
     admin = _admin(api, seed)
     reg = _registry(monkeypatch)
-    client = api.app.test_client()
-    # the SSH server sends the browser's session as the cookie `session`, and its proof
-    client.set_cookie('session', admin.session_id, domain='localhost')
-
-    def creds():
-        from pegaprox.api.realtime import CONSOLE_SERVER_HEADER, console_server_secret
-        return client.get(f'/api/internal/cluster-creds/{CID}', base_url='http://localhost',
-                          headers={CONSOLE_SERVER_HEADER: console_server_secret()})
 
     _standby_of_active(ha_env)
-    r = creds()
-    assert r.status_code == 409 and r.get_json() == STANDBY_ANSWER
+    query = _auth_query(auth, admin)
+    said, closed = _terminal(api, query)
+    assert said == [{'status': 'error', 'message': STANDBY_ANSWER['error']}]
+    assert closed == _closed_with(STANDBY_ANSWER['error'])
     assert reg.asked == []
+    if auth == 'token':
+        assert query[len('token='):] in ws_tokens, 'a standby spent the token'
 
     for role, be in _roles(ha_env):
         be()
-        r = creds()
-        assert r.status_code == 404 and r.get_json()['error'] == 'Cluster not found', (role, r.data)
-        assert reg.asked == [CID], role
+        said, closed = _terminal(api, _auth_query(auth, admin))
+        assert said == [{'status': 'error', 'message': 'Cluster not found'}], (role, said)
+        assert reg.asked and reg.asked[-1] == CID, role
         reg.asked.clear()
 
 
-# --- the SSH server subprocess ------------------------------------------------------------
-
-class _Resp:
-    def __init__(self, status, body=None):
-        self.status_code = status
-        self._body = body if body is not None else {}
-
-    def json(self):
-        return self._body
-
-
-def _ssh_server(answers):
-    """The script start_ssh_websocket_server writes and runs, loaded without running
-    its server, with requests answering from `answers` (URL fragment -> _Resp)."""
-    import pegaprox.api.vms as vms
-    fn = ast.parse(textwrap.dedent(inspect.getsource(vms.start_ssh_websocket_server))).body[0]
-    script = next(n.value.value for n in ast.walk(fn) if isinstance(n, ast.Assign)
-                  and getattr(n.targets[0], 'id', '') == 'server_script')
-    ns = {'__name__': 'ssh_ws_server_under_test'}
-    exec(compile(script, '.ssh_ws_server.py', 'exec'), ns)
-    asked = []
-
-    def get(url, **kw):
-        asked.append(url)
-        for part, resp in answers.items():
-            if part in url:
-                return resp
-        raise AssertionError(f'unexpected call {url}')
-    ns['requests'] = types.SimpleNamespace(get=get, exceptions=ns['requests'].exceptions)
-    return ns, asked
-
-
-STANDBY_409 = _Resp(409, dict(STANDBY_ANSWER))
-SHELL = f'/api/clusters/{CID}/nodes/n1/shellws'
-TERM = f'{VM}/termwebsocket'
-
-
-@pytest.mark.parametrize('path, answers', [
-    (f'{SHELL}?token=t', {'/api/ws/token/validate': STANDBY_409}),
-    (f'{SHELL}?session=s', {'/api/auth/validate': _Resp(200, {'valid': True}),
-                            '/api/internal/cluster-creds/': STANDBY_409}),
-    (f'{TERM}?token=t&ticket=x&port=5900&host=h&user=u', {'/api/ws/token/validate': STANDBY_409}),
-    (f'{TERM}?session=s&ticket=x&port=5900&host=h&user=u',
-     {'/api/auth/validate': _Resp(200, {'valid': True}), '/api/internal/cluster-creds/': STANDBY_409}),
-])
-def test_the_ssh_server_passes_the_standby_answer_on(path, answers):
-    pytest.importorskip('paramiko')
-    pytest.importorskip('websockets')
-    ns, asked = _ssh_server(answers)
-    ws = _AsyncWS(path)
-    asyncio.run(ns['ssh_handler'](ws))
-    assert [json.loads(m) for m in ws.sent] == [{'status': 'error', 'message': STANDBY_ANSWER['error']}]
-    assert ws.closed == (1008, 'standby')
-    assert len(asked) == len(answers)
-
-
-def test_the_ssh_server_keeps_its_other_answers():
-    """Counterproof: a refused token and a 409 that is not the standby's still end the
-    way they did."""
-    pytest.importorskip('paramiko')
-    pytest.importorskip('websockets')
-    for resp in (_Resp(401, {'error': 'Invalid or expired token'}), _Resp(409, {'error': 'something else'})):
-        ns, _asked = _ssh_server({'/api/ws/token/validate': resp})
-        ws = _AsyncWS(f'{SHELL}?token=t')
-        asyncio.run(ns['ssh_handler'](ws))
-        assert ws.closed == (1008, 'Invalid auth'), resp.status_code
-        assert STANDBY_ANSWER['error'] not in ws.sent[0]
+def test_the_vm_terminal_socket_keeps_its_other_answers(ha_env, seed, monkeypatch):
+    """Counterproof: a refused token still ends the way it did, and not with the standby
+    answer, where the instance acts."""
+    api = ha_env.api
+    _admin(api, seed)
+    reg = _registry(monkeypatch)
+    for role, be in _roles(ha_env):
+        be()
+        said, closed = _terminal(api, 'token=not-a-token')
+        assert said == [{'status': 'error', 'message': 'Invalid or expired token'}], (role, said)
+        assert closed == _closed_with('Invalid or expired token')
+    assert reg.asked == []
 
 
 # --- tokens and the two reads -------------------------------------------------------------

@@ -1295,8 +1295,7 @@ def node_shell_refusal(mgr):
     operator types into the dialog and never went through _ssh_connect, so with SSH
     switched off a node shell still opened. Only the switch counts here. A cluster
     without SSH credentials of its own still has a shell, the login is the operator's.
-    Asked by the main port shell and by the two answers the SSH server on port+2 opens
-    its shell with (ws token validate, cluster-creds), so that server cannot get round it.
+    Asked by the node shell socket (api/vms.py) and by the ws token validate call.
     """
     from pegaprox.utils.ssh import ssh_blocked_for
     if mgr is not None and ssh_blocked_for(mgr) == 'SSH_DISABLED':

@@ -470,46 +470,6 @@
         ]
       }
     },
-    "/api/internal/cluster-creds/{cluster_id}": {
-      "get": {
-        "operationId": "auth.get_cluster_creds_internal_get",
-        "tags": [
-          "auth"
-        ],
-        "responses": {
-          "200": {
-            "description": "Success"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Not authenticated"
-          }
-        },
-        "summary": "Internal endpoint for shell/VNC WebSocket to get node connection info",
-        "description": "MK: Returns node IPs for SSH connections\nFor single-node setups, we use the cluster host directly",
-        "parameters": [
-          {
-            "name": "cluster_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "x-pegaprox-auth": "inline",
-        "security": [
-          {
-            "apiToken": []
-          },
-          {
-            "sessionId": []
-          }
-        ]
-      }
-    },
     "/api/auth/verify-password": {
       "post": {
         "operationId": "auth.verify_password_api_post",
@@ -15393,8 +15353,8 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "NS May 2026 — issues a PVE termproxy ticket for a VM/CT.",
-        "description": "Server-side: log into PVE with cluster credentials (NOT API token, since\ntermproxy needs a real session cookie), POST /termproxy, return both the\nauth_ticket (used as PVEAuthCookie) and the termproxy_ticket (used as\n?vncticket=) so the standalone WS server can complete the handshake.",
+        "summary": "NS May 2026 - issues a PVE termproxy ticket for a VM/CT.",
+        "description": "Server-side: log into PVE with cluster credentials (NOT API token, since\ntermproxy needs a real session cookie), POST /termproxy, return the\ntermproxy_ticket (used as ?vncticket=) for the terminal socket, which mints\nits own PVEAuthCookie (vm_terminal_websocket_proxy).",
         "parameters": [
           {
             "name": "cluster_id",

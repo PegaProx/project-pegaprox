@@ -402,13 +402,14 @@ def leading_stream(sender, call, row, nonce, rid):
         raise StreamRefused(429, 'FED_RELAY_BUSY', 'Too many live feeds from your site at once')
     client_id = f'fed-{uuid.uuid4()}'
     q = queue_module.Queue(maxsize=200)
+    # the session at home it streams for: only that one's feeds are superseded for it
+    sid = f"fed:{call.get('home') or ''}:{call.get('sh') or ''}"
     with sse_clients_lock:
-        _supersede_oldest_streams(username)
+        _supersede_oldest_streams(username, sid)
         sse_clients[client_id] = {
             'queue': q, 'user': username, 'clusters': list(scope), 'is_admin': admin,
             'effective_role': eff, 'connected_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
-            'auth_method': 'federation',
-            'sid': f"fed:{call.get('home') or ''}:{call.get('sh') or ''}", 'fed_stream': sender,
+            'auth_method': 'federation', 'sid': sid, 'fed_stream': sender,
         }
     logging.info(f'[FED] live feed of {len(scope)} cluster(s) for {username!r} from site '
                  f'{sender[:8]} opened')
@@ -427,6 +428,10 @@ def leading_stream(sender, call, row, nonce, rid):
     def lines():
         seq = 0
         now_scope = list(scope)
+        # out of the request pool like a browser's stream (api/realtime.py); _streams_in
+        # bounds how many of these there are
+        from pegaprox.utils.realtime import _leave_request_pool
+        _leave_request_pool()
         try:
             yield signed_line(nonce, rid, seq, json.dumps({'type': 'fed_stream',
                                                            'clusters': now_scope}))

@@ -6,13 +6,14 @@ and config.pass_, which on a token cluster are the token id and its secret. PVE 
 token. The helper tests in test_console_endpoint_and_auth.py never ran a handler, so they
 passed the whole time.
 
-These drive the handlers themselves - the standalone one on 5001 the reporter hit, the two
-on the main port and the polling fallback - with PVE faked at urllib and websocket-client,
-answering the way PVE does: 401 for a token posted as a password.
+These drive the handlers themselves - the VNC socket and the polling fallback, and the VM
+terminal - with PVE faked at urllib and websocket-client, answering the way PVE does: 401
+for a token posted as a password. The reporter hit the standalone VNC server on 5001; that
+server is gone and 5001 serves the same VNC socket as the main port, so the one test of
+that socket covers both ports.
 
 MK Oct 2026
 """
-import asyncio
 import json
 import types
 import urllib.error
@@ -158,83 +159,19 @@ def _assert_token_console(pve, mgr, passthrough):
         assert 'port=5907' in url and 'issued-under-the-token' in url, url
 
 
-# --- the standalone handler on 5001, the one in the report -------------------
-
-class _Browser:
-    """The websockets-library side of vnc_handler: a browser that opens and goes away."""
-
-    def __init__(self, path):
-        self.request = types.SimpleNamespace(path=path)
-        self.closed = None
-
-    async def close(self, code=1000, reason=''):
-        self.closed = (code, reason)
-
-    async def send(self, data):
-        pass
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        raise StopAsyncIteration
-
-
-@pytest.fixture(scope='module')
-def standalone_handler():
-    """vnc_handler lives inside start_vnc_websocket_server; take it from there without
-    binding a port or letting the start-up kill whatever holds one."""
-    import subprocess
-    import websockets
-    from unittest import mock
-    got = {}
-
-    class _Serve:
-        def __init__(self, handler, *a, **k):
-            got['handler'] = handler
-
-        async def __aenter__(self):
-            got['loop'] = asyncio.get_running_loop()
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-    nothing = types.SimpleNamespace(returncode=1, stdout='', stderr='')
-    with mock.patch.object(websockets, 'serve', _Serve), \
-            mock.patch.object(subprocess, 'run', lambda *a, **k: nothing), \
-            mock.patch.object(vms, 'gevent_listen_socket', lambda *a, **k: None):
-        vms.start_vnc_websocket_server(port=1, host='127.0.0.1')
-    assert 'handler' in got, 'start_vnc_websocket_server never handed its handler over'
-    # under gevent the server "thread" shares the OS thread, and asyncio keeps one running
-    # loop per OS thread - stop that one before a test runs the handler on a loop of its own
-    import gevent
-    loop = got['loop']
-    loop.call_soon_threadsafe(loop.stop)
-    for _ in range(200):
-        if not loop.is_running():
-            break
-        gevent.sleep(0.01)
-    yield got['handler']
-
-
-@pytest.mark.parametrize('passthrough', [True, False], ids=['browser-ticket', 'own-vncproxy'])
-def test_the_standalone_console_on_a_token_cluster(cluster, pve, standalone_handler, passthrough):
-    browser = _Browser(f'{_PATH}?{_query(passthrough)}')
-    asyncio.run(standalone_handler(browser))
-    _assert_token_console(pve, cluster, passthrough)
-
-
-# --- the two handlers on the main port ---------------------------------------
+# --- the VNC socket, on the main port and on the legacy console port ----------
 
 class _SyncBrowser:
     connected = False
+
+    def __init__(self):
+        self.sent = []
 
     def receive(self, timeout=None):
         return None
 
     def send(self, data):
-        pass
+        self.sent.append(data)
 
     def close(self, *a, **k):
         pass
@@ -245,13 +182,6 @@ def test_the_flask_sock_console_on_a_token_cluster(api, cluster, pve, passthroug
     view = api.app.view_functions['__flask_sock.vnc_websocket_proxy'].__wrapped__
     with api.app.test_request_context(f'{_PATH}?{_query(passthrough)}'):
         view(_SyncBrowser(), 'c1', 'pve1', 'qemu', 100)
-    _assert_token_console(pve, cluster, passthrough)
-
-
-@pytest.mark.parametrize('passthrough', [True, False], ids=['browser-ticket', 'own-vncproxy'])
-def test_the_geventwebsocket_console_on_a_token_cluster(api, cluster, pve, passthrough):
-    with api.app.test_request_context(f'{_PATH}?{_query(passthrough)}'):
-        vms.handle_vnc_websocket(_SyncBrowser(), 'c1', 'pve1', 'qemu', 100)
     _assert_token_console(pve, cluster, passthrough)
 
 
@@ -300,6 +230,22 @@ def test_the_terminal_says_what_is_missing_instead_of_logging_in(api, cluster, p
         '/api/clusters/c1/vms/pve1/qemu/100/termproxy')
     assert r.status_code == 400, r.get_json()
     assert pve.logins == []
+
+
+def test_the_terminal_socket_on_a_token_cluster_dials_nothing(api, cluster, pve):
+    """The socket wants a PVE session ticket of the manager's, and a token cluster has
+    none to mint (mint_console_auth_ticket answers None there without a login, above): it
+    says so instead of dialling PVE with no cookie."""
+    cluster.mint_console_auth_ticket = lambda with_csrf=False: None
+    view = api.app.view_functions['__flask_sock.vm_terminal_websocket_proxy'].__wrapped__
+    page = _SyncBrowser()
+    with api.app.test_request_context(
+            f'/api/clusters/c1/vms/pve1/qemu/100/termwebsocket?{_query(False)}'
+            f'&ticket={_BROWSER_TICKET}&port=5901&host=10.0.0.9&user={_ID}'):
+        view(page, 'c1', 'pve1', 'qemu', 100)
+    assert pve.logins == [] and pve.upgrades == []
+    said = json.loads(page.sent[0])
+    assert said['status'] == 'error' and 'user/password' in said['message'], said
 
 
 # --- and a password cluster keeps doing exactly what it did ------------------

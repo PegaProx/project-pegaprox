@@ -4,10 +4,8 @@ PegaProx Realtime API Routes - Layer 6
 WebSocket, SSE, and email test endpoints.
 """
 
-import hmac
 import json
 import logging
-import secrets
 import threading
 import time
 import uuid
@@ -34,6 +32,8 @@ from pegaprox.utils.realtime import (
     create_ws_token, validate_ws_token,
     push_immediate_update,
     hold_websocket,
+    fd_budget, _env_count, _leave_request_pool,
+    drop_stream, stream_ended, dropped_streams, STREAM_DROPPED,
 )
 from pegaprox.utils.audit import get_client_ip
 from pegaprox.utils.email import send_email
@@ -255,29 +255,6 @@ def narrow_stream_scope(previous, fresh_allowed):
     return [c for c in previous if c in fresh_allowed]
 
 
-# The SSH console server this process starts (api/vms.py start_ssh_websocket_server) gets
-# this in its environment and sends it back with every validate and cluster-creds call.
-# Only that caller is handed the cluster context, and the PVE session ticket in it is one
-# of the cluster's own account - root@pam unless an admin set another, so root on every
-# node. Any other holder of a ws token learns whether the token is good and nothing else;
-# cluster-creds (api/auth.py) answers nobody else at all. New with every start: the
-# console server is restarted with the app.
-CONSOLE_SERVER_HEADER = 'X-PegaProx-Console-Server'
-_CONSOLE_SERVER_SECRET = secrets.token_urlsafe(32)
-
-
-def console_server_secret():
-    return _CONSOLE_SERVER_SECRET
-
-
-def from_console_server():
-    """True for a request of the console server this process started."""
-    sent = request.headers.get(CONSOLE_SERVER_HEADER) or ''
-    if not sent or not _CONSOLE_SERVER_SECRET:
-        return False
-    return hmac.compare_digest(sent.encode(), _CONSOLE_SERVER_SECRET.encode())
-
-
 def _floor_by_token_role(user, token_role):
     """Cap a stored user record at the role its ws/API token was issued with, so a token can
     never out-rank itself through its owner's account. Mirrors build_authz_user / the inline
@@ -302,19 +279,85 @@ _fed_watch_lock = threading.Lock()
 # as it lives — the #777 idle-connection reaper cannot touch it, because it is not idle. There
 # was no bound at all, so any authenticated account could open streams until the pool was gone
 # and the whole UI stopped answering. Generous enough for a wall of browser tabs; the oldest
-# stream of the same account is superseded rather than the new one refused, so a reconnect
+# stream of the same session is superseded rather than the new one refused, so a reconnect
 # (which the frontend does on its own watchdog) never locks the user out of their own session.
-MAX_SSE_STREAMS_PER_USER = 20
+MAX_SSE_STREAMS_PER_SESSION = 20
+# MK Nov 2026 - per session, it was per account: one account may be several people (a shared
+# admin), and the account's oldest stream was a colleague's, whose dashboard reconnected a
+# second later and superseded the next one. The account has a cap of its own over all its
+# sessions, past which a session without a stream is refused (429, the dashboard retries
+# with its backoff) rather than somebody else's stream dropped.
+MAX_SSE_STREAMS_PER_USER = _env_count('PEGAPROX_MAX_SSE_STREAMS_PER_USER', 100)
+# MK Nov 2026 - and the instance's. A stream leaves the request pool once it starts, as a
+# console does (utils/realtime.py), so the pool no longer bounds how many are open: one
+# descriptor each, an eighth of the limit by default. Past it a new stream is refused with
+# a 503, which the dashboard's EventSource retries with its backoff; nobody else's stream
+# is dropped for it. A session that holds one replaces its own oldest instead, as with
+# consoles: the dashboard reconnects every five minutes with a fresh token, and the stream
+# it just closed is still registered until its next frame finds the socket gone.
+MAX_SSE_STREAMS = _env_count('PEGAPROX_MAX_SSE_STREAMS', fd_budget(8))
 
 
-def _supersede_oldest_streams(username):
-    """Drop this user's oldest streams once they are over the cap. Call with sse_clients_lock
-    held; the generators notice they were dropped and close on their next frame."""
+def _streams_full(username):
+    """'account' when `username` holds MAX_SSE_STREAMS_PER_USER browser streams, 'instance'
+    when the instance holds MAX_SSE_STREAMS streams, else None. Call with sse_clients_lock
+    held."""
+    mine = sum(1 for c in sse_clients.values()
+               if c.get('user') == username and not c.get('fed_stream'))
+    if mine >= MAX_SSE_STREAMS_PER_USER:
+        return 'account'
+    if len(sse_clients) >= MAX_SSE_STREAMS:
+        return 'instance'
+    return None
+
+
+def _no_room_for_stream(username, sid):
+    """What refuses a new stream of this session (_streams_full), or None. Nothing does
+    while the session holds a browser stream of its own: it replaces that one. Call with
+    sse_clients_lock held."""
+    # MK Nov 2026 - the one it replaces keeps its connection until its generator is done
+    # (utils/realtime.py drop_stream), so replacing is no way past the caps: those dropped
+    # and not ended yet count, and a session's worth of them over the cap refuses even
+    # a reconnect
+    lingering = dropped_streams(username)
+    if lingering:
+        mine = sum(1 for c in sse_clients.values()
+                   if c.get('user') == username and not c.get('fed_stream'))
+        if mine + lingering >= MAX_SSE_STREAMS_PER_USER + MAX_SSE_STREAMS_PER_SESSION:
+            return 'account'
+    if dropped_streams() and \
+            len(sse_clients) + dropped_streams() >= MAX_SSE_STREAMS + MAX_SSE_STREAMS_PER_SESSION:
+        return 'instance'
+    if any(c.get('user') == username and c.get('sid') == sid and not c.get('fed_stream')
+           for c in sse_clients.values()):
+        return None
+    return _streams_full(username)
+
+
+def _supersede_oldest_streams(username, sid=None, make_room=False):
+    """Drop this session's oldest streams once they are over the cap, never another
+    session's. make_room: the account or the instance is full, so the oldest of the
+    session's browser streams goes in any case. Call with sse_clients_lock held; the
+    generators notice they were dropped and close on their next frame."""
     mine = sorted(((c.get('connected_at', ''), cid) for cid, c in sse_clients.items()
-                   if c.get('user') == username))
-    for _, cid in mine[:max(0, len(mine) - MAX_SSE_STREAMS_PER_USER + 1)]:
-        sse_clients.pop(cid, None)
-        logging.info(f"[SSE] superseded stream {cid} — '{_sl(username)}' over the per-user cap")
+                   if c.get('user') == username and c.get('sid') == sid))
+    going = mine[:max(0, len(mine) - MAX_SSE_STREAMS_PER_SESSION + 1)]
+    if make_room and not going:
+        # never a feed of another site (core/federation_stream.py), which no cap here refuses
+        going = [m for m in mine if not sse_clients[m[1]].get('fed_stream')][:1]
+    for _, cid in going:
+        drop_stream(cid)
+        logging.info(f"[SSE] superseded stream {cid} - a session of '{_sl(username)}' over its "
+                     "cap, or the account or the instance full")
+
+
+def _release_db():
+    """Close this greenlet's database connection, a stream's between two of its reads."""
+    from pegaprox.core.db import get_db
+    try:
+        get_db().release_connection()
+    except Exception:
+        logging.debug("[SSE] could not release the database connection", exc_info=True)
 
 
 def _stream_identity(username):
@@ -387,8 +430,9 @@ def get_ws_token():
 
 @bp.route('/api/ws/token/validate')
 def validate_ws_token_api():
-    """Validate a WS token - called by standalone VNC/SSH servers
-    MK: internal endpoint, consumes the token (single-use)
+    """Validate a WS token. MK: consumes the token (single-use). It was the console
+    servers' check on port+1/+2; MK Nov 2026 those are gone, the console sockets check
+    their tokens in this process, and nothing in PegaProx calls this any more.
 
     MK May 2026 (CodeAnt CWE-285) - if the caller passes ?cluster_id=<id>, also
     verify the token's user has access to that cluster. Closes the cross-cluster
@@ -396,8 +440,7 @@ def validate_ws_token_api():
     and trust the token alone to gate it. cluster_id is OPTIONAL for back-compat
     (the VNC paths in vms.py / VM-level shells call without it today).
     """
-    # #625 - only the console servers ask here: the node shell and the VM terminal of
-    # the SSH server. A standby opens neither, whatever the token says.
+    # #625 - a console token on a standby opens no console, whatever it says
     from pegaprox.api.ha import standby_console_refusal
     refused = standby_console_refusal()
     if refused:
@@ -425,7 +468,6 @@ def validate_ws_token_api():
         return jsonify({'error': 'Account disabled', 'code': 'ACCOUNT_DISABLED'}), 401
 
     requested_cluster = (request.args.get('cluster_id') or '').strip()
-    cluster_context = None
     if requested_cluster:
         try:
             from pegaprox.utils.auth import resolve_authz_user
@@ -475,11 +517,8 @@ def validate_ws_token_api():
                 logging.warning(f"[WS-TOKEN] user '{_sl(data['user'])}' has no access to cluster '{_sl(requested_cluster)}'")
                 return jsonify({'error': 'Access denied to this cluster'}), 403
 
-            # NS Aug 2026 (Aikido pentest) — the standalone SSH shell server (mainPort+2) calls
-            # this with &shell=node. Unlike the in-process node_shell_websocket_proxy (vms.py),
-            # this validate path never checked node.shell, so a user with mere cluster access
-            # could open a root node shell. Enforce node.shell here. The VM termproxy path does
-            # NOT send shell=node (it's a guest console gated separately), so it's unaffected.
+            # NS Aug 2026 (Aikido pentest) - &shell=node asks for a node shell: node.shell,
+            # as the node shell socket (vms.py node_shell_websocket_proxy) asks it.
             if (request.args.get('shell') or '') == 'node':
                 from pegaprox.utils.rbac import has_permission
                 if not has_permission(user, 'node.shell'):
@@ -487,86 +526,27 @@ def validate_ws_token_api():
                     return jsonify({'error': 'node.shell permission required'}), 403
                 # a root shell on a node is as whole-cluster as it gets: a caller who
                 # reaches this cluster only through a VM ACL or a pool grant gets none,
-                # the same answer /api/internal/cluster-creds gives (require_unconfined)
+                # the same answer the node shell socket gives
                 from pegaprox.api.helpers import caller_is_scoped
                 if caller_is_scoped({**user, 'username': data['user']}, requested_cluster):
                     logging.warning(f"[WS-TOKEN] user '{_sl(data['user'])}' is confined on '{_sl(requested_cluster)}', no node shell")
                     return jsonify({'error': 'Access denied: this action affects the whole cluster'}), 403
-                # MK Nov 2026 - and none on a cluster with SSH switched off. Answered here,
-                # not by the SSH server: without this answer it gets no node address
+                # MK Nov 2026 - and none on a cluster with SSH switched off
                 from pegaprox.api.helpers import node_shell_refusal
                 from pegaprox.globals import cluster_managers
                 why = node_shell_refusal(cluster_managers.get(requested_cluster))
                 if why:
                     return jsonify({'code': 'SSH_DISABLED', 'error': why}), 409
 
-            # MK May 2026 - lightweight cluster context for the SSH/VNC proxy.
-            # We intentionally do NOT call mgr._get_node_ip() here: that has a
-            # network-probing first-call path (up to ~15s) which would hang the
-            # validate endpoint when this same Flask process is busy. The proxy
-            # gets the cluster's primary host + any fallback_hosts already known
-            # from the DB. Multi-node clusters where the frontend prefetched a
-            # per-node IP that isn't in this set will need to re-resolve through
-            # the normal cluster-creds endpoint with a session cookie.
-            # MK Oct 2026 (#1143) - except for a node shell: it has to land on the node it
-            # was opened for, and without that node's address the SSH server put it on the
-            # primary host, which is another node. Its call waits long enough for the probe.
-            try:
-                from pegaprox.globals import cluster_managers
-                mgr = cluster_managers.get(requested_cluster)
-                # only for our own console server, see CONSOLE_SERVER_HEADER
-                if mgr is not None and from_console_server():
-                    cluster_host = getattr(mgr, 'host', None)
-                    cfg = getattr(mgr, 'config', None)
-                    node_ips = {}
-                    # Include fallback_hosts from the DB — those were discovered by
-                    # the manager at connect time and persist across restarts. Cheap.
-                    fb = getattr(cfg, 'fallback_hosts', None) or []
-                    for i, host in enumerate(fb):
-                        if host:
-                            node_ips[f'_fallback_{i}'] = host
-                    if (request.args.get('shell') or '') == 'node':
-                        from pegaprox.api.helpers import node_shell_address
-                        shell_node = request.args.get('node') or ''
-                        shell_ip = node_shell_address(mgr, shell_node)
-                        if shell_ip:
-                            node_ips[shell_node] = shell_ip
-                    cluster_context = {
-                        'host': cluster_host,
-                        'node_ips': node_ips,
-                        'ssh_port': getattr(cfg, 'ssh_port', 22) or 22,
-                        # MK Sep 2026 (#956) - the termproxy's PVE upgrade port. Both context
-                        # sources have to carry it or the bug survives on one of the two flows.
-                        'api_port': int(getattr(mgr, 'api_port', 8006) or 8006),
-                        # NS Aug 2026 (AI-pentest) — carry the per-cluster TLS-verify flag to the
-                        # termproxy WS subprocess. Without it the consumer defaults verify_pve_tls to
-                        # False and pins CERT_NONE even when the admin enabled ssl_verification, so a
-                        # MitM between PegaProx and PVE could intercept the console + its auth ticket.
-                        'verify_pve_tls': bool(getattr(mgr, '_ssl_verify', False)),
-                    }
-                    # NS 2026-06-05 (C-1): hand the PVE session cookie to the WS
-                    # subprocess server-side (it used to come from the browser).
-                    # Mint fresh; None for token-only clusters. termproxy is the
-                    # only consumer — VNC/SSH ignore it.
-                    try:
-                        _tk = mgr.mint_console_auth_ticket()
-                        if _tk:
-                            cluster_context['pve_auth_ticket'] = _tk
-                    except Exception:
-                        pass
-            except Exception as e:
-                logging.debug(f"[WS-TOKEN] cluster-context build soft-fail: {e}")
         except Exception as e:
             logging.error(f"[WS-TOKEN] cluster-access check failed: {e}")
             # fail closed
             return jsonify({'error': 'Authorization check failed'}), 500
 
     from pegaprox.core import ha
-    # #625 - a standby holds the leader's known_hosts: the SSH server pins nothing new there
+    # #625 - a standby holds the leader's known_hosts and pins no new host key (ssh_security)
     resp = {'valid': True, 'user': data['user'], 'role': data['role'],
             'known_hosts_only': ha.is_standby()}
-    if cluster_context is not None:
-        resp['cluster_context'] = cluster_context
     return jsonify(resp)
 
 
@@ -601,6 +581,12 @@ def sse_updates():
     if not user:
         return jsonify({'error': 'Authentication required. Provide a valid SSE token.',
                         'code': 'INVALID_TOKEN'}), 401
+
+    # MK Nov 2026 - Flask answers HEAD on this route too, and Werkzeug sends no body for one:
+    # generate() never ran, so the stream registered below was never let go of and kept one
+    # of MAX_SSE_STREAMS until a restart. A HEAD gets the headers and no stream.
+    if request.method == 'HEAD':
+        return Response(mimetype='text/event-stream', headers={'Cache-Control': 'no-cache'})
 
     client_id = str(uuid.uuid4())
     message_queue = queue_module.Queue(maxsize=100)
@@ -666,7 +652,20 @@ def sse_updates():
 
     _client_ip = get_client_ip()
     with sse_clients_lock:
-        _supersede_oldest_streams(user)
+        full = _no_room_for_stream(user, _bound.get('sid'))
+        if full == 'account':
+            logging.warning(f"[SSE] refused a stream of '{_sl(user)}' - the account holds "
+                            f"{MAX_SSE_STREAMS_PER_USER} (PEGAPROX_MAX_SSE_STREAMS_PER_USER)")
+            return jsonify({'error': 'This account holds as many live streams as it may, '
+                                     'the dashboard tries again shortly',
+                            'code': 'SSE_ACCOUNT_FULL'}), 429, {'Retry-After': '30'}
+        if full:
+            logging.warning(f"[SSE] refused a stream of '{_sl(user)}' - {MAX_SSE_STREAMS} are "
+                            "open on this instance (PEGAPROX_MAX_SSE_STREAMS)")
+            return jsonify({'error': 'This instance holds as many live streams as it takes, '
+                                     'the dashboard tries again shortly',
+                            'code': 'SSE_FULL'}), 503, {'Retry-After': '10'}
+        _supersede_oldest_streams(user, _bound.get('sid'), make_room=bool(_streams_full(user)))
         sse_clients[client_id] = {
             'queue': message_queue,
             'user': user,
@@ -703,9 +702,29 @@ def sse_updates():
 
     logging.info(f"[SSE] Client connected: {client_id} (user: {user}, auth: {auth_method}) - Total: {len(sse_clients)}")
 
+    # once, from generate()'s finally or from the response's close, whichever comes first: a
+    # generator closed before it started skips its finally, and the stream stayed registered
+    _registered = [True]
+
+    def _let_go():
+        if not _registered:
+            return
+        _registered.clear()
+        with sse_clients_lock:
+            stream_ended(client_id)
+        federation_stream.unwatch(client_id)
+        logging.info(f"[SSE] Client disconnected: {client_id} - Remaining clients: {len(sse_clients)}")
+
     def generate():
         _next_authz = time.monotonic() + SSE_REAUTHZ_INTERVAL
         _authz_misses = 0
+        # MK Nov 2026 - out of the request pool from the first frame on: the stream holds its
+        # connection for hours. Here and not in the view, so only an answer that really
+        # streams leaves, the one that says Connection: close below.
+        _leave_request_pool()
+        # and the database connection the view opened: two descriptors and a page cache
+        # for as long as the stream lives, which reads the database every 30 s
+        _release_db()
         try:
             # Send initial connected message
             yield f"data: {json.dumps({'type': 'connected', 'client_id': client_id})}\n\n"
@@ -714,7 +733,12 @@ def sse_updates():
                 try:
                     # Wait for message with timeout
                     message = message_queue.get(timeout=30)
-                    yield f"data: {message}\n\n"
+                    if message is not STREAM_DROPPED:
+                        # a frame of the broadcast brings the bytes every stream writes for
+                        # it (utils/realtime.py SSEFrame), what another site's feed hands
+                        # in does not
+                        wire = getattr(message, 'wire', None)
+                        yield wire if wire is not None else f"data: {message}\n\n"
                 except queue_module.Empty:
                     # Send keepalive
                     yield f": keepalive\n\n"
@@ -832,19 +856,18 @@ def sse_updates():
                             federation_stream.unwatch(client_id)
                         if _here_empty:
                             return
+                    _release_db()
         except GeneratorExit:
             pass
         finally:
-            with sse_clients_lock:
-                if client_id in sse_clients:
-                    del sse_clients[client_id]
-            federation_stream.unwatch(client_id)
-            logging.info(f"[SSE] Client disconnected: {client_id} - Remaining clients: {len(sse_clients)}")
+            _let_go()
 
     response = Response(generate(), mimetype='text/event-stream')
+    response.call_on_close(_let_go)
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['X-Accel-Buffering'] = 'no'
-    response.headers['Connection'] = 'keep-alive'
+    # the greenlet that left the pool serves no further request on this connection
+    response.headers['Connection'] = 'close'
     return response
 
 

@@ -2,7 +2,6 @@
 """VM operations, snapshots, backups, replication & console routes - split from monolith dec 2025, NS/MK"""
 
 import os
-import sys
 import json
 import time
 import logging
@@ -64,10 +63,9 @@ from pegaprox.core import ha, ha_transport
 from pegaprox.core import transfer_net, preflight, migration_tunnel
 from pegaprox.core.transfer_net import transfer_ssh_address
 from pegaprox.background import guest_index
-from pegaprox.utils.ssh import get_paramiko, ssh_password_for, ssh_password_to, ssh_blocked_for, bare_host, node_login
+from pegaprox.utils.ssh import get_paramiko, ssh_password_for, ssh_password_to, ssh_blocked_for, bare_host, node_login, node_ssh_port
 from pegaprox.utils.sanitization import sanitize_int, validate_snapshot_name, redact_url, url_without_login
 from urllib.parse import urlencode, quote as url_quote
-import signal
 import requests.exceptions
 from pegaprox.api.realtime import sock
 
@@ -81,13 +79,8 @@ bp = Blueprint('vms', __name__)
 # inspection middleboxes (TLS DPI, Falcon-style EDR scoring) to finish their work.
 VNC_PVE_CONNECT_TIMEOUT = int(os.environ.get('PEGAPROX_VNC_CONNECT_TIMEOUT', '15'))
 
-# #740 (Frisch12) — under gevent's monkey-patch, asyncio.to_thread never delivers, so the console's
-# offloaded PVE socket calls burn VNC_PVE_CONNECT_TIMEOUT instead of connecting. Route to_thread
-# through gevent once, process-wide; no-op when gevent isn't patched in (e.g. under pytest).
-from pegaprox.utils.concurrent import install_gevent_to_thread, gevent_listen_socket
 from pegaprox.utils.ssh import read_capped as _read_capped
 from pegaprox.utils.vnc_polling import clear_tls_errors_before_io, write_with_deadline
-install_gevent_to_thread()
 
 
 # NS 2026-05-06: cluster-add / -join nehmen frei eingegebene node-targets
@@ -5867,7 +5860,7 @@ def get_node_shell_ticket(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
     # a root shell on a node: not for a caller who reaches this cluster only through a VM
-    # ACL or a pool grant, the same rule as /api/internal/cluster-creds
+    # ACL or a pool grant, the same rule as the node shell socket
     from pegaprox.api.helpers import require_unconfined
     denied = require_unconfined(cluster_id)
     if denied:
@@ -9248,27 +9241,6 @@ def _safe_vnc_passthrough(port_raw, ticket_raw):
     return (True, p)
 
 
-def _ws_subprocess_base_url(main_port, ssl_cert=None):
-    """Base URL the SSH-websocket subprocess should use to reach PegaProx.
-
-    It validates every session against this address, and it used to be pinned to
-    127.0.0.1. That only holds while we bind a wildcard: with "Proxy Bind Address"
-    set to one LAN IP the app listens there and nowhere else, loopback refuses the
-    connection, and every terminal ends with "Auth server unreachable" (#957).
-
-    A wildcard bind keeps loopback, which is the shortest path and does not depend
-    on an interface staying up. Read through the globals MODULE, never the
-    star-import: main() fills the value in long after this module is imported.
-    MK Sep 2026
-    """
-    from pegaprox import globals as _ppg
-    bind = (getattr(_ppg, 'SERVER_BIND_HOST', '') or '').strip()
-    target = '127.0.0.1' if bind in ('', '0.0.0.0', '::', '*') else bind
-    if ':' in target and not target.startswith('['):
-        target = f"[{target}]"          # IPv6 literal needs brackets in a URL
-    return f"https://{target}:{main_port}" if ssl_cert else f"http://{target}:{main_port}"
-
-
 def _pve_console_ws_path(node, vm_type, vmid, vnc_port, vnc_ticket):
     """Path of PVE's vncwebsocket endpoint for one guest.
 
@@ -11793,224 +11765,9 @@ def _console_authz(user, cluster_id, vmid, vm_type=None, by_session=False):
     return True, None
 
 
-# WebSocket proxy for VNC - using geventwebsocket
-def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
-    """Handle VNC WebSocket connection"""
-    print(f"\n{'='*60}")
-    print(f"VNC WEBSOCKET: {vm_type}/{vmid} on {node}")
-    print(f"{'='*60}")
-    
-    # #625 - keyboard and mouse on a guest: the active's to hand out, or a standby's
-    # that serves users
-    if not ha.consoles_here():
-        try:
-            ws.close(1008, STANDBY_CONSOLE_ERROR)
-        except Exception:
-            pass
-        return
-
-    if cluster_id not in cluster_managers:
-        print(f"ERROR: Cluster {cluster_id} not found")
-        return
-    
-    manager = cluster_managers[cluster_id]
-    host, port = manager.host, manager.api_port
-    
-    print(f"Target host: {host}")
-    
-    pve_ws = None
-    running = True
-    
-    try:
-        import gevent
-        from gevent import spawn, sleep as gsleep
-        import urllib.parse
-        import urllib.request
-        import json
-        import websocket
-        
-        # Create SSL context
-        ssl_context = ssl.create_default_context()
-        # NS Jul 2026 (CodeAnt) — gate TLS verify on the per-cluster ssl_verify flag
-        # (default off: PVE ships self-signed; honoured when the admin enables it).
-        _verify_tls = bool(getattr(manager, '_ssl_verify', False))
-        if not _verify_tls:
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-        from pegaprox.core.manager import pve_opener
-        opener = pve_opener(ssl_context)
-        
-        # Step 1: Login - not on a token cluster, there is no password (#955)
-        _token_auth = _console_uses_token(manager)
-        pve_ticket = csrf_token = None
-        if not _token_auth:
-            print(f"Step 1: Login...")
-            login_data = urlencode({
-                'username': manager.config.user,
-                'password': manager.config.pass_
-            }).encode('utf-8')
-        
-            login_req = urllib.request.Request(
-                f"https://{manager.auth_host}:{port}/api2/json/access/ticket",
-                data=login_data, method='POST'
-            )
-        
-            with opener.open(login_req, timeout=10) as response:
-                login_result = json.loads(response.read().decode('utf-8'))
-
-            pve_ticket = login_result['data']['ticket']
-            csrf_token = login_result['data']['CSRFPreventionToken']
-            print(f"Got PVE ticket")
-
-        # MK Apr 2026 (#352 follow-up) — single-vncproxy mode. If the JS
-        # already got a vncproxy ticket+port via /console, reuse it so the VNC
-        # password noVNC uses matches the password PVE's vncterm expects. PVE
-        # 9.1.x generates fresh random VNC password per vncproxy call.
-        pve_port_q = request.args.get('pve_port')
-        pve_ticket_q = request.args.get('pve_ticket')
-        _ppt_ok, _ppt_port = _safe_vnc_passthrough(pve_port_q, pve_ticket_q)
-        # MK Sep 2026 (#945, #956) - the vncproxy port goes in its OWN variable. It
-        # used to overwrite `port`, which still had to be the API port for the URL
-        # authority two steps down, so the upgrade was dialled against :5900 and got
-        # ECONNREFUSED. Reusing the browser's ticket also means the upgrade has to
-        # present the manager's auth, not a fresh login cookie (#945.2 / #955).
-        _reuse_manager_auth = False
-        if pve_port_q and pve_ticket_q and _ppt_ok:
-            vnc_ticket = pve_ticket_q
-            vnc_port = _ppt_port
-            _reuse_manager_auth = True
-            print(f"Reusing JS-issued vncproxy ticket port={vnc_port}")
-        elif _token_auth:
-            vnc_ticket, vnc_port = _vncproxy_via_manager(manager, node, vm_type, vmid)
-            _reuse_manager_auth = True
-        else:
-            print(f"Step 2: Get VNC ticket...")
-            if vm_type == 'qemu':
-                vnc_url = f"https://{host}:{port}/api2/json/nodes/{node}/qemu/{vmid}/vncproxy"
-            else:
-                vnc_url = f"https://{host}:{port}/api2/json/nodes/{node}/lxc/{vmid}/vncproxy"
-            vnc_data = urlencode({'websocket': '1'}).encode('utf-8')
-            vnc_req = urllib.request.Request(vnc_url, data=vnc_data, method='POST')
-            vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
-            vnc_req.add_header('CSRFPreventionToken', csrf_token)
-            with opener.open(vnc_req, timeout=10) as response:
-                vnc_result = json.loads(response.read().decode('utf-8'))
-            vnc_ticket = vnc_result['data']['ticket']
-            vnc_port = vnc_result['data']['port']
-            print(f"Got VNC ticket, port={vnc_port} (no JS pass-through - PVE 9.1.x users may hit issue #352)")
-        
-        # Step 3: Connect to Proxmox WebSocket
-        print(f"Step 3: Connect to Proxmox...")
-        pve_ws_path = _pve_console_ws_path(node, vm_type, vmid, vnc_port, vnc_ticket)
-        pve_ws_url = f"wss://{host}:{port}{pve_ws_path}"
-
-        pve_ws = websocket.create_connection(
-            pve_ws_url,
-            sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
-            header=_pve_console_ws_auth(manager, pve_ticket,
-                                        reuse_manager_auth=_reuse_manager_auth),
-            redirect_limit=0,
-            timeout=VNC_PVE_CONNECT_TIMEOUT
-        )
-        _refuse_ws_redirect(pve_ws)
-        # MK Apr 2026 — TCP_NODELAY + keepalive: survives idle conntrack drops
-        _apply_vnc_socket_options(pve_ws.sock)
-
-        print(f"✓ Connected to Proxmox!")
-        # #713 — pve_ws is a single SSL object; a concurrent SSL_read (the reader
-        # greenlet below) and SSL_write (this main loop / a keepalive) splice a TLS
-        # record and pveproxy tears the session with a tlsv1 decode-error. The
-        # standalone vnc_handler leg already funnels its pve_ws ops through one lock;
-        # the reverse-proxy / geventwebsocket console lands HERE on the main port and
-        # needed the same. Bounded read slice so the writer isn't starved on an empty recv —
-        # and short enough that an outbound pointer event doesn't inherit it (the 1.1.0 jitter).
-        pve_ws.settimeout(VNC_PVE_RECV_SLICE)
-        _pve_io_lock = threading.Lock()
-
-        bytes_sent = 0
-        bytes_received = 0
-        # #713 - why it ended, first one wins; printed at WARNING when it was an error
-        ended = []
-
-        # Greenlet to read from Proxmox and send to client
-        def proxmox_to_client():
-            nonlocal bytes_received, running
-            try:
-                while running:
-                    try:
-                        with _pve_io_lock:
-                            data = pve_ws.recv()
-                        if data:
-                            bytes_received += len(data)
-                            ws.send(data)
-                    except websocket.WebSocketTimeoutException:
-                        gsleep(0.01)
-                    except websocket.WebSocketConnectionClosedException:
-                        ended.append(('PVE closed', False))
-                        running = False
-                        break
-                    except Exception as e:
-                        if running:
-                            ended.append((f'PVE->Client: {e}', True))
-                        running = False
-                        break
-            except Exception as e:
-                ended.append((f'PVE->Client crashed: {e}', True))
-                running = False
-        
-        # Start the proxmox reader greenlet
-        pve_reader = spawn(proxmox_to_client)
-        
-        print(f"Step 4: Proxy running...")
-        
-        # Main loop: read from client, send to Proxmox
-        while running:
-            try:
-                data = ws.receive()
-                if data is None:
-                    ended.append(('browser closed', False))
-                    running = False
-                    break
-                if data:
-                    bytes_sent += len(data)
-                    try:
-                        with _pve_io_lock:
-                            write_with_deadline(pve_ws, pve_ws.send, data)
-                    except Exception as e:
-                        ended.append((f'Client->PVE: {e}', True))
-                        running = False
-                        break
-            except Exception as e:
-                if running:
-                    err_str = str(e)
-                    ended.append(('browser closed', False) if 'closed' in err_str.lower()
-                                 else (f'browser: {e}', True))
-                running = False
-                break
-        
-        running = False
-        pve_reader.kill()
-        
-        _reason, _failed = ended[0] if ended else ('browser closed', False)
-        logging.log(logging.WARNING if _failed else logging.INFO,
-                    f"[VNC] session ended host={host} vm={vm_type}/{vmid} reason={_reason} "
-                    f"sent={bytes_sent}B recv={bytes_received}B")
-        
-    except Exception as e:
-        logging.exception(f"VNC proxy error: {type(e).__name__}: {e}")
-    finally:
-        running = False
-        if pve_ws:
-            try:
-                pve_ws.close()
-            except:
-                pass
-        print(f"{'='*60}\n")
-
-
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/vncwebsocket')
 def vnc_websocket_route(cluster_id, node, vm_type, vmid):
-    """WebSocket endpoint for VNC - redirect to dedicated WS port
+    """The VNC path asked without an upgrade: 426 for a signed-in caller
     
     NS: Auth via query param since WebSocket can't send custom headers
     """
@@ -12019,7 +11776,7 @@ def vnc_websocket_route(cluster_id, node, vm_type, vmid):
     # because a WebSocket can't send custom headers), so request.session isn't
     # populated yet and check_cluster_access() would blow up with
     # AttributeError: 'Request' object has no attribute 'session' on every GET.
-    # The cluster gate is enforced by _console_authz() below — it does the same
+    # The cluster gate is enforced by _console_authz() below - it does the same
     # get_user_clusters() + VM-ACL fallback against the resolved query-param user.
     # NS: Mar 2026 - prefer WS token, session as fallback
     from pegaprox.utils.realtime import validate_ws_token
@@ -12037,7 +11794,7 @@ def vnc_websocket_route(cluster_id, node, vm_type, vmid):
     else:
         return jsonify({'error': 'Auth required', 'code': 'AUTH_REQUIRED'}), 401
 
-    # MK 2026-06-10 (#537/RBAC): coarse "global vm.console perm OR admin" pre-check dropped —
+    # MK 2026-06-10 (#537/RBAC): coarse "global vm.console perm OR admin" pre-check dropped -
     # the per-VM _console_authz gate below is authoritative and portal/custom-role aware.
     # NS Oct 2026 (#1101, #1116) - the account by its own row, refused when unreadable,
     # and held to the role of the API token that minted the ws token
@@ -12049,805 +11806,78 @@ def vnc_websocket_route(cluster_id, node, vm_type, vmid):
     if not _ok:
         return jsonify({'error': 'Permission denied', 'code': 'INSUFFICIENT_PERMISSIONS'}), 403
 
-    # This route is just a fallback - actual WebSocket handling is done by the
-    # dedicated WebSocket server started in start_vnc_websocket_server()
-    # MK 2026-06-10: removed a redundant local `from flask import request` here —
-    # request is already module-level, and the local re-import made `request` a
-    # function-local, so the request.args.get(...) auth lookup above raised
-    # UnboundLocalError once check_cluster_access (which used to crash first) was gone.
-    print(f"\n*** VNC ROUTE HIT (HTTP): {vm_type}/{vmid} on {node} ***")
-    print(f"HTTP_UPGRADE: {request.environ.get('HTTP_UPGRADE', 'NONE')}")
-    print(f"wsgi.websocket: {request.environ.get('wsgi.websocket', 'NONE')}")
-    
-    # Try geventwebsocket first
-    ws = request.environ.get('wsgi.websocket')
-    if ws is not None:
-        print("Using geventwebsocket handler...")
-        # #988 - counted against the account until the request ends, and hung up with
-        # the session it was opened under (#1038)
-        hold_websocket(user['username'], ws, sid=auth.get('sid') if ws_token else session_id)
-        handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid)
-        return ''
-    
-    # If not a websocket, return error
+    # A request that reaches this rule is no WebSocket upgrade: a real one goes to the
+    # flask-sock route below (vnc_websocket_proxy), the upgrade with a stripped Connection
+    # header included (utils/ws_lenient.py). The token above is spent, a retry needs a new
+    # one, as before.
     return jsonify({'error': 'WebSocket connection required'}), 426
 
 
-# Standalone VNC WebSocket Server using websockets library
-def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0.0.0'):
-    """Start a dedicated WebSocket server for VNC proxying"""
-    import asyncio
-    import re
-    import threading
-    import subprocess
+# answer of a console the instance has no room for (utils/realtime.py MAX_CONSOLES)
+CONSOLES_FULL_ERROR = 'Too many consoles are open on this instance - try again in a moment'
+# MK Nov 2026 - and of one its account has no room for (MAX_CONSOLES_PER_USER). A close code
+# of its own: the console page opens a dropped console again by itself, and here that opens
+# nothing until one of the account's consoles is closed
+ACCOUNT_CONSOLES_ERROR = 'This account has too many consoles open - close one of them first'
+ACCOUNT_CONSOLES_CLOSE = 4429
 
-    try:
-        import websockets
-    except ImportError:
-        print("WARNING: 'websockets' library not installed. VNC console will not work.")
-        print("Install with: pip install websockets")
-        return
 
-    # MK Feb 2026 - kill stale processes on port before binding (same as SSH server)
+def _console_full(held):
+    """(reason, close code) of a console hold_websocket did not take."""
+    if held is None:
+        return ACCOUNT_CONSOLES_ERROR, ACCOUNT_CONSOLES_CLOSE
+    return CONSOLES_FULL_ERROR, 1013
+
+
+def _vnc_refusal(ws, message, code=1008):
+    """End a VNC socket with a reason. RFB runs on it, so a text frame would be garbage to
+    noVNC: the reason rides on the close."""
     try:
-        result = subprocess.run(['fuser', '-k', f'{port}/tcp'], capture_output=True, timeout=5)
-        if result.returncode == 0:
-            print(f"Killed existing process on VNC port {port}")
-            time.sleep(0.5)
+        ws.close(reason=code, message=str(message)[:120])
     except Exception:
-        try:
-            result = subprocess.run(['lsof', '-t', f'-i:{port}'], capture_output=True, text=True, timeout=5)
-            if result.stdout.strip():
-                for pid in result.stdout.strip().split('\n'):
-                    try:
-                        os.kill(int(pid), signal.SIGTERM)
-                        print(f"Killed existing VNC process {pid} on port {port}")
-                    except (ProcessLookupError, ValueError):
-                        pass
-                time.sleep(0.5)
-        except Exception:
-            pass
-
-    # Event to signal server is ready
-    server_ready = threading.Event()
-    
-    async def vnc_handler(websocket):
-        """Handle VNC WebSocket connections
-        
-        NS: Auth via query param since WebSocket can't send custom headers
-        """
-        # Get path from websocket
-        path = websocket.request.path if hasattr(websocket, 'request') else websocket.path
-        
-        print(f"\n{'='*60}")
-        print(f"VNC WebSocket connected: {path}")
-        print(f"{'='*60}")
-
-        # #625 - the console port runs on a standby too; unless it serves users the
-        # answer there is no, before a token is spent or a stable-mode key is claimed
-        if not ha.consoles_here():
-            await websocket.close(1008, STANDBY_CONSOLE_ERROR)
-            return
-        
-        # NS: Mar 2026 - authenticate via single-use WS token (not session in URL)
-        from urllib.parse import urlparse, parse_qs
-        parsed = urlparse(path)
-        query_params = parse_qs(parsed.query)
-        ws_token = query_params.get('token', [None])[0]
-        # LW: backwards compat, accept session= too for now
-        session_id = query_params.get('session', [None])[0]
-
-        # MK Apr 2026 — Stable VNC Mode (D): if frontend asked for an encrypted
-        # tunnel via /console?stable=1, it gets back an enc_session id which it
-        # then passes here. We claim the matching AES-256-GCM key (one-shot,
-        # auto-expires after 60s if never claimed) and use it to wrap forwarded
-        # frames in both directions. None → plain mode (default, backwards-compat).
-        crypto_session = None
-        enc_sid = query_params.get('enc_session', [None])[0]
-        if enc_sid:
-            try:
-                from pegaprox.utils import vnc_crypto as _vc
-                _key = _vc.claim_session_key(enc_sid)
-                if _key:
-                    crypto_session = _vc.VncCryptoSession(_key)
-                    print(f"[VNC] stable mode active for sid={enc_sid[:8]}...")
-                else:
-                    print(f"[VNC] enc_session={enc_sid[:8]}... not found / expired — falling back to plain mode")
-            except Exception as _e:
-                print(f"[VNC] crypto setup failed ({_e}) — falling back to plain mode")
-
-        if ws_token:
-            from pegaprox.utils.realtime import validate_ws_token
-            token_data = validate_ws_token(ws_token)
-            if not token_data:
-                print("ERROR: Invalid or expired WS token")
-                await websocket.close(1002, "Invalid token")
-                return
-            # check perms from token - as the token's role, from the account's own row (#1116, #1101)
-            user = resolve_authz_user(token_data)
-            # MK 2026-06-10 (#537 abyss1): the per-VM _console_authz gate below (H-1/H-2) is the
-            # authoritative check (cluster + per-VM vm.console via user_can_access_vm). The old
-            # coarse "global vm.console perm OR admin" pre-check here rejected Client-Portal users
-            # — they hold per-VM console access through the portal model, not a global RBAC perm —
-            # so the portal console hung at "Connecting…". Dropped; _console_authz still enforces it.
-            print(f"User {token_data['user']} authenticated for VNC (ws_token)")
-        elif session_id:
-            session = validate_session(session_id)
-            if not session:
-                print("ERROR: Invalid session")
-                await websocket.close(1002, "Invalid session")
-                return
-            user = resolve_authz_user(session)
-            # #537: per-VM _console_authz below is the authoritative gate (see ws_token note).
-            print(f"User {session['user']} authenticated for VNC (session)")
-        else:
-            print("ERROR: No token or session provided")
-            await websocket.close(1002, "Authentication required")
-            return
-        if not user:
-            print("ERROR: account could not be read, no console")
-            await websocket.close(1002, "Authentication required")
-            return
-
-        # Parse path: /api/clusters/{cluster_id}/vms/{node}/{vm_type}/{vmid}/vncwebsocket
-        import re
-        match = re.match(r'/api/clusters/([^/]+)/vms/([^/]+)/(qemu|lxc)/(\d+)/vncwebsocket', parsed.path)
-        if not match:
-            print(f"ERROR: Invalid path: {parsed.path}")
-            await websocket.close(1002, "Invalid path")
-            return
-        
-        cluster_id, node, vm_type, vmid = match.groups()
-        vmid = int(vmid)
-
-        print(f"Cluster: {cluster_id}, Node: {node}, Type: {vm_type}, VMID: {vmid}")
-
-        # H-1/H-2: cluster + per-VM gate before we self-mint a PVE ticket for this vmid
-        _ok, _why = _console_authz(user, cluster_id, vmid, vm_type, by_session=not ws_token)
-        if not _ok:
-            print(f"ERROR: console authz denied ({_why}) for {cluster_id}/{vmid}")
-            await websocket.close(1002, "Permission denied")
-            return
-
-        if cluster_id not in cluster_managers:
-            print(f"ERROR: Cluster {cluster_id} not found")
-            await websocket.close(1002, "Cluster not found")
-            return
-        
-        manager = cluster_managers[cluster_id]
-        host, port = manager.host, manager.api_port
-        
-        pve_ws = None
-
-        try:
-            import urllib.parse
-            import urllib.request
-            import json
-            import websocket as ws_client
-
-            ssl_ctx = ssl.create_default_context()
-            # NS Jul 2026 (CodeAnt) — gate TLS verify on the per-cluster ssl_verify flag
-            # (default off: PVE ships self-signed; honoured when the admin enables it).
-            _verify_tls = bool(getattr(manager, '_ssl_verify', False))
-            if not _verify_tls:
-                ssl_ctx.check_hostname = False
-                ssl_ctx.verify_mode = ssl.CERT_NONE
-
-            # MK Apr 2026 — wrap synchronous urllib.urlopen in asyncio.to_thread
-            # so concurrent VNC handlers don't serialize on the TLS handshake.
-            import asyncio as _aiowrap
-            from pegaprox.core.manager import pve_opener
-            opener = pve_opener(ssl_ctx)
-
-            def _do_urlopen(req):
-                with opener.open(req, timeout=10) as r:
-                    return r.read()
-
-            # Login to Proxmox to get auth ticket. Not on a token cluster: config.user
-            # and pass_ are the token id and secret there, PVE answers 401 (#955).
-            _token_auth = _console_uses_token(manager)
-            pve_ticket = csrf_token = None
-            if not _token_auth:
-                login_data = urlencode({
-                    'username': manager.config.user,
-                    'password': manager.config.pass_
-                }).encode('utf-8')
-
-                login_req = urllib.request.Request(
-                    f"https://{manager.auth_host}:{port}/api2/json/access/ticket",
-                    data=login_data, method='POST'
-                )
-                login_body = await _aiowrap.to_thread(_do_urlopen, login_req)
-                login_result = json.loads(login_body.decode('utf-8'))
-
-                pve_ticket = login_result['data']['ticket']
-                csrf_token = login_result['data']['CSRFPreventionToken']
-
-            # MK Apr 2026 — issue #352 follow-up. Single-vncproxy fast path.
-            # If the JS already obtained a vncproxy ticket+port via /console
-            # (which it always does — that's where it gets the VNC RFB password
-            # for noVNC), reuse THAT ticket here instead of issuing a fresh
-            # vncproxy call. PVE 9.1.x generates a random VNC password per
-            # vncproxy call. Two calls = two different passwords; noVNC sends
-            # DES(password_A) but PVE's vncterm is initialised with password_B,
-            # so RFB auth fails (the customer-visible recv=60B + ttfb≈1s pattern).
-            # Older PVE was tolerant because passwords were derived from the
-            # ticket prefix. Newer PVE is strict.
-            pve_port_q = query_params.get('pve_port', [None])[0]
-            pve_ticket_q = query_params.get('pve_ticket', [None])[0]
-            # sec-review: validate the passthrough; null it on garbage so both this
-            # block AND the auth-header reuse below fall back cleanly to a fresh vncproxy.
-            _ppt_ok, _ppt_port = _safe_vnc_passthrough(pve_port_q, pve_ticket_q)
-            if not _ppt_ok:
-                pve_port_q = pve_ticket_q = None
-            if pve_port_q and pve_ticket_q:
-                # Single-vncproxy mode: trust the caller-supplied port+ticket.
-                vnc_ticket = pve_ticket_q
-                vnc_port = _ppt_port
-                logging.info(f"[VNC] reusing JS-issued vncproxy ticket port={vnc_port} (single-call mode)")
-            elif _token_auth:
-                vnc_ticket, vnc_port = await _aiowrap.to_thread(
-                    _vncproxy_via_manager, manager, node, vm_type, vmid)
-            else:
-                # Backwards-compat fallback: issue our own vncproxy. This still
-                # works on older PVE where two vncproxy calls produce matching
-                # passwords (or where noVNC isn't used in the browser).
-                if vm_type == 'qemu':
-                    vnc_url = f"https://{host}:{port}/api2/json/nodes/{node}/qemu/{vmid}/vncproxy"
-                else:
-                    vnc_url = f"https://{host}:{port}/api2/json/nodes/{node}/lxc/{vmid}/vncproxy"
-                vnc_data = urlencode({'websocket': '1'}).encode('utf-8')
-                vnc_req = urllib.request.Request(vnc_url, data=vnc_data, method='POST')
-                vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
-                vnc_req.add_header('CSRFPreventionToken', csrf_token)
-                vnc_body = await _aiowrap.to_thread(_do_urlopen, vnc_req)
-                vnc_result = json.loads(vnc_body.decode('utf-8'))
-                vnc_ticket = vnc_result['data']['ticket']
-                vnc_port = vnc_result['data']['port']
-                logging.warning(f"[VNC] no pve_port/pve_ticket in URL - issued fresh vncproxy (port={vnc_port}). Update the frontend to pass JS-issued ticket through to avoid PVE 9.1.x password-mismatch (issue #352).")
-
-            pve_ws_path = _pve_console_ws_path(node, vm_type, vmid, vnc_port, vnc_ticket)
-
-            # MK Apr 2026 — VNC SSH-Tunnel-Mode (D2 / second leg).
-            # If the cluster is flagged with vnc_tunnel=True, we open a persistent
-            # SSH connection to the PVE node and forward localhost:RAND→pve:8006
-            # through it. The WSS connection then goes to localhost:RAND instead
-            # of pve:8006, so the WSS bytes ride inside SSH which TLS-inspection
-            # engines can't decrypt (no trust-anchor for the SSH host key).
-            # Multi-user: each session gets its own ephemeral local port.
-            tunnel_endpoint = None
-            tunnel_target_host = host
-            # MK Sep 2026 (#956) - the cluster's API port, not a literal 8006. A
-            # cluster reachable on a forwarded port worked everywhere except here.
-            tunnel_target_port = port
-            try:
-                _use_tunnel = _vnc_tunnel_wanted(manager)
-            except Exception:
-                _use_tunnel = False
-
-            if _use_tunnel:
-                try:
-                    from pegaprox.utils import vnc_tunnel as _vt
-                    _ssh_user = node_login(manager.config)
-                    _ssh_port = getattr(manager.config, 'ssh_port', 22) or 22
-                    _ssh_key = getattr(manager.config, 'ssh_key', '') or ''
-                    _ssh_pass = ssh_password_to(manager, host)
-                    # MK Apr 2026 — _vt.acquire() is sync. On the *first* call for a
-                    # cluster it builds the SSH transport (~1-2s on a fast LAN, more
-                    # over WAN). If we ran it directly on the event loop, that 1-2s
-                    # blocks websockets.serve from completing opening handshakes for
-                    # other concurrent connections — which is exactly the "5/5 timed
-                    # out during opening handshake" we saw in the multi-user test.
-                    # Offload to a worker so the event loop stays free.
-                    import asyncio as _aio_acq
-                    tunnel_endpoint = await _aio_acq.to_thread(
-                        _vt.acquire,
-                        cluster_id=cluster_id,
-                        pve_host=host,
-                        ssh_user=_ssh_user,
-                        ssh_port=_ssh_port,
-                        ssh_key_content=_ssh_key,
-                        ssh_password=_ssh_pass,
-                        target_host='127.0.0.1',
-                        target_port=port,
-                    )
-                    # Reroute the WSS through the local listener
-                    tunnel_target_host = '127.0.0.1'
-                    tunnel_target_port = tunnel_endpoint.local_port
-                    logging.info(
-                        f"[VNC] SSH tunnel mode active for cluster={cluster_id}: "
-                        f"WSS routed via 127.0.0.1:{tunnel_target_port} → SSH → {host}:{port}"
-                    )
-                except Exception as _tun_err:
-                    logging.warning(
-                        f"[VNC] SSH tunnel setup failed ({_tun_err}) — falling back "
-                        f"to direct WSS to {host}:{port}. Customer may still see "
-                        "TLS-inspection issues until SSH is fixed."
-                    )
-                    tunnel_endpoint = None
-                    tunnel_target_host = host
-                    tunnel_target_port = port
-
-            pve_ws_url = f"wss://{tunnel_target_host}:{tunnel_target_port}{pve_ws_path}"
-
-            # MK Apr 2026 (#352 follow-up) — auth-context for the PVE WS upgrade.
-            # When we're REUSING the JS-issued vncproxy ticket, the ticket was
-            # bound to the manager's existing auth context (API token or stored
-            # access cookie). Using a fresh login's cookie produces "permission
-            # denied - invalid PVEVNC ticket" on PVE 9.1.x. Reuse the manager's
-            # stored auth instead. Backwards-compat path keeps the fresh login.
-            ws_auth_header = _pve_console_ws_auth(
-                manager, pve_ticket,
-                reuse_manager_auth=bool(pve_port_q and pve_ticket_q) or _token_auth)
-
-            # MK Apr 2026 — ws_client.create_connection is synchronous; offload to
-            # a worker thread so concurrent VNC handlers don't serialize on the
-            # TLS+WS-Upgrade handshake (~1-2s each) on the event loop.
-            import asyncio as _asyncio_for_connect
-            import time as _t_connect
-            _connect_started = _t_connect.monotonic()
-            pve_ws = await _asyncio_for_connect.to_thread(
-                ws_client.create_connection,
-                pve_ws_url,
-                sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
-                header=ws_auth_header,
-                redirect_limit=0,
-                timeout=VNC_PVE_CONNECT_TIMEOUT,
-            )
-            _refuse_ws_redirect(pve_ws)
-            _connect_ms = int((_t_connect.monotonic() - _connect_started) * 1000)
-
-            # MK Apr 2026: TCP_NODELAY + aggressive keepalive (replaces older NS comment).
-            # Nagle off = no 40ms input lag for keystrokes/mouse; keepalive on = stateful
-            # firewalls don't drop the session during natural idle periods.
-            _apply_vnc_socket_options(pve_ws.sock)
-
-            logging.info(f"[VNC] connected to {host} for {vm_type}/{vmid} in {_connect_ms}ms")
-            if _connect_ms > 3000:
-                logging.warning(f"[VNC] slow PVE connect: {_connect_ms}ms — possible TLS-inspection / EDR latency on the path to {host}")
-
-            import asyncio
-
-            bytes_sent = 0
-            bytes_received = 0
-            running = True
-            stop_evt = asyncio.Event()
-            # MK Apr 2026 — time-to-first-byte from PVE side; helps distinguish
-            # "couldn't connect" from "connected but stuck mid-handshake" in support
-            _ttfb_ms = None
-            _session_started = _t_connect.monotonic()
-
-            # NS Aug 2026 (#713) — the ONE pve_ws SSL object is read by proxmox_to_client and
-            # written by client_to_proxmox + pve_keepalive. websocket-client serialises
-            # writer-vs-writer (self.lock) but read-vs-write share no common lock (recv uses a
-            # separate self.readlock), so a concurrent SSL_read + SSL_write hit the same OpenSSL
-            # object at once and can splice an outbound TLS record — pveproxy then answers
-            # "tlsv1 alert decode error" and tears the console (intermittent, native noVNC fine,
-            # reconnect works). Serialise EVERY SSL op on pve_ws through one lock so the read and
-            # the writes never touch the object at the same time (correct for any TLS version;
-            # no transport/handshake change).
-            import threading as _threading
-            _pve_io_lock = _threading.Lock()
-
-            # NS Apr 2026 (#312/#92): recv must NOT busy-wait on the event loop (the old
-            # settimeout(0.001)+asyncio.sleep starved the loop, dropped pongs → disconnect). We
-            # keep recv in a worker thread (asyncio.to_thread), but with a bounded SLICE instead of
-            # blocking forever so it releases _pve_io_lock for the writers between reads.
-            # websocket-client's frame_buffer is resumable across a timed-out recv (partial
-            # header/length/payload persist in recv_buffer), so a slice expiring mid-frame loses NO
-            # bytes; the worker thread keeps the event loop free. 50ms slice = ≤50ms worst-case
-            # keystroke latency on a fully idle screen, negligible while the framebuffer streams.
-            # MK Sep 2026 — that idle-screen worst case IS the reported mouse jitter; the slice
-            # now comes from one constant (VNC_PVE_RECV_SLICE, 10ms) shared by all four legs.
-            _PVE_RECV_SLICE = VNC_PVE_RECV_SLICE
-            pve_ws.settimeout(_PVE_RECV_SLICE)
-
-            # The only three call sites that touch the pve_ws SSL object — all funnelled through
-            # the one lock. Blocking calls run in a worker thread via asyncio.to_thread.
-            # MK Oct 2026 (#713) - the writes with a deadline of their own, not the read slice
-            def _pve_recv():
-                with _pve_io_lock:
-                    return pve_ws.recv()
-
-            def _pve_send(msg):
-                with _pve_io_lock:
-                    write_with_deadline(pve_ws, pve_ws.send, msg)
-
-            def _pve_send_binary(msg):
-                with _pve_io_lock:
-                    write_with_deadline(pve_ws, pve_ws.send_binary, msg)
-
-            def _pve_ping():
-                with _pve_io_lock:
-                    write_with_deadline(pve_ws, pve_ws.ping)
-
-            # why the session ended, first one wins - an error goes out at WARNING below
-            ended = []
-
-            async def proxmox_to_client():
-                """Forward data from Proxmox to browser (blocking recv handled in thread).
-
-                In Stable VNC Mode (crypto_session is not None): plain RFB bytes
-                from PVE are wrapped in an AES-256-GCM frame before they hit the
-                browser-side WebSocket. The middlebox can re-encrypt our outer
-                TLS but sees opaque ciphertext inside, so it can't pattern-match
-                or modify the binary RFB.
-                """
-                nonlocal bytes_received, running, _ttfb_ms
-                while running:
-                    try:
-                        data = await asyncio.to_thread(_pve_recv)
-                        if not data:
-                            ended.append(('PVE closed', False))
-                            running = False
-                            break
-                        if _ttfb_ms is None:
-                            _ttfb_ms = int((_t_connect.monotonic() - _session_started) * 1000)
-                        bytes_received += len(data)
-                        if isinstance(data, str):
-                            data = data.encode('latin-1')
-                        if crypto_session is not None:
-                            data = crypto_session.encrypt(data)
-                        await websocket.send(data)
-                    except ws_client.WebSocketTimeoutException:
-                        # idle slice — no frame this tick; loop so the writers get the lock (#713)
-                        continue
-                    except ws_client.WebSocketConnectionClosedException:
-                        ended.append(('PVE closed', False))
-                        running = False
-                        break
-                    except Exception as e:
-                        if running:
-                            ended.append((f'PVE->Client: {e}', True))
-                        running = False
-                        break
-                stop_evt.set()
-
-            async def client_to_proxmox():
-                """Forward data from browser to Proxmox (blocking send handled in thread).
-
-                In Stable VNC Mode: each browser-side WebSocket frame is an
-                AES-256-GCM ciphertext blob. We unwrap it (which also verifies
-                the auth tag — if a middlebox modified bytes mid-flight, decrypt
-                raises and we close the session with code 4099 and a clear
-                'integrity check failed' reason instead of letting RFB later
-                fail with a confusing 'Authentication failed').
-                """
-                nonlocal bytes_sent, running
-                try:
-                    async for message in websocket:
-                        if not running:
-                            break
-                        bytes_sent += len(message)
-                        if isinstance(message, str):
-                            message = message.encode('latin-1')
-                        if crypto_session is not None:
-                            try:
-                                message = crypto_session.decrypt(message)
-                            except Exception as _crypto_err:
-                                logging.warning(
-                                    f"[VNC] integrity check FAILED on browser→PVE frame "
-                                    f"(host={host} vm={vm_type}/{vmid}): {_crypto_err}. "
-                                    "TLS-inspection / EDR is modifying packets mid-flight."
-                                )
-                                ended.append(('integrity check failed', True))
-                                running = False
-                                try:
-                                    await websocket.close(4099, f"integrity_check_failed: {_crypto_err}")
-                                except Exception:
-                                    pass
-                                break
-                        try:
-                            await asyncio.to_thread(_pve_send, message)
-                        except Exception as e:
-                            ended.append((f'Client->PVE: {e}', True))
-                            break
-                    else:
-                        ended.append(('browser closed', False))
-                except Exception as e:
-                    if running:
-                        ended.append(('browser closed', False) if 'close' in str(e).lower()
-                                     else (f'browser: {e}', True))
-                finally:
-                    running = False
-                    stop_evt.set()
-
-            async def pve_keepalive():
-                """Keepalive for pvedaemon idle timeout (#312).
-
-                Two-layer: WS ping every 15s AND an RFB-level FramebufferUpdateRequest
-                every 20s. pveproxy sits between us and qemu and can timeout based on
-                RFB traffic, not WS frames — the browser's WS ping alone doesn't always
-                count as activity on the qemu side. By injecting an RFB incremental
-                update request we produce real RFB traffic that flows end-to-end.
-
-                RFB FramebufferUpdateRequest wire format (8 bytes, Big-Endian):
-                  U8  message-type = 3
-                  U8  incremental  = 1   (only changed regions -> cheap)
-                  U16 x            = 0
-                  U16 y            = 0
-                  U16 width        = 0xFFFF  (server clamps to FB size)
-                  U16 height       = 0xFFFF
-
-                15s grace before first RFB frame so the RFB handshake completes first —
-                injecting our bytes into the handshake would confuse qemu.
-                """
-                import time as _time
-                RFB_FB_UPDATE_REQUEST = b'\x03\x01\x00\x00\x00\x00\xff\xff\xff\xff'
-                session_start = _time.monotonic()
-                ws_ping_interval = 15
-                rfb_interval = 20
-                next_rfb_at = session_start + 15 + rfb_interval  # 15s grace + 20s first interval
-                while running:
-                    try:
-                        await asyncio.wait_for(stop_evt.wait(), timeout=ws_ping_interval)
-                        break  # stop_evt was set — session ending
-                    except asyncio.TimeoutError:
-                        pass
-                    if not running:
-                        break
-                    # WS-layer ping (cheap, keeps any websocket-aware intermediary happy)
-                    try:
-                        await asyncio.to_thread(_pve_ping)
-                    except Exception as e:
-                        # this task ending ends the session too - it used to say nothing
-                        ended.append((f'keepalive ping to PVE: {e}', True))
-                        break
-                    # RFB-layer keepalive (keeps pveproxy/qemu from declaring the session idle)
-                    now = _time.monotonic()
-                    if now >= next_rfb_at:
-                        try:
-                            await asyncio.to_thread(_pve_send_binary, RFB_FB_UPDATE_REQUEST)
-                            next_rfb_at = now + rfb_interval
-                        except Exception as e:
-                            ended.append((f'RFB keepalive to PVE: {e}', True))
-                            break
-
-            task1 = asyncio.create_task(proxmox_to_client())
-            task2 = asyncio.create_task(client_to_proxmox())
-            task3 = asyncio.create_task(pve_keepalive())
-
-            done, pending = await asyncio.wait(
-                [task1, task2, task3],
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            
-            running = False
-            
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-            
-            # MK Apr 2026 — richer session-end diagnostic. Helps support correlate
-            # short / weird sessions with network / inspection issues. Format is
-            # easy to grep + machine-parseable.
-            _duration_ms = int((_t_connect.monotonic() - _session_started) * 1000)
-            _ttfb_str = f"{_ttfb_ms}ms" if _ttfb_ms is not None else "never"
-            _short_session = _duration_ms < 5000 and bytes_received < 4096
-            # #713 - the reason was a DEBUG line of its own, so a drop in the field said nothing
-            _reason, _failed = ended[0] if ended else ('unknown', False)
-            _level = logging.WARNING if (_short_session or _failed) else logging.INFO
-            logging.log(
-                _level,
-                f"[VNC] session ended host={host} vm={vm_type}/{vmid} reason={_reason} "
-                f"connect={_connect_ms}ms ttfb={_ttfb_str} duration={_duration_ms}ms "
-                f"sent={bytes_sent}B recv={bytes_received}B "
-                f"{'SHORT_OR_EMPTY — middlebox/EDR may be interfering' if _short_session else ''}"
-            )
-            
-        except Exception as e:
-            logging.exception(f"VNC WS handler error: {type(e).__name__}: {e}")
-        finally:
-            # MK Apr 2026 — pve_ws.close() is a SYNC call from the websocket-client
-            # library. It runs the TLS close handshake which on a tunneled SSH leg
-            # can block when the far end is gone. If we run it on the event loop,
-            # ALL subsequent VNC handshakes on this server queue behind it (we hit
-            # this in the multi-user concurrency test: 1st session OK, then 5 in
-            # parallel all timeout). Offload to a worker with a short upper bound.
-            if pve_ws:
-                try:
-                    import asyncio as _aio_close
-                    await _aio_close.wait_for(
-                        _aio_close.to_thread(pve_ws.close), timeout=2.0
-                    )
-                except Exception:
-                    pass
-            try:
-                if 'tunnel_endpoint' in locals() and tunnel_endpoint is not None:
-                    tunnel_endpoint.stop()
-            except Exception as _tend:
-                logging.debug(f"[VNC] tunnel cleanup error: {_tend}")
-            print(f"{'='*60}\n")
-
-    async def main():
-        nonlocal server_ready
-        ssl_context = None
-        if ssl_cert and ssl_key:
-            # follows the pair on disk like the HTTPS port, a renewal needs no restart
-            from pegaprox.utils.served_pair import ServedPair
-            ssl_context = ServedPair(ssl_cert, ssl_key).context
-            proto = "wss"
-        else:
-            proto = "ws"
-        
-        # LW: suppress websocket error logs from bots/scanners
-        import logging as ws_logging
-        ws_logging.getLogger('websockets').setLevel(ws_logging.CRITICAL)
-        
-        # NS: added ping keepalive like ssh server has, was causing random disconnects (#92)
-        # MK Aug 2026: loosened 20/10 -> 30/60. This ws server runs as a monkey-patched
-        # greenlet on the shared gevent hub, so during a brief hub stall its asyncio loop
-        # can't answer a pong in time — and that same stall is what makes the client's SSE
-        # watchdog reconnect. A 10s ping_timeout was killing healthy consoles exactly when
-        # SSE renewed ("VNC drops on SSE refresh"). 60s rides out the jitter; TCP + the
-        # client's own reconnect still catch a genuinely dead peer.
-        # LW Feb 2026: host='' means all interfaces (asyncio creates IPv4+IPv6 listeners)
-        # MK Apr 2026 (#352): lenient Connection-header recovery for PVE 9.1.8-9 hosts
-        # and middlebox-stripped Upgrade tokens. See pegaprox/utils/ws_lenient.py.
-        from pegaprox.utils.ws_lenient import lenient_process_request as _lpr_vnc
-        ws_host = host if host else None
-        display_host = host or '0.0.0.0'
-        # #740 (Frisch12) — from Python 3.13 on, websockets.serve() never binds under gevent's
-        # monkey-patch (the greenlet parks in the selector, no listener appears). Hand it a socket
-        # we bind ourselves from the un-patched socket. py<=3.12 binds natively, so leave it be.
-        def _vnc_serve(bind_host):
-            if sys.version_info >= (3, 13):
-                return websockets.serve(vnc_handler, sock=gevent_listen_socket(bind_host, port), ssl=ssl_context, ping_interval=30, ping_timeout=60, process_request=_lpr_vnc)
-            return websockets.serve(vnc_handler, bind_host, port, ssl=ssl_context, ping_interval=30, ping_timeout=60, process_request=_lpr_vnc)
-        try:
-            async with _vnc_serve(ws_host):
-                print(f"VNC WebSocket Server ready on {proto}://{display_host}:{port}", flush=True)
-                server_ready.set()
-                await asyncio.Future()  # Run forever
-        except OSError as bind_err:
-            # Issue #71: IPv6 bind failed, fall back to 0.0.0.0
-            if ':' in str(host):
-                print(f"VNC WebSocket: IPv6 bind failed ({bind_err}), falling back to 0.0.0.0", flush=True)
-                async with _vnc_serve('0.0.0.0'):
-                    print(f"VNC WebSocket Server ready on {proto}://0.0.0.0:{port}", flush=True)
-                    server_ready.set()
-                    await asyncio.Future()
-            else:
-                raise
-    
-    # LW Feb 2026 - run in thread, with proper fallback for gevent environments
-    # NS May 2026 (#388 follow-up) — capture exception into a shared box so the
-    # caller waiting on server_ready can surface it loudly in the journal
-    # instead of just "may not be ready yet". Silent thread death is the
-    # hardest pattern to debug at the customer.
-    thread_err = {}  # exception sink — populated if the thread crashes pre-bind
-
-    def run_server():
-        try:
-            # Try asyncio.run() first (clean Python, no gevent)
-            asyncio.run(main())
-        except RuntimeError as e:
-            if "cannot be called from a running event loop" in str(e):
-                # NS: gevent monkey-patches asyncio, need explicit event loop
-                print("VNC WebSocket: gevent detected, using new event loop", flush=True)
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(main())
-                finally:
-                    loop.close()
-            else:
-                logging.exception(f"VNC WebSocket Server RuntimeError: {e}")
-                thread_err['err'] = ('RuntimeError', str(e))
-        except (KeyboardInterrupt, SystemExit):
-            pass
-        except OSError as e:
-            # bind failures land here — port in use, permission denied, AppArmor block, etc.
-            logging.exception(f"VNC WebSocket Server bind failed (port {port}): {e}")
-            thread_err['err'] = ('OSError', f"bind error: {e}")
-        except TypeError as e:
-            # signature mismatches with websockets library (e.g. older websockets)
-            logging.exception(f"VNC WebSocket Server TypeError (likely websockets lib version mismatch): {e}")
-            thread_err['err'] = ('TypeError', str(e))
-        except Exception as e:
-            logging.exception(f"VNC WebSocket Server crashed: {type(e).__name__}: {e}")
-            thread_err['err'] = (type(e).__name__, str(e))
-
-    print(f"VNC WebSocket: starting thread, target port {port}", flush=True)
-    ws_thread = threading.Thread(target=run_server, daemon=True, name=f'vnc-ws:{port}')
-    ws_thread.start()
-
-    # NS May 2026 (#388): if the thread is dead at this point and never set
-    # server_ready, surface WHY in the log so support can act. Silent failure
-    # was the customer-visible symptom that hid the underlying cause.
-    if server_ready.wait(timeout=5):
-        print(f"VNC WebSocket Server started successfully on port {port}", flush=True)
-    else:
-        # Wait briefly for the thread to fully die so thread_err has a chance to populate
-        ws_thread.join(timeout=1)
-        if thread_err.get('err'):
-            etype, emsg = thread_err['err']
-            logging.error(
-                f"[VNC] startup failed — thread died with {etype}: {emsg}. "
-                f"Port {port} will NOT be bound. Console connections to this server will fail. "
-                f"Most common causes: (a) port already in use by another process, "
-                f"(b) websockets library version mismatch (need ≥11.0; we expect "
-                f"the post-13.x process_request signature), "
-                f"(c) AppArmor/SELinux blocking the bind, "
-                f"(d) SSL cert path missing or unreadable. "
-                f"Run: ss -tlnp | grep ':{port}'  +  pip show websockets  +  journalctl -u pegaprox -p err"
-            )
-        elif not ws_thread.is_alive():
-            logging.error(
-                f"[VNC] startup timed out — thread died silently within 5s without setting "
-                f"server_ready and without raising an exception we could capture. "
-                f"Port {port} will NOT be bound. Probable causes: SystemExit / os._exit "
-                f"in a downstream import or a fatal C-level signal. "
-                f"Run: journalctl -u pegaprox --since '1 minute ago'"
-            )
-        else:
-            logging.warning(
-                f"[VNC] startup slow — server_ready not set after 5s but thread is still alive. "
-                f"Port {port} may bind shortly. If it never does, the asyncio event loop "
-                f"is likely blocked at startup."
-            )
+        pass
 
 
-# Keep flask-sock version as backup (renamed)
+# MK Nov 2026 - the one VNC console. It existed twice: here for reverse proxies, and as an
+# asyncio server on port+1 that every direct install used, with Stable Mode, the SSH tunnel
+# and the #312 keepalive only over there. The browser always comes here now, on the main
+# port or on a legacy console port that serves this same app (app.py).
 @sock.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/vncwebsocket')
 def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
-    """WebSocket proxy for VNC connection via Flask-Sock (same port as main app)"""
-    import gevent
-    from gevent import spawn, sleep as gsleep
-    
-    print(f"\n{'='*60}")
-    print(f"VNC WEBSOCKET: {vm_type}/{vmid} on {node}")
-    print(f"{'='*60}")
-    
-    # #625 - see handle_vnc_websocket
+    """WebSocket proxy for the VNC console of a guest"""
+    # #625 - keyboard and mouse on a guest: the active's to hand out, or a standby's that
+    # serves users. Before a token is spent or a stable-mode key is claimed
     if not ha.consoles_here():
-        try:
-            ws.send(STANDBY_CONSOLE_ERROR)
-            ws.close(reason=1008, message=STANDBY_CONSOLE_ERROR)
-        except Exception:
-            pass
-        return
+        return _vnc_refusal(ws, STANDBY_CONSOLE_ERROR)
 
     # NS: Mar 2026 - prefer WS token, session as legacy fallback
     from pegaprox.utils.realtime import validate_ws_token
     ws_token = request.args.get('token')
     session_id = request.args.get('session')
-
     if ws_token:
         auth = validate_ws_token(ws_token)
         if not auth:
-            try: ws.send('Invalid or expired token')
-            except: pass
-            return
-        # #537/RBAC: coarse "global vm.console OR admin" pre-check dropped — _console_authz below is authoritative.
+            return _vnc_refusal(ws, 'Invalid or expired token')
     elif session_id:
         auth = validate_session(session_id)
         if not auth:
-            try: ws.send('Invalid session')
-            except: pass
-            return
+            return _vnc_refusal(ws, 'Invalid session')
     else:
-        try: ws.send('Authentication required')
-        except: pass
-        return
+        return _vnc_refusal(ws, 'Authentication required')
 
     # #1101, #1116 - see vnc_websocket_route
     user = resolve_authz_user(auth)
     if not user:
-        try: ws.send('Authentication required')
-        except: pass
-        return
-    print(f"User {user['username']} authenticated for VNC")
+        return _vnc_refusal(ws, 'Authentication required')
 
-    # H-1/H-2: cluster + per-VM gate before this proxy self-mints a PVE ticket
+    # H-1/H-2: cluster + per-VM gate before this proxy self-mints a PVE ticket.
+    # #537: the coarse "global vm.console OR admin" pre-check is gone, this is the gate,
+    # and it knows portal users and custom roles
     _ok, _why = _console_authz(user, cluster_id, vmid, vm_type, by_session=not ws_token)
     if not _ok:
-        try: ws.send('Permission denied')
-        except: pass
-        return
+        logging.info(f"[VNC] console of {_sl(cluster_id)}/{vmid} refused for "
+                     f"'{_sl(user.get('username'))}': {_why}")
+        return _vnc_refusal(ws, 'Permission denied')
 
     # MK 2026-06-04 (PR #523 / Aikido SSRF triage): `node` flows raw into the
     # PVE vncproxy URL path below. The route's string converter blocks '/'
@@ -12855,230 +11885,395 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
     # (trusted) PVE host. Validate against the same node-name shape api/nodes.py
     # uses (_NODE_NAME_RE). vmid is already int-safe via the <int:vmid> route
     # converter, and vm_type only ever reaches the URL through the qemu/lxc
-    # if/else — node is the only raw segment. (Closed the Aikido PR in favour
+    # if/else - node is the only raw segment. (Closed the Aikido PR in favour
     # of this: its vm_type regex would have regressed the qemu/lxc normalisation.)
     if not re.match(r'^[a-zA-Z][a-zA-Z0-9.\-]{0,62}$', node or '') or vm_type not in ('qemu', 'lxc'):
-        try: ws.send('Invalid node or vm_type')
-        except: pass
-        return
+        return _vnc_refusal(ws, 'Invalid node or vm_type')
 
-    # NS Oct 2026 (#988) - this socket holds a request slot for as long as the console is
-    # open: counted against the account until the request ends, and hung up with the
-    # session it was opened under (#1038)
-    hold_websocket(user['username'], ws, sid=auth.get('sid') if ws_token else session_id)
+    manager = cluster_managers.get(cluster_id)
+    if manager is None:
+        return _vnc_refusal(ws, 'Cluster not found')
 
-    if cluster_id not in cluster_managers:
-        print(f"ERROR: Cluster {cluster_id} not found")
-        return
-    
-    manager = cluster_managers[cluster_id]
-    host, port = manager.host, manager.api_port
-    
-    print(f"Target host: {host}")
-    
-    pve_ws = None
-    running = True
-    
+    # NS Oct 2026 (#988) - counted against the account until the request ends, and hung up
+    # with the session it was opened under (#1038). As a console it leaves the request
+    # pool, on budgets of its own
+    held = hold_websocket(user['username'], ws, sid=auth.get('sid') if ws_token else session_id,
+                          console=True)
+    if not held:
+        return _vnc_refusal(ws, *_console_full(held))
+
+    # MK Apr 2026 - Stable VNC Mode (D): if frontend asked for an encrypted
+    # tunnel via /console?stable=1, it gets back an enc_session id which it
+    # then passes here. We claim the matching AES-256-GCM key (one-shot,
+    # auto-expires after 60s if never claimed) and use it to wrap forwarded
+    # frames in both directions. None → plain mode (default, backwards-compat).
+    crypto_session = None
+    enc_sid = request.args.get('enc_session')
+    if enc_sid:
+        try:
+            from pegaprox.utils import vnc_crypto as _vc
+            _key = _vc.claim_session_key(enc_sid)
+            if _key:
+                crypto_session = _vc.VncCryptoSession(_key)
+                logging.info(f"[VNC] stable mode active for sid={enc_sid[:8]}...")
+            else:
+                logging.info(f"[VNC] enc_session={enc_sid[:8]}... not found / expired - plain mode")
+        except Exception as _e:
+            logging.warning(f"[VNC] crypto setup failed ({_e}) - plain mode")
+
+    _vnc_relay(ws, manager, cluster_id, node, vm_type, vmid, crypto_session)
+
+
+# MK Nov 2026 - the TLS context of the console logins and tickets towards PVE, per cluster
+# and verify flag. create_default_context() reads the whole CA store, about 25 ms of the
+# hub, and every VNC open and terminal ticket made one, with verification off as well. A
+# verifying one is made again once the system's CA bundle changed.
+_console_ssl = {}
+
+
+def _ca_store_stamp():
+    paths = ssl.get_default_verify_paths()
+    stamp = []
+    for path in (paths.cafile, paths.capath):
+        try:
+            stamp.append(os.stat(path).st_mtime_ns if path else None)
+        except OSError:
+            stamp.append(None)
+    return tuple(stamp)
+
+
+def _console_ssl_context(cluster_id, verify):
+    stamp = _ca_store_stamp() if verify else None
+    known = _console_ssl.get((cluster_id, verify))
+    if known is not None and known[0] == stamp:
+        return known[1]
+    ctx = ssl.create_default_context()
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    _console_ssl[(cluster_id, verify)] = (stamp, ctx)
+    return ctx
+
+
+def _pve_socket_readable(s, timeout):
+    """True once the socket under a PVE websocket has something to read, False after
+    timeout. OpenSSL may already hold a decrypted record the socket no longer shows.
+    Not select(): it refuses a descriptor above 1023, a busy instance holds more than
+    that, and every console opened past it ended in its first second. gevent's watcher
+    has no such ceiling."""
+    from gevent.socket import wait_read
     try:
-        import urllib.parse
-        import urllib.request
-        import json
-        import websocket
-        
-        # Create SSL context
-        ssl_context = ssl.create_default_context()
-        # NS Jul 2026 (CodeAnt) — gate TLS verify on the per-cluster ssl_verify flag
+        if s.pending():
+            return True
+    except AttributeError:
+        pass
+    try:
+        wait_read(s.fileno(), timeout=timeout)
+    except socket.timeout:
+        return False
+    return True
+
+
+def _vnc_relay(ws, manager, cluster_id, node, vm_type, vmid, crypto_session=None):
+    """Get the vncproxy, dial PVE (through the cluster's SSH tunnel when it has one) and
+    move RFB both ways until either side ends. crypto_session: Stable Mode, or None."""
+    import gevent
+    import urllib.request
+    import websocket
+
+    host, port = manager.host, manager.api_port
+    pve_ws = None
+    tunnel_endpoint = None
+    try:
+        # NS Jul 2026 (CodeAnt) - gate TLS verify on the per-cluster ssl_verify flag
         # (default off: PVE ships self-signed; honoured when the admin enables it).
         _verify_tls = bool(getattr(manager, '_ssl_verify', False))
-        if not _verify_tls:
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
+        ssl_context = _console_ssl_context(cluster_id, _verify_tls)
         from pegaprox.core.manager import pve_opener
         opener = pve_opener(ssl_context)
-        
-        # Step 1: Login - not on a token cluster, there is no password (#955)
+
+        # Login to Proxmox for an auth ticket. Not on a token cluster: config.user and
+        # pass_ are the token id and secret there, PVE answers 401 (#955).
         _token_auth = _console_uses_token(manager)
         pve_ticket = csrf_token = None
         if not _token_auth:
-            print(f"Step 1: Login...")
-            login_data = urlencode({
-                'username': manager.config.user,
-                'password': manager.config.pass_
-            }).encode('utf-8')
-        
             login_req = urllib.request.Request(
                 f"https://{manager.auth_host}:{port}/api2/json/access/ticket",
-                data=login_data, method='POST'
-            )
-        
+                data=urlencode({'username': manager.config.user,
+                                'password': manager.config.pass_}).encode('utf-8'),
+                method='POST')
             with opener.open(login_req, timeout=10) as response:
                 login_result = json.loads(response.read().decode('utf-8'))
-
             pve_ticket = login_result['data']['ticket']
             csrf_token = login_result['data']['CSRFPreventionToken']
-            print(f"Got PVE ticket")
 
-        # MK Apr 2026 (#352 follow-up) — single-vncproxy mode. If the JS
-        # already got a vncproxy ticket+port via /console, reuse it so the VNC
-        # password noVNC uses matches the password PVE's vncterm expects. PVE
-        # 9.1.x generates fresh random VNC password per vncproxy call.
+        # MK Apr 2026 (#352 follow-up) - single-vncproxy mode. If the JS already got a
+        # vncproxy ticket+port via /console, reuse it so the VNC password noVNC uses matches
+        # the one PVE's vncterm expects: PVE 9.1.x makes a fresh random password per
+        # vncproxy call, two calls = two passwords and RFB auth fails (the recv=60B +
+        # ttfb≈1s pattern). Validated first, garbage falls back to a fresh vncproxy.
+        # MK Sep 2026 (#945, #956) - the vncproxy port goes in its OWN variable, `port`
+        # stays the API port of the URL authority. Reusing the browser's ticket also means
+        # the upgrade presents the manager's auth, not a fresh login cookie (#945.2 / #955).
         pve_port_q = request.args.get('pve_port')
         pve_ticket_q = request.args.get('pve_ticket')
         _ppt_ok, _ppt_port = _safe_vnc_passthrough(pve_port_q, pve_ticket_q)
-        # MK Sep 2026 (#945, #956) - the vncproxy port goes in its OWN variable. It
-        # used to overwrite `port`, which still had to be the API port for the URL
-        # authority two steps down, so the upgrade was dialled against :5900 and got
-        # ECONNREFUSED. Reusing the browser's ticket also means the upgrade has to
-        # present the manager's auth, not a fresh login cookie (#945.2 / #955).
         _reuse_manager_auth = False
         if pve_port_q and pve_ticket_q and _ppt_ok:
-            vnc_ticket = pve_ticket_q
-            vnc_port = _ppt_port
+            vnc_ticket, vnc_port = pve_ticket_q, _ppt_port
             _reuse_manager_auth = True
-            print(f"Reusing JS-issued vncproxy ticket port={vnc_port}")
         elif _token_auth:
             vnc_ticket, vnc_port = _vncproxy_via_manager(manager, node, vm_type, vmid)
             _reuse_manager_auth = True
         else:
-            print(f"Step 2: Get VNC ticket...")
-            if vm_type == 'qemu':
-                vnc_url = f"https://{host}:{port}/api2/json/nodes/{node}/qemu/{vmid}/vncproxy"
-            else:
-                vnc_url = f"https://{host}:{port}/api2/json/nodes/{node}/lxc/{vmid}/vncproxy"
-            vnc_data = urlencode({'websocket': '1'}).encode('utf-8')
-            vnc_req = urllib.request.Request(vnc_url, data=vnc_data, method='POST')
+            kind = 'qemu' if vm_type == 'qemu' else 'lxc'
+            vnc_req = urllib.request.Request(
+                f"https://{host}:{port}/api2/json/nodes/{node}/{kind}/{vmid}/vncproxy",
+                data=urlencode({'websocket': '1'}).encode('utf-8'), method='POST')
             vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
             vnc_req.add_header('CSRFPreventionToken', csrf_token)
             with opener.open(vnc_req, timeout=10) as response:
                 vnc_result = json.loads(response.read().decode('utf-8'))
             vnc_ticket = vnc_result['data']['ticket']
             vnc_port = vnc_result['data']['port']
-            print(f"Got VNC ticket, port={vnc_port} (no JS pass-through - PVE 9.1.x users may hit issue #352)")
-        
-        # Step 3: Connect to Proxmox WebSocket
-        print(f"Step 3: Connect to Proxmox...")
-        pve_ws_path = _pve_console_ws_path(node, vm_type, vmid, vnc_port, vnc_ticket)
-        pve_ws_url = f"wss://{host}:{port}{pve_ws_path}"
+            logging.warning(f"[VNC] no pve_port/pve_ticket in URL - issued fresh vncproxy "
+                            f"(port={vnc_port}); PVE 9.1.x may refuse the RFB password (#352)")
 
+        pve_ws_path = _pve_console_ws_path(node, vm_type, vmid, vnc_port, vnc_ticket)
+
+        # MK Apr 2026 - VNC SSH-Tunnel-Mode (D2 / second leg). A cluster with vnc_tunnel
+        # gets a persistent SSH connection to the PVE node that forwards
+        # localhost:RAND → pve:<api port>, so the WSS bytes ride inside SSH, which a
+        # TLS-inspection engine cannot open. One pooled transport, a local port per session.
+        # MK Sep 2026 (#956) - the cluster's API port, not a literal 8006.
+        target_host, target_port = host, port
+        try:
+            _use_tunnel = _vnc_tunnel_wanted(manager)
+        except Exception:
+            _use_tunnel = False
+        if _use_tunnel:
+            try:
+                from pegaprox.utils import vnc_tunnel as _vt
+                tunnel_endpoint = _vt.acquire(
+                    cluster_id=cluster_id,
+                    pve_host=host,
+                    ssh_user=node_login(manager.config),
+                    ssh_port=node_ssh_port(manager.config),
+                    ssh_key_content=getattr(manager.config, 'ssh_key', '') or '',
+                    ssh_password=ssh_password_to(manager, host),
+                    target_host='127.0.0.1',
+                    target_port=port,
+                )
+                target_host, target_port = '127.0.0.1', tunnel_endpoint.local_port
+                logging.info(f"[VNC] SSH tunnel mode active for cluster={cluster_id}: WSS routed "
+                             f"via 127.0.0.1:{target_port} → SSH → {host}:{port}")
+            except Exception as _tun_err:
+                logging.warning(f"[VNC] SSH tunnel setup failed ({_tun_err}) - direct WSS to "
+                                f"{host}:{port}; TLS inspection may still interfere")
+                tunnel_endpoint = None
+                target_host, target_port = host, port
+
+        _connect_started = time.monotonic()
         pve_ws = websocket.create_connection(
-            pve_ws_url,
+            f"wss://{target_host}:{target_port}{pve_ws_path}",
             sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
-            header=_pve_console_ws_auth(manager, pve_ticket,
-                                        reuse_manager_auth=_reuse_manager_auth),
+            header=_pve_console_ws_auth(manager, pve_ticket, reuse_manager_auth=_reuse_manager_auth),
             redirect_limit=0,
-            timeout=VNC_PVE_CONNECT_TIMEOUT
+            timeout=VNC_PVE_CONNECT_TIMEOUT,
         )
         _refuse_ws_redirect(pve_ws)
-        # MK Apr 2026 — TCP_NODELAY + keepalive (consolidated helper)
+        _connect_ms = int((time.monotonic() - _connect_started) * 1000)
+        # MK Apr 2026 - TCP_NODELAY + keepalive: no 40 ms input lag, and stateful
+        # firewalls keep the session through natural idle periods
         _apply_vnc_socket_options(pve_ws.sock)
-
-        print(f"✓ Connected!")
-        # #713 — pve_ws is a single SSL object; a concurrent SSL_read (the reader
-        # greenlet below) and SSL_write (this main loop / a keepalive) splice a TLS
-        # record and pveproxy tears the session with a tlsv1 decode-error. The
-        # standalone vnc_handler leg already funnels its pve_ws ops through one lock;
-        # the reverse-proxy / geventwebsocket console lands HERE on the main port and
-        # needed the same. Bounded read slice so the writer isn't starved on an empty recv —
-        # and short enough that an outbound pointer event doesn't inherit it (the 1.1.0 jitter).
-        pve_ws.settimeout(VNC_PVE_RECV_SLICE)
-        _pve_io_lock = threading.Lock()
-
-        bytes_sent = 0
-        bytes_received = 0
-        # #713 - why it ended, first one wins; printed at WARNING when it was an error
-        ended = []
-
-        # Greenlet to read from Proxmox and send to client
-        def proxmox_to_client():
-            nonlocal bytes_received, running
-            try:
-                while running:
-                    try:
-                        with _pve_io_lock:
-                            data = pve_ws.recv()
-                        if data:
-                            bytes_received += len(data)
-                            ws.send(data)
-                    except websocket.WebSocketTimeoutException:
-                        gsleep(0.01)
-                    except websocket.WebSocketConnectionClosedException:
-                        ended.append(('PVE closed', False))
-                        running = False
-                        break
-                    except Exception as e:
-                        if running:
-                            ended.append((f'PVE->Client: {e}', True))
-                        running = False
-                        break
-            except Exception as e:
-                ended.append((f'PVE->Client crashed: {e}', True))
-                running = False
-        
-        # Start the proxmox reader greenlet
-        pve_reader = spawn(proxmox_to_client)
-        
-        print(f"Step 4: Proxy running...")
-        
-        # Main loop: read from client, send to Proxmox
-        while running:
-            try:
-                data = ws.receive(timeout=0.1)
-                if data is None:
-                    # MK Sep 2026 (#945.4) - simple-websocket returns None for BOTH
-                    # "timed out with nothing to read" and "the peer is gone", and
-                    # this read times out ten times a second by design. Treating it
-                    # as a disconnect ended the session ~0.1s after it opened unless
-                    # the browser happened to send something first. Ask the socket
-                    # whether it is actually still connected.
-                    if getattr(ws, 'connected', False):
-                        gsleep(0.01)
-                        continue
-                    ended.append(('browser closed', False))
-                    running = False
-                    break
-                if data:
-                    bytes_sent += len(data)
-                    # #713 - outside the timeout handling below: that one is for the
-                    # browser's read. A write to PVE that times out was swallowed by it,
-                    # and the next frame went out behind a partial one.
-                    try:
-                        with _pve_io_lock:
-                            write_with_deadline(pve_ws, pve_ws.send, data)
-                    except Exception as e:
-                        ended.append((f'Client->PVE: {e}', True))
-                        running = False
-                        break
-            except TimeoutError:
-                gsleep(0.01)
-            except Exception as e:
-                if "timed out" not in str(e).lower() and "timeout" not in str(e).lower():
-                    ended.append(('browser closed', False) if 'closed' in str(e).lower()
-                                 else (f'browser: {e}', True))
-                    running = False
-                    break
-                gsleep(0.01)
-        
-        running = False
-        pve_reader.kill()
-        
-        _reason, _failed = ended[0] if ended else ('browser closed', False)
-        logging.log(logging.WARNING if _failed else logging.INFO,
-                    f"[VNC] session ended host={host} vm={vm_type}/{vmid} reason={_reason} "
-                    f"sent={bytes_sent}B recv={bytes_received}B")
-        
+        logging.info(f"[VNC] connected to {host} for {vm_type}/{vmid} in {_connect_ms}ms")
+        if _connect_ms > 3000:
+            logging.warning(f"[VNC] slow PVE connect: {_connect_ms}ms - possible TLS-inspection "
+                            f"/ EDR latency on the path to {host}")
     except Exception as e:
-        logging.exception(f"SSH proxy error: {type(e).__name__}: {e}")
-    finally:
-        running = False
-        if pve_ws:
+        logging.warning(f"[VNC] console of {vm_type}/{vmid} on {host} did not open: "
+                        f"{type(e).__name__}: {e}")
+        if pve_ws is not None:
             try:
                 pve_ws.close()
-            except:
+            except Exception:
                 pass
-        print(f"{'='*60}\n")
+        if tunnel_endpoint is not None:
+            try:
+                tunnel_endpoint.stop()
+            except Exception:
+                pass
+        return _vnc_refusal(ws, f'Could not open the console on Proxmox VE: {type(e).__name__}', 1011)
+
+    # #713 - pve_ws is one SSL object. A read and a write on it at the same time can splice
+    # a TLS record and pveproxy tears the session with a tlsv1 decode-error, so every
+    # operation on it goes through this lock, and a read waits at most the slice for a
+    # frame that is still arriving (websocket-client keeps the partial frame for the next
+    # read, nothing is lost) before it hands the lock to a writer.
+    pve_ws.settimeout(VNC_PVE_RECV_SLICE)
+    _pve_io_lock = threading.Lock()
+    state = {'on': True, 'sent': 0, 'recv': 0, 'ttfb': None}
+    # why the session ended, first one wins - an error goes out at WARNING below
+    ended = []
+    _session_started = time.monotonic()
+
+    def _stop(reason, failed):
+        ended.append((reason, failed))
+        state['on'] = False
+
+    def _pve_readable():
+        # waits for PVE outside the lock: a still screen costs a wakeup a second instead
+        # of a hundred, and the browser's input never queues behind an empty read.
+        s = pve_ws.sock
+        if s is None:
+            raise websocket.WebSocketConnectionClosedException('socket is already closed')
+        return _pve_socket_readable(s, 1.0)
+
+    def proxmox_to_client():
+        """PVE → browser. In Stable Mode the plain RFB from PVE goes out wrapped in
+        AES-256-GCM, so a middlebox re-encrypting our TLS sees ciphertext it cannot
+        pattern-match or change. However it ends, the session ends with it."""
+        try:
+            _pump_from_pve()
+        except Exception as e:
+            _stop(f'PVE->Client crashed: {type(e).__name__}: {e}', True)
+        finally:
+            state['on'] = False
+
+    def _pump_from_pve():
+        while state['on']:
+            try:
+                if not _pve_readable():
+                    continue
+                with _pve_io_lock:
+                    data = pve_ws.recv()
+            except websocket.WebSocketTimeoutException:
+                continue
+            except websocket.WebSocketConnectionClosedException:
+                return _stop('PVE closed', False)
+            except Exception as e:
+                if state['on']:
+                    _stop(f'PVE->Client: {e}', True)
+                return
+            if isinstance(data, str):
+                if not data:
+                    # websocket-client answers a close frame with ''
+                    return _stop('PVE closed', False)
+                data = data.encode('latin-1', errors='replace')
+            if not data:
+                continue
+            if state['ttfb'] is None:
+                state['ttfb'] = int((time.monotonic() - _session_started) * 1000)
+            state['recv'] += len(data)
+            if crypto_session is not None:
+                data = crypto_session.encrypt(data)
+            try:
+                ws.send(data)
+            except Exception as e:
+                if state['on']:
+                    _stop('browser closed' if 'close' in str(e).lower() else f'browser: {e}',
+                          'close' not in str(e).lower())
+                return
+
+    def pve_keepalive():
+        """Keepalive for pvedaemon's idle timeout (#312). A WS ping every 15 s and an RFB
+        FramebufferUpdateRequest every 20 s: pveproxy sits between us and qemu and can time
+        out on RFB traffic, not WS frames. The request (8 bytes, big-endian: type 3,
+        incremental 1, x 0, y 0, w 0xFFFF, h 0xFFFF; the server clamps) produces real RFB
+        traffic end to end. 15 s grace first so the RFB handshake is done before any byte
+        of ours goes in."""
+        rfb_fb_update_request = b'\x03\x01\x00\x00\x00\x00\xff\xff\xff\xff'
+        next_rfb_at = time.monotonic() + 15 + 20
+        while state['on']:
+            gevent.sleep(15)
+            if not state['on']:
+                return
+            try:
+                with _pve_io_lock:
+                    write_with_deadline(pve_ws, pve_ws.ping)
+            except Exception as e:
+                return _stop(f'keepalive ping to PVE: {e}', True)
+            now = time.monotonic()
+            if now >= next_rfb_at:
+                try:
+                    with _pve_io_lock:
+                        write_with_deadline(pve_ws, pve_ws.send_binary, rfb_fb_update_request)
+                    next_rfb_at = now + 20
+                except Exception as e:
+                    return _stop(f'RFB keepalive to PVE: {e}', True)
+
+    # MK Nov 2026 - the relay reads nothing from the database, and the connection this
+    # greenlet opened while the console signed in stayed open for as long as it relays
+    get_db().release_connection()
+    helpers = [gevent.spawn(proxmox_to_client), gevent.spawn(pve_keepalive)]
+    try:
+        # browser → PVE. In Stable Mode each frame is an AES-256-GCM blob; unwrapping it
+        # checks the tag, so bytes a middlebox changed end the session with 4099 and a
+        # clear reason instead of a confusing RFB 'Authentication failed' later.
+        while state['on']:
+            try:
+                data = ws.receive(timeout=1)
+            except Exception:
+                if state['on']:
+                    _stop('browser closed', False)
+                break
+            if data is None:
+                # MK Sep 2026 (#945.4) - simple-websocket returns None for a read that timed
+                # out and for a peer that is gone alike
+                if getattr(ws, 'connected', False):
+                    continue
+                _stop('browser closed', False)
+                break
+            state['sent'] += len(data)
+            if isinstance(data, str):
+                data = data.encode('latin-1', errors='replace')
+            if crypto_session is not None:
+                try:
+                    data = crypto_session.decrypt(data)
+                except Exception as _crypto_err:
+                    logging.warning(f"[VNC] integrity check FAILED on browser→PVE frame "
+                                    f"(host={host} vm={vm_type}/{vmid}): {_crypto_err}. "
+                                    "TLS-inspection / EDR is modifying packets mid-flight.")
+                    _stop('integrity check failed', True)
+                    _vnc_refusal(ws, f'integrity_check_failed: {_crypto_err}', 4099)
+                    break
+            # #713 - a write to PVE that times out halfway ends the session, nothing may
+            # follow a partial record
+            try:
+                with _pve_io_lock:
+                    write_with_deadline(pve_ws, pve_ws.send, data)
+            except Exception as e:
+                _stop(f'Client->PVE: {e}', True)
+                break
+    finally:
+        state['on'] = False
+        gevent.killall(helpers, block=False)
+        # MK Apr 2026 - richer session-end diagnostic. Helps support correlate short / weird
+        # sessions with network / inspection issues. Easy to grep, machine-parseable.
+        _duration_ms = int((time.monotonic() - _session_started) * 1000)
+        _ttfb = state['ttfb']
+        _short_session = _duration_ms < 5000 and state['recv'] < 4096
+        _reason, _failed = ended[0] if ended else ('unknown', False)
+        logging.log(
+            logging.WARNING if (_short_session or _failed) else logging.INFO,
+            f"[VNC] session ended host={host} vm={vm_type}/{vmid} reason={_reason} "
+            f"connect={_connect_ms}ms ttfb={f'{_ttfb}ms' if _ttfb is not None else 'never'} "
+            f"duration={_duration_ms}ms sent={state['sent']}B recv={state['recv']}B"
+            f"{' SHORT_OR_EMPTY - middlebox/EDR may be interfering' if _short_session else ''}")
+        # the TLS close of a tunnelled leg whose far end is gone can hang
+        try:
+            with gevent.Timeout(2):
+                pve_ws.close()
+        except (Exception, gevent.Timeout):
+            pass
+        if tunnel_endpoint is not None:
+            try:
+                tunnel_endpoint.stop()
+            except Exception as _tend:
+                logging.debug(f"[VNC] tunnel cleanup error: {_tend}")
 
 
-# NS May 2026 — Proxmox built-in termproxy (xterm.js) for LXC + QEMU.
+# NS May 2026 - Proxmox built-in termproxy (xterm.js) for LXC + QEMU.
 # Same idea as the VNC proxy above but talks PVE's text-frame termproxy
 # protocol instead of RFB. No second login: the PegaProx session is
 # already trusted to act as the cluster admin user, so we log into PVE
@@ -13098,12 +12293,12 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/termproxy', methods=['POST'])
 @require_auth(perms=['vm.console'])
 def get_termproxy_ticket_api(cluster_id, node, vm_type, vmid):
-    """NS May 2026 — issues a PVE termproxy ticket for a VM/CT.
+    """NS May 2026 - issues a PVE termproxy ticket for a VM/CT.
 
     Server-side: log into PVE with cluster credentials (NOT API token, since
-    termproxy needs a real session cookie), POST /termproxy, return both the
-    auth_ticket (used as PVEAuthCookie) and the termproxy_ticket (used as
-    ?vncticket=) so the standalone WS server can complete the handshake.
+    termproxy needs a real session cookie), POST /termproxy, return the
+    termproxy_ticket (used as ?vncticket=) for the terminal socket, which mints
+    its own PVEAuthCookie (vm_terminal_websocket_proxy).
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
@@ -13131,18 +12326,13 @@ def get_termproxy_ticket_api(cluster_id, node, vm_type, vmid):
     if password_login(mgr.config):
         return jsonify({'error': 'Cluster has no stored password — termproxy needs user/pass auth (API tokens cannot mint termproxy tickets).'}), 400
 
-    import ssl as _ssl
     import urllib.request as _urlreq
     from urllib.parse import urlencode as _urlencode
-    ssl_ctx = _ssl.create_default_context()
     # NS Jul 2026 (CodeAnt) — gate TLS verify on the per-cluster ssl_verify flag
     # (default off: PVE ships self-signed; honoured when the admin enables it).
     _verify_tls = bool(getattr(mgr, '_ssl_verify', False))
-    if not _verify_tls:
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = _ssl.CERT_NONE
     from pegaprox.core.manager import pve_opener
-    opener = pve_opener(ssl_ctx)
+    opener = pve_opener(_console_ssl_context(cluster_id, _verify_tls))
     host, port = mgr.host, mgr.api_port
 
     # Step 1: real PVE session login
@@ -13185,10 +12375,9 @@ def get_termproxy_ticket_api(cluster_id, node, vm_type, vmid):
 
     # NS 2026-06-05 (security audit C-1): the PVE session ticket (auth_ticket =
     # PVEAuthCookie = effectively root on pve:8006) is NO LONGER returned to the
-    # browser. The standalone WS subprocess fetches it server-side via the
-    # cluster-creds / ws-token-validate internal path right before the PVE WS
-    # connect. Only the per-console termproxy ticket (scoped to this vmid:port)
-    # leaves to the client.
+    # browser. The terminal socket mints it server-side right before the PVE WS
+    # connect (vm_terminal_websocket_proxy). Only the per-console termproxy ticket
+    # (scoped to this vmid:port) leaves to the client.
     return jsonify({
         'success': True,
         'host': host,
@@ -13201,950 +12390,351 @@ def get_termproxy_ticket_api(cluster_id, node, vm_type, vmid):
     })
 
 
-def start_ssh_websocket_server(port=5002, ssl_cert=None, ssl_key=None, host='0.0.0.0'):
-    """Start a dedicated WebSocket server for SSH terminal proxying
-    
-    runs as separate process to avoid gevent/asyncio conflicts.
-    Gevent monkey-patches asyncio which breaks the websockets library.
-    By using a subprocess, we get a clean Python interpreter.
-    """
-    import subprocess
-    import sys
-    import os
-    
-    # Create a standalone script that runs the SSH WebSocket server
-    server_script = '''#!/usr/bin/env python3
-"""Standalone SSH WebSocket Server - runs without gevent"""
-import asyncio
-import ssl
-import json
-import re
-import sys
-import os
-import errno
-import stat
-import tempfile
-import warnings
-warnings.filterwarnings('ignore')
-
-PORT = int(os.environ.get('SSH_WS_PORT', 5002))
-BIND_HOST = os.environ.get('SSH_WS_HOST', '0.0.0.0')
-SSL_CERT = os.environ.get('SSH_WS_SSL_CERT', '')
-SSL_KEY = os.environ.get('SSH_WS_SSL_KEY', '')
-PEGAPROX_URL = os.environ.get('PEGAPROX_URL', 'http://127.0.0.1:5000')
-# shows the main app it is talking to the console server it started (api/realtime.py
-# CONSOLE_SERVER_HEADER); only then do /validate and cluster-creds hand back the cluster
-# context
-CONSOLE_HEADERS = {'X-PegaProx-Console-Server': os.environ.get('PEGAPROX_CONSOLE_SECRET', '')}
-
-try:
-    import websockets
-    import paramiko
-    import requests
-    import urllib3
-    urllib3.disable_warnings()
-except ImportError as e:
-    print(f"Missing library: {e}")
-    sys.exit(1)
-
-import threading
-# Serialize known_hosts writes across concurrent WS connections in this
-# subprocess: a TOFU host-key save must not race another and corrupt the file
-# (mirrors the main app's _persist_lock, which this standalone can't import).
-_KH_WRITE_LOCK = threading.Lock()
-
-
-# MK Nov 2026 - the two below are inlined from utils/ssh_security.py, which this script
-# cannot import. A key that never reaches the disk is trusted again on the next connect,
-# with whatever key that one shows, so no first use without a known_hosts we can write.
-def _kh_writable(path):
-    # the save puts a temp file next to known_hosts and renames it over, so the folder
-    # has to take new files and an existing file must not be read-only
-    target = os.path.realpath(path)
-    if os.path.exists(target) and not os.access(target, os.W_OK):
-        return False
-    return os.access(os.path.dirname(target) or '.', os.W_OK | os.X_OK)
-
-
-def _write_kh(path, write):
-    """Replace known_hosts with what write(tmp) puts into a temp file next to it.
-    paramiko's save() truncates first, so a write that failed half way left a shorter
-    file and every pin after the cut read as unknown. The rename leaves either file."""
-    target = os.path.realpath(path)
-    st = None
-    if os.path.exists(target):
-        if not os.access(target, os.W_OK):
-            raise PermissionError(errno.EACCES, 'known_hosts is read-only', target)
-        st = os.stat(target)
-    fd, tmp = tempfile.mkstemp(prefix='.ssh_known_hosts.', dir=os.path.dirname(target) or '.')
-    os.close(fd)
+def _text_console_refusal(ws, message, code=1008):
+    """End a shell or terminal socket: the page shows {'status': 'error'} in the terminal,
+    the close carries the same reason."""
     try:
-        write(tmp)
-        fd = os.open(tmp, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        if st is not None:
-            os.chmod(tmp, stat.S_IMODE(st.st_mode))
-            try:
-                os.chown(tmp, st.st_uid, st.st_gid)
-            except OSError:
-                pass
-        os.replace(tmp, target)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
-async def _refused_as_standby(ws, resp):
-    """#625 - on a standby the main app answers 409 HA_STANDBY to the validate and
-    cluster-creds calls. Hand its sentence to the browser instead of calling it a bad
-    session. True when it did and the socket is closed."""
-    if resp is None or resp.status_code != 409:
-        return False
-    try:
-        body = resp.json() or {}
+        ws.send(json.dumps({'status': 'error', 'message': message}))
+        ws.close(reason=code, message=str(message)[:120])
     except Exception:
-        return False
-    if body.get('code') != 'HA_STANDBY':
-        return False
-    await ws.send(json.dumps({'status': 'error', 'message': body.get('error') or 'Consoles are only available on the active instance.'}))
-    await ws.close(1008, "standby")
-    return True
+        pass
 
 
-async def _refused_ssh_off(ws, resp):
-    """The main app answers 409 SSH_DISABLED for the node shell of a cluster with SSH
-    switched off. Its sentence goes to the browser; True when the socket is closed."""
-    if resp is None or resp.status_code != 409:
-        return False
-    try:
-        body = resp.json() or {}
-    except Exception:
-        return False
-    if body.get('code') != 'SSH_DISABLED':
-        return False
-    await ws.send(json.dumps({'status': 'error', 'message': body.get('error') or 'SSH is switched off for this cluster'}))
-    await ws.close(1008, "ssh disabled")
-    return True
+def _console_ws_auth(ws, refuse):
+    """The ws token, or the legacy ?session=, of a console socket, and the account behind
+    it: (auth, user, by_session), or None after refuse() told the page why."""
+    from pegaprox.utils.realtime import validate_ws_token
+    ws_token = request.args.get('token')
+    session_id = request.args.get('session')
+    if ws_token:
+        auth = validate_ws_token(ws_token)
+        if not auth:
+            refuse(ws, 'Invalid or expired token')
+            return None
+    elif session_id:
+        auth = validate_session(session_id)
+        if not auth:
+            refuse(ws, 'Invalid session')
+            return None
+    else:
+        refuse(ws, 'Authentication required')
+        return None
+    user = resolve_authz_user(auth)
+    if not user:
+        refuse(ws, 'Authentication required')
+        return None
+    return auth, user, not ws_token
 
 
-async def ssh_handler(websocket):
-    """SSH WebSocket handler with user credential prompt and SSH key support
-    
-    MK: Supports both password and SSH key authentication
-    The node's address comes from the main app, the page's ?ip= is not read (#1143)
-    """
-    path = websocket.request.path if hasattr(websocket, 'request') else websocket.path
-    print(f"SSH WebSocket connection: {path}")
-    
-    from urllib.parse import urlparse, parse_qs, unquote, quote_plus
-    parsed = urlparse(path)
-    query = parse_qs(parsed.query)
-    ws_token = query.get('token', [None])[0]
-    session_id = query.get('session', [None])[0]  # LW: backwards compat
-
-    # NS May 2026 — accept both shell and termproxy paths.
-    # termproxy: /api/clusters/<cid>/vms/<node>/<vm_type>/<vmid>/termwebsocket
-    #            with ?ticket=, ?port=, ?user=, ?host= from the frontend.
-    m_term = re.match(r'/api/clusters/([^/]+)/vms/([^/]+)/(qemu|lxc)/([0-9]+)/termwebsocket', parsed.path)
-    if m_term:
-        await termproxy_handler(websocket, query, m_term, ws_token, session_id)
+# NS May 2026 - Proxmox termproxy proxy.
+# The page has already POSTed /termproxy and got a ticket for this guest; it sends
+# ticket+port+host+user as query params on the WS open. We connect to PVE's vncwebsocket
+# with that ticket, send the `user:ticket\n` handshake, wait for "OK", then move bytes
+# both ways. No SSH, no second login - the cluster auth happens server-side.
+# MK Nov 2026 - on the main port now. It only existed inside the SSH console server on
+# port+2, so behind a proxy that sends everything to the main port there was no terminal.
+# In this process the socket checks the guest itself (_console_authz); port+2 could only
+# ask for the cluster and left the guest to the ticket call.
+@sock.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/termwebsocket')
+def vm_terminal_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
+    """WebSocket proxy for the xterm.js terminal of a guest"""
+    # #625 - see vnc_websocket_proxy
+    if not ha.consoles_here():
+        return _text_console_refusal(ws, STANDBY_CONSOLE_ERROR)
+    signed_in = _console_ws_auth(ws, _text_console_refusal)
+    if signed_in is None:
         return
+    auth, user, by_session = signed_in
+    _ok, _why = _console_authz(user, cluster_id, vmid, vm_type, by_session=by_session)
+    if not _ok:
+        logging.info(f"[TERMPROXY] terminal of {_sl(cluster_id)}/{vmid} refused for "
+                     f"'{_sl(user.get('username'))}': {_why}")
+        return _text_console_refusal(ws, 'Permission denied')
+    # the node name goes into the PVE path, see vnc_websocket_proxy
+    if not re.match(r'^[a-zA-Z][a-zA-Z0-9.\-]{0,62}$', node or '') or vm_type not in ('qemu', 'lxc'):
+        return _text_console_refusal(ws, 'Invalid node or vm_type')
+    mgr = cluster_managers.get(cluster_id)
+    if mgr is None:
+        return _text_console_refusal(ws, 'Cluster not found')
 
-    # Match both /shell and /shellws
-    match = re.match(r'/api/clusters/([^/]+)/nodes/([^/]+)/shell(?:ws)?', parsed.path)
-    if not match:
-        print(f"Invalid path: {parsed.path}")
-        await websocket.send('{"status":"error","message":"Invalid path"}')
-        await websocket.close(1008, "Invalid path")
-        return
+    pve_ticket = request.args.get('ticket') or ''
+    pve_host = request.args.get('host') or ''
+    pve_user = request.args.get('user') or ''
+    _port_ok, pve_port = _safe_vnc_passthrough(request.args.get('port'), pve_ticket)
+    if not (_port_ok and pve_host and pve_user) or any(c in pve_user for c in '\r\n\x00:'):
+        return _text_console_refusal(ws, 'Missing termproxy params')
 
-    cluster_id, node = match.groups()
-    print(f"Cluster: {cluster_id}, Node: {node}")
-
-    # NS: Mar 2026 - prefer WS token auth (single-use, doesn't leak session)
-    auth_token = ws_token or session_id
-    if not auth_token:
-        print("No token or session provided")
-        await websocket.send('{"status":"error","message":"No auth token provided"}')
-        await websocket.close(1008, "No auth")
-        return
-
-    # Validate via main server. MK May 2026 - when called with ws_token + cluster_id,
-    # the response now also carries `cluster_context` (host/node_ips/ssh_port) so we
-    # don't need a second authenticated round-trip. The WS subprocess holds only the
-    # consumed ws-token, no session cookie, so cluster-creds was previously
-    # unreachable from here.
-    node_ip = None
-    cluster_host = None
-    node_ips = {}
-    ssh_port = 22
-    known_only = False
-
-    def _ssh_port_of(v):
-        # JB Nov 2026 - both answers carry the cluster's ssh_port for this login; a number
-        # in range or 22, the way the app reads it
-        try:
-            p = int(v)
-        except (TypeError, ValueError):
-            return 22
-        return p if 0 < p < 65536 else 22
-    try:
-        if ws_token:
-            # NS Aug 2026 (Aikido pentest) — shell=node makes /validate enforce the node.shell
-            # permission for this node SSH shell (the VM termproxy path deliberately omits it).
-            # MK Oct 2026 (#1143) - the token quoted too: ?token=x%26shell%3D1 came out as a
-            # shell=1 ahead of ours, and /validate reads the first one, node.shell skipped.
-            validate_url = (
-                f"{PEGAPROX_URL}/api/ws/token/validate"
-                f"?token={quote_plus(ws_token)}&cluster_id={quote_plus(cluster_id)}&node={quote_plus(node)}&shell=node"
-            )
-            print(f"Validating WS token (cluster={cluster_id}, node={node})...")
-        else:
-            validate_url = f"{PEGAPROX_URL}/api/auth/validate"
-            print("Validating session (legacy)...")
-
-        headers = dict(CONSOLE_HEADERS, **({'X-Session-ID': session_id} if session_id else {}))
-        cookies = {'session': session_id} if session_id else {}
-        # nosec B501 — localhost-to-PegaProx (PEGAPROX_URL = 127.0.0.1:port) with our
-        # own self-signed cert. Same-host trust boundary; attacker with local
-        # cert-read access already has more direct attack paths. MK 2026-06-04.
-        # MK Oct 2026 (#1143) - the token check also looks up the node's address now, which
-        # can probe the node: more time than a bare check needs.
-        r = requests.get(validate_url, cookies=cookies, headers=headers, timeout=30, verify=False)
-
-        if await _refused_as_standby(websocket, r) or await _refused_ssh_off(websocket, r):
-            return
-        if r.status_code == 403:
-            print(f"Auth failed: 403 (no access to cluster {cluster_id})")
-            await websocket.send(json.dumps({'status': 'error', 'message': f'No access to cluster {cluster_id}'}))
-            await websocket.close(1008, "Forbidden")
-            return
-        if r.status_code != 200:
-            print(f"Auth failed: {r.status_code}")
-            await websocket.send('{"status":"error","message":"Session ungültig - bitte neu einloggen"}')
-            await websocket.close(1008, "Invalid auth")
-            return
-
-        # #625 - a standby holds the leader's known_hosts and the next sync replaces it:
-        # the main app says so, and a host key it does not know yet is refused below
-        try:
-            known_only = bool((r.json() or {}).get('known_hosts_only'))
-        except Exception:
-            known_only = False
-
-        # Pull the cluster context out of the validate response (ws-token path only)
-        if ws_token:
-            try:
-                payload = r.json() or {}
-                ctx = payload.get('cluster_context') or {}
-                cluster_host = ctx.get('host')
-                node_ips = ctx.get('node_ips') or {}
-                ssh_port = _ssh_port_of(ctx.get('ssh_port'))
-                print(f"validate→ host={cluster_host} node_ips={node_ips}")
-            except Exception as e:
-                print(f"Could not parse validate payload: {e}")
-
-        # Legacy session path: fall back to cluster-creds with the session cookie.
-        if not ws_token and session_id:
-            try:
-                print(f"Fetching cluster creds from: {PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}")
-                # nosec B501 — same-host PegaProx self-signed cert, see MK 2026-06-04 audit
-                rc = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}",
-                                  cookies={'session': session_id}, headers=CONSOLE_HEADERS,
-                                  timeout=10, verify=False)
-                if await _refused_as_standby(websocket, rc) or await _refused_ssh_off(websocket, rc):
-                    return
-                if rc.status_code == 200:
-                    creds = rc.json()
-                    cluster_host = creds.get('host')
-                    node_ips = creds.get('node_ips', {})
-                    ssh_port = _ssh_port_of(creds.get('ssh_port'))
-            except Exception as e:
-                print(f"Could not get node IP from API: {e}")
-
-        print("Auth successful")
-    except requests.exceptions.ConnectionError as e:
-        print(f"Connection error to main server: {e}")
-        # NS Feb 2026 - never skip auth, even if main server is unreachable
-        await websocket.send('{"status":"error","message":"Authentifizierung fehlgeschlagen - Server nicht erreichbar"}')
-        await websocket.close(1011, "Auth server unreachable")
-        return
-    except Exception as e:
-        print(f"Auth error: {e}")
-        await websocket.send('{"status":"error","message":"Authentifizierungsfehler"}')
-        await websocket.close(1011, "Auth error")
-        return
-
-    # MK Oct 2026 (#1143) - the shell logs in on the node it was opened for, at the address
-    # the main app resolved under that node's name. The connection host used to stand in
-    # when there was none, and the validate answer never named the node, so every shell on
-    # this port that the page's ?ip= did not move landed on that host under this node's
-    # name. No stand-in now, and neither ?ip= nor the dialog's host field moves the shell:
-    # the target is only ever an address the server resolved, which the CWE-918 allow-list
-    # they were checked against stood for. _fallback_0 and _default are keys of the
-    # context, no node names.
-    node_ip = None if node.startswith('_') else (node_ips.get(node) or node_ips.get(node.lower()))
-    if not node_ip:
-        print(f"No address for node {node} (connection host {cluster_host}) - no shell")
-        await websocket.send(json.dumps({'status': 'error', 'message': f'Could not find the address of node {node}'}))
-        await websocket.close(1008, "node address unknown")
-        return
-    print(f"Final node IP for {node}: {node_ip}")
-
-    # Send need_credentials status - frontend will show login dialog
-    await websocket.send(json.dumps({
-        'status': 'need_credentials',
-        'node': node,
-        'ip': node_ip,
-    }))
-
-    # Wait for credentials from user
-    try:
-        creds_msg = await asyncio.wait_for(websocket.recv(), timeout=300)
-        creds = json.loads(creds_msg)
-        ssh_user = creds.get('username', 'root')
-        ssh_pass = creds.get('password', '')
-        ssh_key = creds.get('privateKey', '')
-
-        # #1143 - the dialog's host is shown to the user, the target stays the node's own
-        user_ip = str(creds.get('host') or '').strip()
-        if user_ip and user_ip != node_ip:
-            print(f"Ignoring host {user_ip!r} from the page, the shell of {node} opens on {node_ip}")
-
-        if not ssh_pass and not ssh_key:
-            await websocket.send('{"status":"error","message":"Password or SSH key required"}')
-            return
-            
-    except asyncio.TimeoutError:
-        await websocket.send('{"status":"error","message":"Login timeout"}')
-        await websocket.close(1008, "Timeout")
-        return
-    except Exception as e:
-        print(f"Credentials receive error: {e}")
-        await websocket.send('{"status":"error","message":"Failed to receive credentials"}')
-        return
-    
-    # Send connecting status
-    await websocket.send('{"status":"connecting"}')
-    
-    # Connect SSH — TOFU host-key verification (standalone WS subprocess, policy
-    # inlined; known_hosts path handed in via env, shared with the main app).
-    ssh = paramiko.SSHClient()
-    _ssh_kh = os.environ.get('PEGAPROX_SSH_KNOWN_HOSTS')
-    if not _ssh_kh:
-        # The launcher normally hands us the main app's absolute known_hosts path.
-        # If it is missing we fall back to a cwd-relative path — announce it loudly
-        # so a silent trust-store mismatch (pinning that never matches the app) is
-        # visible in the [SSH-WS] log rather than bypassing verification quietly.
-        _ssh_kh = os.path.abspath(os.path.join('config', '.ssh_known_hosts'))
-        print("[SSH-WS] WARNING: PEGAPROX_SSH_KNOWN_HOSTS not set; falling back to "
-              + _ssh_kh + " — host-key pinning may not match the main app")
-    kh_unreadable = False
-    try:
-        if os.path.exists(_ssh_kh):
-            ssh.load_host_keys(_ssh_kh)
-    except Exception as _kh_err:
-        # NS Oct 2026 - as in utils/ssh_security.py: the pins behind a damaged line read as
-        # unknown hosts, so no first use while the file cannot be read, and no save over it
-        print("[SSH-WS] known_hosts unreadable (" + str(_kh_err) + ") - refusing new host keys")
-        kh_unreadable = True
-    class _TofuPolicy(paramiko.MissingHostKeyPolicy):
-        def missing_host_key(self, _c, _h, _k):
-            if known_only:
-                # the address tried, not the node name: the leader pins a key under the
-                # address it reaches the node at (as utils/ssh_security.py says it)
-                raise paramiko.SSHException(
-                    f"host key of {_h} is not known here yet - open a shell to it on the "
-                    "leader once. This standby only has the keys the leader pinned; if the "
-                    f"leader reaches this node at another address than {_h}, its key is "
-                    "pinned under that one")
-            if kh_unreadable:
-                raise paramiko.SSHException(
-                    f"config/.ssh_known_hosts could not be read, so the host key of {_h} "
-                    "cannot be checked against its pin - refusing to trust it on first use. "
-                    "Repair or remove the damaged line (see the log) and connect again")
-            if os.environ.get('PEGAPROX_SSH_STRICT_HOST_KEYS', '').strip().lower() in ('1', 'true', 'yes', 'on'):
-                raise paramiko.SSHException("strict host-key checking: unknown SSH host key for " + str(_h))
-            # the key is saved after the login, so check before it that it can be
-            if not _kh_writable(_ssh_kh):
-                print("[SSH-WS] known_hosts " + _ssh_kh + " is not writable - not trusting "
-                      + str(_h) + " on first use")
-                raise paramiko.SSHException(
-                    f"config/.ssh_known_hosts could not be written, so the host key of {_h} "
-                    "cannot be pinned - refusing to trust it on first use. Check the permissions "
-                    "and free space of the config folder (see the log) and connect again")
-            try:
-                _c._host_keys.add(_h, _k.get_name(), _k)
-            except Exception:
-                pass
-    ssh.set_missing_host_key_policy(_TofuPolicy())
-    def _persist_ssh_hostkeys():
-        if known_only or kh_unreadable:
-            return
-        # NS Oct 2026 - save_host_keys() wrote the set loaded before connect over the file,
-        # erasing any pin the main app or another shell recorded meanwhile (#1025). Merge
-        # into what is on disk now and let the disk win, as persist_host_keys() does.
-        try:
-            with _KH_WRITE_LOCK:
-                merged = paramiko.hostkeys.HostKeys()
-                if os.path.exists(_ssh_kh):
-                    merged.load(_ssh_kh)
-                added = 0
-                for _hn, _keys in ssh.get_host_keys().items():
-                    _on_disk = merged.lookup(_hn)
-                    for _kt, _key in _keys.items():
-                        if _on_disk is None or _kt not in _on_disk:
-                            merged.add(_hn, _kt, _key)
-                            added += 1
-                if added:
-                    _write_kh(_ssh_kh, merged.save)
-        except Exception as e:
-            # the shell stays open, but these hosts are not pinned
-            print("[SSH-WS] could not write known_hosts (" + str(e) + ") - new host keys were not pinned")
-
-    try:
-        print(f"Connecting SSH to {ssh_user}@{node_ip}...")
-        
-        # Try SSH key authentication first if provided
-        # #778 (zobsg) — paramiko needs a bare host; strip IPv6 brackets before connecting. The
-        # allow-list check above already matched node_ip in its bracketed form, so this affects only
-        # the outbound SSH connection, not the authorization. (The manager-internal SSH helpers all
-        # debracket the same way; these two console handlers were the only SSH paths that didn't.)
-        _ssh_host = node_ip[1:-1] if node_ip and node_ip.startswith('[') and node_ip.endswith(']') else node_ip
-        if ssh_key:
-            try:
-                import io
-                # Parse the private key
-                key_file = io.StringIO(ssh_key)
-                
-                # Try different key types
-                pkey = None
-                for key_class in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey, getattr(paramiko, 'DSSKey', None)]:
-                    if key_class is None:
-                        continue
-                    try:
-                        key_file.seek(0)
-                        pkey = key_class.from_private_key(key_file, password=ssh_pass if ssh_pass else None)
-                        break
-                    except:
-                        continue
-                
-                if pkey:
-                    print(f"Using SSH key authentication")
-                    ssh.connect(_ssh_host, port=ssh_port, username=ssh_user, pkey=pkey, timeout=10, look_for_keys=False, allow_agent=False)
-                    _persist_ssh_hostkeys()
-                else:
-                    raise Exception("Could not parse SSH key - unsupported format")
-                    
-            except Exception as key_error:
-                print(f"SSH key auth failed: {key_error}")
-                await websocket.send(f'{{"status":"error","message":"SSH key error: {str(key_error)}"}}')
-                return
-        else:
-            # Password authentication
-            ssh.connect(_ssh_host, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=10, look_for_keys=False, allow_agent=False)
-            _persist_ssh_hostkeys()
-
-        channel = ssh.invoke_shell(term='xterm-256color', width=120, height=40)
-        channel.settimeout(0.1)
-
-        print(f"SSH connected: {cluster_id}/{node}")
-
-        # Send connected status - frontend will clear terminal
-        await websocket.send('{"status":"connected"}')
-        
-        async def ssh_to_ws():
-            while True:
-                try:
-                    if channel.recv_ready():
-                        data = channel.recv(4096)
-                        if data:
-                            await websocket.send(data.decode('utf-8', errors='replace'))
-                    await asyncio.sleep(0.01)
-                except:
-                    break
-        
-        async def ws_to_ssh():
-            try:
-                async for message in websocket:
-                    if isinstance(message, str):
-                        if message.startswith('{"type":"resize"'):
-                            try:
-                                data = json.loads(message)
-                                if data.get('type') == 'resize':
-                                    channel.resize_pty(width=data.get('cols', 120), height=data.get('rows', 40))
-                            except:
-                                pass
-                        elif message.startswith('{'):
-                            # Ignore other JSON messages (like old credential format)
-                            pass
-                        else:
-                            channel.send(message)
-                    else:
-                        channel.send(message)
-            except:
-                pass
-        
-        await asyncio.gather(ssh_to_ws(), ws_to_ssh(), return_exceptions=True)
-    except paramiko.AuthenticationException as e:
-        print(f"SSH auth failed: {e}")
-        await websocket.send(f'\\r\\n\\x1b[31mSSH Authentication Failed\\x1b[0m\\r\\nCheck cluster credentials.\\r\\n')
-    except Exception as e:
-        print(f"SSH error: {e}")
-        try:
-            await websocket.send(f"\\r\\n\\x1b[31mSSH Error: {e}\\x1b[0m\\r\\n")
-        except:
-            pass
-    finally:
-        try:
-            ssh.close()
-        except:
-            pass
-        print(f"SSH disconnected: {cluster_id}/{node}")
-
-
-# NS May 2026 — Proxmox termproxy proxy.
-# Frontend has already POSTed /termproxy on the main app and got a ticket.
-# It sends the ticket+port+host+user as query params on the WS open.
-# We connect to PVE's vncwebsocket with that ticket, send the
-# `user:ticket\\n` handshake, wait for "OK", then proxy bytes both ways.
-# No SSH, no second login — the cluster auth happens server-side at the
-# /termproxy POST step.
-async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
-    from urllib.parse import unquote, quote_plus
-    cluster_id, node, vm_type, vmid_str = m_term.groups()
-    print(f"[TERMPROXY] {vm_type}/{vmid_str} on {node} cluster={cluster_id}")
-
-    auth_token = ws_token or session_id
-    if not auth_token:
-        await client_ws.send('{"status":"error","message":"No auth token"}')
-        await client_ws.close(1008, "No auth")
-        return
-
-    # Validate via main server (cluster-scope check + inline cluster context)
-    # MK May 2026 - response carries cluster_context so we don't need a second
-    # authenticated round-trip from the WS subprocess.
-    validate_payload = {}
-    try:
-        if ws_token:
-            validate_url = (
-                f"{PEGAPROX_URL}/api/ws/token/validate"
-                f"?token={quote_plus(ws_token)}&cluster_id={quote_plus(cluster_id)}&node={quote_plus(node)}"
-            )
-        else:
-            validate_url = f"{PEGAPROX_URL}/api/auth/validate"
-        headers = dict(CONSOLE_HEADERS, **({'X-Session-ID': session_id} if session_id else {}))
-        cookies = {'session': session_id} if session_id else {}
-        # nosec B501 — localhost-to-PegaProx (PEGAPROX_URL = 127.0.0.1:port) with our
-        # own self-signed cert. Same-host trust boundary; attacker with local
-        # cert-read access already has more direct attack paths. MK 2026-06-04.
-        r = requests.get(validate_url, cookies=cookies, headers=headers, timeout=8, verify=False)
-        if await _refused_as_standby(client_ws, r):
-            return
-        if r.status_code == 403:
-            await client_ws.send(json.dumps({'status': 'error', 'message': f'No access to cluster {cluster_id}'}))
-            await client_ws.close(1008, "Forbidden")
-            return
-        if r.status_code != 200:
-            await client_ws.send('{"status":"error","message":"Invalid session"}')
-            await client_ws.close(1008, "auth")
-            return
-        try:
-            validate_payload = r.json() or {}
-        except Exception:
-            validate_payload = {}
-    except Exception as e:
-        print(f"[TERMPROXY] auth validate failed: {e}")
-        await client_ws.send('{"status":"error","message":"Auth server unreachable"}')
-        await client_ws.close(1011, "auth")
-        return
-
-    # Frontend gave us the termproxy ticket+port already (via POST /termproxy).
-    # NS 2026-06-05 (security audit C-1): the PVE session cookie (auth_ticket =
-    # PVEAuthCookie, effectively root on pve:8006) is NO LONGER taken from the
-    # browser query — we resolve it server-side below from the validate /
-    # cluster-creds cluster_context.
-    pve_ticket = query.get('ticket', [None])[0]
-    pve_port = query.get('port', [None])[0]
-    pve_host = query.get('host', [None])[0]
-    pve_user = query.get('user', [None])[0]
-    pve_auth = None  # resolved server-side from cluster_context, see below
-    if not (pve_ticket and pve_port and pve_host and pve_user):
-        print(f"[TERMPROXY] missing query params; got: ticket={bool(pve_ticket)} port={pve_port} host={pve_host} user={pve_user}")
-        await client_ws.send('{"status":"error","message":"Missing termproxy params"}')
-        await client_ws.close(1008, "params")
-        return
-
-    pve_ticket = unquote(pve_ticket)
-    pve_user = unquote(pve_user)
-    pve_host = unquote(pve_host)
-
-    # MK May 2026 (CodeAnt CWE-918) - SSRF gate. Use the cluster_context already
-    # returned by the validate call; fall back to cluster-creds only on the legacy
-    # session-cookie path (ws-token flow has no session cookie to authenticate it).
-    allowed_hosts = set()
-    ctx = (validate_payload or {}).get('cluster_context') or {}
-    if ctx.get('host'):
-        allowed_hosts.add(ctx['host'])
-    allowed_hosts.update(v for v in (ctx.get('node_ips') or {}).values() if v)
-    # C-1: server-side PVE session cookie (ws-token flow)
-    if ctx.get('pve_auth_ticket'):
-        pve_auth = ctx['pve_auth_ticket']
-    # MK 2026-06-04: pull per-cluster ssl_verify out of the same context for
-    # the PVE wss-proxy below. Defaults to False because PVE ships self-signed
-    # certs and most labs run them. Admins toggle on once they've installed
-    # a real cert + the cluster's `ssl_verify` config field is true.
-    verify_pve_tls = bool(ctx.get('verify_pve_tls', False))
-    # MK Sep 2026 (#956) - the API port of this cluster. 8006 stays the default for a
-    # context built before this field existed.
-    try:
-        pve_api_port = int(ctx.get('api_port') or 8006)
-    except (TypeError, ValueError):
-        pve_api_port = 8006
-    if not allowed_hosts and session_id:
-        try:
-            # console=term: a PVE API console, which a cluster with SSH switched off keeps
-            cr = requests.get(f"{PEGAPROX_URL}/api/internal/cluster-creds/{cluster_id}?console=term",
-                              headers=CONSOLE_HEADERS,
-                              cookies={'session': session_id}, timeout=10, verify=False)  # nosec B501 — localhost-to-PegaProx self-signed cert; same-host trust boundary, see MK 2026-06-04 audit
-            if await _refused_as_standby(client_ws, cr):
-                return
-            if cr.status_code == 200:
-                cr_data = cr.json() or {}
-                if cr_data.get('host'):
-                    allowed_hosts.add(cr_data['host'])
-                allowed_hosts.update(v for v in (cr_data.get('node_ips') or {}).values() if v)
-                # Honour the cluster-side ssl_verify flag from the creds payload.
-                if 'verify_pve_tls' in cr_data:
-                    verify_pve_tls = bool(cr_data['verify_pve_tls'])
-                if cr_data.get('api_port'):
-                    try:
-                        pve_api_port = int(cr_data['api_port'])
-                    except (TypeError, ValueError):
-                        pass
-                # C-1: server-side PVE session cookie (session-cookie flow)
-                if cr_data.get('pve_auth_ticket'):
-                    pve_auth = cr_data['pve_auth_ticket']
-            else:
-                print(f"[TERMPROXY] cluster-creds non-200 ({cr.status_code}); allow-list empty")
-        except Exception as e:
-            print(f"[TERMPROXY] cluster-creds legacy fetch failed: {e}")
-
+    # MK May 2026 (CodeAnt CWE-918) - SSRF gate: the page names the host, and only the
+    # cluster's own addresses are dialled
+    allowed_hosts = {getattr(mgr, 'host', None)}
+    allowed_hosts.update(getattr(mgr.config, 'fallback_hosts', None) or [])
+    allowed_hosts.discard(None)
+    allowed_hosts.discard('')
     if pve_host not in allowed_hosts:
-        print(f"[TERMPROXY] REJECT host {pve_host!r} (not in {sorted(allowed_hosts)})")
-        await client_ws.send(json.dumps({
-            'status': 'error',
-            'message': f"Host {pve_host!r} is not a known node of cluster {cluster_id}."
-        }))
-        await client_ws.close(1008, "host not allowed")
-        return
+        logging.warning(f"[TERMPROXY] REJECT host {_sl(pve_host)!r} for cluster {_sl(cluster_id)}")
+        return _text_console_refusal(ws, f"Host {pve_host!r} is not a known node of cluster {cluster_id}.")
 
-    # C-1: the PVE session cookie must have come from the server-side
-    # cluster_context (not the browser). If it's missing the cluster has no
-    # password auth (termproxy can't work) or the mint failed — fail closed.
-    if not pve_auth:
-        print(f"[TERMPROXY] no server-side PVE auth ticket for cluster {cluster_id}")
-        await client_ws.send('{"status":"error","message":"Console auth unavailable for this cluster (needs user/password auth)"}')
-        await client_ws.close(1011, "no-pve-auth")
-        return
+    # on the console budgets before anything logs in to PVE
+    held = hold_websocket(user['username'], ws, sid=auth.get('sid') if not by_session
+                          else request.args.get('session'), console=True)
+    if not held:
+        return _text_console_refusal(ws, *_console_full(held))
 
-    # Connect to PVE WS — Cookie uses session auth ticket; URL uses termproxy ticket.
-    pve_path = f"/api2/json/nodes/{node}/{vm_type}/{vmid_str}/vncwebsocket?port={pve_port}&vncticket={quote_plus(pve_ticket)}"
-    pve_url = f"wss://{pve_host}:{pve_api_port}{pve_path}"
-    # NS Jul 2026 (CodeAnt sensitive-data-in-url) — never log the vncticket (a live PVE console
-    # credential in the query string); redact it (self-contained: runs in the WS subprocess).
-    print("[TERMPROXY] connecting to PVE: " + pve_url.split('vncticket=')[0] + "vncticket=[REDACTED]")
-    # MK 2026-06-04: TLS verify is gated by the per-cluster ssl_verify flag
-    # (exposed via /api/internal/cluster-creds as `verify_pve_tls`). Default
-    # is False because PVE ships self-signed certs by default; admins flip
-    # it on once they have a real cert + uploaded the CA. Hard-disabling
-    # check_hostname + verify_mode used to be unconditional — now it's the
-    # opt-out path with a logged warning so cert posture is observable.
-    pve_ssl = ssl.create_default_context()
-    if not verify_pve_tls:
-        pve_ssl.check_hostname = False
-        pve_ssl.verify_mode = ssl.CERT_NONE
-        print(f"[TERMPROXY] TLS verify DISABLED for PVE host {pve_host!r} (cluster ssl_verify=false)")
+    # NS 2026-06-05 (C-1): the PVE session cookie (root on pve:8006) never transits the
+    # browser; it is minted here. None without a stored password: termproxy needs one.
     try:
-        pve_ws = await websockets.connect(
-            pve_url,
-            additional_headers={'Cookie': f'PVEAuthCookie={pve_auth}'},
-            ssl=pve_ssl,
-            open_timeout=10,
-        )
+        pve_auth = mgr.mint_console_auth_ticket()
     except Exception as e:
-        print(f"[TERMPROXY] PVE WS connect failed: {type(e).__name__}: {e}")
-        await client_ws.send(f'{{"status":"error","message":"PVE WS connect failed: {type(e).__name__}"}}')
-        await client_ws.close(1011, "pve")
-        return
+        logging.warning(f"[TERMPROXY] could not mint the PVE ticket for {_sl(cluster_id)}: {e}")
+        pve_auth = None
+    if not pve_auth:
+        return _text_console_refusal(ws, 'Console auth unavailable for this cluster (needs user/password auth)', 1011)
+    _terminal_relay(ws, mgr, node, vm_type, vmid, pve_host, pve_port, pve_ticket, pve_user, pve_auth)
 
-    # Send PVE auth handshake: user:ticket\\n
+
+def _terminal_relay(ws, mgr, node, vm_type, vmid, pve_host, pve_port, pve_ticket, pve_user, pve_auth):
+    """Wire protocol (verbatim from pve-xtermjs/src/www/main.js):
+      client → PVE (after auth): "0:<len>:<data>" (xterm input, len in UTF-8 bytes)
+                                 "1:<cols>:<rows>:" (resize, no body)
+      PVE → client (after auth): raw TTY bytes, the first message after the handshake "OK"
+    The page speaks plain xterm.js, the framing is ours on both sides."""
+    import codecs
+    import gevent
+    import websocket
+
+    verify = bool(getattr(mgr, '_ssl_verify', False))
+    netloc = f'[{pve_host}]' if ':' in pve_host and not pve_host.startswith('[') else pve_host
+    api_port = int(getattr(mgr, 'api_port', 8006) or 8006)
+    path = (f"/api2/json/nodes/{node}/{vm_type}/{vmid}/vncwebsocket"
+            f"?port={pve_port}&vncticket={url_quote(pve_ticket, safe='')}")
+    pve_ws = None
     try:
-        await pve_ws.send(f"{pve_user}:{pve_ticket}\\n")
-        first = await asyncio.wait_for(pve_ws.recv(), timeout=5.0)
+        pve_ws = websocket.create_connection(
+            f"wss://{netloc}:{api_port}{path}",
+            sslopt=({} if verify else {"cert_reqs": ssl.CERT_NONE}),
+            header={'Cookie': f'PVEAuthCookie={pve_auth}'},
+            redirect_limit=0,
+            timeout=10,
+        )
+        _refuse_ws_redirect(pve_ws)
+        _apply_vnc_socket_options(pve_ws.sock)
+        pve_ws.send(f"{pve_user}:{pve_ticket}\n")
+        pve_ws.settimeout(5)
+        first = pve_ws.recv()
         first_str = first.decode('utf-8', errors='replace') if isinstance(first, (bytes, bytearray)) else (first or '')
         if not first_str.startswith('OK'):
-            print(f"[TERMPROXY] PVE rejected handshake: {first_str!r}")
-            await client_ws.send(f'{{"status":"error","message":"PVE rejected: {first_str[:80]!r}"}}')
-            await pve_ws.close()
-            await client_ws.close(1011, "pve-auth")
-            return
-        print(f"[TERMPROXY] PVE handshake OK")
+            logging.warning(f"[TERMPROXY] PVE refused the handshake of {vm_type}/{vmid}: {first_str[:80]!r}")
+            pve_ws.close()
+            return _text_console_refusal(ws, f'PVE rejected: {first_str[:80]!r}', 1011)
     except Exception as e:
-        print(f"[TERMPROXY] handshake error: {type(e).__name__}: {e}")
-        await client_ws.send(f'{{"status":"error","message":"handshake error: {type(e).__name__}"}}')
-        try: await pve_ws.close()
-        except: pass
-        await client_ws.close(1011, "handshake")
+        # never the URL: it carries the vncticket, a live console credential
+        logging.warning(f"[TERMPROXY] PVE terminal of {vm_type}/{vmid} on {pve_host} did not open: "
+                        f"{type(e).__name__}: {e}")
+        if pve_ws is not None:
+            try:
+                pve_ws.close()
+            except Exception:
+                pass
+        return _text_console_refusal(ws, f'PVE WS connect failed: {type(e).__name__}', 1011)
+
+    try:
+        ws.send('{"status":"connected"}')
+    except Exception:
+        pve_ws.close()
         return
 
-    await client_ws.send('{"status":"connected"}')
+    # #713 - one SSL object, one lock around every operation on it, see _vnc_relay
+    pve_ws.settimeout(VNC_PVE_RECV_SLICE)
+    io_lock = threading.Lock()
+    state = {'on': True}
+    # a UTF-8 character split over two PVE frames is decoded whole
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
 
-    # Bidirectional proxy
-    async def pve_to_client():
-        try:
-            async for msg in pve_ws:
-                # PVE termproxy sends raw bytes (TTY output)
-                if isinstance(msg, (bytes, bytearray)):
-                    await client_ws.send(msg.decode('utf-8', errors='replace'))
-                else:
-                    await client_ws.send(msg)
-        except Exception as e:
-            print(f"[TERMPROXY] PVE→client: {type(e).__name__}: {e}")
-
-    async def client_to_pve():
-        try:
-            async for msg in client_ws:
-                if isinstance(msg, str):
-                    # Resize protocol: JSON {type:'resize', cols, rows}
-                    if msg.startswith('{'):
-                        try:
-                            j = json.loads(msg)
-                            if j.get('type') == 'resize':
-                                cols = int(j.get('cols', 80))
-                                rows = int(j.get('rows', 24))
-                                await pve_ws.send(f"1:{cols}:{rows}:")
-                                continue
-                        except Exception:
-                            pass
-                    payload_len = len(msg.encode('utf-8'))
-                    await pve_ws.send(f"0:{payload_len}:{msg}")
-                else:
-                    try: text = msg.decode('utf-8')
-                    except Exception: text = msg.decode('latin-1', errors='replace')
-                    await pve_ws.send(f"0:{len(msg)}:{text}")
-        except Exception as e:
-            print(f"[TERMPROXY] client→PVE: {type(e).__name__}: {e}")
-
-    try:
-        await asyncio.gather(pve_to_client(), client_to_pve(), return_exceptions=True)
-    finally:
-        try: await pve_ws.close()
-        except: pass
-        print(f"[TERMPROXY] session ended {vm_type}/{vmid_str}")
-
-
-async def main():
-    sys.path.insert(0, os.environ.get('PEGAPROX_PKG_BASE') or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    ssl_context = None
-    if SSL_CERT and SSL_KEY and os.path.exists(SSL_CERT) and os.path.exists(SSL_KEY):
-        # a renewed pair reaches this process only through the files, so the context
-        # follows them (pegaprox/utils/served_pair.py)
-        try:
-            from pegaprox.utils.served_pair import ServedPair
-        except ImportError as _e:
-            print(f"[SSH-WS] WARNING: served_pair not importable ({_e}), a new certificate needs a restart")
-            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ssl_context.load_cert_chain(SSL_CERT, SSL_KEY)
-        else:
-            ssl_context = ServedPair(SSL_CERT, SSL_KEY).context
-    
-    # Issue #71/#95: empty host = all interfaces (dual-stack IPv4+IPv6)
-    ws_host = None if not BIND_HOST else BIND_HOST
-    display_host = BIND_HOST or '0.0.0.0'
-    # NS May 2026 (#388): wire the lenient_process_request hook so PVE 9.1.x
-    # hosts (and any middlebox that strips the Upgrade token from Connection)
-    # don't trigger InvalidUpgrade at SSH WS handshake. Was only on VNC before.
-    # crcro on issue #388 reported the exact SSH-WS InvalidUpgrade trace this fixes.
-    _lpr_ssh = None
-    try:
-        from pegaprox.utils.ws_lenient import lenient_process_request as _lpr_ssh
-    except Exception as _e:
-        print(f"[SSH-WS] WARNING: lenient_process_request not importable ({_e}) — strict handshake only")
-    serve_kwargs = {'ssl': ssl_context, 'ping_interval': 30, 'ping_timeout': 10}
-    if _lpr_ssh is not None:
-        serve_kwargs['process_request'] = _lpr_ssh
-    try:
-        async with websockets.serve(ssh_handler, ws_host, PORT, **serve_kwargs):
-            print(f"SSH WebSocket server ready on {display_host}:{PORT} (lenient-hook={_lpr_ssh is not None})")
-            await asyncio.Future()
-    except OSError as e:
-        if ':' in str(display_host):
-            print(f"SSH WebSocket: IPv6 bind failed ({e}), falling back to 0.0.0.0")
-            async with websockets.serve(ssh_handler, '0.0.0.0', PORT, **serve_kwargs):
-                print(f"SSH WebSocket server ready on 0.0.0.0:{PORT}")
-                await asyncio.Future()
-        else:
-            raise
-
-def _watch_parent():
-    # the server goes with the PegaProx that started it, also after a kill -9 of that one,
-    # which left it holding its port for the next start (start_new_session: no signal
-    # reaches it from the parent's group)
-    import time as _time
-    parent = os.getppid()
-
-    def watch():
-        while True:
-            _time.sleep(5)
-            if os.getppid() != parent:
-                os._exit(0)
-    threading.Thread(target=watch, daemon=True).start()
-
-
-if __name__ == '__main__':
-    _watch_parent()
-    asyncio.run(main())
-'''
-    
-    # Write the helper script where the service user can actually write.
-    # MK 2026-06-09 (#528 akagoldsmith): the Debian package lives under
-    # /usr/lib/pegaprox (root-owned, read-only for the pegaprox service user), so
-    # writing into the package's api/ dir failed with EACCES and the SSH-WS
-    # subprocess never started — port 5002 stayed dead. Fall back to a writable dir;
-    # the subprocess gets the package base via PEGAPROX_PKG_BASE below so its
-    # `import pegaprox.*` still resolves from wherever the script ends up.
-    import tempfile
-    pkg_base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    if not os.access(script_dir, os.W_OK):
-        # MK Sep 2026 (#958) - CONFIG_DIR before the shared temp dir. On a package
-        # install the fallback above put an executable under a predictable name in
-        # a world-writable directory; CONFIG_DIR is the service's own (created 0700
-        # next to the database), so nobody else can pre-create or swap the file.
-        # gettempdir() stays as the last resort for installs where even that fails.
-        for _cand in (CONFIG_DIR, tempfile.gettempdir()):
-            if _cand and os.path.isdir(_cand) and os.access(_cand, os.W_OK):
-                script_dir = _cand
-                break
-    script_path = os.path.join(script_dir, '.ssh_ws_server.py')
-    
-    try:
-        # kill existing process on port if any on this port first
-        try:
-            result = subprocess.run(
-                ['fuser', '-k', f'{port}/tcp'],
-                capture_output=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                print(f"Killed existing process on port {port}")
-                time.sleep(0.5)  # Give it time to release the port
-        except Exception as e:
-            # fuser might not be available, try lsof
+    def pve_to_client():
+        while state['on']:
             try:
-                result = subprocess.run(
-                    ['lsof', '-t', f'-i:{port}'],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                if result.stdout.strip():
-                    pids = result.stdout.strip().split('\n')
-                    for pid in pids:
-                        try:
-                            os.kill(int(pid), signal.SIGTERM)
-                            print(f"Killed existing process {pid} on port {port}")
-                        except:
-                            pass
-                    time.sleep(0.5)
-            except:
-                pass  # Neither fuser nor lsof available, hope for the best
-        
-        # MK Sep 2026 (#958) - O_NOFOLLOW so a symlink planted at script_path is an
-        # error rather than a write through it, O_EXCL so a plain file somebody else
-        # got there first is refused instead of written into (O_NOFOLLOW alone only
-        # covers the symlink half, and O_TRUNC would have handed us their inode to
-        # rewrite between our write and the exec), and 0600 so the file we are about
-        # to execute is not readable or writable by anyone else. Our own leftover from
-        # the last start has to go first or O_EXCL would refuse every restart; if the
-        # unlink fails because the file is not ours, the open fails too, and the
-        # terminal not starting is the right outcome there.
-        try:
-            os.unlink(script_path)
-        except OSError:
-            pass
-        _fd = os.open(script_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        try:
-            with os.fdopen(_fd, 'w') as f:
-                _fd = None
-                f.write(server_script)
-        finally:
-            if _fd is not None:
-                os.close(_fd)
-        try:
-            os.chmod(script_path, 0o600)   # pre-existing file keeps its old mode otherwise
-        except OSError:
-            pass
-        
-        # Set environment variables for the subprocess
-        env = os.environ.copy()
-        env['PEGAPROX_PKG_BASE'] = pkg_base  # #528: subprocess may live outside the pkg dir now
-        # hand the shared known_hosts path to the WS subprocess so its TOFU host-key
-        # verification uses the SAME file as the main app (reject-on-change works).
-        try:
-            from pegaprox.utils.ssh_security import _KNOWN_HOSTS as _shared_kh
-            env['PEGAPROX_SSH_KNOWN_HOSTS'] = _shared_kh
-        except Exception:
-            pass
-        env['SSH_WS_PORT'] = str(port)
-        env['SSH_WS_HOST'] = host  # Issue #71: IPv6 support
-        main_port = port - 2
-        env['PEGAPROX_URL'] = _ws_subprocess_base_url(main_port, ssl_cert)   # #957
-        from pegaprox.api.realtime import console_server_secret
-        env['PEGAPROX_CONSOLE_SECRET'] = console_server_secret()
-        if ssl_cert:
-            env['SSH_WS_SSL_CERT'] = ssl_cert
-        if ssl_key:
-            env['SSH_WS_SSL_KEY'] = ssl_key
-        
-        # Start as subprocess (completely separate process, no gevent)
-        # Use same working directory as main server
-        proc = subprocess.Popen(
-            [sys.executable, script_path],
-            env=env,
-            cwd=os.getcwd(),  # MK: Ensure same working dir for config file access
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            start_new_session=True
-        )
-        
-        # Read output in background
-        def read_output():
-            for line in proc.stdout:
-                line = line.decode('utf-8', errors='replace').strip()
-                if line:
-                    print(f"[SSH-WS] {line}")
-        
-        import threading
-        output_thread = threading.Thread(target=read_output, daemon=True)
-        output_thread.start()
-        
-        print(f"SSH WebSocket server subprocess started (PID: {proc.pid})", flush=True)
-        return proc
+                s = pve_ws.sock
+                if s is None:
+                    break
+                if not _pve_socket_readable(s, 1.0):
+                    continue
+                with io_lock:
+                    opcode, data = pve_ws.recv_data()
+            except websocket.WebSocketTimeoutException:
+                continue
+            except Exception:
+                break
+            if opcode == websocket.ABNF.OPCODE_CLOSE:
+                break
+            text = decoder.decode(data) if isinstance(data, (bytes, bytearray)) else data
+            if not text:
+                continue
+            try:
+                ws.send(text)
+            except Exception:
+                break
+        state['on'] = False
 
-    except Exception as e:
-        print(f"Failed to start SSH WebSocket server: {e}", flush=True)
+    def to_pve(msg):
+        with io_lock:
+            write_with_deadline(pve_ws, pve_ws.send, msg)
+
+    def keepalive():
+        # a quiet terminal stays open: a WS ping every 20 s, as the websockets client of
+        # the port+2 server sent it, and termproxy's own "2", which pve-xtermjs sends
+        while state['on']:
+            gevent.sleep(20)
+            if not state['on']:
+                return
+            try:
+                with io_lock:
+                    write_with_deadline(pve_ws, pve_ws.ping)
+                to_pve('2')
+            except Exception:
+                state['on'] = False
+                return
+
+    # no database from here on either, see _vnc_relay
+    get_db().release_connection()
+    reader = gevent.spawn(pve_to_client)
+    pinger = gevent.spawn(keepalive)
+    try:
+        while state['on']:
+            try:
+                msg = ws.receive(timeout=1)
+            except Exception:
+                break
+            if msg is None:
+                if getattr(ws, 'connected', False):
+                    continue
+                break
+            if isinstance(msg, str):
+                # resize: {type:'resize', cols, rows}
+                if msg.startswith('{'):
+                    try:
+                        j = json.loads(msg)
+                        if j.get('type') == 'resize':
+                            to_pve(f"1:{int(j.get('cols', 80))}:{int(j.get('rows', 24))}:")
+                            continue
+                    except (ValueError, TypeError, AttributeError):
+                        pass
+                    except Exception:
+                        break
+                payload = msg
+            else:
+                try:
+                    payload = msg.decode('utf-8')
+                except UnicodeDecodeError:
+                    payload = msg.decode('latin-1')
+            try:
+                to_pve(f"0:{len(payload.encode('utf-8'))}:{payload}")
+            except Exception:
+                break
+    finally:
+        state['on'] = False
+        gevent.killall([reader, pinger], block=False)
+        try:
+            with gevent.Timeout(2):
+                pve_ws.close()
+        except (Exception, gevent.Timeout):
+            pass
+        logging.info(f"[TERMPROXY] session ended {vm_type}/{vmid}")
+
+
+# an encrypted OpenSSH key names its own bcrypt rounds, ~12 ms each; ssh-keygen takes 16,
+# hardening guides say 100
+_SHELL_KEY_MAX_ROUNDS = 128
+
+
+def _openssh_key_header(text):
+    """(key type, bcrypt rounds) of an OpenSSH private key, (None, 0) for another or a
+    broken one. Read before paramiko sees the key: it would run the key's own rounds once
+    for every class it tries."""
+    import base64
+    import struct
+    begin, end = '-----BEGIN OPENSSH PRIVATE KEY-----', '-----END OPENSSH PRIVATE KEY-----'
+    if begin not in text or end not in text:
+        return None, 0
+    try:
+        blob = base64.b64decode(''.join(text.split(begin, 1)[1].split(end, 1)[0].split()))
+        magic = b'openssh-key-v1\x00'
+        if not blob.startswith(magic):
+            return None, 0
+        pos = len(magic)
+
+        def string():
+            nonlocal pos
+            n = struct.unpack('>I', blob[pos:pos + 4])[0]
+            out = blob[pos + 4:pos + 4 + n]
+            if len(out) != n:
+                raise ValueError('cut')
+            pos += 4 + n
+            return out
+        string()                            # cipher
+        kdf, kdf_opts = string(), string()
+        pos += 4                            # number of keys
+        public = string()
+        key_type = public[4:4 + struct.unpack('>I', public[:4])[0]].decode('ascii', 'replace')
+        rounds = 0
+        if kdf == b'bcrypt':
+            salt_len = struct.unpack('>I', kdf_opts[:4])[0]
+            rounds = struct.unpack('>I', kdf_opts[4 + salt_len:8 + salt_len])[0]
+        return key_type, rounds
+    except Exception:
+        return None, 0
+
+
+def _shell_private_key(paramiko, text, passphrase=''):
+    """The private key the shell dialog sent, as a paramiko key, or None. RSA, Ed25519,
+    ECDSA and, where paramiko still has it, DSA.
+
+    MK Nov 2026 - parsed in gevent's threadpool: bcrypt lets go of the GIL, and on the hub
+    an encrypted key held every request and console of the instance for as long as its
+    rounds took (the console server on port+2 only held itself). One class per key, the
+    one its type names, and no more rounds than _SHELL_KEY_MAX_ROUNDS."""
+    import io
+    key_type, rounds = _openssh_key_header(text)
+    if rounds > _SHELL_KEY_MAX_ROUNDS:
+        logging.warning(f"[SHELL] refused an SSH key with {rounds} bcrypt rounds "
+                        f"(at most {_SHELL_KEY_MAX_ROUNDS})")
         return None
+    by_type = {'ssh-rsa': paramiko.RSAKey, 'ssh-ed25519': paramiko.Ed25519Key,
+               'ssh-dss': getattr(paramiko, 'DSSKey', None)}
+    if key_type and key_type.startswith('ecdsa-sha2-'):
+        classes = (paramiko.ECDSAKey,)
+    elif key_type:
+        classes = (by_type.get(key_type),)
+    else:
+        classes = (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey,
+                   getattr(paramiko, 'DSSKey', None))
+
+    def parse():
+        for key_class in classes:
+            if key_class is None:
+                continue
+            try:
+                return key_class.from_private_key(io.StringIO(text), password=passphrase or None)
+            except Exception:
+                continue
+        return None
+    try:
+        import gevent
+        from gevent import monkey
+        if monkey.is_module_patched('socket'):
+            return gevent.get_hub().threadpool.apply(parse)
+    except ImportError:
+        pass
+    return parse()
 
 
-# Terminal/Shell WebSocket proxy (legacy - flask-sock version, kept for non-gevent setups)
+def _shell_say(ws, message):
+    try:
+        ws.send(json.dumps({'status': 'error', 'message': message}))
+    except Exception:
+        pass
+
+
+# The node shell (SSH) - MK Nov 2026: the only one, the SSH console server on port+2 is gone
 @sock.route('/api/clusters/<cluster_id>/nodes/<node>/shellws')
 def node_shell_websocket_proxy(ws, cluster_id, node):
     """WebSocket proxy for node shell via SSH"""
@@ -14222,7 +12812,7 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
             pass
         return
     # confined to single VMs or a pool here (a portal user, say): no node shell, the same
-    # rule as /api/internal/cluster-creds
+    # rule as the shell ticket route (require_unconfined)
     from pegaprox.api.helpers import caller_is_scoped
     if caller_is_scoped(user, cluster_id):
         logging.error(f"SHELL WS: User {session['user']} is confined on cluster {cluster_id}")
@@ -14234,8 +12824,16 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
 
     logging.info(f"SHELL WS: User {session['user']} authenticated for shell on {cluster_id}/{node}")
     # #988 - counted against the account until the request ends, the credential wait included,
-    # and hung up with its session (#1038), the one the token was minted under
-    hold_websocket(session['user'], ws, sid=session.get('sid') if ws_token else session_id)
+    # and hung up with its session (#1038), the one the token was minted under. As a console
+    # it leaves the request pool, so the five minutes the login dialog may take hold no slot
+    held = hold_websocket(session['user'], ws, sid=session.get('sid') if ws_token else session_id,
+                          console=True)
+    if not held:
+        try:
+            ws.send(json.dumps({'status': 'error', 'message': _console_full(held)[0]}))
+        except Exception:
+            pass
+        return
 
     logging.info(f"")
     logging.info(f"========================================")
@@ -14275,8 +12873,10 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
     # Get node IP address from cluster status
     logging.info(f"Step 1: Getting IP for node {node}...")
     
-    # First authenticate with cluster
-    if not manager.connect_to_proxmox():
+    # First authenticate with cluster. MK Nov 2026 - only when the manager is not connected:
+    # a login of its own drops the cluster's caches, and with every shell going through
+    # here that was a flush per shell (the console server on port+2 never logged in)
+    if not manager.is_connected and not manager.connect_to_proxmox():
         logging.error("Failed to authenticate with cluster!")
         try:
             ws.send('{"status":"error","message":"Cluster auth failed"}')
@@ -14307,24 +12907,32 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
     
     logging.info(f"Step 2: Waiting for SSH credentials...")
     
-    # Wait for credentials from client
+    # Wait for credentials from client. MK Nov 2026 - five minutes and a key login, as the
+    # SSH console server on port+2 had them: the page offers both
     try:
-        cred_msg = ws.receive(timeout=60)
+        cred_msg = ws.receive(timeout=300)
         if not cred_msg:
-            logging.error("No credentials received")
+            logging.info("SHELL WS: no credentials within five minutes")
+            ws.send('{"status":"error","message":"Login timeout"}')
             return
-        
+
         creds = json.loads(cred_msg)
-        ssh_user = creds.get('username', 'root')
-        ssh_pass = creds.get('password', '')
-        
-        logging.info(f"  Got credentials for user: {ssh_user}")
-        
+        if not isinstance(creds, dict):
+            raise ValueError('credentials are no object')
+        ssh_user = str(creds.get('username') or 'root')
+        ssh_pass = str(creds.get('password') or '')
+        ssh_key = str(creds.get('privateKey') or '')
+        if not ssh_pass and not ssh_key:
+            ws.send('{"status":"error","message":"Password or SSH key required"}')
+            return
+
+        logging.info(f"  Got credentials for user: {_sl(ssh_user)}")
+
     except Exception as e:
         logging.error(f"Error receiving credentials: {e}")
         try:
-            ws.send('{"status":"error","message":"Credentials timeout"}')
-        except:
+            ws.send('{"status":"error","message":"Failed to receive credentials"}')
+        except Exception:
             pass
         return
     
@@ -14344,15 +12952,24 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
         # #778 (zobsg) — strip IPv6 brackets before handing the host to paramiko (node_ip can fall
         # back to the bracketed config host); a bracketed literal fails to resolve in ssh.connect.
         _ssh_host = node_ip[1:-1] if node_ip and node_ip.startswith('[') and node_ip.endswith(']') else node_ip
+        login = {'password': ssh_pass}
+        if ssh_key:
+            pkey = _shell_private_key(paramiko, ssh_key, ssh_pass)
+            if pkey is None:
+                ws.send('{"status":"error","message":"SSH key error: Could not parse SSH key - unsupported format"}')
+                return
+            login = {'pkey': pkey}
         # Connect
         ssh.connect(
             hostname=_ssh_host,
-            port=getattr(manager.config, 'ssh_port', 22) or 22,
+            # the cluster's ssh_port as every SSH path reads it, 22 for a stored value that
+            # is no port (the console server on port+2 did the same)
+            port=node_ssh_port(manager.config),
             username=ssh_user,
-            password=ssh_pass,
             timeout=30,
             allow_agent=False,
-            look_for_keys=False
+            look_for_keys=False,
+            **login
         )
         persist_host_keys(ssh)
 
@@ -14360,82 +12977,84 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
         
         # Get interactive shell
         channel = ssh.invoke_shell(term='xterm-256color', width=120, height=40)
-        channel.settimeout(0.1)
+        # MK Nov 2026 - a read that waits for the node instead of asking it a hundred times
+        # a second; the second is only how soon the reader sees the session end
+        channel.settimeout(1.0)
 
         ws.send('{"status":"connected"}')
         logging.info(f"Step 5: Shell ready!")
-        
-        stop_event = threading.Event()
-        
-        # Thread: SSH -> WebSocket
+
+        import codecs
+        import gevent
+        state = {'on': True}
+        # text frames, as the port+2 server sent them; a UTF-8 character split over two
+        # reads is decoded whole
+        decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+
+        # SSH -> WebSocket
         def ssh_to_ws():
             try:
-                while not stop_event.is_set():
+                while state['on']:
                     try:
-                        if channel.recv_ready():
-                            data = channel.recv(4096)
-                            if data:
-                                ws.send(data)
-                        else:
-                            import time
-                            time.sleep(0.01)
+                        data = channel.recv(32768)
                     except socket.timeout:
                         continue
-                    except Exception as e:
-                        logging.error(f"SSH recv error: {e}")
+                    if not data:
                         break
-            except:
-                pass
+                    text = decoder.decode(data)
+                    if text:
+                        ws.send(text)
+            except Exception as e:
+                if state['on']:
+                    logging.info(f"SSH recv ended: {e}")
             finally:
-                stop_event.set()
-        
-        ssh_thread = threading.Thread(target=ssh_to_ws)
-        ssh_thread.daemon = True
-        ssh_thread.start()
-        
+                state['on'] = False
+
+        # no database from here on either, see _vnc_relay
+        get_db().release_connection()
+        reader = gevent.spawn(ssh_to_ws)
+
         # Main loop: WebSocket -> SSH
-        while not stop_event.is_set():
+        while state['on']:
             try:
-                data = ws.receive()
-                if data is None:
-                    logging.info("Client disconnected")
-                    break
-                
-                # Handle JSON messages
-                if isinstance(data, str) and data.startswith('{'):
-                    try:
-                        msg = json.loads(data)
+                data = ws.receive(timeout=1)
+            except Exception:
+                break
+            if data is None:
+                if getattr(ws, 'connected', False):
+                    continue
+                logging.info("Client disconnected")
+                break
+            # Handle JSON messages
+            if isinstance(data, str) and data.startswith('{'):
+                try:
+                    msg = json.loads(data)
+                    if isinstance(msg, dict):
                         # Handle resize
                         if msg.get('type') == 'resize':
-                            channel.resize_pty(
-                                width=msg.get('cols', 120),
-                                height=msg.get('rows', 40)
-                            )
+                            channel.resize_pty(width=int(msg.get('cols', 120)), height=int(msg.get('rows', 40)))
                         continue
-                    except:
-                        pass
-                
-                # Send to SSH
-                if isinstance(data, str):
-                    channel.send(data)
-                else:
-                    channel.send(data)
-                    
+                except (ValueError, TypeError):
+                    pass
+            # Send to SSH - all of it, a paste can be bigger than one window
+            try:
+                channel.sendall(data.encode('utf-8') if isinstance(data, str) else data)
             except Exception as e:
-                logging.error(f"WS recv error: {e}")
+                logging.info(f"SSH send ended: {e}")
                 break
-        
-        stop_event.set()
-        
+
+        state['on'] = False
+        reader.kill(block=False)
+
     except paramiko.AuthenticationException:
-        logging.error("SSH authentication failed!")
-        ws.send('{"status":"error","message":"SSH Login fehlgeschlagen - falscher Username oder Passwort"}')
+        logging.info("SSH authentication failed")
+        _shell_say(ws, 'SSH login failed - wrong user name, password or key')
     except paramiko.SSHException as e:
-        logging.error(f"SSH error: {e}")
-        ws.send(f'{{"status":"error","message":"SSH Fehler: {str(e)}"}}')
+        logging.warning(f"SSH error: {e}")
+        _shell_say(ws, f'SSH error: {e}')
     except Exception as e:
-        logging.exception(f"Shell error: {e}")
-        ws.send(f'{{"status":"error","message":"{str(e)}"}}')
+        logging.warning(f"Shell error: {type(e).__name__}: {e}")
+        _shell_say(ws, f'{type(e).__name__}: {e}')
     finally:
         try:
             channel.close()

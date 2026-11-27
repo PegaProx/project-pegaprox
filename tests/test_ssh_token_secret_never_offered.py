@@ -711,10 +711,12 @@ def _own_nodes(fn):
 
 def test_every_console_tunnel_asks_whether_ssh_may_go_out():
     """The tile screenshot, vnc_poll and the console websocket each read vnc_tunnel and
-    went straight to the SSH tunnel. Only _vnc_tunnel_wanted reads the setting now."""
+    went straight to the SSH tunnel. Only _vnc_tunnel_wanted reads the setting now, and
+    each opener asks it. The console websocket is the main port's _vnc_relay since the
+    VNC server on port+1 (vnc_handler) is gone."""
     with open(os.path.join(ROOT, 'pegaprox', 'api', 'vms.py'), encoding='utf-8') as fh:
         tree = ast.parse(fh.read())
-    readers, openers = set(), set()
+    readers, openers, askers = set(), set(), set()
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -725,8 +727,11 @@ def test_every_console_tunnel_asks_whether_ssh_may_go_out():
             if (isinstance(n, ast.Attribute) and n.attr == 'acquire'
                     and isinstance(n.value, ast.Name) and n.value.id == '_vt'):
                 openers.add(fn.name)
+            if isinstance(n, ast.Call) and _callee(n) == '_vnc_tunnel_wanted':
+                askers.add(fn.name)
     assert readers == {'_vnc_tunnel_wanted'}
-    assert openers == {'_screenshot_via_rfb', 'vnc_poll', 'vnc_handler'}
+    assert openers == {'_screenshot_via_rfb', 'vnc_poll', '_vnc_relay'}
+    assert openers <= askers, openers - askers
 
 
 def test_the_tunnel_pool_opens_no_socket_without_anything_to_log_in_with(logins):

@@ -13,6 +13,7 @@ import itertools
 import os
 import socket
 from datetime import datetime
+from functools import cached_property
 
 from pegaprox.constants import SSE_TOKEN_TTL
 from pegaprox.utils.sanitization import sanitize_log_message as _sl
@@ -335,7 +336,7 @@ def end_session_channels(username: str, sids=None, keep: str = None) -> int:
     session and its SSE token, and left a console token minted under it working for its
     60 s and every stream and socket it had open running. sids: those sessions only.
     Without: every one of the user's but `keep`'s, the API token ones among them.
-    Consoles on the VNC and SSH ports of their own are not reached from here.
+    The consoles are among the sockets, on whichever port of this process they came in.
     """
     sids = set(sids) if sids is not None else None
 
@@ -352,7 +353,10 @@ def end_session_channels(username: str, sids=None, keep: str = None) -> int:
         with lock:
             gone = [k for k, d in store.items() if isinstance(d, dict) and _ends(d)]
             for k in gone:
-                store.pop(k, None)
+                if store is sse_clients:
+                    drop_stream(k)
+                else:
+                    store.pop(k, None)
         n += len(gone)
     with _held_ws_lock:
         gone = [k for k, (user, _ws) in _held_ws.items()
@@ -360,18 +364,61 @@ def end_session_channels(username: str, sids=None, keep: str = None) -> int:
         socks = [_held_ws.pop(k)[1] for k in gone]
         for k in gone:
             _held_ws_sid.pop(k, None)
+            _held_consoles.discard(k)
     for ws in socks:
         logging.info(f"[WS] hung up a WebSocket of '{_sl(username)}' - its session ended")
         _hang_up(ws)
     return n + len(socks)
 
 
+# MK Nov 2026 - a browser stream taken out of sse_clients (a cap superseded it, its session
+# ended) is not over yet. Its generator waits up to 30 s on its queue before it looks, or
+# longer on a client that reads nothing, and since streams left the request pool nothing
+# counted it meanwhile: a viewer reopening streams on one token held as many connections as
+# it liked. Counted here until the generator ends (api/realtime.py sse_updates), and woken.
+_dropped_streams = {}        # client id -> username, with sse_clients_lock held
+STREAM_DROPPED = object()    # put on a dropped stream's queue, never sent
+
+
+def drop_stream(client_id):
+    """Take a stream out of sse_clients and wake a browser stream's generator, which then
+    finds itself gone and ends. Call with sse_clients_lock held."""
+    entry = sse_clients.pop(client_id, None)
+    if not isinstance(entry, dict) or entry.get('fed_stream'):
+        # a feed for another site reads its queue itself (core/federation_stream.py)
+        return entry
+    _dropped_streams[client_id] = entry.get('user')
+    q = entry.get('queue')
+    try:
+        q.put_nowait(STREAM_DROPPED)
+    except Exception:
+        # a full queue: the generator waits in a write and looks once that is done
+        pass
+    return entry
+
+
+def stream_ended(client_id):
+    """The generator of a stream is done: out of sse_clients and out of the dropped ones.
+    Call with sse_clients_lock held."""
+    sse_clients.pop(client_id, None)
+    _dropped_streams.pop(client_id, None)
+
+
+def dropped_streams(username=None):
+    """How many dropped streams have not ended yet, of `username` or of everybody. Call
+    with sse_clients_lock held."""
+    if username is None:
+        return len(_dropped_streams)
+    return sum(1 for u in _dropped_streams.values() if u == username)
+
+
 # NS Oct 2026 (#988) - a WebSocket on the main port holds a request-pool slot for as long
 # as it is open, like an SSE stream, and nothing bounded how many one account kept open:
-# any signed-in viewer could fill the pool with them. Counted per account across the
-# live-update socket and the consoles. Over the cap the oldest is hung up rather than the
-# new one refused, so a console that reconnects never locks its owner out. Next to the
-# SSE cap (20) one account holds at most 31 slots (slow bodies below), and the smallest
+# any signed-in viewer could fill the pool with them. Counted per account (the consoles
+# have their own budget since Nov 2026, see MAX_CONSOLES_PER_USER). Over the cap the oldest
+# is hung up rather than the new one refused, so a socket that reconnects never locks its
+# owner out. With the slow bodies below one account holds at most 11 slots (its SSE
+# streams left the pool in Nov 2026, api/realtime.py MAX_SSE_STREAMS), and the smallest
 # pool is 32.
 MAX_WS_PER_USER = 10
 _held_ws = {}
@@ -389,19 +436,174 @@ def _bodies_of(username):
     return sum(1 for user in _held_bodies.values() if user == username)
 
 
-def hold_websocket(username, ws, sid=None):
+def _default_max_consoles():
+    # two descriptors per console at the least (browser and PVE), four while its greenlet
+    # has a database connection open (the file and its WAL), more over an SSH tunnel; an
+    # eighth of the limit leaves the rest of the app its share
+    try:
+        import resource
+        soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+        if soft == resource.RLIM_INFINITY:
+            soft = 65536
+    except Exception:
+        soft = 1024
+    return max(64, min(2000, soft // 8))
+
+
+# MK Nov 2026 - the consoles came over from ports of their own (5001/5002), where neither
+# the request pool nor the cap above reached them. A console that stays in the pool holds
+# a slot for hours, and a few operators with their console tabs fill it: gevent stops
+# accepting and the instance answers nobody (#777). So a console leaves the request pool
+# once it is signed in (hold_websocket(console=True)) and counts on budgets of its own: per
+# session, where the session's oldest is hung up as above, and per account and for the
+# instance, where the new one is refused rather than somebody else's hung up. Per session
+# because one account may be several people (a shared admin): the account's oldest console
+# was a colleague's, whose noVNC reconnected and hung up the next one. The live-update
+# socket and slow bodies keep MAX_WS_PER_USER to themselves.
+def _env_count(name, default):
+    try:
+        return max(1, int(os.environ.get(name) or default))
+    except ValueError:
+        logging.warning(f"[WS] {name} is no number, using {default}")
+        return default
+
+
+MAX_CONSOLES_PER_SESSION = _env_count('PEGAPROX_MAX_CONSOLES_PER_SESSION', 24)
+MAX_CONSOLES_PER_USER = _env_count('PEGAPROX_MAX_CONSOLES_PER_USER', 200)
+MAX_CONSOLES = _env_count('PEGAPROX_MAX_CONSOLES', _default_max_consoles())
+_held_consoles = set()      # keys of _held_ws that are consoles
+_request_pools = []
+_out_of_pool = None         # gevent Group of the greenlets that left one, see end_out_of_pool
+
+
+def fd_budget(share):
+    """1/share of the descriptor limit, at least 64 and at most 2000: the default of a
+    budget of things that hold one descriptor each for long (SSE streams, idle
+    connections out of the request pool)."""
+    try:
+        import resource
+        soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+        if soft == resource.RLIM_INFINITY:
+            soft = 65536
+    except Exception:
+        soft = 1024
+    return max(64, min(2000, soft // share))
+
+
+def register_request_pool(pool):
+    """A gevent request pool of this process (app.py), so a console can leave it."""
+    _request_pools.append(pool)
+
+
+def _left_pool():
+    global _out_of_pool
+    if _out_of_pool is None:
+        import gevent.pool
+        _out_of_pool = gevent.pool.Group()
+    return _out_of_pool
+
+
+def _leave_request_pool():
+    """Give this greenlet's request slot back. True when it held one. The pool's stop()
+    no longer reaches a greenlet that left; end_out_of_pool ends it on shutdown."""
+    try:
+        import gevent
+        me = gevent.getcurrent()
+    except Exception:
+        return False
+    for pool in list(_request_pools):
+        try:
+            if me in pool:
+                pool.discard(me)
+                # a Group lets go of it by itself when it ends
+                _left_pool().add(me)
+                return True
+        except Exception:
+            logging.debug("[WS] could not take a console out of the request pool", exc_info=True)
+    return False
+
+
+def _rejoin_request_pool(pool):
+    """Take a slot of `pool` again for this greenlet, waiting for one while the pool is
+    full as a new connection waits to be accepted (app.py, a kept-alive connection whose
+    next request came in)."""
+    import gevent
+    me = gevent.getcurrent()
+    if me in pool:
+        return
+    pool.add(me)
+    if _out_of_pool is not None:
+        _out_of_pool.discard(me)
+
+
+def end_out_of_pool(timeout=2):
+    """End what left the request pools - consoles, SSE streams, idle connections - once
+    the servers stopped (app.py). Each unwinds as when its client goes away: the stream
+    leaves the registry, the socket is closed."""
+    if _out_of_pool is not None:
+        _out_of_pool.kill(block=True, timeout=timeout)
+
+
+def consoles_open():
+    with _held_ws_lock:
+        return len(_held_consoles)
+
+
+def hold_websocket(username, ws, sid=None, console=False):
     """Count this request's open WebSocket against its account until the route returns.
     Past MAX_WS_PER_USER the account's oldest socket is hung up. sid: the session it was
-    opened under, hung up with it (end_session_channels)."""
+    opened under, hung up with it (end_session_channels).
+
+    console: a console (VNC, shell, terminal). It leaves the request pool and counts
+    against MAX_CONSOLES_PER_SESSION instead: past it the session's oldest console is hung
+    up, never another session's. False when the instance already holds MAX_CONSOLES of
+    them, None when the account holds MAX_CONSOLES_PER_USER, and the session none of its
+    own to make room with: the caller refuses this one."""
     from flask import after_this_request
     key = next(_held_ws_seq)
     with _held_ws_lock:
-        mine = sorted(k for k, (user, _) in _held_ws.items() if user == username)
-        over = len(mine) + _bodies_of(username) - MAX_WS_PER_USER + 1
-        gone = [_held_ws.pop(k)[1] for k in mine[:max(0, over)]]
-        _held_ws[key] = (username, ws)
-        if sid:
-            _held_ws_sid[key] = sid
+        if console:
+            account = [k for k, (user, _) in _held_ws.items()
+                       if user == username and k in _held_consoles]
+            mine = sorted(k for k in account if _held_ws_sid.get(k) == (sid or None))
+            over = len(mine) - MAX_CONSOLES_PER_SESSION + 1
+            if len(account) - max(0, over) >= MAX_CONSOLES_PER_USER:
+                room = None
+            elif len(_held_consoles) - max(0, over) >= MAX_CONSOLES:
+                room = False
+            else:
+                room = True
+            # a full account or instance still lets a session replace its own oldest
+            # console, so a reconnect is never refused because of the dead socket it left
+            # behind
+            if not room and mine:
+                room, over = True, max(over, 1)
+            refused = not room
+            if room:
+                _held_consoles.add(key)
+        else:
+            refused = False
+            mine = sorted(k for k, (user, _) in _held_ws.items()
+                          if user == username and k not in _held_consoles)
+            over = len(mine) + _bodies_of(username) - MAX_WS_PER_USER + 1
+        if refused:
+            gone = []
+        else:
+            gone = [_held_ws.pop(k)[1] for k in mine[:max(0, over)]]
+            for k in mine[:max(0, over)]:
+                _held_ws_sid.pop(k, None)
+                _held_consoles.discard(k)
+            _held_ws[key] = (username, ws)
+            if sid:
+                _held_ws_sid[key] = sid
+    if refused:
+        if room is None:
+            logging.warning(f"[WS] refused a console of '{_sl(username)}' - the account holds "
+                            f"{MAX_CONSOLES_PER_USER} consoles (PEGAPROX_MAX_CONSOLES_PER_USER)")
+        else:
+            logging.warning(f"[WS] refused a console of '{_sl(username)}' - {MAX_CONSOLES} "
+                            "consoles are open on this instance (PEGAPROX_MAX_CONSOLES)")
+        return room
 
     # per request, not an app-wide hook: the lease fast path in app.py stands in for the
     # app-wide ones and turns itself off for any it does not know
@@ -411,14 +613,19 @@ def hold_websocket(username, ws, sid=None):
         return response
 
     for old in gone:
-        logging.info(f"[WS] hung up the oldest WebSocket of '{_sl(username)}' - over the per-user cap")
+        logging.info(f"[WS] hung up the oldest {'console' if console else 'WebSocket'} of "
+                     f"'{_sl(username)}' - over the per-{'session' if console else 'user'} cap")
         _hang_up(old)
+    if console:
+        _leave_request_pool()
+    return True
 
 
 def release_websocket(key):
     with _held_ws_lock:
         _held_ws.pop(key, None)
         _held_ws_sid.pop(key, None)
+        _held_consoles.discard(key)
 
 
 def hold_body(username):
@@ -426,7 +633,8 @@ def hold_body(username):
     The key to release it with, or None when the account's WebSockets and slow bodies
     already fill MAX_WS_PER_USER: that body keeps its clock."""
     with _held_ws_lock:
-        mine = sum(1 for user, _ in _held_ws.values() if user == username) + _bodies_of(username)
+        mine = sum(1 for k, (user, _) in _held_ws.items()
+                   if user == username and k not in _held_consoles) + _bodies_of(username)
         if mine >= MAX_WS_PER_USER:
             return None
         key = next(_held_ws_seq)
@@ -596,15 +804,30 @@ def _node_event_view(user, username, perm, node, cluster_ids, effective_role=Non
     return None
 
 
+class SSEFrame(str):
+    """A frame of the broadcast: the JSON text, which a federation feed relays as it is, and
+    the bytes a browser stream writes for it.
+
+    MK Nov 2026 - every stream built its own `data: ...` string of the frame and Werkzeug
+    encoded that again, two copies of 4-5 MB per stream and frame at 10k guests, held for as
+    long as a slow client took to read them. The bytes are made once, by the first stream
+    that sends the frame, and every other stream it went to writes that same object."""
+
+    @cached_property
+    def wire(self):
+        return b'data: %b\n\n' % self.encode()
+
+
 def _serialize_sse_message(update_type, data, cluster_id, timestamp):
     """One consistent SSE frame — used for the shared broadcast and per-user filtered frames."""
-    return json.dumps({
+    return SSEFrame(json.dumps({
         'type': update_type, 'data': data,
         'cluster_id': cluster_id, 'timestamp': timestamp,
-    }, default=str)
+    }, default=str))
 
 
-def _filtered_resources_frame(resources, cluster_id, username, timestamp, effective_role=None):
+def _filtered_resources_frame(resources, cluster_id, username, timestamp, effective_role=None,
+                              frames=None):
     """A per-VM-authorized 'resources' frame for a NON-admin client. Returns the serialized JSON,
     or None to send nothing (unknown user -> fail closed).
 
@@ -613,26 +836,47 @@ def _filtered_resources_frame(resources, cluster_id, username, timestamp, effect
     filters per-VM; the SSE stream previously did not). Scale: the caller filters ONLY scoped
     clients and caches this per DISTINCT username within one broadcast, so it's
     O(distinct-scoped-users), not O(clients); we fetch a SINGLE user (get_db().get_user), never
-    load_users() — that call is the documented hot-path landmine. user_can_access_vm admin-fast-
-    returns and reads the cached ACL map, so the per-VM pass is a dict lookup per VM.
+    load_users() - that call is the documented hot-path landmine.
+
+    MK Nov 2026 - the per-VM pass asked user_can_access_vm guest by guest, four or five SQL
+    statements each: 2.7 s a frame for an operator on 10k guests, 5 s for a pool-scoped one,
+    all of it on the hub. user_vm_access reads the account once per frame, then a guest is a
+    few dict lookups. frames: {kept row indexes: frame} of this broadcast, so the accounts that
+    keep the same guests (an unconfined operator keeps all of them) share one serialization.
     """
     if not isinstance(resources, list):
         return None
-    from pegaprox.utils.rbac import user_can_access_vm
+    from pegaprox.utils.rbac import user_vm_access
+    from pegaprox.utils.concurrent import HubTurns
     user = _sse_stored_user(username, effective_role)
     if not user:
         return None
-    allowed = [
-        r for r in resources
-        if user_can_access_vm(user, cluster_id, r.get('vmid'), 'vm.view', r.get('type'))
-    ]
+    may_view = user_vm_access(user, cluster_id, 'vm.view')
+    if getattr(may_view, 'everything', False):
+        # most non-admins are unconfined operators: they keep every row, none to look at
+        keep = range(len(resources))
+    else:
+        turns = HubTurns()
+        keep = []
+        for i, r in enumerate(resources):
+            if may_view(r.get('vmid'), r.get('type')):
+                keep.append(i)
+            if not i & 1023:
+                turns.take()
+    allowed = [resources[i] for i in keep]
     # MK Nov 2026 - the nodes these guests run on are what the stream shows of the cluster
     try:
         _note_node_scope(cluster_id, username, effective_role,
                          _node_scope_of(user, cluster_id, allowed))
     except Exception as e:
         logging.debug(f"[SSE] node scope of '{_sl(username)}' on {cluster_id} not kept: {e}")
-    return _serialize_sse_message('resources', allowed, cluster_id, timestamp)
+    if frames is None:
+        return _serialize_sse_message('resources', allowed, cluster_id, timestamp)
+    keep = tuple(keep)
+    frame = frames.get(keep)
+    if frame is None:
+        frame = frames[keep] = _serialize_sse_message('resources', allowed, cluster_id, timestamp)
+    return frame
 
 
 def _sse_user_can_view_vm(username, cluster_id, vmid, effective_role=None):
@@ -819,7 +1063,7 @@ def _filtered_tasks_frame(tasks, cluster_id, username, timestamp, effective_role
     client). None => unknown user, fail closed."""
     if not isinstance(tasks, list):
         return None
-    from pegaprox.utils.rbac import user_can_access_vm
+    from pegaprox.utils.rbac import user_vm_access
     user = _sse_stored_user(username, effective_role)
     if not user:
         return None
@@ -841,12 +1085,15 @@ def _filtered_tasks_frame(tasks, cluster_id, username, timestamp, effective_role
                 continue
         return None
 
+    # the account is read once for the 50 rows, not once per row (push_immediate_update sends
+    # this after every guest action)
+    may_view = user_vm_access(user, cluster_id, 'vm.view')
     allowed = []
     for t in tasks:
         _vid = _vmid_of(t)
         if _vid is None:
             continue  # node/cluster task → not for a per-VM-scoped client
-        if user_can_access_vm(user, cluster_id, _vid, 'vm.view'):
+        if may_view(_vid):
             allowed.append(t)
     return _serialize_sse_message('tasks', allowed, cluster_id, timestamp)
 
@@ -911,6 +1158,7 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
         # keyed on (user, the role the STREAM was minted with) — two streams of the same
         # account can be floored differently, and must not share a filter decision
         _res_frame_cache = {}
+        _res_frames = None        # kept row indexes -> that frame, the shared one for all rows
         _cfg_access_cache = {}    # uname -> bool: may this user view THIS vm_config frame's vmid (audit M1)
         _tasks_frame_cache = {}   # uname -> per-VM-filtered 'tasks' frame (audit M1)
         _vmw_perm_cache = {}      # uname -> bool: holds the vmware.* perm the REST twin requires
@@ -975,8 +1223,14 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
                         uname, _eff = client_info.get('user'), client_info.get('effective_role')
                         client_message = _res_frame_cache.get((uname, _eff), _SSE_FILTER_MISSING)
                         if client_message is _SSE_FILTER_MISSING:
+                            if _res_frames is None:
+                                from pegaprox.utils.concurrent import HubTurns
+                                _res_frames = ({tuple(range(len(data))): message}
+                                               if isinstance(data, list) else {})
+                                _res_turns = HubTurns()
+                            _res_turns.take()   # many accounts take a while, let the hub in
                             client_message = _filtered_resources_frame(data, cluster_id, uname,
-                                                                       timestamp, _eff)
+                                                                       timestamp, _eff, _res_frames)
                             _res_frame_cache[uname, _eff] = client_message
                     elif update_type == 'vm_config' and cluster_id is not None and not client_info.get('is_admin', False):
                         # audit M1 — vm_config carries the full VM config (disks/net/cloud-init);
@@ -1110,6 +1364,11 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
                         continue  # unknown user -> fail closed, send nothing
                     if len(client_message) > _MAX_BROADCAST_BYTES:
                         logging.warning(f"SSE message too large ({len(client_message)} bytes), skipping")
+                        continue
+                    # the resources pass lets the hub in, and a stream ended meanwhile (signed
+                    # out, revoked, superseded) is still in the snapshot. Its generator sends
+                    # what it finds queued before it looks, so it must find nothing.
+                    if sse_clients.get(client_id) is not client_info:
                         continue
                     try:
                         q.put_nowait(client_message)

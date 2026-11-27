@@ -9,11 +9,22 @@ that cluster's log went silent and its lines landed in the sibling's file.
 #784 — signal.signal installs the handler ON the gevent hub, and http_server.stop()
 waits for in-flight greenlets. Waiting on the hub raises BlockingSwitchOutError,
 so a systemd stop exited 1 instead of stopping cleanly. MK
+
+Nov 2026: the SSH console server is no subprocess any more, so there is nothing of ours
+left to outlive the app. The legacy console ports are listeners of the same app in the
+same process now, and the shutdown stops them with the main server.
 """
 import logging
 import os
+import signal
+import socket
+import subprocess
+import sys
+import time
 
 import pytest
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ── #783: a sibling's log handler must survive ───────────────────────────────
@@ -118,23 +129,114 @@ def test_the_handler_does_not_exit_the_process_itself():
     assert 'sys.exit' not in block, 'the handler still exits out from under the deferred stop'
 
 
-def test_the_console_subprocess_is_terminated():
-    """The SSH WebSocket server is a separate process on an endless asyncio Future —
-    verified in practice: it was reparented to init and survived its parent."""
-    block = _shutdown_handler_source()
+def test_each_legacy_console_listener_is_stopped_off_the_hub():
+    """The listeners on port+1 and port+2 are servers of their own; serve_forever() only
+    returns for the main one. Each is stopped in a greenlet of its own and bounded, as
+    the main server is."""
+    block = _shutdown_handler_source(strip_comments=True)
 
-    assert 'ssh_ws_proc' in block and 'terminate()' in block
+    assert 'for extra_server in legacy_servers:' in block
+    assert 'spawn(lambda srv=extra_server: srv.stop(timeout=' in block
 
 
-def test_the_subprocess_handle_is_actually_threaded_through():
-    """Guards the guard: terminate() on a handle that is always None does nothing."""
-    src = open('pegaprox/app.py').read()
+_SERVER = r'''
+import gevent.monkey; gevent.monkey.patch_all()
+import socket
+import sys
 
-    assert 'ssh_ws_proc = _start_console_servers(' in src
-    assert 'return ssh_proc' in src, '_start_console_servers never hands the handle back'
-    vms = open('pegaprox/api/vms.py').read()
-    i = vms.index('SSH WebSocket server subprocess started')
-    assert 'return proc' in vms[i:i + 200], 'the starter never returns its Popen'
+import gevent
+from flask import Flask
+
+import pegaprox.app as app_mod
+
+web = Flask('shutdown-test')
+
+
+@web.route('/ping')
+def ping():
+    return 'pong'
+
+
+port = int(sys.argv[1])
+app_mod._start_gevent_server(web, '127.0.0.1', port, None, None, 4)
+# serve_forever() has returned; the stops of the legacy listeners run in greenlets of their own
+gevent.sleep(0.5)
+for p in (port, port + 1, port + 2):
+    probe = socket.socket()
+    probe.settimeout(2)
+    try:
+        probe.connect(('127.0.0.1', p))
+        print(f'STILL LISTENING {p}', flush=True)
+    except OSError:
+        print(f'STOPPED {p}', flush=True)
+    finally:
+        probe.close()
+print('SERVE_FOREVER RETURNED', flush=True)
+'''
+
+
+def _free_ports(count):
+    """A first port with count-1 free ports after it."""
+    for _ in range(50):
+        s = socket.socket()
+        s.bind(('127.0.0.1', 0))
+        base = s.getsockname()[1]
+        s.close()
+        if base + count > 65535:
+            continue
+        try:
+            for p in range(base, base + count):
+                t = socket.socket()
+                t.bind(('127.0.0.1', p))
+                t.close()
+        except OSError:
+            continue
+        return base
+    pytest.skip('no run of free ports')
+
+
+def _listening(port):
+    try:
+        socket.create_connection(('127.0.0.1', port), timeout=1).close()
+        return True
+    except OSError:
+        return False
+
+
+def test_a_sigterm_stops_the_main_server_and_both_legacy_console_ports(tmp_path):
+    """The real thing, as production runs it (gevent's monkey patching, the signal handler
+    on the hub): a SIGTERM ends serve_forever() without a BlockingSwitchOutError, the
+    process exits 0, and none of the three ports is still listening by then."""
+    port = _free_ports(3)
+    log_path = tmp_path / 'server.log'
+    env = {**os.environ, 'PYTHONPATH': REPO, 'PEGAPROX_CONFIG_DIR': str(tmp_path / 'config')}
+    env.pop('PEGAPROX_LEGACY_CONSOLE_PORTS', None)
+    with open(log_path, 'w') as log:
+        proc = subprocess.Popen([sys.executable, '-c', _SERVER, str(port)], cwd=str(tmp_path),
+                                env=env, stdout=log, stderr=subprocess.STDOUT)
+    try:
+        end = time.monotonic() + 60
+        while not all(_listening(p) for p in (port, port + 1, port + 2)):
+            if proc.poll() is not None or time.monotonic() > end:
+                pytest.fail('test server did not come up:\n' + log_path.read_text())
+            time.sleep(0.2)
+
+        proc.send_signal(signal.SIGTERM)
+        try:
+            code = proc.wait(30)
+        except subprocess.TimeoutExpired:
+            pytest.fail('a SIGTERM did not stop the server:\n' + log_path.read_text())
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(5)
+
+    out = log_path.read_text()
+    assert code == 0, out
+    assert 'BlockingSwitchOutError' not in out and 'Traceback' not in out, out
+    assert 'SERVE_FOREVER RETURNED' in out, out
+    assert [line for line in out.splitlines() if line.startswith(('STOPPED', 'STILL'))] == [
+        f'STOPPED {p}' for p in (port, port + 1, port + 2)], out
 
 
 def test_greenlet_exit_during_handshake_is_swallowed():

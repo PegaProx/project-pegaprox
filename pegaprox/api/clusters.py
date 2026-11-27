@@ -2086,6 +2086,110 @@ def get_cluster_api_latency(cluster_id):
     })
 
 
+# MK Nov 2026 - every caller who gets the whole guest list (an admin, an operator of the
+# owning tenant on a cluster without VM-ACLs) had it encoded and compressed for them alone:
+# 75 ms of jsonify on the hub and 20-110 ms of compression per poll at 10k guests, with a
+# few dozen dashboards polling several times a second. The same rows give the same bytes, so
+# the body is made once per snapshot of the manager (get_vm_resources' read-cache, which the
+# broadcast loop renews), each coding once per body and off the hub, every variant with a
+# strong ETag of its own. Only the two answers of the route that send the list as it is take
+# it; a caller the route filters for never comes near it.
+_whole_lists = {}     # cluster_id -> _WholeList of the snapshot asked for last
+
+
+class _WholeList:
+    """One snapshot's body as jsonify made it, its tag and the codings made of it so far."""
+
+    def __init__(self, stamp, made):
+        import hashlib
+        from pegaprox.utils.index_page import CODINGS
+        self.stamp = stamp
+        self.raw = made.get_data()
+        self.mimetype = made.mimetype
+        self.tag = hashlib.sha256(self.raw).hexdigest()[:32]
+        self.coded = {}
+        self.failed = set()
+        self.locks = {name: threading.Lock() for name, _ in CODINGS}
+
+    def offered(self, min_size):
+        from pegaprox.utils.index_page import CODINGS
+        if len(self.raw) < min_size:
+            return []
+        return [name for name, _ in CODINGS if name not in self.failed]
+
+    def etag(self, coding):
+        return self.tag if coding is None else f'{self.tag}-{coding}'
+
+    def body(self, coding, level):
+        """The bytes of a coding, None when it cannot be made (then it is not offered again
+        for this snapshot). The first caller of a coding compresses, the others wait."""
+        if coding is None:
+            return self.raw
+        data = self.coded.get(coding)
+        if data is not None:
+            return data
+        from pegaprox.utils.index_page import _off_hub
+        with self.locks[coding]:
+            data = self.coded.get(coding)
+            if data is None and coding not in self.failed:
+                try:
+                    data = _off_hub(_code_whole_list, coding, self.raw, level)
+                except Exception:
+                    logging.exception(f"[resources] {coding} of a guest list failed, "
+                                      f"it goes out as it is")
+                    self.failed.add(coding)
+                    return None
+                self.coded[coding] = data
+        return data
+
+
+def _code_whole_list(coding, raw, level):
+    from pegaprox.utils import index_page
+    if coding == 'zstd':
+        return index_page._zstd.compress(raw, level=level)
+    if coding == 'br':
+        return index_page._brotli.compress(raw, quality=level)
+    import gzip
+    return gzip.compress(raw, compresslevel=level, mtime=0)
+
+
+def _whole_list_answer(cluster_id, rows, snapshot):
+    """The answer for a caller the route gives every row of `rows`. `snapshot` is the manager's
+    read-cache as it stood right after `rows` came out of it; rows that are not the list it
+    holds (a fresh read, a manager without that cache) go out through jsonify as before."""
+    if not (isinstance(snapshot, tuple) and len(snapshot) == 2 and snapshot[1] is rows):
+        return jsonify(rows)
+    from flask import Response, current_app
+    from pegaprox.utils.index_page import negotiate
+    held = _whole_lists.get(cluster_id)
+    if held is None or held.stamp != snapshot[0]:
+        held = _WholeList(snapshot[0], jsonify(rows))
+        _whole_lists[cluster_id] = held
+        for gone in [c for c in _whole_lists if c not in cluster_managers]:
+            _whole_lists.pop(gone, None)
+    config = current_app.config
+    coding = negotiate(request.headers.get('Accept-Encoding', ''),
+                       held.offered(config.get('COMPRESS_MIN_SIZE', 500)))
+    if request.if_none_match.contains_weak(held.etag(coding)):
+        resp = Response(status=304)
+    else:
+        # the levels flask-compress takes for the rest of the API
+        level = {'zstd': config.get('COMPRESS_ZSTD_LEVEL', 3),
+                 'br': config.get('COMPRESS_BR_LEVEL', 4),
+                 'gzip': config.get('COMPRESS_LEVEL', 6)}.get(coding)
+        body = held.body(coding, level)
+        if body is None:
+            coding, body = None, held.raw
+        resp = Response(body, mimetype=held.mimetype)
+        if coding:
+            resp.headers['Content-Encoding'] = coding
+    resp.set_etag(held.etag(coding))
+    resp.headers['Vary'] = 'Accept-Encoding'
+    # app.py: flask-compress leaves a response alone that carries its own coding
+    resp.pp_encoded = True
+    return resp
+
+
 @bp.route('/api/clusters/<cluster_id>/resources', methods=['GET'])
 @require_auth()
 def get_cluster_resources(cluster_id):
@@ -2110,6 +2214,8 @@ def get_cluster_resources(cluster_id):
     # this endpoint is polled 15s (selected) + 30s (overview) + per expanded sidebar
     # cluster, so the same heavy walk was happening 2-3x per window per cluster.
     all_resources = mgr.get_vm_resources(max_age=6)
+    # which snapshot that is, read before anything below can let the loop renew it
+    snapshot = getattr(mgr, '_vm_resources_cache', None)
 
     # NS Aug 2026 — build the authz user so an admin-owned scoped API token is floored to its
     # effective_role (the stored-role fast-path let such a token see everything).
@@ -2119,7 +2225,7 @@ def get_cluster_resources(cluster_id):
     user['username'] = request.session['user']
     from pegaprox.utils.rbac import acts_as_admin
     if acts_as_admin(user):
-        return jsonify(all_resources)
+        return _whole_list_answer(cluster_id, all_resources, snapshot)
 
     # Aikido 469089182 re-verify — the RESTRICTIVE ACL listing below (an ACL'd VM is hidden from
     # non-whitelisted TENANT operators; a no-ACL VM stays visible via role-level vm.view) is correct
@@ -2163,7 +2269,7 @@ def get_cluster_resources(cluster_id):
     # if no ACLs defined for this cluster, check if user has general vm.view permission
     if not cluster_acls:
         if has_permission(user, 'vm.view'):
-            return jsonify(all_resources)
+            return _whole_list_answer(cluster_id, all_resources, snapshot)
         else:
             return jsonify([])  # no vm.view permission and no ACLs
 

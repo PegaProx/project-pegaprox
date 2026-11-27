@@ -15,8 +15,8 @@ while it does not. A standby pins no SSH host key of its own, whether it serves 
 
 MK Oct 2026
 """
-import asyncio
 import json
+import os
 import subprocess
 import threading
 import time
@@ -29,9 +29,9 @@ from test_ha_api import _admin, _audit, _local_user, ADMIN_PW  # noqa: F401
 from test_ha_members import (group, _built, _pair, _post, _promote, _pub, _send, _sync,  # noqa: F401
                              _watch, IDS, URLS)
 from test_ha_forward import fwd, probe, _forward_calls, _hook_lists, _concrete, FORWARD  # noqa: F401
-from test_ha_v2_surface import (CID, VM, SHELL, STANDBY_ANSWER, _registry, _fake_manager,
-                                _console_calls, _SyncWS, _AsyncWS, _sock_handler,
-                                _standalone_vnc_handler, _auth_query, _ssh_server, _Resp)
+from test_ha_v2_surface import (CID, VM, STANDBY_ANSWER, _registry, _fake_manager,
+                                _console_calls, _SyncWS, _sock_handler, _auth_query,
+                                _closed_with, TERM_RULE, TERM_PARAMS)
 
 VNC_SOCKET = '/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/vncwebsocket'
 NOT_KNOWN = 'is not known here yet - open a shell to it on the leader once'
@@ -825,77 +825,67 @@ def test_every_plugin_route_that_hands_out_a_console_is_a_console_path():
 # --- consoles: the WebSockets ------------------------------------------------------------------
 
 @pytest.mark.parametrize('auth', ['token', 'session'])
-def test_the_vnc_sockets_open_on_a_serving_standby(fwd, seed, monkeypatch, auth):
+def test_the_console_sockets_open_on_a_serving_standby(fwd, seed, monkeypatch, auth):
+    """The VNC socket (port+1 serves the same one now) and the VM terminal, which came
+    over from the SSH server on port+2."""
     g = fwd
     admin = _built(g, seed, 'b')
     reg = _registry(monkeypatch)
     app = g.api.app
-    main_port = _sock_handler(app, VNC_SOCKET)
-    own_port = _standalone_vnc_handler(reg)
-    path = f'{VM}/vncwebsocket'
+    vnc = _sock_handler(app, VNC_SOCKET)
+    term = _sock_handler(app, TERM_RULE)
 
-    def on_main_port():
+    def vnc_socket():
         ws = _SyncWS()
-        with app.test_request_context(f'{path}?{_auth_query(auth, admin)}'):
-            main_port(ws, CID, 'n1', 'qemu', 100)
-        return ws
+        with app.test_request_context(f'{VM}/vncwebsocket?{_auth_query(auth, admin)}'):
+            vnc(ws, CID, 'n1', 'qemu', 100)
+        return ws.closed
 
-    def on_own_port():
-        ws = _AsyncWS(f'{path}?{_auth_query(auth, admin)}')
-        asyncio.run(own_port(ws))
-        return ws
+    def terminal():
+        ws = _SyncWS()
+        with app.test_request_context(f'{VM}/termwebsocket?{_auth_query(auth, admin)}&{TERM_PARAMS}'):
+            term(ws, CID, 'n1', 'qemu', 100)
+        return [json.loads(m)['message'] for m in ws.sent]
 
     with g.at('b'):
-        assert on_main_port().sent == [STANDBY_ANSWER['error']]
-        assert on_own_port().closed == (1008, STANDBY_ANSWER['error'])
+        assert vnc_socket() == _closed_with(STANDBY_ANSWER['error'])
+        assert terminal() == [STANDBY_ANSWER['error']]
     assert reg.asked == []
 
     _serve(g, 'b')
     with g.at('b'):
-        ws = on_main_port()
-        assert STANDBY_ANSWER['error'] not in ws.sent and reg.asked[-1] == CID
+        assert vnc_socket() == _closed_with('Cluster not found') and reg.asked[-1] == CID
         reg.asked.clear()
-        ws = on_own_port()
-        assert ws.closed == (1002, 'Cluster not found') and reg.asked[-1] == CID
+        assert terminal() == ['Cluster not found'] and reg.asked[-1] == CID
 
 
-def test_the_gevent_vnc_socket_and_the_legacy_shell_open_on_a_serving_standby(fwd, seed, monkeypatch):
+def test_the_node_shell_opens_on_a_serving_standby(fwd, seed, monkeypatch):
     g = fwd
     admin = _built(g, seed, 'b')
     reg = _registry(monkeypatch)
     app = g.api.app
-    client = app.test_client()
-    url = f'{VM}/vncwebsocket?session={admin.session_id}'
     shell = _sock_handler(app, '/api/clusters/<cluster_id>/nodes/<node>/shellws')
     shell_url = f'/api/clusters/{CID}/nodes/n1/shellws?session={admin.session_id}'
 
-    def gevent_vnc():
-        ws = _SyncWS()
-        client.get(url, base_url='http://localhost', environ_base={'wsgi.websocket': ws})
-        return ws
-
-    def legacy_shell():
+    def node_shell():
         ws = _SyncWS()
         with app.test_request_context(shell_url):
             shell(ws, CID, 'n1')
         return [json.loads(m)['message'] for m in ws.sent]
 
     with g.at('b'):
-        assert gevent_vnc().closed == ((1008, STANDBY_ANSWER['error']), {})
-        assert legacy_shell() == [STANDBY_ANSWER['error']]
+        assert node_shell() == [STANDBY_ANSWER['error']]
     assert reg.asked == []
 
     pytest.importorskip('paramiko')
     _serve(g, 'b')
     with g.at('b'):
-        assert gevent_vnc().closed is None and reg.asked[-1] == CID
-        reg.asked.clear()
-        assert legacy_shell() == ['Cluster not found'] and reg.asked[-1] == CID
+        assert node_shell() == ['Cluster not found'] and reg.asked[-1] == CID
 
 
-def test_the_ssh_servers_calls_answer_on_a_serving_standby(fwd, seed, monkeypatch):
-    """The ws token check and the cluster-creds of the SSH server process, and what it
-    learns there: a standby holds the leader's known_hosts."""
+def test_the_validate_calls_answer_on_a_serving_standby(fwd, seed, monkeypatch):
+    """The ws token check and the session check the SSH server process asked stay routes:
+    they answer on a serving standby, and say that it holds the leader's known_hosts."""
     from pegaprox.utils.realtime import create_ws_token
     g = fwd
     admin = _built(g, seed, 'b')
@@ -908,17 +898,11 @@ def test_the_ssh_servers_calls_answer_on_a_serving_standby(fwd, seed, monkeypatc
         return client.get(f'/api/ws/token/validate?token={token}&cluster_id={CID}&node=n1&shell=node',
                           base_url='http://localhost')
 
-    def creds():
-        from pegaprox.api.realtime import CONSOLE_SERVER_HEADER, console_server_secret
-        return client.get(f'/api/internal/cluster-creds/{CID}', base_url='http://localhost',
-                          headers={CONSOLE_SERVER_HEADER: console_server_secret()})
-
     def session_check():
         return client.get('/api/auth/validate', base_url='http://localhost')
 
     with g.at('b'):
         assert validate().get_json() == STANDBY_ANSWER
-        assert creds().get_json() == STANDBY_ANSWER
     assert reg.asked == []
 
     _serve(g, 'b')
@@ -926,8 +910,6 @@ def test_the_ssh_servers_calls_answer_on_a_serving_standby(fwd, seed, monkeypatc
         r = validate()
         assert r.status_code == 200 and r.get_json()['valid'] is True, r.data
         assert r.get_json()['known_hosts_only'] is True
-        r = creds()
-        assert r.status_code == 404 and r.get_json()['error'] == 'Cluster not found'
         assert session_check().get_json()['known_hosts_only'] is True
     assert CID in reg.asked
     with g.at('a'):
@@ -936,109 +918,6 @@ def test_the_ssh_servers_calls_answer_on_a_serving_standby(fwd, seed, monkeypatc
 
 
 # --- no host key pinned on a standby -----------------------------------------------------------
-
-class _HostKeys(dict):
-    def add(self, host, keytype, key):
-        self.setdefault(host, {})[keytype] = key
-
-
-def _fake_paramiko(known):
-    """What the SSH server script uses of paramiko: a client whose connect meets the
-    host key as `known` or not, and notes whether the keys were saved."""
-    fake = types.SimpleNamespace(saved=[])
-
-    class SSHException(Exception):
-        pass
-
-    class SSHClient:
-        def __init__(self):
-            self._host_keys, self._policy = _HostKeys(), None
-
-        def load_host_keys(self, path):
-            pass
-
-        def set_missing_host_key_policy(self, policy):
-            self._policy = policy
-
-        def connect(self, host, **kw):
-            if not known:
-                self._policy.missing_host_key(self, host, types.SimpleNamespace(get_name=lambda: 'ssh-ed25519'))
-
-        def get_host_keys(self):
-            return self._host_keys
-
-        def invoke_shell(self, **kw):
-            raise SSHException('no shell in this test')
-
-        def close(self):
-            pass
-
-    class _OnDisk(_HostKeys):
-        # the script merges into the file instead of saving the client's set (NS Oct 2026)
-        def load(self, path):
-            pass
-
-        def lookup(self, host):
-            return self.get(host)
-
-        def save(self, path):
-            # the script hands save() a temp file next to known_hosts and renames it over
-            with open(path, 'w') as f:
-                f.writelines(f'{host} {kt}\n' for host, keys in self.items() for kt in keys)
-            fake.saved.append(path)
-
-    fake.hostkeys = types.SimpleNamespace(HostKeys=_OnDisk)
-    fake.SSHException = SSHException
-    fake.AuthenticationException = type('AuthenticationException', (SSHException,), {})
-    fake.MissingHostKeyPolicy = object
-    fake.SSHClient = SSHClient
-    return fake
-
-
-class _TalkingWS(_AsyncWS):
-    """A browser that sends the node's credentials when asked for them."""
-
-    def __init__(self, path, *incoming):
-        super().__init__(path)
-        self.incoming = list(incoming)
-
-    async def recv(self):
-        if self.incoming:
-            return self.incoming.pop(0)
-        raise ConnectionError('nothing more to say')
-
-
-@pytest.mark.parametrize('known_only, known', [(True, False), (True, True), (False, False)])
-def test_the_ssh_server_pins_nothing_on_a_standby(tmp_path, monkeypatch, known_only, known):
-    pytest.importorskip('paramiko')
-    pytest.importorskip('websockets')
-    monkeypatch.setenv('PEGAPROX_SSH_KNOWN_HOSTS', str(tmp_path / 'known_hosts'))
-    # the node's own address, as the main app names it (#1143)
-    answer = _Resp(200, {'valid': True, 'known_hosts_only': known_only,
-                         'cluster_context': {'host': '192.0.2.10', 'node_ips': {'n1': '192.0.2.10'}}})
-    ns, _asked = _ssh_server({'/api/ws/token/validate': answer})
-    fake = _fake_paramiko(known)
-    ns['paramiko'] = fake
-    ws = _TalkingWS(f'{SHELL}?token=t', json.dumps({'username': 'root', 'password': 'pw'}))
-    asyncio.run(ns['ssh_handler'](ws))
-    said = ''.join(m for m in ws.sent if isinstance(m, str))
-    if known_only and not known:
-        # the address tried, as the main app says it (the leader may know the node under
-        # another one), and not the node's name
-        from pegaprox.utils.ssh_security import _not_known_here
-        assert _not_known_here('192.0.2.10') in said, ws.sent
-        assert 'another address than 192.0.2.10,' in said and 'host key of n1' not in said
-        assert fake.saved == []
-    elif known_only:
-        # a key it holds: the shell opens (and fails in this test), and nothing is saved
-        assert NOT_KNOWN not in said and 'no shell in this test' in said, ws.sent
-        assert fake.saved == []
-    else:
-        # counterproof: the TOFU pin as before, then the (fake) shell fails
-        assert NOT_KNOWN not in said and 'no shell in this test' in said, ws.sent
-        assert len(fake.saved) == 1
-        assert (tmp_path / 'known_hosts').read_text() == '192.0.2.10 ssh-ed25519\n'
-
 
 @pytest.fixture
 def known_hosts(tmp_path, monkeypatch):
@@ -1063,6 +942,74 @@ def _roles(g):
                   'pairing': None, 'sync': {}})
     g.write('b', {'role': 'standby', 'epoch': 1, 'instance_id': IDS['b'], 'interval': 30,
                   'pairing': None, 'sync': {}, 'serve_assigned': True})
+
+
+class _ShellPage(_SyncWS):
+    """A node shell page that sends the node's login when asked for it, then goes away."""
+    connected = False
+
+    def __init__(self, login):
+        super().__init__()
+        self.login = login
+
+    def receive(self, timeout=None):
+        msg, self.login = self.login, None
+        return msg
+
+
+@pytest.mark.parametrize('where, known', [('b', False), ('b', True), ('a', False)],
+                         ids=['standby-unknown', 'standby-known', 'leader-unknown'])
+def test_the_node_shell_pins_nothing_on_a_standby(fwd, seed, monkeypatch, known_hosts, where, known):
+    """The shell end to end with paramiko's own client, the host key exchange stood in for.
+    The SSH server on port+2 learned from the validate call whether it may pin and had a
+    policy of its own; the shell of the main port goes by pins_host_keys_here() through
+    utils/ssh_security, on a serving standby as anywhere."""
+    paramiko = pytest.importorskip('paramiko')
+    g = fwd
+    admin = _built(g, seed, 'b')
+    mgr = _fake_manager(g.api)
+    mgr.member_node_ip.return_value = '192.0.2.10'
+    mgr.config.ssh_port = 22
+    _registry(monkeypatch, **{CID: mgr})
+    key = paramiko.ECDSAKey.generate()
+    if known:
+        pinned = paramiko.hostkeys.HostKeys()
+        pinned.add('192.0.2.10', key.get_name(), key)
+        pinned.save(known_hosts)
+
+    def connect(client, hostname, port=22, **kw):
+        # what paramiko does with the node's key once the key exchange is through
+        if client.get_host_keys().lookup(hostname) is None:
+            client._policy.missing_host_key(client, hostname, key)
+
+    def invoke_shell(client, **kw):
+        raise paramiko.SSHException('no shell in this test')
+    monkeypatch.setattr(paramiko.SSHClient, 'connect', connect)
+    monkeypatch.setattr(paramiko.SSHClient, 'invoke_shell', invoke_shell)
+    before = open(known_hosts).read() if known else None
+
+    _serve(g, 'b')
+    page = _ShellPage(json.dumps({'username': 'root', 'password': 'pw'}))
+    with g.at(where):
+        with g.api.app.test_request_context(
+                f'/api/clusters/{CID}/nodes/n1/shellws?session={admin.session_id}'):
+            _sock_handler(g.api.app, '/api/clusters/<cluster_id>/nodes/<node>/shellws')(page, CID, 'n1')
+    said = ' '.join(json.loads(m).get('message', '') for m in page.sent)
+    if where == 'b' and not known:
+        # the address tried, as the main app says it (the leader may know the node under
+        # another one), and not the node's name
+        from pegaprox.utils.ssh_security import _not_known_here
+        assert _not_known_here('192.0.2.10') in said, page.sent
+        assert 'another address than 192.0.2.10,' in said and 'host key of n1' not in said
+        assert not os.path.exists(known_hosts)
+    elif where == 'b':
+        # a key it holds: the shell opens (and fails in this test), and nothing is saved
+        assert NOT_KNOWN not in said and 'no shell in this test' in said, page.sent
+        assert open(known_hosts).read() == before
+    else:
+        # counterproof: the TOFU pin as before, then the (fake) shell fails
+        assert NOT_KNOWN not in said and 'no shell in this test' in said, page.sent
+        assert paramiko.hostkeys.HostKeys(known_hosts).lookup('192.0.2.10')
 
 
 def test_a_standby_pins_no_host_key_and_takes_the_ones_it_holds(group, known_hosts):

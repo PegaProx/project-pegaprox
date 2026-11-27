@@ -1,6 +1,6 @@
 """What the console tells PVE: which port it dials, and whose credential it shows.
 
-Four handlers build the same upgrade to PVE's vncwebsocket and all four had
+Four handlers built the same upgrade to PVE's vncwebsocket and all four had
 drifted apart. Between them they carried three defects, reported separately:
 
   #945.1  the main-port handlers reassigned `port` to the vncproxy port and then
@@ -15,12 +15,24 @@ drifted apart. Between them they carried three defects, reported separately:
 They now share _pve_console_ws_path and _pve_console_ws_auth. These tests pin
 what those two produce, because that is the part PVE sees.
 
+MK Nov 2026 - the console servers of their own (asyncio on port+1, the SSH console server
+on port+2) are gone. What is left builds the upgrade in vnc_websocket_proxy/_vnc_relay,
+vnc_poll, the screenshot and the VM terminal (vm_terminal_websocket_proxy/_terminal_relay).
+
 MK Sep 2026
 """
 import ast
 import inspect
 
+import pytest
+
 import pegaprox.api.vms as vms
+from test_vm_terminal_main_port import _let_go, pve  # noqa: F401
+
+
+# every function on the way to PVE's console socket
+CONSOLE_DIALLERS = ('vnc_websocket_proxy', '_vnc_relay', 'vnc_poll', '_screenshot_via_rfb',
+                    'vm_terminal_websocket_proxy', '_terminal_relay')
 
 
 class _TokenCluster:
@@ -69,12 +81,13 @@ def test_no_console_path_hardcodes_the_api_port(_vms_source=None):
     src = inspect.getsource(vms)
     tree = ast.parse(src)
     offenders = []
+    seen = set()
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if node.name not in ('vnc_handler', 'vnc_websocket_proxy',
-                             'handle_vnc_websocket', 'vnc_poll', '_screenshot_via_rfb'):
+        if node.name not in CONSOLE_DIALLERS:
             continue
+        seen.add(node.name)
         for sub in ast.walk(node):
             if isinstance(sub, ast.Constant) and sub.value == 8006:
                 # the one allowed use is a defensive default when the manager has
@@ -83,6 +96,8 @@ def test_no_console_path_hardcodes_the_api_port(_vms_source=None):
                 if 'getattr' in line:
                     continue
                 offenders.append(f'{node.name}:{sub.lineno}')
+    # a guard over names that no longer exist guards nothing
+    assert seen == set(CONSOLE_DIALLERS), set(CONSOLE_DIALLERS) - seen
     assert not offenders, f'console paths still hardcode 8006: {offenders}'
 
 
@@ -153,29 +168,34 @@ def test_the_api_port_variable_is_never_reassigned_in_a_console_handler():
     """
     src = inspect.getsource(vms)
     tree = ast.parse(src)
-    handlers = ('vnc_handler', 'vnc_websocket_proxy', 'handle_vnc_websocket', 'vnc_poll')
+    handlers = ('vnc_websocket_proxy', '_vnc_relay', 'vnc_poll', '_terminal_relay')
     rebinds = {}
+    seen = set()
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         if node.name not in handlers:
             continue
+        seen.add(node.name)
         lines = [n.lineno for n in ast.walk(node)
                  if isinstance(n, ast.Name) and n.id == 'port'
                  and isinstance(n.ctx, ast.Store)]
         if len(lines) > 1:
             rebinds[node.name] = lines
+    assert seen == set(handlers), set(handlers) - seen
     assert not rebinds, (
         'the API port is rebound inside a console handler, so whatever it means '
         f'at the URL is not manager.api_port any more: {rebinds}')
 
 
-# --- #956, the half that lives in the terminal subprocess --------------------
+# --- #956, the half that lives in the VM terminal ---------------------------
 #
 # The VNC handlers were the visible part. The termproxy path builds its own PVE
-# websocket URL inside the generated subprocess script, and that one still pinned
-# 8006 - so on the reporter's tunnel (X:18006 open, X:8006 closed) the LXC terminal
-# would keep failing after the console started working.
+# websocket URL, and that one still pinned 8006 - so on the reporter's tunnel
+# (X:18006 open, X:8006 closed) the LXC terminal would keep failing after the
+# console started working. It lived in the SSH console server's script, which had
+# the port from two answers of the app (cluster_context, cluster-creds); it is a
+# route of the app now and reads the manager.
 
 def _vms_source():
     import pegaprox.api.vms as vms
@@ -190,42 +210,23 @@ def test_the_termproxy_does_not_pin_8006_for_its_pve_upgrade():
     assert not bad, f"termproxy still builds a fixed-port PVE url: {bad}"
 
 
-def test_both_places_that_describe_a_cluster_to_the_subprocess_carry_the_port():
-    """The subprocess learns about its cluster from cluster_context (ws-token flow)
-    or from /api/internal/cluster-creds (legacy cookie flow). A port carried by only
-    one of them is a bug that shows up on exactly one of the two login paths."""
-    import inspect
-    import pegaprox.api.auth as authmod
-    import pegaprox.api.realtime as rt
-    creds = inspect.getsource(authmod.get_cluster_creds_internal)
-    assert "'api_port'" in creds, 'cluster-creds does not report the API port'
-    assert "'api_port'" in inspect.getsource(rt), 'cluster_context does not carry the API port'
-
-
-def test_cluster_creds_reports_the_port_the_cluster_is_actually_on(api, seed):
-    # this endpoint authenticates off the session COOKIE (it is called by the
-    # subprocess, which sends no X-Session-ID), so it is driven directly here
-    # instead of through the header-based client the other tests use; the
-    # subprocess proves itself with the console server header
+@pytest.mark.parametrize('api_port', [18006, 8006])
+def test_the_terminal_dials_the_port_the_cluster_is_actually_on(api, seed, pve, api_port):
+    from test_vm_terminal_main_port import _query, _terminal, _token
     seed.user('root', role='admin')
     mgr = api.make_fake_manager()
     mgr.host = '10.77.10.55'
-    mgr.api_port = 18006
-    mgr.get_nodes.return_value = {'success': True, 'nodes': []}
-    mgr.config.ssh_port = 22
-    mgr.mint_console_auth_ticket.return_value = None
+    mgr.api_port = api_port
+    mgr.config.fallback_hosts = []
+    mgr._ssl_verify = False
+    mgr.mint_console_auth_ticket.return_value = 'PVE:root@pam:65F00000::sig'
     api.set_manager('cluster_1', mgr)
 
-    from pegaprox.utils.auth import create_session
-    with api.app.test_request_context('/'):
-        sid = create_session('root', 'admin')
-    client = api.app.test_client()
-    client.set_cookie('session', sid, domain='localhost')
-    from pegaprox.api.realtime import CONSOLE_SERVER_HEADER, console_server_secret
-    r = client.get('/api/internal/cluster-creds/cluster_1',
-                   headers={CONSOLE_SERVER_HEADER: console_server_secret()})
-    assert r.status_code == 200, r.data
-    assert r.get_json().get('api_port') == 18006
+    _terminal(api, _query(f"token={_token(api, {'username': 'root', 'role': 'admin'})}",
+                          host='10.77.10.55'))
+
+    assert [url.split('?')[0] for url, _kw in pve.dials] == [
+        f'wss://10.77.10.55:{api_port}/api2/json/nodes/pve2/qemu/100/vncwebsocket']
 
 
 def test_no_handler_reads_a_certificate_from_a_port_it_was_not_told_about():

@@ -283,9 +283,11 @@ def test_a_remote_console_goes_through_this_instance():
     assert '/api/federation/console?' in modals
     # the stable VNC mode keeps a handle at this instance's console server: never for a remote id
     assert "!String(clusterId).includes('~')" in modals
-    # and no hint to accept the certificate of a console port the tunnel does not use
-    assert "!reverseProxyEnabled && !fedRemote && (" in modals
-    assert modals.count('!fedRemote') == 2
+    # a console of this site's own clusters goes to the page's own address as well: no
+    # console port of its own, so no certificate of one to accept, remote or not
+    assert modals.count('//${window.location.host}/api/clusters/${clusterId}/') == 3
+    for gone in ('mainPort + 1', 'mainPort + 2', "t('acceptCert')", "t('certInstructions')"):
+        assert gone not in modals, gone
 
 
 def test_the_dialogs_and_the_pop_out_know_remote_clusters():

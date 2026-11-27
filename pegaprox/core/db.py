@@ -347,6 +347,24 @@ class PegaProxDB:
             dbcrypto.wal_normal(self._local.conn)
         return self._local.conn
     
+    def release_connection(self):
+        """Close this thread's connection (a greenlet's under gevent), unless a transaction
+        is open on it; the next use opens a new one. True when one was closed.
+
+        MK Nov 2026 - for a console, whose greenlet relays for hours once it is set up and
+        reads nothing more: the connection it opened to sign in stayed open as long, two
+        descriptors (the file and its WAL) and its page cache per console.
+        """
+        conn = getattr(self._local, 'conn', None)
+        if conn is None or conn.in_transaction:
+            return False
+        self._local.conn = None
+        try:
+            conn.close()
+        except Exception as e:
+            logging.debug(f"[DB] closing a released connection: {e}")
+        return True
+
     @property
     def conn(self):
         return self._get_connection()

@@ -27,6 +27,7 @@ test_ha_api.py drives the HA routes, and makes one guard refuse one caller:
 MK Nov 2026
 """
 import base64
+import json
 import secrets
 import time
 
@@ -35,8 +36,6 @@ import pytest
 from pegaprox.api.settings import (EXTERNAL_ROLE_SETTINGS, EXTERNAL_SOURCE_SECRETS,
                                    EXTERNAL_SOURCE_SETTINGS)
 from pegaprox.core import federation, ha_wire
-from test_cluster_creds_console_server_only import TICKET, _creds, _proof
-from test_node_shell_ssh_switch import _cluster
 
 # a member id this instance is not: what fed_home names on a mirrored row
 FOREIGN = 'f' * 32
@@ -1411,24 +1410,95 @@ def test_an_account_that_does_not_read_registers_no_passkey(switchable, seed, mo
     assert r.status_code == 200, r.data
 
 
-def test_a_leftover_mirror_session_opens_no_console(switchable, seed):
-    """The SSH console server signs its legacy ?session= login in through
-    /api/auth/validate and takes the node addresses and a PVE ticket from cluster-creds.
-    Neither runs under require_auth, so each refuses a mirror with the switch off itself:
-    no node shell and no guest terminal on the cluster account's ticket. Counterproof: the
-    same session of a local account gets both."""
-    mgr = _cluster(switchable, ssh_off=False)
+TICKET = 'PVE:root@pam:65F00000::sig'
+
+
+def _console_cluster(api):
+    """A PVE cluster with one node, whose manager mints the terminal's PVE ticket."""
+    mgr = api.make_fake_manager('cluster_1')
+    mgr.host = mgr.config.host = '10.0.0.1'
+    mgr.api_port = 8006
+    mgr.nodes = {'pve1': {'node': 'pve1', 'status': 'online'}}
+    mgr.member_node_ip.return_value = '10.0.0.1'
+    mgr.connect_to_proxmox.return_value = True
+    mgr.mint_console_auth_ticket.return_value = TICKET
+    mgr.config.name = 'c1'
+    mgr.config.fallback_hosts = []
+    mgr.config.ssh_disabled = False
+    api.set_manager('cluster_1', mgr)
+    return mgr
+
+
+class _Page:
+    """The browser end of a console socket that goes away when it is asked something."""
+    connected = False
+
+    def __init__(self):
+        self.sent, self.closed = [], None
+
+    def send(self, data):
+        self.sent.append(data)
+
+    def receive(self, timeout=None):
+        return None
+
+    def close(self, reason=None, message=None):
+        self.closed = (reason, message)
+
+
+def _open_consoles(api, session_id, monkeypatch):
+    """The VNC console, the VM terminal and the node shell, signed in with the legacy
+    ?session=. What each said, and which got past every gate: VNC and terminal to the
+    relay that dials PVE, the shell to asking for the node's login."""
+    from pegaprox.api import vms
+    relayed = []
+    monkeypatch.setattr(vms, '_vnc_relay', lambda ws, mgr, *a, **k: relayed.append('vnc'))
+    monkeypatch.setattr(vms, '_terminal_relay', lambda ws, mgr, *a: relayed.append(('term', a[-1])))
+    views = api.app.view_functions
+    vm = '/api/clusters/cluster_1/vms/pve1/qemu/100'
+    said = {}
+    page = _Page()
+    with api.app.test_request_context(f'{vm}/vncwebsocket?session={session_id}'):
+        views['__flask_sock.vnc_websocket_proxy'].__wrapped__(page, 'cluster_1', 'pve1', 'qemu', 100)
+    said['vnc'] = page.closed
+    page = _Page()
+    with api.app.test_request_context(f'{vm}/termwebsocket?session={session_id}'
+                                      '&ticket=PVEVNC:t&port=5900&host=10.0.0.1&user=root@pam'):
+        views['__flask_sock.vm_terminal_websocket_proxy'].__wrapped__(page, 'cluster_1', 'pve1',
+                                                                       'qemu', 100)
+    said['term'] = [json.loads(m) for m in page.sent]
+    page = _Page()
+    with api.app.test_request_context(f'/api/clusters/cluster_1/nodes/pve1/shellws?session={session_id}'):
+        views['__flask_sock.node_shell_websocket_proxy'].__wrapped__(page, 'cluster_1', 'pve1')
+    said['shell'] = [json.loads(m) for m in page.sent]
+    return said, relayed
+
+
+def test_a_leftover_mirror_session_opens_no_console(switchable, seed, monkeypatch):
+    """The consoles sign their legacy ?session= login in themselves, outside require_auth,
+    so each refuses a mirror with the switch off on its own: no VNC console, no guest
+    terminal on the cluster account's ticket, no node shell. The session check the SSH
+    console server used to ask refuses it too. Counterproof: the same session of a local
+    account gets past every gate."""
+    pytest.importorskip('paramiko')
+    mgr = _console_cluster(switchable)
     mira = _mirror(seed, 'mira', role='admin')
+    sid = switchable.as_user(mira).session_id
     assert switchable.as_user(mira).get('/api/auth/validate').status_code == 401
-    for query in ('', '?console=term'):
-        r = _creds(switchable, mira, query, headers=_proof())
-        assert r.status_code == 403 and 'pve_auth_ticket' not in r.get_json(), (query, r.data)
+    said, relayed = _open_consoles(switchable, sid, monkeypatch)
+    assert relayed == [], said
+    refused = {'Invalid session', 'Authentication required'}
+    assert said['vnc'][0] == 1008 and said['vnc'][1] in refused, said
+    assert [m['status'] for m in said['term']] == ['error'] and said['term'][0]['message'] in refused
+    assert [m['status'] for m in said['shell']] == ['error'] and said['shell'][0]['message'] in refused
     mgr.mint_console_auth_ticket.assert_not_called()
+
     seed.db.conn.execute("UPDATE users SET fed_home = '' WHERE username = 'mira'")
     seed.db.conn.commit()
     assert switchable.as_user(mira).get('/api/auth/validate').status_code == 200
-    r = _creds(switchable, mira, '?console=term', headers=_proof())
-    assert r.status_code == 200 and r.get_json()['pve_auth_ticket'] == TICKET, r.data
+    said, relayed = _open_consoles(switchable, sid, monkeypatch)
+    assert relayed == ['vnc', ('term', TICKET)], said
+    assert said['shell'][0]['status'] == 'need_credentials', said
 
 
 # --- forced second factor and a mirror -----------------------------------------------------------

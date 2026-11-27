@@ -23,21 +23,49 @@ covered too.
 
 MK Sep 2026 (#945)
 """
+import contextlib
 import logging
+import os
+import socket
+import threading
 
 _PATCHED = False
 
+# MK Nov 2026 - how long one frame may take to go out before the peer counts as gone
+_SEND_TIMEOUT = float(os.environ.get('PEGAPROX_WS_SEND_TIMEOUT', '120'))
+
+
+def _send_deadline():
+    try:
+        from gevent import Timeout, monkey
+        if _SEND_TIMEOUT > 0 and monkey.is_module_patched('socket'):
+            return Timeout(_SEND_TIMEOUT, socket.timeout('the peer took no data in time'))
+    except Exception:
+        pass
+    return contextlib.nullcontext()
+
 
 class _SendAllSocket:
-    """Forwards to the real socket; `send` writes everything or raises."""
+    """Forwards to the real socket; `send` writes everything or raises.
 
-    __slots__ = ('_sock',)
+    MK Nov 2026 - one writer at a time. simple-websocket's own thread writes its pings,
+    pongs and close frames on the socket the route sends its frames on. Two writes at once
+    break a TLS record (OpenSSL refuses a second write while one is half out, and the
+    socket is closed) and on a plain socket put the ping inside a frame; a VNC console on a
+    slow link met that at its first ping. And a deadline per frame: a peer that takes
+    nothing for that long is gone, and holds no console after it. A socket.timeout, which
+    simple-websocket's thread ends on like on any socket error."""
+
+    __slots__ = ('_sock', '_write_lock')
 
     def __init__(self, sock):
         object.__setattr__(self, '_sock', sock)
+        object.__setattr__(self, '_write_lock', threading.Lock())
 
     def send(self, data, *args, **kwargs):
-        self._sock.sendall(data, *args, **kwargs)
+        with self._write_lock:
+            with _send_deadline():
+                self._sock.sendall(data, *args, **kwargs)
         return len(data)
 
     # everything else is the real socket's business

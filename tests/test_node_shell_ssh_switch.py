@@ -3,19 +3,18 @@
 The switch is there to stop every SSH connection to the cluster's nodes, and its own
 description names the node shell first. Neither shell asked it: both log in with what the
 operator types into the dialog, outside _ssh_connect where the switch is read. The main
-port handler refuses now before it looks the node up. The SSH server on port+2 is refused
-by the main app's two answers it opens a shell with, the ws token check and cluster-creds,
-so its own code decides nothing.
+port handler, the only node shell since the SSH server on port+2 is gone, refuses now
+before it looks the node up. /api/ws/token/validate, which that server opened its shell
+with, still answers a node shell on such a cluster with the reason.
 
 The guest terminal (PVE termproxy, a PVE API socket and no SSH) is not the switch's
-business and stays open; it reads cluster-creds too and says so with console=term.
+business and stays open; it moved from port+2 to the main port as well.
 
-The script of the SSH server runs here with its calls to the main app answered by the real
-app. paramiko is stopped at the connect, so "dialled" is (host, port) of the login.
+paramiko is stopped at the connect, so "dialled" is (host, port) of the login, and
+websocket-client is stopped at the connect to PVE.
 
 MK Nov 2026
 """
-import asyncio
 import json
 import types
 
@@ -23,13 +22,10 @@ import paramiko
 import pytest
 
 import pegaprox.api.vms as vms
-from test_ha_v2_surface import _Resp, _ssh_server
-from test_node_shell_target_1143 import _Talking, _let_go, _shell, _token  # noqa: F401
+from test_node_shell_target_1143 import _let_go, _shell, _token  # noqa: F401
 
 OFF = 'SSH is switched off for this cluster'
-APP = 'http://pegaprox.test'
 ADDRESSES = {'pve1': '10.0.0.1', 'pve2': '10.0.0.12', 'pve3': '10.0.0.13'}
-SHELL = '/api/clusters/cluster_1/nodes/pve2/shellws'
 TERM = '/api/clusters/cluster_1/vms/pve2/qemu/100/termwebsocket'
 
 
@@ -84,55 +80,50 @@ def _admin(seed):
     return seed.user('root', role='admin')
 
 
-def _script(api, monkeypatch, tmp_path, query, path=SHELL, websockets=None):
-    """The SSH server's handler for one connection, its calls to the main app answered by
-    the app itself. (what it said, the paths it asked)"""
-    from pegaprox.api.realtime import console_server_secret
-    monkeypatch.setenv('PEGAPROX_URL', APP)
-    monkeypatch.setenv('PEGAPROX_CONSOLE_SECRET', console_server_secret())
-    monkeypatch.setenv('PEGAPROX_SSH_KNOWN_HOSTS', str(tmp_path / 'known_hosts'))
-    monkeypatch.delenv('PEGAPROX_SSH_STRICT_HOST_KEYS', raising=False)
-    ns, _asked = _ssh_server({})
-    client = api.app.test_client()
-    asked = []
-
-    def get(url, cookies=None, headers=None, **kw):
-        assert url.startswith(APP), url
-        asked.append(url[len(APP):])
-        for name, value in (cookies or {}).items():
-            client.set_cookie(name, value, domain='localhost')
-        r = client.get(url[len(APP):], headers=headers or {}, base_url='http://localhost')
-        return _Resp(r.status_code, r.get_json(silent=True))
-
-    ns['requests'] = types.SimpleNamespace(get=get, exceptions=ns['requests'].exceptions)
-    if websockets is not None:
-        ns['websockets'] = websockets
-    ws = _Talking(f'{path}?{query}', json.dumps({'username': 'root', 'password': 'pw'}))
-    asyncio.run(ns['ssh_handler'](ws))
-    said = [json.loads(m) for m in ws.sent if isinstance(m, str) and m.startswith('{')]
-    return said, asked
+def _shell_by(api, seed, way, node='pve2'):
+    """The main port shell, opened with the page's ws token or the old ?session= of the
+    same account."""
+    user = _admin(seed)
+    if way == 'token':
+        return _shell(api, f'token={_token(api, user)}', node=node)
+    return _shell(api, f'session={api.as_user(user).session_id}', node=node)
 
 
 def _errors(said):
     return [m['message'] for m in said if m.get('status') == 'error']
 
 
-def _way(api, seed, way):
-    """The query the SSH server's shell is opened with: the page's ws token, or the old
-    ?session= of the same account."""
-    user = _admin(seed)
-    if way == 'token':
-        return f'token={_token(api, user)}'
-    return f'session={api.as_user(user).session_id}'
+class _Page:
+    def __init__(self):
+        self.sent = []
+        self.closed = None
+
+    def send(self, data):
+        self.sent.append(data)
+
+    def receive(self, timeout=None):
+        return None
+
+    def close(self, reason=None, message=None):
+        self.closed = (reason, message)
 
 
-# --- the switch closes every way in -------------------------------------------------------
+def _terminal(api, query):
+    view = api.app.view_functions['__flask_sock.vm_terminal_websocket_proxy'].__wrapped__
+    ws = _Page()
+    with api.app.test_request_context(f'{TERM}?{query}'):
+        view(ws, 'cluster_1', 'pve2', 'qemu', 100)
+    return [json.loads(m) for m in ws.sent], ws
 
+
+# --- the switch closes the shell -----------------------------------------------------------
+
+@pytest.mark.parametrize('way', ['token', 'session'])
 @pytest.mark.parametrize('kind,ssh_key', [('pve', ''), ('pve', 'KEY'), ('pool', '')],
                          ids=['pve', 'pve-with-key', 'xcp-ng'])
-def test_the_main_port_shell_stays_closed(api, seed, dialled, kind, ssh_key):
+def test_the_main_port_shell_stays_closed(api, seed, dialled, kind, ssh_key, way):
     mgr = _cluster(api, ssh_off=True, kind=kind, ssh_key=ssh_key)
-    said = _shell(api, f'token={_token(api, _admin(seed))}')
+    said = _shell_by(api, seed, way)
     assert dialled == []
     assert [m['status'] for m in said] == ['error'], said
     assert OFF in said[0]['message']
@@ -141,79 +132,58 @@ def test_the_main_port_shell_stays_closed(api, seed, dialled, kind, ssh_key):
     mgr.connect_to_proxmox.assert_not_called()
 
 
-@pytest.mark.parametrize('way', ['token', 'session'])
-@pytest.mark.parametrize('kind', ['pve', 'pool'], ids=['pve', 'xcp-ng'])
-def test_the_ssh_server_shell_stays_closed(api, seed, dialled, monkeypatch, tmp_path, way, kind):
-    _cluster(api, ssh_off=True, kind=kind)
-    said, asked = _script(api, monkeypatch, tmp_path, _way(api, seed, way))
-    assert dialled == []
-    assert 'need_credentials' not in [m.get('status') for m in said], said
-    errors = _errors(said)
-    assert len(errors) == 1 and OFF in errors[0], said
-    # it is the main app's answer that closed it
-    assert any(p.startswith(('/api/ws/token/validate', '/api/internal/cluster-creds/')) for p in asked)
-
-
-def test_the_two_answers_say_why_and_look_nothing_up(api, seed, monkeypatch):
-    """What the SSH server gets: 409 SSH_DISABLED with the sentence the page shows, no
-    node address, no PVE ticket, and no lookup of the node first. The page opens its login
-    dialog again for a message with Login, auth or Host in it; this one is final."""
-    from pegaprox.api.realtime import CONSOLE_SERVER_HEADER, console_server_secret
+def test_the_validate_answer_says_why_and_looks_nothing_up(api, seed):
+    """What /api/ws/token/validate answers a node shell on such a cluster: 409 SSH_DISABLED
+    with the sentence the page shows, no node address, no PVE ticket, and no lookup of the
+    node first. The page opens its login dialog again for a message with Login, auth or
+    Host in it; this one is final. cluster-creds, the other answer, is gone."""
     mgr = _cluster(api, ssh_off=True)
     user = _admin(seed)
-    tok = _token(api, user)
-    r = api.anon().get(f'/api/ws/token/validate?token={tok}&cluster_id=cluster_1&node=pve2&shell=node',
-                       headers={CONSOLE_SERVER_HEADER: console_server_secret()})
-    client = api.app.test_client()
-    client.set_cookie('session', api.as_user(user).session_id, domain='localhost')
-    c = client.get('/api/internal/cluster-creds/cluster_1', base_url='http://localhost',
-                   headers={CONSOLE_SERVER_HEADER: console_server_secret()})
-    for answer in (r, c):
-        assert answer.status_code == 409, answer.data
-        body = answer.get_json()
-        assert body['code'] == 'SSH_DISABLED' and OFF in body['error']
-        assert not any(w in body['error'] for w in ('Login', 'auth', 'Host'))
-        assert 'node_ips' not in body and 'cluster_context' not in body
+    r = api.anon().get(f'/api/ws/token/validate?token={_token(api, user)}&cluster_id=cluster_1'
+                       '&node=pve2&shell=node')
+    assert r.status_code == 409, r.data
+    body = r.get_json()
+    assert body['code'] == 'SSH_DISABLED' and OFF in body['error']
+    assert not any(w in body['error'] for w in ('Login', 'auth', 'Host'))
+    assert 'node_ips' not in body and 'cluster_context' not in body
     mgr.member_node_ip.assert_not_called()
     mgr._get_node_ip.assert_not_called()
     mgr.mint_console_auth_ticket.assert_not_called()
+    assert api.as_user(user).get('/api/internal/cluster-creds/cluster_1').status_code == 404
+    # counterproof: the guest terminal's call (no shell=node) is not the switch's business
+    r = api.anon().get(f'/api/ws/token/validate?token={_token(api, user)}&cluster_id=cluster_1&node=pve2')
+    assert r.status_code == 200, r.data
 
 
 # --- counterproof: without the switch the shell opens, on the cluster's port -------------------
 
 @pytest.mark.parametrize('port', [22, 2222])
-def test_the_main_port_shell_opens_without_the_switch(api, seed, dialled, port):
-    _cluster(api, ssh_off=False, port=port)
-    said = _shell(api, f'token={_token(api, _admin(seed))}')
-    assert [m['ip'] for m in said if m.get('status') == 'need_credentials'] == ['10.0.0.12']
-    assert dialled == [('10.0.0.12', port)]
-
-
-@pytest.mark.parametrize('port', [22, 2222])
 @pytest.mark.parametrize('way', ['token', 'session'])
-def test_the_ssh_server_shell_opens_without_the_switch(api, seed, dialled, monkeypatch, tmp_path,
-                                                       way, port):
+def test_the_main_port_shell_opens_without_the_switch(api, seed, dialled, port, way):
     _cluster(api, ssh_off=False, port=port)
-    said, _asked = _script(api, monkeypatch, tmp_path, _way(api, seed, way))
+    said = _shell_by(api, seed, way)
     assert [m['ip'] for m in said if m.get('status') == 'need_credentials'] == ['10.0.0.12'], said
     assert dialled == [('10.0.0.12', port)]
 
 
 @pytest.mark.parametrize('way', ['token', 'session'])
-def test_the_guest_terminal_is_no_business_of_the_switch(api, seed, dialled, monkeypatch,
-                                                          tmp_path, way):
-    """The PVE termproxy console goes to PVE's API socket, no SSH: with the switch on it gets
-    its allow-list and its ticket as before and goes on to connect to PVE."""
+def test_the_guest_terminal_is_no_business_of_the_switch(api, seed, dialled, monkeypatch, way):
+    """The PVE termproxy console goes to PVE's API socket, no SSH: with the switch on it
+    gets its ticket and goes on to connect to PVE, now from the main port."""
+    import websocket
     _cluster(api, ssh_off=True)
     tried = []
 
-    async def connect(url, **kw):
-        tried.append(url.split('?')[0])
+    def connect(url, **kw):
+        tried.append((url.split('?')[0], kw.get('header')))
         raise ConnectionRefusedError('stopped by the test')
-
-    said, asked = _script(api, monkeypatch, tmp_path,
-                          f'{_way(api, seed, way)}&ticket=PVEVNC:x&port=5900&host=10.0.0.1&user=root@pam',
-                          path=TERM, websockets=types.SimpleNamespace(connect=connect))
-    assert tried == ['wss://10.0.0.1:8006/api2/json/nodes/pve2/qemu/100/vncwebsocket'], (said, asked)
+    monkeypatch.setattr(websocket, 'create_connection', connect)
+    user = _admin(seed)
+    auth = f'token={_token(api, user)}' if way == 'token' else f'session={api.as_user(user).session_id}'
+    said, ws = _terminal(api, f'{auth}&ticket=PVEVNC:x&port=5900&host=10.0.0.1&user=root@pam')
+    assert tried == [('wss://10.0.0.1:8006/api2/json/nodes/pve2/qemu/100/vncwebsocket',
+                      {'Cookie': 'PVEAuthCookie=PVE:root@pam:65F00000::sig'})], said
+    assert _errors(said) == ['PVE WS connect failed: ConnectionRefusedError']
+    assert ws.closed == (1011, 'PVE WS connect failed: ConnectionRefusedError')
     assert not any(OFF in e for e in _errors(said))
     assert dialled == []

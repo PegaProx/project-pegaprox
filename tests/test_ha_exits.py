@@ -411,14 +411,12 @@ EXITS = {
     ('pegaprox/api/vms.py', 'node_shell_websocket_proxy', 'ssh-paramiko'): (1, 'console'),
     ('pegaprox/api/vms.py', 'node_shell_websocket_proxy', 'ssh-exec'): (1, 'console'),
     ('pegaprox/api/vms.py', 'vnc_poll', 'http-urllib'): (2, 'console'),
-    ('pegaprox/api/vms.py', 'handle_vnc_websocket', 'http-urllib'): (2, 'console'),
-    ('pegaprox/api/vms.py', 'handle_vnc_websocket', 'ws'): (1, 'console'),
-    ('pegaprox/api/vms.py', 'vnc_websocket_proxy', 'http-urllib'): (2, 'console'),
-    ('pegaprox/api/vms.py', 'vnc_websocket_proxy', 'ws'): (1, 'console'),
-    ('pegaprox/api/vms.py', 'start_vnc_websocket_server.vnc_handler._do_urlopen', 'http-urllib'): (1, 'console'),
+    # the one VNC console (the login and the vncproxy, then the upgrade) and the VM
+    # terminal, both routes of the main port since the console servers of their own are gone
+    ('pegaprox/api/vms.py', '_vnc_relay', 'http-urllib'): (2, 'console'),
+    ('pegaprox/api/vms.py', '_vnc_relay', 'ws'): (1, 'console'),
+    ('pegaprox/api/vms.py', '_terminal_relay', 'ws'): (1, 'console'),
     ('pegaprox/api/vms.py', 'get_termproxy_ticket_api', 'http-urllib'): (2, 'console'),
-    ('pegaprox/api/vms.py', 'start_vnc_websocket_server', 'subprocess'): (2, 'local'),
-    ('pegaprox/api/vms.py', 'start_ssh_websocket_server', 'subprocess'): (3, 'local'),
     ('pegaprox/utils/vnc_tunnel.py', 'SshVncTunnelPool._get_or_create_client', 'ssh-paramiko'): (1, 'console'),
     ('pegaprox/utils/vnc_tunnel.py', 'TunnelEndpoint._accept_loop', 'ssh-exec'): (1, 'console'),
     ('pegaprox/utils/vnc_tunnel.py', '_ssh_server._serve_one', 'ssh-paramiko'): (1, 'console'),
@@ -441,8 +439,6 @@ EXITS = {
     ('pegaprox/app.py', '_create_listener', 'socket'): (1, 'local'),
     ('pegaprox/app.py', '_start_http_redirect', 'socket'): (1, 'local'),
     ('pegaprox/app.py', '_test_ipv6_available', 'socket'): (1, 'local'),
-    # the listening socket of the console websocket servers (`sock_cls = socket.socket`)
-    ('pegaprox/utils/concurrent.py', 'gevent_listen_socket', 'socket'): (3, 'local'),
     ('pegaprox/background/syslog_server.py', '_tcp_listener', 'socket'): (1, 'local'),
     ('pegaprox/background/syslog_server.py', '_udp_listener', 'socket'): (1, 'local'),
     # outside the clusters
@@ -531,12 +527,14 @@ def test_the_inventory_counts_what_the_report_says():
     # less the ESXi guest config over REST (the API has no such call), and the session of
     # the federation's member calls (kept per member address since the batched rounds),
     # the three frees of a partial volume of the XCP-ng transfer in one helper and the
-    # cleanup of a failed ESXi disk, and the console tunnel of the federation's linked mode:
-    # 261 calls out of this process, 158 (function, kind) pairs in 143 functions; 45 of
-    # them guarded at the exit and 87 execs on a client from a guarded factory. No route
+    # cleanup of a failed ESXi disk, and the console tunnel of the federation's linked mode,
+    # less the console servers on port+1 and port+2 (their subprocess calls, the listening
+    # socket and three copies of the VNC relay, now one relay and the terminal on the main
+    # port): 250 calls out of this process, 153 (function, kind) pairs in 139 functions; 45
+    # of them guarded at the exit and 87 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 261 and len(EXITS) == 158
-    assert len({(f, q) for f, q, _k in EXITS}) == 143
+    assert sum(n for n, _v in EXITS.values()) == 250 and len(EXITS) == 153
+    assert len({(f, q) for f, q, _k in EXITS}) == 139
     assert by['guard'] == 45 and by['client'] == 87
 
 
@@ -768,12 +766,13 @@ AUTOMATIONS = {
     ('pegaprox/api/vms.py', 'join_node_to_cluster'): (1, 'read'),
     ('pegaprox/api/vms.py', 'remove_node_from_cluster'): (1, 'read'),
     ('pegaprox/api/vms.py', 'run_cross_cluster_replication'): (1, 'job'),
-    ('pegaprox/api/vms.py', 'start_vnc_websocket_server'): (1, 'console'),
-    ('pegaprox/api/vms.py', 'start_ssh_websocket_server'): (1, 'console'),
     ('pegaprox/api/vms.py', 'node_shell_websocket_proxy'): (1, 'console'),
-    ('pegaprox/api/vms.py', 'handle_vnc_websocket'): (1, 'console'),
-    ('pegaprox/api/vms.py', 'vnc_websocket_proxy'): (1, 'console'),
-    ('pegaprox/app.py', '_start_gevent_server.signal_handler'): (1, 'local'),
+    # the reader and the keepalive of a VNC console and of a VM terminal: they move the
+    # bytes of a console that is open already
+    ('pegaprox/api/vms.py', '_vnc_relay'): (2, 'console'),
+    ('pegaprox/api/vms.py', '_terminal_relay'): (2, 'console'),
+    # the stop of the main server and of each legacy console port, the same app's listeners
+    ('pegaprox/app.py', '_start_gevent_server.signal_handler'): (2, 'local'),
     # one thread (a greenlet under gevent) per client of the extra HTTP redirect port
     ('pegaprox/app.py', '_start_http_redirect'): (1, 'local'),
     ('pegaprox/core/ha.py', 'pull_soon'): (1, 'peer'),
@@ -870,7 +869,6 @@ AUTOMATIONS = {
     ('pegaprox/core/xcpng.py', 'XcpngManager.start_node_update'): (1, 'job'),
     # the thread fallback and the greenlets of a fan-out with a whole deadline, both on the carried tasks
     ('pegaprox/utils/concurrent.py', 'run_per_node'): (2, 'carry'),
-    ('pegaprox/utils/concurrent.py', 'gevent_to_thread'): (1, 'console'),
     ('pegaprox/utils/rbac.py', 'get_pool_membership_cache'): (1, 'read'),
     ('pegaprox/utils/realtime.py', 'push_immediate_update'): (1, 'read'),
     ('pegaprox/utils/vnc_polling.py', 'VncPollSession.__init__'): (1, 'console'),

@@ -1084,9 +1084,9 @@ def _console(a, b, monkeypatch, user='alice', query=None, upstream=None, api_tok
     from pegaprox.utils.realtime import create_ws_token
     opened = []
 
-    def fake_open(rec, kind, path, q, reverse_proxy, timeout=10):
+    def fake_open(rec, kind, path, q, main_port, timeout=10):
         opened.append({'url': rec['url'], 'kind': kind, 'path': path, 'query': q,
-                       'reverse_proxy': reverse_proxy})
+                       'main_port': main_port})
         return upstream or _FakeUpstream()
     monkeypatch.setattr(relay, 'open_console', fake_open)
     sid = _session(a, user)
@@ -1113,7 +1113,8 @@ def test_a_console_opens_at_the_leading_site_with_its_own_token(linked, monkeypa
     ws, opened = _console(a, b, monkeypatch, upstream=upstream)
     assert len(opened) == 1, ws.sent
     o = opened[0]
-    assert o['url'] == URL['b'] and o['kind'] == 'vnc' and o['reverse_proxy'] is False
+    # the leading site serves its consoles on its main port (console-token: single_port)
+    assert o['url'] == URL['b'] and o['kind'] == 'vnc' and o['main_port'] is True
     assert o['path'] == f'/api/clusters/{CID}/vms/n1/qemu/101/vncwebsocket'
     from urllib.parse import parse_qs
     q = parse_qs(o['query'])

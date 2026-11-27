@@ -334,8 +334,8 @@ site's clusters.
 This instance asks the leading site for a one-time console token as you, then opens that
 site's own console server with it, over TLS checked against the site's pins, and passes the
 bytes on. The leading site checks the token, the cluster and the guest or node as for its own
-users. Between the sites its console ports (its port + 1 and + 2) have to be reachable, or,
-behind a reverse proxy, its main address. SPICE gives you the `.vv` file of that site, which
+users. Its consoles are reached at the same address as the rest of it, so nothing beyond that
+address has to be reachable between the sites. SPICE gives you the `.vv` file of that site, which
 works where your network reaches that site's Proxmox VE.
 
 **When a site gives you nothing,** its section says why: it does not answer, the federation

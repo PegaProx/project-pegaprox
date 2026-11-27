@@ -9,10 +9,11 @@ after it opened.
 The handlers run as in test_console_token_cluster_955, and what they hand websocket-client
 goes through its own handshake builder, so the lines counted are the lines it would send.
 Through the SSH tunnel the connection goes to 127.0.0.1. The polling console and the
-screenshot tile name the node in their one Host line, the standalone console names the
-tunnel it dials, both as before.
+screenshot tile name the node in their one Host line, the VNC socket names the tunnel it
+dials, as the standalone console did before it took the tunnel over. The VM terminal, a
+socket of the main port now, sends its one cookie and one Host as well.
 """
-import asyncio
+import json
 import types
 
 import pytest
@@ -21,9 +22,8 @@ from websocket._handshake import _get_handshake_headers
 from websocket._url import parse_url
 
 from pegaprox.api import vms
-from test_console_token_cluster_955 import (  # noqa: F401
-    _PATH, _PasswordManager, _PveWs, _SyncBrowser, _TokenManager, _Browser, _query, pve,
-    standalone_handler)
+from test_console_token_cluster_955 import (  # noqa: F401  (pve is a fixture)
+    _PATH, _PasswordManager, _SyncBrowser, _TokenManager, _query, pve)
 
 NODE = '10.0.0.9:8006'
 TUNNEL_PORT = 40123
@@ -75,28 +75,35 @@ def tunnel(monkeypatch):
                         lambda **k: types.SimpleNamespace(local_port=TUNNEL_PORT, stop=lambda: None))
 
 
-def test_the_standalone_console_sends_one_host(cluster, sent, standalone_handler):
-    asyncio.run(standalone_handler(_Browser(f'{_PATH}?{_query(False)}')))
-    assert sent == [[NODE]] and sent.repeated == []
-
-
-def test_the_standalone_console_through_the_tunnel_sends_one_host(cluster, sent, standalone_handler, tunnel):
-    # it dials the tunnel and takes its Host from that URL, as it did before the fix
-    asyncio.run(standalone_handler(_Browser(f'{_PATH}?{_query(False)}')))
-    assert sent == [[f'127.0.0.1:{TUNNEL_PORT}']] and sent.repeated == []
-
-
-def test_the_flask_sock_console_sends_one_host(api, cluster, sent):
+def _vnc_socket(api):
     view = api.app.view_functions['__flask_sock.vnc_websocket_proxy'].__wrapped__
     with api.app.test_request_context(f'{_PATH}?{_query(False)}'):
         view(_SyncBrowser(), 'c1', 'pve1', 'qemu', 100)
+
+
+def test_the_flask_sock_console_sends_one_host(api, cluster, sent):
+    _vnc_socket(api)
     assert sent == [[NODE]] and sent.repeated == []
 
 
-def test_the_geventwebsocket_console_sends_one_host(api, cluster, sent):
-    with api.app.test_request_context(f'{_PATH}?{_query(False)}'):
-        vms.handle_vnc_websocket(_SyncBrowser(), 'c1', 'pve1', 'qemu', 100)
-    assert sent == [[NODE]] and sent.repeated == []
+def test_the_flask_sock_console_through_the_tunnel_sends_one_host(api, cluster, sent, tunnel):
+    # it dials the tunnel and takes its Host from that URL, as the standalone console did
+    _vnc_socket(api)
+    assert sent == [[f'127.0.0.1:{TUNNEL_PORT}']] and sent.repeated == []
+
+
+def test_the_terminal_sends_one_host(api, cluster, sent, monkeypatch):
+    """Its PVEAuthCookie is the one cookie of the upgrade; the URL names the node."""
+    monkeypatch.setattr(cluster, 'mint_console_auth_ticket',
+                        lambda with_csrf=False: 'PVE:root@pam:TERM', raising=False)
+    cluster.config.fallback_hosts = []
+    view = api.app.view_functions['__flask_sock.vm_terminal_websocket_proxy'].__wrapped__
+    page = _SyncBrowser()
+    with api.app.test_request_context(
+            f'/api/clusters/c1/vms/pve1/qemu/100/termwebsocket?{_query(False)}'
+            '&ticket=PVEVNC:t&port=5901&host=10.0.0.9&user=root@pam'):
+        view(page, 'c1', 'pve1', 'qemu', 100)
+    assert sent == [[NODE]] and sent.repeated == [], [json.loads(m) for m in page.sent]
 
 
 def _poll(api):

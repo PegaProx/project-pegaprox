@@ -42,6 +42,8 @@ paramiko>=4.0.0
 # Checked against 17.1: serve() still takes process_request/ping_interval/ping_timeout/ssl/sock,
 # connect() still takes additional_headers/open_timeout, and both our callbacks already use the
 # new two-argument shape.
+# MK Nov 2026 - nothing imports it any more: the consoles are routes of the main port (flask-sock
+# for the browser, websocket-client towards PVE). It stays until the packages drop it too.
 websockets>=16.1,<18
 websocket-client>=1.6.0
 h11>=0.16.0

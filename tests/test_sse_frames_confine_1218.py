@@ -368,17 +368,8 @@ def test_a_metrics_frame_costs_no_guest_and_no_account_at_scale(seed, stream, mo
         seed.user(name, role='user', tenant_id='acme')
         add(name, name, [CID])
 
-    # The resources pass decides guest by guest, which costs that pass at this size, not this
-    # frame: a stand-in decides there, checked against the real gate on a few guests.
-    real_gate = rbac.user_can_access_vm
-    for name, vmid in (('cust00', 10000), ('cust37', 10707), ('cust37', 10000), ('oper05', 10707)):
-        user = rt._sse_stored_user(name, 'user')
-        assert real_gate(user, CID, vmid, 'vm.view', 'qemu') == (vmid in grants.get(name, {vmid}))
-
-    def stand_in(user, cluster_id, vmid, permission='vm.view', vm_type=None):
-        mine = grants.get(user.get('username'))
-        return mine is None or int(vmid) in mine
-    monkeypatch.setattr(rbac, 'user_can_access_vm', stand_in)
+    # The resources pass reads each account once (rbac.user_vm_access) and keeps where its
+    # nodes are; that pass is not what is measured here.
     _prime(big, queues)
 
     calls = collections.Counter()
@@ -388,7 +379,8 @@ def test_a_metrics_frame_costs_no_guest_and_no_account_at_scale(seed, stream, mo
             calls[what] += 1
             return fn(*a, **k)
         return wrapper
-    monkeypatch.setattr(rbac, 'user_can_access_vm', counted('per-guest', real_gate))
+    monkeypatch.setattr(rbac, 'user_can_access_vm', counted('per-guest', rbac.user_can_access_vm))
+    monkeypatch.setattr(rbac, 'user_vm_access', counted('guests', rbac.user_vm_access))
     monkeypatch.setattr(rbac, 'has_permission', counted('permission', rbac.has_permission))
     monkeypatch.setattr(helpers, 'caller_is_scoped', counted('scoped', helpers.caller_is_scoped))
     monkeypatch.setattr(rt, '_sse_stored_user', counted('user read', rt._sse_stored_user))
@@ -402,7 +394,8 @@ def test_a_metrics_frame_costs_no_guest_and_no_account_at_scale(seed, stream, mo
         assert _nodes(queues[name]) == want[name], name
     for k in range(50):
         assert _nodes(queues[f'oper{k:02d}']) == sorted(nodes)
-    assert calls['per-guest'] == 0 and calls['user read'] == 0 and calls['db user'] == 0, calls
+    assert calls['per-guest'] == 0 and calls['guests'] == 0, calls
+    assert calls['user read'] == 0 and calls['db user'] == 0, calls
     assert calls['permission'] == 0 and calls['scoped'] == 0, calls
     assert calls['serialized'] == 1 + len({tuple(v) for v in want.values()}) == 11, calls
 

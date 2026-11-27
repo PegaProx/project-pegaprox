@@ -8,17 +8,18 @@ sockets do, with every check after that as it was.
 Behind that it looked the node up with a cluster_port nobody had set, the NameError
 was caught and the SSH login went to the cluster's connection host - another node,
 under the clicked one's name. The SSH server on port+2 did the same whenever the
-page's ?ip= did not happen to match: the validate answer never named the node. Both
-take the address the server resolves for that node now, refuse without one, and
-neither ?ip= nor the host field of the dialog moves the shell.
+page's ?ip= did not happen to match. The route takes the address the server resolves
+for that node now, refuses without one, and neither ?ip= nor the host field of the
+dialog moves the shell. Since Nov 2026 it is the only node shell: the SSH server on
+port+2 and the node addresses /api/ws/token/validate and cluster-creds handed it are
+gone.
 
-The flask-sock handler runs as flask-sock calls it and the SSH server's coroutine as
-the script runs it; paramiko is stopped at the connect, so "dialled" is the host the
-login went to. Every refusal has its counterproof next to it.
+The flask-sock handler runs as flask-sock calls it; paramiko is stopped at the connect,
+so "dialled" is the host the login went to. Every refusal has its counterproof next
+to it.
 
 MK Oct 2026
 """
-import asyncio
 import json
 import types
 
@@ -26,8 +27,6 @@ import paramiko
 import pytest
 
 import pegaprox.api.vms as vms
-from test_console_server_ticket import _confined, _console_server, _mgr, _operator, _portal, _validate
-from test_ha_v2_surface import SHELL, _AsyncWS, _Resp, _ssh_server
 
 CONNECTION_HOST = '10.0.0.1'
 # pve1 is the node the cluster is connected through, the other two are not
@@ -81,10 +80,33 @@ def dialled(monkeypatch):
     return hosts
 
 
+def _confined(seed):
+    """node.shell through a custom grant, a tenant that does not own cluster_1, and one
+    VM ACL there: reach to the cluster, confined to that VM."""
+    seed.tenant('t1', clusters=['other'])
+    user = seed.user('ops', role='viewer', tenant_id='t1', permissions=['node.shell'])
+    seed.vm_acl('cluster_1', 100, ['ops'])
+    return user
+
+
+def _portal(seed):
+    """The tenant owns cluster_1, but the user holds a VM ACL there: confined as well."""
+    seed.tenant('t2', clusters=['cluster_1'])
+    user = seed.user('portal', role='viewer', tenant_id='t2', permissions=['node.shell'])
+    seed.vm_acl('cluster_1', 101, ['portal'])
+    return user
+
+
+def _operator(seed):
+    seed.tenant('t3', clusters=['cluster_1'])
+    return seed.user('opr', role='viewer', tenant_id='t3', permissions=['node.shell'])
+
+
 def _cluster(api, addresses=None):
     mgr = api.make_fake_manager('cluster_1')
     mgr.host = mgr.config.host = CONNECTION_HOST
     mgr.api_port = 8006
+    mgr.config.ssh_port = 22
     mgr.nodes = {n: {'node': n, 'status': 'online'} for n in ADDRESSES}
     mgr.connect_to_proxmox.return_value = True
     table = ADDRESSES if addresses is None else addresses
@@ -246,23 +268,40 @@ def test_a_token_minted_before_the_account_was_disabled_opens_no_shell(api, seed
 
 def test_the_shell_ends_with_the_session_the_token_was_minted_under(api, seed, dialled, monkeypatch):
     """hold_websocket gets the token's session (#1038): signing that session out hangs the
-    shell up, signing out another one does not."""
+    shell up, signing out another one does not. It is held as a console, so the login
+    dialog's five minutes count against the console budget, not the request pool."""
     import pegaprox.utils.realtime as rt
     hung_up = []
     monkeypatch.setattr(rt, '_hang_up', hung_up.append)
     held = []
     real_hold = rt.hold_websocket
-    monkeypatch.setattr(vms, 'hold_websocket', lambda user, ws, sid=None: (held.append(ws), real_hold(user, ws, sid=sid)))
+
+    def hold(user, ws, sid=None, console=False):
+        held.append((ws, console))
+        return real_hold(user, ws, sid=sid, console=console)
+    monkeypatch.setattr(vms, 'hold_websocket', hold)
     root = seed.user('root', role='admin')
     c = api.as_user(root)
     other = api.as_user(root).session_id
     tok = c.post('/api/ws/token', json={}).get_json()['token']
     _shell(api, f'token={tok}')
-    assert len(held) == 1
+    assert [console for _ws, console in held] == [True]
     rt.end_session_channels('root', sids=[other])
     assert hung_up == []
     rt.end_session_channels('root', sids=[c.session_id])
-    assert hung_up == held
+    assert hung_up == [ws for ws, _console in held]
+
+
+def test_a_full_instance_opens_no_shell(api, seed, dialled, monkeypatch):
+    """hold_websocket says no when MAX_CONSOLES are open: the page is told, nothing is
+    looked up and nobody logs in."""
+    mgr = _cluster(api)
+    monkeypatch.setattr(vms, 'hold_websocket', lambda *a, **kw: False)
+    said = _shell(api, f'token={_token(api, seed.user("root", role="admin"))}')
+    assert _errors(said) == [vms.CONSOLES_FULL_ERROR], said
+    mgr.connect_to_proxmox.assert_not_called()
+    mgr.member_node_ip.assert_not_called()
+    assert dialled == []
 
 
 # --- 2. the node it logs in on ----------------------------------------------------------------
@@ -433,225 +472,42 @@ def test_the_shell_of_a_node_that_is_down_does_not_open_on_its_neighbour(api, se
     assert dialled == ['pve10.lab']
 
 
-# --- 2b. the SSH server on port+2 -------------------------------------------------------------
+# --- 2b. /api/ws/token/validate names no node any more ------------------------------------------
 
-class _Talking(_AsyncWS):
-    def __init__(self, path, *incoming):
-        super().__init__(path)
-        self.incoming = list(incoming)
-
-    async def recv(self):
-        if self.incoming:
-            return self.incoming.pop(0)
-        raise ConnectionError('nothing more to say')
+def _validate(api, token, extra=''):
+    return api.anon().get(f'/api/ws/token/validate?token={token}&cluster_id=cluster_1{extra}')
 
 
-def _run_script(monkeypatch, tmp_path, answers, path=f'{SHELL}?token=t', host=None):
-    monkeypatch.setenv('PEGAPROX_SSH_KNOWN_HOSTS', str(tmp_path / 'known_hosts'))
-    monkeypatch.delenv('PEGAPROX_SSH_STRICT_HOST_KEYS', raising=False)
-    ns, asked = _ssh_server(answers)
-    hosts = []
-
-    class _Client(paramiko.SSHClient):
-        def connect(self, hostname, **kw):
-            hosts.append(hostname)
-            raise paramiko.AuthenticationException('stopped by the test')
-
-    fake = types.SimpleNamespace(**vars(paramiko))
-    fake.SSHClient = _Client
-    ns['paramiko'] = fake
-    creds = {'username': 'root', 'password': 'pw'}
-    if host is not None:
-        creds['host'] = host
-    ws = _Talking(path, json.dumps(creds))
-    asyncio.run(ns['ssh_handler'](ws))
-    said = [json.loads(m) for m in ws.sent if isinstance(m, str) and m.startswith('{')]
-    return said, ws, hosts, asked
-
-
-def _validated(node_ips, host='192.0.2.1'):
-    return {'/api/ws/token/validate': _Resp(200, {'valid': True, 'known_hosts_only': False,
-                                                  'cluster_context': {'host': host, 'node_ips': node_ips}})}
-
-
-def test_the_ssh_server_logs_in_on_the_address_the_app_named(monkeypatch, tmp_path):
-    said, ws, hosts, asked = _run_script(monkeypatch, tmp_path,
-                                         _validated({'_fallback_0': '192.0.2.1', 'n1': '192.0.2.11'}))
-    assert _asked_for(said) == ['192.0.2.11'] and hosts == ['192.0.2.11'], said
-    # it asks the app for this node's shell, which is what makes the app look the node up
-    assert len(asked) == 1 and '&node=n1&shell=node' in asked[0]
-
-
-def test_the_ssh_server_opens_nothing_without_the_nodes_address(monkeypatch, tmp_path):
-    """The connection host and a fallback host are known, the node's address is not."""
-    said, ws, hosts, _asked = _run_script(monkeypatch, tmp_path, _validated({'_fallback_0': '192.0.2.5'}))
-    assert said == [{'status': 'error', 'message': f'{NO_ADDRESS} n1'}]
-    assert ws.closed == (1008, 'node address unknown')
-    assert hosts == [], 'the login went to the connection host'
-
-
-@pytest.mark.parametrize('ip', ['192.0.2.1', '192.0.2.5', '203.0.113.9'])
-def test_neither_ip_nor_the_dialog_moves_the_ssh_servers_shell(monkeypatch, tmp_path, ip):
-    """The connection host and a fallback host passed the old allow-list and took the
-    shell there; a host outside it was refused. All three end on the node now."""
-    said, ws, hosts, _asked = _run_script(
-        monkeypatch, tmp_path, _validated({'_fallback_0': '192.0.2.5', 'n1': '192.0.2.11'}),
-        path=f'{SHELL}?token=t&ip={ip}', host=ip)
-    assert _asked_for(said) == ['192.0.2.11'] and hosts == ['192.0.2.11'], said
-
-
-def test_a_key_of_the_context_is_no_node(monkeypatch, tmp_path):
-    path = '/api/clusters/c1/nodes/_fallback_0/shellws?token=t'
-    said, ws, hosts, _asked = _run_script(monkeypatch, tmp_path, _validated({'_fallback_0': '192.0.2.5'}), path=path)
-    assert said == [{'status': 'error', 'message': f'{NO_ADDRESS} _fallback_0'}] and hosts == []
-
-
-def test_the_legacy_session_path_takes_the_nodes_address_too(monkeypatch, tmp_path):
-    def run(node_ips):
-        return _run_script(monkeypatch, tmp_path, {
-            '/api/auth/validate': _Resp(200, {'valid': True}),
-            '/api/internal/cluster-creds/': _Resp(200, {'host': '192.0.2.1', 'node_ips': node_ips}),
-        }, path=f'{SHELL}?session=s&ip=192.0.2.1', host='192.0.2.1')
-
-    said, _ws, hosts, _asked = run({'n1': '192.0.2.11', 'n2': '192.0.2.12'})
-    assert _asked_for(said) == ['192.0.2.11'] and hosts == ['192.0.2.11'], said
-    # cluster-creds' own stand-in for "no node found" is no node either
-    said, ws, hosts, _asked = run({'_default': '192.0.2.1'})
-    assert _errors(said) == [f'{NO_ADDRESS} n1'] and hosts == []
-
-
-def _query(url):
-    from urllib.parse import parse_qs, urlparse
-    return parse_qs(urlparse(url).query)
-
-
-def test_the_token_adds_nothing_to_the_validate_call(monkeypatch, tmp_path):
-    """The page's token went into the validate URL as it came, so ?token=t%26shell%3Dx put
-    a shell=x ahead of shell=node, and /validate reads the first: no node.shell check, no
-    confinement check. Before this change the shell then opened on the connection host."""
-    _said, _ws, _hosts, asked = _run_script(monkeypatch, tmp_path, _validated({'n1': '192.0.2.11'}),
-                                            path=f'{SHELL}?token=t%26shell%3Dx%26node%3Dn9')
-    q = _query(asked[0])
-    assert q['token'] == ['t&shell=x&node=n9'], q
-    assert q['shell'] == ['node'] and q['node'] == ['n1'], q
-
-
-def test_the_vm_terminals_token_adds_nothing_either():
-    from test_ha_v2_surface import CID, TERM
-    ns, asked = _ssh_server({'/api/ws/token/validate': _Resp(401)})
-    asyncio.run(ns['ssh_handler'](_AsyncWS(f'{TERM}?token=t%26cluster_id%3Dother&ticket=x&port=5900&host=h&user=u')))
-    q = _query(asked[0])
-    assert q['token'] == ['t&cluster_id=other'] and q['cluster_id'] == [CID], q
-
-
-def _app_behind(api, ns):
-    """The script's calls answered by the app itself, as our own console server."""
-    from pegaprox.api.realtime import CONSOLE_SERVER_HEADER, console_server_secret
-    answered = []
-
-    def get(url, headers=None, **kw):
-        path = url[len(ns['PEGAPROX_URL']):]
-        r = api.anon().get(path, headers=headers or {})
-        answered.append((path.split('?')[0], r.status_code))
-        return _Resp(r.status_code, r.get_json(silent=True) or {})
-    ns['requests'] = types.SimpleNamespace(get=get, exceptions=ns['requests'].exceptions)
-    ns['CONSOLE_HEADERS'] = {CONSOLE_SERVER_HEADER: console_server_secret()}
-    return answered
-
-
-def _port2(api, monkeypatch, tmp_path, query, node='pve2'):
-    from urllib.parse import quote
-    monkeypatch.setenv('PEGAPROX_SSH_KNOWN_HOSTS', str(tmp_path / 'known_hosts'))
-    ns, _asked = _ssh_server({})
-    answered = _app_behind(api, ns)
-    hosts = []
-
-    class _Client(paramiko.SSHClient):
-        def connect(self, hostname, **kw):
-            hosts.append(hostname)
-            raise paramiko.AuthenticationException('stopped by the test')
-
-    fake = types.SimpleNamespace(**vars(paramiko))
-    fake.SSHClient = _Client
-    ns['paramiko'] = fake
-    ws = _Talking(f'/api/clusters/cluster_1/nodes/{quote(node)}/shellws?{query}',
-                  json.dumps({'username': 'root', 'password': 'pw'}))
-    asyncio.run(ns['ssh_handler'](ws))
-    said = [json.loads(m) for m in ws.sent if isinstance(m, str) and m.startswith('{')]
-    return said, answered, hosts
-
-
-def _port2_cluster(api):
+def test_the_validate_answer_names_no_node_and_mints_nothing(api, seed):
+    """The SSH server on port+2 took the node's address (and a PVE ticket) from this answer;
+    with that server gone the answer is the token's verdict and nothing else, and nothing
+    is looked up or minted for it."""
     mgr = _cluster(api)
-    mgr.config.fallback_hosts = []
-    mgr.config.ssh_port = 22
-    mgr._ssl_verify = False
-    mgr.mint_console_auth_ticket.return_value = None
-    return mgr
+    mgr.mint_console_auth_ticket.return_value = 'PVE:root@pam:65F00000::sig'
+    r = _validate(api, _token(api, seed.user('root', role='admin')), '&node=pve2&shell=node')
+    assert r.status_code == 200, r.data
+    assert r.get_json() == {'valid': True, 'user': 'root', 'role': 'admin', 'known_hosts_only': False}
+    mgr.member_node_ip.assert_not_called()
+    mgr._get_node_ip.assert_not_called()
+    mgr.mint_console_auth_ticket.assert_not_called()
 
 
-def test_the_ssh_server_and_the_app_open_the_clicked_node(api, seed, monkeypatch, tmp_path):
-    """Both halves together: the script's validate call answered by the app."""
-    _port2_cluster(api)
-    root = seed.user('root', role='admin')
-    for node in ('pve2', 'pve3'):
-        said, answered, hosts = _port2(api, monkeypatch, tmp_path, f'token={_token(api, root)}', node=node)
-        assert answered == [('/api/ws/token/validate', 200)]
-        assert _asked_for(said) == [ADDRESSES[node]] and hosts == [ADDRESSES[node]], said
-
-
-def test_a_token_that_adds_a_shell_gets_no_further_than_validate(api, seed, monkeypatch, tmp_path):
-    """A viewer of the cluster without node.shell. Her token with a shell=x behind it was a
-    valid token for /validate and skipped its node.shell check (200)."""
-    from urllib.parse import quote
-    mgr = _port2_cluster(api)
+def test_the_validate_call_still_asks_node_shell_for_a_node_shell(api, seed):
+    """The endpoint stays and still consumes a ws token for anyone who sends one, so its
+    shell=node checks keep answering: a viewer of the cluster without node.shell is refused
+    and a confined caller with it as well."""
+    mgr = _cluster(api)
     seed.tenant('t3', clusters=['cluster_1'])
     viewer = seed.user('vic', role='viewer', tenant_id='t3')
-    said, answered, hosts = _port2(api, monkeypatch, tmp_path,
-                                   'token=' + quote(_token(api, viewer) + '&shell=x', safe=''))
-    assert answered == [('/api/ws/token/validate', 401)], answered
-    assert _asked_for(said) == [] and hosts == []
+    r = _validate(api, _token(api, viewer), '&node=pve2&shell=node')
+    assert r.status_code == 403 and r.get_json()['error'] == 'node.shell permission required', r.data
+    r = _validate(api, _token(api, _portal(seed)), '&node=pve2&shell=node')
+    assert r.status_code == 403 and 'whole cluster' in r.get_json()['error'], r.data
+    # counterproof: the viewer's token without shell=node is valid for her cluster, and
+    # an operator with node.shell passes
+    assert _validate(api, _token(api, viewer), '&node=pve2').status_code == 200
+    assert _validate(api, _token(api, _operator(seed)), '&node=pve2&shell=node').status_code == 200
     mgr.member_node_ip.assert_not_called()
-    # counterproof: her token as it is gets the node.shell refusal
-    said, answered, _hosts = _port2(api, monkeypatch, tmp_path, f'token={_token(api, viewer)}')
-    assert answered == [('/api/ws/token/validate', 403)]
-    assert _errors(said) == ['No access to cluster cluster_1']
-
-
-# --- 2c. the main app's half: the validate call names the node's address ----------------------
-
-def _shell_cluster(api, addresses):
-    mgr = _mgr(api)
-    mgr.nodes = {'pve1': {}, 'pve2': {}}
-    mgr.member_node_ip.side_effect = lambda n: addresses.get(n)
-    return mgr
-
-
-def test_the_validate_call_of_a_node_shell_names_the_nodes_address(api, seed):
-    mgr = _shell_cluster(api, {'pve2': '10.0.0.12'})
-    root = seed.user('root', role='admin')
-    r = _validate(api, _token(api, root), '&node=pve2&shell=node', headers=_console_server())
-    assert r.status_code == 200, r.data
-    ctx = r.get_json()['cluster_context']
-    assert ctx['node_ips'] == {'pve2': '10.0.0.12'} and ctx['host'] == '10.0.0.1'
-    mgr.member_node_ip.assert_called_once_with('pve2')
-    # counterproof: the VM terminal asks no node shell, so nothing is probed for it
-    r = _validate(api, _token(api, root), '&node=pve2', headers=_console_server())
-    assert r.status_code == 200 and r.get_json()['cluster_context']['node_ips'] == {}
-    assert mgr.member_node_ip.call_count == 1
-
-
-@pytest.mark.parametrize('node', ['pve1', 'pve9', '_fallback_0'])
-def test_the_validate_call_names_no_address_it_does_not_have(api, seed, node):
-    """pve1 is a member without an address, the other two are no members at all."""
-    mgr = _shell_cluster(api, {'pve2': '10.0.0.12', 'pve9': '10.0.0.99'})
-    mgr.config.fallback_hosts = ['10.0.0.5']
-    r = _validate(api, _token(api, seed.user('root', role='admin')), f'&node={node}&shell=node',
-                  headers=_console_server())
-    assert r.status_code == 200, r.data
-    assert r.get_json()['cluster_context']['node_ips'] == {'_fallback_0': '10.0.0.5'}
-    if node != 'pve1':
-        mgr.member_node_ip.assert_not_called()
 
 
 # --- the helper and the XCP-ng lookup ---------------------------------------------------------
@@ -699,25 +555,28 @@ def test_an_xcp_ng_host_resolves_by_hostname_or_label_and_nothing_stands_in():
     assert x.member_node_ip('xh1') is None and x._get_host_ip('xh1') == '10.1.1.1'
 
 
-def test_cluster_creds_lists_no_stand_in_for_an_xcp_ng_host(api, seed):
+def test_the_shell_of_an_xcp_ng_host_xapi_does_not_know_has_no_stand_in(api, seed, dialled):
+    """The older lookup hands the pool's own host back for a host it does not find. The
+    shell asks member_node_ip, so a host XAPI does not know is no shell, and its login
+    does not land on the pool master under that host's name. cluster-creds, which listed
+    the node addresses for the SSH server on port+2, is gone with that server."""
     mgr = api.make_fake_manager('cluster_1', cluster_type='xcpng')
-    mgr.host = '10.1.1.1'
-    mgr.api_port = 443
-    mgr.get_nodes.return_value = [{'node': 'xh1'}, {'node': 'xh2'}]
+    mgr.host = mgr.config.host = '10.1.1.1'
+    mgr.nodes = {}
+    mgr.connect_to_proxmox.return_value = True
     mgr.member_node_ip.side_effect = {'xh1': '10.1.1.11'}.get
     mgr._get_host_ip.return_value = '10.1.1.1'
-    mgr.mint_console_auth_ticket.return_value = None
     mgr.config.ssh_port = 22
-    mgr._ssl_verify = False
+    mgr.config.ssh_disabled = False
     api.set_manager('cluster_1', mgr)
-    sid = api.as_user(seed.user('root', role='admin')).session_id
-    client = api.app.test_client()
-    client.set_cookie('session', sid, domain='localhost')
-    r = client.get('/api/internal/cluster-creds/cluster_1', base_url='http://localhost',
-                   headers=_console_server())
-    assert r.status_code == 200, r.data
-    assert r.get_json()['node_ips'] == {'xh1': '10.1.1.11'}
+    root = seed.user('root', role='admin')
+    assert _errors(_shell(api, f'token={_token(api, root)}', node='xh2')) == [f'{NO_ADDRESS} xh2']
+    assert dialled == []
+    # counterproof: a host XAPI knows opens on its own address
+    assert _asked_for(_shell(api, f'token={_token(api, root)}', node='xh1')) == ['10.1.1.11']
+    assert dialled == ['10.1.1.11']
     mgr._get_host_ip.assert_not_called()
+    assert api.as_user(root).get('/api/internal/cluster-creds/cluster_1').status_code == 404
 
 
 # --- the address the dialog shows before the shell server names one ----------------------------

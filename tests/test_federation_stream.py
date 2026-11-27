@@ -115,6 +115,40 @@ def test_a_stream_closed_before_its_first_frame_lets_its_slot_go(linked):
     assert fstream._streams_in._used == 0
 
 
+def test_a_feed_leaves_the_request_pool_when_it_starts(linked, monkeypatch):
+    """Like a browser's stream: an hour-long feed holds no request slot, and its
+    connection serves nothing after it."""
+    import gevent
+    import gevent.pool
+    from pegaprox.utils import realtime as rtu
+    from pegaprox.core.db import get_db
+    a, b = linked
+    resp, _n, _r = _open(a, b)
+    assert resp.status_code == 200
+    assert resp.headers.get('Connection') == 'close'
+    resp.close()
+
+    monkeypatch.setattr(rtu, '_request_pools', [])
+    pool = gevent.pool.Pool(2)
+    rtu.register_request_pool(pool)
+    call = {'user': 'alice', 'home': iid(a), 'sh': '', 'tok': None, 'query': f'clusters={CID}'}
+    seen = {}
+
+    def serve_feed():
+        row = dict(get_db().get_user('alice'), username='alice')
+        body = fstream.leading_stream(iid(a), call, row, 'n' * 24, 'f' * 32)
+        seen['before'] = gevent.getcurrent() in pool
+        next(body)
+        seen['after'] = gevent.getcurrent() in pool
+        body.close()
+
+    with at(b):
+        pool.spawn(serve_feed).join(5)
+    assert seen == {'before': True, 'after': False}
+    assert pool.free_count() == 2
+    assert fstream._streams_in._used == 0
+
+
 def test_the_browser_gets_the_frames_under_the_remote_id(linked):
     a, b = linked
     resp, nonce, rid = _open(a, b)

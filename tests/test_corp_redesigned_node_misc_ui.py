@@ -469,7 +469,10 @@ def test_runtime_the_shell_bar_follows_the_session(open_app):
     page.locator('[data-cr-nsh="tab"][data-cr-nsh-state="login"]').wait_for(timeout=10000)
     assert page.locator('[data-cr-nsh-badge] .cr-badge').inner_text().strip() == 'Waiting for login'
     assert page.locator('[data-cr-nsh-at]').inner_text() == '10.0.0.11'
-    assert page.locator('[data-cr-nsh-port]').inner_text() == 'Shell port 82'
+    # the shell is a socket of the page's own address, port and all (no port+2 any more):
+    # the harness serves the page on plain http without a port
+    assert page.locator('[data-cr-nsh-port]').inner_text() == 'Shell port 80'
+    assert shell.sockets[0].url.startswith('ws://pegaprox.test/api/clusters/'), shell.sockets[0].url
     # the one terminal of the classic tab, clipped like it (#727), 500 px high
     term = page.locator('[data-cr-nsh-term]')
     assert term.evaluate('el => getComputedStyle(el).overflow') == 'clip' and round(term.bounding_box()['height']) == 500

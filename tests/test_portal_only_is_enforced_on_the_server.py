@@ -396,13 +396,14 @@ def test_a_portal_account_cannot_stop_a_guest_it_has_no_acl_for(world, db, porta
 
 
 def test_the_inline_routes_refuse_a_portal_account(world, db):
-    """The routes that find their caller themselves: the SSH server's validate calls, the
-    live streams, a ws or SSE token in the query. A ws token is single-use and stays."""
+    """The routes that find their caller themselves: the validate calls, the live streams,
+    the shell and the VM terminal, a ws or SSE token in the query. A ws token is single-use
+    and stays."""
     from pegaprox.utils.realtime import create_ws_token, create_sse_token
     from pegaprox.globals import ws_tokens
     cust = world.as_user(_account(db, 'cust', portal_only=True))
     anon = world.anon()
-    # a client that sends the Cookie header it is given, as the SSH server does
+    # a client that sends the Cookie header it is given, as the SSH console server did
     bare = world.app.test_client(use_cookies=False)
 
     ws_token = create_ws_token('cust', 'user')
@@ -412,8 +413,15 @@ def test_the_inline_routes_refuse_a_portal_account(world, db):
 
     r = bare.get('/api/auth/validate', headers={'Cookie': f'session={cust.session_id}'})
     assert (r.status_code, _code(r)) == REFUSED
-    r = bare.get(f'/api/internal/cluster-creds/{HOME}',
-                 headers={'Cookie': f'session={cust.session_id}'})
+    # the VM terminal is a socket of the main port now; on port+2 the validate call above
+    # held it. The portal opens none, so the hook holds it before the token is spent
+    term = f'/api/clusters/{HOME}/vms/n1/qemu/100/termwebsocket'
+    term_token = create_ws_token('cust', 'user')
+    r = anon.get(f'{term}?token={term_token}&ticket=PVEVNC:x&port=5900&host=h&user=u',
+                 headers=WS_HEADERS)
+    assert (r.status_code, _code(r)) == REFUSED
+    assert term_token in ws_tokens
+    r = anon.get(f'{term}?session={cust.session_id}', headers=WS_HEADERS)
     assert (r.status_code, _code(r)) == REFUSED
     r = anon.get(f'/api/sse/updates?token={create_sse_token("cust", None)}')
     assert (r.status_code, _code(r)) == REFUSED

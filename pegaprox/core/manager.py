@@ -13989,8 +13989,8 @@ echo "AGENT_INSTALLED_OK"
             
             # ================================================================
             # STEP 3: Try candidates with connectivity probe (SSH port).
-            # Cap at 3 attempts so a cluster-creds call stays under the WS
-            # server's 10s timeout even on bad networks (PR #324).
+            # Cap at 3 attempts so a node shell lookup stays near 10s even on bad
+            # networks (PR #324).
             # ================================================================
             probed = 0
             for score, ip, iface, reason in candidates:
@@ -17914,9 +17914,9 @@ echo "AGENT_INSTALLED_OK"
         """Mint a FRESH PVE session ticket (PVEAuthCookie) for the console WS proxy.
 
         NS 2026-06-05 (security audit C-1): the cluster-wide PVE ticket must NOT
-        transit the browser — it's effectively root on pve:8006. The standalone
-        WS subprocess fetches it server-side (via the internal cluster-creds /
-        ws-token-validate path) right before connecting to PVE's vncwebsocket.
+        transit the browser - it's effectively root on pve:8006. The terminal socket
+        (api/vms.py vm_terminal_websocket_proxy) mints it in this process right before
+        connecting to PVE's vncwebsocket.
         Returns the ticket string, or None when the cluster has no stored
         password (API-token clusters can't mint session tickets anyway, and
         termproxy needs a real session cookie). Kept off self._ticket on purpose

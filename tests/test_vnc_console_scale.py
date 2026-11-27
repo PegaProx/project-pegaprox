@@ -23,12 +23,13 @@ def test_the_relay_slice_is_short_enough_for_pointer_input():
 
 
 def test_every_vnc_leg_uses_the_shared_slice():
-    """Four legs carried their own copy of the number; three were plain 0.05."""
+    """Four legs carried their own copy of the number; three were plain 0.05. The VNC relay
+    and the VM terminal on the main port are the legs vms.py has left."""
     vms = open('pegaprox/api/vms.py').read()
     poll = open('pegaprox/utils/vnc_polling.py').read()
 
     assert 'settimeout(0.05)' not in vms and 'settimeout(0.05)' not in poll
-    assert vms.count('VNC_PVE_RECV_SLICE') >= 3
+    assert vms.count('VNC_PVE_RECV_SLICE') >= 2
     assert 'VNC_PVE_RECV_SLICE' in poll
 
 

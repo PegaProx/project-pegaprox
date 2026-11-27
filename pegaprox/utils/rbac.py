@@ -1919,6 +1919,9 @@ def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str =
     once, rather than at each of its five grant points — the #941 follow-up was a lesson
     in what happens when a guard is added to the path you happened to read instead of to
     the place every path passes through.
+
+    user_vm_access gives the same answer for many guests at once: a branch added to either
+    goes into the other.
     """
     if not _user_can_access_vm_uncapped(user, cluster_id, vmid, permission, vm_type):
         return False
@@ -1928,6 +1931,105 @@ def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str =
                       f"does not carry it")
         return False
     return True
+
+
+def user_vm_access(user: dict, cluster_id: str, permission: str = 'vm.view'):
+    """user_can_access_vm for many guests of one cluster. Returns allowed(vmid, vm_type=None),
+    which gives that function's answer for each guest (allowed.everything, where it is set:
+    the answer is yes for every one of them); what does not depend on the guest
+    (the ACL rows naming the account, its pool grants, tenant clusters, role and token
+    ceiling) is read once here, so a guest costs a few dict lookups.
+
+    MK Nov 2026 - the stream's 'resources' filter asked user_can_access_vm guest by guest, four
+    or five SQL statements each, and one non-admin stream on a 10k-guest cluster held the hub
+    2.5 to 5 s per frame. Build it once per frame and account; never keep it longer, a revoked
+    grant has to take effect on the next frame. The two have to stay alike branch for branch
+    (tests/test_user_vm_access.py holds one against the other): a change there goes here."""
+    if not user:
+        return lambda vmid, vm_type=None: False
+    # the ceiling depends on the token's role alone, so it decides for every guest at once
+    if not _within_token_role(user, permission):
+        return lambda vmid, vm_type=None: False
+    if acts_as_admin(user):
+        return lambda vmid, vm_type=None: True
+
+    username = user.get('username', '')
+    acls = get_vm_acls()
+    if acls_unavailable(acls):
+        logging.error(f"[VM-ACL] ACL store unavailable - denying {permission} for "
+                      f"'{username}' on every guest of {cluster_id}")
+        return lambda vmid, vm_type=None: False
+    cluster_acls = acls.get(cluster_id, {})
+    # a row that is no mapping (only the legacy JSON fallback hands one over) made
+    # user_can_access_vm raise on its guest for anyone: a store that did not load, not no row
+    if any(not isinstance(a, dict) for a in cluster_acls.values()):
+        logging.error(f"[VM-ACL] an ACL row of {cluster_id} is unreadable - denying {permission} "
+                      f"for '{username}' on every guest of {cluster_id}")
+        return lambda vmid, vm_type=None: False
+    # a guest whose own row names the account (or '*') is decided by that row and nothing else
+    by_row = {}
+    for key, vm_acl in cluster_acls.items():
+        if vm_acl and acl_grants_user(vm_acl, username):
+            if vm_acl.get('inherit_role', True):
+                by_row[key] = permission in ACL_INHERITED_VM_PERMISSIONS
+            else:
+                by_row[key] = permission in vm_acl.get('permissions', [])
+
+    # a grant table that could not be read skips the pool step and confines below
+    pool_unread = False
+    try:
+        pool_perms = _pool_perms_for(cluster_id, username, user.get('groups', [])) or {}
+    except Exception as e:
+        logging.error(f"[POOL-PERM] Error checking pool permission: {e}")
+        pool_perms, pool_unread = {}, True
+    granting_pools = {pid for pid, perms in pool_perms.items()
+                      if perms and ('pool.admin' in perms or permission in perms
+                                    or permission in ('vm.view', 'pool.view'))}
+    membership = {}
+    if granting_pools:
+        try:
+            membership = get_pool_membership_cache(cluster_id)
+        except Exception as e:
+            logging.error(f"[POOL-PERM] Error checking pool permission: {e}")
+
+    # the role-wide fall-through: False for no guest, True for all, or the vmids it covers
+    tenant_clusters = get_user_clusters(user, include_pools=False)
+    if portal_only_holds(user) or (tenant_clusters is not None and cluster_id not in tenant_clusters):
+        rest = False
+    elif not has_permission(user, permission):
+        rest = False
+    else:
+        acl_scoped = set(int(v) for v, a in cluster_acls.items()
+                         if username in (a.get('users') or []) and str(v).lstrip('-').isdigit())
+        has_pool_grant = pool_unread or any(p for p in pool_perms.values())
+        rest = acl_scoped if (acl_scoped or has_pool_grant) else True
+        if has_pool_grant and not pool_unread:
+            try:
+                rest = acl_scoped | get_user_pool_vmids(user, cluster_id, _perms=pool_perms)
+            except Exception as e:
+                logging.error(f"[VM-ACL] pool-scope lookup failed for {username}@{cluster_id}: {e} → fail closed")
+
+    def allowed(vmid, vm_type=None):
+        decided = by_row.get(str(vmid))
+        if decided is not None:
+            return decided
+        if granting_pools:
+            if vm_type:
+                pool_id = membership.get(f"{vmid}:{vm_type}")
+            else:
+                pool_id = membership.get(f"{vmid}:qemu") or membership.get(f"{vmid}:lxc")
+            if pool_id and pool_id in granting_pools:
+                return True
+        if isinstance(rest, bool):
+            return rest
+        try:
+            return int(vmid) in rest
+        except (ValueError, TypeError):
+            return False
+    # True for any vmid at all (no row of the account takes one away and the role covers the
+    # rest): a caller with many guests can keep them all without asking guest by guest
+    allowed.everything = rest is True and all(by_row.values())
+    return allowed
 
 
 def get_user_vms(user: dict, cluster_id: str) -> list:

@@ -11,6 +11,11 @@ Three things, each shown here on the real mechanism before the fix is held to it
     timeout and kept writing; the polling leg kept its session open for the next send.
   * why a session ended was a DEBUG line, or a print, so the drop in the field said nothing.
 
+The VNC console had three relays then (the standalone server on 5001, the flask-sock and the
+geventwebsocket routes); one is left, `_vnc_relay` behind the flask-sock route, and its
+reader waits for PVE (a gevent watcher, select() stops at descriptor 1023) before it
+takes the lock to read.
+
 MK Oct 2026
 """
 import base64
@@ -18,6 +23,7 @@ import ctypes
 import datetime
 import hashlib
 import logging
+import os
 import socket
 import ssl
 import threading
@@ -32,8 +38,7 @@ from pegaprox.constants import VNC_PVE_RECV_SLICE, VNC_PVE_SEND_TIMEOUT
 from pegaprox.utils import vnc_polling
 from pegaprox.utils.vnc_polling import VncPollSession
 
-from test_console_token_cluster_955 import (  # noqa: F401  (standalone_handler is a fixture)
-    _PATH, _Browser, _PasswordManager, _Pve, _query, standalone_handler)
+from test_console_token_cluster_955 import _PATH, _PasswordManager, _Pve, _query
 
 
 # --- a TLS peer on loopback --------------------------------------------------
@@ -249,7 +254,6 @@ class _OnceSlowPve(_SlowPve):
         self.written.append(payload)
 
     send = send_binary = _write
-    sock = None
 
 
 @pytest.fixture
@@ -260,15 +264,32 @@ def cluster(api, seed, monkeypatch):
     return api.set_manager('c1', _PasswordManager())
 
 
-def test_the_flask_sock_leg_stops_after_a_write_that_timed_out(api, cluster, monkeypatch, caplog):
-    """It used to read 'timed out' in the message, take it for its own receive timeout,
-    and send the next key behind the partial frame."""
-    pve = _OnceSlowPve()
-    monkeypatch.setattr(websocket, 'create_connection', lambda *a, **k: pve)
+@pytest.fixture
+def pve_socket():
+    """The socket under a PVE websocket, for the relay's wait: .idle has nothing to
+    read, .ready always has a byte waiting."""
+    idle, idle_peer = socket.socketpair()
+    ready, ready_peer = socket.socketpair()
+    ready_peer.send(b'x')
+    yield types.SimpleNamespace(idle=idle, ready=ready)
+    for s in (idle, idle_peer, ready, ready_peer):
+        s.close()
+
+
+def _vnc_socket(api, browser):
     view = api.app.view_functions['__flask_sock.vnc_websocket_proxy'].__wrapped__
+    with api.app.test_request_context(f'{_PATH}?{_query(True)}'):
+        view(browser, 'c1', 'pve1', 'qemu', 100)
+
+
+def test_the_relay_stops_after_a_write_that_timed_out(api, cluster, monkeypatch, caplog, pve_socket):
+    """The flask-sock relay used to read 'timed out' in the message, take it for its own
+    receive timeout, and send the next key behind the partial frame."""
+    pve = _OnceSlowPve()
+    pve.sock = pve_socket.idle
+    monkeypatch.setattr(websocket, 'create_connection', lambda *a, **k: pve)
     with caplog.at_level(logging.INFO):
-        with api.app.test_request_context(f'{_PATH}?{_query(True)}'):
-            view(_Browser3(), 'c1', 'pve1', 'qemu', 100)
+        _vnc_socket(api, _Browser3())
     assert pve.written == [], f'kept writing after a partial frame: {pve.written}'
     assert pve.timeouts_at_write == [VNC_PVE_SEND_TIMEOUT]
     ends = [r for r in caplog.records if 'session ended' in r.getMessage()]
@@ -276,13 +297,11 @@ def test_the_flask_sock_leg_stops_after_a_write_that_timed_out(api, cluster, mon
     assert 'reason=Client->PVE' in ends[-1].getMessage()
 
 
-def test_the_flask_sock_leg_writes_with_the_deadline(api, cluster, monkeypatch):
+def test_the_relay_writes_with_the_deadline(api, cluster, monkeypatch, pve_socket):
     pve = _SlowPve()
-    pve.sock = None
+    pve.sock = pve_socket.idle
     monkeypatch.setattr(websocket, 'create_connection', lambda *a, **k: pve)
-    view = api.app.view_functions['__flask_sock.vnc_websocket_proxy'].__wrapped__
-    with api.app.test_request_context(f'{_PATH}?{_query(True)}'):
-        view(_Browser3(), 'c1', 'pve1', 'qemu', 100)
+    _vnc_socket(api, _Browser3())
     assert pve.written == [b'k1', b'k2', b'k3']
     assert set(pve.timeouts_at_write) == {VNC_PVE_SEND_TIMEOUT}
 
@@ -290,7 +309,10 @@ def test_the_flask_sock_leg_writes_with_the_deadline(api, cluster, monkeypatch):
 # --- why it ended, at WARNING ------------------------------------------------
 
 class _ResetPve:
-    sock = None
+    """PVE that resets the connection on the first read; the socket says there is one."""
+
+    def __init__(self, sock):
+        self.sock = sock
 
     def settimeout(self, t):
         pass
@@ -311,54 +333,82 @@ def _ended_lines(caplog):
     return [r for r in caplog.records if 'session ended' in r.getMessage()]
 
 
-def test_the_standalone_leg_says_why_at_warning(cluster, monkeypatch, standalone_handler, caplog):
-    """The line the reporter could only see with --debug: '[VNC] PVE->Client: [Errno 104]'."""
-    import asyncio
-
-    class _Staying(_Browser):
-        async def __anext__(self):
-            await asyncio.sleep(2)          # still there when PVE resets
-            raise StopAsyncIteration
-
-    monkeypatch.setattr(websocket, 'create_connection', lambda *a, **k: _ResetPve())
-    with caplog.at_level(logging.INFO):
-        asyncio.run(standalone_handler(_Staying(f'{_PATH}?{_query(True)}')))
-    ends = _ended_lines(caplog)
-    assert ends, [r.getMessage() for r in caplog.records]
-    assert ends[-1].levelno == logging.WARNING
-    assert 'reason=PVE->Client: [Errno 104] Connection reset by peer' in ends[-1].getMessage()
-
-
-def test_the_geventwebsocket_leg_says_why_at_warning(api, cluster, monkeypatch, caplog):
-    import gevent as _g
-
+def test_the_relay_says_why_at_warning(api, cluster, monkeypatch, caplog, pve_socket):
+    """The line the reporter could only see with --debug: '[VNC] PVE->Client: [Errno 104]'.
+    It was the standalone server's; the one relay left says it the same way."""
     class _Waiting:
         """stays open until the reader has hit the reset"""
         connected = True
 
         def receive(self, timeout=None):
-            _g.sleep(0.05)
+            gevent.sleep(0.05)
             return None
 
         def send(self, data):
             pass
 
-    monkeypatch.setattr(websocket, 'create_connection', lambda *a, **k: _ResetPve())
+        def close(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(websocket, 'create_connection', lambda *a, **k: _ResetPve(pve_socket.ready))
     with caplog.at_level(logging.INFO):
-        with api.app.test_request_context(f'{_PATH}?{_query(True)}'):
-            vms.handle_vnc_websocket(_Waiting(), 'c1', 'pve1', 'qemu', 100)
+        _vnc_socket(api, _Waiting())
     ends = _ended_lines(caplog)
     assert ends and ends[-1].levelno == logging.WARNING, [r.getMessage() for r in caplog.records]
     assert 'reason=PVE->Client: [Errno 104] Connection reset by peer' in ends[-1].getMessage()
 
 
-def test_a_browser_closing_the_tab_is_no_warning(api, cluster, monkeypatch, caplog):
-    """The counterweight: the WARNING is for a session that broke, not for every close."""
-    class _QuietPve(_ResetPve):
-        def recv(self):
-            gevent.sleep(0.005)
-            raise websocket.WebSocketTimeoutException('read slice')
+class _ScreenPve(_ResetPve):
+    """PVE that sends one screen's worth of RFB, then nothing."""
 
+    def __init__(self, sock):
+        super().__init__(sock)
+        self.frames = [b'\x00' * 8192]
+
+    def recv(self):
+        if self.frames:
+            return self.frames.pop(0)
+        gevent.sleep(0.005)
+        raise websocket.WebSocketTimeoutException('read slice')
+
+
+class _LeavesAfterTheScreen:
+    """A browser that closes the tab once the screen has arrived."""
+
+    def __init__(self):
+        self.got = []
+
+    @property
+    def connected(self):
+        return not self.got
+
+    def receive(self, timeout=None):
+        gevent.sleep(0.01)
+        return None
+
+    def send(self, data):
+        self.got.append(data)
+
+    def close(self, *a, **k):
+        pass
+
+
+def test_a_browser_closing_the_tab_is_no_warning(api, cluster, monkeypatch, caplog, pve_socket):
+    """The counterweight: the WARNING is for a session that broke, not for every close."""
+    monkeypatch.setattr(websocket, 'create_connection', lambda *a, **k: _ScreenPve(pve_socket.ready))
+    browser = _LeavesAfterTheScreen()
+    with caplog.at_level(logging.INFO):
+        _vnc_socket(api, browser)
+    assert browser.got == [b'\x00' * 8192]
+    ends = _ended_lines(caplog)
+    assert ends and ends[-1].levelno == logging.INFO, [r.getMessage() for r in ends]
+    assert 'reason=browser closed' in ends[-1].getMessage()
+    assert 'SHORT_OR_EMPTY' not in ends[-1].getMessage()
+
+
+def test_a_session_that_never_got_a_screen_is_a_warning(api, cluster, monkeypatch, caplog, pve_socket):
+    """A tab closed within seconds before PVE sent anything is how a middlebox that eats
+    the RFB stream looks from here; the standalone server flagged it, the relay does."""
     class _Leaves:
         connected = False
 
@@ -368,11 +418,64 @@ def test_a_browser_closing_the_tab_is_no_warning(api, cluster, monkeypatch, capl
         def send(self, data):
             pass
 
-    monkeypatch.setattr(websocket, 'create_connection', lambda *a, **k: _QuietPve())
-    view = api.app.view_functions['__flask_sock.vnc_websocket_proxy'].__wrapped__
+        def close(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(websocket, 'create_connection', lambda *a, **k: _ScreenPve(pve_socket.idle))
     with caplog.at_level(logging.INFO):
-        with api.app.test_request_context(f'{_PATH}?{_query(True)}'):
-            view(_Leaves(), 'c1', 'pve1', 'qemu', 100)
+        _vnc_socket(api, _Leaves())
     ends = _ended_lines(caplog)
-    assert ends and ends[-1].levelno == logging.INFO, [r.getMessage() for r in ends]
+    assert ends and ends[-1].levelno == logging.WARNING, [r.getMessage() for r in ends]
     assert 'reason=browser closed' in ends[-1].getMessage()
+    assert 'recv=0B SHORT_OR_EMPTY' in ends[-1].getMessage()
+
+
+@pytest.fixture
+def pve_socket_past_1023():
+    """pve_socket, but numbered above 1023: an instance with a few dozen consoles and its
+    cluster connections holds that many descriptors, and select() refuses those."""
+    resource = pytest.importorskip('resource')
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = 1400
+    if hard != resource.RLIM_INFINITY and hard < want:
+        pytest.skip(f'hard descriptor limit {hard}')
+    resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, want), hard))
+    held = []
+    try:
+        while True:
+            fd = os.open(os.devnull, os.O_RDONLY)
+            held.append(fd)
+            if fd >= 1100:
+                break
+        idle, idle_peer = socket.socketpair()
+        ready, ready_peer = socket.socketpair()
+        ready_peer.send(b'x')
+        try:
+            assert min(idle.fileno(), ready.fileno()) > 1023
+            yield types.SimpleNamespace(idle=idle, ready=ready)
+        finally:
+            for s in (idle, idle_peer, ready, ready_peer):
+                s.close()
+    finally:
+        for fd in held:
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_the_wait_for_pve_takes_a_descriptor_past_1023(pve_socket_past_1023):
+    assert vms._pve_socket_readable(pve_socket_past_1023.idle, 0.05) is False
+    assert vms._pve_socket_readable(pve_socket_past_1023.ready, 0.05) is True
+
+
+def test_a_console_opened_past_descriptor_1023_gets_its_screen(api, cluster, monkeypatch, caplog,
+                                                               pve_socket_past_1023):
+    """With select() in the wait every such console ended in its first second, before
+    PVE's first byte, as 'PVE->Client: filedescriptor out of range in select()'."""
+    monkeypatch.setattr(websocket, 'create_connection',
+                        lambda *a, **k: _ScreenPve(pve_socket_past_1023.ready))
+    browser = _LeavesAfterTheScreen()
+    with caplog.at_level(logging.INFO):
+        _vnc_socket(api, browser)
+    assert browser.got == [b'\x00' * 8192]
+    ends = _ended_lines(caplog)
+    assert ends and 'reason=browser closed' in ends[-1].getMessage(), [r.getMessage() for r in ends]

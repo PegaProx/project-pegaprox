@@ -417,7 +417,7 @@ def test_every_console_upgrade_and_ticket_call_refuses_redirects():
             limit = [k for k in node.keywords if k.arg == 'redirect_limit']
             upgrades.append((node.lineno, bool(limit) and ast.unparse(limit[0].value) == '0'))
         checks += name == '_refuse_ws_redirect'
-    assert len(upgrades) >= 5
+    assert len(upgrades) >= 4      # VNC relay, VM terminal, screenshot, vnc-poll
     assert [u for u in upgrades if not u[1]] == []
     assert checks == len(upgrades)
     for module in (vms, mgrmod):

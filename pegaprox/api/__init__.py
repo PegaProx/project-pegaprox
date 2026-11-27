@@ -104,6 +104,19 @@ def register_blueprints(app):
     app.register_blueprint(qnetd_bp)
 
     # Initialize WebSocket support for realtime blueprint
+    # MK Nov 2026 - a ping from our side on every socket, as the console ports sent every
+    # 30 s: a proxy with nginx's default 60 s read timeout keeps an idle console, and a
+    # browser that went away (laptop lid, NAT drop) is noticed instead of holding its
+    # console until the session ends. simple-websocket hangs up when the pong is not back
+    # by the next ping, so the interval is also how long a stalled hub may take.
+    # max_message_size: a message is put together in memory before a route sees it, and the
+    # console ports took 1 MiB (1009 above it), so one console could fill the memory.
+    # receive_bytes: with a ping interval simple-websocket asks select() before each read,
+    # which does not see what OpenSSL already decrypted - with 4 KiB a paste over that stayed
+    # in OpenSSL until the next ping. One read takes a whole TLS record (16 KiB).
+    app.config.setdefault('SOCK_SERVER_OPTIONS', {'ping_interval': 40,
+                                                  'max_message_size': 1 << 20,
+                                                  'receive_bytes': 65536})
     from pegaprox.api.realtime import sock
     sock.init_app(app)
 

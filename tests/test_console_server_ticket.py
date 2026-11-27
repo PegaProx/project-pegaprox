@@ -1,18 +1,20 @@
-"""The PVE session ticket a console needs goes to our own console server only, and a
-caller confined to single VMs or a pool on a cluster gets no root shell on its nodes.
+"""The PVE session ticket of the cluster account stays in this process, and a caller
+confined to single VMs or a pool on a cluster gets no root shell on its nodes.
 
 /api/ws/token/validate used to put a freshly minted ticket of the cluster's own account
 (root@pam by default) into its answer for anyone holding a ws token, and any signed-in
-account can mint one. The SSH console server the app starts now proves itself with a
-per-start secret from its environment; nobody else gets the cluster context.
+account can mint one. Then only the SSH console server on port+2 got that cluster
+context, proving itself with a per-start secret. The server is gone, the consoles are
+routes of this app and mint the ticket next to the PVE socket, and validate hands the
+context to nobody: it says whether the token is good, and nothing else.
 
-The node shell had three exits besides /api/internal/cluster-creds, and only that one
-refused a caller who reaches the cluster through a VM ACL or a pool grant.
+The node shell had three exits besides /api/internal/cluster-creds (gone as well), and
+only that one refused a caller who reaches the cluster through a VM ACL or a pool grant.
 
 MK Oct 2026
 """
-import inspect
 import json
+import secrets
 
 import pytest
 
@@ -39,8 +41,8 @@ def _validate(api, token, extra='', headers=None):
 
 
 def _console_server():
-    from pegaprox.api.realtime import CONSOLE_SERVER_HEADER, console_server_secret
-    return {CONSOLE_SERVER_HEADER: console_server_secret()}
+    """The header the SSH console server sent with its secret. It opens nothing now."""
+    return {'X-PegaProx-Console-Server': secrets.token_urlsafe(32)}
 
 
 # --- the ticket ------------------------------------------------------------------------
@@ -59,39 +61,23 @@ def test_a_ws_token_alone_gets_no_ticket(api, seed, who):
     mgr.mint_console_auth_ticket.assert_not_called()
 
 
-def test_our_console_server_gets_the_context(api, seed):
+@pytest.mark.parametrize('extra', ['', '&node=pve1&shell=node', '&console=term'])
+@pytest.mark.parametrize('headers', [None, 'old-proof', 'empty-proof'])
+def test_nobody_gets_the_cluster_context(api, seed, extra, headers):
+    """Not even with the console server's header: no host, no node address, no ticket.
+    The node shell and the guest terminal mint and resolve what they need themselves."""
     mgr = _mgr(api)
-    user = seed.user('vic', role='admin')
-    c = api.as_user(user)
-    r = _validate(api, c.post('/api/ws/token', json={}).get_json()['token'], headers=_console_server())
+    c = api.as_user(seed.user('vic', role='admin'))
+    sent = {None: None, 'old-proof': _console_server(),
+            'empty-proof': {'X-PegaProx-Console-Server': ''}}[headers]
+    r = _validate(api, c.post('/api/ws/token', json={}).get_json()['token'], extra, headers=sent)
     assert r.status_code == 200, r.data
-    ctx = r.get_json()['cluster_context']
-    assert ctx['pve_auth_ticket'] == TICKET and ctx['host'] == '10.0.0.1'
-    # a wrong or empty proof is no proof
-    from pegaprox.api.realtime import CONSOLE_SERVER_HEADER
-    for wrong in ('', 'x' * 43, _console_server()[CONSOLE_SERVER_HEADER][:-1] + '?'):
-        r = _validate(api, c.post('/api/ws/token', json={}).get_json()['token'],
-                      headers={CONSOLE_SERVER_HEADER: wrong})
-        assert r.status_code == 200 and 'cluster_context' not in r.get_json(), wrong
-    assert mgr.mint_console_auth_ticket.call_count == 1
-
-
-def test_the_console_server_is_given_the_secret_and_sends_it():
-    """The script the app writes for its SSH console server reads the secret from its
-    environment and sends it with both validate calls; the app puts it there."""
-    import pegaprox.api.vms as vms
-    src = inspect.getsource(vms.start_ssh_websocket_server)
-    assert "env['PEGAPROX_CONSOLE_SECRET'] = console_server_secret()" in src
-    script = src[src.index("server_script = '''"):]
-    assert "CONSOLE_HEADERS = {'X-PegaProx-Console-Server': os.environ.get('PEGAPROX_CONSOLE_SECRET', '')}" in script
-    assert script.count("f\"{PEGAPROX_URL}/api/ws/token/validate\"") == 2
-    assert script.count("headers = dict(CONSOLE_HEADERS, **(") == 2
-
-
-def test_the_secret_is_long_and_new_per_process():
-    from pegaprox.api import realtime
-    assert len(realtime.console_server_secret()) >= 40
-    assert 'token_urlsafe(32)' in inspect.getsource(realtime)
+    body = r.get_json()
+    assert body['valid'] is True and 'cluster_context' not in body, body
+    text = r.get_data(as_text=True)
+    assert TICKET not in text and 'pve_auth_ticket' not in text and 'node_ips' not in text
+    mgr.mint_console_auth_ticket.assert_not_called()
+    mgr.member_node_ip.assert_not_called()
 
 
 # --- the node shell ----------------------------------------------------------------------
@@ -125,9 +111,9 @@ def test_a_confined_caller_gets_no_node_shell_ticket(api, seed, make):
     r = c.post('/api/clusters/cluster_1/nodes/pve1/shell', json={})
     assert r.status_code == 403 and 'whole cluster' in r.get_json()['error'], r.data
     mgr.get_node_shell_ticket.assert_not_called()
-    # nor through the console server's validate call for a node shell
+    # nor through the validate call of a node shell, which still asks
     tok = c.post('/api/ws/token', json={}).get_json()['token']
-    r = _validate(api, tok, '&node=pve1&shell=node', headers=_console_server())
+    r = _validate(api, tok, '&node=pve1&shell=node')
     assert r.status_code == 403 and 'whole cluster' in r.get_json()['error'], r.data
     mgr.mint_console_auth_ticket.assert_not_called()
 
@@ -139,9 +125,11 @@ def test_a_cluster_operator_still_gets_the_node_shell(api, seed):
     r = c.post('/api/clusters/cluster_1/nodes/pve1/shell', json={})
     assert r.status_code == 200, r.data
     tok = c.post('/api/ws/token', json={}).get_json()['token']
-    r = _validate(api, tok, '&node=pve1&shell=node', headers=_console_server())
-    assert r.status_code == 200 and r.get_json()['cluster_context']['pve_auth_ticket'] == TICKET
+    r = _validate(api, tok, '&node=pve1&shell=node')
+    assert r.status_code == 200 and r.get_json()['valid'] is True, r.data
+    assert 'cluster_context' not in r.get_json()
     assert mgr.get_node_shell_ticket.call_count == 1
+    mgr.mint_console_auth_ticket.assert_not_called()
 
 
 class _WS:

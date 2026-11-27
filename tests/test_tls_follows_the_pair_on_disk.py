@@ -1,15 +1,15 @@
 """A TLS listener serves the cert/key pair on disk, not only the one it started with.
 
 The background renewal wrote a new pair into config/ssl and every listener kept the one
-it had loaded at start, until somebody restarted by hand. The HTTPS port, the VNC console
-port and the SSH console process take a new pair up with the next handshake now, and a
-pair that does not load leaves the one they serve.
+it had loaded at start, until somebody restarted by hand. The HTTPS port and the two
+legacy console ports take a new pair up with the next handshake now, and a pair that does
+not load leaves the one they serve.
 
-The HTTPS server with the VNC server next to it runs in a subprocess, the way
-_start_gevent_server runs in production (gevent's monkey patching), and the SSH console
-server is the script vms.py writes, run on its own. All on spare ports. MK
+The console ports used to be servers of their own, the VNC one in this process and the
+SSH one a script vms.py wrote and ran. They are listeners of the same app now, started by
+_start_gevent_server next to the HTTPS port, so one subprocess running it the way
+production does (gevent's monkey patching) holds all three, on spare ports. MK
 """
-import ast
 import datetime
 import logging
 import os
@@ -196,17 +196,14 @@ def test_an_issued_certificate_asks_for_a_restart_only_when_a_listener_kept_the_
     assert r.get_json()['restart_required'] is broken
 
 
-# ---- the HTTPS port and the VNC console port, as production starts them ----
+# ---- the HTTPS port and the legacy console ports, as production starts them ----
 
 _SERVER = r'''
 import gevent.monkey; gevent.monkey.patch_all()
 import sys
 from flask import Flask
 import pegaprox.app as app_mod
-import pegaprox.api.vms as vms
 
-# the SSH console server is a script of its own, tested below
-vms.start_ssh_websocket_server = lambda *a, **k: None
 web = Flask('pair-test')
 
 
@@ -219,74 +216,37 @@ app_mod._start_gevent_server(web, '127.0.0.1', int(sys.argv[1]), (sys.argv[2], s
 '''
 
 
-def test_the_https_and_vnc_ports_serve_a_renewal_without_a_restart(tmp_path):
+def test_the_https_and_console_ports_serve_a_renewal_without_a_restart(tmp_path):
     ssl_dir = tmp_path / 'ssl'
     ssl_dir.mkdir()
     _install(ssl_dir, 'first')
-    port = _free_ports(2)
+    port = _free_ports(3)
+    ports = (port, port + 1, port + 2)
     log_path = tmp_path / 'server.log'
     env = {**os.environ, 'PYTHONPATH': REPO, 'PEGAPROX_CONFIG_DIR': str(tmp_path / 'config')}
+    env.pop('PEGAPROX_LEGACY_CONSOLE_PORTS', None)
     with open(log_path, 'w') as log:
         proc = subprocess.Popen([sys.executable, '-c', _SERVER, str(port),
                                  str(ssl_dir / 'cert.pem'), str(ssl_dir / 'key.pem')],
                                 cwd=str(tmp_path), env=env, stdout=log, stderr=subprocess.STDOUT)
     try:
-        _wait(lambda: b'pong' in _https_get(port) and _served(port + 1), proc, log_path, 'test server')
-        assert (_served(port), _served(port + 1)) == ('first', 'first')
+        _wait(lambda: b'pong' in _https_get(port) and _served(port + 1) and _served(port + 2),
+              proc, log_path, 'test server')
+        assert tuple(_served(p) for p in ports) == ('first',) * 3
+        # the console ports are the same app, but answer nothing besides the consoles
+        for extra in ports[1:]:
+            assert _https_get(extra).startswith(b'HTTP/1.1 404'), extra
 
         _install(ssl_dir, 'second')
-        assert (_served(port), _served(port + 1)) == ('second', 'second')
+        assert tuple(_served(p) for p in ports) == ('second',) * 3
         assert b'pong' in _https_get(port)
 
         # a pair that does not load changes nothing, and the port keeps answering
         _install(ssl_dir, 'third', broken=True)
-        assert (_served(port), _served(port + 1)) == ('second', 'second')
+        assert tuple(_served(p) for p in ports) == ('second',) * 3
         assert b'pong' in _https_get(port)
 
         _install(ssl_dir, 'fourth')
-        assert (_served(port), _served(port + 1)) == ('fourth', 'fourth')
-    finally:
-        _stop(proc)
-
-
-# ---- the SSH console server, the script vms.py writes ----
-
-def _ssh_server_script():
-    """server_script as start_ssh_websocket_server writes it."""
-    with open(os.path.join(REPO, 'pegaprox', 'api', 'vms.py'), encoding='utf-8') as f:
-        tree = ast.parse(f.read())
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == 'start_ssh_websocket_server')
-    assign = next(n for n in ast.walk(fn) if isinstance(n, ast.Assign)
-                  and any(getattr(t, 'id', None) == 'server_script' for t in n.targets))
-    return ast.literal_eval(assign.value)
-
-
-def test_the_ssh_console_server_serves_a_renewal_without_a_restart(tmp_path):
-    ssl_dir = tmp_path / 'ssl'
-    ssl_dir.mkdir()
-    _install(ssl_dir, 'first')
-    script = tmp_path / 'ssh_ws.py'
-    script.write_text(_ssh_server_script())
-    port = _free_ports(1)
-    log_path = tmp_path / 'ssh.log'
-    env = {**os.environ, 'SSH_WS_PORT': str(port), 'SSH_WS_HOST': '127.0.0.1',
-           'SSH_WS_SSL_CERT': str(ssl_dir / 'cert.pem'), 'SSH_WS_SSL_KEY': str(ssl_dir / 'key.pem'),
-           'PEGAPROX_PKG_BASE': REPO, 'PEGAPROX_URL': 'https://127.0.0.1:9'}
-    with open(log_path, 'w') as log:
-        proc = subprocess.Popen([sys.executable, str(script)], cwd=str(tmp_path), env=env,
-                                stdout=log, stderr=subprocess.STDOUT)
-    try:
-        _wait(lambda: _served(port), proc, log_path, 'SSH console server')
-        assert _served(port) == 'first'
-
-        _install(ssl_dir, 'second')
-        assert _served(port) == 'second'
-
-        _install(ssl_dir, 'third', broken=True)
-        assert _served(port) == 'second'
-
-        _install(ssl_dir, 'fourth')
-        assert _served(port) == 'fourth'
+        assert tuple(_served(p) for p in ports) == ('fourth',) * 3
     finally:
         _stop(proc)

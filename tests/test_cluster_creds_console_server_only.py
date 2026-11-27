@@ -1,47 +1,99 @@
-"""cluster-creds answers the SSH console server only, and the node shell route keeps the
-cluster account's session to itself.
+"""cluster-creds is gone, the cluster account's session stays in this process, and the node
+shell and the guest terminal still open on the main port.
 
-GET /api/internal/cluster-creds/<cluster> has one caller, the SSH console server this
-process starts: the legacy ?session= login of its node shell takes the node addresses
-from it, its guest terminal (PVE termproxy) the allow-list and a fresh PVE ticket of the
-cluster account. Nothing in the page or a plugin calls it. It now asks the same proof
-/api/ws/token/validate asks before it hands out a cluster context, the per-start secret
-the console server gets in its environment, and the console server sends it on both
-calls. The checks behind it (node.shell, unconfined, SSH switch) run as before.
+GET /api/internal/cluster-creds/<cluster> had one caller, the SSH console server on
+port+2: the legacy ?session= login of its node shell took the node addresses from it, its
+guest terminal a fresh PVE ticket of the cluster account. It answered only that server,
+which proved itself with a per-start secret. The server is gone, both consoles are routes
+of this app, and the route went with it: nobody can ask for the addresses or the ticket,
+with or without the header that once opened it. The checks it ran (node.shell, the
+confinement, the SSH switch) are the main port shell's own.
 
-POST /api/clusters/<cluster>/nodes/<node>/shell put the manager's own PVEAuthCookie into
-its answer. Nobody read it; the VNC and term tickets dropped theirs long ago.
+The termproxy ticket call and POST /api/clusters/<cluster>/nodes/<node>/shell never put
+the cluster account's PVEAuthCookie into their answer (C-1): the terminal mints it next to
+the PVE socket, and the browser never holds it.
 
-The script of the console server runs here with its calls answered by the real app, as
-in test_node_shell_ssh_switch. paramiko stops at the connect, the PVE socket likewise.
+The routes run as flask-sock calls them. paramiko stops at the connect, so "dialled" is
+the SSH login; websocket.create_connection stands in for PVE.
 
 MK Nov 2026
 """
-import asyncio
 import json
+import secrets
 import types
 
+import paramiko
 import pytest
 
-from test_ha_v2_surface import _Resp, _ssh_server
-from test_node_shell_target_1143 import _Talking, _let_go, _token  # noqa: F401
-from test_node_shell_ssh_switch import APP, OFF, SHELL, TERM, _cluster, dialled  # noqa: F401
+import pegaprox.api.vms as vms
+from test_vm_terminal_main_port import _Page, _let_go, _query, _terminal, pve  # noqa: F401
 
 TICKET = 'PVE:root@pam:65F00000::sig'
 CREDS = '/api/internal/cluster-creds/cluster_1'
+ADDRESSES = {'pve1': '10.0.0.1', 'pve2': '10.0.0.12', 'pve3': '10.0.0.13'}
+SHELL = '/api/clusters/cluster_1/nodes/pve2/shellws'
+PVE_URL = 'wss://10.0.0.1:8006/api2/json/nodes/pve2/qemu/100/vncwebsocket'
+NO_AUTH = 'Console auth unavailable for this cluster (needs user/password auth)'
 
 
 def _proof():
-    from pegaprox.api.realtime import CONSOLE_SERVER_HEADER, console_server_secret
-    return {CONSOLE_SERVER_HEADER: console_server_secret()}
+    """The header the SSH console server proved itself with, and a value of the shape its
+    secret had. It opens nothing any more."""
+    return {'X-PegaProx-Console-Server': secrets.token_urlsafe(32)}
 
 
 def _creds(api, user, query='', headers=None):
-    """cluster-creds the way the console server calls it: the browser's session as the
-    cookie `session`, plus whatever headers it sends."""
+    """cluster-creds the way the console server called it: the browser's session as the
+    cookie `session`, plus whatever headers it sent."""
     client = api.app.test_client()
     client.set_cookie('session', api.as_user(user).session_id, domain='localhost')
     return client.get(CREDS + query, headers=headers or {}, base_url='http://localhost')
+
+
+@pytest.fixture
+def dialled(monkeypatch):
+    """(host, port) of every SSH login of the shell; the login itself fails."""
+    seen = []
+
+    class _Client(paramiko.SSHClient):
+        def connect(self, hostname=None, port=22, **kw):
+            seen.append((hostname, port))
+            raise paramiko.AuthenticationException('stopped by the test')
+
+    monkeypatch.setattr(paramiko, 'SSHClient', _Client)
+    monkeypatch.setattr(vms, 'apply_host_key_policy', lambda client, _p: client)
+    monkeypatch.setattr(vms, 'persist_host_keys', lambda client: None)
+    return seen
+
+
+def _cluster(api, ssh_off=False, auth='password'):
+    """A cluster whose nodes answer at ADDRESSES. 'token' signs in with an API token and
+    has no ticket to mint, 'password' mints one."""
+    from pegaprox.core.manager import PegaProxManager
+    mgr = api.make_fake_manager('cluster_1')
+    mgr.id = 'cluster_1'
+    mgr.host = mgr.config.host = '10.0.0.1'
+    mgr.api_port = 8006
+    mgr._ssl_verify = False
+    mgr.nodes = {n: {'node': n, 'status': 'online'} for n in ADDRESSES}
+    mgr.member_node_ip.side_effect = ADDRESSES.get
+    mgr._get_node_ip.side_effect = ADDRESSES.get
+    mgr.connect_to_proxmox.return_value = True
+    cfg = mgr.config
+    cfg.name = 'c1'
+    cfg.fallback_hosts = []
+    cfg.ssh_disabled = ssh_off
+    cfg.ssh_port = 22
+    cfg.ssh_key = ''
+    if auth == 'token':
+        cfg.user, cfg.pass_ = 'pegaprox@pve!shell', 'token-secret'
+        mgr.mint_console_auth_ticket.return_value = None
+    else:
+        cfg.user, cfg.pass_ = 'root@pam', 'secret'
+        mgr.mint_console_auth_ticket.return_value = TICKET
+    mgr.ssh_blocked_reason = types.MethodType(PegaProxManager.ssh_blocked_reason, mgr)
+    api.set_manager('cluster_1', mgr)
+    return mgr
 
 
 def _operator(seed):
@@ -54,203 +106,135 @@ def _admin(seed):
     return seed.user('root', role='admin')
 
 
-# --- a browser session --------------------------------------------------------------------
-
-@pytest.mark.parametrize('query', ['', '?console=term', '?node=pve2'])
-@pytest.mark.parametrize('make', [_admin, _operator], ids=['admin', 'operator'])
-def test_a_browser_session_gets_nothing_from_cluster_creds(api, seed, query, make):
-    mgr = _cluster(api, ssh_off=False)
-    r = _creds(api, make(seed), query)
-    assert r.status_code == 403, r.data
-    body = r.get_json()
-    assert body['code'] == 'CONSOLE_SERVER_ONLY', body
-    assert 'node_ips' not in body and 'pve_auth_ticket' not in body
-    assert TICKET not in r.get_data(as_text=True)
-    # nothing was looked up or minted for it
-    mgr.mint_console_auth_ticket.assert_not_called()
-    mgr._get_node_ip.assert_not_called()
-
-
-def test_a_wrong_or_empty_proof_is_no_proof(api, seed, monkeypatch):
-    from pegaprox.api import realtime
-    from pegaprox.api.realtime import CONSOLE_SERVER_HEADER
-    mgr = _cluster(api, ssh_off=False)
-    user = _admin(seed)
-    right = _proof()[CONSOLE_SERVER_HEADER]
-    for wrong in ('', ' ', 'x' * len(right), right[:-1] + '?', right + 'x', right.lower()):
-        if wrong == right:
-            continue
-        r = _creds(api, user, headers={CONSOLE_SERVER_HEADER: wrong})
-        assert r.status_code == 403 and 'pve_auth_ticket' not in r.get_json(), repr(wrong)
-    # and a process without a secret matches nothing, an empty header least of all
-    monkeypatch.setattr(realtime, '_CONSOLE_SERVER_SECRET', '')
-    for sent in ('', right):
-        r = _creds(api, user, headers={CONSOLE_SERVER_HEADER: sent})
-        assert r.status_code == 403, repr(sent)
-    mgr.mint_console_auth_ticket.assert_not_called()
-
-
-def test_the_console_server_gets_its_answer(api, seed):
-    """Counterproof: the same session with the proof gets the addresses and the ticket."""
-    mgr = _cluster(api, ssh_off=False)
-    r = _creds(api, _operator(seed), '?node=pve2', headers=_proof())
+def _token(api, user):
+    r = api.as_user(user).post('/api/ws/token', json={})
     assert r.status_code == 200, r.data
-    body = r.get_json()
-    assert body['node_ips']['pve2'] == '10.0.0.12' and body['pve_auth_ticket'] == TICKET
-    assert mgr.mint_console_auth_ticket.call_count == 1
+    return r.get_json()['token']
 
 
-def test_the_checks_behind_the_proof_still_decide(api, seed):
-    """node.shell, the confinement and the SSH switch answer the console server as before."""
-    mgr = _cluster(api, ssh_off=False)
-    seed.tenant('t9', clusters=['cluster_1'])
-    plain = seed.user('plain', role='user', tenant_id='t9')
-    r = _creds(api, plain, headers=_proof())
-    assert r.status_code == 403 and r.get_json()['error'] == 'Permission denied', r.data
-
-    seed.tenant('t1', clusters=['other'])
-    confined = seed.user('ops', role='viewer', tenant_id='t1', permissions=['node.shell'])
-    seed.vm_acl('cluster_1', 100, ['ops'])
-    r = _creds(api, confined, headers=_proof())
-    assert r.status_code == 403 and 'whole cluster' in r.get_json()['error'], r.data
-    mgr.mint_console_auth_ticket.assert_not_called()
-
-    mgr.config.ssh_disabled = True
-    r = _creds(api, _admin(seed), headers=_proof())
-    assert r.status_code == 409 and r.get_json()['code'] == 'SSH_DISABLED', r.data
-    mgr.mint_console_auth_ticket.assert_not_called()
-    # the guest terminal is no SSH and keeps its answer
-    r = _creds(api, _admin(seed), '?console=term', headers=_proof())
-    assert r.status_code == 200 and r.get_json()['pve_auth_ticket'] == TICKET, r.data
-
-
-# --- the console server, run against the app ----------------------------------------------
-
-def _script(api, monkeypatch, tmp_path, query, path=SHELL, websockets=None, secret=True):
-    """One connection to the console server, its calls answered by the app. (what it said,
-    [(path, status, sent the proof)])"""
-    from pegaprox.api.realtime import CONSOLE_SERVER_HEADER, console_server_secret
-    monkeypatch.setenv('PEGAPROX_URL', APP)
-    if secret:
-        monkeypatch.setenv('PEGAPROX_CONSOLE_SECRET', console_server_secret())
-    else:
-        monkeypatch.delenv('PEGAPROX_CONSOLE_SECRET', raising=False)
-    monkeypatch.setenv('PEGAPROX_SSH_KNOWN_HOSTS', str(tmp_path / 'known_hosts'))
-    monkeypatch.delenv('PEGAPROX_SSH_STRICT_HOST_KEYS', raising=False)
-    ns, _asked = _ssh_server({})
-    client = api.app.test_client()
-    asked = []
-
-    def get(url, cookies=None, headers=None, **kw):
-        assert url.startswith(APP), url
-        for name, value in (cookies or {}).items():
-            client.set_cookie(name, value, domain='localhost')
-        r = client.get(url[len(APP):], headers=headers or {}, base_url='http://localhost')
-        proof = (headers or {}).get(CONSOLE_SERVER_HEADER) == console_server_secret()
-        asked.append((url[len(APP):].split('?')[0], r.status_code, proof))
-        return _Resp(r.status_code, r.get_json(silent=True))
-
-    ns['requests'] = types.SimpleNamespace(get=get, exceptions=ns['requests'].exceptions)
-    if websockets is not None:
-        ns['websockets'] = websockets
-    ws = _Talking(f'{path}?{query}', json.dumps({'username': 'root', 'password': 'pw'}))
-    asyncio.run(ns['ssh_handler'](ws))
-    said = [json.loads(m) for m in ws.sent if isinstance(m, str) and m.startswith('{')]
-    return said, asked
+def _shell(api, query, path=SHELL):
+    """One node shell socket on the main port, the login dialog answered."""
+    view = api.app.view_functions['__flask_sock.node_shell_websocket_proxy'].__wrapped__
+    parts = path.split('/')
+    page = _Page(json.dumps({'username': 'root', 'password': 'pw'}))
+    with api.app.test_request_context(f'{path}?{query}'):
+        view(page, parts[3], parts[5])
+    return [json.loads(m) for m in page.sent if isinstance(m, str) and m.startswith('{')]
 
 
 def _addresses(said):
     return [m['ip'] for m in said if m.get('status') == 'need_credentials']
 
 
-def _cluster_of(api, auth):
-    """'token' is an API-token cluster, no PVE ticket to mint; 'password' mints one."""
-    mgr = _cluster(api, ssh_off=False)
-    if auth == 'token':
-        mgr.mint_console_auth_ticket.return_value = None
-    else:
-        mgr.config.user, mgr.config.pass_ = 'root@pam', 'secret'
-    return mgr
+def _errors(said):
+    return [m['message'] for m in said if m.get('status') == 'error']
+
+
+# --- the route ----------------------------------------------------------------------------
+
+@pytest.mark.parametrize('headers', [None, 'proof'], ids=['session', 'with-the-old-proof'])
+@pytest.mark.parametrize('query', ['', '?console=term', '?node=pve2'])
+@pytest.mark.parametrize('make', [_admin, _operator], ids=['admin', 'operator'])
+def test_cluster_creds_answers_nobody(api, seed, query, make, headers):
+    mgr = _cluster(api)
+    r = _creds(api, make(seed), query, headers=_proof() if headers else None)
+
+    assert r.status_code == 404, r.data
+    text = r.get_data(as_text=True)
+    assert 'node_ips' not in text and 'pve_auth_ticket' not in text and TICKET not in text
+    # nothing was looked up or minted for it
+    mgr.mint_console_auth_ticket.assert_not_called()
+    mgr._get_node_ip.assert_not_called()
+    mgr.member_node_ip.assert_not_called()
+
+
+def test_the_same_session_is_good_elsewhere(api, seed):
+    """Counterproof: the 404 is the route, not a session the app refused."""
+    _cluster(api)
+    client = api.app.test_client()
+    client.set_cookie('session', api.as_user(_operator(seed)).session_id, domain='localhost')
+
+    r = client.get('/api/auth/validate', base_url='http://localhost')
+    assert r.status_code == 200 and r.get_json()['valid'] is True, r.data
+
+
+# --- the checks it ran, on the main port shell --------------------------------------------
+
+def test_the_checks_decide_the_main_port_shell(api, seed, dialled, pve):
+    """node.shell, the confinement and the SSH switch, as cluster-creds answered them."""
+    from pegaprox.api.helpers import NODE_SHELL_SSH_OFF
+    mgr = _cluster(api)
+    seed.tenant('t9', clusters=['cluster_1'])
+    plain = seed.user('plain', role='user', tenant_id='t9')
+    assert _errors(_shell(api, f'token={_token(api, plain)}')) == ['Permission denied']
+
+    # the tenant owns the cluster, the account holds a VM ACL there: confined, and only the
+    # confinement stops it
+    seed.tenant('t2', clusters=['cluster_1'])
+    confined = seed.user('portal', role='viewer', tenant_id='t2', permissions=['node.shell'])
+    seed.vm_acl('cluster_1', 101, ['portal'])
+    assert _errors(_shell(api, f'token={_token(api, confined)}')) == [
+        'Access denied: this action affects the whole cluster']
+
+    mgr.config.ssh_disabled = True
+    said = _shell(api, f'token={_token(api, _admin(seed))}')
+    assert _errors(said) == [NODE_SHELL_SSH_OFF] and _addresses(said) == []
+    assert dialled == []
+
+    # the guest terminal is no SSH and keeps its answer
+    _terminal(api, _query(f'token={_token(api, _admin(seed))}'))
+    assert [url.split('?')[0] for url, _kw in pve.dials] == [PVE_URL]
+    mgr.mint_console_auth_ticket.assert_called_once()
 
 
 @pytest.mark.parametrize('auth', ['token', 'password'])
-def test_the_legacy_session_shell_still_opens(api, seed, dialled, monkeypatch, tmp_path, auth):
-    _cluster_of(api, auth)
-    user = _operator(seed)
-    said, asked = _script(api, monkeypatch, tmp_path, f'session={api.as_user(user).session_id}')
-    assert _addresses(said) == ['10.0.0.12'], said
-    assert dialled == [('10.0.0.12', 22)]
-    assert asked == [('/api/auth/validate', 200, True), (CREDS, 200, True)], asked
-
-
-def test_the_legacy_session_shell_needs_the_proof(api, seed, dialled, monkeypatch, tmp_path):
-    """Counterproof: a console server without the secret is a browser to the app here."""
-    _cluster_of(api, 'token')
-    user = _operator(seed)
-    said, asked = _script(api, monkeypatch, tmp_path, f'session={api.as_user(user).session_id}',
-                          secret=False)
-    assert ('/api/internal/cluster-creds/cluster_1', 403, False) in asked, asked
-    assert _addresses(said) == [] and dialled == []
-
-
-@pytest.mark.parametrize('auth', ['token', 'password'])
-def test_the_token_shell_still_opens(api, seed, dialled, monkeypatch, tmp_path, auth):
-    _cluster_of(api, auth)
-    said, asked = _script(api, monkeypatch, tmp_path, f'token={_token(api, _operator(seed))}')
-    assert _addresses(said) == ['10.0.0.12'], said
-    assert dialled == [('10.0.0.12', 22)]
-    assert asked == [('/api/ws/token/validate', 200, True)], asked
-
-
-def _pve():
-    tried = []
-
-    async def connect(url, additional_headers=None, **kw):
-        tried.append((url.split('?')[0], (additional_headers or {}).get('Cookie')))
-        raise ConnectionRefusedError('stopped by the test')
-    return tried, types.SimpleNamespace(connect=connect)
-
-
 @pytest.mark.parametrize('way', ['token', 'session'])
-def test_the_guest_terminal_still_gets_its_ticket(api, seed, dialled, monkeypatch, tmp_path, way):
-    """Both logins of the guest terminal reach PVE with the cluster account's ticket,
-    the session login through cluster-creds?console=term."""
-    _cluster_of(api, 'password')
+def test_the_shell_still_opens_on_the_clicked_node(api, seed, dialled, way, auth):
+    """Both logins of the shell, on a token cluster and on a password one: the address of
+    the node it was opened for, without cluster-creds."""
+    _cluster(api, auth=auth)
     user = _operator(seed)
     q = f'token={_token(api, user)}' if way == 'token' else f'session={api.as_user(user).session_id}'
-    tried, websockets = _pve()
-    said, asked = _script(api, monkeypatch, tmp_path,
-                          f'{q}&ticket=PVEVNC:x&port=5900&host=10.0.0.1&user=root@pam',
-                          path=TERM, websockets=websockets)
-    assert tried == [('wss://10.0.0.1:8006/api2/json/nodes/pve2/qemu/100/vncwebsocket',
-                      f'PVEAuthCookie={TICKET}')], (said, asked)
-    assert all(proof for _p, _s, proof in asked), asked
-    if way == 'session':
-        assert (CREDS, 200, True) in asked, asked
+    said = _shell(api, q)
+
+    assert _addresses(said) == ['10.0.0.12'], said
+    assert dialled == [('10.0.0.12', 22)]
+
+
+# --- the guest terminal -------------------------------------------------------------------
+
+@pytest.mark.parametrize('way', ['token', 'session'])
+def test_the_guest_terminal_still_gets_its_ticket(api, seed, dialled, pve, way):
+    """Both logins of the guest terminal reach PVE with the cluster account's ticket,
+    minted in this process: cluster-creds?console=term handed it out before."""
+    mgr = _cluster(api)
+    user = _operator(seed)
+    q = f'token={_token(api, user)}' if way == 'token' else f'session={api.as_user(user).session_id}'
+    _terminal(api, _query(q))
+
+    assert [(url.split('?')[0], kw['header']) for url, kw in pve.dials] == [
+        (PVE_URL, {'Cookie': f'PVEAuthCookie={TICKET}'})]
+    assert mgr.mint_console_auth_ticket.call_count == 1
     assert dialled == []
 
 
-def test_the_guest_terminal_of_a_token_cluster_says_why(api, seed, dialled, monkeypatch, tmp_path):
+def test_the_guest_terminal_of_a_token_cluster_says_why(api, seed, pve):
     """An API-token cluster has no ticket for PVE's terminal socket: that sentence, as before."""
-    _cluster_of(api, 'token')
-    user = _operator(seed)
-    tried, websockets = _pve()
-    said, asked = _script(api, monkeypatch, tmp_path,
-                          f'session={api.as_user(user).session_id}&ticket=PVEVNC:x&port=5900'
-                          f'&host=10.0.0.1&user=root@pam', path=TERM, websockets=websockets)
-    assert (CREDS, 200, True) in asked, asked
-    assert tried == []
-    assert [m['message'] for m in said if m.get('status') == 'error'] == [
-        'Console auth unavailable for this cluster (needs user/password auth)'], said
+    _cluster(api, auth='token')
+    page = _terminal(api, _query(f'session={api.as_user(_operator(seed)).session_id}'))
+
+    assert pve.dials == []
+    assert [m['message'] for m in map(json.loads, page.sent) if m.get('status') == 'error'] == [NO_AUTH]
+    assert page.closed == (1011, NO_AUTH)
 
 
-# --- the node shell route -------------------------------------------------------------------
+# --- the answers of the ticket calls ------------------------------------------------------
 
 def test_the_node_shell_answer_carries_no_session_cookie(api, seed):
     """The manager's own get_node_shell_ticket behind the route, PVE's termproxy answer
     faked: the termproxy ticket goes out, the cluster account's session does not."""
     from pegaprox.core.manager import PegaProxManager
-    mgr = _cluster(api, ssh_off=False)
+    mgr = _cluster(api)
     mgr.is_connected = True
     mgr._ticket = 'PVE:root@pam:SERVICE::sig'
 
@@ -267,3 +251,38 @@ def test_the_node_shell_answer_carries_no_session_cookie(api, seed):
     assert 'pve_auth_cookie' not in body, body
     assert 'PVE:root@pam:SERVICE::sig' not in r.get_data(as_text=True)
     assert body['ticket'] == 'PVEVNC:term' and body['port'] == 5900 and body['node'] == 'pve2'
+
+
+def test_the_termproxy_answer_carries_no_session_cookie(api, seed, monkeypatch):
+    """C-1. The ticket call logs in to PVE as the cluster account for the termproxy ticket;
+    that login's session ticket is root on the cluster and stays here, only the termproxy
+    ticket for this guest goes to the page."""
+    import io
+    from contextlib import contextmanager
+
+    import pegaprox.core.manager as manager_mod
+    mgr = _cluster(api)
+    mgr.auth_host = '10.0.0.1'
+    asked = []
+
+    class _Opener:
+        @contextmanager
+        def open(self, req, timeout=None):
+            url = req.full_url
+            asked.append(url.split('/api2/json')[1])
+            if url.endswith('/access/ticket'):
+                data = {'ticket': TICKET, 'CSRFPreventionToken': 'csrf', 'username': 'root@pam'}
+            else:
+                assert req.get_header('Cookie') == f'PVEAuthCookie={TICKET}'
+                data = {'ticket': 'PVEVNC:term', 'port': 5900, 'user': 'root@pam'}
+            yield io.BytesIO(json.dumps({'data': data}).encode())
+    monkeypatch.setattr(manager_mod, 'pve_opener', lambda _ctx: _Opener())
+
+    r = api.as_user(_admin(seed)).post('/api/clusters/cluster_1/vms/pve2/qemu/100/termproxy', json={})
+
+    assert r.status_code == 200, r.data
+    assert asked == ['/access/ticket', '/nodes/pve2/qemu/100/termproxy']
+    body = r.get_json()
+    assert body['ticket'] == 'PVEVNC:term' and body['port'] == 5900 and body['host'] == '10.0.0.1'
+    text = r.get_data(as_text=True)
+    assert TICKET not in text and 'csrf' not in text

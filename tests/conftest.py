@@ -295,6 +295,25 @@ def _federation_forgotten(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _held_sockets_forgotten():
+    """The open sockets and consoles counted per account (utils/realtime.hold_websocket)
+    are released when the request ends, and a socket view driven inside a bare request
+    context never ends one: each test starts with none counted, or a busy worker reaches
+    MAX_CONSOLES and refuses consoles no test opened."""
+    from pegaprox.utils import realtime as rtu
+    def forget():
+        with rtu._held_ws_lock:
+            rtu._held_ws.clear()
+            rtu._held_ws_sid.clear()
+            rtu._held_consoles.clear()
+            rtu._held_bodies.clear()
+        rtu._dropped_streams.clear()
+    forget()
+    yield
+    forget()
+
+
+@pytest.fixture(autouse=True)
 def _node_history_forgotten():
     """What core/node_history.py knows of each node lives as long as the process, and the
     next test's cluster_1 is another cluster with another database."""

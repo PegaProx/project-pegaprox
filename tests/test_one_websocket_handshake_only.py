@@ -1,11 +1,13 @@
 """Exactly one party may perform the websocket handshake.
 
 #945.3 - geventwebsocket's handler upgrades every request carrying
-`Upgrade: websocket`, at the WSGI layer, before Flask routes anything. Three of
+`Upgrade: websocket`, at the WSGI layer, before Flask routes anything. Four of
 our endpoints are flask-sock, and simple_websocket handshakes them itself once
 reached. The client got two 101 responses back to back, read the second as a
 frame, and closed with 1002 Protocol Error - which is why the console never came
-up behind a reverse proxy while direct access on :5001 was fine.
+up behind a reverse proxy while direct access on :5001 was fine. Since every console
+is a flask-sock route of the main port (the VM terminal too, which only the SSH
+server on :5002 had), all of them depend on this.
 
 The decision is taken from the URL map (flask-sock registers websocket=True
 rules), so these tests drive it with the real app and real request environments.
@@ -26,6 +28,7 @@ def _env(path, upgrade='websocket', method='GET'):
 
 FLASK_SOCK = [
     '/api/clusters/c1/vms/pve1/qemu/100/vncwebsocket',
+    '/api/clusters/c1/vms/pve1/lxc/101/termwebsocket',
     '/api/clusters/c1/nodes/pve1/shellws',
     '/api/ws/updates',
 ]

@@ -1209,10 +1209,11 @@ def _pins_match(der, pins):
     return any(isinstance(p, str) and p.replace(':', '').lower() == got for p in pins)
 
 
-def open_console(rec, kind, path, query, reverse_proxy, timeout=10):
+def open_console(rec, kind, path, query, main_port, timeout=10):
     """A websocket-client connection to the leading site's console server for `path`?`query`.
     Its certificate must match the site's pins (or, without pins, a CA and its host name)
-    before the upgrade goes out. Raises on anything else."""
+    before the upgrade goes out. Raises on anything else. main_port: the site serves its
+    consoles on the port of its address (one port, or behind a proxy), else on +1/+2."""
     import socket
     import ssl
     from urllib.parse import urlsplit
@@ -1222,7 +1223,7 @@ def open_console(rec, kind, path, query, reverse_proxy, timeout=10):
     if url.scheme != 'https' or not host or not fed._url_ok(rec['url'] + path):
         raise ValueError('the site has no https address this instance may dial')
     base = url.port or 443
-    port = base if reverse_proxy else base + (1 if kind == 'vnc' else 2)
+    port = base if main_port else base + (1 if kind == 'vnc' else 2)
     pins = list(rec.get('fingerprints') or [])
     raw_sock = socket.create_connection((host, port), timeout=timeout)
     try:

@@ -10,20 +10,19 @@ could be read is refused; a host whose pin did load still verifies.
 The race (#1025): verify_transport_host_key() re-read the file inside the lock and then
 add()ed its key, replacing a pin another first-use connection had saved since the
 lookup. The SSH console server did worse: save_host_keys() wrote the set it loaded
-before connecting over the file. The pin on disk wins now.
+before connecting over the file. The pin on disk wins now. That server is gone; the node
+shell on the main port goes through ssh_security and is run here as flask-sock calls it.
 
 NS Oct 2026
 """
-import asyncio
-import json
 import os
-import types
 
 import paramiko
 import pytest
 
 import pegaprox.utils.ssh_security as sec
-from test_ha_v2_surface import _AsyncWS, _Resp, _ssh_server, SHELL
+from test_node_shell_known_hosts_pin import open_shell
+from test_node_shell_target_1143 import _let_go  # noqa: F401
 
 _KEYS = {}
 
@@ -172,91 +171,57 @@ def test_the_same_key_pinned_meanwhile_is_accepted(known_hosts, monkeypatch):
     assert _disk(known_hosts).lookup('node-a')['ssh-rsa'] == _key('genuine')
 
 
-# --- the SSH console server (the generated standalone script) -------------------------------
+# --- the node shell (the main port route, the only one since the SSH server on port+2 went) ---
 
-NODE = '192.0.2.10'
-
-
-class _Browser(_AsyncWS):
-    def __init__(self, path, *incoming):
-        super().__init__(path)
-        self.incoming = list(incoming)
-
-    async def recv(self):
-        if self.incoming:
-            return self.incoming.pop(0)
-        raise ConnectionError('nothing more to say')
+NODE = '10.0.0.12'
 
 
-def _run_shell(monkeypatch, path, server_key, on_connect=None):
-    """Open a node shell through the script with real paramiko host-key handling; the
-    connect meets `server_key` the way SSHClient.connect would."""
-    monkeypatch.setenv('PEGAPROX_SSH_KNOWN_HOSTS', path)
-    monkeypatch.delenv('PEGAPROX_SSH_STRICT_HOST_KEYS', raising=False)
-    # the main app names the node's own address; the connection host stands in for none (#1143)
-    answer = _Resp(200, {'valid': True, 'known_hosts_only': False,
-                         'cluster_context': {'host': NODE, 'node_ips': {'n1': NODE}}})
-    ns, _asked = _ssh_server({'/api/ws/token/validate': answer})
-
-    class _Client(paramiko.SSHClient):
-        def connect(self, host, **kw):
-            if on_connect:
-                on_connect()
-            pinned = self._host_keys.lookup(host)
-            if pinned is None:
-                self._policy.missing_host_key(self, host, server_key)
-            elif pinned.get(server_key.get_name()) != server_key:
-                raise paramiko.BadHostKeyException(host, server_key, pinned.get(server_key.get_name()))
-
-        def invoke_shell(self, **kw):
-            raise paramiko.SSHException('no shell in this test')
-
-    fake = types.SimpleNamespace(**vars(paramiko))
-    fake.SSHClient = _Client
-    ns['paramiko'] = fake
-    ws = _Browser(f'{SHELL}?token=t', json.dumps({'username': 'root', 'password': 'pw'}))
-    asyncio.run(ns['ssh_handler'](ws))
-    return ''.join(m for m in ws.sent if isinstance(m, str))
+def _run_shell(api, seed, monkeypatch, server_key, on_connect=None):
+    """Open pve2's node shell with the real host-key handling; the connect meets
+    `server_key` the way SSHClient.connect would. What the page was told."""
+    _logins, said = open_shell(api, seed, monkeypatch, server_key, on_connect)
+    return said
 
 
-def test_console_refuses_a_new_host_when_known_hosts_is_damaged(known_hosts, monkeypatch):
+def test_console_refuses_a_new_host_when_known_hosts_is_damaged(api, seed, monkeypatch, known_hosts):
     _pin(known_hosts, '192.0.2.99', _key('other'))
     _damage(known_hosts)
     before = _raw(known_hosts)
 
-    said = _run_shell(monkeypatch, known_hosts, _key('node'))
+    said = _run_shell(api, seed, monkeypatch, _key('node'))
 
-    assert 'could not be read' in said and 'no shell in this test' not in said, said
+    assert 'could not be read' in said and 'the test opens no shell' not in said, said
     assert 'ValueError' not in said, 'the parse error went to the browser'
     assert _raw(known_hosts) == before, 'the damaged file was written over'
 
 
-def test_console_still_opens_a_pinned_host_when_known_hosts_is_damaged(known_hosts, monkeypatch):
+def test_console_still_opens_a_pinned_host_when_known_hosts_is_damaged(api, seed, monkeypatch,
+                                                                       known_hosts):
     _pin(known_hosts, NODE, _key('node'))
     _damage(known_hosts)
     before = _raw(known_hosts)
 
-    said = _run_shell(monkeypatch, known_hosts, _key('node'))
+    said = _run_shell(api, seed, monkeypatch, _key('node'))
 
-    assert 'no shell in this test' in said, said
+    assert 'the test opens no shell' in said, said
     assert _raw(known_hosts) == before
 
 
-def test_console_keeps_a_pin_recorded_while_it_connected(known_hosts, monkeypatch):
+def test_console_keeps_a_pin_recorded_while_it_connected(api, seed, monkeypatch, known_hosts):
     """The main app pins another node while this shell connects; the shell's save must
     not write its older picture of the file over that."""
-    said = _run_shell(monkeypatch, known_hosts, _key('node'),
+    said = _run_shell(api, seed, monkeypatch, _key('node'),
                       on_connect=lambda: _pin(known_hosts, '192.0.2.20', _key('other')))
 
-    assert 'no shell in this test' in said, said
+    assert 'the test opens no shell' in said, said
     on_disk = _disk(known_hosts)
     assert on_disk.lookup(NODE) is not None, 'first use no longer pins'
     assert on_disk.lookup('192.0.2.20') is not None, 'a pin recorded meanwhile was erased'
 
 
-def test_console_does_not_replace_a_pin_with_its_first_use_key(known_hosts, monkeypatch):
-    said = _run_shell(monkeypatch, known_hosts, _key('racer'),
+def test_console_does_not_replace_a_pin_with_its_first_use_key(api, seed, monkeypatch, known_hosts):
+    said = _run_shell(api, seed, monkeypatch, _key('racer'),
                       on_connect=lambda: _pin(known_hosts, NODE, _key('genuine')))
 
-    assert 'no shell in this test' in said, said
+    assert 'the test opens no shell' in said, said
     assert _disk(known_hosts).lookup(NODE)['ssh-rsa'] == _key('genuine')

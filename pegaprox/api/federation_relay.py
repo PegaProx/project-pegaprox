@@ -491,6 +491,8 @@ def peer_relay_stream():
     resp = Response(body, mimetype='text/event-stream')
     resp.headers['Cache-Control'] = 'no-cache'
     resp.headers['X-Accel-Buffering'] = 'no'
+    # the feed leaves the request pool when it starts: nothing after it on this connection
+    resp.headers['Connection'] = 'close'
     return resp
 
 
@@ -900,9 +902,12 @@ def console_token(cluster_id):
     token = create_ws_token(session.get('user'),
                             session.get('effective_role') or session.get('role') or 'viewer',
                             sid=f"fed:{mark.get('home') or ''}:{mark.get('sh') or ''}")
-    settings = load_server_settings() or {}
+    # single_port: this instance serves its consoles on its main port (MK Nov 2026); a site
+    # without the answer gets them dialled on its port+1/+2 as before
+    from pegaprox.api.helpers import effective_reverse_proxy
     return jsonify({'token': token, 'expires_in': 60,
-                    'reverse_proxy': bool(settings.get('reverse_proxy_enabled'))})
+                    'reverse_proxy': effective_reverse_proxy(load_server_settings() or {}),
+                    'single_port': True})
 
 
 def _console_refusal(ws, message, code=1008):
@@ -1041,16 +1046,25 @@ def federation_console(ws):
         query = urlencode(dict(extra, token=granted['token']))
         try:
             upstream = relay.open_console(fed.member_record(iid), kind, path, query,
-                                          granted.get('reverse_proxy') is True)
+                                          granted.get('reverse_proxy') is True
+                                          or granted.get('single_port') is True)
         except Exception as e:
             logging.warning(f'[FED] the console of {raw} at {site["site"]} did not open: '
                             f'{type(e).__name__}')
             return _console_refusal(ws, f'The console server of {site["site"]} cannot be '
                                         'reached from this site', 1011)
-        hold_websocket(username, ws, sid=auth.get('sid'))
+        # a console like the local ones: out of the request pool, on the console budgets
+        held = hold_websocket(username, ws, sid=auth.get('sid'), console=True)
+        if not held:
+            from pegaprox.api.vms import _console_full
+            upstream.close()
+            return _console_refusal(ws, *_console_full(held))
         log_audit(username, 'federation.console',
                   f'{kind} console of {path.split("/clusters/", 1)[1]} at {site["site"]} opened',
                   ip_address=get_client_ip())
+        # and like theirs it relays without the database connection it signed in with
+        from pegaprox.core.db import get_db
+        get_db().release_connection()
         _pump(ws, upstream)
     finally:
         relay.give_tunnel(username, iid)

@@ -37,6 +37,7 @@ from pegaprox.constants import (
 from pegaprox import globals as g
 from pegaprox.api import register_blueprints
 from pegaprox.utils.auth import BODY_DEADLINE_ENVIRON
+from pegaprox.utils.realtime import fd_budget
 
 
 def get_allowed_origins():
@@ -484,6 +485,10 @@ def create_app():
     # inside the lease fast path below; with the federation off it moves no path
     from pegaprox.core import federation_relay as _fed_relay
     app.wsgi_app = _fed_relay.RemotePaths(app.wsgi_app)
+    # MK Nov 2026 (#352) - a console upgrade whose Connection header lost its `upgrade`
+    # token on the way gets it back before routing, as the console ports did it
+    from pegaprox.utils.ws_lenient import LenientUpgrade
+    app.wsgi_app = LenientUpgrade(app.wsgi_app)
 
     # MK Oct 2026 - portal_only on the routes require_auth does not guard. require_auth holds
     # the account on every route behind it, with the record it loads anyway; the rest find
@@ -1752,11 +1757,11 @@ def main(debug_mode=False):
     print("\nChecking optional libraries...")
     missing_libs = []
     try:
-        import websockets
-        print("  ✓ websockets (VNC/SSH console)")
+        import websocket
+        print("  ✓ websocket-client (VNC console and VM terminal)")
     except ImportError:
-        missing_libs.append('websockets')
-        print("  ✗ websockets - VNC/SSH console will NOT work!")
+        missing_libs.append('websocket-client')
+        print("  ✗ websocket-client - VNC console and VM terminal will NOT work!")
 
     try:
         import paramiko
@@ -2144,11 +2149,14 @@ def main(debug_mode=False):
     print("WARNING: Not recommended for production!")
     print("Install gevent for better performance: pip install gevent")
 
-    vnc_ws_port = port + 1
-    ssh_ws_port = port + 2
-
-    # Start VNC/SSH WebSocket servers
-    _start_console_servers(bind_host, port, ssl_context)
+    # the consoles are routes of this app now; the dev server serves them on this port,
+    # whole frames only with the patch (#945.5). No legacy console ports here.
+    _forget_console_script()
+    try:
+        from pegaprox.utils.ws_sendall import apply_sendall_patch
+        apply_sendall_patch()
+    except Exception as _e:
+        logging.warning(f"[ws-patch] could not make simple-websocket write whole frames: {_e}")
 
     if ssl_context:
         print(f"HTTPS on https://{bind_host}:{port}")
@@ -2160,44 +2168,72 @@ def main(debug_mode=False):
         app.run(host=bind_host, port=port, debug=False, threaded=True)
 
 
-def _start_console_servers(bind_host, port, ssl_context):
-    """Start VNC and SSH WebSocket servers on port+1 and port+2.
+# MK Nov 2026 - the consoles (VNC, node shell, VM terminal) are routes of the main port.
+# port+1 and port+2 used to be servers of their own, an asyncio one and a subprocess; they
+# stay as listeners of this same app for proxies, firewalls and federation peers that still
+# send consoles there, and answer nothing but the console paths. Each has a request pool of
+# its own, so a flood there leaves the main port alone. PEGAPROX_LEGACY_CONSOLE_PORTS=0
+# turns them off.
+_CONSOLE_PATHS = re.compile(r'/api/clusters/[^/]+/(?:vms/[^/]+/(?:qemu|lxc)/\d+/'
+                            r'(?:vncwebsocket|termwebsocket)|nodes/[^/]+/shellws)')
+_LEGACY_NOTE_EVERY = 3600.0
 
-    Returns the SSH WebSocket subprocess (a Popen) so the caller can terminate it on
-    shutdown. The VNC server is a daemon thread and needs no handle; the SSH server is a
-    long-running asyncio subprocess that would otherwise outlive us. (#780)"""
-    vnc_ws_port = port + 1
-    ssh_ws_port = port + 2
 
-    try:
-        from pegaprox.api.vms import start_vnc_websocket_server, start_ssh_websocket_server
-    except ImportError as e:
-        print(f"WARNING: Console WebSocket servers not available: {e}")
-        return None
-
-    # NS Feb 2026 - asyncio/websockets creates IPv6-only socket for '::' (#95)
-    # Use '' so asyncio binds to ALL interfaces (creates both IPv4 + IPv6 listeners)
-    console_host = '' if bind_host == '::' else bind_host
-
-    # MK Feb 2026 - start each server independently so one failure doesn't block the other
-    ssh_proc = None
-    for name, start_fn, ws_port in [
-        ("VNC", start_vnc_websocket_server, vnc_ws_port),
-        ("SSH", start_ssh_websocket_server, ssh_ws_port),
-    ]:
+def _forget_console_script():
+    """Delete the script the SSH console server of older versions wrote and ran on port+2
+    (.ssh_ws_server.py, in the package's api folder, CONFIG_DIR or the temp folder). Only
+    a plain file of our own: nothing follows a link, and another user's file in the shared
+    temp folder stays where it is."""
+    import stat
+    import tempfile
+    from pegaprox.constants import CONFIG_DIR
+    api_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'api')
+    for folder in (api_dir, CONFIG_DIR, tempfile.gettempdir()):
+        path = os.path.join(folder or '.', '.ssh_ws_server.py')
         try:
-            if ssl_context:
-                result = start_fn(ws_port, ssl_cert=ssl_context[0], ssl_key=ssl_context[1], host=console_host)
-            else:
-                result = start_fn(ws_port, host=console_host)
-            # only the SSH server hands back a live subprocess
-            if name == "SSH" and result is not None:
-                ssh_proc = result
-        except Exception as e:
-            print(f"ERROR: {name} WebSocket server (port {ws_port}) failed to start: {e}")
-            logging.error(f"{name} WebSocket server startup failed: {e}", exc_info=True)
+            st = os.lstat(path)
+            if stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid():
+                os.unlink(path)
+                logging.info(f"[console] removed {path}, the SSH console server is gone")
+        except OSError:
+            pass
 
-    return ssh_proc
+
+def legacy_console_ports_on():
+    return os.environ.get('PEGAPROX_LEGACY_CONSOLE_PORTS', '1').strip().lower() not in (
+        '0', 'false', 'no', 'off')
+
+
+class _ConsolePathsOnly:
+    """The WSGI app of a legacy console port: a websocket upgrade (a GET) of a console path
+    goes to the app, anything else gets a 404 - a plain GET there would spend its console
+    token on the 426 of the HTTP route (fullmatch: a '$' would also take a path ending in a newline,
+    which gevent decodes from %0A). Says once an hour per port and client that something
+    still uses it."""
+
+    def __init__(self, wsgi_app, port):
+        self.wsgi_app = wsgi_app
+        self.port = port
+        self._noted = {}
+
+    def __call__(self, environ, start_response):
+        if (environ.get('REQUEST_METHOD') != 'GET'
+                or 'websocket' not in str(environ.get('HTTP_UPGRADE', '')).lower()
+                or not _CONSOLE_PATHS.fullmatch(environ.get('PATH_INFO') or '')):
+            body = b'Not Found - this port only answers consoles\n'
+            start_response('404 Not Found', [('Content-Type', 'text/plain'),
+                                             ('Content-Length', str(len(body)))])
+            return [body]
+        peer = environ.get('REMOTE_ADDR') or '?'
+        now = time.monotonic()
+        if now - self._noted.get(peer, -_LEGACY_NOTE_EVERY) >= _LEGACY_NOTE_EVERY:
+            if len(self._noted) > 256:
+                self._noted.clear()
+            self._noted[peer] = now
+            logging.info(f"[console] a console from {peer} came in on legacy port {self.port}; "
+                         "consoles are served on the main port now - point the proxy or "
+                         "firewall there (PEGAPROX_LEGACY_CONSOLE_PORTS=0 turns this port off)")
+        return self.wsgi_app(environ, start_response)
 
 
 def _test_ipv6_available():
@@ -2575,6 +2611,31 @@ _BODY_TIMEOUT = float(os.environ.get('PEGAPROX_BODY_TIMEOUT', '30'))
 # and the answer: how long a client may take none of it (_IdleTimeoutMixin._sendall)
 _SEND_TIMEOUT = float(os.environ.get('PEGAPROX_SEND_TIMEOUT', '60'))
 _SEND_SLICE = 64 * 1024
+# MK Nov 2026 - and the wait for the next request held a slot all along. A connection is
+# one greenlet of the pool from accept to close, so each browser held the five or so
+# sockets it keeps alive between two polls, and 64 slots were full at about eleven users:
+# gevent stopped accepting for everybody. A connection that served a request now waits for
+# the next one outside the pool and takes a slot again when the request line is in
+# (_IdleTimeoutMixin.read_requestline), as a new connection would. The keep-alive window
+# above still ends the wait. This many may wait outside at once, a descriptor and a TLS
+# session each; past it a connection waits in its slot as before, and 0 keeps every one
+# there.
+def _idle_connection_budget():
+    # a typo here must not keep the instance from starting, as with the console budgets
+    try:
+        return max(0, int(os.environ.get('PEGAPROX_MAX_IDLE_CONNECTIONS') or fd_budget(8)))
+    except ValueError:
+        logging.warning("PEGAPROX_MAX_IDLE_CONNECTIONS is no number, using the default")
+        return fd_budget(8)
+
+
+_MAX_IDLE_CONNECTIONS = _idle_connection_budget()
+_idle_out = None       # gevent Group of the connections waiting outside the pool
+# and each kept the database connection its requests opened, two descriptors and about
+# 0.4 MB: 2000 of them were 0.8 GB, for a client that never signed in. Past this many
+# waiting, one gives its database connection up (reopening it costs a few ms of the hub
+# on the next request), below it keeps it as before
+_IDLE_WITH_DB = 256
 
 
 class _BodyTimedOut(TimeoutError):
@@ -2724,6 +2785,7 @@ class _IdleTimeoutMixin:
     _header_timeout = _HEADER_TIMEOUT
     _body_timeout = _BODY_TIMEOUT
     _send_timeout = _SEND_TIMEOUT
+    _max_idle = _MAX_IDLE_CONNECTIONS
 
     def get_environ(self):
         env = super().get_environ()
@@ -2800,6 +2862,8 @@ class _IdleTimeoutMixin:
         return None
 
     def read_request(self, raw_requestline):
+        # before the clock: the wait for a slot is not the client's
+        self._back_into_the_pool()
         to = self._header_timeout
         if not to or to <= 0:
             return super().read_request(raw_requestline)
@@ -2816,7 +2880,57 @@ class _IdleTimeoutMixin:
         finally:
             t.close()
 
+    def _wait_out_of_the_pool(self):
+        """Before the next request line of a connection that served one: its slot goes back
+        to the pool while the client takes its time, unless _max_idle connections wait
+        outside already. The first request keeps the slot it was accepted with."""
+        global _idle_out
+        if not self.__dict__.get('_kept_alive'):
+            self._kept_alive = True
+            return
+        # an HA member renews its lease on a kept-alive connection many times a second, a
+        # federation member asks for its lease votes every ten seconds and waits five for
+        # them: those keep their slot as before, so a pool full of slow requests never holds
+        # up a renewal. Only once one was answered, a forged call waits outside like the
+        # rest. Not the relayed calls of a member, they come on as many connections as it
+        # likes (core/federation_relay.py). The vote's path is federation.LEASE_PATH
+        path = str(getattr(self, 'path', '') or '')
+        if getattr(self, 'code', None) == 200 and (
+                path.startswith('/api/ha/peer/')
+                or path.split('?', 1)[0] == '/api/federation/peer/lease-vote'):
+            return
+        import gevent
+        import gevent.pool
+        from pegaprox.utils.realtime import _leave_request_pool
+        if _idle_out is None:
+            _idle_out = gevent.pool.Group()
+        # a Group lets go of a connection that ends without another request by itself
+        if len(_idle_out) < self._max_idle and _leave_request_pool():
+            _idle_out.add(gevent.getcurrent())
+            if len(_idle_out) > _IDLE_WITH_DB:
+                try:
+                    from pegaprox.core.db import get_db
+                    get_db().release_connection()
+                except Exception:
+                    logging.debug("could not release the database connection of an idle "
+                                  "connection", exc_info=True)
+
+    def _back_into_the_pool(self):
+        """A request line came in: a slot again, waiting while the pool is full as a new
+        connection waits to be accepted. Counts as waiting outside until it has one."""
+        pool = getattr(getattr(self, 'server', None), 'pool', None)
+        if pool is None:
+            return
+        import gevent
+        from pegaprox.utils.realtime import _rejoin_request_pool
+        _rejoin_request_pool(pool)
+        if _idle_out is not None:
+            _idle_out.discard(gevent.getcurrent())
+
     def read_requestline(self):
+        # MK Nov 2026 - out of the request pool while a kept-alive connection waits, see
+        # _MAX_IDLE_CONNECTIONS; read_request takes a slot again
+        self._wait_out_of_the_pool()
         to = self._idle_timeout
         if not to or to <= 0:
             return super().read_requestline()          # disabled → old unbounded behaviour
@@ -3188,10 +3302,15 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
         class _IdleTimeoutHandler(_IdleTimeoutMixin, _BaseWSGIHandler):
             pass
 
-    server_kwargs = {'log': None, 'spawn': _RequestPool(workers), 'handler_class': _IdleTimeoutHandler}
+    # MK Nov 2026 - a console leaves its pool once it is signed in (utils/realtime.py)
+    from pegaprox.utils.realtime import register_request_pool
+    request_pool = _RequestPool(workers)
+    register_request_pool(request_pool)
+    server_kwargs = {'log': None, 'spawn': request_pool, 'handler_class': _IdleTimeoutHandler}
 
     is_ipv6_bind = ':' in bind_host
 
+    ssl_ctx = None
     if ssl_context:
         print(f"HTTPS on https://{bind_host}:{port}", flush=True)
         # the context follows cert.pem/key.pem, a renewal is served without a restart
@@ -3215,28 +3334,46 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
         print("WARNING: Running without HTTPS - noVNC console may not work!", flush=True)
         http_server = QuietWSGIServer(_create_listener(bind_host, port), app, **server_kwargs)
 
-    # Start VNC/SSH WebSocket servers. The SSH one hands back its subprocess so the
-    # shutdown path can stop it; the VNC server is a daemon thread and needs no handle.
-    ssh_ws_proc = _start_console_servers(bind_host, port, ssl_context)
+    # the legacy console ports, see _ConsolePathsOnly
+    _forget_console_script()
+    legacy_servers = []
+    if legacy_console_ports_on():
+        for extra in (port + 1, port + 2):
+            if extra > 65535:
+                continue
+            extra_kwargs = dict(server_kwargs, spawn=_RequestPool(max(16, workers // 4)))
+            register_request_pool(extra_kwargs['spawn'])
+            try:
+                if ssl_context:
+                    extra_server = DualProtocolWSGIServer(
+                        _create_listener(bind_host, extra), _ConsolePathsOnly(app, extra),
+                        ssl_context=ssl_ctx, redirect_domain=domain, **extra_kwargs)
+                else:
+                    extra_server = QuietWSGIServer(_create_listener(bind_host, extra),
+                                                   _ConsolePathsOnly(app, extra), **extra_kwargs)
+                extra_server.start()
+                legacy_servers.append(extra_server)
+            except Exception as e:
+                print(f"WARNING: legacy console port {extra} not available ({e}); consoles "
+                      f"still open on {port}", flush=True)
+        if legacy_servers:
+            print(f"Consoles on port {port}; legacy console port(s) "
+                  f"{', '.join(str(x.server_port) for x in legacy_servers)} answer consoles only",
+                  flush=True)
+    else:
+        print(f"Consoles on port {port} only (PEGAPROX_LEGACY_CONSOLE_PORTS=0)", flush=True)
 
     # Handle graceful shutdown (#780 / #784)
     def signal_handler(signum, frame):
         print("\nShutting down gracefully...")
-        # terminate() sends SIGTERM and returns immediately, so it is safe from the hub's
-        # signal callback. The SSH WebSocket server is a separate process sitting on an
-        # endless asyncio Future — nothing else ever stops it, so it survived us and got
-        # reparented to init.
-        if ssh_ws_proc is not None and ssh_ws_proc.poll() is None:
-            try:
-                ssh_ws_proc.terminate()
-            except Exception:
-                pass
         # gevent runs signal handlers inside the hub greenlet, and http_server.stop()
         # blocks on pool.join() — illegal there, which is the BlockingSwitchOutError that
         # made a systemd stop exit 1. Defer it to its own greenlet and bound the join so a
         # long-lived SSE or WebSocket connection cannot hold shutdown open. serve_forever()
         # returns once stop() sets the stop event, so there is no sys.exit() to make here.
         from gevent import spawn
+        for extra_server in legacy_servers:
+            spawn(lambda srv=extra_server: srv.stop(timeout=2))
         spawn(lambda: http_server.stop(timeout=10))
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -3244,3 +3381,7 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers):
 
     print("SSL/WebSocket errors (bots, scanners, disconnects) are suppressed")
     http_server.serve_forever()
+    # MK Nov 2026 - consoles, SSE streams and idle connections left the pool, so the stop()
+    # above did not end them; they end here, as when their clients go away
+    from pegaprox.utils.realtime import end_out_of_pool
+    end_out_of_pool(timeout=2)
