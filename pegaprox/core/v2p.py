@@ -1897,7 +1897,11 @@ def _run_v2p_migration(task):
                     f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}/tasks/{pve_task_id}/status")
                 if sr.status_code == 200 and sr.json().get('data', {}).get('status') == 'stopped':
                     es = sr.json()['data'].get('exitstatus', '')
-                    if es == 'OK': task.log("VM shell created"); break
+                    if es == 'OK':
+                        task.log("VM shell created")
+                        # MK Nov 2026 - this run made it: _drop_empty_target may take it away again
+                        task._made_target = True
+                        break
                     else: task.set_phase('failed', f'VM creation failed: {es}'); return
             except: pass
         
@@ -3259,6 +3263,62 @@ def _run_v2p_migration(task):
         # brings the source back on ESXi, wherever it stopped
         if task.status in ('failed', 'cancelled'):
             _guest_prep_rollback(task)
+            try:
+                _drop_empty_target(task)
+            except Exception as _de:
+                logging.warning(f"[V2P:{task.id}] empty target check failed: {_de}")
+
+
+# the phases a run only reaches with data on the target, or with the source switched over
+_PHASES_WITH_DATA = ('delta_sync', 'awaiting_confirmation', 'cutover', 'verify', 'cleanup', 'completed')
+
+
+def _drop_empty_target(task):
+    """Delete the VM a failed run created on Proxmox VE while nothing was copied into it.
+
+    MK Nov 2026 - a run that stopped between the VM's creation and the first copy (an SSHFS
+    mount that failed, change tracking the source refused) left an empty VM behind on the
+    target node, which the next try did not reuse. Kept is every VM that holds data or may:
+    one with a copied byte, one of a run that reached the switchover or the delta sync (the
+    target starts only after those), and one that runs. Returns True when it was deleted."""
+    vmid = getattr(task, 'proxmox_vmid', None)
+    if not getattr(task, '_made_target', False) or not vmid:
+        return False
+    if any((d or {}).get('copied') for d in (task.disk_progress or {}).values()):
+        return False
+    if set(task.phase_times or {}) & set(_PHASES_WITH_DATA):
+        return False
+    pve_mgr = cluster_managers.get(task.target_cluster)
+    if not pve_mgr:
+        return False
+    base = f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}/qemu/{int(vmid)}"
+    st = pve_mgr._api_get(f"{base}/status/current", timeout=20)
+    if st.status_code != 200:
+        task.log(f"VM {vmid} on {task.target_node} kept: its state could not be read ({st.status_code})")
+        return False
+    if (st.json().get('data') or {}).get('status') != 'stopped':
+        return False
+    r = pve_mgr._api_delete(base, params={'purge': 1, 'destroy-unreferenced-disks': 1}, timeout=60)
+    upid = (r.json().get('data') if r.status_code == 200 else '') or ''
+    ok = r.status_code == 200
+    if ok and upid:
+        ok = False
+        for _ in range(30):
+            time.sleep(2)
+            sr = pve_mgr._api_get(f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/"
+                                  f"{task.target_node}/tasks/{upid}/status", timeout=20)
+            d = (sr.json().get('data') or {}) if sr.status_code == 200 else {}
+            if d.get('status') == 'stopped':
+                ok = d.get('exitstatus') == 'OK'
+                break
+    if ok:
+        task._made_target = False
+        task.log(f"Removed the empty VM {vmid} this run had created on {task.target_node}: "
+                 f"nothing was copied into it")
+    else:
+        task.log(f"VM {vmid} on {task.target_node} is empty but could not be removed "
+                 f"({r.status_code}): delete it on the node")
+    return ok
 
 
 # NS Apr 2026 — 4K-sector iSCSI LUN fix. Lots of SAN targets (TrueNAS LIO, some
