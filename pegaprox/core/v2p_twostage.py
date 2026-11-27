@@ -591,8 +591,8 @@ def boot(pve_mgr, task):
     task.log(f'Two-stage boot: first boot from {first}0')
     outcome, why = v2p._start_target_vm(pve_mgr, task)
     if outcome == 'running':
-        # the guest serves from here on: the downtime of the switchover ends with this start,
-        # not with the switch to VirtIO minutes later
+        # the first start: the run says how much of the downtime came after it (the first
+        # boot and the switch to VirtIO), the downtime itself runs until the switch is done
         ts['up_at'] = time.time()
     if outcome != 'running':
         if outcome == 'failed':

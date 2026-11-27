@@ -243,8 +243,8 @@ def test_a_folder_the_node_moved_aside_is_named_in_a_warning(monkeypatch):
     assert w.qm.conf['net0'].startswith('virtio=')
 
 
-def test_the_downtime_of_a_live_clone_ends_with_the_first_boot_not_with_the_switch(monkeypatch):
-    w = Win(monkeypatch, mode='vmkfstools_clone')
+def _slow_first_boot_run(monkeypatch, mode):
+    w = Win(monkeypatch, mode=mode)
     clock, real_time = w.r.clock, time.time
     # wall time follows the run's clock: every sleep of the harness moves it on
     monkeypatch.setattr(time, 'time', lambda: real_time() + (clock.now - 1000.0))
@@ -255,11 +255,27 @@ def test_the_downtime_of_a_live_clone_ends_with_the_first_boot_not_with_the_swit
         clock.sleep(900)      # drivers, guest agent, the network: a first boot takes its time
         return real_fb(pve_mgr, task, wait)
     monkeypatch.setattr(v2p_twostage, '_firstboot', slow_first_boot)
-    w.go()
+    return w.go()
+
+
+def test_the_downtime_of_a_live_clone_runs_until_the_guest_is_up_on_virtio(monkeypatch):
+    # a lab run of Windows Server 2025 logged 162s: the time to the first start on SATA. The
+    # guest was away for 643s, its first boot sets the address late and goes down for the switch
+    w = _slow_first_boot_run(monkeypatch, 'vmkfstools_clone')
     t = w.task
     assert t.status == 'completed' and t._two_stage['state'] == 'switched'
-    assert t.total_downtime_seconds < 600, t.total_downtime_seconds
-    assert any(f'SWITCHOVER DONE (downtime {t.total_downtime_seconds:.1f}s)' in ln for ln in t.log_lines)
+    assert t.total_downtime_seconds >= 900, t.total_downtime_seconds
+    line = next(ln for ln in t.log_lines if 'SWITCHOVER DONE' in ln)
+    assert f'(downtime {t.total_downtime_seconds:.1f}s: the target VM started after ' in line
+    assert 'the first boot of the guest and its switch to VirtIO took the rest' in line
+
+
+def test_the_downtime_of_a_presync_run_takes_in_the_start_and_the_first_boot(monkeypatch):
+    w = _slow_first_boot_run(monkeypatch, 'auto')
+    t = w.task
+    assert t.status == 'completed' and t._two_stage['state'] == 'switched', t.error
+    assert t.total_downtime_seconds >= 900, t.total_downtime_seconds
+    assert not any('downtime ended with its first boot' in ln for ln in t.log_lines)
 
 
 def test_the_package_plan_of_a_windows_run_downloads_the_iso_but_never_needs_it():

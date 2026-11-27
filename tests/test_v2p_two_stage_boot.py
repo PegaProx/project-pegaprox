@@ -471,8 +471,8 @@ def test_live_mirror_after_the_in_guest_preparation_keeps_virtio(lab):
 
 # --------------------------------------------------------------------------- the downtime
 
-def test_the_guest_counts_as_up_from_its_first_start_not_from_the_switch(lab, monkeypatch):
-    # the switchover's downtime ends when the guest serves again: with its first boot on SATA
+def test_the_first_start_is_stamped_for_the_downtime_split(lab, monkeypatch):
+    # the run tells the time to the first start on SATA apart from the first boot and the switch
     lb = lab(files=FILES)
     t = _staged(lb)
     starts = []

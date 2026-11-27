@@ -2630,12 +2630,16 @@ def _run_v2p_migration(task):
                             _guest_log_after_start(pve_mgr, task)
                     else:
                         task.log("  Target VM is stopped on Proxmox (start_after is off)")
-                # MK Nov 2026 - with the two-stage boot the guest serves from its first start on
-                # SATA; the switch to VirtIO after it is no downtime
+                # MK Nov 2026 - the downtime runs until the guest is up on its final controller.
+                # It used to end with the first start on SATA, but that boot has no static
+                # address for its first minutes, installs drivers and goes down again for the
+                # switch: a lab run said 162s for a Windows guest that was away for 643s.
                 _up_at = (getattr(task, '_two_stage', None) or {}).get('up_at') if _two_stage_on else None
-                actual_downtime = (_up_at or time.time()) - cut_t0
+                actual_downtime = time.time() - cut_t0
                 task.total_downtime_seconds = actual_downtime
-                task.log(f"=== SWITCHOVER DONE (downtime {actual_downtime:.1f}s) ===")
+                task.log(f"=== SWITCHOVER DONE (downtime {actual_downtime:.1f}s"
+                         + (f": the target VM started after {_up_at - cut_t0:.0f}s, the first boot of the "
+                            f"guest and its switch to VirtIO took the rest" if _up_at else '') + ") ===")
 
                 # --- cleanup (clone artifacts + snapshot + source) ---
                 # the source is off by now: stopped above, or it was never running
@@ -3123,8 +3127,7 @@ def _run_v2p_migration(task):
         if _two_stage_on:
             _ts_outcome, _ts_why = _two_stage_boot(pve_mgr, task)
             if _ts_outcome == 'running':
-                task.log(f"VM {task.proxmox_vmid} running (two-stage boot {task._two_stage.get('state')}, the "
-                         f"downtime ended with its first boot) - DOWNTIME ENDS")
+                task.log(f"VM {task.proxmox_vmid} running (two-stage boot {task._two_stage.get('state')}) - DOWNTIME ENDS")
             elif _ts_outcome != 'stopped':
                 task.log(f"WARNING: Could not start VM: {_ts_why}")
         elif task.start_after:
@@ -3136,6 +3139,11 @@ def _run_v2p_migration(task):
                 task.log(f"VM {task.proxmox_vmid} started - DOWNTIME ENDS")
             except Exception as e:
                 task.log(f"WARNING: Could not start VM: {e}")
+        # MK Nov 2026 - the downtime of this path ended when the cutover began, before the
+        # driver injection, the start and a two-stage boot: it ends with the start now
+        if task.downtime_start and (_two_stage_on or task.start_after):
+            task.downtime_end = datetime.now()
+            task.total_downtime_seconds = round((task.downtime_end - task.downtime_start).total_seconds(), 1)
         
         # ================================================================
         # VERIFY + CLEANUP
