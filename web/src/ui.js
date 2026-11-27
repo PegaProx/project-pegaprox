@@ -3517,32 +3517,38 @@
             const nodeList = (nodes && nodes.length) ? nodes : ownNodes;
             React.useEffect(() => {
                 if ((nodes && nodes.length) || !clusterId) return;
+                // LW Nov 2026 - the answer for the cluster before a switch came after the new one
+                // and put its nodes back, with the node picked from the new cluster still selected
+                let gone = false;
                 (async () => {
                     try {
                         const r = await authFetch(`${apiUrl}/clusters/${encodeURIComponent(clusterId)}/metrics`);
-                        if (!r || !r.ok) return;
+                        if (gone || !r || !r.ok) return;
                         const j = await r.json();
-                        if (!j || typeof j !== 'object' || Array.isArray(j) || j.error) return;
+                        if (gone || !j || typeof j !== 'object' || Array.isArray(j) || j.error) return;
                         const names = Object.keys(j).sort();
                         setOwnNodes(names);
-                        setTargetNode(cur => cur || names[0] || '');
+                        setTargetNode(cur => names.includes(cur) ? cur : (names[0] || ''));
                     } catch (_) {}
                 })();
+                return () => { gone = true; };
             }, [clusterId]);
 
             // suggested next free vmid for "new" mode
             React.useEffect(() => {
                 if (mode !== 'new' || !clusterId) return;
+                let gone = false;
                 (async () => {
                     try {
                         const r = await authFetch(`${apiUrl}/clusters/${clusterId}/nextid`);
-                        if (r && r.ok) {
+                        if (!gone && r && r.ok) {
                             const j = await r.json();
                             // a full tenant range answers with PVE's next id, which the restore refuses
-                            if (j.vmid && !j.range_exhausted && !vmidTyped.current) setTargetVmid(j.vmid);
+                            if (!gone && j.vmid && !j.range_exhausted && !vmidTyped.current) setTargetVmid(j.vmid);
                         }
                     } catch (_) {}
                 })();
+                return () => { gone = true; };
             }, [mode, clusterId]);
 
             const submit = async () => {
