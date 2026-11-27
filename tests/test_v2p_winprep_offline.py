@@ -89,8 +89,12 @@ def test_a_download_cut_off_with_its_session_leaves_nothing_behind(tmp_path, mon
     # the SSH session drops, or the node command is ended: the whole process group gets the signal
     box = Box(tmp_path, mode='hang', size=4096)
     box.iso.mkdir()
+    # a shell started under nohup (a suite run in the background) has SIGHUP ignored, and a
+    # signal ignored when bash starts can be neither trapped nor reset: the node's shell under
+    # sshd has it at its default, so the script gets it the same way here
     p = subprocess.Popen(['/bin/bash', '-c', box.script(monkeypatch)], env=box.env, stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, start_new_session=True)
+                         stderr=subprocess.PIPE, start_new_session=True,
+                         preexec_fn=lambda: signal.signal(sig, signal.SIG_DFL))
     try:
         deadline = time.time() + 20
         while time.time() < deadline and not [e for e in os.listdir(box.iso) if not e.endswith('.err')
