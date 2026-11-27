@@ -161,7 +161,18 @@ if exist "%W%\tools.done" (
     goto :finish
 )
 if not "%KM_TOOLS_UNINSTALL%"=="1" (
-    set "MSG=step ESXi guest tools: left installed (no uninstall entry found, or the VM keeps a device of theirs)"
+    rem stage 2 of the in-guest preparation uninstalls them before it shuts down, released.flag says it ran
+    sc query VMTools >nul 2>&1
+    if errorlevel 1 (
+        set "TOOLS=absent"
+        set "MSG=step ESXi guest tools: not installed, nothing to uninstall"
+        if exist "%W%\released.flag" (
+            set "TOOLS=removed"
+            set "MSG=step ESXi guest tools: uninstalled by the in-guest preparation before its shutdown"
+        )
+    ) else (
+        set "MSG=step ESXi guest tools: left installed (no uninstall entry found, or the VM keeps a device of theirs)"
+    )
     call :log
     goto :tools_done
 )

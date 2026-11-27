@@ -179,6 +179,21 @@ def test_the_esxi_guest_tools_go_only_without_a_device_on_their_drivers():
     assert 'call :okcode 0 1605 1641 3010' in tools
 
 
+def test_tools_the_in_guest_preparation_uninstalled_are_reported_removed_not_kept():
+    # a lab run after the in-guest preparation reported "ESXi guest tools: kept" and logged "left
+    # installed", while its stage 2 had uninstalled them before the shutdown. That path hands
+    # the uninstall to stage 2 (KM_TOOLS_UNINSTALL=0), so this step only says what it finds.
+    # The block ran on cmd.exe of a Windows Server 2025 guest: VMTools there -> kept, gone ->
+    # absent, gone with released.flag -> removed.
+    tools = _section('tools', 'finish')
+    skip = tools[tools.index('if not "%KM_TOOLS_UNINSTALL%"=="1" ('):tools.index('call :bound pvscsi')]
+    assert skip.index('sc query VMTools >nul 2>&1') < skip.index('if errorlevel 1 (')
+    gone = skip[skip.index('if errorlevel 1 ('):skip.index(') else (')]
+    assert 'set "TOOLS=absent"' in gone
+    assert gone.index('if exist "%W%\\released.flag" (') < gone.index('set "TOOLS=removed"')
+    assert 'set "TOOLS=' not in skip[skip.index(') else ('):], 'VMTools still there: kept, as set at the start'
+
+
 def test_old_devices_are_removed_only_where_pnputil_can():
     dev = _section('devices', 'tools')
     assert dev.index('if not "%KM_REMOVE_DEVICES%"=="1" (') < dev.index('pnputil /remove-device "!KM_OLDDEV%%n!"')
