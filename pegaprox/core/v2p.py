@@ -5034,6 +5034,14 @@ def _qemu_device_spec(drive_id, disk_index, disk_bus):
         return f"ide-hd,drive={drive_id},bus=ide.{disk_index // 2},unit={disk_index % 2},bootindex={disk_index}"
 
 
+def _live_device_spec(task, drive_id, disk_index, disk_bus):
+    """The -device of a Live Mirror disk: the boot disk of a Windows guest booted on SATA
+    first (v2p_twostage.live_first_sata) on port 0 of the q35 AHCI controller"""
+    if getattr(task, '_live_boot_di', None) == disk_index:
+        return f"ide-hd,drive={drive_id},bus=ide.0,unit=0,bootindex={disk_index}"
+    return _qemu_device_spec(drive_id, disk_index, disk_bus)
+
+
 def _qm_monitor_cmd(pve_mgr, node, vmid, command, timeout=15):
     """Send HMP command to running QEMU VM. Returns (success: bool, output: str).
     NS Apr 2026 — switched from /monitor HTTPS API (returned HTTP 500 with no body)
@@ -6870,7 +6878,22 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     # Build QEMU args for each disk via SSH
     # QEMU's SSH block driver: file.driver=ssh, with cache=writeback for host-side caching
     ssh_key_opt = f",file.identity-file={key_path}" if key_path else ""
-    
+
+    # When using SCSI bus with custom args, Proxmox won't auto-create the SCSI
+    # controller because we removed scsiN: lines. Add it explicitly.
+    scsi_prefix = _scsi_controller_args(pve_mgr, task.target_node, task.proxmox_vmid, disk_bus)
+    if scsi_prefix:
+        task.log(f"  SCSI controller added: {scsi_prefix.strip()}")
+    # MK Nov 2026 - a Windows guest prepared in ESXi boots with its boot disk on SATA, the
+    # other disks on VirtIO SCSI; the boot disk moves to VirtIO SCSI for the next start
+    from pegaprox.core import v2p_twostage
+    task._live_boot_di = None
+    if disk_bus == 'scsi' and v2p_twostage.live_first_sata(task, scsi_prefix):
+        task._live_boot_di = next(iter(task.kept_disks(len(descriptor_files))), None)
+        if task._live_boot_di is not None:
+            task.log(f"  Windows guest: disk {task._live_boot_di} boots on SATA, VirtIO SCSI binds next to it "
+                     f"(a boot disk on VirtIO SCSI from the start stops Windows with INACCESSIBLE_BOOT_DEVICE)")
+
     args_parts = []
     for di, desc_file in enumerate(descriptor_files):
         if task.disk_target(di) is None:
@@ -6900,20 +6923,13 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         )
         
         # Match the original disk controller so guest OS finds root device
-        device_spec = _qemu_device_spec(drive_id, di, disk_bus)
+        device_spec = _live_device_spec(task, drive_id, di, disk_bus)
         
         # qemu-server splits the args: line into words like a shell does: a path with a
         # space stays one word only quoted (the names hold no quote or backslash)
         args_parts.append(f"-drive {shlex.quote(drive_spec)}")
         args_parts.append(f"-device {device_spec}")
     
-    args_line = " ".join(args_parts)
-    
-    # When using SCSI bus with custom args, Proxmox won't auto-create the SCSI
-    # controller because we removed scsiN: lines. Add it explicitly.
-    scsi_prefix = _scsi_controller_args(pve_mgr, task.target_node, task.proxmox_vmid, disk_bus)
-    if scsi_prefix:
-        task.log(f"  SCSI controller added: {scsi_prefix.strip()}")
     args_line = scsi_prefix + " ".join(args_parts)
     
     # Write directly to VM config
@@ -7069,7 +7085,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     f"aio=threads,"
                     f"detect-zeroes=on"
                 )
-                device_spec = _qemu_device_spec(drive_id, di, disk_bus)
+                device_spec = _live_device_spec(task, drive_id, di, disk_bus)
                 args_parts.append(f"-drive {drive_spec}")
                 args_parts.append(f"-device {device_spec}")
             
@@ -7141,7 +7157,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     f"aio=threads,"
                     f"detect-zeroes=on"
                 )
-                device_spec = _qemu_device_spec(drive_id, di, disk_bus)
+                device_spec = _live_device_spec(task, drive_id, di, disk_bus)
                 args_parts.append(f"-drive {shlex.quote(drive_spec)}")
                 args_parts.append(f"-device {device_spec}")
             
@@ -7234,7 +7250,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     f"cache=writeback,"
                     f"aio=threads"
                 )
-                device_spec = _qemu_device_spec(drive_id, di, disk_bus)
+                device_spec = _live_device_spec(task, drive_id, di, disk_bus)
                 nbd_args_parts.append(f"-drive {drive_spec}")
                 nbd_args_parts.append(f"-device {device_spec}")
             
@@ -7392,7 +7408,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                                     f"format=raw,if=none,id={did},"
                                     f"cache=writeback,aio=threads")
                                 nbd_retry_parts.append(
-                                    f"-device {_qemu_device_spec(did, rdi, disk_bus)}")
+                                    f"-device {_live_device_spec(task, did, rdi, disk_bus)}")
                             
                             if nbd_retry_ok and nbd_retry_parts:
                                 _pve_node_exec(pve_mgr, task.target_node,
@@ -8163,6 +8179,25 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     # ================================================================
     # Configure local disks and (if needed) restart VM  -- NS Feb 2026
     # ================================================================
+    # MK Nov 2026 - the boot disk of a guest that booted on SATA first (live_first_sata): on
+    # VirtIO SCSI for the next start once vioscsi is bound, else it stays on SATA
+    _boot_di = getattr(task, '_live_boot_di', None)
+    _boot_sata = False
+    if _boot_di is not None:
+        try:
+            from pegaprox.core import v2p_twostage
+            _boot_sata = (v2p_twostage.live_switch(pve_mgr, task) if vm_running_on_ssh else 'sata') == 'sata'
+        except Exception as _lse:
+            task.log(f"  The guest could not be checked ({_lse}), the boot disk stays on SATA")
+            _boot_sata = True
+
+    def _slot(di):
+        return 'sata0' if (_boot_sata and di == _boot_di) else f"{disk_bus}{di}"
+
+    def _slot_opts(di):
+        return task._disk_attach_opts(bus='sata') if (_boot_sata and di == _boot_di) else task._disk_attach_opts()
+    _boot_slot = _slot(_boot_di if _boot_di is not None else 0)
+
     if mirror_success and vm_running_on_ssh:
         # drive-mirror already pivoted -- VM is live on local storage!
         # Update config FILE ONLY (no qm set -- avoid hot-plug conflicts).
@@ -8186,13 +8221,13 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 dk = f'disk{di}'
                 disk_total = task.disk_progress.get(dk, {}).get('total', 0)
                 size_gb = max(1, math.ceil(disk_total / (1024**3)))
-                disk_line = f"{disk_bus}{di}: {vol_id},size={size_gb}G{task._disk_attach_opts()}"
+                disk_line = f"{_slot(di)}: {vol_id},size={size_gb}G{_slot_opts(di)}"
                 _pve_node_exec(pve_mgr, task.target_node,
                     f"echo '{disk_line}' >> {conf_path}", timeout=5)
                 task.log(f"  Disk {di}: {disk_line} ✓")
         
         _pve_node_exec(pve_mgr, task.target_node,
-            f"echo 'boot: order={disk_bus}0' >> {conf_path}", timeout=5)
+            f"echo 'boot: order={_boot_slot}' >> {conf_path}", timeout=5)
         # MK: ensure BIOS config is preserved after sed cleanup (#222)
         if bios == 'ovmf':
             _pve_node_exec(pve_mgr, task.target_node,
@@ -8215,6 +8250,9 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 _log_efidisk_result(task, rc_alloc, out_alloc, pre_keys)
             try:
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
+                if _boot_sata and getattr(task, '_sector_args', False):
+                    # the emulation names the devices by bus: the boot disk is sata0 here
+                    _rebuild_sector_args(pve_mgr, task.target_node, task.proxmox_vmid)
             except Exception as _se:
                 task.log(f"  sector-size emulation skipped: {_se}")
             try:
@@ -8224,8 +8262,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             # VirtIO injection intentionally NOT called here — VM is live (sshfs_boot
             # live-pivot path), offline NTFS edits would corrupt the running guest.
             # Inject runs only on offline/auto/snapshot_zero paths where the VM is off.
-        task.log(f"  Boot: order={disk_bus}0")
-        task.log(f"  VM {task.proxmox_vmid} continues running - ZERO downtime ✓")
+        task.log(f"  Boot: order={_boot_slot}")
+        task.log(f"  VM {task.proxmox_vmid} continues running on its local disks, no restart for the switch")
         
     elif vm_running_on_ssh:
         task.log("Switching VM from SSH to local storage (brief restart)...")
@@ -8311,18 +8349,18 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     task.log(f"  WARNING: post-pivot no volume for disk {di} — skipping")
                     continue
                 rc_at, out_at, _ = _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {shlex.quote(vol_id)}{task._disk_attach_opts()} 2>&1", timeout=15)
+                    f"qm set {task.proxmox_vmid} --{_slot(di)} {shlex.quote(vol_id)}{_slot_opts(di)} 2>&1", timeout=15)
                 at_out = str(out_at or '').strip()
                 if rc_at == 0 and 'error' not in at_out.lower():
-                    task.log(f"  Disk {di}: {disk_bus}{di} → {vol_id} ✓ (persisted)")
+                    task.log(f"  Disk {di}: {_slot(di)} → {vol_id} ✓ (persisted)")
                     attached_count += 1
                 else:
-                    task.log(f"  WARNING: post-pivot qm set --{disk_bus}{di} {vol_id} failed: {at_out[:150]}")
+                    task.log(f"  WARNING: post-pivot qm set --{_slot(di)} {vol_id} failed: {at_out[:150]}")
 
             # 3) boot order so the next reboot finds the disk
             _pve_node_exec(pve_mgr, task.target_node,
-                f"qm set {task.proxmox_vmid} --boot order={disk_bus}0 2>&1", timeout=10)
-            task.log(f"  Post-pivot persistent config updated: {attached_count}/{len(descriptor_files)} disk(s) wired, boot order={disk_bus}0")
+                f"qm set {task.proxmox_vmid} --boot order={_boot_slot} 2>&1", timeout=10)
+            task.log(f"  Post-pivot persistent config updated: {attached_count}/{len(descriptor_files)} disk(s) wired, boot order={_boot_slot}")
         except Exception as e:
             task.log(f"  WARNING: post-pivot config update failed: {e} — VM runs now but reboot will fail")
 
@@ -8350,13 +8388,13 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             _pve_node_exec(pve_mgr, task.target_node,
                 f"sed -i '/^unused.*{escaped_vol}/d' {conf_path}", timeout=5)
             rc_at, out_at, _ = _pve_node_exec(pve_mgr, task.target_node,
-                f"qm set {task.proxmox_vmid} --{disk_bus}{di} {shlex.quote(vol_id)}{task._disk_attach_opts()} 2>&1", timeout=15)
+                f"qm set {task.proxmox_vmid} --{_slot(di)} {shlex.quote(vol_id)}{_slot_opts(di)} 2>&1", timeout=15)
             at_out = str(out_at or '').strip()
             if rc_at == 0 and 'error' not in at_out.lower():
-                task.log(f"  Disk {di}: {disk_bus}{di} → {vol_id} ✓")
+                task.log(f"  Disk {di}: {_slot(di)} → {vol_id} ✓")
                 attached_count += 1
             else:
-                task.log(f"  WARNING: qm set --{disk_bus}{di} {vol_id} failed: {at_out[:150]}")
+                task.log(f"  WARNING: qm set --{_slot(di)} {vol_id} failed: {at_out[:150]}")
 
         # fallback: scan for any remaining unused disks and try to attach them
         if attached_count == 0:
@@ -8379,10 +8417,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
 
         # set boot order
         rc_boot, out_boot, _ = _pve_node_exec(pve_mgr, task.target_node,
-            f"qm set {task.proxmox_vmid} --boot order={disk_bus}0 2>&1", timeout=10)
+            f"qm set {task.proxmox_vmid} --boot order={_boot_slot} 2>&1", timeout=10)
         boot_out = str(out_boot or '').strip()
         if rc_boot == 0 and 'error' not in boot_out.lower():
-            task.log(f"  Boot: order={disk_bus}0")
+            task.log(f"  Boot: order={_boot_slot}")
         else:
             task.log(f"  WARNING: boot order failed: {boot_out[:150]}")
 

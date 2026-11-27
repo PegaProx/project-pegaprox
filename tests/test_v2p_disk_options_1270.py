@@ -99,12 +99,16 @@ def test_cache_and_aio_go_on_together():
 
 def test_every_attach_of_a_final_disk_carries_the_drive_options():
     # the rescue of an unused volume attaches a final disk too, and a bare attach drops them
-    attaches = re.findall(r'qm set \{task\.proxmox_vmid\} --\{disk_bus\}\{\w+\} '
+    # Live Mirror names its slots through _slot(di): sata0 for a boot disk that stays on SATA
+    attaches = re.findall(r'qm set \{task\.proxmox_vmid\} --\{(?:disk_bus\}\{\w+|_slot\(\w+\))\} '
                           r'\{(?:shlex\.quote\()?\w*vol\w*\)?\}(\S*)',
                           inspect.getsource(v2p))
     # 10 since Snapshot-Iterative attaches through the live clone's code
     assert len(attaches) >= 10, attaches
-    assert [a for a in attaches if not a.startswith('{task._disk_attach_opts()}')] == []
+    assert [a for a in attaches if not a.startswith(('{task._disk_attach_opts()}', '{_slot_opts(di)}'))] == []
+    # and those take the options from the same place, for the bus they attach on
+    mirror = inspect.getsource(v2p._do_sshfs_boot_migration)
+    assert "return task._disk_attach_opts(bus='sata') if (_boot_sata and di == _boot_di) else task._disk_attach_opts()" in mirror
 
 
 # -- the start of the migration --------------------------------------------------------------

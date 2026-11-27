@@ -479,6 +479,7 @@ def _upload(vmware_mgr, pve_mgr, task, sess, sf, files):
 
 
 def _config(task, st, drivers, installer, agent):
+    from pegaprox.core import v2p_twostage
     go_wait = GO_WAIT_SECONDS
     if getattr(task, 'wait_for_confirmation', False):
         hold = int(getattr(task, '_confirmation_timeout', 86400) or 0)
@@ -486,7 +487,8 @@ def _config(task, st, drivers, installer, agent):
     return {'version': 1, 'run': str(task.id), 'drivers': sorted(drivers),
             'installer': installer, 'agent_msi': agent,
             'go_wait_seconds': min(go_wait, GO_WAIT_MAX),
-            'sata_first_boot': bool((getattr(task, '_two_stage', None) or {}).get('on')),
+            # the two-stage boot and Live Mirror both boot the guest on SATA first
+            'sata_first_boot': v2p_twostage.sata_first_boot_planned(task),
             'preserve_mac': bool(getattr(task, 'preserve_mac', False))}
 
 

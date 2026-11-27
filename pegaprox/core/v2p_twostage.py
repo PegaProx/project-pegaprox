@@ -330,6 +330,64 @@ def not_with_live_mirror(pve_mgr, task):
         v2p_winprep.keep_source_nics(pve_mgr, task, 'Live Mirror boots the guest before the drivers are staged')
 
 
+def sata_first_boot_planned(task):
+    """The first boot on Proxmox VE has the boot disk on SATA: the two-stage boot, or Live
+    Mirror booting a guest prepared in ESXi (live_first_sata). The in-guest preparation sets
+    storahci to boot start for it."""
+    if (getattr(task, '_two_stage', None) or {}).get('on'):
+        return True
+    return str(getattr(task, 'transfer_mode', '') or '') == 'sshfs_boot'
+
+
+def live_first_sata(task, scsi_prefix):
+    """MK Nov 2026 - Live Mirror boots a Windows guest prepared in ESXi with its boot disk on
+    SATA and the other disks on VirtIO SCSI, as the first boot of the two-stage boot does.
+    The drivers in the Driver Store and vioscsi at boot start are not enough: Windows Server
+    2025 stopped with INACCESSIBLE_BOOT_DEVICE on a lab run when the boot disk was on VirtIO
+    SCSI from the start, then booted on SATA and bound vioscsi to the controller next to it."""
+    from pegaprox.core import v2p_winprep
+    gp = getattr(task, '_guest_prep', None) or {}
+    return (bool(v2p_winprep.state(task).get('windows')) and gp.get('state') == 'shut_down'
+            and 'virtio-scsi' in str(scsi_prefix or ''))
+
+
+def live_switch(pve_mgr, task):
+    """After Live Mirror moved the disks of a guest booted by live_first_sata: 'scsi' when
+    vioscsi is bound and starts at boot (the next start has the boot disk on VirtIO SCSI),
+    'sata' when the boot disk has to stay on SATA. The guest keeps running either way."""
+    from pegaprox.core import v2p
+    svc = FINAL['scsi']['service']
+    vmid = _vmid(task)
+    task.log('  Checking the guest before the boot disk moves to VirtIO SCSI for the next start...')
+    if not agent_ping(pve_mgr, task, AGENT_FIRST_SECONDS):
+        v2p._result_warning(task, f'The guest agent of VM {vmid} did not answer within {AGENT_FIRST_SECONDS // 60} '
+                                  f'min of its start on Proxmox VE: open its console. The boot disk stays on '
+                                  f'SATA (sata0); move it to VirtIO SCSI once Windows runs.')
+        return 'sata'
+    fb = None
+    try:
+        from pegaprox.core import v2p_winprep
+        fb = v2p_winprep.read_first_boot(pve_mgr, task, FIRSTBOOT_SECONDS)
+        if fb:
+            v2p_winprep.log_first_boot(pve_mgr, task, fb)
+    except Exception as e:
+        task.log(f'  The first boot report could not be read: {e}')
+    if not fb:
+        v2p._result_warning(task, f'Windows: the first boot task did not report within {FIRSTBOOT_SECONDS // 60} '
+                                  f'min, the static IPv4 may not be on the new adapters; see '
+                                  f'C:\\ProgramData\\KVMMigration\\migrate.log in the guest.')
+    bound, start = _bind_state(pve_mgr, task, svc, BIND_SECONDS)
+    if bound and start != 0:
+        agent_exec(pve_mgr, task, ['sc.exe', 'config', svc, 'start=', 'boot'])
+        bound, start = _bind_state(pve_mgr, task, svc, 30)
+    if not bound or start != 0:
+        seen = f'{svc} is not bound to any device' if not bound else f'{svc} does not start at boot (Start {start})'
+        v2p._result_warning(task, f'Live Mirror: {seen}. The boot disk stays on SATA (sata0).')
+        return 'sata'
+    task.log(f'  {svc} is bound and starts at boot: the boot disk is on VirtIO SCSI from the next start on')
+    return 'scsi'
+
+
 def _drivers_missing(task):
     gp = getattr(task, '_guest_prep', None) or {}
     if gp.get('state') == 'shut_down':
