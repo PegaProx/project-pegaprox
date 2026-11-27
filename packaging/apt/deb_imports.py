@@ -63,6 +63,10 @@ OPTIONAL = {
     'backports': 'backports.zstd, the zstd variant of the page before Python 3.14.',
     'compression': 'compression.zstd, the zstd variant of the page from Python 3.14 on '
                    '(standard library there).',
+    # MK Nov 2026 - imported on the Proxmox VE node, never by PegaProx itself
+    'hivex': 'core/v2p_winprep_node.py runs on the Proxmox VE node of an ESXi Windows '
+             'migration and edits the guest registry there; the package check installs '
+             'python3-hivex on that node. The PegaProx host only sends the file.',
 }
 
 # NS Nov 2026 - the module the smoke test imports for an OPTIONAL entry where the name says
