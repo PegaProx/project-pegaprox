@@ -32423,7 +32423,107 @@
           }
         },
         "summary": "Start near-zero-downtime migration from VMware to Proxmox.",
-        "description": "Required body:\n- target_cluster, target_node, target_storage\n- esxi_password: Root password for ESXi SSH access\n\nOptional:\n- esxi_host: ESXi host IP (default: from the ESXi server config)\n- esxi_user: SSH username (default: root)\n- esxi_datastore: Datastore name (auto-detected if not set)\n- esxi_vm_dir: VM directory name on datastore (default: VM name)\n- network_bridge, start_after, remove_source\n- wait_for_confirmation (#562): hold before the final switchover and wait for an\n  explicit POST .../confirm-cutover (or .../cancel-cutover). Default false.\n- confirmation_timeout: seconds to wait at that gate before auto-aborting (default 86400).\n- nic_map: [{index, bridge, vlan, skip}] per source NIC, in the order of the migration\n  plan's source.nics. The bridge must exist on the target node (bridge, OVS bridge or an\n  SDN VNet of a zone on that node).\n- disk_map: [{index, storage, skip}] per source disk, in the order of source.disks. The\n  storage must be active on the target node and take images; disk 0 cannot be skipped.\n  EFI and TPM state stay on target_storage.\n- verify: 'sample' (default), 'full' (every copied disk compared with its source before\n  the target starts; Live Clone, Auto and Offline Copy only) or 'off'.\n- target_vmid (#1339): the VMID of the new guest, 100 to 999999999. It has to be free on\n  the target cluster, inside the caller's tenant range and allowed by the cluster's next-id\n  setting. It is asked again right before the guest is created, and the migration fails\n  when it got taken meanwhile. Empty: the next free VMID, inside the caller's tenant range.\n- allow_package_install (#1252): default true. False installs nothing on the target node;\n  a run that misses a package it needs stops before it changes anything and names them.\n- dry_run: true checks all of it against the target node and answers 200 with the\n  resolved plan ({ok, errors, warnings, nics, disks, storages, available, node_packages});\n  nothing is started and no ESXi password is needed. node_packages lists what the options\n  may install on the target node and which of it is missing (one SSH call to that node;\n  checked false when it could not be asked). check_packages: false leaves that call out\n  (node_packages null), for a dry run that only wants the node's bridges and storages.",
+        "description": "Required body:\n- target_cluster, target_node, target_storage\n- esxi_password: Root password for ESXi SSH access\n\nOptional:\n- esxi_host: ESXi host IP (default: from the ESXi server config)\n- esxi_user: SSH username (default: root)\n- esxi_datastore: Datastore name (auto-detected if not set)\n- esxi_vm_dir: VM directory name on datastore (default: VM name)\n- network_bridge, start_after, remove_source\n- wait_for_confirmation (#562): hold before the final switchover and wait for an\n  explicit POST .../confirm-cutover (or .../cancel-cutover). Default false.\n- confirmation_timeout: seconds to wait at that gate before auto-aborting (default 86400).\n- nic_map: [{index, bridge, vlan, skip}] per source NIC, in the order of the migration\n  plan's source.nics. The bridge must exist on the target node (bridge, OVS bridge or an\n  SDN VNet of a zone on that node).\n- disk_map: [{index, storage, skip}] per source disk, in the order of source.disks. The\n  storage must be active on the target node and take images; disk 0 cannot be skipped.\n  EFI and TPM state stay on target_storage.\n- verify: 'sample' (default), 'full' (every copied disk compared with its source before\n  the target starts; Live Clone, Auto and Offline Copy only) or 'off'.\n- target_vmid (#1339): the VMID of the new guest, 100 to 999999999. It has to be free on\n  the target cluster, inside the caller's tenant range and allowed by the cluster's next-id\n  setting. It is asked again right before the guest is created, and the migration fails\n  when it got taken meanwhile. Empty: the next free VMID, inside the caller's tenant range.\n- allow_package_install (#1252): default true. False installs nothing on the target node;\n  a run that misses a package it needs stops before it changes anything and names them.\n- Windows guests are prepared fully automatically (MK Nov 2026), no login needed: the VirtIO\n  drivers and the guest agent are staged offline after the copy (virtio-win.iso from the\n  node, downloaded into its ISO storage when missing and package installs are allowed), the\n  static IPv4 of every adapter is carried over to the new VirtIO NIC at the first boot, the\n  old adapter's address is cleared, the old adapters are removed where Windows can, the ESXi\n  guest tools are uninstalled, and the two-stage boot (SATA first, then VirtIO SCSI) runs.\n  The source VM on ESXi is not changed by it.\n  install_virtio_drivers: absent = on for Windows guests, false turns the preparation off.\n  two_stage_boot: absent/null = on for Windows guests whose drivers will be there, false off,\n  true refused where it cannot run (Live Mirror, disk_bus sata/ide, another scsihw, agent\n  false, no drivers). Its failure is a warning, never a failed migration.\n  guest_prep: true prepares the guest in the running source VM first, over the ESXi guest\n  operations (SOAP connection, guest tools running), with guest_user and guest_password (a\n  Windows administrator; with UAC only the built-in Administrator gets a full token). They\n  are used for that and nothing else: never stored, logged or returned. Any problem before\n  the guest is released falls back to the offline preparation; a failure after it powers\n  the source on again with its guest tools installer mounted.\n- dry_run: true checks all of it against the target node and answers 200 with the\n  resolved plan ({ok, errors, warnings, nics, disks, storages, available, node_packages});\n  nothing is started and no ESXi password is needed. node_packages lists what the options\n  may install on the target node and which of it is missing (one SSH call to that node;\n  checked false when it could not be asked). check_packages: false leaves that call out\n  (node_packages null), for a dry run that only wants the node's bridges and storages.",
+        "parameters": [
+          {
+            "name": "vmware_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vm_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vmware.vm.migrate"
+        ]
+      }
+    },
+    "/api/vmware/guest-prep-script": {
+      "get": {
+        "operationId": "vmware.get_vmware_guest_prep_script_get",
+        "tags": [
+          "vmware"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The PowerShell script of the Windows preparation, for a run by hand",
+        "description": "MK Nov 2026 - the same bytes the in-guest preparation (guest_prep) runs in the guest. Mount\nvirtio-win.iso in the Windows guest on ESXi, run it as administrator\n(powershell -ExecutionPolicy Bypass -File Prepare-KvmMigration.ps1): it puts the VirtIO\ndrivers into the Driver Store, saves and releases the static IPv4, uninstalls the ESXi guest\ntools and shuts the guest down (-NoShutdown leaves that to you). Then migrate it, and do not\npower it on again on ESXi. Without it PegaProx prepares a Windows guest on its own after the\ncopy, no login needed.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vmware.vm.migrate"
+        ]
+      }
+    },
+    "/api/vmware/{vmware_id}/vms/{vm_id}/guest-login": {
+      "post": {
+        "operationId": "vmware.check_vmware_guest_login_post",
+        "tags": [
+          "vmware"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Check a Windows login for the preparation in the running guest",
+        "description": "MK Nov 2026 - body {guest_user, guest_password}. One login attempt in the guest over the ESXi\nguest operations per call (never retried: a wrong password tried in a loop locks the\naccount), at most 15 per caller in 5 minutes over all guests and 5 per caller and guest\n(429). Answers {ok, tools_running, windows, error}. Nothing of the body is stored, logged\nor audited.",
         "parameters": [
           {
             "name": "vmware_id",
@@ -32724,7 +32824,7 @@
           }
         },
         "summary": "Migrate several guests of an ESXi server to Proxmox, a few at a time",
-        "description": "Body: vms (1 to 200 guests: a VM id, or {vm_id, nic_map, disk_map} with the guest's own\nNIC and disk choices as the single migrate route takes them), width (how many migrate at\nonce, 1 to 5, default 1), esxi_password (one for the run), dry_run, and what every guest\nshares: target_cluster, target_node, target_storage (required), network_bridge,\nnet_vlan_tag, transfer_mode, verify, start_after, remove_source (needs vmware.vm.manage\non each guest), wait_for_confirmation, confirmation_timeout, esxi_user, preserve_mac,\nbios, disk_format, allow_package_install (#1252, default true). Any other key is refused.\n\nEach guest is checked like a dry run of POST .../vms/<vm_id>/migrate: the caller may\nmigrate it, no other migration has it, its NICs and disks fit the target node, and the\nguests together fit the storages and the tenant quota. dry_run: true answers 200 with\nthat check ({ok, errors, warnings, items: one per guest, storages, available,\nnode_packages: what the run may install on the target node, asked once}), needs no\npassword and starts nothing. Without it, one guest that does not fit refuses the whole\nrequest (400, with the same items); otherwise the answer is the run (202, {run}), to\nfollow with GET /api/vmware/bulk-migrate/<run_id>.\n\nA guest's target_vmid in vms is its own VMID, checked as the single route checks it; no\ntwo guests of a run get the same one. The others get the next free VMID each,\ninside the caller's tenant range.\n\nBefore each guest starts, the run asks all of it again. Each started guest is a normal\nmigration in /api/vmware/migrations. The run lives in this process (a restart ends it),\nand the ESXi password with it: in memory only, dropped once no guest is left to start.",
+        "description": "Body: vms (1 to 200 guests: a VM id, or {vm_id, nic_map, disk_map} with the guest's own\nNIC and disk choices as the single migrate route takes them), width (how many migrate at\nonce, 1 to 5, default 1), esxi_password (one for the run), dry_run, and what every guest\nshares: target_cluster, target_node, target_storage (required), network_bridge,\nnet_vlan_tag, transfer_mode, verify, start_after, remove_source (needs vmware.vm.manage\non each guest), wait_for_confirmation, confirmation_timeout, esxi_user, preserve_mac,\nbios, disk_format, allow_package_install (#1252, default true), and the Windows\npreparation as the single route takes it: install_virtio_drivers, virtio_iso_path,\ntwo_stage_boot, guest_prep with guest_user / guest_password for the run (a guest's vms\nrow may bring its own guest_user and guest_password, only for the real start; never\nstored, logged or shown). Any other key is refused.\n\nEach guest is checked like a dry run of POST .../vms/<vm_id>/migrate: the caller may\nmigrate it, no other migration has it, its NICs and disks fit the target node, and the\nguests together fit the storages and the tenant quota. dry_run: true answers 200 with\nthat check ({ok, errors, warnings, items: one per guest, storages, available,\nnode_packages: what the run may install on the target node, asked once}), needs no\npassword and starts nothing. Without it, one guest that does not fit refuses the whole\nrequest (400, with the same items); otherwise the answer is the run (202, {run}), to\nfollow with GET /api/vmware/bulk-migrate/<run_id>.\n\nA guest's target_vmid in vms is its own VMID, checked as the single route checks it; no\ntwo guests of a run get the same one. The others get the next free VMID each,\ninside the caller's tenant range.\n\nBefore each guest starts, the run asks all of it again. Each started guest is a normal\nmigration in /api/vmware/migrations. The run lives in this process (a restart ends it),\nand the ESXi password with it: in memory only, dropped once no guest is left to start.",
         "parameters": [
           {
             "name": "vmware_id",

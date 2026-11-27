@@ -1122,6 +1122,60 @@ class VMwareManager:
         except Exception as e:
             return {'error': getattr(e, 'msg', None) or str(e)}
 
+    # -- Guest operations (MK Nov 2026, the Windows preparation of an ESXi migration) --
+
+    def guest_state(self, vm_id: str) -> dict:
+        """{'data': {power_state, tools_running, ops_ready, family, full_name, soap}} of a guest.
+        SOAP only knows whether the guest operations are ready; over REST ops_ready is None."""
+        if self._connection_type != 'soap':
+            got = self.get_vm(vm_id)
+            if 'error' in got:
+                return got
+            d = got.get('data') or {}
+            info = self.get_vm_guest_info(vm_id).get('data') or {}
+            return {'data': {'power_state': d.get('power_state'), 'tools_running': None, 'ops_ready': None,
+                             'family': info.get('family'), 'full_name': info.get('full_name') or d.get('guest_OS'),
+                             'soap': False}}
+        try:
+            vm, err = self._soap_vm(vm_id)
+            if err:
+                return {'error': err}
+            g = vm.guest
+            power = str(getattr(vm.runtime, 'powerState', '') or '')
+            return {'data': {
+                'power_state': {'poweredOn': 'POWERED_ON', 'poweredOff': 'POWERED_OFF',
+                                'suspended': 'SUSPENDED'}.get(power, power.upper() or None),
+                'tools_running': str(getattr(g, 'toolsRunningStatus', '')) == 'guestToolsRunning',
+                'ops_ready': bool(getattr(g, 'guestOperationsReady', False)),
+                'family': str(g.guestFamily) if getattr(g, 'guestFamily', None) else None,
+                'full_name': getattr(g, 'guestFullName', None),
+                'soap': True,
+            }}
+        except Exception as e:
+            return {'error': getattr(e, 'msg', None) or str(e)}
+
+    def mount_tools_installer(self, vm_id: str) -> dict:
+        """The installer CD of the ESXi guest tools into the guest (the way back of a migration
+        given up after the Windows preparation uninstalled them)"""
+        try:
+            vm, err = self._soap_vm(vm_id)
+            if err:
+                return {'error': err}
+            vm.MountToolsInstaller()
+            return {'data': 'ok'}
+        except Exception as e:
+            return {'error': getattr(e, 'msg', None) or str(e)}
+
+    def unmount_tools_installer(self, vm_id: str) -> dict:
+        try:
+            vm, err = self._soap_vm(vm_id)
+            if err:
+                return {'error': err}
+            vm.UnmountToolsInstaller()
+            return {'data': 'ok'}
+        except Exception as e:
+            return {'error': getattr(e, 'msg', None) or str(e)}
+
     # -- Hosts --
     
     def get_hosts(self) -> dict:

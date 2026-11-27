@@ -65,7 +65,13 @@ _XAPI_READ_RE = re.compile(r'(get_|query_|compute_|assert_|retrieve_|check_)|get
 _XAPI_READ_CLASSES = frozenset(('session', 'event'))
 # vSphere methods outside the *_Task ones that change a guest
 _SOAP_WRITES = frozenset(('ShutdownGuest', 'RebootGuest', 'StandbyGuest', 'MarkAsTemplate',
-                          'MarkAsVirtualMachine', 'UnregisterVM', 'AnswerVM', 'RenameVM'))
+                          'MarkAsVirtualMachine', 'UnregisterVM', 'AnswerVM', 'RenameVM',
+                          # MK Nov 2026 - the Windows preparation of an ESXi migration: what changes
+                          # files or runs programs in a guest, and its tools installer CD
+                          'StartProgramInGuest', 'TerminateProcessInGuest', 'InitiateFileTransferToGuest',
+                          'MakeDirectoryInGuest', 'DeleteDirectoryInGuest', 'DeleteFileInGuest',
+                          'CreateTemporaryDirectoryInGuest', 'CreateTemporaryFileInGuest', 'MoveFileInGuest',
+                          'MoveDirectoryInGuest', 'MountToolsInstaller', 'UnmountToolsInstaller'))
 
 # `timeout -k 2 <bound>` around a command on the way to a node: bounded even when this
 # process is frozen (5.4)

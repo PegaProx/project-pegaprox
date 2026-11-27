@@ -476,6 +476,8 @@ def resolve_migration_plan(inv, source_disks, source_nics, opts, target_storage,
 
 
 _BASIC_AUTH_HEADER = re.compile(r'(authorization:[ \t]*basic[ \t]+)[^\s]+', re.I)
+# the query of an ESXi guest file transfer URL is a one-time ticket
+_GUEST_FILE_URL = re.compile(r'(guestFile\?)[^\s"\']+')
 
 # the cache modes of a PVE drive; native AIO opens the disk with O_DIRECT, which only these two keep
 DISK_CACHE_MODES = ('none', 'writethrough', 'writeback', 'directsync', 'unsafe')
@@ -615,7 +617,19 @@ class V2PMigrationTask:
         # Default off — VMware Workloads boot fine on Proxmox via vmxnet3+pvscsi
         # compatibility. Enable to pre-stage Windows for native virtio-scsi/virtio-net.
         self.install_virtio_drivers = bool(self.config.get('install_virtio_drivers', False))
+        # MK Nov 2026 - absent, a Windows guest gets it (core/v2p_winprep.plan); false keeps it off
+        self._virtio_explicit = isinstance(self.config.get('install_virtio_drivers'), bool)
         self.virtio_iso_path = self.config.get('virtio_iso_path', '') or ''
+        # MK Nov 2026 - the optional Windows preparation in the running source guest
+        # (core/v2p_guestprep.py, with a Windows login) and the two-stage boot (core/v2p_twostage.py).
+        # The guest password leaves the config like the ESXi one; go() of the preparation wipes
+        # it, the end of the run at the latest.
+        self.guest_prep = self.config.get('guest_prep') is True
+        self.guest_user = str(self.config.pop('guest_user', '') or '')[:256]
+        self._guest_password = str(self.config.pop('guest_password', '') or '')
+        self._guest_prep = {'on': self.guest_prep, 'state': 'planned' if self.guest_prep else 'off',
+                            'os': '', 'drivers': '', 'why': ''}
+        self._two_stage = {'on': False, 'state': 'off', 'boot_disk': None, 'why': ''}
         # MK Oct 2026 - per NIC / per disk choices and the verify mode. The route checked them
         # against the target node already; parsed again here so a task built any other way
         # cannot carry an unchecked name into a node command. A value that does not parse
@@ -680,7 +694,7 @@ class V2PMigrationTask:
         is the TPM state Proxmox creates with the VM, and the fixes write to what they get."""
         return (getattr(self, '_disk_vols', None) or {}).get(0) or None
 
-    def _disk_attach_opts(self):
+    def _disk_attach_opts(self, bus=None, hw=None):
         # #598 — extra drive options appended to a FINAL target-disk attach only.
         # aio_mode, disk_cache and disk_discard are whitelisted in __init__ to literal
         # tokens and disk_iothread and disk_ssd are bools, so the returned suffix can
@@ -689,7 +703,9 @@ class V2PMigrationTask:
         opts = ''
         # JB Nov 2026 (#1270) - PVE runs a disk in its own IO thread only on VirtIO Block or on
         # SCSI behind virtio-scsi-single; elsewhere the flag is ignored or refused
-        bus, hw = getattr(self, '_attach_bus', ''), getattr(self, '_attach_scsihw', '')
+        # MK Nov 2026 - bus/hw for an attach on another bus than the copies used (two-stage boot)
+        bus = getattr(self, '_attach_bus', '') if bus is None else bus
+        hw = getattr(self, '_attach_scsihw', '') if hw is None else hw
         if getattr(self, 'disk_iothread', False) and (bus == 'virtio' or (bus == 'scsi' and hw == 'virtio-scsi-single')):
             opts += ',iothread=1'
         # none is what PVE does without the option
@@ -713,6 +729,16 @@ class V2PMigrationTask:
             import urllib.parse
             for form in {pw, urllib.parse.quote(pw, safe=''), shlex.quote(pw)}:
                 text = text.replace(form, '********')
+        # MK Nov 2026 - the Windows account of the preparation, and the one-time tickets of the
+        # guest file transfers
+        gpw = getattr(self, '_guest_password', '') or ''
+        if gpw:
+            import urllib.parse
+            forms = {gpw, urllib.parse.quote(gpw, safe=''), shlex.quote(gpw), json.dumps(gpw)[1:-1]}
+            for form in sorted(forms, key=len, reverse=True):
+                if form:
+                    text = text.replace(form, '********')
+        text = _GUEST_FILE_URL.sub(r'\1********', text)
         # curl -v prints the request headers it sent, the login as base64 among them
         return _BASIC_AUTH_HEADER.sub(r'\1********', text)
 
@@ -740,9 +766,13 @@ class V2PMigrationTask:
         needed. Called from set_phase() on completed/failed."""
         try:
             self.esxi_password = ''
+            self._guest_password = ''
             # ensure no leftover copy in config either
             if isinstance(self.config, dict):
                 self.config.pop('esxi_password', None)
+                self.config.pop('guest_password', None)
+                self.config.pop('guest_user', None)
+            self.guest_user = ''
         except Exception:
             pass
         # and the secret files the run left on the node (_node_secret_file): the one the
@@ -894,6 +924,9 @@ class V2PMigrationTask:
         self.log("=== Operator confirmed — proceeding with the switchover now. ===")
 
     def to_dict(self):
+        # MK Nov 2026 - the preparation and the two-stage boot as the UI shows them, never the account
+        gp = getattr(self, '_guest_prep', None) or {}
+        ts = getattr(self, '_two_stage', None) or {}
         return {
             'id': self.id, 'vmware_id': self.vmware_id, 'vm_id': self.vm_id,
             'vm_name': self.vm_name, 'target_cluster': self.target_cluster,
@@ -910,6 +943,12 @@ class V2PMigrationTask:
             'total_downtime_seconds': self.total_downtime_seconds,
             'warnings': list(getattr(self, 'warnings', None) or []),
             'log': self.log_lines[-20:],  # Last 20 log lines
+            'guest_prep': {'on': bool(gp.get('on')), 'state': str(gp.get('state') or 'off'),
+                           'os': str(gp.get('os') or ''), 'drivers': str(gp.get('drivers') or ''),
+                           'why': str(gp.get('why') or '')},
+            'two_stage': {'on': bool(ts.get('on')), 'state': str(ts.get('state') or 'off'),
+                          'boot_disk': ts.get('boot_disk'), 'why': str(ts.get('why') or '')},
+            'windows_prep': _winprep_view(self),
             'config': {
                 'network_bridge': self.network_bridge,
                 'start_after': self.start_after,
@@ -917,6 +956,9 @@ class V2PMigrationTask:
                 'esxi_host': self.esxi_host,
                 'esxi_datastore': self.esxi_datastore,
                 'verify': getattr(self, 'verify_mode', 'sample'),
+                'guest_prep': bool(getattr(self, 'guest_prep', False)),
+                'two_stage_boot': bool(ts.get('on')) or ts.get('state') in ('switched', 'kept_sata',
+                                                                            'first_boot_staged'),
             },
         }
 
@@ -1146,7 +1188,8 @@ def _node_packages_refusal(pve_mgr, task):
     boot_type = ''
     if virtio and task.transfer_mode != 'sshfs_boot':
         boot_type = _pve_storage_type(pve_mgr, node, task.disk_target(0))
-    plan = pk.package_plan(task.transfer_mode, virtio, boot_type)
+    plan = pk.package_plan(task.transfer_mode, virtio, boot_type,
+                           guest_prep=bool(getattr(task, 'guest_prep', False)))
     rep = pk.package_report(_pve_node_exec, pve_mgr, node, plan, allow_install=False)
     if not rep['checked']:
         return (f"Cannot check the packages on target node {node} ({rep['error']}), and this migration "
@@ -1161,6 +1204,130 @@ def _node_packages_refusal(pve_mgr, task):
     else:
         task.log(f"Packages on {node}: everything this migration uses is installed")
     return None
+
+
+def virtio_iso_candidates(iso_path, target_storage):
+    """Where a virtio-win.iso is looked for on the target node, the caller's path first.
+    Raises ValueError for a path that is no absolute path to an .iso file."""
+    out = []
+    if iso_path:
+        from pegaprox.utils.sanitization import validate_node_iso_path
+        if not validate_node_iso_path(iso_path):
+            raise ValueError('the virtio-win ISO path is not an absolute path to an .iso file')
+        out.append(iso_path)
+    return out + ["/var/lib/vz/template/iso/virtio-win.iso",
+                  f"/mnt/pve/{target_storage}/template/iso/virtio-win.iso",
+                  "/var/lib/pegaprox/virtio-win.iso"]
+
+
+def _find_virtio_iso(pve_mgr, task):
+    """(path, searched) of the virtio-win.iso on the target node, path None when there is
+    none. The driver injection, the Windows preparation and the two-stage boot ask here."""
+    searched = virtio_iso_candidates(getattr(task, 'virtio_iso_path', '') or '', task.target_storage)
+    for p in searched:
+        rc, _, _ = _pve_node_exec(pve_mgr, task.target_node, f"test -f {shlex.quote(p)}", timeout=5)
+        if rc == 0:
+            return p, searched
+    return None, searched
+
+
+def _winprep_view(task):
+    try:
+        from pegaprox.core import v2p_winprep
+        return v2p_winprep.view(task)
+    except Exception:
+        return {'windows': False, 'on': False, 'state': 'off', 'first_boot': None, 'why': ''}
+
+
+def _source_off_for_cutover(vmware_mgr, pve_mgr, task):
+    """MK Nov 2026 - True when the in-guest Windows preparation shut the source down: it
+    replaces the power-off of the cutover. False when it is off or fell back to the offline
+    preparation (the caller stops the VM as before). RuntimeError only when the guest is still
+    not off after its go and a hard power-off."""
+    gp = getattr(task, '_guest_prep', None)
+    if not (isinstance(gp, dict) and gp.get('on')):
+        return False
+    from pegaprox.core import v2p_guestprep
+    try:
+        got = v2p_guestprep.go(vmware_mgr, pve_mgr, task)
+    except Exception as e:
+        # the caller stops the source as before; a guest that got its go is on its way down
+        task.log(f"Windows preparation at the switchover: {type(e).__name__}: {str(e)[:200]}")
+        return False
+    if got == 'stuck':
+        raise RuntimeError("The source VM did not power off after the Windows preparation")
+    return got in ('off', 'forced')
+
+
+def _guest_prep_stage1(vmware_mgr, pve_mgr, task):
+    """Stage 1 of the in-guest Windows preparation while the source still serves (the snapshot
+    modes before their hold, the pre-sync flow before its delta sync). Never raises: a guest
+    it cannot prepare is prepared offline after the copy."""
+    gp = getattr(task, '_guest_prep', None)
+    if isinstance(gp, dict) and gp.get('on'):
+        from pegaprox.core import v2p_guestprep
+        try:
+            v2p_guestprep.prepare(vmware_mgr, pve_mgr, task)
+        except Exception as e:
+            v2p_guestprep.fallback(task, f'{type(e).__name__}: {str(e)[:200]}', 'stage 1')
+
+
+def _guest_prep_abort(task):
+    try:
+        from pegaprox.core import v2p_guestprep
+        v2p_guestprep.abort_if_pending(vmware_managers.get(task.vmware_id), task)
+    except Exception as e:
+        logging.warning(f"[V2P:{task.id}] calling the Windows preparation off failed: {e}")
+
+
+def _guest_prep_rollback(task):
+    """A run that failed after the in-guest preparation released the guest: the source comes
+    back on ESXi with the installer of its guest tools, its first boot task does the rest"""
+    try:
+        from pegaprox.core import v2p_guestprep
+        v2p_guestprep.roll_back(vmware_managers.get(task.vmware_id), cluster_managers.get(task.target_cluster), task)
+    except Exception as e:
+        task.log(f"Bringing the source back after the Windows preparation failed: {e}")
+
+
+def _two_stage_stage(pve_mgr, task):
+    """v2p_twostage.stage() for the post-copy chains: True when its boot() takes the start"""
+    from pegaprox.core import v2p_twostage
+    try:
+        return v2p_twostage.stage(pve_mgr, task)
+    except Exception as e:
+        _result_warning(task, f"Two-stage boot left out: {e}")
+        return False
+
+
+def _two_stage_boot(pve_mgr, task):
+    """(outcome, why) of v2p_twostage.boot(): 'running' / 'stopped' once the first start ran,
+    whatever came after it; the first start's own failure otherwise"""
+    from pegaprox.core import v2p_twostage
+    try:
+        return v2p_twostage.boot(pve_mgr, task)
+    except Exception as e:
+        _result_warning(task, f"Two-stage boot stopped half way ({e}); check the boot disk of the VM")
+        return ('running' if _pve_vm_status(pve_mgr, task.target_node, task.proxmox_vmid) == 'running'
+                else 'stopped'), ''
+
+
+def _after_injection(pve_mgr, task):
+    try:
+        from pegaprox.core import v2p_winprep
+        v2p_winprep.after_injection(pve_mgr, task)
+    except Exception as e:
+        task.log(f"[Windows] checking the injection failed: {e}")
+
+
+def _guest_log_after_start(pve_mgr, task):
+    """After a start without the two-stage boot: what the first boot task of the offline
+    preparation did, and the rest of the in-guest preparation's log"""
+    try:
+        from pegaprox.core import v2p_winprep
+        v2p_winprep.first_boot_report(pve_mgr, task)
+    except Exception as e:
+        task.log(f"The guest's first boot could not be read through the agent: {e}")
 
 
 def _run_v2p_migration(task):
@@ -1420,11 +1587,24 @@ def _run_v2p_migration(task):
                     f"migration again. Nothing was copied, the source VM was not touched.")
                 return
 
+        # MK Nov 2026 - the Windows preset: the driver injection on, virtio-win.iso found on the
+        # node or downloaded there, the two-stage boot decided. Before the package check below,
+        # whose list it may change
+        from pegaprox.core import v2p_winprep, v2p_guestprep
+        _fv_plan = full_vm.get('data') if isinstance(full_vm, dict) and isinstance(full_vm.get('data'), dict) \
+            else vm_data
+        v2p_winprep.plan(pve_mgr, task, _fv_plan)
+
         # MK Nov 2026 (#1252) - a run that may not install packages stops here when the node
         # lacks one it needs: before the first apt-get below, and before ESXi or Proxmox changed
         _pkg_refusal = _node_packages_refusal(pve_mgr, task)
         if _pkg_refusal:
             task.set_phase('failed', _pkg_refusal); return
+
+        # MK Nov 2026 - the optional in-guest preparation checks the guest before anything
+        # changes (no package installed, no VMID taken, no VM created yet). A guest it cannot
+        # prepare is prepared offline after the copy: never a failed run
+        v2p_guestprep.probe(vmware_mgr, pve_mgr, task)
 
         # Verify sshfs on Proxmox node (auto-install + re-verify).
         # NS Apr 2026 — old check looked for the substring "sshfs" in apt-get output,
@@ -1517,13 +1697,24 @@ def _run_v2p_migration(task):
             scsihw = hw.get('scsi_controller_pve', 'virtio-scsi-single')
         if task.disk_bus == 'scsi' and scsihw not in ('pvscsi', 'lsi', 'lsi53c810', 'megasas', 'virtio-scsi-pci', 'virtio-scsi-single'):
             scsihw = 'virtio-scsi-single'
-        
+        # MK Nov 2026 - the Windows preset: where the VirtIO drivers will be there before the
+        # first boot (two-stage boot, in-guest preparation), a controller on auto is
+        # virtio-scsi-single. keep_source_controller() puts the source's back when they are not.
+        _ts_on = bool((getattr(task, '_two_stage', None) or {}).get('on'))
+        _virtio_hw = v2p_winprep.wants_virtio_hardware(task)
+        if _virtio_hw and task.scsihw_override in ('', 'auto', None) and scsihw != 'virtio-scsi-single':
+            scsihw = 'virtio-scsi-single'
+            task._scsihw_switched = True
+
         # Disk bus: honor the user's wizard pick, else match VMware.
         # MK #597 — 'virtio' was missing from this allowlist, so an explicit virtio
         # choice silently fell back to the detected bus (scsi). virtio0 attaches +
         # boots fine via the generic --{disk_bus} path below.
         detected_bus = hw.get('disk_bus', 'scsi')
         disk_bus = task.disk_bus if task.disk_bus in ('scsi', 'sata', 'ide', 'virtio') else detected_bus
+        if _ts_on and task.disk_bus not in ('scsi', 'sata', 'ide', 'virtio'):
+            disk_bus = task._two_stage['final_bus']
+            task._bus_switched = disk_bus != detected_bus
         # every attach of a final disk reads these for its drive options (#1270)
         task._attach_bus, task._attach_scsihw = disk_bus, scsihw
         if getattr(task, 'disk_ssd', False) is True and disk_bus == 'virtio':
@@ -1536,6 +1727,12 @@ def _run_v2p_migration(task):
         _valid_nic = ('e1000', 'e1000e', 'virtio', 'vmxnet3')
         nic_explicit = task.net_driver in _valid_nic   # user picked a specific model, not 'auto'
         net_driver = task.net_driver if nic_explicit else detected_nic
+        if _virtio_hw and not nic_explicit:
+            # NetKVM comes with the drivers, the vmxnet3 driver leaves with the ESXi guest tools;
+            # after_injection() puts the source's model back when the drivers did not come
+            net_driver, nic_explicit = 'virtio', True
+            task._nics_switched = True
+        task._net_model = net_driver
         
         # PVE requires DNS-valid names - ESXi allows spaces/special chars (#129)
         raw_name = vm_data.get('name', f'v2p-{task.proxmox_vmid}')
@@ -1595,6 +1792,8 @@ def _run_v2p_migration(task):
         # NS: create all selected NICs (not just primary), optionally preserve MACs
         selected_nics = getattr(task, 'selected_nics', None) or vm_data.get('nics', [])
         preserve_mac = getattr(task, 'preserve_mac', False)
+        # the first boot of a Windows guest carries each NIC's static IPv4 over by these MACs
+        task._source_nics = [n for n in (selected_nics if isinstance(selected_nics, list) else [selected_nics])]
         if selected_nics:
             for idx, nic in enumerate(selected_nics if isinstance(selected_nics, list) else [selected_nics]):
                 # bridge and tag per NIC from the nic_map, the job's
@@ -1854,12 +2053,16 @@ def _run_v2p_migration(task):
         if task.transfer_mode == 'sshfs_boot':
             task.log(f"=== TRANSFER MODE: QEMU SSH Boot + Live Copy ===")
             task.log("Near-zero downtime: boot from SSH, copy in background")
-            
+
             # Stop VMware VM if running
             vm_state = vmware_mgr.get_vm(task.vm_id)
             is_running = 'data' in vm_state and vm_state['data'].get('power_state') == 'POWERED_ON'
-            
-            if is_running:
+
+            if is_running and _source_off_for_cutover(vmware_mgr, pve_mgr, task):
+                # the prepared guest shut itself down
+                try: vmware_mgr.delete_migration_snapshot(task.vm_id)
+                except: pass
+            elif is_running:
                 task.log("Stopping VMware VM...")
                 vmware_mgr.vm_power_action(task.vm_id, 'stop')
                 for attempt in range(15):
@@ -2245,6 +2448,10 @@ def _run_v2p_migration(task):
                     else:
                         task.log(f"  Disk {i}: checksums failed, the switchover computes them instead")
 
+                # MK Nov 2026 - stage 1 of the in-guest Windows preparation while the source still
+                # serves: the catch-up rounds (Snapshot-Iterative) or the block replay carry what it wrote
+                _guest_prep_stage1(vmware_mgr, pve_mgr, task)
+
                 # #562 - optional operator-scheduled cutover. The copy finished and the source
                 # VM is still running on ESXi, so this is the clean seam to hold. A source that
                 # is off serves nothing, holding it would only add time.
@@ -2268,9 +2475,12 @@ def _run_v2p_migration(task):
                 src_state = _vm_power_state(vmware_mgr, task.vm_id)
                 if src_state != 'POWERED_OFF':
                     task.log(f"=== SWITCHOVER: stopping the source VM on ESXi ({src_state or 'state unknown'}), downtime starts ===")
+                    # MK Nov 2026 - a guest prepared in ESXi shuts itself down after its stage 2
+                    if src_state == 'POWERED_ON' and _source_off_for_cutover(vmware_mgr, pve_mgr, task):
+                        src_stopped = True
                     # Snapshot-Iterative lets the guest shut down first, so what it holds in memory
                     # reaches the disk that the switchover copies
-                    if _iterative and src_state == 'POWERED_ON' and _shut_down_guest(vmware_mgr, task):
+                    elif _iterative and src_state == 'POWERED_ON' and _shut_down_guest(vmware_mgr, task):
                         src_stopped = True
                     else:
                         vmware_mgr.vm_power_action(task.vm_id, 'stop')
@@ -2383,25 +2593,37 @@ def _run_v2p_migration(task):
                 # must run while the VM is STILL stopped (live-NTFS guard inside)
                 try: _inject_virtio_drivers(pve_mgr, task)
                 except Exception as _ve: _virtio_not_injected(task, _ve)
+                _after_injection(pve_mgr, task)
                 try: _maybe_convert_disks_to_qcow2(pve_mgr, task)
                 except Exception as _qe: task.log(f"  qcow2 convert skipped: {_qe}")
+                # MK Nov 2026 - the two-stage boot of a Windows guest, after the qcow2 move (it
+                # changes the volume ids). It runs with start_after off too and stops the VM then
+                _two_stage_on = _two_stage_stage(pve_mgr, task)
 
                 task.set_phase('cutover')
                 target_running = False
-                if task.start_after:
+                if task.start_after or _two_stage_on:
                     target_start_sent = True
                     task.log("Starting the target VM on Proxmox...")
                     # MK Oct 2026 (#1124) - _api_post hands back an error answer instead of raising,
                     # and the start task can still fail after it. Only a VM that runs counts.
-                    outcome, why = _start_target_vm(pve_mgr, task)
+                    outcome, why = _two_stage_boot(pve_mgr, task) if _two_stage_on else _start_target_vm(pve_mgr, task)
                     if outcome == 'failed':
                         target_start_sent = False  # Proxmox said no and nothing runs: the source may come back
                         raise _VmkSwitchoverFailed(f'The target VM did not start: {why}')
-                    if outcome != 'running':
+                    if outcome not in ('running', 'stopped'):
                         raise _VmkSwitchoverFailed(f'The target VM start did not settle: {why}')
-                    target_running = True
-                    task.log("  Target VM is running on Proxmox")
-                actual_downtime = time.time() - cut_t0
+                    target_running = outcome == 'running'
+                    if target_running:
+                        task.log("  Target VM is running on Proxmox")
+                        if not _two_stage_on:
+                            _guest_log_after_start(pve_mgr, task)
+                    else:
+                        task.log("  Target VM is stopped on Proxmox (start_after is off)")
+                # MK Nov 2026 - with the two-stage boot the guest serves from its first start on
+                # SATA; the switch to VirtIO after it is no downtime
+                _up_at = (getattr(task, '_two_stage', None) or {}).get('up_at') if _two_stage_on else None
+                actual_downtime = (_up_at or time.time()) - cut_t0
                 task.total_downtime_seconds = actual_downtime
                 task.log(f"=== SWITCHOVER DONE (downtime {actual_downtime:.1f}s) ===")
 
@@ -2443,6 +2665,7 @@ def _run_v2p_migration(task):
             except V2PCutoverCancelled:
                 # the hold comes before the source is touched. The outer handler marks the run
                 # cancelled, the clones go here
+                _guest_prep_abort(task)
                 # MK Nov 2026 - and our snapshots, before change tracking is switched back, as on
                 # the failure path: ESXi puts the reconfigure off or refuses it while one is there.
                 # They leave the outer handler's list, so nothing is removed twice
@@ -2465,6 +2688,7 @@ def _run_v2p_migration(task):
                     return
             except Exception as _vce:
                 msg = str(_vce) if isinstance(_vce, _VmkSwitchoverFailed) else f'vmkfstools_clone exception: {_vce}'
+                _guest_prep_abort(task)
                 # MK Oct 2026 (#1124) - we stopped the source and the target does not run: bring
                 # the source back, the target stays off. A start that may have gone through leaves
                 # both alone, two running copies would be worse than two stopped ones.
@@ -2495,7 +2719,11 @@ def _run_v2p_migration(task):
             vm_state = vmware_mgr.get_vm(task.vm_id)
             is_running = 'data' in vm_state and vm_state['data'].get('power_state') == 'POWERED_ON'
             
-            if is_running:
+            if is_running and _source_off_for_cutover(vmware_mgr, pve_mgr, task):
+                # MK Nov 2026 - the guest prepared in ESXi shut itself down
+                try: vmware_mgr.delete_migration_snapshot(task.vm_id)
+                except: pass
+            elif is_running:
                 task.log("Stopping VMware VM...")
                 vmware_mgr.vm_power_action(task.vm_id, 'stop')
                 for attempt in range(15):
@@ -2594,19 +2822,26 @@ def _run_v2p_migration(task):
             _register_uefi_fallback_loader(pve_mgr, task)
             try: _inject_virtio_drivers(pve_mgr, task)
             except Exception as _ve: _virtio_not_injected(task, _ve)
+            _after_injection(pve_mgr, task)
 
             _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
 
             # honour qcow2 selection while the VM is still stopped (disks at rest)
             _maybe_convert_disks_to_qcow2(pve_mgr, task)
 
-            if task.start_after:
+            # MK Nov 2026 - the two-stage boot of a Windows guest (with start_after off as well)
+            if _two_stage_stage(pve_mgr, task):
+                _ts_outcome, _ts_why = _two_stage_boot(pve_mgr, task)
+                if _ts_outcome not in ('running', 'stopped'):
+                    task.log(f"Start failed: {_ts_why}")
+            elif task.start_after:
                 task.log("Starting Proxmox VM...")
                 try:
                     pve_mgr._api_post(
                         f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}"
                         f"/qemu/{task.proxmox_vmid}/status/start")
                     task.log(f"VM {task.proxmox_vmid} started")
+                    _guest_log_after_start(pve_mgr, task)
                 except Exception as e:
                     task.log(f"Start failed: {e}")
 
@@ -2684,20 +2919,21 @@ def _run_v2p_migration(task):
             if not vol_id and not stopped_for_presync:
                 task.log("Pre-sync failed (VMDK locked) - switching to QEMU SSH boot")
                 
-                # Stop VMware VM
-                task.log("Stopping VMware VM...")
-                vmware_mgr.vm_power_action(task.vm_id, 'stop')
-                for attempt in range(15):
-                    time.sleep(2)
-                    vm_check = vmware_mgr.get_vm(task.vm_id)
-                    if 'data' in vm_check and vm_check['data'].get('power_state') == 'POWERED_OFF':
-                        task.log(f"VM stopped after {(attempt+1)*2}s"); break
-                else:
-                    task.log("Force stopping...")
-                    vmware_mgr.vm_power_action(task.vm_id, 'reset')
-                    time.sleep(2)
+                # stop the source on ESXi (MK Nov 2026 - a guest prepared in ESXi shuts itself down)
+                if not _source_off_for_cutover(vmware_mgr, pve_mgr, task):
+                    task.log("Stopping the source VM on ESXi...")
                     vmware_mgr.vm_power_action(task.vm_id, 'stop')
-                    time.sleep(5)
+                    for attempt in range(15):
+                        time.sleep(2)
+                        vm_check = vmware_mgr.get_vm(task.vm_id)
+                        if 'data' in vm_check and vm_check['data'].get('power_state') == 'POWERED_OFF':
+                            task.log(f"VM stopped after {(attempt+1)*2}s"); break
+                    else:
+                        task.log("Force stopping...")
+                        vmware_mgr.vm_power_action(task.vm_id, 'reset')
+                        time.sleep(2)
+                        vmware_mgr.vm_power_action(task.vm_id, 'stop')
+                        time.sleep(5)
                 try: vmware_mgr.delete_migration_snapshot(task.vm_id)
                 except: pass
                 time.sleep(2)
@@ -2780,19 +3016,24 @@ def _run_v2p_migration(task):
             # PHASE: DELTA SYNC (brief downtime - block-level sync)
             # VM stopped → compare checksums → transfer only changed blocks
             # ================================================================
+            # MK Nov 2026 - stage 1 of the in-guest Windows preparation while the source still serves
+            _guest_prep_stage1(vmware_mgr, pve_mgr, task)
             task.set_phase('delta_sync')
             task.log("=== DELTA SYNC: DOWNTIME STARTS ===")
         
-            # Stop VMware VM (unlocks VMDKs for SSH dd access)
-            task.log("Stopping VMware VM...")
-            vmware_mgr.vm_power_action(task.vm_id, 'stop')
-            for attempt in range(30):
-                time.sleep(2)
-                vm_check = vmware_mgr.get_vm(task.vm_id)
-                if 'data' in vm_check and vm_check['data'].get('power_state') == 'POWERED_OFF':
-                    task.log(f"VM powered off after {(attempt+1)*2}s"); break
+            # stop the source on ESXi (unlocks VMDKs for SSH dd access); a guest prepared in ESXi shuts itself down
+            if _source_off_for_cutover(vmware_mgr, pve_mgr, task):
+                task.log("VM powered off by the Windows preparation")
             else:
-                task.log("WARNING: VM may not be fully stopped yet")
+                task.log("Stopping the source VM on ESXi...")
+                vmware_mgr.vm_power_action(task.vm_id, 'stop')
+                for attempt in range(30):
+                    time.sleep(2)
+                    vm_check = vmware_mgr.get_vm(task.vm_id)
+                    if 'data' in vm_check and vm_check['data'].get('power_state') == 'POWERED_OFF':
+                        task.log(f"VM powered off after {(attempt+1)*2}s"); break
+                else:
+                    task.log("WARNING: VM may not be fully stopped yet")
         
             # Delete migration snapshot (consolidates delta back into base VMDK)
             task.log("Deleting migration snapshot (consolidating delta)...")
@@ -2883,8 +3124,18 @@ def _run_v2p_migration(task):
             _register_uefi_fallback_loader(pve_mgr, task)
         try: _inject_virtio_drivers(pve_mgr, task)
         except Exception as _ve: _virtio_not_injected(task, _ve)
+        _after_injection(pve_mgr, task)
 
-        if task.start_after:
+        # MK Nov 2026 - the two-stage boot of a Windows guest (with start_after off as well)
+        _two_stage_on = _two_stage_stage(pve_mgr, task)
+        if _two_stage_on:
+            _ts_outcome, _ts_why = _two_stage_boot(pve_mgr, task)
+            if _ts_outcome == 'running':
+                task.log(f"VM {task.proxmox_vmid} running (two-stage boot {task._two_stage.get('state')}, the "
+                         f"downtime ended with its first boot) - DOWNTIME ENDS")
+            elif _ts_outcome != 'stopped':
+                task.log(f"WARNING: Could not start VM: {_ts_why}")
+        elif task.start_after:
             task.log("Starting VM on Proxmox...")
             try:
                 pve_mgr._api_post(
@@ -2910,6 +3161,8 @@ def _run_v2p_migration(task):
         task.set_phase('cleanup')
         _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
         task.log("SSHFS unmounted")
+        if task.start_after and not _two_stage_on:
+            _guest_log_after_start(pve_mgr, task)
         if task.remove_source:
             _remove_source_once_target_runs(pve_mgr, vmware_mgr, task)
         
@@ -2918,6 +3171,7 @@ def _run_v2p_migration(task):
         task.log(f"COMPLETED{dt_msg}: {task.vm_name} -> VMID {task.proxmox_vmid}")
         
     except V2PCutoverCancelled as _cc:
+        _guest_prep_abort(task)
         # #562 — operator cancelled (or the confirmation gate timed out) BEFORE the
         # switchover. The source VM was never suspended, so it's still running and
         # serving — mark the run 'cancelled' (not the red 'failed'), tear down only the
@@ -2954,6 +3208,7 @@ def _run_v2p_migration(task):
         except Exception: pass
         return
     except Exception as e:
+        _guest_prep_abort(task)
         task.set_phase('failed', str(e))
         try: _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
         except: pass
@@ -3000,6 +3255,10 @@ def _run_v2p_migration(task):
             _drop_area_copy_key(pve_mgr, task, esxi_host, esxi_user)
         except Exception:
             pass
+        # MK Nov 2026 - a run that failed after the in-guest preparation released the guest
+        # brings the source back on ESXi, wherever it stopped
+        if task.status in ('failed', 'cancelled'):
+            _guest_prep_rollback(task)
 
 
 # NS Apr 2026 — 4K-sector iSCSI LUN fix. Lots of SAN targets (TrueNAS LIO, some
@@ -3259,25 +3518,13 @@ def _inject_virtio_drivers(pve_mgr, task):
         task.log("[VirtIO] ! libhivex-bin not installed - the guest's Windows build "
                  "can't be read, so the driver variant is a guess")
 
-    # 2) Locate ISO. User-set path wins.
-    iso_candidates = []
-    if getattr(task, 'virtio_iso_path', ''):
-        from pegaprox.utils.sanitization import validate_node_iso_path
-        if not validate_node_iso_path(task.virtio_iso_path):
-            task.log("[VirtIO] ✗ virtio_iso_path must be an absolute path to an .iso file - skipping")
-            return _virtio_not_injected(task, "the virtio-win ISO path is not an absolute path to an .iso file")
-        iso_candidates.append(task.virtio_iso_path)
-    iso_candidates += [
-        "/var/lib/vz/template/iso/virtio-win.iso",
-        f"/mnt/pve/{task.target_storage}/template/iso/virtio-win.iso",
-        "/var/lib/pegaprox/virtio-win.iso",
-    ]
-    iso_path = None
-    for p in iso_candidates:
-        rc, _, _ = _pve_node_exec(pve_mgr, node, f"test -f {shlex.quote(p)}", timeout=5)
-        if rc == 0:
-            iso_path = p
-            break
+    # 2) Locate ISO. User-set path wins (MK Nov 2026 - the search the Windows preset and the
+    # in-guest preparation share, _find_virtio_iso)
+    try:
+        iso_path, iso_candidates = _find_virtio_iso(pve_mgr, task)
+    except ValueError:
+        task.log("[VirtIO] ✗ virtio_iso_path must be an absolute path to an .iso file - skipping")
+        return _virtio_not_injected(task, "the virtio-win ISO path is not an absolute path to an .iso file")
     if not iso_path:
         task.log("[VirtIO] ⚠ virtio-win.iso not found — skipping. Searched: " + ", ".join(iso_candidates))
         task.log("[VirtIO]   Hint: drop virtio-win.iso into /var/lib/vz/template/iso/ or set virtio_iso_path")
@@ -3310,10 +3557,26 @@ def _inject_virtio_drivers(pve_mgr, task):
         _ensure_node_packages(pve_mgr, task, 'rbd', prefix='[VirtIO] ')
 
     drivers_arg = ' '.join(_VIRTIO_DRIVERS)
+    # MK Nov 2026 - the first boot on KVM (core/v2p_winprep.py): the node helper reads the saved
+    # network out of the copied registry and registers the first boot service; firstboot.cmd
+    # travels in base64 (its CRLF line ends intact). Neither holds a secret.
+    import base64
+    from pegaprox.core import v2p_winprep
+    wp_helper = _write_node_script(pve_mgr, node, v2p_winprep.helper_source(), 'winprep')
+    wp_fb64 = _write_node_script(pve_mgr, node, base64.b64encode(v2p_winprep.firstboot_bytes()).decode('ascii'),
+                                 'firstboot')
+    if not (wp_helper and wp_fb64):
+        task.log("[VirtIO] the first boot helper could not be written on the node, the network is not carried over")
+    wp_nics = v2p_winprep.nic_pairs(pve_mgr, task)
     script = (
         "#!/bin/bash\n"
         "set -u\n"
         f"VOL={shlex.quote(vol_path)}\n"
+        f"WINPREP={shlex.quote(wp_helper or '')}\n"
+        f"FB64={shlex.quote(wp_fb64 or '')}\n"
+        f"RUN={shlex.quote(str(getattr(task, 'id', '') or ''))}\n"
+        f"NICS={shlex.quote(wp_nics)}\n"
+        f"UNINSTALL_TOOLS={'1' if v2p_winprep.uninstall_tools_ok(task) else '0'}\n"
         f"VOL_ID={shlex.quote(vol_id)}\n"
         f"STYPE={shlex.quote(storage_type)}\n"
         f"RBD_MAP=({rbd_map})\n"
@@ -3611,84 +3874,29 @@ def _inject_virtio_drivers(pve_mgr, task):
         # ran into "registry corrupt" because RunOnce executes with the
         # logged-in user's standard token (no elevation), even for admins.
         # SYSTEM service has full token, no UAC.
-        "PEGADIR=\"$WIN_MNT/$WDIR/../PegaProx\"\n"
-        "mkdir -p \"$PEGADIR\"\n"
-        "MSI_OK=0\n"
+        # MK Nov 2026 - staged in <ProgramData>\\KVMMigration with firstboot.cmd and its log
+        # (migrate.log), no longer in C:\\PegaProx. Only the node helper writes there: every
+        # user of the guest may make a folder in ProgramData (a junction to System32 included),
+        # it checks the folder first and copies the packages in itself. MSI_STAGED comes from it.
+        "MSI_SRC=''; AGENT_SRC=''\n"
         # Pick the right MSI by host arch — almost always x64 these days
         "for cand in virtio-win-gt-x64.msi virtio-win-gt-x86.msi; do "
-        "  if [ -f \"$ISO_MNT/$cand\" ]; then "
-        "    cp -f \"$ISO_MNT/$cand\" \"$PEGADIR/$cand\"; "
-        "    echo \"MSI_STAGED $cand\"; "
-        "    MSI_OK=1; "
-        "    break; "
-        "  fi; "
+        "  if [ -f \"$ISO_MNT/$cand\" ]; then MSI_SRC=\"$ISO_MNT/$cand\"; break; fi; "
         "done\n"
-        "[ \"$MSI_OK\" -eq 1 ] || echo 'MSI_MISSING (skipping bulk install)'\n"
+        "[ -n \"$MSI_SRC\" ] || echo 'MSI_MISSING (skipping bulk install)'\n"
         # JB Nov 2026 (#1247) - the driver MSI does not bring the guest agent, it is a package of its own on the ISO
         "if [ -f \"$ISO_MNT/guest-agent/qemu-ga-x86_64.msi\" ]; then "
-        "  cp -f \"$ISO_MNT/guest-agent/qemu-ga-x86_64.msi\" \"$PEGADIR/qemu-ga-x86_64.msi\"; "
-        "  echo 'MSI_STAGED qemu-ga-x86_64.msi'; "
+        "  AGENT_SRC=\"$ISO_MNT/guest-agent/qemu-ga-x86_64.msi\"; "
         "else echo 'GUEST_AGENT_MSI_MISSING (skipping the guest agent)'; fi\n"
-        # Register the one-shot service in the SYSTEM hive.
-        # ImagePath runs as LocalSystem at next boot; cmd /c chains:
-        #   msiexec /quiet → sc delete self → del MSI
-        # Service stays disabled-by-failure if msiexec doesn't exit 0,
-        # so user can investigate via msi.log. Self-deletion needs the
-        # service to have already returned, hence the trailing & chain.
+        # MK Nov 2026 - the first boot service, the saved network, firstboot.cmd and its data,
+        # all through the node helper (core/v2p_winprep_node.py). Its failure leaves the drivers
+        # in place and registers no service: the NICs and the controller stay as on the source.
         "SYSTEM_HIVE=\"$WIN_MNT/$WDIR/System32/config/SYSTEM\"\n"
-        "python3 - \"$SYSTEM_HIVE\" \"$MSI_OK\" << 'PYSV' || { echo 'SVC_FAILED (non-fatal)'; }\n"
-        "import sys, hivex\n"
-        "from hivex.hive_types import REG_DWORD, REG_SZ, REG_EXPAND_SZ\n"
-        "h = hivex.Hivex(sys.argv[1], write=True)\n"
-        "msi_ok = int(sys.argv[2])\n"
-        "if msi_ok == 0:\n"
-        "    print('skipping service — no MSI'); sys.exit(0)\n"
-        "def fc(p, n): return h.node_get_child(p, n)\n"
-        "def navigate(parent, parts):\n"
-        "    n = parent\n"
-        "    for p in parts:\n"
-        "        ch = h.node_get_child(n, p)\n"
-        "        if ch is None: ch = h.node_add_child(n, p)\n"
-        "        n = ch\n"
-        "    return n\n"
-        "def set_dword(node, k, v):\n"
-        "    h.node_set_value(node, {'key': k, 't': REG_DWORD, 'value': v.to_bytes(4, 'little')})\n"
-        "def set_sz(node, k, v):\n"
-        "    h.node_set_value(node, {'key': k, 't': REG_SZ, 'value': (v + chr(0)).encode('utf-16-le')})\n"
-        "def set_exp(node, k, v):\n"
-        "    h.node_set_value(node, {'key': k, 't': REG_EXPAND_SZ, 'value': (v + chr(0)).encode('utf-16-le')})\n"
-        # NS May 2026 — after MSI install, also flip vioscsi/viostor to Start=0
-        # (boot-critical). MSI registers them as Start=3 (manual), which means
-        # if the user later switches scsihw to virtio-scsi-*, Windows boot
-        # loader can't find a boot-time storage driver → INACCESSIBLE_BOOT_DEVICE.
-        # Pre-arming Start=0 means the controller switch "just works" without
-        # any manual `sc config` step on the customer side.
-        "cmdline = (\n"
-        "    'cmd.exe /c '\n"
-        "    '(start \"\" /wait msiexec /i \"C:\\\\PegaProx\\\\virtio-win-gt-x64.msi\" '\n"
-        "    'ADDLOCAL=ALL /quiet /norestart /l*v \"C:\\\\PegaProx\\\\msi.log\") & '\n"
-        "    '(if exist \"C:\\\\PegaProx\\\\qemu-ga-x86_64.msi\" start \"\" /wait msiexec /i \"C:\\\\PegaProx\\\\qemu-ga-x86_64.msi\" '\n"
-        "    '/quiet /norestart /l*v \"C:\\\\PegaProx\\\\qemu-ga.log\") & '\n"
-        "    '(sc config vioscsi start= boot >> \"C:\\\\PegaProx\\\\bootarm.log\" 2>&1) & '\n"
-        "    '(sc config viostor start= boot >> \"C:\\\\PegaProx\\\\bootarm.log\" 2>&1) & '\n"
-        "    '(sc delete PegaProxFirstBoot >> \"C:\\\\PegaProx\\\\service.log\" 2>&1) & '\n"
-        "    '(del \"C:\\\\PegaProx\\\\virtio-win-gt-x64.msi\" \"C:\\\\PegaProx\\\\qemu-ga-x86_64.msi\" 2>nul)'\n"
-        ")\n"
-        "for cs_name in ['ControlSet001','ControlSet002']:\n"
-        "    cs = fc(h.root(), cs_name)\n"
-        "    if cs is None: continue\n"
-        "    services = fc(cs, 'Services')\n"
-        "    if services is None: continue\n"
-        "    svc = navigate(services, ['PegaProxFirstBoot'])\n"
-        "    set_sz(svc, 'DisplayName', 'PegaProx First-Boot Driver Install')\n"
-        "    set_dword(svc, 'Type', 0x10)\n"
-        "    set_dword(svc, 'Start', 2)\n"
-        "    set_dword(svc, 'ErrorControl', 0)\n"
-        "    set_exp(svc, 'ImagePath', cmdline)\n"
-        "    set_sz(svc, 'ObjectName', 'LocalSystem')\n"
-        "h.commit(None)\n"
-        "print('SVC_REGISTERED')\n"
-        "PYSV\n"
+        "if [ -n \"$WINPREP\" ] && [ -n \"$FB64\" ]; then "
+        "  python3 \"$WINPREP\" --root \"$WIN_MNT\" --windows \"$WIN_MNT/$WDIR\" --run \"$RUN\" "
+        "--firstboot \"$FB64\" --nics \"$NICS\" --driver-msi \"$MSI_SRC\" --agent-msi \"$AGENT_SRC\" "
+        "--uninstall-tools \"$UNINSTALL_TOOLS\" || echo 'WINPREP_FAILED the node helper ended with an error'; "
+        "else echo 'WINPREP_FAILED the node helper was not written'; fi\n"
         "echo 'INJECTION_OK'\n"
     )
 
@@ -3723,17 +3931,27 @@ def _inject_virtio_drivers(pve_mgr, task):
         subdir_hint = '2k19/amd64'
 
     env_prefix = f"VIRTIO_SUBDIR={shlex.quote(subdir_hint)} " if subdir_hint else ""
+    _wp_rm = ' '.join(shlex.quote(f) for f in (wp_helper, wp_fb64) if f)
     rc, out, _ = _pve_node_exec(pve_mgr, node,
-        f"{env_prefix}bash {sf} 2>&1; rc=$?; rm -f {sf}; exit $rc",
+        f"{env_prefix}bash {sf} 2>&1; rc=$?; rm -f {sf} {_wp_rm}; exit $rc",
         timeout=300)
     out_str = str(out or '')
+    # MK Nov 2026 - what the first boot gets (v2p_twostage asks before its SATA boot)
+    task._virtio_staged = {
+        'drivers': rc == 0 and 'INJECTION_OK' in out_str,
+        'driver_msi': any(ln.strip().startswith('MSI_STAGED virtio-win-gt-') for ln in out_str.splitlines()),
+        'agent_msi': any(ln.strip() == 'MSI_STAGED qemu-ga-x86_64.msi' for ln in out_str.splitlines()),
+        'first_boot': False,
+    }
+    if task._virtio_staged['drivers']:
+        task._virtio_staged['first_boot'] = v2p_winprep.parse_result(task, out_str)
     # Surface the interesting lines — keep the log compact.
     # Most markers are once-per-run; COPIED/SKIP/COPY_FAILED are per-driver
     # so we log all of them (otherwise we'd hide which drivers actually staged).
     # JB Nov 2026 (#1247) - MSI_STAGED comes once per package, and every marker starts
     # its line: as a substring, MSI_MISSING also took the guest agent's line.
     _multi = ('COPIED ', 'SKIP ', 'COPY_FAILED ', 'MSI_STAGED ')
-    for marker in ['WIN_PART=', 'WDIR=', 'VER_NAME=', 'VER_BUILD=', 'SUBDIR_PRIMARY=', 'SUBDIR_FALLBACKS=', 'SUBDIR=', 'COPIED ', 'SKIP ', 'COPY_FAILED ', 'MSI_STAGED ', 'MSI_MISSING', 'GUEST_AGENT_MSI_MISSING', 'SVC_REGISTERED', 'SVC_FAILED', 'INJECTION_OK']:
+    for marker in ['WIN_PART=', 'WDIR=', 'VER_NAME=', 'VER_BUILD=', 'SUBDIR_PRIMARY=', 'SUBDIR_FALLBACKS=', 'SUBDIR=', 'COPIED ', 'SKIP ', 'COPY_FAILED ', 'MSI_STAGED ', 'MSI_MISSING', 'GUEST_AGENT_MSI_MISSING', 'INJECTION_OK']:
         for line in out_str.splitlines():
             if line.strip().startswith(marker):
                 task.log(f"[VirtIO] {line.strip()}")
@@ -3763,7 +3981,9 @@ def _inject_virtio_drivers(pve_mgr, task):
         # so user can switch manually after a successful first boot.
         # If we ever want to re-enable: gate behind explicit task.config opt-in
         # AND verify the OS isn't Win11/Server2025-class.
-        task.log("[VirtIO]   scsihw left untouched — switch manually after first boot if desired")
+        # MK Nov 2026 - what the auto switch could not do, the two-stage boot does: one boot on
+        # SATA with a VirtIO SCSI device present, then the boot disk moves (core/v2p_twostage.py)
+        task.log("[VirtIO]   scsihw left as it is here; the two-stage boot moves the boot disk when it is on")
         return True
     task.log(f"[VirtIO] ✗ Injection failed (rc={rc}). Last 400 chars of output:")
     task.log(out_str[-400:])
@@ -4694,6 +4914,8 @@ def _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, disk_count):
             task.log(f"⚠ 512b sector emulation could not be set, the guest may not boot from this LUN: {why[-200:]}")
             return
         task.log(f"Applied 512b sector emulation ({disk_count} disk(s)): {args_str}")
+        # the two-stage boot rebuilds these after each bus change (v2p_twostage._sector_args)
+        task._sector_args = True
         # If the customer later swaps scsi0 → sata0 via the Proxmox UI, these
         # static args break ("no device 'scsi0' defined"). They can recover via
         # the "Fix QEMU args" action in the PegaProx VM context menu — we
@@ -6464,6 +6686,13 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     # no notice about it
     if getattr(task, 'install_virtio_drivers', False):
         _virtio_not_injected(task, "the live mirror boots the VM before the drivers can be staged")
+    # MK Nov 2026 - no two-stage boot here, and without the in-guest preparation the guest
+    # keeps the controller and NICs of the source (Auto lands here with the VM made for VirtIO)
+    try:
+        from pegaprox.core import v2p_twostage
+        v2p_twostage.not_with_live_mirror(pve_mgr, task)
+    except Exception as _lme:
+        task.log(f"Restoring the controller of the source failed: {_lme}")
 
     # NS Apr 2026 — resolve bios at function entry. The live-pivot post-mirror block
     # references `bios` (line ~4055) which previously was only defined later in the

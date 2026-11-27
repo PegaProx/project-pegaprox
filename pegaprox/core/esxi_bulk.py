@@ -21,7 +21,8 @@ instance ends it: the migrations it started belong to this process as any migrat
 the guests it had not started stay on ESXi.
 
 The ESXi password of a run is kept on the run object only, never in its view, a log line
-or the audit log. Each started migration takes its own copy (the task drops that at its
+or the audit log. MK Nov 2026 - so is the Windows login of the in-guest preparation, the
+run's and a guest's own: dropped with the password, never in a view or the settings. Each started migration takes its own copy (the task drops that at its
 end), and the run drops its own as soon as no guest is left to start: the last one
 started, a cancel, the run stopped or over.
 
@@ -56,7 +57,7 @@ OVER = ('done', 'failed', 'skipped', 'cancelled', 'unknown')
 # what a view shows of the common settings
 SHOWN_SETTINGS = ('target_cluster', 'target_node', 'target_storage', 'network_bridge', 'net_vlan_tag',
                   'transfer_mode', 'verify', 'start_after', 'remove_source', 'wait_for_confirmation',
-                  'preserve_mac', 'esxi_user')
+                  'preserve_mac', 'esxi_user', 'guest_prep', 'two_stage_boot', 'install_virtio_drivers')
 
 _runs = {}
 _lock = threading.Lock()
@@ -65,7 +66,8 @@ _held = {}
 
 
 class EsxiBulkRun:
-    def __init__(self, vmware_id, vmware_name, user, session, ip, settings, width, items, password):
+    def __init__(self, vmware_id, vmware_name, user, session, ip, settings, width, items, password,
+                 guest_login=None):
         self.id = uuid.uuid4().hex[:16]
         self.vmware_id, self.vmware_name = vmware_id, vmware_name
         self.user, self.ip = user, ip
@@ -74,10 +76,13 @@ class EsxiBulkRun:
         session = session or {}
         self._session = {'api_token': bool(session.get('api_token')), 'role': session.get('role'),
                          'token_id': session.get('token_id')}
-        self.settings = {k: v for k, v in (settings or {}).items() if k != 'esxi_password'}
+        # the Windows login of the run is _guest_login, never a setting
+        self.settings = {k: v for k, v in (settings or {}).items()
+                         if k not in ('esxi_password', 'guest_password', 'guest_user')}
         self.width = width
         self.items = items
         self._password = password or None
+        self._guest_login = dict(guest_login) if guest_login else None
         self.state = 'running'          # running, done, cancelled, stopped
         self.reason = ''
         self.cancelled_by = ''
@@ -96,6 +101,15 @@ class EsxiBulkRun:
         with _lock:
             return self._password
 
+    def guest_login(self, item):
+        """{'guest_user', 'guest_password'} for the in-guest preparation of one guest: its own,
+        else the run's; None once the run dropped them"""
+        with _lock:
+            if self._password is None:
+                return None
+            own = item.get('_guest_login')
+            return dict(own) if own else (dict(self._guest_login) if self._guest_login else None)
+
     def items_copy(self):
         with _lock:
             return [{k: v for k, v in it.items() if not k.startswith('_')} for it in self.items]
@@ -111,6 +125,7 @@ class EsxiBulkRun:
                    'settings': {k: self.settings[k] for k in SHOWN_SETTINGS if k in self.settings},
                    'width': self.width, 'state': self.state, 'reason': self.reason,
                    'cancelled_by': self.cancelled_by, 'holds_password': bool(self._password),
+                   'holds_guest_login': bool(self._guest_login) or any(it.get('_guest_login') for it in self.items),
                    'created': int(self.created), 'finished': int(self.finished) if self.finished else None,
                    'total': len(items), 'counts': counts,
                    'current': [it['vm_id'] for it in items if it['state'] in (STARTING, MIGRATING)]}
@@ -119,14 +134,15 @@ class EsxiBulkRun:
         return out
 
 
-def new_item(vm_id, name='', maps=None):
-    """A guest of a run. maps: its own nic_map / disk_map / target_vmid, as the submit checked them."""
+def new_item(vm_id, name='', maps=None, guest_login=None):
+    """A guest of a run. maps: its own nic_map / disk_map / target_vmid, as the submit checked them;
+    guest_login: its own Windows login for the in-guest preparation (kept like the password)."""
     maps = {k: v for k, v in (maps or {}).items() if k in ('nic_map', 'disk_map', 'target_vmid') and v is not None}
     return {'vm_id': str(vm_id), 'name': str(name or '')[:200], 'state': WAITING, 'note': '',
             'migration_id': None, 'proxmox_vmid': None, 'phase': None, 'progress': 0,
             'began': None, 'ended': None,
             'custom_network': 'nic_map' in maps, 'custom_storage': 'disk_map' in maps,
-            '_maps': maps}
+            '_maps': maps, '_guest_login': dict(guest_login) if guest_login else None}
 
 
 def _item_set(item, state, note=None, **kw):
@@ -298,12 +314,20 @@ def caller(run):
     return u
 
 
+def _drop_logins(run):
+    # under _lock: the run's Windows login and every guest's own go with the password
+    run._password = None
+    run._guest_login = None
+    for it in run.items:
+        it['_guest_login'] = None
+
+
 def _drop_password_when_done(run):
     # nothing is left to start: the password is not needed any more
     with _lock:
         if run.cancelled_by or run.state != 'running' or \
                 not any(it['state'] in (WAITING, STARTING) for it in run.items):
-            run._password = None
+            _drop_logins(run)
 
 
 def cancel(run, by):
@@ -478,7 +502,7 @@ def _finish(run):
         if run.state == 'running':
             run.state = 'cancelled' if run.cancelled_by else 'done'
         run.finished = time.time()
-        run._password = None
+        _drop_logins(run)
         items = [dict(it) for it in run.items]
     _let_go_all(run)
     by = {}

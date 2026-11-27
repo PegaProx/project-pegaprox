@@ -19,6 +19,7 @@ from pegaprox.utils.audit import log_audit
 # vmware_id from URL. Sanitise both before logging for consistency.
 from pegaprox.utils.sanitization import sanitize_log_message as _sl
 from pegaprox.utils.rbac import user_can_access_vmware_vm, acts_as_admin
+from pegaprox.utils.ratelimit import SlidingWindow
 from pegaprox.api.helpers import (check_cluster_access, check_vmware_access, caller_is_scoped,
                                   acting_user, vmware_server_reach, upstream_failure,
                                   UPSTREAM_AUTH_STATUSES, caller_acts_as_admin)
@@ -1409,6 +1410,23 @@ def start_vmware_migration(vmware_id, vm_id):
       when it got taken meanwhile. Empty: the next free VMID, inside the caller's tenant range.
     - allow_package_install (#1252): default true. False installs nothing on the target node;
       a run that misses a package it needs stops before it changes anything and names them.
+    - Windows guests are prepared fully automatically (MK Nov 2026), no login needed: the VirtIO
+      drivers and the guest agent are staged offline after the copy (virtio-win.iso from the
+      node, downloaded into its ISO storage when missing and package installs are allowed), the
+      static IPv4 of every adapter is carried over to the new VirtIO NIC at the first boot, the
+      old adapter's address is cleared, the old adapters are removed where Windows can, the ESXi
+      guest tools are uninstalled, and the two-stage boot (SATA first, then VirtIO SCSI) runs.
+      The source VM on ESXi is not changed by it.
+      install_virtio_drivers: absent = on for Windows guests, false turns the preparation off.
+      two_stage_boot: absent/null = on for Windows guests whose drivers will be there, false off,
+      true refused where it cannot run (Live Mirror, disk_bus sata/ide, another scsihw, agent
+      false, no drivers). Its failure is a warning, never a failed migration.
+      guest_prep: true prepares the guest in the running source VM first, over the ESXi guest
+      operations (SOAP connection, guest tools running), with guest_user and guest_password (a
+      Windows administrator; with UAC only the built-in Administrator gets a full token). They
+      are used for that and nothing else: never stored, logged or returned. Any problem before
+      the guest is released falls back to the offline preparation; a failure after it powers
+      the source on again with its guest tools installer mounted.
     - dry_run: true checks all of it against the target node and answers 200 with the
       resolved plan ({ok, errors, warnings, nics, disks, storages, available, node_packages});
       nothing is started and no ESXi password is needed. node_packages lists what the options
@@ -1454,6 +1472,9 @@ def start_vmware_migration(vmware_id, vm_id):
 
     if not dry_run and not data.get('esxi_password'):
         return jsonify({'error': 'esxi_password is required for SSHFS-based migration'}), 400
+    if data.get('guest_prep') is True and not dry_run and not (data.get('guest_user') and data.get('guest_password')):
+        return jsonify({'error': 'guest_user and guest_password are required for the Windows preparation in '
+                                 'the running guest (guest_prep)'}), 400
     if data['target_cluster'] not in cluster_managers:
         return jsonify({'error': 'Target cluster not found'}), 404
 
@@ -1547,6 +1568,15 @@ def start_vmware_migration(vmware_id, vm_id):
             _plan['ok'] = False
         if _pwarn:
             _plan['warnings'].append(_pwarn)
+        # MK Nov 2026 - the in-guest preparation uploads from the node to ESXi's port 443
+        if data.get('guest_prep') is True and data.get('check_packages') is not False and _plan.get('guest_prep'):
+            _gp_reach = _v2p._node_cannot_reach(cluster_managers.get(data['target_cluster']), data['target_node'],
+                                                mgr.host, int(getattr(mgr, 'port', 443) or 443))
+            _plan['guest_prep']['reaches_esxi_443'] = None if _gp_reach is None else not _gp_reach
+            if _gp_reach:
+                _plan['warnings'].append(f"Prepare Windows in the running guest will fall back to the offline "
+                                         f"preparation: node {data['target_node']} cannot reach {mgr.host} on port "
+                                         f"443 ({_gp_reach})")
         return jsonify({'dry_run': True, 'vm_name': vm_name, **_plan})
     if _plan is not None and not _plan['ok']:
         return jsonify({'error': 'The migration plan does not fit the target node: '
@@ -1610,6 +1640,7 @@ def start_vmware_migration(vmware_id, vm_id):
                   f"per-NIC network {'yes' if _opts['nic_map'] else 'no'})")
     if _pick['vmid']:
         _extra += f" as VMID {_pick['vmid']}"
+    _extra += _winprep_audit(vm_detail, data)
     log_audit(request.session.get('user', 'admin'), 'vmware.migration.started',
               f"V2P migration: {vm_name} @ {data.get('esxi_host', mgr.host)} -> "
               f"{data['target_cluster']}/{data['target_node']}/{data['target_storage']}{_extra}")
@@ -1620,6 +1651,87 @@ def start_vmware_migration(vmware_id, vm_id):
         'task': task.to_dict(),
         **({'quota_warning': _qwarn} if _qwarn else {}),
     }), 202
+
+
+@bp.route('/api/vmware/guest-prep-script', methods=['GET'])
+@require_auth(perms=['vmware.vm.migrate'])
+def get_vmware_guest_prep_script():
+    """The PowerShell script of the Windows preparation, for a run by hand
+
+    MK Nov 2026 - the same bytes the in-guest preparation (guest_prep) runs in the guest. Mount
+    virtio-win.iso in the Windows guest on ESXi, run it as administrator
+    (powershell -ExecutionPolicy Bypass -File Prepare-KvmMigration.ps1): it puts the VirtIO
+    drivers into the Driver Store, saves and releases the static IPv4, uninstalls the ESXi guest
+    tools and shuts the guest down (-NoShutdown leaves that to you). Then migrate it, and do not
+    power it on again on ESXi. Without it PegaProx prepares a Windows guest on its own after the
+    copy, no login needed."""
+    from flask import Response
+    from pegaprox.core.v2p_guestprep import script_bytes, SCRIPT_NAME
+    resp = Response(script_bytes(), status=200)
+    resp.headers['Content-Type'] = 'text/plain; charset=us-ascii'
+    resp.headers['Content-Disposition'] = f'attachment; filename="{SCRIPT_NAME}"'
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['X-Content-Type-Options'] = 'nosniff'
+    return resp
+
+
+# MK Nov 2026 - the login check's own windows, never the shared auth-action ones: its keys
+# hold a VM id from the URL, and 4096 made-up ones would push the password change and 2FA
+# windows of the same window size out. Per caller across all guests first (a domain account
+# is not sprayed over every guest), per caller and guest once ESXi knows the guest.
+_guest_login_callers = SlidingWindow(limit=15, window=300, max_keys=4096, name='esxi-guest-login-caller')
+_guest_login_guests = SlidingWindow(limit=5, window=300, max_keys=4096, name='esxi-guest-login-guest')
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/guest-login', methods=['POST'])
+@require_auth(perms=['vmware.vm.migrate'])
+def check_vmware_guest_login(vmware_id, vm_id):
+    """Check a Windows login for the preparation in the running guest
+
+    MK Nov 2026 - body {guest_user, guest_password}. One login attempt in the guest over the ESXi
+    guest operations per call (never retried: a wrong password tried in a loop locks the
+    account), at most 15 per caller in 5 minutes over all guests and 5 per caller and guest
+    (429). Answers {ok, tools_running, windows, error}. Nothing of the body is stored, logged
+    or audited."""
+    from pegaprox.core import v2p_guestprep
+    from pegaprox.core.esxi_guestops import GuestSession, GuestOpsError
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'ESXi server not found'}), 404
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.migrate'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'A JSON object is expected'}), 400
+    if not (data.get('guest_user') and data.get('guest_password')):
+        return jsonify({'error': 'guest_user and guest_password are required'}), 400
+    err = _winprep_refusal({'guest_user': data.get('guest_user'), 'guest_password': data.get('guest_password')})
+    if err:
+        return jsonify({'error': err}), 400
+    who = request.session.get('user', '') or '?'
+    if not _guest_login_callers.allow(who):
+        return jsonify({'error': 'Too many login checks, wait a few minutes'}), 429
+    mgr = vmware_managers[vmware_id]
+    mgr.ensure_connected()
+    gs = v2p_guestprep.guest_state(mgr, vm_id)
+    out = {'ok': False, 'tools_running': bool(gs.get('tools_running')),
+           'windows': (gs.get('family') == 'windowsGuest') if gs.get('family') else None, 'error': None}
+    why = v2p_guestprep.state_refusal(gs)
+    if why:
+        out['error'] = why
+        return jsonify(out)
+    # a guest ESXi answered for: the key space is the caller's real guests
+    if not _guest_login_guests.allow(f'{who}:{vmware_id}:{vm_id}'):
+        return jsonify({'error': 'Too many login checks for this guest, wait a few minutes'}), 429
+    sess = GuestSession(mgr, vm_id, data['guest_user'], data['guest_password'])
+    try:
+        sess.validate()
+        out['ok'] = True
+    except GuestOpsError as e:
+        out['error'] = e.msg
+    finally:
+        sess.close()
+    return jsonify(out)
 
 
 def _migrate_body_refusal(vmware_id, data, dry_run):
@@ -1674,11 +1786,15 @@ def _migrate_body_refusal(vmware_id, data, dry_run):
     except ValueError as e:
         return str(e), None
 
-    # NS Oct 2026 (#1090) - root loop-mounts this on the node; empty = the default places
+    # NS Oct 2026 (#1090) - root loop-mounts this on the node; empty = the default places.
+    # MK Nov 2026 - a Windows guest takes it without install_virtio_drivers too (the preset)
     from pegaprox.utils.sanitization import validate_node_iso_path
     _iso = data.get('virtio_iso_path')
-    if data.get('install_virtio_drivers') and _iso not in (None, '') and not validate_node_iso_path(_iso):
+    if _iso not in (None, '') and not validate_node_iso_path(_iso):
         return 'Invalid virtio_iso_path: an absolute path to an .iso file on the node', None
+    _wp_err = _winprep_refusal(data)
+    if _wp_err:
+        return _wp_err, None
 
     # NS Oct 2026 (#1106) - esxi_host decides which host the PVE node SSHes/sshfs-mounts and
     # reads disks from as root. Left to the caller it could aim the node at any SSH server,
@@ -1736,6 +1852,84 @@ def _migrate_body_refusal(vmware_id, data, dry_run):
     return None, _opts
 
 
+_CONTROL_CHARS = re.compile(r'[\x00-\x1f\x7f]')
+
+
+def _winprep_refusal(data):
+    """MK Nov 2026 - the shape of the Windows preparation fields, None when it is fine"""
+    if 'guest_prep' in data and data['guest_prep'] is not None and not isinstance(data['guest_prep'], bool):
+        return 'guest_prep must be true or false'
+    if data.get('two_stage_boot') is not None and not isinstance(data['two_stage_boot'], bool):
+        return 'two_stage_boot must be true, false or null'
+    u = data.get('guest_user')
+    if u not in (None, '') and (not isinstance(u, str) or len(u) > 256 or _CONTROL_CHARS.search(u)):
+        return 'guest_user is a Windows account name of at most 256 characters, without control characters'
+    pw = data.get('guest_password')
+    if pw not in (None, '') and (not isinstance(pw, str) or len(pw) > 1024 or '\x00' in pw):
+        return 'guest_password is a text of at most 1024 characters'
+    from pegaprox.core import v2p_twostage
+    return v2p_twostage.refusal(data)
+
+
+def _winprep_views(mgr, vm_id, vm_detail, data, plan):
+    """plan['windows_prep'], plan['two_stage'] and, with guest_prep, plan['guest_prep'] of a
+    dry run or bulk check; their errors and warnings go into the plan's lists"""
+    from pegaprox.core import v2p_twostage, v2p_winprep
+    vd = (vm_detail.get('data') or {}) if isinstance(vm_detail, dict) else {}
+    win = v2p_winprep.is_windows(data.get('ostype') or '', vd.get('guest_id'), vd.get('guest_OS'))
+    mode = data.get('transfer_mode') or 'auto'
+    offline = win and data.get('install_virtio_drivers') is not False and mode != 'sshfs_boot'
+    gp = data.get('guest_prep') is True
+    ts = v2p_twostage.plan_view(vm_detail, data, kept_disks=sum(1 for d in plan.get('disks') or [] if not d.get('skip')),
+                                drivers=offline or gp)
+    virtio_hw = bool(ts['on']) or gp
+    wp = {'windows': win, 'on': bool(offline or gp), 'offline': bool(offline), 'guest_prep': gp,
+          'scsihw': ts['scsihw'] if win else None,
+          'net_driver': ('virtio' if virtio_hw and data.get('net_driver') in (None, '', 'auto') else
+                         (data.get('net_driver') or 'auto')) if win else None,
+          'iso': None, 'errors': [], 'warnings': []}
+    if win and not wp['on']:
+        wp['warnings'].append('Windows guest without the automatic preparation: '
+                              + ('Live Mirror boots it before anything can be staged' if mode == 'sshfs_boot'
+                                 else 'install_virtio_drivers is off')
+                              + '; it keeps the disk controller and NICs of the source')
+    if not win and (gp or data.get('two_stage_boot') is True):
+        wp['warnings'].append('The guest does not look like Windows: the Windows preparation does not run')
+    plan['windows_prep'], plan['two_stage'] = wp, ts
+    if gp:
+        from pegaprox.core import v2p_guestprep
+        plan['guest_prep'] = v2p_guestprep.plan_view(mgr, vm_id, vm_detail, data)
+    for part in (ts, plan.get('guest_prep') or {}):
+        for e in part.get('errors') or []:
+            plan['errors'].append(e)
+            plan['ok'] = False
+        plan['warnings'] += [w for w in part.get('warnings') or [] if w not in plan['warnings']]
+    plan['warnings'] += [w for w in wp['warnings'] if w not in plan['warnings']]
+
+
+def _winprep_audit(vm_detail, data):
+    """The words the audit line of a migration start gets for the Windows preparation, never
+    the account"""
+    from pegaprox.core import v2p_twostage, v2p_winprep
+    vd = (vm_detail.get('data') or {}) if isinstance(vm_detail, dict) else {}
+    if not v2p_winprep.is_windows(data.get('ostype') or '', vd.get('guest_id'), vd.get('guest_OS')):
+        return ''
+    mode = data.get('transfer_mode') or 'auto'
+    offline = data.get('install_virtio_drivers') is not False and mode != 'sshfs_boot'
+    gp = data.get('guest_prep') is True
+    out = ''
+    if offline:
+        out += ', Windows prepared automatically'
+    if gp:
+        out += ', guest preparation'
+    d = v2p_twostage.decide(data, windows=True, transfer_mode=mode, disk_bus_req=data.get('disk_bus'),
+                            scsihw_req=data.get('scsihw'), agent=data.get('agent', True) is not False,
+                            drivers=offline or gp)
+    if d['on']:
+        out += ', two-stage boot'
+    return out
+
+
 def _v2p_node_packages(data, plan=None):
     """(report, error, warning): what the options of a migrate request may install on its
     target node and which of it the node has, with one SSH call to that one node
@@ -1744,7 +1938,14 @@ def _v2p_node_packages(data, plan=None):
     of the boot disk; a bulk check hands in the disks of all its guests, and one boot disk
     on rbd among them is enough for the rbd CLI."""
     from pegaprox.core import v2p_packages as pk
-    virtio = bool(data.get('install_virtio_drivers'))
+    # MK Nov 2026 - a Windows guest gets the injection unless it was turned off (the preset),
+    # and a virtio-win.iso the node may not have yet
+    wp = (plan or {}).get('windows_prep') or {}
+    windows = bool(wp.get('windows'))
+    mirror = (data.get('transfer_mode') or 'auto') == 'sshfs_boot'
+    virtio = bool(data.get('install_virtio_drivers')) or (windows and data.get('install_virtio_drivers') is None
+                                                          and not mirror)
+    guest_prep = data.get('guest_prep') is True
     boot_type = ''
     if virtio and plan:
         types_of = {s.get('storage'): str(s.get('type') or '').lower()
@@ -1753,11 +1954,27 @@ def _v2p_node_packages(data, plan=None):
                  for d in plan.get('disks') or [] if d.get('boot')] \
             or [types_of.get(data.get('target_storage'), '')]
         boot_type = 'rbd' if 'rbd' in boots else boots[0]
+    pkplan = pk.package_plan(data.get('transfer_mode') or 'auto', virtio, boot_type, guest_prep=guest_prep,
+                             virtio_iso=(virtio or guest_prep) and not data.get('virtio_iso_path'))
     report = pk.package_report(_v2p._pve_node_exec, cluster_managers.get(data['target_cluster']),
-                               str(data['target_node']),
-                               pk.package_plan(data.get('transfer_mode') or 'auto', virtio, boot_type),
+                               str(data['target_node']), pkplan,
                                allow_install=data.get('allow_package_install', True) is not False)
-    return (report,) + pk.report_problem(report)
+    err, warn = pk.report_problem(report)
+    iso = next((it for it in report['items'] if it['package'] == 'virtio-win.iso'), None)
+    if iso is not None and wp:
+        wp.setdefault('warnings', [])
+        wp['iso'] = 'present' if iso['installed'] else ('missing' if iso['installed'] is False else None)
+        if iso['installed'] is False:
+            if report['allow_install']:
+                wp['warnings'].append(f"virtio-win.iso is not on node {data['target_node']}: the migration downloads "
+                                      f"it from fedorapeople.org into {pk.VIRTIO_ISO_DIR} first")
+            else:
+                wp['warnings'].append(f"virtio-win.iso is not on node {data['target_node']} and this migration may not "
+                                      f"download it: the Windows guest keeps the disk controller and NICs of the "
+                                      f"source, without the automatic preparation")
+        if plan is not None and isinstance(plan.get('warnings'), list):
+            plan['warnings'] += [w for w in wp['warnings'] if w not in plan['warnings']]
+    return report, err, warn
 
 
 def _v2p_footprint(vm_detail, data, skipped):
@@ -1815,6 +2032,8 @@ def _v2p_plan(mgr, vm_id, data, opts, vm_detail, inv=None, exp=None):
     fw_warn = _v2p.firmware_mismatch(vd, bios)
     if fw_warn:
         plan['warnings'].append(fw_warn)
+    # MK Nov 2026 - the Windows preset, the two-stage boot and the in-guest preparation
+    _winprep_views(mgr, vm_id, vm_detail, data, plan)
     plan['target'] = {'cluster': data['target_cluster'], 'node': node, 'storage': data['target_storage']}
     plan['available'] = {
         'bridges': [{'name': n, 'kind': k} for n, k in sorted(inv['bridges'].items())],
@@ -2149,9 +2368,12 @@ def cancel_vmware_cutover(mid):
 _BULK_COMMON = ('target_cluster', 'target_node', 'target_storage', 'network_bridge', 'net_vlan_tag',
                 'transfer_mode', 'verify', 'start_after', 'remove_source', 'wait_for_confirmation',
                 'confirmation_timeout', 'esxi_user', 'preserve_mac', 'bios', 'disk_format',
-                'allow_package_install')
-_BULK_KEYS = frozenset(_BULK_COMMON + ('vms', 'width', 'dry_run', 'esxi_password'))
-_BULK_FLAGS = ('start_after', 'remove_source', 'wait_for_confirmation', 'preserve_mac', 'allow_package_install')
+                'allow_package_install',
+                # MK Nov 2026 - the Windows preparation (two_stage_boot may be null: the rule)
+                'guest_prep', 'two_stage_boot', 'install_virtio_drivers', 'virtio_iso_path', 'guest_user')
+_BULK_KEYS = frozenset(_BULK_COMMON + ('vms', 'width', 'dry_run', 'esxi_password', 'guest_password'))
+_BULK_FLAGS = ('start_after', 'remove_source', 'wait_for_confirmation', 'preserve_mac', 'allow_package_install',
+               'guest_prep', 'install_virtio_drivers')
 _BULK_MODES = ('vmkfstools_clone', 'auto', 'sshfs_boot', 'snapshot_zero', 'offline')
 # what ESXi calls a guest: vm-42 over REST, a plain number on a lone host over SOAP
 _ESXI_VM_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}')
@@ -2257,7 +2479,7 @@ def _bulk_vms(raw):
             raise ValueError(f"vms gives VMID {vmid} to {vmids[vmid]} and {str(row.get('vm_id'))[:64]}")
         if vmid is not None:
             vmids[vmid] = str(row.get('vm_id'))[:64]
-        row = {k: v for k, v in row.items() if k != 'target_vmid'}
+        row = {k: v for k, v in row.items() if k not in ('target_vmid', 'guest_user', 'guest_password')}
         extra = sorted(str(k)[:40] for k in row if k not in ('vm_id', 'nic_map', 'disk_map'))
         if extra:
             raise ValueError(f'vms: unknown field {extra[0]!r}')
@@ -2270,6 +2492,26 @@ def _bulk_vms(raw):
         out.append((vm_id, {k: row[k] for k in ('nic_map', 'disk_map') if row.get(k) not in (None, [])}))
         if vmid is not None:
             out[-1][1]['target_vmid'] = vmid
+    return out
+
+
+def _bulk_guest_logins(raw):
+    """{vm_id: {'guest_user', 'guest_password'}} of the guests of a bulk request that bring their
+    own Windows login for the in-guest preparation (both or neither). Raises ValueError."""
+    out = {}
+    for row in raw if isinstance(raw, list) else []:
+        if not isinstance(row, dict) or ('guest_user' not in row and 'guest_password' not in row):
+            continue
+        vm_id = str(row.get('vm_id'))[:64]
+        user, pw = row.get('guest_user'), row.get('guest_password')
+        if user in (None, '') and pw in (None, ''):
+            continue
+        if not (user and pw):
+            raise ValueError(f'vms: {vm_id} needs guest_user and guest_password together')
+        err = _winprep_refusal({'guest_user': user, 'guest_password': pw})
+        if err:
+            raise ValueError(f'vms: {vm_id}: {err}')
+        out[vm_id] = {'guest_user': user, 'guest_password': pw}
     return out
 
 
@@ -2380,7 +2622,9 @@ def _bulk_check(vmware_id, settings, vms, user):
             it['errors'].append(_answer_error(perr))
             continue
         it.update(nics=plan['nics'], disks=plan['disks'], storages=plan['storages'],
-                  verify=plan['verify'], transfer_mode=plan['transfer_mode'])
+                  verify=plan['verify'], transfer_mode=plan['transfer_mode'],
+                  windows_prep=plan.get('windows_prep'), two_stage=plan.get('two_stage'),
+                  guest_prep=plan.get('guest_prep'))
         it['errors'] += plan['errors']
         it['warnings'] += plan['warnings']
         skipped = {i for i, e in (opts['disk_map'] or {}).items() if e['skip']}
@@ -2429,6 +2673,9 @@ def _bulk_check(vmware_id, settings, vms, user):
     packages, perr, pwarn = _v2p_node_packages(settings, {
         'disks': [d for it in items for d in it['disks']],
         'available': {'storages': [{'storage': n, 'type': st.get('type')} for n, st in inv['storages'].items()]},
+        # MK Nov 2026 - one Windows guest among them is enough for the injection and the ISO
+        'windows_prep': {'windows': any((it.get('windows_prep') or {}).get('windows') for it in items),
+                         'warnings': []},
     }) if todo else (None, None, None)
     if perr:
         errors.append(perr)
@@ -2523,6 +2770,12 @@ def _bulk_start_item(app, run, item):
             if nics:
                 body['selected_nics'] = nics
             body['esxi_password'] = pw
+            if s.get('guest_prep') is True:
+                login = run.guest_login(item)
+                if not login:
+                    return {'state': 'failed', 'note': 'No Windows login for the preparation in the guest: '
+                                                       'the run dropped it'}
+                body.update(login)
             from pegaprox.core import target_vmid as tvmid
             if pick['vmid'] and tvmid.claim(s['target_cluster'], pick['vmid'], holder,
                                             tvmid.until_over(_v2p_task, mid), replaces=run.holder):
@@ -2548,7 +2801,8 @@ def _bulk_start_item(app, run, item):
         log_audit(run.user, 'vmware.migration.started',
                   f"V2P migration: {vm_name} @ {body.get('esxi_host')} -> {s['target_cluster']}/"
                   f"{s['target_node']}/{s['target_storage']} (bulk run {run.id}, verify {opts['verify']}"
-                  f"{', own network' if 'nic_map' in maps else ''}{', own storage' if 'disk_map' in maps else ''})",
+                  f"{', own network' if 'nic_map' in maps else ''}{', own storage' if 'disk_map' in maps else ''}"
+                  f"{_winprep_audit(vm_detail, body)})",
                   ip_address=run.ip)
         return {'migration_id': mid, 'name': vm_name}
 
@@ -2583,7 +2837,11 @@ def start_vmware_bulk_migration(vmware_id):
     shares: target_cluster, target_node, target_storage (required), network_bridge,
     net_vlan_tag, transfer_mode, verify, start_after, remove_source (needs vmware.vm.manage
     on each guest), wait_for_confirmation, confirmation_timeout, esxi_user, preserve_mac,
-    bios, disk_format, allow_package_install (#1252, default true). Any other key is refused.
+    bios, disk_format, allow_package_install (#1252, default true), and the Windows
+    preparation as the single route takes it: install_virtio_drivers, virtio_iso_path,
+    two_stage_boot, guest_prep with guest_user / guest_password for the run (a guest's vms
+    row may bring its own guest_user and guest_password, only for the real start; never
+    stored, logged or shown). Any other key is refused.
 
     Each guest is checked like a dry run of POST .../vms/<vm_id>/migrate: the caller may
     migrate it, no other migration has it, its NICs and disks fit the target node, and the
@@ -2623,6 +2881,7 @@ def start_vmware_bulk_migration(vmware_id):
         return jsonify({'error': f'width is a number from 1 to {ebulk.WIDTH_MAX}'}), 400
     try:
         vms = _bulk_vms(data.get('vms'))
+        logins = _bulk_guest_logins(data.get('vms'))
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     settings, serr = _bulk_settings(vmware_id, data, dry_run)
@@ -2633,6 +2892,16 @@ def start_vmware_bulk_migration(vmware_id):
         return jsonify({'error': 'esxi_password is a text of at most 1024 characters'}), 400
     if not dry_run and not pw:
         return jsonify({'error': 'esxi_password is required for SSHFS-based migration'}), 400
+    gpw_err = _winprep_refusal({'guest_password': data.get('guest_password')})
+    if gpw_err:
+        return jsonify({'error': gpw_err}), 400
+    run_login = {'guest_user': data['guest_user'], 'guest_password': data['guest_password']} \
+        if data.get('guest_user') and data.get('guest_password') else None
+    if settings.get('guest_prep') is True and not dry_run:
+        without = [vm_id for vm_id, _m in vms if vm_id not in logins and not run_login]
+        if without:
+            return jsonify({'error': f"guest_user and guest_password are required for the Windows preparation in "
+                                     f"the running guest: none for {', '.join(without[:20])}"}), 400
     target = settings['target_cluster']
     if target not in cluster_managers:
         return jsonify({'error': 'Target cluster not found'}), 404
@@ -2670,9 +2939,11 @@ def start_vmware_bulk_migration(vmware_id):
         return jsonify({'error': why, **res}), 400
 
     mgr = vmware_managers[vmware_id]
-    items = [ebulk.new_item(vm_id, it['name'], maps) for (vm_id, maps), it in zip(vms, res['items'])]
+    items = [ebulk.new_item(vm_id, it['name'], maps, logins.get(vm_id) if settings.get('guest_prep') else None)
+             for (vm_id, maps), it in zip(vms, res['items'])]
     run = ebulk.EsxiBulkRun(vmware_id, str(getattr(mgr, 'name', '') or vmware_id), me, request.session,
-                            get_client_ip(), settings, width, items, pw)
+                            get_client_ip(), settings, width, items, pw,
+                            guest_login=run_login if settings.get('guest_prep') else None)
     # the chosen VMIDs are the run's till each guest's migration takes its own over
     from pegaprox.core import target_vmid as tvmid
     for it in items:
@@ -2693,7 +2964,10 @@ def start_vmware_bulk_migration(vmware_id):
                   f"ESXi bulk migration {run.id} of {len(items)} guest(s) from {run.vmware_name} to "
                   f"{target}/{settings['target_node']}/{settings['target_storage']}, {width} at a time, "
                   f"{settings['transfer_mode']}, verify {settings.get('verify') or 'sample'}"
-                  f"{', source removed after' if settings.get('remove_source') else ''}: "
+                  f"{', source removed after' if settings.get('remove_source') else ''}"
+                  f"{', guest preparation' if settings.get('guest_prep') else ''}"
+                  f"{', no Windows preparation' if settings.get('install_virtio_drivers') is False else ''}"
+                  f"{', no two-stage boot' if settings.get('two_stage_boot') is False else ''}: "
                   f"{', '.join(names[:50])}{' ...' if len(names) > 50 else ''}", ip_address=run.ip)
         ebulk.launch(run, partial(_bulk_start_item, current_app._get_current_object()), _v2p_task)
     except Exception as e:

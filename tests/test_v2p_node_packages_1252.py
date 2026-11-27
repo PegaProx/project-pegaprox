@@ -213,8 +213,10 @@ def test_the_probe_reads_dpkg_and_counts_a_tool_from_elsewhere(tmp_path):
               dpkg='sshfs=install ok installed;sshpass=deinstall ok config-files;ntfs-3g=install ok installed')
     rc, out, _ = box.sh(pk.probe_script(EVERY))
     found = pk.parse_probe(out, EVERY)
+    # MK Nov 2026 - curl (in-guest preparation) and virtio-win.iso (a download, no package) joined
     assert found == {'sshfs': True, 'sshpass': False, 'python3-hivex': False, 'ntfs-3g': True,
-                     'libhivex-bin': False, 'ceph-common': False, 'lz4': True}
+                     'libhivex-bin': False, 'ceph-common': False, 'lz4': True, 'curl': False,
+                     'virtio-win.iso': False}
 
 
 @pytest.mark.parametrize('out', [

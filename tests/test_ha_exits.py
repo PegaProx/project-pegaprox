@@ -317,6 +317,12 @@ EXITS = {
     ('pegaprox/core/vmware.py', 'VMwareManager._connect_soap', 'socket'): (1, 'read'),
     # a SOAP login and its logout, nothing else
     ('pegaprox/api/vmware.py', 'diagnose_vmware_connection', 'soap'): (1, 'login'),
+    # the Windows preparation in a running guest (MK Nov 2026): a file PUT into the guest
+    # through ha_transport.http, the GET of one of its files, and one TLS handshake that reads
+    # the host key the node's curl is pinned to
+    ('pegaprox/core/esxi_guestops.py', 'GuestSession.put', 'http-guarded'): (1, 'guard'),
+    ('pegaprox/core/esxi_guestops.py', 'GuestSession.get', 'http-guarded'): (1, 'read'),
+    ('pegaprox/core/esxi_guestops.py', 'pinned_key', 'socket'): (1, 'read'),
     # XCP-ng
     ('pegaprox/core/xcpng.py', 'XcpngManager.connect', 'xapi'): (1, 'guard'),
     ('pegaprox/core/xcpng.py', 'XcpngManager.remote_migrate_vm', 'xapi'): (1, 'guard'),
@@ -530,12 +536,13 @@ def test_the_inventory_counts_what_the_report_says():
     # cleanup of a failed ESXi disk, and the console tunnel of the federation's linked mode,
     # less the console servers on port+1 and port+2 (their subprocess calls, the listening
     # socket and three copies of the VNC relay, now one relay and the terminal on the main
-    # port): 250 calls out of this process, 153 (function, kind) pairs in 139 functions; 45
-    # of them guarded at the exit and 87 execs on a client from a guarded factory. No route
-    # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 250 and len(EXITS) == 153
-    assert len({(f, q) for f, q, _k in EXITS}) == 139
-    assert by['guard'] == 45 and by['client'] == 87
+    # port), and the file PUT, GET and key read of the Windows preparation in a running guest:
+    # 253 calls out of this process, 156 (function, kind) pairs in 142 functions; 46 of them
+    # guarded at the exit and 87 execs on a client from a guarded factory. No route relies on
+    # the write gate alone any more
+    assert sum(n for n, _v in EXITS.values()) == 253 and len(EXITS) == 156
+    assert len({(f, q) for f, q, _k in EXITS}) == 142
+    assert by['guard'] == 46 and by['client'] == 87
 
 
 @pytest.mark.parametrize('key', sorted(k for k, v in EXITS.items() if v[1] == 'guard'),
@@ -831,6 +838,9 @@ AUTOMATIONS = {
     ('pegaprox/core/bulk_migrate.py', 'launch'): (1, 'job'),
     # and the ESXi bulk run, a few guests of one ESXi server at a time
     ('pegaprox/core/esxi_bulk.py', 'launch'): (1, 'job'),
+    # the unmount of the ESXi tools installer once a source brought back after a failed
+    # migration runs its tools again (MK Nov 2026)
+    ('pegaprox/core/v2p_guestprep.py', 'roll_back'): (1, 'job'),
     # one SSH login per node after a cluster was added, `sudo -n true` at most (#1136)
     ('pegaprox/core/node_creds.py', 'check_in_background'): (1, 'read'),
     ('pegaprox/core/ha.py', '_later'): (1, 'lease'),
