@@ -140,7 +140,7 @@
    [
     "node",
     "pve1",
-    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root -o \"ssh_command=ssh -E $_log -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
    ],
    [
     "node",
@@ -540,7 +540,7 @@
    [
     "node",
     "pve1",
-    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root -o \"ssh_command=ssh -E $_log -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
    ],
    [
     "node",
@@ -1034,7 +1034,7 @@
    [
     "node",
     "pve1",
-    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root -o \"ssh_command=ssh -E $_log -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
    ],
    [
     "node",
@@ -1476,7 +1476,7 @@
    [
     "node",
     "pve1",
-    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root -o \"ssh_command=ssh -E $_log -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
    ],
    [
     "node",
@@ -1884,7 +1884,7 @@
    [
     "node",
     "pve1",
-    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root -o \"ssh_command=ssh -E $_log -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
    ],
    [
     "node",
@@ -2248,7 +2248,7 @@
    [
     "node",
     "pve1",
-    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root -o \"ssh_command=ssh -E $_log -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
    ],
    [
     "node",
@@ -2748,7 +2748,7 @@
    [
     "node",
     "pve1",
-    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,big_writes,large_read,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root,ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput -o \"ssh_command=ssh -E $_log\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
+    "mkdir -p /tmp/v2p-t1 && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && { sshfs -o password_stdin,StrictHostKeyChecking=accept-new,ConnectTimeout=10,reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,cache=yes,kernel_cache,max_read=1048576,max_write=1048576,entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,no_check_root -o \"ssh_command=ssh -E $_log -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 -o PreferredAuthentications=keyboard-interactive\\,password -o Compression=no -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr -o TCPKeepAlive=yes -o IPQoS=throughput\" root@esx1.lab:/vmfs/volumes/ds1 /tmp/v2p-t1; _rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }"
    ],
    [
     "node",

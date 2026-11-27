@@ -439,7 +439,9 @@ class Run:
 # that say which tool is missing and the reachability probe of the ESXi host, the ESXi
 # password in a file on the node instead of on a command line, the drive options of every
 # attach, and the EFI disk a live pivot gives a guest left on Auto firmware. Then the package
-# checks and installs of the node behind one helper (#1252): only those steps changed.
+# checks and installs of the node behind one helper (#1252): only those steps changed. Then the
+# SSHFS mount with the ssh options inside its one ssh_command and without the FUSE 2 options:
+# only the mount step changed.
 LEGACY_SCENARIOS = {
     'offline': dict(mode='offline'),
     'vmkfstools_clone': dict(mode='vmkfstools_clone'),
