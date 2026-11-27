@@ -27,6 +27,11 @@ from pegaprox.core import bulk_migrate as bulk
 
 CID, TGT = 'cluster_1', 'cluster_2'
 GB = 1024 ** 3
+# The app the api fixture builds starts the drift scanner, whose first pass reads every manager
+# registered at that moment. On the one of a test here it put /nodes/pve1/network into the reads
+# test_reads_stay_bounded counts (2 runs of this file in 5). What a scanner reads is not the
+# preflight's.
+SCANNERS = ('drift-scanner', 'multi-sdn-drift-scanner')
 
 
 class _Resp:
@@ -110,8 +115,9 @@ class _Pve:
 
     def _api_get(self, url, **kw):
         path = url.split('/api2/json', 1)[1]
-        with self.lock:
-            self.reads.append(path)
+        if threading.current_thread().name not in SCANNERS:
+            with self.lock:
+                self.reads.append(path)
         if path == '/cluster/resources?type=storage':
             return _Resp(200, [dict(s) for s in self.storages])
         m = re.fullmatch(r'/nodes/([^/]+)/network', path)
