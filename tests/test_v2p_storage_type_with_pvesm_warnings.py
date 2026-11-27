@@ -87,6 +87,8 @@ def test_the_injection_script_gets_the_real_type(monkeypatch):
             return 0, '/dev/pve/vm-116-disk-0\n', ''
         if cmd.startswith('pvesm status'):
             return 0, PVE1_STDOUT, ''
+        if 'echo PRESENT' in cmd:
+            return 0, 'PRESENT\n', ''     # a package check: installed
         return 0, '', ''
 
     written = []

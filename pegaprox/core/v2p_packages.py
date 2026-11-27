@@ -116,9 +116,11 @@ def parse_ensure(rc, out, names):
     """(verdict, packages, apt output) of an ensure_script answer. packages: the ones the
     verdict is about, those installed for INSTALLED, those still missing otherwise.
 
-    An answer without a verdict line is read by its exit code alone, as the checks this
-    replaces always were read. Installing is never decided here: the script holds the
-    apt-get run or it does not."""
+    MK Nov 2026 - an answer without a verdict line is UNKNOWN, whatever its exit code: the
+    script ends with the verdict, so its exit code is the one of an echo, and an answer
+    without that line is one whose end got lost. Read by its exit code, a cut answer of
+    an apt-get that failed made sshfs count as installed. Installing is never decided
+    here: the script holds the apt-get run or it does not."""
     lines = str(out or '').splitlines()
     for i in range(len(lines) - 1, -1, -1):
         words = lines[i].split()
@@ -128,9 +130,8 @@ def parse_ensure(rc, out, names):
                 return verdict, [], '\n'.join(lines[:i]).strip()
             named = [w for w in words[1:] if w in names] or list(names)
             return verdict, named, '\n'.join(lines[:i]).strip()
-    if rc == 0:
-        return 'PRESENT', [], ''
-    return 'UNKNOWN', list(names), ' '.join(str(out or '').split())[:300]
+    said = ' '.join(str(out or '').split())[:300]
+    return 'UNKNOWN', list(names), said or f'no answer (exit code {rc})'
 
 
 def probe_script(names):

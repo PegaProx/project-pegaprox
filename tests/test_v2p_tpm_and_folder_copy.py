@@ -276,7 +276,9 @@ class Node:
         if 'bash /tmp/v2p-runs-' in cmd:
             # the copy of written areas: every run arrives and matches on both sides
             return 0, f"RUNS_MATCH {len(self.runs.splitlines())}\n", ''
-        if 'command -v sshfs' in cmd:
+        if 'echo PRESENT' in cmd:
+            # a package check: every package is on this node (an answer without the
+            # verdict line reads as unknown since the timeout fix)
             return 0, 'PRESENT\n', ''
         if 'df --output=avail' in cmd:
             return 0, '99999999\n', ''

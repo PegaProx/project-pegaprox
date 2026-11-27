@@ -1126,7 +1126,10 @@ def _ensure_node_packages(pve_mgr, task, feature, install=True, trust_apt=False,
             task.log(f"{prefix}{' '.join(named)} is not installed on {node} and installing packages "
                      f"is turned off for this migration ({pk.NODE_PACKAGES[feature]['purpose']})")
     elif verdict == 'UNKNOWN':
-        task.log(f"{prefix}Could not check {' '.join(names)} on {node}: {said or f'exit code {rc}'}")
+        # MK Nov 2026 - the node's own words go with it: "no output within 240s" says that
+        # apt-get may still be at work there, which "exit code 124" alone does not
+        why = ' '.join(x for x in (said, ' '.join(str(_err or '').split())[-300:]) if x)
+        task.log(f"{prefix}Could not check {' '.join(names)} on {node}: {why or f'exit code {rc}'}")
     ok = verdict in ('PRESENT', 'INSTALLED') or (trust_apt and verdict == 'UNVERIFIED')
     return ok, ([] if ok else named)
 

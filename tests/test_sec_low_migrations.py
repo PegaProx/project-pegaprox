@@ -412,6 +412,8 @@ class _Sandbox:
             seen = (stat.S_IMODE(lp.stat().st_mode), lp.read_text()) if lp.exists() else None
             self.ran.append((cmd, path, seen))
             return 0, 'DELTA_DONE errors=0\nfallback loader installed\n', ''
+        if 'echo PRESENT' in cmd:
+            return 0, 'PRESENT\n', ''     # a package check: installed
         if not self.WRITES.search(cmd):
             return 0, '', ''
         # what the node call hands the command on stdin (a secret file's content)
@@ -678,8 +680,8 @@ def _virtio_box(tmp_path):
         'pvesm path': (0, '/dev/pve/vm-101-disk-0\n', ''),
         'pvesm status': (0, 'lvm\n', ''),
         'test -f': (0, '', ''),
-        'python3 -c': (0, '', ''),
-        'command -v': (0, '', ''),
+        'python3 -c': (0, 'PRESENT\n', ''),    # the package checks: installed
+        'command -v': (0, 'PRESENT\n', ''),
     })
 
 

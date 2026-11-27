@@ -118,7 +118,7 @@ _SSH_OUTPUT_CAP = max(1, int(os.environ.get('PEGAPROX_SSH_OUTPUT_MB', '8') or 8)
 _SSH_DRAIN_FACTOR = 10          # keep draining past the cap so the far end is not wedged
 
 
-def read_capped(fh, limit=None):
+def read_capped(fh, limit=None, cut=None):
     """Read a paramiko channel file into a str, bounded.
 
     Past the cap the content is dropped but the channel keeps being drained, so the
@@ -126,6 +126,11 @@ def read_capped(fh, limit=None):
     comes back. At limit*_SSH_DRAIN_FACTOR the command is pathological rather than
     chatty and we stop; the channel timeout bounds the wall clock either way.
     Returns the text with a marker appended when anything was dropped.
+
+    cut: a list that gets the exception when a read failed (mostly the channel timeout).
+    MK Nov 2026 - the text is then only what came before it, and the command may well
+    end a moment later with exit code 0: a caller that reads the exit status after such a
+    read takes a lost answer for a good one.
     """
     limit = _SSH_OUTPUT_CAP if limit is None else limit
     chunks, kept, seen = [], 0, 0
@@ -133,7 +138,9 @@ def read_capped(fh, limit=None):
     while True:
         try:
             block = fh.read(65536)
-        except Exception:
+        except Exception as e:
+            if cut is not None:
+                cut.append(e)
             break
         if not block:
             break
@@ -432,9 +439,7 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
             stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
             if stdin_data is not None:
                 _feed_stdin(stdin, stdin_data)
-            out = read_capped(stdout)
-            err = read_capped(stderr)
-            rc = stdout.channel.recv_exit_status()
+            rc, out, err = _collect(stdout, stderr, timeout)
             client.close()
             return rc, out, err
         except Exception as e:
@@ -621,34 +626,56 @@ def _is_cluster_member(pve_mgr, node):
         return False
 
 
-def _run_on_client(client, cmd, timeout, stdin_data=None):
-    """(rc, out, err) of one command on a connected paramiko client, which is closed after.
+# after a stdout that took the whole deadline (a chatty command), stderr and the exit status
+# still get this long: its end comes a moment after the last byte
+_SSH_TAIL_GRACE = 5.0
+
+
+def _collect(stdout, stderr, timeout, deadline=None):
+    """(rc, out, err) of a command started with exec_command(cmd, timeout=timeout).
 
     One deadline of `timeout` for the call: stdout is read to EOF or until `timeout` passes
     without a byte, stderr and the exit status get what is left. recv_exit_status alone
     waits for ever; past the deadline the call answers 124 (what coreutils' timeout says)
-    while the command may still be running. stdin_data goes to the command's stdin."""
+    while the command may still be running.
+
+    MK Nov 2026 - a stdout read that ran out of time answers 124 as well, whatever the exit
+    status says after it. The read gave up on its own clock: a command ending a moment later
+    with 0 sent its last lines into a read nobody made, and a script whose verdict is its
+    last line read as a good answer (sshfs counted as installed on a node without internet,
+    after apt-get gave up there)."""
+    deadline = time.monotonic() + max(1, timeout) if deadline is None else deadline
+    ch = stdout.channel
+    cut = []
+    out = read_capped(stdout, cut=cut)
+    if cut:
+        return 124, out, f"no output from the node within {timeout}s, the answer is incomplete"
+    try:
+        ch.settimeout(max(_SSH_TAIL_GRACE, deadline - time.monotonic()))
+    except Exception:
+        pass
+    err = read_capped(stderr)
+    # counted, so a clock that stands still cannot keep it going
+    for _ in range(int(max(_SSH_TAIL_GRACE, deadline - time.monotonic()) / 0.2) + 1):
+        if ch.exit_status_ready():
+            break
+        time.sleep(0.2)
+    if ch.exit_status_ready():
+        return ch.recv_exit_status(), out, err
+    note = f"no exit status from the node within {timeout}s"
+    return 124, out, f"{err.rstrip()}\n{note}" if err.strip() else note
+
+
+def _run_on_client(client, cmd, timeout, stdin_data=None):
+    """(rc, out, err) of one command on a connected paramiko client, which is closed after.
+    The output and the exit status are read as _collect says. stdin_data goes to the
+    command's stdin."""
     deadline = time.monotonic() + max(1, timeout)
     try:
         _in, stdout, stderr = client.exec_command(cmd, timeout=timeout)
         if stdin_data is not None:
             _feed_stdin(_in, stdin_data)
-        ch = stdout.channel
-        out = read_capped(stdout)
-        try:
-            ch.settimeout(max(0.0, deadline - time.monotonic()))
-        except Exception:
-            pass
-        err = read_capped(stderr)
-        # counted, so a clock that stands still cannot keep it going
-        for _ in range(int(max(0.0, deadline - time.monotonic()) / 0.2) + 1):
-            if ch.exit_status_ready():
-                break
-            time.sleep(0.2)
-        if ch.exit_status_ready():
-            return ch.recv_exit_status(), out, err
-        note = f"no exit status from the node within {timeout}s"
-        return 124, out, f"{err.rstrip()}\n{note}" if err.strip() else note
+        return _collect(stdout, stderr, timeout, deadline)
     finally:
         try:
             client.close()

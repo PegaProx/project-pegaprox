@@ -31,6 +31,8 @@ def _inject(monkeypatch, lines):
             return 0, out, ''
         if 'pvesm path' in cmd:
             return 0, '/dev/pve/vm-120-disk-0\n', ''
+        if 'echo PRESENT' in cmd:
+            return 0, 'PRESENT\n', ''     # a package check: installed
         return 0, '', ''
     monkeypatch.setattr(v2p, '_pve_node_exec', node_exec)
     monkeypatch.setattr(v2p, '_write_node_script', lambda *a, **k: '/tmp/inject.sh')

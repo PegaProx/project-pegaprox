@@ -198,8 +198,10 @@ def test_only_the_missing_packages_of_a_feature_are_installed(tmp_path):
     assert box.apt() == ['apt-get install -y --no-install-recommends -o DPkg::Lock::Timeout=60 python3-hivex']
 
 
-def test_an_answer_without_a_verdict_is_read_by_its_exit_code():
-    assert pk.parse_ensure(0, '', ('sshpass',))[0] == 'PRESENT'
+def test_an_answer_without_a_verdict_is_unknown_whatever_its_exit_code():
+    # the script ends with its verdict: without it the end of the answer got lost, and
+    # exit code 0 is then only the one of an echo
+    assert pk.parse_ensure(0, '', ('sshpass',))[:2] == ('UNKNOWN', ['sshpass'])
     assert pk.parse_ensure(1, '', ('sshpass',))[:2] == ('UNKNOWN', ['sshpass'])
     assert pk.parse_ensure(255, 'Permission denied', ('sshfs',))[2] == 'Permission denied'
 
