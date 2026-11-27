@@ -156,7 +156,7 @@ def test_deleting_a_cluster_keeps_a_pin_another_cluster_still_uses():
     connection — the exact window reject-on-change exists to close."""
     src = open('pegaprox/api/clusters.py').read()
     block = src[src.index('def delete_cluster('):]
-    block = block[:block.index('remove_host_keys(hosts_to_clean)')]
+    block = block[:block.index('remove_host_keys(hosts_to_clean')]
 
     assert 'still_pinned' in block, 'the delete path no longer excludes shared hosts'
     assert 'hosts_to_clean -= still_pinned' in block
