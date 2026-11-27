@@ -454,7 +454,7 @@ def test_an_admin_token_still_opens_the_node_shell(api, estate, how):
 def _agent_cluster(api):
     m = api.make_fake_manager(cluster_id='cluster_1')
     m.host, m.api_port = '10.0.0.9', 8006
-    m._api_post.return_value = types.SimpleNamespace(
+    m._api_get.return_value = types.SimpleNamespace(
         status_code=200, text='',
         json=lambda: {'data': {'content': 'root:$6$secret:19000::::::', 'truncated': False}})
     api.set_manager('cluster_1', m)
@@ -467,13 +467,31 @@ def _agent_cluster(api):
 _READ = '/api/clusters/cluster_1/vms/pve1/qemu/100/guest-file-read'
 
 
+def _file_reads(m):
+    """the calls of the manager that reached the guest agent's file-read, by either method"""
+    return [c for c in m._api_get.call_args_list + m._api_post.call_args_list if 'agent/file-read' in str(c)]
+
+
+def test_the_read_goes_to_pve_as_a_get_with_the_file_in_the_query(api, seed):
+    # PVE has file-read as GET only: the POST it used to send came back "not implemented"
+    seed.tenant('acme', clusters=['cluster_1'])
+    u = seed.user('ops2', role='admin', tenant_id='acme')
+    m = _agent_cluster(api)
+    r = api.as_user(u).post(_READ, json={'file': r'C:\ProgramData\KVMMigration\migrate.log', 'count': 4096})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert not [c for c in m._api_post.call_args_list if 'agent/file-read' in str(c)]
+    (url,), kw = m._api_get.call_args
+    assert url.endswith('/nodes/pve1/qemu/100/agent/file-read')
+    assert kw['params'] == {'file': r'C:\ProgramData\KVMMigration\migrate.log', 'count': 4096}
+
+
 def test_a_viewer_reads_no_guest_file(api, seed):
     seed.tenant('acme', clusters=['cluster_1'])
     vera = seed.user('vera', role='viewer', tenant_id='acme')
     m = _agent_cluster(api)
     r = api.as_user(vera).post(_READ, json={'file': '/etc/shadow'})
     assert r.status_code == 403, r.get_data(as_text=True)
-    m._api_post.assert_not_called()
+    assert not _file_reads(m)
 
 
 def test_a_pool_grant_without_config_reads_no_guest_file(api, seed):
@@ -484,7 +502,7 @@ def test_a_pool_grant_without_config_reads_no_guest_file(api, seed):
     m = _agent_cluster(api)
     r = api.as_user(paul).post(_READ, json={'file': '/etc/shadow'})
     assert r.status_code == 403, r.get_data(as_text=True)
-    m._api_post.assert_not_called()
+    assert not _file_reads(m)
 
 
 @pytest.mark.parametrize('role', ['user', 'admin'])
@@ -495,7 +513,7 @@ def test_an_operator_and_an_admin_still_read_guest_files(api, seed, role):
     r = api.as_user(u).post(_READ, json={'file': '/etc/hostname'})
     assert r.status_code == 200, r.get_data(as_text=True)
     assert r.get_json()['content'].startswith('root:')
-    m._api_post.assert_called_once()
+    assert len(_file_reads(m)) == 1
 
 
 def test_a_pool_grant_with_config_still_reads_guest_files(api, seed):

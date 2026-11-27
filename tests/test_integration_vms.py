@@ -444,9 +444,10 @@ def test_pool_reach_denied_at_vm_level_guest_file_read_403(api, seed):
     alice = _pool_reach_user(api, seed)
     resp = api.as_user(alice).post(_guest_file_read(), json={'file': '/etc/hostname'})
     assert resp.status_code == 403, resp.get_data(as_text=True)
-    # deny fires at _require_vm_access, upstream of the raw mgr._api_post the
-    # allow-path would make — so the guest-agent HTTP call is never issued.
-    _ppglobals.cluster_managers[CID]._api_post.assert_not_called()
+    # deny fires at _require_vm_access, upstream of the raw mgr._api_get the
+    # allow-path would make - so the guest-agent HTTP call is never issued.
+    m = _ppglobals.cluster_managers[CID]
+    assert not [c for c in m._api_get.call_args_list + m._api_post.call_args_list if 'agent/file-read' in str(c)]
 
 
 # =========================================================================== #

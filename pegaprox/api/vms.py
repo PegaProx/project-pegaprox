@@ -6416,7 +6416,9 @@ def get_vm_guest_file_read_api(cluster_id, node, vm_type, vmid):
 
     try:
         url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/qemu/{vmid}/agent/file-read"
-        resp = mgr._api_post(url, data=params)
+        # MK Nov 2026 - file-read is a GET on PVE; the POST this sent was answered with
+        # "Method 'POST .../agent/file-read' not implemented" on every call (seen on 9.2)
+        resp = mgr._api_get(url, params=params)
         if resp.status_code == 200:
             data = (resp.json().get('data') or {})
             return jsonify({
