@@ -2228,7 +2228,47 @@
         // of it is missing (node_packages of a review). A package the node was not asked about
         // shows as not checked, never as installed.
         const V2P_PKG_FOR = {sshfs: 'v2pPkgForSshfs', sshpass: 'v2pPkgForSshpass', virtio: 'v2pPkgForVirtio',
-                             virtio_build: 'v2pPkgForVirtioBuild', rbd: 'v2pPkgForRbd', lz4: 'v2pPkgForLz4'};
+                             virtio_build: 'v2pPkgForVirtioBuild', rbd: 'v2pPkgForRbd', lz4: 'v2pPkgForLz4',
+                             guestprep: 'v2pPkgForGuestPrep', virtio_iso: 'v2pPkgForVirtioIso'};
+
+        // LW Nov 2026 - a Windows guest: the OS type picked wins, else what ESXi says of the guest,
+        // else the server's word from a dry run (who may not view the guest gets no OS with the plan)
+        function v2pIsWindows(form, source, srv) {
+            const o = String((form && form.ostype) || '').toLowerCase();
+            if (o && o !== 'auto') return o.startsWith('win');
+            const s = source || {};
+            if ([s.guest_OS, s.guest_os, s.guest_id].some(v => /windows|^win/i.test(String(v || '')))) return true;
+            return !!(srv && srv.windows);
+        }
+
+        // why the two-stage boot cannot run with these choices, '' when it can (core/v2p_twostage.decide)
+        function v2pTwoStageBlock(form, drivers) {
+            if (form.transfer_mode === 'sshfs_boot') return 'v2pTwoStageOffLiveMirror';
+            const hw = String(form.scsihw || 'auto');
+            if (['sata', 'ide'].includes(form.disk_bus) || !['auto', 'virtio-scsi-single', 'virtio-scsi-pci'].includes(hw)) return 'v2pTwoStageOffBus';
+            if (form.agent === false) return 'v2pTwoStageNeedsAgent';
+            if (!drivers) return 'v2pTwoStageNeedsDrivers';
+            return '';
+        }
+
+        // the script of the preparation in the guest, for a run by hand; false when it did not come
+        async function v2pDownloadPrepScript(authFetch) {
+            try {
+                const r = await authFetch(`${API_URL}/vmware/guest-prep-script`);
+                if (!r || !r.ok) return false;
+                const blob = await r.blob();
+                const named = /filename="([^"]+)"/.exec(r.headers.get('Content-Disposition') || '');
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = named ? named[1] : 'Prepare-KvmMigration.ps1';
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 150);
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
         function V2pNodePackages({ np, t }) {
             if (!np || !Array.isArray(np.items) || !np.items.length) return null;
             const state = (p) => {
@@ -2263,6 +2303,61 @@
             );
         }
 
+        // LW Nov 2026 - the Windows preparation and the two-stage boot of a review (windows_prep,
+        // two_stage and guest_prep of the dry run); the reasons it gives are the server's words
+        function V2pWinReview({ rv, t }) {
+            const wp = rv && rv.windows_prep;
+            if (!wp || !wp.windows) return null;
+            const ts = rv.two_stage || {};
+            const gp = rv.guest_prep;
+            const iso = wp.iso === 'present' ? t('v2pReviewIsoPresent')
+                : wp.iso === 'missing' ? ((rv.node_packages || {}).allow_install ? t('v2pReviewIsoDownload') : t('v2pReviewIsoMissing')) : '';
+            return (
+                <div className="text-xs text-gray-400 space-y-0.5" data-v2p-review-winprep>
+                    <div className="font-semibold">{t('v2pWinTitle')}</div>
+                    <div>{t('v2pReviewWinPrep')}: <span className="text-gray-200">{wp.guest_prep ? t('v2pReviewWinGuest') : wp.on ? t('v2pReviewWinAuto') : t('v2pReviewWinOff')}</span></div>
+                    {wp.on && <div>{t('v2pReviewWinHw').replace('{scsihw}', wp.scsihw || '-').replace('{net}', wp.net_driver || '-')}</div>}
+                    {wp.on && iso && <div data-v2p-review-iso>virtio-win.iso: <span className={wp.iso === 'present' ? 'text-gray-200' : 'text-yellow-300'}>{iso}</span></div>}
+                    <div data-v2p-review-twostage>{t('v2pReviewTwoStage')}: {ts.on
+                        ? <span className="text-gray-200">{t('v2pReviewTwoStageOn').replace('{first}', `${ts.first_bus || 'sata'}0`).replace('{final}', `${ts.final_bus || 'scsi'}0`)}{ts.temp_disk ? `, ${t('v2pReviewTwoStageTemp')}` : ''}</span>
+                        : <span className="text-yellow-300">{t('v2pReviewWinOff')}{ts.why ? ` (${ts.why})` : ''}</span>}</div>
+                    {gp && gp.on && (
+                        <div data-v2p-review-guestprep>{t('v2pReviewGuestPrep')}: <span className="text-gray-200">{gp.os || '-'}</span>
+                            {' - '}<span className={gp.tools_running ? 'text-gray-200' : 'text-yellow-300'}>{gp.tools_running ? t('v2pReviewGuestToolsOn') : t('v2pReviewGuestToolsOff')}</span>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // the Windows outcome of a migration (windows_prep, two_stage, guest_prep of the task)
+        function V2pWinResult({ m, t, inline }) {
+            const wp = (m && m.windows_prep) || {};
+            const ts = (m && m.two_stage) || {};
+            const gp = (m && m.guest_prep) || {};
+            const fb = {applied: 'v2pFirstBootApplied', partial: 'v2pFirstBootPartial', failed: 'v2pFirstBootFailed', restored: 'v2pFirstBootRestored'}[wp.first_boot];
+            const lines = [];
+            if (ts.boot_disk && (ts.state === 'switched' || ts.state === 'kept_sata')) {
+                const kept = ts.state === 'kept_sata';
+                lines.push(<div key="ts" data-v2p-twostage-result className={kept ? 'text-yellow-300' : 'text-green-400'}>
+                    {t('v2pResultBootDisk')}: <span className="font-mono">{ts.boot_disk}</span> ({kept ? t('v2pResultKeptSata') : (String(ts.boot_disk).startsWith('virtio') ? 'VirtIO Block' : 'VirtIO SCSI')})
+                </div>);
+            }
+            if (wp.windows && (fb || wp.state === 'staged' || wp.state === 'failed' || wp.state === 'dropped')) {
+                const bad = wp.first_boot === 'failed' || wp.first_boot === 'partial' || wp.state === 'failed' || wp.state === 'dropped';
+                lines.push(<div key="wp" data-v2p-winprep-result className={bad ? 'text-yellow-300' : 'text-gray-300'}>
+                    {t('v2pResultWinFirstBoot')}: {fb ? t(fb) : wp.state === 'staged' ? t('v2pFirstBootStaged') : t('v2pFirstBootNotStaged')}
+                </div>);
+            }
+            if (gp.state === 'shut_down' || gp.state === 'fallback') {
+                lines.push(<div key="gp" data-v2p-guestprep-result className={gp.state === 'fallback' ? 'text-yellow-300' : 'text-gray-300'}>
+                    {t('v2pReviewGuestPrep')}: {gp.state === 'fallback' ? `${t('v2pGuestPrepFellBack')}${gp.why ? ` (${gp.why})` : ''}` : t('v2pGuestPrepDone')}
+                </div>);
+            }
+            if (!lines.length) return null;
+            return <div className={inline ? 'mt-1 text-xs space-y-0.5' : 'p-3 border-t border-proxmox-border/50 text-xs space-y-1'} data-v2p-win-result>{lines}</div>;
+        }
+
         function EsxiBulkMigrate({ server, vms, runId, onClose, onStarted, authFetch, addToast, t, haReadOnly }) {
             const [step, setStep] = React.useState(runId ? 'run' : 'settings');
             const [guests, setGuests] = React.useState(vms || []);
@@ -2273,8 +2368,17 @@
                 transfer_mode: 'vmkfstools_clone', verify: 'sample', start_after: true, remove_source: false,
                 wait_for_confirmation: false, preserve_mac: true, esxi_user: 'root', width: 2,
                 allow_package_install: true,
+                // LW Nov 2026 - the Windows guests of the run: null = the server's preset, false = off
+                install_virtio_drivers: null, two_stage_boot: null, guest_prep: false, virtio_iso_path: '',
             });
             const [password, setPassword] = React.useState('');
+            // the Windows login of the preparation in the guest: one for the run, a guest's own wins.
+            // Never part of a check, only of the start, and gone with the dialog
+            const [guestUser, setGuestUser] = React.useState('');
+            const [guestPassword, setGuestPassword] = React.useState('');
+            const [ownLogins, setOwnLogins] = React.useState({});
+            // the folded section stays as it was left when the steps change
+            const [prepOpen, setPrepOpen] = React.useState(false);
             const [rows, setRows] = React.useState({});
             // LW Nov 2026 (#1339) - a guest's own VMID, empty = the next free one
             const [vmids, setVmids] = React.useState({});
@@ -2359,21 +2463,37 @@
                 if (!Number.isFinite(from) || from < 100) return;
                 setVmids(Object.fromEntries(guests.map((g, i) => [g.id, String(from + i)])));
             };
+            const ownLogin = (id) => {
+                const o = ownLogins[id];
+                return o && o.user && o.password ? {guest_user: o.user, guest_password: o.password} : null;
+            };
             const buildBody = (dryRun) => {
                 const body = {...form, width: Number(form.width) || 1,
                     vms: guests.map(g => {
                         const m = {...mapsOf(g.id), ...vmidOf(g.id)};
+                        // a guest's own Windows login, with the start only
+                        if (!dryRun && form.guest_prep) Object.assign(m, ownLogin(g.id) || {});
                         return Object.keys(m).length ? {vm_id: g.id, ...m} : g.id;
                     })};
                 if (String(form.net_vlan_tag ?? '').trim() === '') delete body.net_vlan_tag;
                 else body.net_vlan_tag = String(form.net_vlan_tag).trim();
                 if (!form.esxi_user) delete body.esxi_user;
+                // the bulk route takes a flag as true or false only: the preset is no key at all
+                if (body.install_virtio_drivers === null) delete body.install_virtio_drivers;
+                if (body.two_stage_boot === null) delete body.two_stage_boot;
+                if (!body.virtio_iso_path) delete body.virtio_iso_path;
                 if (dryRun) body.dry_run = true;
                 else body.esxi_password = password;
+                if (!dryRun && form.guest_prep && guestUser && guestPassword) {
+                    body.guest_user = guestUser;
+                    body.guest_password = guestPassword;
+                }
                 return body;
             };
             const current = !!check && checkKey === JSON.stringify(buildBody(true));
             const canCheck = !!(form.target_cluster && form.target_node && form.target_storage && guests.length);
+            // with the preparation in the guest every guest needs a login: the run's or its own
+            const loginMissing = form.guest_prep && !(guestUser && guestPassword) && guests.some(g => !ownLogin(g.id));
 
             const runCheck = async (next) => {
                 const key = JSON.stringify(buildBody(true));
@@ -2412,6 +2532,7 @@
 
             const start = async () => {
                 if (haReadOnly || !current || !check?.ok || !password) return;
+                if (loginMissing) return;
                 setStarting(true);
                 try {
                     const r = await authFetch(`${base}/bulk-migrate`, {
@@ -2420,6 +2541,8 @@
                     const d = r ? await r.json().catch(() => ({})) : {};
                     if (r && r.status === 202 && d.run) {
                         setPassword('');
+                        setGuestPassword('');
+                        setOwnLogins({});
                         setRun(d.run);
                         setCurrentRun(d.run.id);
                         setStep('run');
@@ -2595,6 +2718,70 @@
                                         <span className="block text-xs text-gray-500 mt-0.5">{t('v2pAllowPackageInstallDesc')}</span>
                                     </span>
                                 </label>
+                                {/* LW Nov 2026 - the Windows guests of the run are prepared as the single wizard does it */}
+                                <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-3 space-y-2" data-esxi-bulk-win>
+                                    <div className="text-sm text-gray-200">{t('v2pWinTitle')}</div>
+                                    <p className="text-xs text-gray-500">{t('esxiBulkWinHint')}</p>
+                                    <label className="flex items-start gap-2 text-sm text-gray-400 cursor-pointer">
+                                        <input type="checkbox" checked={form.install_virtio_drivers !== false} onChange={e => set({install_virtio_drivers: e.target.checked ? null : false})} className="rounded mt-0.5" data-esxi-bulk-win-auto />
+                                        <span>
+                                            <span className="text-gray-200">{t('v2pWinAuto')}</span>
+                                            <span className="block text-xs text-gray-500 mt-0.5">{form.install_virtio_drivers !== false ? t('v2pWinAutoDesc') : t('v2pWinAutoOff')}</span>
+                                        </span>
+                                    </label>
+                                    {form.transfer_mode === 'sshfs_boot' && <p className="text-xs text-yellow-300">{t('v2pWinLiveMirror')}</p>}
+                                    {(() => {
+                                        const block = v2pTwoStageBlock({transfer_mode: form.transfer_mode},
+                                            (form.install_virtio_drivers !== false && form.transfer_mode !== 'sshfs_boot') || form.guest_prep);
+                                        return (
+                                            <label className={`flex items-start gap-2 text-sm text-gray-400 ${block ? 'opacity-60' : 'cursor-pointer'}`}>
+                                                <input type="checkbox" checked={!block && form.two_stage_boot !== false} disabled={!!block} onChange={e => set({two_stage_boot: e.target.checked ? null : false})} className="rounded mt-0.5" data-esxi-bulk-two-stage />
+                                                <span>
+                                                    <span className="text-gray-200">{t('v2pTwoStage')}</span>
+                                                    <span className="block text-xs text-gray-500 mt-0.5">{block ? t(block) : t('v2pTwoStageDesc')}</span>
+                                                </span>
+                                            </label>
+                                        );
+                                    })()}
+                                    <input type="text" value={form.virtio_iso_path} onChange={e => set({virtio_iso_path: e.target.value.trim()})} placeholder={t('v2pWinIsoPath')} className={input} data-esxi-bulk-virtio-iso />
+                                    <details open={prepOpen} onToggle={e => setPrepOpen(e.currentTarget.open)} className="border-t border-proxmox-border pt-2" data-esxi-bulk-guest-prep-section>
+                                        <summary className="text-xs font-medium text-gray-400 cursor-pointer hover:text-gray-300">
+                                            {t('v2pGuestPrepSection')}
+                                            {form.guest_prep && <span className="text-emerald-400 ml-1">({t('enabled')})</span>}
+                                        </summary>
+                                        <div className="mt-2 ml-4 space-y-2">
+                                            <label className="flex items-start gap-2 text-sm text-gray-400 cursor-pointer">
+                                                <input type="checkbox" checked={form.guest_prep} onChange={e => { set({guest_prep: e.target.checked}); if (!e.target.checked) { setGuestUser(''); setGuestPassword(''); setOwnLogins({}); } }} className="rounded mt-0.5" data-esxi-bulk-guest-prep />
+                                                <span>
+                                                    <span className="text-gray-200">{t('v2pGuestPrep')}</span>
+                                                    <span className="block text-xs text-gray-500 mt-0.5">{t('v2pGuestPrepDesc')}</span>
+                                                </span>
+                                            </label>
+                                            {form.guest_prep && (
+                                                <div className="ml-6 space-y-2">
+                                                    <div className="grid grid-cols-2 gap-3">
+                                                        <div>
+                                                            <label className="text-xs text-gray-500 mb-1 block">{t('v2pGuestUser')}</label>
+                                                            <input type="text" autoComplete="off" spellCheck={false} value={guestUser} onChange={e => setGuestUser(e.target.value)} className={input} data-esxi-bulk-guest-user />
+                                                        </div>
+                                                        <div>
+                                                            <label className="text-xs text-gray-500 mb-1 block">{t('v2pGuestPassword')}</label>
+                                                            <input type="password" autoComplete="off" value={guestPassword} onChange={e => setGuestPassword(e.target.value)} className={input} data-esxi-bulk-guest-password />
+                                                        </div>
+                                                    </div>
+                                                    <p className="text-xs text-gray-500">{t('v2pGuestUserHint')} {t('esxiBulkGuestLoginHint')} {t('v2pGuestLoginNotStored')}</p>
+                                                </div>
+                                            )}
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <button type="button" onClick={async () => { if (!(await v2pDownloadPrepScript(authFetch))) addToast(t('v2pGuestPrepScriptFailed'), 'error'); }}
+                                                    className="flex items-center gap-1.5 px-2 py-1 rounded bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white text-xs" data-esxi-bulk-guest-prep-script>
+                                                    <Icons.Download /> {t('v2pGuestPrepScript')}
+                                                </button>
+                                                <span className="text-xs text-gray-500 min-w-0 flex-1">{t('v2pGuestPrepScriptDesc')}</span>
+                                            </div>
+                                        </div>
+                                    </details>
+                                </div>
                                 <div className="grid grid-cols-2 gap-3">
                                     <div>
                                         <label className="text-xs text-gray-500 mb-1 block">{t('esxiBulkSshUser')}</label>
@@ -2647,6 +2834,17 @@
                                                         <input type="text" inputMode="numeric" value={vmids[g.id] ?? ''} onChange={e => setVmids(prev => ({...prev, [g.id]: e.target.value.trim()}))}
                                                             placeholder={t('v2pTargetVmidAuto')} className={`w-32 ${small}`} data-esxi-bulk-vmid={g.id} />
                                                     </div>
+                                                    {form.guest_prep && (
+                                                        <div className="flex flex-wrap items-center gap-2 text-xs text-gray-300" data-esxi-bulk-guest-login={g.id}>
+                                                            <span className="text-gray-500">{t('esxiBulkGuestLoginOwn')}</span>
+                                                            <input type="text" autoComplete="off" spellCheck={false} value={(ownLogins[g.id] || {}).user || ''}
+                                                                onChange={e => setOwnLogins(prev => ({...prev, [g.id]: {...(prev[g.id] || {}), user: e.target.value}}))}
+                                                                placeholder={t('v2pGuestUser')} className={`w-32 ${small}`} />
+                                                            <input type="password" autoComplete="off" value={(ownLogins[g.id] || {}).password || ''}
+                                                                onChange={e => setOwnLogins(prev => ({...prev, [g.id]: {...(prev[g.id] || {}), password: e.target.value}}))}
+                                                                placeholder={t('v2pGuestPassword')} className={`w-32 ${small}`} />
+                                                        </div>
+                                                    )}
                                                     {r && r.nics.length > 0 && (
                                                         <div>
                                                             <div className="text-xs text-gray-500 mb-1">{t('v2pNetworkPerNic')}</div>
@@ -2739,6 +2937,13 @@
                                                     <div className="flex items-center gap-2">
                                                         <span className="text-sm text-white truncate min-w-0">{it.name || (guests.find(g => g.id === it.vm_id) || {}).name || it.vm_id}</span>
                                                         <span className={`px-1.5 py-0.5 rounded ${it.ok ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>{it.ok ? t('esxiBulkGuestOk') : t('esxiBulkGuestProblems').replace('{n}', (it.errors || []).length)}</span>
+                                                        {(it.windows_prep || {}).windows && (
+                                                            <span className={`px-1.5 py-0.5 rounded ${it.windows_prep.on ? 'bg-blue-500/20 text-blue-300' : 'bg-yellow-500/10 text-yellow-300'}`} data-esxi-bulk-win-tag={it.vm_id}>{it.windows_prep.on ? t('esxiBulkTagWinAuto') : t('esxiBulkTagWinOff')}</span>
+                                                        )}
+                                                        {(it.two_stage || {}).on && <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300" data-esxi-bulk-twostage-tag={it.vm_id}>{t('v2pReviewTwoStage')}</span>}
+                                                        {(it.guest_prep || {}).on && it.guest_prep.tools_running === false && (
+                                                            <span className="px-1.5 py-0.5 rounded bg-yellow-500/10 text-yellow-300">{t('esxiBulkTagToolsOff')}</span>
+                                                        )}
                                                         {!it.ok && guests.length > 1 && (
                                                             <button onClick={() => setGuests(gs => gs.filter(g => g.id !== it.vm_id))} className="ml-auto text-gray-400 hover:text-white underline">{t('esxiBulkLeaveOut')}</button>
                                                         )}
@@ -2773,6 +2978,7 @@
                                     </div>
                                 )}
                                 {!password && <p className="text-xs text-yellow-300">{t('esxiBulkNeedPassword')}</p>}
+                                {loginMissing && <p className="text-xs text-yellow-300" data-esxi-bulk-needs-login>{t('esxiBulkGuestPrepNeedsLogin')}</p>}
                                 <div className="flex items-center gap-2">
                                     <button onClick={() => runCheck()} disabled={checking || !canCheck}
                                         className="px-3 py-1.5 rounded-lg bg-proxmox-dark border border-proxmox-border text-gray-300 text-xs disabled:opacity-50">
@@ -2780,7 +2986,7 @@
                                     </button>
                                     <span className="flex-1" />
                                     {!haReadOnly && (
-                                        <button onClick={start} disabled={starting || checking || !current || !check?.ok || !password}
+                                        <button onClick={start} disabled={starting || checking || !current || !check?.ok || !password || loginMissing}
                                             className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50" data-esxi-bulk-start>
                                             {starting ? t('esxiBulkStarting') : t('esxiBulkStart').replace('{n}', guests.length)}
                                         </button>
@@ -15022,13 +15228,14 @@
                 // Migrations-User wenigstens einmal sehen, wer das ganze sshfs-boot/4K/EFI-Gefrickel
                 // bezahlt. Reset auf false bei jedem neuen Wizard-Run.
                 oc_acknowledge:false,
-                // NS Apr 2026 — opt-in VirtIO driver injection. Default off — Windows boots
-                // sowieso via vmxnet3+pvscsi compatibility, aber wer native Performance will
-                // kann das hier aktivieren. Voraussetzung: virtio-win.iso liegt unter
-                // /var/lib/vz/template/iso/.
-                install_virtio_drivers:false, virtio_iso_path:'',
+                // LW Nov 2026 - VirtIO drivers: null leaves it to the server: a Windows guest is prepared
+                // automatically after the copy, false turns that off
+                install_virtio_drivers:null, virtio_iso_path:'',
                 // LW Nov 2026 (#1252) - off: nothing is installed on the target node
                 allow_package_install:true,
+                // LW Nov 2026 - two-stage boot: null = on for Windows guests, false = off. The
+                // Windows login of the optional preparation in the guest lives for one wizard only
+                two_stage_boot:null, guest_prep:false, guest_user:'', guest_password:'',
             });
             const [migrateWizardStep, setMigrateWizardStep] = useState('target'); // target, hardware, advanced, review
             const [vmwareMigrateLoading, setVmwareMigrateLoading] = useState(false);
@@ -15040,6 +15247,9 @@
             const [v2pReviewKey, setV2pReviewKey] = useState('');
             const [v2pReviewLoading, setV2pReviewLoading] = useState(false);
             const [v2pInventory, setV2pInventory] = useState(null);
+            // LW Nov 2026 - what the server says of the guest (windows_prep of a dry run), and the login check
+            const [v2pWinSrv, setV2pWinSrv] = useState(null);
+            const [v2pGuestLogin, setV2pGuestLogin] = useState(null);
             // LW Oct 2026 - the guests ticked in the ESXi VM list, and the bulk dialog: {vms} to
             // set one up, {runId} to follow one
             const [esxiBulkSel, setEsxiBulkSel] = useState([]);
@@ -19992,9 +20202,16 @@
                     if (r.storage) row.storage = r.storage;
                     return row;
                 });
+                // LW Nov 2026 - the Windows login goes along only with the preparation in the guest,
+                // and its password only with the real start (as the ESXi password)
+                if (!body.guest_prep) {
+                    delete body.guest_user;
+                    delete body.guest_password;
+                }
                 if (dryRun) {
                     body.dry_run = true;
                     delete body.esxi_password;
+                    delete body.guest_password;
                 }
                 return body;
             };
@@ -20010,6 +20227,7 @@
                     if (resp?.ok) {
                         setV2pReview(data);
                         if (data.available) setV2pInventory(data.available);
+                        if (data.windows_prep) setV2pWinSrv(data.windows_prep);
                     } else {
                         setV2pReview({ok: false, errors: [data.error || t('v2pReviewError')], warnings: [],
                                       nics: [], disks: [], storages: []});
@@ -20040,7 +20258,10 @@
                                                   target_storage: f.target_storage, dry_run: true, check_packages: false})
                         });
                         const data = resp?.ok ? await resp.json().catch(() => null) : null;
-                        if (!gone) setV2pInventory(data?.available || null);
+                        if (!gone) {
+                            setV2pInventory(data?.available || null);
+                            if (data?.windows_prep) setV2pWinSrv(data.windows_prep);
+                        }
                     } catch(e) {
                         if (!gone) setV2pInventory(null);
                     }
@@ -20051,6 +20272,28 @@
             useEffect(() => {
                 if (showVmwareMigrate) setVmwareMigrateForm(f => (f.target_vmid ? {...f, target_vmid: ''} : f));
             }, [showVmwareMigrate, vmwareSelectedVm]);
+            // LW Nov 2026 - the Windows choices are per guest and the login per wizard: both go when
+            // the wizard closes or opens for another guest
+            useEffect(() => {
+                setVmwareMigrateForm(f => (f.guest_prep || f.guest_user || f.guest_password || f.two_stage_boot !== null || f.install_virtio_drivers !== null
+                    ? {...f, guest_prep: false, guest_user: '', guest_password: '', two_stage_boot: null, install_virtio_drivers: null} : f));
+                setV2pGuestLogin(null);
+                setV2pWinSrv(null);
+            }, [showVmwareMigrate, vmwareSelectedVm]);
+            const checkV2pGuestLogin = async () => {
+                const f = vmwareMigrateForm;
+                setV2pGuestLogin({busy: true});
+                try {
+                    const resp = await authFetch(`${API_URL}/vmware/${selectedVMware.id}/vms/${vmwareSelectedVm}/guest-login`, {
+                        method: 'POST', headers: {'Content-Type':'application/json'},
+                        body: JSON.stringify({guest_user: f.guest_user, guest_password: f.guest_password})
+                    });
+                    const data = resp ? await resp.json().catch(() => ({})) : {};
+                    setV2pGuestLogin(resp?.ok ? data : {ok: false, error: data.error || ''});
+                } catch(e) {
+                    setV2pGuestLogin({ok: false, error: e.message});
+                }
+            };
 
             // Start the ESXi migration - only from the review step, with the body it checked
             const startVmwareMigration = async (vmId) => {
@@ -30358,6 +30601,7 @@
                                                                                         {(m.warnings || []).map((w, i) => (
                                                                                             <div key={i} data-v2p-warnings className="text-xs text-yellow-300 mt-1 flex items-start gap-1"><Icons.AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" /><span>{w}</span></div>
                                                                                         ))}
+                                                                                        {m.status !== 'running' && <V2pWinResult m={m} t={t} inline />}
                                                                                         {m.phase === 'awaiting_confirmation' && !haReadOnly && (
                                                                                             <div className="mt-2 flex items-center gap-2">
                                                                                                 <span className="text-xs text-amber-300 flex-1">{t('awaitingCutoverShort') || 'Ready to switch over — source still running.'}</span>
@@ -30699,6 +30943,9 @@
                                                             {migrateWizardStep === 'hardware' && (
                                                             <div className="space-y-3">
                                                                 <p className="text-xs text-gray-500 mb-2">Auto-detected from ESXi. Override if needed.</p>
+                                                                {v2pIsWindows(vmwareMigrateForm, vmwareMigrationPlan.source, v2pWinSrv) && vmwareMigrateForm.install_virtio_drivers !== false && vmwareMigrateForm.transfer_mode !== 'sshfs_boot' && (
+                                                                    <p className="text-xs text-emerald-400 mb-2" data-v2p-win-hw-hint>{t('v2pWinHardwareHint')}</p>
+                                                                )}
                                                                 {/* LW Oct 2026 - who may migrate the guest but not view it gets no hardware
                                                                     with the plan; Auto still reads it from ESXi when the migration starts */}
                                                                 {vmwareMigrationPlan.source?.details === false && (
@@ -31009,6 +31256,7 @@
                                                                                 </div>
                                                                             )}
                                                                             <V2pNodePackages np={rv.node_packages} t={t} />
+                                                                            <V2pWinReview rv={rv} t={t} />
                                                                             {rv.verify && (
                                                                                 <div className="text-xs text-gray-400">{t('v2pVerify')}: <span className="text-gray-200">{rv.verify === 'full' ? t('v2pVerifyFull') : rv.verify === 'off' ? t('v2pVerifyOff') : t('v2pVerifySample')}</span></div>
                                                                             )}
@@ -31016,6 +31264,9 @@
                                                                                 <div className="text-xs text-gray-400" data-v2p-review-vmid>{t('v2pTargetVmid')}: <span className="text-gray-200 font-mono">{rv.target_vmid || (rv.vmid_range ? `${t('v2pTargetVmidAuto')} (${rv.vmid_range[0]}-${rv.vmid_range[1]})` : t('v2pTargetVmidAuto'))}</span></div>
                                                                             )}
                                                                         </div>
+                                                                    )}
+                                                                    {vmwareMigrateForm.guest_prep && (!vmwareMigrateForm.guest_user || !vmwareMigrateForm.guest_password) && (
+                                                                        <p className="text-xs text-yellow-300" data-v2p-guest-prep-needs-login>{t('v2pGuestPrepNeedsLogin')}</p>
                                                                     )}
                                                                     <button onClick={() => reviewVmwareMigration(vmwareSelectedVm)} disabled={v2pReviewLoading || !vmwareMigrateForm.target_storage}
                                                                         className="px-3 py-1.5 rounded-lg bg-proxmox-dark border border-proxmox-border text-gray-300 text-xs disabled:opacity-50">
@@ -31025,64 +31276,111 @@
                                                                 );
                                                             })()}
 
-                                                            {/* NS Apr 2026, MK May 2026 — VirtIO MSI bulk install (opt-in). Off by default.
-                                                                Checks for virtio-win.iso on the Proxmox node, copies the official
-                                                                virtio-win-gt-x64.msi onto the disk and registers a SYSTEM-context
-                                                                one-shot service that runs msiexec /quiet at first boot. Boot disk
-                                                                STAYS on pvscsi (Win11/Server2025 don't bind vioscsi at early-boot —
-                                                                see memory note v2p_no_auto_scsihw_switch.md). Best-effort fallback
-                                                                only; recommended path is to install virtio-win-guest-tools in the
-                                                                source VM BEFORE migrating. */}
-                                                            <div className="mt-3 p-3 rounded-lg border border-proxmox-border" style={{background: 'rgba(30,30,40,0.4)'}}>
-                                                                <label className="flex items-start gap-2 cursor-pointer">
-                                                                    <input type="checkbox"
-                                                                        checked={!!vmwareMigrateForm.install_virtio_drivers}
-                                                                        onChange={e => setVmwareMigrateForm(f => ({...f, install_virtio_drivers: e.target.checked}))}
-                                                                        className="rounded mt-0.5" />
-                                                                    <div className="flex-1 min-w-0">
-                                                                        <span className="text-sm text-gray-200">
-                                                                            {t('installVirtioDrivers') || 'Pre-stage VirtIO drivers (Windows)'}
+                                                            {/* LW Nov 2026 - a Windows guest is prepared without a login: drivers, guest agent and its
+                                                                static IPv4 staged on the copied disk, the rest at the first boot under Proxmox VE
+                                                                (core/v2p_winprep.py), then the two-stage boot that lets Windows bind vioscsi before
+                                                                the boot disk moves to VirtIO SCSI. The preparation in the guest is the optional
+                                                                extra. This card replaced the opt-in VirtIO card (NS Apr 2026, MK May 2026). */}
+                                                            {(() => {
+                                                                const f = vmwareMigrateForm;
+                                                                if (!v2pIsWindows(f, vmwareMigrationPlan.source, v2pWinSrv)) return null;
+                                                                const mirror = f.transfer_mode === 'sshfs_boot';
+                                                                const auto = f.install_virtio_drivers !== false;
+                                                                const block = v2pTwoStageBlock(f, (auto && !mirror) || f.guest_prep);
+                                                                const running = (vmwareMigrationPlan.source?.power_state || 'POWERED_ON') === 'POWERED_ON';
+                                                                const lg = v2pGuestLogin;
+                                                                const field = 'w-full px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-xs';
+                                                                return (
+                                                                <div className="mt-3 p-3 rounded-lg border border-proxmox-border space-y-3" style={{background: 'rgba(30,30,40,0.4)'}} data-v2p-win>
+                                                                    <div className="text-sm text-gray-200 font-semibold">{t('v2pWinTitle')}</div>
+                                                                    <label className="flex items-start gap-2 cursor-pointer">
+                                                                        <input type="checkbox" checked={auto}
+                                                                            onChange={e => setVmwareMigrateForm(x => ({...x, install_virtio_drivers: e.target.checked ? null : false}))}
+                                                                            className="rounded mt-0.5" data-v2p-win-auto />
+                                                                        <span className="flex-1 min-w-0">
+                                                                            <span className="text-sm text-gray-200">{t('v2pWinAuto')}</span>
+                                                                            <span className="block text-xs text-gray-400 mt-1">{auto ? t('v2pWinAutoDesc') : t('v2pWinAutoOff')}</span>
                                                                         </span>
-                                                                        <p className="text-xs text-gray-400 mt-1 leading-snug">
-                                                                            {t('installVirtioDriversDesc') || 'Stages virtio-win-gt-x64.msi onto the disk and installs the full driver stack (storage, network, balloon, qemu-ga) silently as LocalSystem at first boot. Best-effort fallback when the source VM doesn\'t have the drivers yet. Requires virtio-win.iso on the target node.'}
-                                                                        </p>
-                                                                    </div>
-                                                                </label>
-                                                                {/* MK May 2026 — strong warning: customers should install virtio-win drivers
-                                                                    inside Windows BEFORE running V2P. Modern Win11/Server2025 boot path
-                                                                    won't bind vioscsi at early-boot regardless of staging — Proxmox/QEMU
-                                                                    technical limitation we can't work around. Our injection is best-effort. */}
-                                                                <div className="mt-3 p-3 rounded border border-amber-500/50" style={{background:'rgba(234,179,8,0.10)'}}>
-                                                                    <div className="flex items-start gap-2">
-                                                                        <span className="text-amber-300 text-base leading-none mt-0.5">⚠</span>
-                                                                        <div className="flex-1 min-w-0">
-                                                                            <p className="text-xs text-amber-200 font-semibold mb-1">
-                                                                                {t('virtioPreInstallWarnTitle') || 'Treiber besser VOR der Migration installieren'}
-                                                                            </p>
-                                                                            <p className="text-xs text-amber-100/90 leading-snug">
-                                                                                {t('virtioPreInstallWarnBody') || 'Lade virtio-win.iso in der laufenden Quell-VM auf VMware, mounte sie als CD und führe virtio-win-guest-tools.exe aus — dann migriere. Unsere Inject-Variante ist Best-Effort: Windows 11 / Server 2025 binden vioscsi im Early-Boot nicht zuverlässig (Proxmox/QEMU-Limitation), Boot-Disk muss dann auf pvscsi bleiben. VMs die vor Migration die Treiber installiert haben, lassen sich danach problemlos auf virtio-scsi umstellen.'}
-                                                                            </p>
+                                                                    </label>
+                                                                    {mirror && (auto || f.guest_prep) && (
+                                                                        <div className="ml-6 p-2 rounded border border-yellow-500/40" style={{background:'rgba(234,179,8,0.07)'}}>
+                                                                            <p className="text-xs text-yellow-300" data-v2p-win-mirror>{t('v2pWinLiveMirror')}</p>
                                                                         </div>
-                                                                    </div>
+                                                                    )}
+                                                                    {((auto && !mirror) || f.guest_prep) && (
+                                                                        <div className="ml-6 space-y-1">
+                                                                            <p className="text-xs text-gray-500">{t('v2pWinIso')}</p>
+                                                                            <input type="text" value={f.virtio_iso_path}
+                                                                                onChange={e => setVmwareMigrateForm(x => ({...x, virtio_iso_path: e.target.value}))}
+                                                                                placeholder={t('v2pWinIsoPath')} className={field} data-v2p-virtio-iso />
+                                                                        </div>
+                                                                    )}
+                                                                    <label className={`flex items-start gap-2 ${block ? 'opacity-60' : 'cursor-pointer'}`}>
+                                                                        <input type="checkbox" checked={!block && f.two_stage_boot !== false} disabled={!!block}
+                                                                            onChange={e => setVmwareMigrateForm(x => ({...x, two_stage_boot: e.target.checked ? null : false}))}
+                                                                            className="rounded mt-0.5" data-v2p-two-stage />
+                                                                        <span className="flex-1 min-w-0">
+                                                                            <span className="text-sm text-gray-200">{t('v2pTwoStage')}</span>
+                                                                            <span className="block text-xs text-gray-400 mt-1">{block ? t(block) : t('v2pTwoStageDesc')}</span>
+                                                                        </span>
+                                                                    </label>
+                                                                    <details className="border-t border-proxmox-border pt-2" data-v2p-guest-prep-section>
+                                                                        <summary className="text-xs font-medium text-gray-400 cursor-pointer hover:text-gray-300">
+                                                                            {t('v2pGuestPrepSection')}
+                                                                            {f.guest_prep && <span className="text-emerald-400 ml-1">({t('enabled')})</span>}
+                                                                        </summary>
+                                                                        <div className="mt-2 ml-4 space-y-2">
+                                                                            <label className={`flex items-start gap-2 ${running || f.guest_prep ? 'cursor-pointer' : 'opacity-60'}`}>
+                                                                                <input type="checkbox" checked={!!f.guest_prep} disabled={!running && !f.guest_prep}
+                                                                                    onChange={e => { setV2pGuestLogin(null); setVmwareMigrateForm(x => ({...x, guest_prep: e.target.checked, ...(e.target.checked ? {} : {guest_user: '', guest_password: ''})})); }}
+                                                                                    className="rounded mt-0.5" data-v2p-guest-prep />
+                                                                                <span className="flex-1 min-w-0">
+                                                                                    <span className="text-sm text-gray-200">{t('v2pGuestPrep')}</span>
+                                                                                    <span className="block text-xs text-gray-400 mt-1">{running ? t('v2pGuestPrepDesc') : t('v2pGuestPrepOff')}</span>
+                                                                                </span>
+                                                                            </label>
+                                                                            {f.guest_prep && (
+                                                                                <div className="ml-6 space-y-2">
+                                                                                    <div className="grid grid-cols-2 gap-2">
+                                                                                        <div>
+                                                                                            <label className="text-xs text-gray-500 mb-1 block">{t('v2pGuestUser')}</label>
+                                                                                            <input type="text" autoComplete="off" spellCheck={false} value={f.guest_user}
+                                                                                                onChange={e => { setV2pGuestLogin(null); setVmwareMigrateForm(x => ({...x, guest_user: e.target.value})); }}
+                                                                                                className={field} data-v2p-guest-user />
+                                                                                        </div>
+                                                                                        <div>
+                                                                                            <label className="text-xs text-gray-500 mb-1 block">{t('v2pGuestPassword')}</label>
+                                                                                            <input type="password" autoComplete="off" value={f.guest_password}
+                                                                                                onChange={e => { setV2pGuestLogin(null); setVmwareMigrateForm(x => ({...x, guest_password: e.target.value})); }}
+                                                                                                className={field} data-v2p-guest-password />
+                                                                                        </div>
+                                                                                    </div>
+                                                                                    <p className="text-xs text-gray-500">{t('v2pGuestUserHint')} {t('v2pGuestLoginNotStored')}</p>
+                                                                                    <div className="flex flex-wrap items-center gap-2">
+                                                                                        <button type="button" onClick={checkV2pGuestLogin} disabled={!f.guest_user || !f.guest_password || !!lg?.busy}
+                                                                                            className="px-2 py-1 rounded bg-proxmox-dark border border-proxmox-border text-gray-300 text-xs disabled:opacity-50" data-v2p-guest-login-check>
+                                                                                            {lg?.busy ? t('v2pGuestLoginChecking') : t('v2pGuestLoginCheck')}
+                                                                                        </button>
+                                                                                        {lg && !lg.busy && (
+                                                                                            <span className={`text-xs ${lg.ok ? 'text-green-400' : 'text-red-300'}`} data-v2p-guest-login-result>
+                                                                                                {lg.ok ? t('v2pGuestLoginOk') : `${t('v2pGuestLoginFailed')}${lg.error ? `: ${lg.error}` : ''}`}
+                                                                                            </span>
+                                                                                        )}
+                                                                                    </div>
+                                                                                </div>
+                                                                            )}
+                                                                            <div className="flex flex-wrap items-center gap-2 pt-1">
+                                                                                <button type="button" onClick={async () => { if (!(await v2pDownloadPrepScript(authFetch))) addToast(t('v2pGuestPrepScriptFailed'), 'error'); }}
+                                                                                    className="flex items-center gap-1.5 px-2 py-1 rounded bg-proxmox-dark border border-proxmox-border text-gray-300 hover:text-white text-xs" data-v2p-guest-prep-script>
+                                                                                    <Icons.Download /> {t('v2pGuestPrepScript')}
+                                                                                </button>
+                                                                                <span className="text-xs text-gray-500 min-w-0 flex-1">{t('v2pGuestPrepScriptDesc')}</span>
+                                                                            </div>
+                                                                        </div>
+                                                                    </details>
                                                                 </div>
-                                                                {vmwareMigrateForm.install_virtio_drivers && (
-                                                                    <div className="mt-2 pl-6">
-                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('virtioIsoPath') || 'virtio-win.iso path on node'}</label>
-                                                                        <input type="text"
-                                                                            value={vmwareMigrateForm.virtio_iso_path}
-                                                                            onChange={e => setVmwareMigrateForm(f => ({...f, virtio_iso_path: e.target.value}))}
-                                                                            placeholder="/var/lib/vz/template/iso/virtio-win.iso (default)"
-                                                                            className="w-full px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-xs" />
-                                                                    </div>
-                                                                )}
-                                                                {vmwareMigrateForm.install_virtio_drivers && vmwareMigrateForm.transfer_mode === 'sshfs_boot' && (
-                                                                    <div className="mt-2 pl-6 p-2 rounded border border-yellow-500/40" style={{background:'rgba(234,179,8,0.07)'}}>
-                                                                        <p className="text-xs text-yellow-300 leading-snug">
-                                                                            ⚠ {t('virtioSshfsBootWarn') || 'Live-mirror mode boots the VM before disks are settled — offline driver injection would corrupt the running NTFS. Pre-staging is skipped here. Use offline / auto / snapshot_zero for pre-stage, or install drivers post-boot from the mounted virtio-win.iso.'}
-                                                                        </p>
-                                                                    </div>
-                                                                )}
-                                                            </div>
+                                                                );
+                                                            })()}
 
 
                                                             {/* NS Apr 2026 — OpenCollective awareness banner. Subtle slate card, kein Popup,
@@ -31122,8 +31420,10 @@
                                                                 ) : (
                                                                     <button
                                                                         onClick={() => startVmwareMigration(vmwareSelectedVm)}
-                                                                        disabled={!vmwareMigrateForm.target_cluster || !vmwareMigrateForm.target_node || !vmwareMigrateForm.target_storage || !vmwareMigrateForm.esxi_password || !vmwareMigrateForm.oc_acknowledge || vmwareMigrateLoading || v2pReviewLoading || !v2pReview?.ok || !v2pReviewIsCurrent()}
-                                                                        title={!vmwareMigrateForm.oc_acknowledge ? (t('v2pSupportAckRequired') || 'Bitte den Hinweis kurz bestätigen') : (!v2pReviewIsCurrent() ? t('v2pReviewStale') : '')}
+                                                                        disabled={!vmwareMigrateForm.target_cluster || !vmwareMigrateForm.target_node || !vmwareMigrateForm.target_storage || !vmwareMigrateForm.esxi_password || !vmwareMigrateForm.oc_acknowledge || vmwareMigrateLoading || v2pReviewLoading || !v2pReview?.ok || !v2pReviewIsCurrent()
+                                                                            || (vmwareMigrateForm.guest_prep && (!vmwareMigrateForm.guest_user || !vmwareMigrateForm.guest_password))}
+                                                                        title={!vmwareMigrateForm.oc_acknowledge ? (t('v2pSupportAckRequired') || 'Bitte den Hinweis kurz bestätigen') : (!v2pReviewIsCurrent() ? t('v2pReviewStale')
+                                                                            : (vmwareMigrateForm.guest_prep && (!vmwareMigrateForm.guest_user || !vmwareMigrateForm.guest_password)) ? t('v2pGuestPrepNeedsLogin') : '')}
                                                                         className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
                                                                         {vmwareMigrateLoading ? t('starting') : t('xhmStartMigration')}
                                                                     </button>
@@ -31506,6 +31806,7 @@
                                                                             </div>
                                                                             <div className="flex items-center gap-3">
                                                                                 {m.total_downtime_seconds != null && <span className="text-xs text-gray-500">{t('downtime')}: {m.total_downtime_seconds}s</span>}
+                                                                                {m.two_stage?.state === 'kept_sata' && <span data-v2p-kept-sata title={m.two_stage.why || ''} className="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-500/20 text-yellow-300">{t('v2pBadgeKeptSata')}</span>}
                                                                                 {(m.warnings || []).length > 0 && <span data-v2p-warnings title={m.warnings.join('\n')} className="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-500/20 text-yellow-300 flex items-center gap-1"><Icons.AlertTriangle className="w-3 h-3" />{t('migrationWarnings')}: {m.warnings.length}</span>}
                                                                                 <span className={`px-2 py-0.5 rounded text-xs font-semibold ${m.status === 'completed' ? 'bg-green-500/20 text-green-400' : m.status === 'failed' ? 'bg-red-500/20 text-red-400' : m.status === 'cancelled' ? 'bg-gray-500/20 text-gray-400' : m.status === 'interrupted' ? 'bg-yellow-500/20 text-yellow-300' : 'bg-blue-500/20 text-blue-400'}`}>{m.status}</span>
                                                                             </div>
@@ -31588,6 +31889,7 @@
                                                                           fallback={vmwareMigrationDetail.log} authFetch={authFetch} t={t} />
                                                         {vmwareMigrationDetail.error && <div className="p-3 bg-red-500/10 border-t border-red-500/20 text-red-400 text-xs">{t('error')}: {vmwareMigrationDetail.error}</div>}
                                                         {vmwareMigrationDetail.status === 'completed' && <div className="p-3 bg-green-500/10 border-t border-green-500/20 text-green-400 text-xs">✓ {t('migrationCompleted')} VMID: {vmwareMigrationDetail.proxmox_vmid}{vmwareMigrationDetail.total_downtime_seconds ? ` - ${t('downtime')}: ${vmwareMigrationDetail.total_downtime_seconds}s` : ''}</div>}
+                                                        <V2pWinResult m={vmwareMigrationDetail} t={t} />
                                                         {/* LW Nov 2026 - what the run left undone, e.g. VirtIO drivers not injected (#1245) */}
                                                         {(vmwareMigrationDetail.warnings || []).length > 0 && (
                                                             <div data-v2p-warnings className="p-3 bg-yellow-500/10 border-t border-yellow-500/20 text-yellow-300 text-xs space-y-1">
