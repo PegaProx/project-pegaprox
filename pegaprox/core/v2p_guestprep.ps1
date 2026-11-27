@@ -163,13 +163,28 @@ function Initialize-WorkDir {
     }
     if (-not (Test-Path -LiteralPath $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null }
     $rc1 = Invoke-Native 'icacls.exe' @($WorkDir, '/setowner', ('*' + $SID_ADMINS), '/T', '/C', '/Q')
+    # MK Nov 2026 - the grants on the folder only, the files inherit them (/reset). With /T the same
+    # line took every file's inherited entries and granted nothing back, as (OI)(CI) means nothing
+    # on a file: each file was left with an empty ACL, and at the first boot neither the task
+    # (SYSTEM) could read firstboot.cmd nor the guest agent firstboot.json.
     $rc2 = Invoke-Native 'icacls.exe' @($WorkDir, '/inheritance:r', '/grant:r', ('*{0}:(OI)(CI)F' -f $SID_SYSTEM),
-                                        ('*{0}:(OI)(CI)F' -f $SID_ADMINS), '/T', '/C', '/Q')
-    if ($rc1 -ne 0 -or $rc2 -ne 0) { throw ("icacls could not lock {0} (exit codes {1}, {2})" -f $WorkDir, $rc1, $rc2) }
+                                        ('*{0}:(OI)(CI)F' -f $SID_ADMINS), '/C', '/Q')
+    $rc3 = 0
+    if (Get-ChildItem -LiteralPath $WorkDir -Force | Select-Object -First 1) {
+        $rc3 = Invoke-Native 'icacls.exe' @((Join-Path $WorkDir '*'), '/reset', '/T', '/C', '/Q')
+    }
+    if ($rc1 -ne 0 -or $rc2 -ne 0 -or $rc3 -ne 0) {
+        throw ("icacls could not lock {0} (exit codes {1}, {2}, {3})" -f $WorkDir, $rc1, $rc2, $rc3)
+    }
     $acl = Get-Acl -LiteralPath $WorkDir
     foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
         $sid = $rule.IdentityReference.Value
         if ($sid -ne $SID_ADMINS -and $sid -ne $SID_SYSTEM) { throw ("{0} still grants access to {1}" -f $WorkDir, $sid) }
+    }
+    foreach ($f in Get-ChildItem -LiteralPath $WorkDir -Force -Recurse) {
+        $sids = @((Get-Acl -LiteralPath $f.FullName).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+                  ForEach-Object { $_.IdentityReference.Value })
+        if ($sids -notcontains $SID_SYSTEM) { throw ("{0} cannot be read by SYSTEM after the lock" -f $f.FullName) }
     }
 }
 

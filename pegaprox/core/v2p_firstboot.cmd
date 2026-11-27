@@ -30,9 +30,13 @@ for %%I in ("%W%") do set "WATTR=%%~aI"
 if not "!WATTR:l=!"=="!WATTR!" exit /b 1
 
 rem the folder belongs to SYSTEM and the Administrators before anything in it runs (by SID),
-rem without the grants a file written on Linux gets (Everyone) or a user of the guest left
-icacls "%W%" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /T /C /Q >nul 2>&1
-icacls "%W%" /remove:g *S-1-1-0 *S-1-5-11 *S-1-5-32-545 *S-1-5-4 /T /C /Q >nul 2>&1
+rem without the grants a file written on Linux gets (Everyone) or a user of the guest left.
+rem MK Nov 2026 - the grants on the folder only, every file takes them over (/reset): with /T
+rem a file lost what it inherited and got nothing back from (OI)(CI), an empty ACL that kept
+rem SYSTEM out of this script and the guest agent out of firstboot.json
+icacls "%W%" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /C /Q >nul 2>&1
+icacls "%W%" /remove:g *S-1-1-0 *S-1-5-11 *S-1-5-32-545 *S-1-5-4 /C /Q >nul 2>&1
+icacls "%W%\*" /reset /T /C /Q >nul 2>&1
 icacls "%W%" /setowner *S-1-5-32-544 /T /C /Q >nul 2>&1
 
 if not exist "%W%\firstboot-data.cmd" goto :nodata
