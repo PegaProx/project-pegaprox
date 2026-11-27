@@ -706,3 +706,65 @@ def test_an_address_windows_refuses_never_reaches_the_first_boot(ip):
     with pytest.raises(ValueError):
         nh.data_cmd('r1', 20348, [dict(a, ipv4=[{'ip': ip, 'prefix': 24}])])
     assert not nh.host_ip(ip) and nh.host_ip('10.0.0.5')
+
+
+# --------------------------------------------------------------------------- data disks online
+
+# Seen on Server 2025: after the migration the data disk was offline and read-only, its drive
+# letter gone. Windows Server keeps a disk it sees for the first time offline (SAN policy
+# OfflineShared), and on Proxmox VE every data disk sits on a new controller.
+
+def _san(h, cs='ControlSet001'):
+    return h.value(h.child(h.root(), cs, 'Services', 'partmgr', 'Parameters'), 'SanPolicy')
+
+
+@pytest.mark.parametrize('was', [None, 2, 3])
+def test_the_san_policy_becomes_online_all_in_every_control_set(was):
+    spec = system_spec()
+    spec['Select']['@Current'] = 1
+    spec['Select']['@Default'] = 2
+    spec['ControlSet002'] = system_spec()['ControlSet001']
+    if was is not None:
+        for cs in ('ControlSet001', 'ControlSet002'):
+            spec[cs]['Services']['partmgr'] = {'Parameters': {'@SanPolicy': was}}
+    h = hv(spec, write=True)
+    assert nh.san_online(h) == was
+    assert _san(h, 'ControlSet001') == 1 and _san(h, 'ControlSet002') == 1
+
+
+def test_the_staging_sets_the_san_policy_and_reports_what_it_was(volume):
+    volume.specs['SYSTEM']['ControlSet001']['Services']['partmgr'] = {'Parameters': {'@SanPolicy': 2}}
+    got = _stage(volume)
+    assert got['san_policy'] == 2
+    assert _san(nh.Hive(FakeHivex(volume.trees['SYSTEM']))) == 1
+
+
+class _LogTask:
+    def __init__(self):
+        self.lines, self.warnings = [], []
+
+    def log(self, line):
+        self.lines.append(line)
+
+
+@pytest.mark.parametrize('was,said', [(2, 'SAN policy OfflineShared set to OnlineAll'),
+                                      (None, 'SAN policy the default of the edition set to OnlineAll'),
+                                      (1, None)])
+def test_the_migration_log_says_what_the_san_policy_was(monkeypatch, was, said):
+    from pegaprox.core import v2p_winprep
+    task = _LogTask()
+    monkeypatch.setattr(v2p_winprep, 'state', lambda t: {})
+    out = 'WINPREP ' + json.dumps({'build': 26100, 'product': 'Windows Server 2025', 'adapters': [],
+                                   'service': ['ControlSet001'], 'san_policy': was}) + '\nWINPREP_OK\n'
+    assert v2p_winprep.parse_result(task, out) is True
+    hits = [l for l in task.lines if 'SAN policy' in l]
+    assert (hits and said in hits[0]) if said else not hits, task.lines
+
+
+def test_the_in_guest_script_sets_the_san_policy_too():
+    ps = (pathlib.Path(nh.__file__).parent / 'v2p_guestprep.ps1').read_text(encoding='ascii')
+    step = ps.split("Invoke-Step 'data disks online on the new controller'", 1)[1].split('-BestEffort', 1)[0]
+    assert r"CreateSubKey('SYSTEM\CurrentControlSet\Services\partmgr\Parameters')" in step
+    assert "SetValue('SanPolicy', 1, [Microsoft.Win32.RegistryValueKind]::DWord)" in step
+    # before the first boot task is registered: stage 1 ends with it
+    assert ps.index("'data disks online on the new controller'") < ps.index("Invoke-Step 'first boot task'")

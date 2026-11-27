@@ -233,6 +233,12 @@ def parse_result(task, out):
                      f"{'uninstalled at the first boot' if got.get('tools_code') else 'no uninstall entry found, they stay'}"
                      f"; {got.get('old_devices', 0)} old network device(s) to remove; first boot service in "
                      f"{', '.join(got.get('service') or []) or 'no control set'}")
+            if 'san_policy' in got and got['san_policy'] != 1:
+                from pegaprox.core.v2p_winprep_node import SAN_POLICIES
+                was = SAN_POLICIES.get(got['san_policy'], f"{got['san_policy']}") if got['san_policy'] is not None \
+                    else 'the default of the edition'
+                task.log(f"[Windows]   SAN policy {was} set to OnlineAll: the data disks come up online on their "
+                         f"new controller, not offline and read-only")
             if got.get('moved_aside'):
                 _result_warning(task, f"Windows: C:\\ProgramData\\{WORK_DIR} of the guest was there already and not "
                                       f"locked to SYSTEM and the Administrators (made by a user of the guest, or a link). "

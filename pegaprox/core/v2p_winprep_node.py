@@ -651,6 +651,29 @@ def register_service(sys_hv):
     return names
 
 
+# Windows Server keeps a disk it sees for the first time offline and read-only (SAN policy
+# OfflineShared, the default of the server editions); on Proxmox VE every data disk sits on a
+# new controller. 1 = OnlineAll, the default of the client editions
+SAN_ONLINE_ALL = 1
+SAN_POLICIES = {1: 'OnlineAll', 2: 'OfflineShared', 3: 'OfflineAll', 4: 'OfflineInternal'}
+
+
+def san_online(sys_hv):
+    """SanPolicy OnlineAll in each control set Select names. Returns the value it had in the
+    first one, None where none was set (then the edition's default applied).
+
+    MK Nov 2026 - seen on Server 2025: the data disk came up offline and read-only after the
+    migration, its drive letter gone. Left at OnlineAll: a first boot that falls back to SATA
+    moves the data disks again, and they would be new disks once more."""
+    old = None
+    for i, name in enumerate(control_sets(sys_hv)):
+        par = sys_hv.ensure(sys_hv.child(sys_hv.root(), name), 'Services', 'partmgr', 'Parameters')
+        if i == 0:
+            old = sys_hv.value(par, 'SanPolicy')
+        sys_hv.set(par, 'SanPolicy', REG_DWORD, SAN_ONLINE_ALL)
+    return old
+
+
 # --------------------------------------------------------------------------- on the node
 
 def _guest_netconfig(path, run, released=False):
@@ -738,6 +761,7 @@ def stage(root, windows, run, firstboot, pairs, driver_msi='', agent_msi='', uni
         raise
     sys_rw = Hive.open(sys_path, write=True)
     sets = register_service(sys_rw)
+    san_was = san_online(sys_rw)
     sys_rw.commit()
     return {'build': ver['build'], 'product': ver['product'], 'server': ver['server'],
             'source': netconfig['source'], 'tools_code': bool(code), 'locked': True, 'service': sets,
@@ -745,7 +769,8 @@ def stage(root, windows, run, firstboot, pairs, driver_msi='', agent_msi='', uni
             'adapters': [{'mac': a['mac'], 'target_mac': a.get('target_mac') or '',
                           'ipv4': [f"{x['ip']}/{x['prefix']}" for x in a['ipv4']],
                           'gateway': [g['ip'] for g in a['gateway']], 'desc': a['desc']} for a in moved],
-            'stale': len(stale), 'old_devices': len(devs), 'files': [os.path.basename(p) for p in written]}
+            'stale': len(stale), 'old_devices': len(devs), 'files': [os.path.basename(p) for p in written],
+            'san_policy': san_was}
 
 
 def main(argv=None):

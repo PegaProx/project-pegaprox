@@ -509,6 +509,17 @@ function Invoke-Stage1($Cfg, [int]$Build) {
         'Start 0: {0}' -f ($done -join ', ')
     } | Out-Null
 
+    # Windows Server keeps a disk on a new controller offline and read-only (SAN policy
+    # OfflineShared); every data disk is on a new controller under KVM
+    Invoke-Step 'data disks online on the new controller' {
+        $k = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey('SYSTEM\CurrentControlSet\Services\partmgr\Parameters')
+        try {
+            $was = $k.GetValue('SanPolicy')
+            $k.SetValue('SanPolicy', 1, [Microsoft.Win32.RegistryValueKind]::DWord)
+        } finally { $k.Close() }
+        if ($null -eq $was) { 'SAN policy OnlineAll (was the default of the edition)' } else { 'SAN policy OnlineAll (was {0})' -f $was }
+    } -BestEffort | Out-Null
+
     Invoke-Step 'save the static IPv4 configuration' {
         $adapters = Get-Adapters
         Write-JsonFile (Join-Path $WorkDir 'netconfig.json') @{ version = 1; source = 'guest'; run = $Cfg.run; adapters = $adapters }
