@@ -2073,6 +2073,8 @@ def _run_v2p_migration(task):
             vm_state = vmware_mgr.get_vm(task.vm_id)
             is_running = 'data' in vm_state and vm_state['data'].get('power_state') == 'POWERED_ON'
 
+            # MK Nov 2026 - the downtime starts here, a prepared guest releases its address first
+            task._live_down_t0 = time.time() if is_running else None
             if is_running and _source_off_for_cutover(vmware_mgr, pve_mgr, task):
                 # the prepared guest shut itself down
                 try: vmware_mgr.delete_migration_snapshot(task.vm_id)
@@ -2929,6 +2931,7 @@ def _run_v2p_migration(task):
                 task.log("Pre-sync failed (VMDK locked) - switching to QEMU SSH boot")
                 
                 # stop the source on ESXi (MK Nov 2026 - a guest prepared in ESXi shuts itself down)
+                task._live_down_t0 = time.time()
                 if not _source_off_for_cutover(vmware_mgr, pve_mgr, task):
                     task.log("Stopping the source VM on ESXi...")
                     if not _stop_source(vmware_mgr, task, wait=30):
@@ -5317,6 +5320,10 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
                 # Step 5: Resume VM
                 _qm_monitor_cmd(pve_mgr, node, vmid, "cont", timeout=10)
                 paused_for = time.monotonic() - paused_at
+                if getattr(task, '_down_parts', None) is not None:
+                    from pegaprox.core import v2p_twostage
+                    _resumed = time.time()
+                    v2p_twostage.live_downtime(task, 'pivot', _resumed - paused_for, _resumed)
                 
                 if not remaining and pivot_ok:
                     elapsed = time.time() - start_t
@@ -6781,7 +6788,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     1. Deploy SSH key to ESXi
     2. Allocate empty local volumes (target)
     3. Start Proxmox VM with QEMU args pointing to SSH drive (cache=writeback)
-    4. VM boots from SSH - DOWNTIME ENDS (~15-30s total)
+    4. VM boots from SSH; the downtime runs until the guest is up (v2p_twostage.live_started)
     5. Background: drive-mirror copies SSH → local (VM keeps running)
     6. When mirror done: brief stop, reconfig to local disk, restart
     
@@ -7375,7 +7382,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 
                 if vm_st == 'running':
                     vm_running_on_ssh = True
-                    task.log(f"VM {task.proxmox_vmid} STARTED via {boot_method} - DOWNTIME ENDS")
+                    task.log(f"VM {task.proxmox_vmid} STARTED via {boot_method}")
                     task.log(f"(Running on {boot_method}-backed storage with writeback cache)")
                 else:
                     task.log(f"VM failed to stay running (status: {vm_st})")
@@ -7450,7 +7457,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                                         f"/qemu/{task.proxmox_vmid}/status/current")
                                     if st3.json().get('data', {}).get('status') == 'running':
                                         vm_running_on_ssh = True
-                                        task.log(f"VM {task.proxmox_vmid} STARTED via NBD bridge - DOWNTIME ENDS")
+                                        task.log(f"VM {task.proxmox_vmid} STARTED via NBD bridge")
                                     else:
                                         task.log("NBD boot also failed")
                                 except Exception:
@@ -7472,7 +7479,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                                     f"/qemu/{task.proxmox_vmid}/status/current")
                                 if st2.json().get('data', {}).get('status') == 'running':
                                     vm_running_on_ssh = True
-                                    task.log(f"VM {task.proxmox_vmid} STARTED via {boot_method} (retry) - DOWNTIME ENDS")
+                                    task.log(f"VM {task.proxmox_vmid} STARTED via {boot_method} (retry)")
                                 else:
                                     task.log("VM still not running after all retries")
                             except Exception:
@@ -7488,6 +7495,18 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         task.log("Hint: sshfs and sshpass on the node give more transfer options "
                  "(apt-get install --no-install-recommends sshfs sshpass); qemu-img comes with pve-qemu-kvm")
     
+    # MK Nov 2026 - from the stop of a running source (set by the caller) until the guest is up
+    # again, each restart below included; a source that was off has no downtime to count
+    _down_t0 = getattr(task, '_live_down_t0', None)
+
+    def _down_started(key, since, what, report=True):
+        if _down_t0 is not None and since is not None:
+            from pegaprox.core import v2p_twostage
+            v2p_twostage.live_started(pve_mgr, task, key, since, what, report=report)
+
+    if vm_running_on_ssh:
+        _down_started('boot', _down_t0, 'the source stopped')
+
     if not vm_running_on_ssh:
         task.log("Switching to offline mode: copy first, then start VM")
         # Remove SSH/SSHFS args from config -- VM will start with local disks after copy
@@ -7917,6 +7936,9 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             # MK Nov 2026 - asked before the stop, while the guest still answers: the restart
             # below must not boot a Windows guest from VirtIO SCSI that vioscsi did not bind
             _decide_live_boot(vm_running_on_ssh)
+            from pegaprox.core import v2p_twostage
+            v2p_twostage.live_wait(task)
+            _restart_t0 = time.time()
 
             # Graceful shutdown: sync FS, ACPI shutdown, fallback to force stop
             # This prevents filesystem corruption (initramfs on next boot!)
@@ -8004,6 +8026,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}"
                     f"/qemu/{task.proxmox_vmid}/status/start")
                 task.log(f"VM {task.proxmox_vmid} RESTARTED on local storage (full speed)")
+                _down_started('restart', _restart_t0, 'the VM stopped for the switch to its local disks',
+                              report=False)
             except Exception as e:
                 task.log(f"VM start failed: {e}")
             
@@ -8281,6 +8305,9 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         
     elif vm_running_on_ssh:
         task.log("Switching VM from SSH to local storage (brief restart)...")
+        from pegaprox.core import v2p_twostage
+        v2p_twostage.live_wait(task)
+        _restart_t0 = time.time()
         
         # Graceful shutdown to prevent filesystem corruption
         try:
@@ -8502,9 +8529,11 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     f"/qemu/{task.proxmox_vmid}/status/start")
                 if vm_running_on_ssh:
                     task.log(f"VM {task.proxmox_vmid} RESTARTED on local storage (full speed)")
+                    _down_started('restart', _restart_t0, 'the VM stopped for the switch to its local disks',
+                                  report=False)
                 else:
                     task.log(f"VM {task.proxmox_vmid} STARTED on local storage")
-                    task.log("DOWNTIME ENDS")
+                    _down_started('boot', _down_t0, 'the source stopped')
             except Exception as e:
                 task.log(f"VM start failed: {e}")
         else:
@@ -8539,12 +8568,16 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     else:
         _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
     
+    # the guest is up before the run ends (each wait is bounded), so its downtime is in the result
+    from pegaprox.core import v2p_twostage
+    v2p_twostage.live_wait(task)
+    _dt = f" (downtime {task.total_downtime_seconds:.0f}s)" if getattr(task, '_down_parts', None) else ''
     task.set_phase('completed')
     task.log(f"COMPLETED: {task.vm_name} -> VMID {task.proxmox_vmid}")
     if mirror_success:
-        task.log(f"Migration used live storage migration (near-zero downtime)")
+        task.log(f"Migration used live storage migration{_dt}")
     elif vm_running_on_ssh:
-        task.log(f"Migration used {boot_method} boot + importdisk (near-zero downtime)")
+        task.log(f"Migration used {boot_method} boot + importdisk{_dt}")
     else:
         task.log("Migration used offline copy (QEMU SSH not available for this ESXi version)")
 

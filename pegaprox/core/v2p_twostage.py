@@ -24,7 +24,9 @@ The guest commands are fixed argument lists through the guest agent, no shell, n
 
 import re
 import shlex
+import threading
 import time
+from datetime import datetime
 
 FINAL = {'scsi': {'service': 'vioscsi', 'temp': 'scsi30', 'label': 'VirtIO SCSI'},
          'virtio': {'service': 'viostor', 'temp': 'virtio15', 'label': 'VirtIO Block'}}
@@ -384,6 +386,90 @@ def live_switch(pve_mgr, task):
         return 'sata'
     task.log(f'  {svc} is bound and starts at boot: the boot disk is on VirtIO SCSI from the next start on')
     return 'scsi'
+
+
+# MK Nov 2026 - the downtime of Live Mirror, stretch by stretch: from the source stop until the
+# guest is up on Proxmox VE, the pause of the pivot, a restart onto the local disks. It used to
+# end with the start of the VM: a lab run of Windows Server 2025 said so 56s after the source
+# went down, while the guest booted from the ESXi datastore, restarted once for its new devices
+# and had its static addresses back after almost 8 min.
+_down_lock = threading.Lock()
+
+
+def _ended(task):
+    """The run is over without completing: what a watch finds out later is not written into it,
+    the run's history has its last row already"""
+    return getattr(task, 'status', '') in ('failed', 'cancelled')
+
+
+def live_downtime(task, key, since, until):
+    """One stretch of the downtime of Live Mirror, from `since` to `until` (time.time()). The
+    run's downtime is the time the stretches cover together: the pivot can pause a guest whose
+    boot is still being measured, and that pause is in the boot already."""
+    with _down_lock:
+        parts = task.__dict__.setdefault('_down_parts', {})
+        parts[key] = (float(since), max(float(since), float(until)))
+        total, end = 0.0, None
+        for a, b in sorted(parts.values()):
+            if end is None or a > end:
+                total += b - a
+                end = b
+            elif b > end:
+                total += b - end
+                end = b
+        task.total_downtime_seconds = round(total, 1)
+        task.downtime_end = datetime.now()
+
+
+def live_started(pve_mgr, task, key, since, what, report=True):
+    """The VM of Live Mirror has just started after the stop at `since` (time.time()). The
+    stretch until the start is known now; a guest prepared in ESXi has our guest agent, and a
+    thread finds out when it is up: the agent answers and, with report, its first boot task
+    has reported (its static addresses are back then). Other guests are not seen booting, the
+    start ends their stretch. live_wait() joins the threads before the run ends."""
+    started = time.time()
+    if task.downtime_start is None:
+        task.downtime_start = datetime.fromtimestamp(since)
+    live_downtime(task, key, since, started)
+    gp = getattr(task, '_guest_prep', None) or {}
+    if gp.get('state') != 'shut_down':
+        task.log(f'  Downtime {started - since:.0f}s until the VM started after {what}; without the guest '
+                 f'agent of the in-guest preparation its boot is not seen')
+        return
+    task.log(f'  The VM started {started - since:.0f}s after {what}: the downtime runs until Windows is up')
+
+    def found(until, line):
+        # a run that failed meanwhile ends with its error and the figure it had then
+        if not _ended(task):
+            if until is not None:
+                live_downtime(task, key, since, until)
+            task.log(line)
+
+    def watch():
+        from pegaprox.core import v2p_winprep
+        if not agent_ping(pve_mgr, task, AGENT_FIRST_SECONDS):
+            found(None, f'  The guest agent did not answer within {AGENT_FIRST_SECONDS // 60} min of the start: '
+                        f'the downtime after {what} is {started - since:.0f}s or more')
+            return
+        answered = time.time()
+        if report and not v2p_winprep.read_first_boot(pve_mgr, task, FIRSTBOOT_SECONDS):
+            found(answered, f'  Windows answered {answered - since:.0f}s after {what}, its first boot task did not '
+                            f'report: the downtime is that or more')
+            return
+        up = time.time()
+        found(up, f'  Windows is up {up - since:.0f}s after {what}' + (', its first boot task reported' if report else ''))
+
+    from pegaprox.core import ha
+    t = threading.Thread(target=ha.as_job(watch, f'downtime of ESXi migration {task.id}'), daemon=True,
+                         name=f'v2p-downtime-{task.id}')
+    task.__dict__.setdefault('_down_watch', []).append(t)
+    t.start()
+
+
+def live_wait(task):
+    """Join the threads of live_started; each ends within its own waits"""
+    for t in getattr(task, '_down_watch', None) or []:
+        t.join()
 
 
 def _drivers_missing(task):
