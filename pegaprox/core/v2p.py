@@ -7505,6 +7505,9 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             v2p_twostage.live_started(pve_mgr, task, key, since, what, report=report)
 
     if vm_running_on_ssh:
+        # the guest runs from the disks of the source now: what it writes lands there, its first
+        # boot on Proxmox VE included (v2p_guestprep.roll_back keeps such a source off)
+        task._source_disks_used = True
         _down_started('boot', _down_t0, 'the source stopped')
 
     if not vm_running_on_ssh:

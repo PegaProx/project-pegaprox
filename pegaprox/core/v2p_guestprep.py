@@ -743,6 +743,17 @@ def roll_back(vmware_mgr, pve_mgr, task):
         return
     st['rolled_back'] = True
     from pegaprox.core import v2p
+    if getattr(task, '_source_disks_used', False):
+        # MK Nov 2026 - Live Mirror booted the guest from the source's own disks. On a lab run the
+        # source powered on again after that came up without network and guest tools: the first
+        # boot on Proxmox VE had cleared its addresses, removed its ESXi adapters and the first
+        # boot task that would have put them back on ESXi.
+        v2p._result_warning(task, "Live Mirror started the guest on Proxmox VE from the disks of the source VM: "
+                                  "what it wrote, its first boot there included, is on those disks now. The source "
+                                  "VM stays off on ESXi: powered on there after that first boot it has no network "
+                                  "and no guest tools. Look at the VM on Proxmox VE first; a backup of the source "
+                                  "is the way back to ESXi.")
+        return
     try:
         target = v2p._pve_vm_status(pve_mgr, task.target_node, task.proxmox_vmid) if (pve_mgr and task.proxmox_vmid) else None
     except Exception:

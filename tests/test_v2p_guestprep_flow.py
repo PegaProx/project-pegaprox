@@ -405,6 +405,19 @@ def test_the_source_stays_off_when_the_target_may_run(lab, monkeypatch):
     assert lab.esxi.actions == [] and any('stays off' in line for line in lab.task.log_lines)
 
 
+def test_a_source_whose_disks_ran_the_guest_on_proxmox_stays_off(lab, monkeypatch):
+    # Live Mirror boots the guest from the source's own disks. On a lab run the source powered
+    # on again after that had neither network nor guest tools: the first boot on Proxmox VE had
+    # removed its ESXi adapters and the first boot task that would have put them back on ESXi.
+    _released(lab, monkeypatch)
+    lab.task._source_disks_used = True
+    gp.roll_back(lab.esxi, _Pve(running=False), lab.task)
+    assert lab.esxi.actions == []
+    assert any('from the disks of the source VM' in w and 'stays off on ESXi' in w and 'no network' in w
+               for w in lab.task.warnings), lab.task.warnings
+    assert not any('puts its address back' in line for line in lab.task.log_lines)
+
+
 def test_nothing_is_rolled_back_when_the_guest_was_never_released(lab, monkeypatch):
     _prepared(lab)
     gp.roll_back(lab.esxi, _Pve(running=False), lab.task)

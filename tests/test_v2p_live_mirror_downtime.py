@@ -183,6 +183,8 @@ def test_a_live_mirror_run_ends_with_its_downtime(monkeypatch):
     assert any(ln.endswith(f'Migration used qemu-ssh boot + importdisk (downtime '
                            f'{r.task.total_downtime_seconds:.0f}s)') for ln in r.task.log_lines), r.task.log_lines[-5:]
     assert set(r.task._down_parts) == {'boot', 'restart'}
+    # the guest ran from the source's disks: a rollback keeps that source off (v2p_guestprep.roll_back)
+    assert r.task._source_disks_used is True
 
 
 def test_a_source_that_was_off_has_no_downtime(monkeypatch):
