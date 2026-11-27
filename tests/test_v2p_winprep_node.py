@@ -761,6 +761,30 @@ def test_the_migration_log_says_what_the_san_policy_was(monkeypatch, was, said):
     assert (hits and said in hits[0]) if said else not hits, task.lines
 
 
+@pytest.mark.parametrize('code,prep,nic,said', [
+    (True, None, 'virtio', 'ESXi guest tools: uninstalled at the first boot'),
+    (True, None, 'vmxnet3', 'ESXi guest tools: stay installed, the VM keeps a device that runs on their drivers'),
+    # stage 2 in the guest uninstalled them before its shutdown: nothing is left to find
+    (False, 'shut_down', 'virtio', 'ESXi guest tools: no uninstall entry left, the in-guest preparation '
+                                   'uninstalled them before its shutdown'),
+    (False, 'aborted', 'virtio', 'ESXi guest tools: no uninstall entry found, they stay'),
+    (False, None, 'virtio', 'ESXi guest tools: no uninstall entry found, they stay'),
+])
+def test_the_migration_log_says_what_becomes_of_the_guest_tools(monkeypatch, code, prep, nic, said):
+    from pegaprox.core import v2p_winprep
+    task = _LogTask()
+    task._net_model = nic
+    if prep:
+        task._guest_prep = {'state': prep}
+    monkeypatch.setattr(v2p_winprep, 'state', lambda t: {})
+    out = 'WINPREP ' + json.dumps({'build': 26100, 'product': 'Windows Server 2025', 'adapters': [],
+                                   'service': ['ControlSet001'], 'tools_code': code,
+                                   'source': 'guest' if prep else 'offline'}) + '\nWINPREP_OK\n'
+    assert v2p_winprep.parse_result(task, out) is True
+    hits = [ln for ln in task.lines if 'ESXi guest tools:' in ln]
+    assert len(hits) == 1 and said + ';' in hits[0], task.lines
+
+
 def test_the_in_guest_script_sets_the_san_policy_too():
     ps = (pathlib.Path(nh.__file__).parent / 'v2p_guestprep.ps1').read_text(encoding='ascii')
     step = ps.split("Invoke-Step 'data disks online on the new controller'", 1)[1].split('-BestEffort', 1)[0]

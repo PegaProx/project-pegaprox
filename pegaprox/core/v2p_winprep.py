@@ -229,8 +229,16 @@ def parse_result(task, out):
                 task.log("[Windows]   no adapter with a static IPv4 address, nothing to carry over")
             if got.get('stale'):
                 task.log(f"[Windows]   {got['stale']} static adapter(s) of hardware the guest no longer has stay as they are")
-            task.log(f"[Windows]   ESXi guest tools: "
-                     f"{'uninstalled at the first boot' if got.get('tools_code') else 'no uninstall entry found, they stay'}"
+            # stage 2 in the guest uninstalls them before it shuts down: then no entry is left
+            # here, and they are gone rather than staying
+            if got.get('tools_code'):
+                tools = 'uninstalled at the first boot' if uninstall_tools_ok(task) else \
+                    'stay installed, the VM keeps a device that runs on their drivers'
+            elif (getattr(task, '_guest_prep', None) or {}).get('state') == 'shut_down':
+                tools = 'no uninstall entry left, the in-guest preparation uninstalled them before its shutdown'
+            else:
+                tools = 'no uninstall entry found, they stay'
+            task.log(f"[Windows]   ESXi guest tools: {tools}"
                      f"; {got.get('old_devices', 0)} old network device(s) to remove; first boot service in "
                      f"{', '.join(got.get('service') or []) or 'no control set'}")
             if 'san_policy' in got and got['san_policy'] != 1:
