@@ -1647,9 +1647,12 @@ def _run_v2p_migration(task):
                 f'Run apt-get install sshfs on the node, or allow package installs.')
             return
         else:
+            # MK Nov 2026 - "the log above has the apt-get output" was wrong where apt-get gave
+            # no answer in time (a node without network): the log line above says which it was
             task.set_phase('failed',
-                f'sshfs not available on {task.target_node} and auto-install failed (the log above '
-                f'has the apt-get output). Run manually: apt-get install sshfs')
+                f'sshfs is not installed on {task.target_node} and could not be installed there (the line '
+                f'above says why). Run apt-get install sshfs on the node, then start the migration again; '
+                f'no VM was created on Proxmox VE.')
             return
 
         # Also ensure sshpass is available (needed for SCP fallback). Best-effort.
@@ -8925,6 +8928,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     # the HTTPS download that had just worked. Such a node gets a key on ESXi for the copy, as
     # the Live Mirror does; without that too, the copy stays on HTTPS.
     ssh_key = None
+    over_ssh = False
     if ((not src_running) or prefer_ssh) and test_bytes > 0:
         rc_sp, _o, _e = _pve_node_exec(pve_mgr, task.target_node,
             "command -v sshpass >/dev/null 2>&1", timeout=15)
@@ -8933,7 +8937,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
         if rc_sp == 0 or ssh_key:
             task.log(f"  HTTPS test OK but VM is offline - using direct SSH dd pipe (faster)"
                      f"{', logged in with a temporary key (no sshpass on the node)' if ssh_key else ''}.")
-            test_bytes = 0  # force METHOD 2
+            over_ssh = True  # METHOD 2
         else:
             task.log("  HTTPS test OK; the node has no sshpass and no key could be put on ESXi, "
                      "so the copy stays on HTTPS")
@@ -8942,7 +8946,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
         # ================================================================
         # METHOD 1: HTTPS full download (if test download got data)
         # ================================================================
-        if test_bytes > 0:
+        if test_bytes > 0 and not over_ssh:
             task.log(f"  HTTPS test OK ({test_bytes}B) - full download {flat_size_gb:.1f} GB...")
             dd_log = f"/tmp/v2p-{task.id}-dl-{disk_index}.log"
 
@@ -8978,7 +8982,9 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
                 if err_tail:
                     for line in err_tail.splitlines()[-6:]:
                         task.log(f"    HTTPS stderr: {line[:200]}")
-        else:
+        elif not over_ssh:
+            # MK Nov 2026 - only when the test really got nothing: the switch to the dd pipe
+            # above said "HTTPS test OK", and this line after it read as its contradiction
             task.log(f"  HTTPS test 0 bytes - skipping HTTPS full download")
 
         # ================================================================
