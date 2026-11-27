@@ -3716,13 +3716,24 @@ def _inject_virtio_drivers(pve_mgr, task):
         "echo 'blkid output:'; for p in ${LOOP}p*; do blkid \"$p\" 2>/dev/null; done; "
         "exit 5; }\n"
         "echo \"WIN_PART=$WIN_PART\"\n"
-        # NS Apr 2026 — Windows guests almost always leave NTFS in "Fast Startup
-        # hibrid hibernated" state after a "clean" shutdown (Win10/11 default).
-        # ntfsfix clears the journal + dirty bit so ntfs-3g will RW-mount.
-        # Safe here: VM is offline, Windows recovers on next boot anyway.
-        "ntfsfix \"$WIN_PART\" >/tmp/ntfsfix.log 2>&1 || echo \"ntfsfix exit=$?\"\n"
-        "mount -t ntfs-3g -o rw,recover,remove_hiberfile \"$WIN_PART\" \"$WIN_MNT\" || "
-        "{ echo 'NTFS_MOUNT_FAILED'; cat /tmp/ntfsfix.log; exit 6; }\n"
+        # MK Nov 2026 - ntfsfix only for a volume ntfs-3g will not open for writing as it is.
+        # ntfsfix resets the journal and sets the dirty flag, so Windows checks the volume at
+        # its next boot; run on every volume, it left a C: Windows had shut down cleanly with
+        # "requires an Online Scan" after each migration. norecover: ntfs-3g would clear an
+        # unclean journal on its own and set no flag. A volume left by Fast Startup or a
+        # crash (ntfs-3g refuses it or mounts it read only) still goes through ntfsfix.
+        "NTFS_FIX=''\n"
+        "if mount -t ntfs-3g -o rw,norecover,remove_hiberfile \"$WIN_PART\" \"$WIN_MNT\" 2>\"$TMP/ntfs.err\"; then\n"
+        "  if touch \"$WIN_MNT/.pegaprox-rw-test\" 2>/dev/null; then rm -f \"$WIN_MNT/.pegaprox-rw-test\"; "
+        "else umount \"$WIN_MNT\"; NTFS_FIX=ro; fi\n"
+        "else NTFS_FIX=refused; fi\n"
+        "if [ -n \"$NTFS_FIX\" ]; then\n"
+        "  WHY=$(grep -v '^[[:space:]]*$' \"$TMP/ntfs.err\" | head -2 | tr '\\n' ' ' | cut -c1-240)\n"
+        "  ntfsfix \"$WIN_PART\" >\"$TMP/ntfsfix.log\" 2>&1 || echo \"ntfsfix exit=$?\"\n"
+        "  mount -t ntfs-3g -o rw,recover,remove_hiberfile \"$WIN_PART\" \"$WIN_MNT\" || "
+        "{ echo 'NTFS_MOUNT_FAILED'; cat \"$TMP/ntfsfix.log\"; exit 6; }\n"
+        "  echo \"NTFS_CHECK_SCHEDULED ${WHY:-ntfs-3g mounted it read only}\"\n"
+        "else echo 'NTFS_CLEAN'; fi\n"
         # Sanity check that we actually got RW
         "touch \"$WIN_MNT/.pegaprox-rw-test\" 2>/dev/null && rm -f \"$WIN_MNT/.pegaprox-rw-test\" || "
         "{ echo 'NTFS_NOT_RW'; exit 6; }\n"
@@ -4005,6 +4016,19 @@ def _inject_virtio_drivers(pve_mgr, task):
                 task.log(f"[VirtIO] {line.strip()}")
                 if marker not in _multi:
                     break
+    for line in out_str.splitlines():
+        s = line.strip()
+        if s == 'NTFS_CLEAN':
+            task.log("[VirtIO] Windows volume closed cleanly, written as it was (no check at the next boot)")
+            break
+        if s.startswith('NTFS_CHECK_SCHEDULED'):
+            why = s[len('NTFS_CHECK_SCHEDULED'):].strip()
+            task.log(f"[VirtIO] Windows volume was not closed cleanly ({why}): ntfsfix reset its "
+                     "journal, Windows checks the volume at its next boot")
+            _result_warning(task, "Windows had not closed its volume cleanly (Fast Startup, hibernation "
+                                  "or a power off): it was repaired with ntfsfix, and Windows checks it "
+                                  "at the first boot")
+            break
 
     if rc == 0 and 'INJECTION_OK' in out_str:
         task.log("[VirtIO] ✓ Drivers staged + registry merged.")
