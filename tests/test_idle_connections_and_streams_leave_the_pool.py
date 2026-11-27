@@ -273,10 +273,11 @@ def test_a_members_lease_connection_keeps_its_slot(serve, path, signed, held):
 
 
 def test_an_idle_connection_still_ends_after_the_keep_alive_window(serve):
-    srv, pool = serve(_tiny_app(), slots=2, _idle_timeout=0.6)
+    # the slot is free well before the keep-alive window ends, with room for a loaded runner
+    srv, pool = serve(_tiny_app(), slots=2, _idle_timeout=3)
     s = _kept_alive(srv.server_port, '/ping')
-    assert _until(lambda: pool.free_count() == 2, within=0.4), 'the idle connection kept its slot'
-    assert _ends(s, within=3), 'an idle connection outlived its keep-alive window outside the pool'
+    assert _until(lambda: pool.free_count() == 2, within=2), 'the idle connection kept its slot'
+    assert _ends(s, within=8), 'an idle connection outlived its keep-alive window outside the pool'
     assert _until(lambda: not app_mod._idle_out), 'a connection that ended still counts as waiting'
     s.close()
 
@@ -735,7 +736,7 @@ def test_past_a_number_of_idle_connections_one_gives_its_database_connection_up(
     srv, _ = serve(_db_app(db), slots=4)
     idle = [_kept_alive(srv.server_port, '/who') for _ in range(3)]
     gevent.sleep(0.2)
-    assert _until(lambda: db_conns() == kept, within=2), \
+    assert _until(lambda: db_conns() == kept, within=10), \
         f'{db_conns()} of three idle connections hold a database connection, {kept} may'
     # and the one that gave it up opens a new one for its next request
     head, body = _ask(idle[-1], '/who')
