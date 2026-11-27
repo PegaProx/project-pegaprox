@@ -265,6 +265,8 @@ def test_the_downtime_of_a_live_clone_runs_until_the_guest_is_up_on_virtio(monke
     t = w.task
     assert t.status == 'completed' and t._two_stage['state'] == 'switched'
     assert t.total_downtime_seconds >= 900, t.total_downtime_seconds
+    # the detail view prints the figure as it is, every digit of the float
+    assert t.total_downtime_seconds == round(t.total_downtime_seconds, 1)
     line = next(ln for ln in t.log_lines if 'SWITCHOVER DONE' in ln)
     assert f'(downtime {t.total_downtime_seconds:.1f}s: the target VM started after ' in line
     assert 'the first boot of the guest and its switch to VirtIO took the rest' in line

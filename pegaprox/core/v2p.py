@@ -2636,7 +2636,8 @@ def _run_v2p_migration(task):
                 # switch: a lab run said 162s for a Windows guest that was away for 643s.
                 _up_at = (getattr(task, '_two_stage', None) or {}).get('up_at') if _two_stage_on else None
                 actual_downtime = time.time() - cut_t0
-                task.total_downtime_seconds = actual_downtime
+                # the UI shows the figure as it comes
+                task.total_downtime_seconds = round(actual_downtime, 1)
                 task.log(f"=== SWITCHOVER DONE (downtime {actual_downtime:.1f}s"
                          + (f": the target VM started after {_up_at - cut_t0:.0f}s, the first boot of the "
                             f"guest and its switch to VirtIO took the rest" if _up_at else '') + ") ===")
