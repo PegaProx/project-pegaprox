@@ -159,3 +159,22 @@ def test_both_dialogs_read_the_code_and_the_batch_reads_as_before():
     batch = src[src.index('function BatchRestoreModal('):]
     assert 'refused={restoreRefusedOtherGuest(error) || refused.some(r => restoreRefusedOtherGuest(r.error))}' in batch
     assert "restoreRefusedOtherGuest(r.note)" in batch
+
+
+def test_the_wizard_drops_an_answer_for_the_cluster_it_left():
+    """The wizard reads the nodes and the next free id of its cluster. An answer for the
+    cluster before a switch that came after the new one put the old nodes back, with a node
+    of the new cluster selected, or a node of the old one kept. Each read is dropped once
+    its effect is gone, and a kept node must be one of the cluster's."""
+    src = _read('web', 'src', 'ui.js')
+    wizard = src[src.index('function BackupRestoreWizard('):src.index('const submit = async () => {')]
+    nodes = wizard[wizard.index('/metrics`'):]
+    nodes = nodes[:nodes.index('}, [clusterId]);')]
+    assert 'if (gone || !r || !r.ok) return;' in nodes
+    assert 'if (gone || !j ||' in nodes
+    assert 'setTargetNode(cur => names.includes(cur) ? cur : (names[0] || \'\'));' in nodes
+    assert 'return () => { gone = true; };' in nodes
+    nextid = wizard[wizard.index('/nextid`'):]
+    nextid = nextid[:nextid.index('}, [mode, clusterId]);')]
+    assert 'if (!gone && r && r.ok) {' in nextid and 'if (!gone && j.vmid' in nextid
+    assert 'return () => { gone = true; };' in nextid
