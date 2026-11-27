@@ -102,9 +102,11 @@ def test_the_folder_is_locked_by_sid_before_anything_in_it_runs():
     assert lock < data
     assert 'icacls "%W%" /setowner *S-1-5-32-544' in CMD
     # the grants a file written on Linux carries (Everyone) or a user of the guest left go too:
-    # /grant:r only replaces the grants of the SIDs it names
-    strip = CMD.index('icacls "%W%" /remove:g *S-1-1-0 *S-1-5-11 *S-1-5-32-545 *S-1-5-4 /T /C /Q')
-    assert lock < strip < data
+    # /grant:r only replaces the grants of the SIDs it names. On the folder /remove:g takes them,
+    # every file in it is reset to what it inherits from the folder (no explicit grant stays)
+    strip = CMD.index('icacls "%W%" /remove:g *S-1-1-0 *S-1-5-11 *S-1-5-32-545 *S-1-5-4 /C /Q')
+    reset = CMD.index('icacls "%W%\\*" /reset /T /C /Q')
+    assert lock < strip < reset < data
     code = [ln for ln in LINES if not ln.lstrip().lower().startswith('rem')]
     assert not [ln for ln in code if 'icacls' in ln and ('Administrators' in ln or 'SYSTEM:' in ln)]
 
