@@ -6088,6 +6088,15 @@ class PegaProxManager:
                     if off_pin:
                         task.off_pin_vms.append(off_pin)
                     self.logger.info(f"[OK] Evacuated {vm_name} to {target_node} ({task.migrated_vms}/{task.total_vms})")
+                elif vm.get('hastate') and getattr(task, 'native_ha', False):
+                    # #1395 - Proxmox HA refused the node we asked for (a node affinity rule, say),
+                    # and with the node in HA maintenance its CRM moves the guest off by itself a
+                    # little later. It stays pending through the wait below and fails only if it
+                    # is still here after it
+                    task.left_to_ha.append({'vmid': vmid, 'name': vm_name})
+                    self.logger.info(f"[MAINT] {vm_name} ({vmid}) was not taken to {target_node}, "
+                                     f"Proxmox HA moves it off {node_name} itself")
+                    continue
                 else:
                     task.failed_vms.append({'vmid': vmid, 'name': vm_name, 'error': 'Migration failed'})
                     self.logger.error(f"[ERROR] Failed to evacuate {vm_name}")
@@ -6129,8 +6138,10 @@ class PegaProxManager:
                     self.logger.warning(f"[WARN] {remaining} VMs still on {node_name} after post-evacuation wait")
                 elif remaining < 0:
                     self.logger.warning(f"[WARN] could not verify VM count on {node_name} - API unreachable")
+                self._settle_left_to_ha(node_name, task)
                 # a guest still here is why the rolling update has its pause, and what it would otherwise reboot
                 self._note_guests_left(node_name, task, remaining)
+            self._settle_left_to_ha(node_name, task)
 
             # #647 - the CRM can still finish a move we counted as failed; a guest that
             # has left the node by now is no reason to pause the rolling update
@@ -6194,6 +6205,32 @@ class PegaProxManager:
                 and v.get('type') in ('qemu', 'lxc')]
         return len(left) == remaining and all(v.get('vmid') in known and not v.get('hastate')
                                   and 'migrate' not in str(v.get('lock') or '') for v in left)
+
+    def _settle_left_to_ha(self, node_name, task):
+        """#1395 - after the wait: a guest left to Proxmox HA that is off the node counts as
+        moved, one still here (or one the list does not show where) as failed."""
+        left = getattr(task, 'left_to_ha', None)
+        if not left:
+            return
+        task.left_to_ha = []
+        try:
+            vms = self.get_vm_resources()
+            where = None if getattr(vms, 'unavailable', False) else {v.get('vmid'): v.get('node') for v in vms}
+        except Exception:
+            where = None
+        ids = {g['vmid'] for g in left}
+        task.pending_vms = [v for v in task.pending_vms if v.get('vmid') not in ids]
+        for g in left:
+            now = where.get(g['vmid']) if where is not None else None
+            if now not in (None, node_name):
+                task.migrated_vms += 1
+                self.logger.info(f"[OK] Proxmox HA moved {g['name']} ({g['vmid']}) to {now}")
+                continue
+            why = ('Proxmox HA refused the move and had not moved it off the node after the wait'
+                   if where is not None else
+                   'Proxmox HA refused the move, and the guest list could not be read to see where it is')
+            task.failed_vms.append({'vmid': g['vmid'], 'name': g['name'], 'error': why})
+            self.logger.warning(f"[WARN] {g['name']} ({g['vmid']}): {why}")
 
     def _note_guests_left(self, node_name, task, remaining):
         known = {f.get('vmid') for f in task.failed_vms}

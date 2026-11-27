@@ -75,6 +75,9 @@ class MaintenanceTask:
         # no pinned node could take them. Reported, not an error: the drain is what
         # the operator asked for, and pin reconciliation returns them afterwards.
         self.off_pin_vms = []
+        # MK Nov 2026 (#1395) - guests Proxmox HA refused the move we asked for and moves off
+        # the node itself: pending until the wait, not failed
+        self.left_to_ha = []
 
     def to_dict(self):
         return {
