@@ -331,12 +331,13 @@ def not_with_live_mirror(pve_mgr, task):
 
 
 def sata_first_boot_planned(task):
-    """The first boot on Proxmox VE has the boot disk on SATA: the two-stage boot, or Live
-    Mirror booting a guest prepared in ESXi (live_first_sata). The in-guest preparation sets
-    storahci to boot start for it."""
+    """The first boot on Proxmox VE may have the boot disk on SATA: the two-stage boot, or Live
+    Mirror booting a guest prepared in ESXi (live_first_sata), which Auto falls back to when
+    its pre-sync fails. The in-guest preparation sets storahci to boot start for it; on a
+    guest that never boots on SATA that changes nothing."""
     if (getattr(task, '_two_stage', None) or {}).get('on'):
         return True
-    return str(getattr(task, 'transfer_mode', '') or '') == 'sshfs_boot'
+    return str(getattr(task, 'transfer_mode', '') or '') in ('sshfs_boot', 'auto')
 
 
 def live_first_sata(task, scsi_prefix):

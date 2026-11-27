@@ -6893,6 +6893,27 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         if task._live_boot_di is not None:
             task.log(f"  Windows guest: disk {task._live_boot_di} boots on SATA, VirtIO SCSI binds next to it "
                      f"(a boot disk on VirtIO SCSI from the start stops Windows with INACCESSIBLE_BOOT_DEVICE)")
+    task._live_boot_choice = None
+
+    def _decide_live_boot(running):
+        """'sata' or 'scsi' for the boot disk of a guest booted on SATA first, asked once: the
+        guest agent while the guest runs (live_switch), SATA when it cannot be asked"""
+        if task._live_boot_di is None or task._live_boot_choice is not None:
+            return task._live_boot_choice
+        try:
+            task._live_boot_choice = v2p_twostage.live_switch(pve_mgr, task) if running else 'sata'
+        except Exception as _lse:
+            task.log(f"  The guest could not be checked ({_lse}), the boot disk stays on SATA")
+            task._live_boot_choice = 'sata'
+        return task._live_boot_choice
+
+    def _slot(di):
+        """The config slot of disk di after the boot from the datastore: sata0 for a boot disk
+        that stays on SATA, else the bus of the run"""
+        return 'sata0' if (di == task._live_boot_di and task._live_boot_choice == 'sata') else f"{disk_bus}{di}"
+
+    def _slot_opts(di):
+        return task._disk_attach_opts(bus='sata') if _slot(di) == 'sata0' else task._disk_attach_opts()
 
     args_parts = []
     for di, desc_file in enumerate(descriptor_files):
@@ -7892,7 +7913,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         
         if import_ok:
             task.log("=== ALL DISKS COPIED - switching to local storage (brief restart) ===")
-            
+            # MK Nov 2026 - asked before the stop, while the guest still answers: the restart
+            # below must not boot a Windows guest from VirtIO SCSI that vioscsi did not bind
+            _decide_live_boot(vm_running_on_ssh)
+
             # Graceful shutdown: sync FS, ACPI shutdown, fallback to force stop
             # This prevents filesystem corruption (initramfs on next boot!)
             try:
@@ -7967,11 +7991,11 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 task.record_disk_volume(di, vol_id)
                 if vol_id:
                     rc_set, out_set, _ = _pve_node_exec(pve_mgr, task.target_node,
-                        f"qm set {task.proxmox_vmid} --{disk_bus}{di} {shlex.quote(vol_id)}{task._disk_attach_opts()} 2>&1", timeout=15)
-                    task.log(f"  {disk_bus}{di}: {vol_id}")
+                        f"qm set {task.proxmox_vmid} --{_slot(di)} {shlex.quote(vol_id)}{_slot_opts(di)} 2>&1", timeout=15)
+                    task.log(f"  {_slot(di)}: {vol_id}")
             
             _pve_node_exec(pve_mgr, task.target_node,
-                f"qm set {task.proxmox_vmid} --boot order={disk_bus}0 2>&1", timeout=10)
+                f"qm set {task.proxmox_vmid} --boot order={_slot(task._live_boot_di if task._live_boot_di is not None else 0)} 2>&1", timeout=10)
             
             # Start on local storage
             try:
@@ -8181,21 +8205,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     # ================================================================
     # MK Nov 2026 - the boot disk of a guest that booted on SATA first (live_first_sata): on
     # VirtIO SCSI for the next start once vioscsi is bound, else it stays on SATA
-    _boot_di = getattr(task, '_live_boot_di', None)
-    _boot_sata = False
-    if _boot_di is not None:
-        try:
-            from pegaprox.core import v2p_twostage
-            _boot_sata = (v2p_twostage.live_switch(pve_mgr, task) if vm_running_on_ssh else 'sata') == 'sata'
-        except Exception as _lse:
-            task.log(f"  The guest could not be checked ({_lse}), the boot disk stays on SATA")
-            _boot_sata = True
-
-    def _slot(di):
-        return 'sata0' if (_boot_sata and di == _boot_di) else f"{disk_bus}{di}"
-
-    def _slot_opts(di):
-        return task._disk_attach_opts(bus='sata') if (_boot_sata and di == _boot_di) else task._disk_attach_opts()
+    # (the copy fallback above may have asked already, while the guest still ran)
+    _boot_di = task._live_boot_di
+    _decide_live_boot(vm_running_on_ssh)
+    _boot_sata = _slot(_boot_di) == 'sata0' if _boot_di is not None else False
     _boot_slot = _slot(_boot_di if _boot_di is not None else 0)
 
     if mirror_success and vm_running_on_ssh:
@@ -8468,6 +8481,9 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         # when the target LUN is 4Kn (very common with TrueNAS / enterprise SAN iSCSI).
         try:
             _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
+            if _boot_sata and getattr(task, '_sector_args', False):
+                # the emulation names the devices by bus: the boot disk is sata0 here
+                _rebuild_sector_args(pve_mgr, task.target_node, task.proxmox_vmid)
         except Exception as _e:
             task.log(f"sector-size emulation skipped: {_e}")
         try:

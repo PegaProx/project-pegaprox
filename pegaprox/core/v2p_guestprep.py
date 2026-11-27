@@ -210,9 +210,8 @@ def plan_view(vmware_mgr, vm_id, vm_detail, data):
     if str(data.get('scsihw') or '') == 'pvscsi':
         view['warnings'].append('Prepare Windows uninstalls the ESXi guest tools, which bring the pvscsi driver: '
                                 'leave the SCSI controller on auto (VirtIO SCSI single).')
-    if str(data.get('transfer_mode') or '') == 'sshfs_boot':
-        view['warnings'].append('Live Mirror boots the prepared guest straight on VirtIO SCSI, without the two-stage '
-                                'boot to fall back on.')
+    # MK Nov 2026 - no Live Mirror warning any more: it boots the prepared guest with the boot
+    # disk on SATA first and keeps it there when vioscsi did not bind (v2p_twostage.live_switch)
     return view
 
 

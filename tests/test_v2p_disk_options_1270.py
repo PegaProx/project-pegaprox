@@ -108,7 +108,7 @@ def test_every_attach_of_a_final_disk_carries_the_drive_options():
     assert [a for a in attaches if not a.startswith(('{task._disk_attach_opts()}', '{_slot_opts(di)}'))] == []
     # and those take the options from the same place, for the bus they attach on
     mirror = inspect.getsource(v2p._do_sshfs_boot_migration)
-    assert "return task._disk_attach_opts(bus='sata') if (_boot_sata and di == _boot_di) else task._disk_attach_opts()" in mirror
+    assert "return task._disk_attach_opts(bus='sata') if _slot(di) == 'sata0' else task._disk_attach_opts()" in mirror
 
 
 # -- the start of the migration --------------------------------------------------------------

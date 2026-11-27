@@ -62,15 +62,18 @@ def test_only_a_windows_guest_prepared_in_esxi_on_virtio_scsi_boots_on_sata(t, p
     assert ts.live_first_sata(t, prefix) is want
 
 
-def test_the_in_guest_preparation_readies_storahci_for_live_mirror_too():
+@pytest.mark.parametrize('mode,two_stage,want', [
+    ('sshfs_boot', False, True),
+    ('auto', False, True),          # Auto falls back to Live Mirror when its pre-sync fails
+    ('offline', False, False),
+    ('vmkfstools_clone', False, False),
+    ('offline', True, True),
+])
+def test_the_in_guest_preparation_readies_storahci_wherever_the_boot_disk_may_start_on_sata(mode, two_stage, want):
     t = _task()
-    t._two_stage = {'on': False}
-    t.transfer_mode = 'sshfs_boot'
-    assert ts.sata_first_boot_planned(t) is True
-    t.transfer_mode = 'offline'
-    assert ts.sata_first_boot_planned(t) is False
-    t._two_stage = {'on': True}
-    assert ts.sata_first_boot_planned(t) is True
+    t._two_stage = {'on': two_stage}
+    t.transfer_mode = mode
+    assert ts.sata_first_boot_planned(t) is want
 
 
 # --------------------------------------------------------------------------- the check after the mirror
@@ -174,3 +177,52 @@ def test_a_mirror_without_the_sata_boot_is_as_before(monkeypatch):
     assert not any('ide-hd' in a for a in _args_lines(r))
     slots, order = _final_slots(r)
     assert 'sata0' not in slots and order == 'scsi0'
+
+
+# --------------------------------------------------------------------------- the ways out when the mirror fails
+
+class _Lsblk(farm.Node):
+    """the target LUN reports this logical sector size"""
+    sector = '512'
+
+    def __call__(self, mgr, node, cmd, timeout=600, **kw):
+        if 'lsblk -nd -o LOG-SEC' in cmd:
+            self.log.append(('node', node, cmd))
+            return 0, self.sector + '\n', ''
+        return super().__call__(mgr, node, cmd, timeout, **kw)
+
+
+def test_a_mirror_that_failed_restarts_on_the_slot_the_check_chose_and_rebuilds_the_sector_args(monkeypatch):
+    # the restart branch after a failed mirror attaches the boot disk as sata0; the 512b emulation
+    # of a 4Kn LUN named scsi0 there, a device the VM no longer had, and QEMU refused to start
+    asked, rebuilt = [], []
+    monkeypatch.setattr(ts, 'not_with_live_mirror', lambda pve, task: None)
+    monkeypatch.setattr(v2p, '_scsi_controller_args', lambda *a: '-device virtio-scsi-pci,id=scsihw0 ')
+    monkeypatch.setattr(ts, 'live_first_sata', lambda task, prefix: True)
+    monkeypatch.setattr(ts, 'live_switch', lambda pve, task: asked.append(1) or 'sata')
+    monkeypatch.setattr(v2p, '_drive_mirror_to_local', lambda *a, **k: False)
+    monkeypatch.setattr(v2p, '_rebuild_sector_args', lambda *a: rebuilt.append(a) or (True, '', None))
+    r = farm.Run(monkeypatch, mode='sshfs_boot', ssh_key='/tmp/v2p-key-fixed')
+    node = _Lsblk(r.log, r.vols)
+    node.sector = '4096'
+    monkeypatch.setattr(v2p, '_pve_node_exec', node)
+    r.go()
+    assert r.task.status == 'completed', r.task.error
+    assert asked == [1], 'the guest is asked once'
+    slots, order = _final_slots(r)
+    assert 'sata0' in slots and 'scsi0' not in slots and order == 'sata0', (slots, order)
+    assert rebuilt, 'the sector args still name scsi0'
+
+
+def test_the_copy_fallback_asks_before_it_stops_the_guest_and_attaches_by_slot():
+    # the qemu-img convert fallback stops the VM and starts it again on the local disks: a
+    # Windows guest must come back on the slot the check chose, not on scsi0 by default
+    import inspect
+    src = inspect.getsource(v2p._do_sshfs_boot_migration)
+    block = src[src.index('        if import_ok:'):src.index('            mirror_success = True\n            copy_ok = True')]
+    assert block.index('_decide_live_boot(vm_running_on_ssh)') < block.index('/status/shutdown')
+    attaches = re.findall(r'qm set \{task\.proxmox_vmid\} --\{([^}]+)\}', block)
+    assert attaches and all(a.startswith('_slot(') for a in attaches), attaches
+    assert '--boot order={disk_bus}0' not in block
+    # the branches after it reuse what was decided instead of deciding again
+    assert src.count('v2p_twostage.live_switch(') == 1
