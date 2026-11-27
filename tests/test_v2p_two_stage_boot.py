@@ -361,6 +361,47 @@ def test_a_bound_driver_that_starts_on_demand_is_set_to_boot_start(lab):
     assert t._two_stage['state'] == 'switched'
 
 
+class _ForgetfulPve(Pve):
+    """the agent answers the first `misses` reads of the start type with nothing, as a real
+    Server 2025 did right after its agent came up"""
+    misses = 1
+
+    def _out(self, argv):
+        if argv[:2] == ['reg.exe', 'query'] and argv[-1] == 'Start' and self.misses:
+            self.misses -= 1
+            return ''
+        return super()._out(argv)
+
+
+def _forgetful(lb, misses):
+    pve = _ForgetfulPve(lb.qm, files=FILES)
+    pve.misses = misses
+    lb.pve = pve
+    return pve
+
+
+def test_an_unanswered_read_of_the_start_type_is_asked_again_not_repaired(lab):
+    lb = lab(files=FILES)
+    pve = _forgetful(lb, 1)
+    t = _staged(lb)
+    assert ts.boot(pve, t) == ('running', '')
+    assert ['sc.exe', 'config', 'vioscsi', 'start=', 'boot'] not in pve.execs
+    log = '\n'.join(t.log_lines)
+    assert 'starts at boot, shutting the guest down' in log and 'could not be read' not in log
+    assert t._two_stage['state'] == 'switched'
+
+
+def test_a_start_type_never_read_is_said_so_and_repaired(lab):
+    lb = lab(files=FILES)
+    pve = _forgetful(lb, 4)
+    t = _staged(lb)
+    assert ts.boot(pve, t) == ('running', '')
+    log = '\n'.join(t.log_lines)
+    assert 'vioscsi is bound, its start type could not be read, setting it to boot start' in log
+    assert 'Start None' not in log
+    assert ['sc.exe', 'config', 'vioscsi', 'start=', 'boot'] in pve.execs
+
+
 def test_no_agent_in_the_first_boot_keeps_sata_and_still_starts_the_guest(lab):
     lb = lab(disks=2, agent_boots=())
     t = _staged(lb)

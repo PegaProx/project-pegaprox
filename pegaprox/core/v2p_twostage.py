@@ -38,6 +38,8 @@ FIRSTBOOT_SECONDS = 1200
 SHUTDOWN_SECONDS = 300
 SATA_PORTS = 6
 POLL_SECONDS = 10
+# reads of the start type of a bound driver before it counts as not read
+START_READS = 3
 VIRTIO_SCSI = ('virtio-scsi-single', 'virtio-scsi-pci')
 # ostypes of the Windows releases before 8 / 2012, whose msahci is often not a boot driver
 _OLD_WINDOWS = ('win7', 'w2k8', 'wxp', 'w2k', 'wvista')
@@ -469,6 +471,13 @@ def _bind_state(pve_mgr, task, svc, wait):
         start = _reg_dword(agent_exec(pve_mgr, task, ['reg.exe', 'query', key, '/v', 'Start']), 'Start')
         count = _reg_dword(agent_exec(pve_mgr, task, ['reg.exe', 'query', key + '\\Enum', '/v', 'Count']), 'Count')
         if count and count >= 1:
+            # MK Nov 2026 - a read the agent did not answer is no start type: seen on a real
+            # Server 2025, whose first read came back empty right after the agent came up
+            for _ in range(START_READS):
+                if start is not None:
+                    break
+                time.sleep(POLL_SECONDS)
+                start = _reg_dword(agent_exec(pve_mgr, task, ['reg.exe', 'query', key, '/v', 'Start']), 'Start')
             return True, start
         if time.monotonic() >= deadline:
             return False, start
@@ -612,7 +621,10 @@ def boot(pve_mgr, task):
     _firstboot(pve_mgr, task, FIRSTBOOT_SECONDS)
     bound, start = _bind_state(pve_mgr, task, svc, BIND_SECONDS)
     if bound and start != 0:
-        task.log(f'  {svc} is bound but starts on demand (Start {start}), setting it to boot start')
+        if start is None:
+            task.log(f'  {svc} is bound, its start type could not be read, setting it to boot start')
+        else:
+            task.log(f'  {svc} is bound but does not start at boot (Start {start}), setting it to boot start')
         agent_exec(pve_mgr, task, ['sc.exe', 'config', svc, 'start=', 'boot'])
         bound, start = _bind_state(pve_mgr, task, svc, 30)
     if not bound or start != 0:
