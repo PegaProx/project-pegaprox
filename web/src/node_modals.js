@@ -5,7 +5,7 @@
 
         // LW Nov 2026 - linked mode: the console of another site's guest or node opens on this
         // instance's main port, which tunnels it to that site (api/federation_relay.py). null for a
-        // cluster of this site, whose consoles keep their own servers
+        // cluster of this site, whose console sockets the callers build themselves
         function fedConsoleUrl(clusterId, params) {
             if (!String(clusterId || '').includes('~')) return null;
             const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -72,7 +72,7 @@
             const wsRef = useRef(null);
             const termRef = useRef(null);
             const statusRef = useRef('loading');
-            const { sessionId, reverseProxyEnabled } = useAuth();
+            const { sessionId } = useAuth();
 
             // Keep statusRef in sync
             useEffect(() => {
@@ -252,9 +252,9 @@
                         // NS May 2026 — show the SSH auth dialog as soon as we
                         // know (or fail to know) the node IP, NOT when the
                         // WebSocket sends `need_credentials`. Air-gap deployments
-                        // were hitting silent WS handshake failures (self-signed
-                        // cert on port +2 not yet trusted, or reverse-proxy not
-                        // forwarding the secondary port) — the prior flow gated
+                        // were hitting silent WS handshake failures (back then a
+                        // self-signed cert on a port of its own, or a reverse proxy
+                        // not forwarding it) - the prior flow gated
                         // the form on a server message that never arrived, so
                         // the user just saw a blank terminal with no way to
                         // enter credentials. Proactive form ⇒ always visible.
@@ -277,21 +277,16 @@
                         // that nothing shows and nothing closes
                         if (cleanup) return;
 
-                        // Connect WebSocket - Shell runs on main port + 2 (unless reverse proxy port set)
+                        // LW Nov 2026 - the shell is a socket of the page's own address, port and all:
+                        // the SSH console server on port+2 is gone
                         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                        const mainPort = parseInt(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
-                        
-                        let sshPortNum = reverseProxyEnabled ? mainPort : mainPort + 2;
-                        if (reverseProxyEnabled) {
-                            console.log(`Using main port for SSH (Reverse Proxy Enabled): ${sshPortNum}`);
-                        }
-
+                        const sshPortNum = parseInt(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
                         setSshPort(sshPortNum);
                         // no ?ip= any more: the server resolves the node and would not take one (#1143)
                         const wsUrl = fedConsoleUrl(clusterId, { token: wsToken, kind: 'shell', node })
-                            || `${wsProtocol}//${window.location.hostname}:${sshPortNum}/api/clusters/${clusterId}/nodes/${node}/shellws?token=${encodeURIComponent(wsToken)}`;
+                            || `${wsProtocol}//${window.location.host}/api/clusters/${clusterId}/nodes/${node}/shellws?token=${encodeURIComponent(wsToken)}`;
                         
-                        term.write(`${t('connectingWs')} (Port ${sshPortNum})...\r\n`);
+                        term.write(`${t('connectingWs')}...\r\n`);
                         // NS: Mar 2026 - don't log wsUrl, contains session token
                         
                         ws = new WebSocket(wsUrl);
@@ -372,30 +367,14 @@
                         ws.onerror = (err) => {
                             console.error('WebSocket error:', err);
                             if (!cleanup) {
-                                const isHttps = window.location.protocol === 'https:';
-                                const displayPort = sshPort || sshPortNum;
-                                
-                                // Get translated messages
+                                // same origin as the page: no certificate of another port to accept
                                 const errorTitle = t('wsConnectionFailed');
-                                const certTitle = t('certInstructions');
-                                const step1 = t('certStep1');
-                                const step2 = t('certStep2');
-                                const step3 = t('certStep3');
                                 const checkLogs = t('checkServerLogs');
                                 
                                 term.write('\r\n\x1b[31m═══════════════════════════════════════════\x1b[0m\r\n');
                                 term.write(`\x1b[31m  ${errorTitle}\x1b[0m\r\n`);
                                 term.write('\x1b[31m═══════════════════════════════════════════\x1b[0m\r\n\r\n');
-                                
-                                if (isHttps) {
-                                    term.write(`\x1b[33m⚠️  ${certTitle}\x1b[0m\r\n\r\n`);
-                                    term.write(`\x1b[36m${step1}\x1b[0m\r\n`);
-                                    term.write(`   \x1b[4mhttps://${window.location.hostname}:${displayPort}/\x1b[0m\r\n\r\n`);
-                                    term.write(`\x1b[36m${step2}\x1b[0m\r\n\r\n`);
-                                    term.write(`\x1b[36m${step3}\x1b[0m\r\n\r\n`);
-                                } else {
-                                    term.write(`\x1b[90m${checkLogs}\x1b[0m\r\n`);
-                                }
+                                term.write(`\x1b[90m${checkLogs}\x1b[0m\r\n`);
                                 setStatus('error');
                             }
                         };
@@ -716,7 +695,7 @@
             const [status, setStatus] = useState('loading');
             const wsRef = useRef(null);
             const termRef = useRef(null);
-            const { sessionId, reverseProxyEnabled } = useAuth();
+            const { sessionId } = useAuth();
 
             useEffect(() => {
                 if (initRef.current || !containerRef.current) return;
@@ -821,17 +800,10 @@
                             if (r.ok) wsToken = (await r.json()).token;
                         } catch (_) {}
 
-                        // Step 3: open WS to standalone server (port +2)
-                        // Same server as /shellws — clean `websockets` lib, no flask-sock framing bug.
+                        // Step 3: open the WS on the page's own address. LW Nov 2026 - the
+                        // terminal used to live on the SSH console server at port+2 only, so a
+                        // proxy that sends everything to one port had none (#539 was half of it)
                         const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                        const mainPort = parseInt(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
-                        // MK 2026-06-11 (#539 markushergeth): this was gated on the
-                        // window.__pegaproxReverseProxy global, which isn't reliably set —
-                        // so behind a reverse proxy the term WS still went to main+2 (e.g.
-                        // :445) and Caddy/nginx couldn't route it. Key off reverseProxyEnabled
-                        // from the auth context like the VNC + node-shell paths already do.
-                        const sshPort = reverseProxyEnabled ? mainPort : (mainPort + 2);
-                        if (reverseProxyEnabled) console.log(`Using main port for Term (Reverse Proxy Enabled): ${sshPort}`);
                         // NS 2026-06-05 (C-1): auth_ticket (cluster PVEAuthCookie) is
                         // no longer passed through the browser — the WS server fetches
                         // it server-side from the cluster context. Only the scoped
@@ -845,7 +817,7 @@
                         }).toString();
                         const wsUrl = fedConsoleUrl(clusterId, { token: wsToken, kind: 'term', node: vm.node, type: vm.type, vmid: String(vm.vmid),
                                                                  ticket: termInfo.ticket, port: String(termInfo.port), host: termInfo.host, user: termInfo.user || '' })
-                            || `${wsProto}//${window.location.hostname}:${sshPort}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/termwebsocket?${params}`;
+                            || `${wsProto}//${window.location.host}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/termwebsocket?${params}`;
 
                         ws = new WebSocket(wsUrl);
                         wsRef.current = ws;
@@ -6057,7 +6029,6 @@
             const keymapRef = useRef('');
             const [isFullscreen, setIsFullscreen] = useState(false);
             const [connectionStatus, setConnectionStatus] = useState('connecting');
-            const [vncPort, setVncPort] = useState(null);
             const [rfb, setRfb] = useState(null);
             const rfbRef = useRef(null);
             const containerRef = useRef(null);
@@ -6070,7 +6041,14 @@
             // does come back doesn't sit on a two-minute timer.
             const maxRetries = 8;
             const retryDelayMs = (n) => Math.min(1000 * Math.pow(2, Math.max(0, n - 1)), 15000);
-            const { getAuthHeaders, sessionId, reverseProxyEnabled } = useAuth();
+            // LW Nov 2026 - but no retry for a console the server refused for its account (close
+            // 4429): trying again opens nothing until one of the account's consoles is closed.
+            // When the server still hung up the account's oldest instead, each retry on a shared
+            // account hung up a colleague's. noVNC's disconnect only tells clean from not, so
+            // the code is read off the socket itself.
+            const ACCOUNT_FULL_CLOSE = 4429;
+            const [refusedWhy, setRefusedWhy] = useState('');
+            const { getAuthHeaders, sessionId } = useAuth();
             // NS May 2026 — view-mode toggle. 'vnc' = noVNC graphical (default,
             // existing behaviour); 'term' = xterm.js via PVE termproxy. Per-modal
             // state so each open starts on the user's preferred mode.
@@ -6156,16 +6134,9 @@
                             console.warn('VNC WS token failed');
                         }
 
-                        // Build WebSocket URL - VNC runs on main port + 1 (unless reverse proxy port set)
+                        // Build WebSocket URL - LW Nov 2026: on the page's own address, port and
+                        // all; the VNC server on port+1 is gone
                         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                        const mainPort = parseInt(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
-                        
-                        let vncPortNum = reverseProxyEnabled ? mainPort : mainPort + 1;
-                        if (reverseProxyEnabled) {
-                            console.log(`Using main port for VNC (Reverse Proxy Enabled): ${vncPortNum}`);
-                        }
-
-                        setVncPort(vncPortNum);
                         const stableQS = stableHandle ? `&enc_session=${encodeURIComponent(stableHandle.session_id)}` : '';
                         // MK Apr 2026 (#352 follow-up) — pass the JS-issued vncproxy
                         // ticket+port to the WS handler so it doesn't issue its OWN
@@ -6177,7 +6148,7 @@
                                 : '';
                         const wsUrl = fedConsoleUrl(clusterId, { token: vncWsToken, kind: 'vnc', node: vm.node, type: vm.type, vmid: String(vm.vmid),
                                                                  ...(ticketData.ticket && ticketData.port ? { pve_ticket: ticketData.ticket, pve_port: String(ticketData.port) } : {}) })
-                            || `${wsProtocol}//${window.location.hostname}:${vncPortNum}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vncwebsocket?token=${encodeURIComponent(vncWsToken)}${stableQS}${pvePassthroughQS}`;
+                            || `${wsProtocol}//${window.location.host}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vncwebsocket?token=${encodeURIComponent(vncWsToken)}${stableQS}${pvePassthroughQS}`;
                         
                         // LW: Mar 2026 - removed wsUrl log (session leak)
                         
@@ -6263,6 +6234,15 @@
                         // of the URL string. noVNC's Websock.attach() accepts a WebSocket-shaped
                         // object as the second arg, so RFB negotiates the underlying transport
                         // through our wrapper which transparently encrypts/decrypts each frame.
+                        // Either socket is watched for the refusal (ACCOUNT_FULL_CLOSE) before
+                        // noVNC gets it: a listener added now runs ahead of the onclose noVNC sets
+                        let refused = false;
+                        const watchRefusal = (sock) => sock.addEventListener('close', (ev) => {
+                            if (ev.code !== ACCOUNT_FULL_CLOSE) return;
+                            refused = true;
+                            setRefusedWhy(ev.reason || '');
+                            setConnectionStatus('refused');
+                        });
                         let rfbInstance;
                         if (stableHandle && window.connectVnc) {
                             // MK Apr 2026 — fetch the polling-fallback ticket LAZILY (only if the
@@ -6270,7 +6250,9 @@
                             // front broke things on PVE 9.1.x: two concurrent vncproxy sessions
                             // on the same VM make PVE deliver only the initial handshake bytes
                             // (recv=60B / SHORT_OR_EMPTY pattern). One ticket per path, lazily.
-                            const pollUrl = `${window.location.protocol}//${window.location.host}${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vnc-poll`;
+                            // API_URL carries the origin already; prefixing it again made the
+                            // fallback's address https://h:5000https://h:5000/api/...
+                            const pollUrl = `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vnc-poll`;
                             const forcePolling = window.localStorage &&
                                                  window.localStorage.getItem('pegaprox-vnc-force-polling') === '1';
                             const fetchPollHandle = async () => {
@@ -6301,11 +6283,16 @@
                                 console.error('VNC: middlebox tampering detected:', ev.data);
                                 setConnectionStatus('integrity_failed');
                             });
+                            watchRefusal(secureSock);
                             rfbInstance = new window.RFB(canvasRef.current, secureSock, {
                                 credentials: { password: vncPassword }
                             });
                         } else {
-                            rfbInstance = new window.RFB(canvasRef.current, wsUrl, {
+                            // what noVNC does with a URL (new WebSocket(url) and attach), here so
+                            // the close can be watched
+                            const plainSock = new WebSocket(wsUrl);
+                            watchRefusal(plainSock);
+                            rfbInstance = new window.RFB(canvasRef.current, plainSock, {
                                 credentials: { password: vncPassword }
                             });
                         }
@@ -6328,6 +6315,8 @@
 
                         rfbInstance.addEventListener('disconnect', (e) => {
                             console.log('VNC: Disconnected', e.detail);
+                            // refused for the account: shown already, and no retry
+                            if (refused) return;
                             if (authFailed) {
                                 // ticket was rejected at RFB level — retrying just generates
                                 // another ticket that will fail the same way. Surface a
@@ -6541,9 +6530,6 @@
             // open PVE's own GUI (the External button below) and lose our console entirely.
             // Named window per guest, so clicking twice focuses the existing one instead of
             // stacking duplicates. The in-app tab closes: the session lives in the popup now.
-            // LW Nov 2026 - another site's console runs over this instance's main port
-            // (/api/federation/console): there is no second port whose certificate needs accepting
-            const fedRemote = String(clusterId || vm?._clusterId || '').includes('~');
             const popOutConsole = () => {
                 const cid = clusterId || vm?._clusterId;
                 if (!cid || !vm) return;
@@ -6805,40 +6791,15 @@
                                     </div>
                                 </div>
                             )}
-                            {viewMode === 'vnc' && (connectionStatus === 'error' || connectionStatus === 'load_error' || connectionStatus === 'auth_failed') && (
+                            {viewMode === 'vnc' && (connectionStatus === 'error' || connectionStatus === 'load_error' || connectionStatus === 'auth_failed' || connectionStatus === 'refused') && (
                                 <div className="absolute inset-0 flex items-center justify-center bg-proxmox-darker">
                                     <div className="text-center max-w-md p-6">
                                         <div className="text-red-400 text-xl mb-4">⚠️ {t('connectionError')}</div>
-                                        
-                                        {window.location.protocol === 'https:' && !reverseProxyEnabled && !fedRemote && (
-                                            <div className="text-gray-400 text-sm mb-4 p-4 bg-proxmox-dark rounded-lg text-left">
-                                                <p className="mb-3 font-medium text-white">{t('certInstructions')}</p>
-                                                <p className="mb-2">{t('certStep1')}</p>
-                                                <a
-                                                    href={`https://${window.location.hostname}:${vncPort || ((parseInt(window.location.port) || 443) + 1)}/`}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className="block text-proxmox-orange hover:underline mb-3 break-all"
-                                                >
-                                                    https://{window.location.hostname}:{vncPort || ((parseInt(window.location.port) || 443) + 1)}/
-                                                </a>
-                                                <p className="mb-2">{t('certStep2')}</p>
-                                                <p className="text-xs text-gray-500">{t('certStep3')}</p>
-                                            </div>
+                                        {connectionStatus === 'refused' && refusedWhy && (
+                                            <p className="text-gray-300 text-sm mb-4" data-console-refused="">{refusedWhy}</p>
                                         )}
-                                        
+
                                         <div className="flex gap-3 justify-center">
-                                            {!reverseProxyEnabled && !fedRemote && (
-                                                <button
-                                                    onClick={() => {
-                                                        const port = vncPort || ((parseInt(window.location.port) || 443) + 1);
-                                                        window.open(`https://${window.location.hostname}:${port}/`, '_blank');
-                                                    }}
-                                                    className="px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 transition-colors text-sm"
-                                                >
-                                                    {t('acceptCert')}
-                                                </button>
-                                            )}
                                             <button
                                                 onClick={openInProxmox}
                                                 className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors text-sm"
