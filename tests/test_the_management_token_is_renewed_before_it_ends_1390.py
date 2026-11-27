@@ -684,6 +684,36 @@ def test_a_name_noted_for_a_token_in_use_is_never_deleted(cluster, db):
     assert fake.calls('DELETE') == [] and fake.tokens.get(tid) == m.config.api_token_secret
 
 
+def test_a_token_whose_delete_found_no_login_is_deleted_once_the_login_works(cluster, said, minutes):
+    """The delete of a token whose making got no answer needs the password login, and the
+    password was changed on the cluster: the name was taken as settled after the one
+    refused try, and the token stayed on PVE with every right of the account. It stays
+    noted now, is said once, and goes at the first look the login works again."""
+    fake = RenewPVE({USER: PASSWORD})
+    m, _tid = _asking_for_a_login(cluster, fake, 'unanswered-delete')
+    said.listen(m)
+    fake.users[USER] = 'changed-on-the-cluster'
+    fake.seen.clear()
+
+    for _ in range(3):
+        minutes.ahead += m.TOKEN_RENEW_EVERY
+        _look(m)
+
+    # one refused login, the looks after it wait out its half hour
+    assert len(fake.logins()) == 1
+    assert f'{USER}!{LOST}' in fake.tokens
+    assert mgrmod._management_token_kept('c1389').get('unanswered') == [LOST]
+    told = [s for s in said.at(logging.WARNING) if LOST in s]
+    assert len(told) == 1 and 'tries again' in told[0], told
+
+    # the password typed in again on our side
+    m.config.pass_ = 'changed-on-the-cluster'
+    _look(m)
+
+    assert f'{USER}!{LOST}' not in fake.tokens
+    assert mgrmod._management_token_kept('c1389').get('unanswered') == []
+
+
 # --- nothing works ----------------------------------------------------------------------------
 
 @pytest.mark.parametrize('refusal', ['403', '500'])

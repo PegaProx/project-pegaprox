@@ -15630,10 +15630,17 @@ echo "AGENT_INSTALLED_OK"
                 self.logger.info(f"[TOKEN] cluster '{self.config.name}': deleted the API token "
                                  f"{name}, whose making got no answer")
             elif r is None or 'no such token' not in _pve_message(r.text).lower():
-                self.logger.warning(f"[TOKEN] Could not delete the API token {name} of "
-                                    f"{self._token_owner()}, whose making got no answer: "
-                                    f"{why or _pve_message(r.text)} - delete it on the cluster "
-                                    f"if it is there")
+                # MK Nov 2026 - kept for the next look: a login refused or held back, or no
+                # password to log in with, settled the name here and the token PVE may have
+                # made stayed with every right of the account. Said once per name
+                said = self.__dict__.setdefault('_token_drop_said', set())
+                if name not in said:
+                    said.add(name)
+                    self.logger.warning(f"[TOKEN] Could not delete the API token {name} of "
+                                        f"{self._token_owner()}, whose making got no answer: "
+                                        f"{why or _pve_message(r.text)} - PegaProx tries again at "
+                                        f"each look, or delete it on the cluster")
+                continue
             self._token_posted(name, True)
 
     def _renew_over_login(self, tid, policy, ahead):
