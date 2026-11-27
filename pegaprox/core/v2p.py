@@ -8752,6 +8752,14 @@ def _monitor_disk_write(pve_mgr, node, vol_path, disk_size, task, disk_key, stop
         stop_evt.wait(5)
 
 
+def _dd_tail(output, lines=4):
+    """The last lines of a copy's output for the log, each as it ended: dd's status=progress
+    rewrites one line with carriage returns, and the raw tail put a run of those lines,
+    cut mid-number, in front of the summary"""
+    out = [ln.rsplit('\r', 1)[-1].strip() for ln in str(output or '').splitlines()]
+    return ' | '.join([ln for ln in out if ln][-lines:])[-400:]
+
+
 def _copy_complete(task, how, output, copied, size):
     # JB Nov 2026 - 90% used to count as done, and a disk with its last tenth missing went on to completed
     status = re.search(r'(?:PIPE|RC)=(\d+)/(\d+)', output)
@@ -8774,8 +8782,9 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     """Transfer a flat VMDK from ESXi to Proxmox storage.
 
     Strategy (in order):
-    1. HTTPS /folder endpoint with cookie-session auth (works for running VMs)
-    2. SSH dd pipe (works for stopped VMs or after snapshot)
+    1. SSH dd pipe when the 1 MB HTTPS test read the file (stopped VM, snapshot base, clone)
+    2. HTTPS /folder endpoint with cookie-session auth: without SSH, or when the pipe could
+       not read the file (a running VM without a snapshot holds it locked)
     3. SSHFS dd (FUSE, last resort)
 
     Returns (vol_id, vol_path) on success or (None, None) on failure.
@@ -8937,75 +8946,76 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     # NS May 2026 (#222): HTTPS /folder endpoint on ESXi 7/8 with iSCSI VMFS
     # consistently throttles bulk downloads to ~3 MB/s in our lab — at that
     # rate a 150 GB disk would take 14h. SSH dd pipe is 30x faster on the same
-    # link. So unless the VM is RUNNING (HTTPS is the only safe path while
-    # VMDK is locked) we skip HTTPS entirely. `prefer_ssh_pipe` config flag
-    # can also force-skip when the operator already knows their environment.
-    src_running = False
-    try:
-        vstate = task._vmware_mgr_ref.get_vm(task.vm_id) if hasattr(task, '_vmware_mgr_ref') else {}
-        src_running = (vstate.get('data', {}).get('power_state') == 'POWERED_ON')
-    except Exception:
-        pass
-    prefer_ssh = bool(task.config.get('prefer_ssh_pipe', False)) if hasattr(task, 'config') else False
+    # link, so it goes first whenever the HTTPS test read the file.
+    # MK Nov 2026 - that choice was meant to hang on the source running, read through a
+    # manager reference no caller ever set: the source always counted as off. What the pipe
+    # reads is a frozen base under a snapshot, a clone or a stopped VM's disk, readable over
+    # SSH; a running VM without a snapshot holds its disk locked. When the pipe cannot read
+    # the file, the HTTPS download that just read it comes next; it used to be skipped and
+    # the copy ended in "ALL methods failed".
     # MK Nov 2026 - the SSH pipe logged in through sshpass only. On a node without it (and
     # without a repository to fetch it from) the pipe failed and the copy never came back to
     # the HTTPS download that had just worked. Such a node gets a key on ESXi for the copy, as
     # the Live Mirror does; without that too, the copy stays on HTTPS.
     ssh_key = None
     over_ssh = False
-    if ((not src_running) or prefer_ssh) and test_bytes > 0:
+    if test_bytes > 0:
         rc_sp, _o, _e = _pve_node_exec(pve_mgr, task.target_node,
             "command -v sshpass >/dev/null 2>&1", timeout=15)
         if rc_sp != 0:
             ssh_key = _setup_temp_ssh_key(pve_mgr, task.target_node, esxi_host, esxi_user, esxi_pass)
         if rc_sp == 0 or ssh_key:
-            task.log(f"  HTTPS test OK but VM is offline - using direct SSH dd pipe (faster)"
+            task.log(f"  HTTPS test OK - copying over the SSH dd pipe (faster)"
                      f"{', logged in with a temporary key (no sshpass on the node)' if ssh_key else ''}.")
             over_ssh = True  # METHOD 2
         else:
             task.log("  HTTPS test OK; the node has no sshpass and no key could be put on ESXi, "
                      "so the copy stays on HTTPS")
 
+    def _https_full():
+        nonlocal downloaded
+        task.log(f"  HTTPS test OK ({test_bytes}B) - full download {flat_size_gb:.1f} GB...")
+        dd_log = f"/tmp/v2p-{task.id}-dl-{disk_index}.log"
+
+        dl_cmd = (
+            f"curl -sk -b {cookie_jar} {curl_login} "
+            f"--connect-timeout 30 --max-time 86400 "
+            f"'{url}' 2>/dev/null "
+            f"| dd of='{vol_path}' bs=4M status=progress 2>{dd_log}; "
+            f"echo RC=${{PIPESTATUS[0]}}/${{PIPESTATUS[1]}}; "
+            f"cat {dd_log}; rm -f {dd_log}"
+        )
+        # MK May 2026 (#438 follow-up): capture stderr too - when this
+        # path fails silently (HTTPS auth, network drop, curl killed),
+        # the previous `_` discard left the operator with no diagnostic.
+        rc_dl, out_dl, err_dl = _pve_node_exec(pve_mgr, task.target_node, dl_cmd, timeout=86400)
+        dl_out = str(out_dl or '').strip()
+        task.log(f"  HTTPS: {_dd_tail(dl_out)}")
+
+        # MK 2026-06-11 (#538 oetti77): dd can print several "N bytes copied"
+        # lines (SIGUSR1 progress / final summary), so take the LAST match -
+        # re.search() grabbed the FIRST progress block and undercounted a
+        # finished transfer, which tripped a false "incomplete" and made the
+        # cleanup delete a fully-written volume.
+        _bytes_all = re.findall(r'(\d+) bytes', dl_out)
+        if _bytes_all:
+            downloaded = int(_bytes_all[-1])
+        if _copy_complete(task, 'HTTPS', dl_out, downloaded, flat_size):
+            task.log(f"  HTTPS OK: {downloaded/(1024**3):.2f} GB")
+            return True
+        # Surface stderr tail when the dl is short - saves a re-bundle round
+        err_tail = (err_dl or '').strip()
+        if err_tail:
+            for line in err_tail.splitlines()[-6:]:
+                task.log(f"    HTTPS stderr: {line[:200]}")
+        return False
+
     try:
         # ================================================================
         # METHOD 1: HTTPS full download (if test download got data)
         # ================================================================
         if test_bytes > 0 and not over_ssh:
-            task.log(f"  HTTPS test OK ({test_bytes}B) - full download {flat_size_gb:.1f} GB...")
-            dd_log = f"/tmp/v2p-{task.id}-dl-{disk_index}.log"
-
-            dl_cmd = (
-                f"curl -sk -b {cookie_jar} {curl_login} "
-                f"--connect-timeout 30 --max-time 86400 "
-                f"'{url}' 2>/dev/null "
-                f"| dd of='{vol_path}' bs=4M status=progress 2>{dd_log}; "
-                f"echo RC=${{PIPESTATUS[0]}}/${{PIPESTATUS[1]}}; "
-                f"cat {dd_log}; rm -f {dd_log}"
-            )
-            # MK May 2026 (#438 follow-up): capture stderr too — when this
-            # path fails silently (HTTPS auth, network drop, curl killed),
-            # the previous `_` discard left the operator with no diagnostic.
-            rc_dl, out_dl, err_dl = _pve_node_exec(pve_mgr, task.target_node, dl_cmd, timeout=86400)
-            dl_out = str(out_dl or '').strip()
-            task.log(f"  HTTPS: {dl_out[-250:]}")
-
-            # MK 2026-06-11 (#538 oetti77): dd can print several "N bytes copied"
-            # lines (SIGUSR1 progress / final summary), so take the LAST match —
-            # re.search() grabbed the FIRST progress block and undercounted a
-            # finished transfer, which tripped a false "incomplete" and made the
-            # cleanup delete a fully-written volume.
-            _bytes_all = re.findall(r'(\d+) bytes', dl_out)
-            if _bytes_all:
-                downloaded = int(_bytes_all[-1])
-            if _copy_complete(task, 'HTTPS', dl_out, downloaded, flat_size):
-                dl_success = True
-                task.log(f"  HTTPS OK: {downloaded/(1024**3):.2f} GB")
-            else:
-                # Surface stderr tail when the dl is short — saves a re-bundle round
-                err_tail = (err_dl or '').strip()
-                if err_tail:
-                    for line in err_tail.splitlines()[-6:]:
-                        task.log(f"    HTTPS stderr: {line[:200]}")
+            dl_success = _https_full()
         elif not over_ssh:
             # MK Nov 2026 - only when the test really got nothing: the switch to the dd pipe
             # above said "HTTPS test OK", and this line after it read as its contradiction
@@ -9052,7 +9062,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
                                   else (1, '', 'the password file could not be written on the node'))
             _drop_node_secret(pve_mgr, task, pass_file)
             ssh_out = str(out_s or '').strip()
-            task.log(f"  SSH: {ssh_out[-250:]}")
+            task.log(f"  SSH: {_dd_tail(ssh_out)}")
 
             _bytes_all2 = re.findall(r'(\d+) bytes', ssh_out)  # #538: last line, not first
             # this attempt's own count, never what an earlier method got
@@ -9066,6 +9076,10 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
                 if err_tail:
                     for line in err_tail.splitlines()[-6:]:
                         task.log(f"    SSH stderr: {line[:200]}")
+                if over_ssh:  # HTTPS was skipped for the pipe, it has not been tried yet
+                    task.log("  The SSH pipe could not read the whole file (a running VM without a "
+                             "snapshot holds it locked); trying the HTTPS download that read it")
+                    dl_success = _https_full()
 
         # ================================================================
         # METHOD 3: SSHFS dd (FUSE mount)
@@ -9083,7 +9097,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
                     f"dd if={shlex.quote(sshfs_src)} of='{vol_path}' bs=4M status=progress 2>{dd_log3}; echo RC=$?/0; "
                     f"cat {dd_log3}; rm -f {dd_log3}", timeout=86400)
                 dd_out = str(out_dd or '').strip()
-                task.log(f"  SSHFS: {dd_out[-200:]}")
+                task.log(f"  SSHFS: {_dd_tail(dd_out)}")
                 _bytes_all3 = re.findall(r'(\d+) bytes', dd_out)  # #538: last, not first
                 downloaded = int(_bytes_all3[-1]) if _bytes_all3 else 0
                 if _copy_complete(task, 'SSHFS', dd_out, downloaded, flat_size):

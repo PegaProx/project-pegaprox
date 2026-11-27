@@ -24,10 +24,11 @@ def _answer(spec):
 
 
 class _World:
-    """https: what the full HTTPS download prints. Set, the source runs and the 1 MB probe gets data,
-    so HTTPS goes first; left out, the source is off and the copy starts with the SSH pipe."""
+    """https: what the full HTTPS download prints. Set, the 1 MB probe gets data: the copy starts
+    with the SSH pipe and goes to HTTPS when the pipe could not read the file (without sshpass
+    on the node and a key on ESXi, HTTPS goes first). Left out, the probe gets nothing."""
 
-    def __init__(self, monkeypatch, ssh, sshfs=None, stat=None, https=None):
+    def __init__(self, monkeypatch, ssh, sshfs=None, stat=None, https=None, sshpass=True):
         self.sent, self.freed, self.logs, self.allocated = [], [], [], 0
         self.ssh, self.sshfs, self.https = ssh, sshfs, https
         stat = stat if stat is not None else {'flat': SIZE}
@@ -44,6 +45,8 @@ class _World:
                 self.freed.append(cmd)
             if 'sshpass -f ' in cmd:
                 return _answer(self.ssh)
+            if cmd.startswith('command -v sshpass'):
+                return (0 if sshpass else 1), '', ''
             if '-r 0-1048575' in cmd:
                 return 0, ('HTTP=206 DL=1048576 FSIZE=1048576' if self.https is not None else ''), ''
             if '--connect-timeout' in cmd:
@@ -62,14 +65,13 @@ class _World:
         monkeypatch.setattr(v2p, '_pvesm_alloc_disk', alloc)
         monkeypatch.setattr(v2p, '_monitor_disk_write', lambda *a, **k: None)
         monkeypatch.setattr(v2p, '_rbd_map_sink', lambda task: [])
+        monkeypatch.setattr(v2p, '_setup_temp_ssh_key', lambda *a, **k: None)
 
     def copy(self):
         recorded = []
         task = SimpleNamespace(id='t1', target_node='pve1', target_storage='store', proxmox_vmid=100, vm_id='vm-1',
                                log=self.logs.append, config={}, record_disk_volume=lambda i, v: recorded.append(v),
                                disk_target=lambda i: 'store')
-        if self.https is not None:
-            task._vmware_mgr_ref = SimpleNamespace(get_vm=lambda vm: {'data': {'power_state': 'POWERED_ON'}})
         got = v2p._ssh_pipe_transfer(SimpleNamespace(), task, 'esxi', 'root', 'x', 'ds1', 'web01', 'web01.vmdk', 0)
         self.recorded = recorded
         return got
@@ -119,9 +121,18 @@ def test_a_short_copy_by_the_last_method_fails(monkeypatch):
 
 
 def test_https_with_every_byte_and_a_clean_status_is_done(monkeypatch):
-    world = _World(monkeypatch, 'not asked', https=f'RC=0/0\n{_dd(SIZE)}')
+    # the pipe cannot open the file a running VM holds locked, HTTPS reads it
+    world = _World(monkeypatch, f'PIPE=1/0\n{_dd(0)}', https=f'RC=0/0\n{_dd(SIZE)}')
     assert world.copy()[0] == 'store:vm-100-disk-0'
-    assert world.ran('--connect-timeout') and not world.ran('sshpass -f ')
+    order = [c for c in world.sent if 'sshpass -f ' in c or '--connect-timeout' in c]
+    assert ['sshpass -f ' in c for c in order] == [True, False], order
+
+
+def test_https_that_went_first_is_not_tried_twice(monkeypatch):
+    # no sshpass on the node and no key on ESXi: HTTPS first, the pipe after it fails as well
+    world = _World(monkeypatch, f'PIPE=255/0\n{_dd(0)}', https=f'RC=18/0\n{_dd(SIZE)}', sshpass=False)
+    assert world.copy() == (None, None)
+    assert len([c for c in world.sent if '--connect-timeout' in c]) == 1, world.sent
 
 
 @pytest.mark.parametrize('https', [f'RC=0/0\n{_dd(int(SIZE * 0.95))}', f'RC=18/0\n{_dd(SIZE)}'],
