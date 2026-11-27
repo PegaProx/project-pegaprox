@@ -356,7 +356,7 @@ def live_switch(pve_mgr, task):
     """After Live Mirror moved the disks of a guest booted by live_first_sata: 'scsi' when
     vioscsi is bound and starts at boot (the next start has the boot disk on VirtIO SCSI),
     'sata' when the boot disk has to stay on SATA. The guest keeps running either way."""
-    from pegaprox.core import v2p
+    from pegaprox.core import v2p, v2p_winprep
     svc = FINAL['scsi']['service']
     vmid = _vmid(task)
     task.log('  Checking the guest before the boot disk moves to VirtIO SCSI for the next start...')
@@ -367,16 +367,13 @@ def live_switch(pve_mgr, task):
         return 'sata'
     fb = None
     try:
-        from pegaprox.core import v2p_winprep
         fb = v2p_winprep.read_first_boot(pve_mgr, task, FIRSTBOOT_SECONDS)
         if fb:
             v2p_winprep.log_first_boot(pve_mgr, task, fb)
     except Exception as e:
         task.log(f'  The first boot report could not be read: {e}')
     if not fb:
-        v2p._result_warning(task, f'Windows: the first boot task did not report within {FIRSTBOOT_SECONDS // 60} '
-                                  f'min, the static IPv4 may not be on the new adapters; see '
-                                  f'C:\\ProgramData\\KVMMigration\\migrate.log in the guest.')
+        v2p_winprep.no_report(task, f'the first boot task did not report within {FIRSTBOOT_SECONDS // 60} min')
     bound, start = _bind_state(pve_mgr, task, svc, BIND_SECONDS)
     if bound and start != 0:
         agent_exec(pve_mgr, task, ['sc.exe', 'config', svc, 'start=', 'boot'])
@@ -636,7 +633,7 @@ def _firstboot(pve_mgr, task, wait):
     if fb:
         v2p_winprep.log_first_boot(pve_mgr, task, fb)
     else:
-        task.log(f'  The first boot task did not report within {wait // 60} min, going on')
+        v2p_winprep.no_report(task, f'the first boot task did not report within {wait // 60} min')
 
 
 def boot(pve_mgr, task):

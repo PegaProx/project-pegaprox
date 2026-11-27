@@ -378,6 +378,15 @@ def log_first_boot(pve_mgr, task, fb):
                 task.log(LOG_PREFIX + ln.strip()[:400])
 
 
+def no_report(task, why):
+    """MK Nov 2026 - the first boot task's report did not come: a warning of the run, not a log
+    line under COMPLETED. A lab run ended without a warning while the guest had no network."""
+    from pegaprox.core.v2p import _result_warning
+    task.log(f"{LOG_PREFIX}{why}")
+    _result_warning(task, f"Windows: {why}, so whether the static IPv4 is on the new adapters is not known. "
+                          f"Check the guest's network; its log is C:\\ProgramData\\{WORK_DIR}\\migrate.log.")
+
+
 def first_boot_report(pve_mgr, task, agent_wait=300, wait=600):
     """After a start without the two-stage boot: what the first boot task did. Never fails the run."""
     st = state(task)
@@ -385,14 +394,13 @@ def first_boot_report(pve_mgr, task, agent_wait=300, wait=600):
         return
     from pegaprox.core.v2p_twostage import agent_ping
     if not agent_ping(pve_mgr, task, agent_wait):
-        task.log(f"{LOG_PREFIX}the guest agent did not answer, the outcome of the first boot is in "
-                 f"C:\\ProgramData\\{WORK_DIR}\\migrate.log of the guest")
+        no_report(task, f'the guest agent did not answer within {agent_wait // 60} min')
         return
     fb = read_first_boot(pve_mgr, task, wait)
     if fb:
         log_first_boot(pve_mgr, task, fb)
     else:
-        task.log(f"{LOG_PREFIX}the first boot task has not reported yet, see {work_path(pve_mgr, task)}\\migrate.log")
+        no_report(task, f'the first boot task did not report within {wait // 60} min')
 
 
 def view(task):
