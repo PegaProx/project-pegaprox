@@ -1010,18 +1010,35 @@ def _node_cannot_reach(pve_mgr, node, host, port, wait=5):
     return _first_lines(' '.join(lines[:-1])) or f'exit code {code}'
 
 
-def _sshfs_mount_cmd(mnt_path, opts, source):
+# ssh options for an ESXi that still needs the old algorithms, for the ssh_command of sshfs:
+# the commas escaped for FUSE's option parser, which would split them off as options of its own
+SSHFS_LEGACY_SSH = (
+    " -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256"
+    " -o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256"
+    " -o PreferredAuthentications=keyboard-interactive\\,password"
+    " -o Compression=no"
+    " -o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr"
+    " -o TCPKeepAlive=yes -o IPQoS=throughput"
+)
+
+
+def _sshfs_mount_cmd(mnt_path, opts, source, ssh_opts=''):
     """The node's command for one SSHFS mount attempt (#1224). Run it with the ESXi
     password as stdin_data: sshfs reads it from there, it is on no command line.
 
     sshfs 3 sends the stderr of the ssh it starts to /dev/null and says no more than
     'read: Connection reset by peer'. ssh -E puts ssh's own messages in a file, printed
     to stderr when the mount fails and removed either way. Not sshfs_debug: that hands
-    ssh the command's stderr, and an ssh that stays for the mount keeps the call open."""
+    ssh the command's stderr, and an ssh that stays for the mount keeps the call open.
+
+    ssh_opts: options for that ssh (SSHFS_LEGACY_SSH), inside the one quoted ssh_command.
+    MK Nov 2026 - they sat unquoted in opts with a second ssh_command after them: the node's
+    shell split them into options of sshfs, FUSE refused the algorithm names, and the one
+    attempt meant for an older ESXi never ran with them."""
     return (
         f"mkdir -p {mnt_path} && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && {{ "
         f"sshfs -o password_stdin,{opts} "
-        f"-o \"ssh_command=ssh -E $_log\" {source} {mnt_path}; "
+        f"-o \"ssh_command=ssh -E $_log{ssh_opts}\" {source} {mnt_path}; "
         f"_rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }}"
     )
 
@@ -1971,8 +1988,8 @@ def _run_v2p_migration(task):
         #   kernel_cache: use kernel page cache (huge for sequential reads)
         #   max_read=1048576: 1MB read chunks (default 64KB, was 256KB)
         #   max_write=1048576: 1MB write chunks (for cache=writeback flushes)
-        #   big_writes: required to allow writes >4KB through FUSE
-        #   large_read: enable FUSE large reads
+        #   (big_writes and large_read are gone: FUSE 3, so PVE 8 and 9, refuses them, and
+        #   has both on anyway)
         #   entry_timeout/attr_timeout=3600: cache file metadata for 1h
         #     (avoids thousands of stat() calls -- HUGE reduction in FUSE overhead)
         #   negative_timeout=3600: cache "file not found" for 1h
@@ -1985,22 +2002,13 @@ def _run_v2p_migration(task):
             f"StrictHostKeyChecking={_hk},ConnectTimeout=10,"
             "reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,"
             "cache=yes,kernel_cache,"
-            "max_read=1048576,max_write=1048576,big_writes,large_read,"
+            "max_read=1048576,max_write=1048576,"
             "entry_timeout=3600,negative_timeout=3600,attr_timeout=3600,"
             "no_check_root"
         )
-        sshfs_algo_opts = (
-            "ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519\\,ecdsa-sha2-nistp256 "
-            "-o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 "
-            "-o PreferredAuthentications=keyboard-interactive\\,password "
-            "-o Compression=no "
-            "-o Ciphers=aes128-gcm@openssh.com\\,aes128-ctr\\,aes256-ctr "
-            "-o TCPKeepAlive=yes "
-            "-o IPQoS=throughput"
-        )
-        
+
         _src = f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)}"
-        mount_cmd = _sshfs_mount_cmd(mnt_path, f"{sshfs_ssh_opts},{sshfs_algo_opts}", _src)
+        mount_cmd = _sshfs_mount_cmd(mnt_path, sshfs_ssh_opts, _src, ssh_opts=SSHFS_LEGACY_SSH)
         rc, out, err = (_pve_node_exec(pve_mgr, task.target_node, mount_cmd, timeout=30,
                                        stdin_data=esxi_pass)
                         if use_sshfs else (0, '', ''))
@@ -2016,7 +2024,7 @@ def _run_v2p_migration(task):
                 f"StrictHostKeyChecking={_hk},ConnectTimeout=10,"
                 f"reconnect,ServerAliveInterval=15,"
                 f"cache=yes,kernel_cache,"
-                f"max_read=1048576,big_writes,large_read,"
+                f"max_read=1048576,"
                 f"entry_timeout=3600,attr_timeout=3600", _src)
             rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd2, timeout=30,
                                           stdin_data=esxi_pass)
@@ -7219,11 +7227,6 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     elif not qemu_ssh_works and not sshfs_boot and not sshfs_flat_paths:
         # SSHFS mount failed entirely -- try remounting
         task.log("SSHFS not available - trying to remount...")
-        sshfs_algo = (
-            "ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519 "
-            "-o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 "
-            "-o PreferredAuthentications=keyboard-interactive\\,password"
-        )
         # resolve symlink for SSHFS (same as main mount)
         rc_rl2, out_rl2, _ = _ssh_exec(esxi_host, esxi_user, esxi_pass,
             f"readlink /vmfs/volumes/{shlex.quote(datastore)} 2>/dev/null || "
@@ -7235,14 +7238,12 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             resolved2 = f"/vmfs/volumes/{resolved2}"
         ds_remount = resolved2 if resolved2 and resolved2.startswith('/vmfs/') else f"/vmfs/volumes/{datastore}"
         # sshfs reads the password from stdin, which is where it goes
+        # MK Nov 2026 - the same mount command as the first mount: unquoted, the algorithm
+        # list here ended every remount with "fuse: unknown option(s)"
         rc_remount, _, _ = _pve_node_exec(pve_mgr, task.target_node,
-            f"fusermount -u {mnt_path} 2>/dev/null; "
-            f"mkdir -p {mnt_path} && "
-            f"sshfs -o password_stdin,"
-            f"StrictHostKeyChecking={_node_hkc()},"
-            f"reconnect,ServerAliveInterval=15,"
-            f"cache=yes,{sshfs_algo} "
-            f"{esxi_user}@{esxi_host}:{shlex.quote(ds_remount)} {mnt_path} 2>&1",
+            f"fusermount -u {mnt_path} 2>/dev/null; " + _sshfs_mount_cmd(
+                mnt_path, f"StrictHostKeyChecking={_node_hkc()},reconnect,ServerAliveInterval=15,cache=yes",
+                f"{esxi_user}@{esxi_host}:{shlex.quote(ds_remount)}", ssh_opts=SSHFS_LEGACY_SSH),
             timeout=20, stdin_data=esxi_pass)
         if rc_remount == 0:
             # Retry with NBD after remount

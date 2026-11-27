@@ -227,7 +227,7 @@ log=
 for a in "$@"; do
   case "$a" in
     *big_writes*|*large_read*) echo "fuse: unknown option(s): \`-o big_writes,large_read'" >&2; exit 1 ;;
-    "ssh_command=ssh -E "*) log=${a#ssh_command=ssh -E } ;;
+    "ssh_command=ssh -E "*) log=${a#ssh_command=ssh -E }; log=${log%%%% *} ;;
   esac
 done
 [ -n "$log" ] && echo "%s" >> "$log"
@@ -267,8 +267,10 @@ def test_the_mount_failure_says_why_ssh_on_the_node_gave_up(monkeypatch, tmp_pat
     assert r.task.status == 'failed'
     assert r.task.error == f'SSHFS mount failed: {SSH_SAID}', r.task.error
     log = '\n'.join(r.task.log_lines)
-    assert 'SSHFS mount attempt 1/3 failed, trying fewer options: fuse: unknown option' in log
-    assert 'SSHFS mount attempt 2/3 failed, trying fewer options: fuse: unknown option' in log
+    # FUSE 3 refuses no option of any attempt any more: each one says what ssh said
+    assert f'SSHFS mount attempt 1/3 failed, trying fewer options: {SSH_SAID}' in log
+    assert f'SSHFS mount attempt 2/3 failed, trying fewer options: {SSH_SAID}' in log
+    assert 'unknown option' not in log
     # ssh's file is gone again, the mount failed or not
     assert not list(tmp_path.glob('v2p-sshfs-*'))
 
