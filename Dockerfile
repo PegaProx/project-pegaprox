@@ -93,6 +93,7 @@ VOLUME ["/app/config", "/app/logs"]
 # Switch to non-root user
 USER pegaprox
 
+# the web UI, the API and the consoles; 5001/5002 answer consoles for older setups only
 EXPOSE 5000 5001 5002
 # the witness, when the container runs the command `witness`
 EXPOSE 5005

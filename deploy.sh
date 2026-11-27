@@ -275,9 +275,8 @@ main() {
     fi
     if [ "$PY_MINOR" -ge 14 ]; then
         echo -e "${YELLOW}WARNING: Python $PY_VER is newer than what PegaProx is tested on (3.10–3.13).${NC}"
-        echo -e "${YELLOW}Known issue on 3.14: SSH/VNC WebSocket subprocesses may fail to bind${NC}"
-        echo -e "${YELLOW}cleanly (issue #388). If you hit a console-not-working bug, downgrade to${NC}"
-        echo -e "${YELLOW}python3.12 (Ubuntu 24.04 default) or python3.13 and run deploy.sh again.${NC}"
+        echo -e "${YELLOW}If you hit a bug that looks version related, downgrade to python3.12${NC}"
+        echo -e "${YELLOW}(Ubuntu 24.04 default) or python3.13 and run deploy.sh again.${NC}"
         if [ -t 0 ] && [ -z "$DEPLOY_FORCE_PY" ]; then
             read -r -p "Continue anyway? [y/N] " _ans
             case "$_ans" in
@@ -372,7 +371,7 @@ main() {
         done
     fi
 
-    echo -e "${GREEN}✓ Using ports: $ACCESS_PORT (Web), $((ACCESS_PORT+1)) (VNC), $((ACCESS_PORT+2)) (SSH)${NC}"
+    echo -e "${GREEN}✓ Using port: $ACCESS_PORT (web UI and consoles; $((ACCESS_PORT+1))/$((ACCESS_PORT+2)) answer consoles for older setups)${NC}"
     [ "$ACCESS_PORT" -lt 1024 ] && echo -e "${CYAN}  (privileged ports via CAP_NET_BIND_SERVICE)${NC}"
 
     # Create systemd service

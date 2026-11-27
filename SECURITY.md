@@ -201,8 +201,9 @@ To keep your PegaProx installation secure:
    OS user `pegaprox_admin` on first boot.
 2. **Enable 2FA** for all user accounts, especially administrators, preferably with WebAuthn.
 3. **Use HTTPS** with a valid TLS certificate in production instead of the self-signed one.
-4. **Restrict network access** to the PegaProx web interface (port 5000, and 5001-5002 for the
-   consoles) using firewall rules.
+4. **Restrict network access** to the PegaProx web interface (port 5000, which also serves the
+   consoles) using firewall rules. Ports 5001-5002 still answer consoles for older setups; with
+   `PEGAPROX_LEGACY_CONSOLE_PORTS=0` they stay closed.
 5. **Keep PegaProx updated** to the latest version.
 6. **Use a dedicated Proxmox VE user or API token** for each cluster connection instead of
    `root@pam`, with only the privileges PegaProx uses (see

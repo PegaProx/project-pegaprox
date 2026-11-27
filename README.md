@@ -273,12 +273,14 @@ docker compose up -d
 Or without Compose:
 ```bash
 docker run -d --name pegaprox \
-  -p 5000:5000 -p 5001:5001 -p 5002:5002 \
+  -p 5000:5000 \
   -v pegaprox-config:/app/config \
   -v pegaprox-logs:/app/logs \
   --restart unless-stopped \
   ghcr.io/pegaprox/pegaprox:latest
 ```
+
+The consoles (VNC, node shell, VM terminal) run on the same port as the web UI. Ports 5001 and 5002 still answer consoles for older setups that send them there, so an existing `-p 5001:5001 -p 5002:5002` does no harm, but a new install needs only 5000.
 
 The same image is on Docker Hub as [`pegaprox/pegaprox`](https://hub.docker.com/r/pegaprox/pegaprox), with the identical digest, so `pegaprox/pegaprox:latest` works just as well. Other PegaProx images on Docker Hub are not ours and may be outdated.
 
@@ -295,7 +297,7 @@ git clone https://github.com/PegaProx/project-pegaprox.git
 cd project-pegaprox
 docker build -t pegaprox .
 docker run -d --name pegaprox \
-  -p 5000:5000 -p 5001:5001 -p 5002:5002 \
+  -p 5000:5000 \
   -v pegaprox-config:/app/config \
   -v pegaprox-logs:/app/logs \
   --restart unless-stopped \

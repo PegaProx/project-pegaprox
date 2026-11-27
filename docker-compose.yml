@@ -14,9 +14,10 @@ services:
     # build: .  # uncomment to build locally
     container_name: pegaprox
     ports:
-      - "5000:5000"   # web UI + API
-      - "5001:5001"   # VNC websocket (noVNC console)
-      - "5002:5002"   # SSH websocket (xterm.js)
+      - "5000:5000"   # web UI + API + consoles (VNC, shell, terminal)
+      # NS Nov 2026 - 5001/5002 only answer consoles for setups that still send them there
+      # - "5001:5001"
+      # - "5002:5002"
       # NS Nov 2026 - http://host:5000 is redirected to https://host:5000 with nothing set.
       # For http://host on port 80 and for ACME HTTP-01, uncomment this line, and below
       # environment: with PEGAPROX_HTTP_PORT. The image runs as the pegaprox user; Docker
