@@ -277,6 +277,7 @@ class GuestSession:
                 return None
             raise
         url = fix_transfer_url(getattr(info, 'url', ''), self.mgr.host)
+        r = None
         try:
             r = ha_transport.http('GET', url, verify=self.mgr.ssl_verify, timeout=120, stream=True,
                                   allow_redirects=False)
@@ -287,12 +288,16 @@ class GuestSession:
                 buf += chunk
                 if len(buf) >= cap:
                     break
-            r.close()
             return bytes(buf[:cap])
         except GuestOpsError:
             raise
         except Exception as e:
             raise GuestOpsError('other', f'the download from the guest failed ({type(e).__name__})')
+        finally:
+            # MK Nov 2026 - a streamed answer holds its connection until it is closed: an error
+            # answer or a download cut off kept it until the garbage collector came by
+            if r is not None:
+                r.close()
 
     def start(self, program, args, cwd):
         return int(self._call('starting a program in the guest', lambda vm, ops, a:

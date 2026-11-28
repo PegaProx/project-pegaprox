@@ -157,14 +157,22 @@ def test_a_transfer_url_to_another_host_or_without_tls_is_refused(url):
 
 
 class _Http:
-    def __init__(self, status=200, body=b''):
-        self.calls, self.status, self.body = [], status, body
+    def __init__(self, status=200, body=b'', cut=False):
+        self.calls, self.status, self.body, self.cut, self.closed = [], status, body, cut, 0
 
     def __call__(self, method, url, **kw):
         self.calls.append((method, url, kw))
         body = self.body
-        return types.SimpleNamespace(status_code=self.status, close=lambda: None,
-                                     iter_content=lambda n: [body[i:i + n] for i in range(0, len(body), n)] or [b''])
+
+        def iter_content(n):
+            if self.cut:
+                yield body[:n]
+                raise ConnectionError('the guest went away')
+            yield from [body[i:i + n] for i in range(0, len(body), n)] or [b'']
+
+        def close():
+            self.closed += 1
+        return types.SimpleNamespace(status_code=self.status, close=close, iter_content=iter_content)
 
 
 def test_put_goes_through_the_guarded_transport_with_the_servers_tls_setting(monkeypatch):
@@ -193,6 +201,19 @@ def test_get_reads_at_most_the_cap_and_a_missing_file_is_none(monkeypatch):
     assert len(s.get('C:\\big', 1000)) == 1000
     s, _ = _sess(Ops(fail={'InitiateFileTransferFromGuest': _fault('FileNotFound')('no')}))
     assert s.get('C:\\none', 10) is None
+
+
+@pytest.mark.parametrize('http', [_Http(body=b'x' * 10), _Http(status=404), _Http(body=b'x' * 200000, cut=True)],
+                         ids=['read', 'refused', 'cut off'])
+def test_the_download_closes_its_streamed_answer_whatever_came(monkeypatch, http):
+    # an error answer and a download cut off held their connection until the garbage collector
+    monkeypatch.setattr(ha_transport, 'http', http)
+    s, _ = _sess()
+    try:
+        s.get('C:\\x', 10 ** 6)          # more than one chunk: the cut comes before the cap
+    except go.GuestOpsError:
+        pass
+    assert http.closed == 1
 
 
 def test_after_close_nothing_more_runs_with_the_login():
