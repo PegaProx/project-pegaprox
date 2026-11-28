@@ -1895,6 +1895,13 @@ def _winprep_views(mgr, vm_id, vm_detail, data, plan):
                               + '; it keeps the disk controller and NICs of the source')
     if not win and (gp or data.get('two_stage_boot') is True):
         wp['warnings'].append('The guest does not look like Windows: the Windows preparation does not run')
+    # MK Nov 2026 - stage 1 runs after the clone: Live Clone copies what it writes (drivers and
+    # guest tools, several GB) at the switchover, in the downtime (34 min against 9 with
+    # Snapshot-Iterative in the lab), Auto takes Snapshot-Iterative for it
+    if win and gp and mode == 'vmkfstools_clone':
+        wp['warnings'].append('Live Clone copies what the preparation in the guest writes (drivers and guest tools, '
+                              'several GB) at the switchover, in the downtime: Snapshot-Iterative or Auto copy it '
+                              'while the source VM still runs')
     plan['windows_prep'], plan['two_stage'] = wp, ts
     # MK Nov 2026 - not for a guest that is no Windows: its check warned that it falls back to the
     # offline preparation, which does not run for it either, and the bulk list tagged its tools
@@ -2030,6 +2037,16 @@ def _v2p_plan(mgr, vm_id, data, opts, vm_detail, inv=None, exp=None):
         inv, disks, nics, opts, data['target_storage'], data.get('network_bridge', 'vmbr0'),
         net_vlan_tag=data.get('net_vlan_tag'), transfer_mode=data.get('transfer_mode', 'auto'),
         needs_efi=needs_efi, needs_tpm=needs_tpm)
+    # MK Nov 2026 - what keeps Snapshot-Iterative from running (change tracking the VM does not
+    # support, a raw or independent disk, snapshots), said in the review and not at the start.
+    # The wizard picks it for the in-guest Windows preparation
+    if data.get('transfer_mode') == 'snapshot_zero' and plan['ok']:
+        keys = {str((disks[r['index']] or {}).get('key')) for r in plan.get('disks') or []
+                if not r.get('skip') and r['index'] < len(disks) and isinstance(disks[r['index']], dict)}
+        why = _v2p._snapshot_iterative_refusal(mgr, vm_id, disks, keys)
+        if why:
+            plan['errors'].append(why.replace(' Nothing was copied, the source VM was not touched.', ''))
+            plan['ok'] = False
     # MK Nov 2026 (#1253) - the wizard's review and each guest of a bulk check list these
     fw_warn = _v2p.firmware_mismatch(vd, bios)
     if fw_warn:

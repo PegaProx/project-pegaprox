@@ -357,3 +357,52 @@ def test_a_cancelled_or_abandoned_run_drops_the_logins(env):
     ebulk.register(run2)
     ebulk.abandon(run2, 'test')
     assert run2._guest_login is None
+
+
+# --------------------------------------------------------------------------- the mode for it
+
+def _tracking(esxi, supported=True):
+    esxi.change_tracking_state = lambda vm_id: {'data': {
+        'supported': supported, 'enabled': False,
+        'disks': {d['key']: {'file': d['vmdk_file'], 'mode': 'persistent', 'raw': False} for d in esxi.disks}}}
+
+
+def test_the_review_of_live_clone_with_the_in_guest_preparation_names_the_mode_for_it(route, probe, monkeypatch):
+    # stage 1 runs after the clone: Live Clone copies what it writes in the downtime (34 min
+    # against 9 with Snapshot-Iterative for a lab guest)
+    monkeypatch.setattr(v2p, '_node_cannot_reach', lambda *a, **k: '')
+    _windows(route.esxi)
+    p = route.post(dry_run=True, esxi_password=None, transfer_mode='vmkfstools_clone', guest_prep=True).get_json()
+    hint = [w for w in p['warnings'] if w.startswith('Live Clone copies what the preparation in the guest writes')]
+    assert len(hint) == 1 and 'Snapshot-Iterative or Auto copy it while the source VM still runs' in hint[0], p['warnings']
+    for mode in ('snapshot_zero', 'auto'):
+        _tracking(route.esxi)
+        q = route.post(dry_run=True, esxi_password=None, transfer_mode=mode, guest_prep=True).get_json()
+        assert not any(w.startswith('Live Clone copies') for w in q['warnings']), (mode, q['warnings'])
+    # without the preparation Live Clone is no reason for it
+    q = route.post(dry_run=True, esxi_password=None, transfer_mode='vmkfstools_clone').get_json()
+    assert not any(w.startswith('Live Clone copies') for w in q['warnings'])
+
+
+@pytest.mark.parametrize('case,word', [
+    ('snapshot', 'The VM has snapshots (before-upgrade)'),
+    ('old_hardware', 'virtual hardware older than version 7'),
+    ('no_reader', 'this connection cannot read it'),
+])
+def test_the_review_says_what_keeps_snapshot_iterative_from_running(route, case, word):
+    # the wizard picks Snapshot-Iterative for the in-guest preparation: what would refuse it at
+    # the start is an error of the review now
+    if case == 'snapshot':
+        _tracking(route.esxi)
+        route.esxi.snaps.append({'snapshot': 'snapshot-0', 'name': 'before-upgrade'})
+    elif case == 'old_hardware':
+        _tracking(route.esxi, supported=False)
+    p = route.post(dry_run=True, esxi_password=None, transfer_mode='snapshot_zero').get_json()
+    assert p['ok'] is False and any(word in e for e in p['errors']), p['errors']
+    assert not any('Nothing was copied' in e for e in p['errors'])
+
+
+def test_the_review_of_snapshot_iterative_on_a_vm_that_takes_it_is_clean(route):
+    _tracking(route.esxi)
+    p = route.post(dry_run=True, esxi_password=None, transfer_mode='snapshot_zero').get_json()
+    assert p['ok'] is True, p['errors']

@@ -2126,11 +2126,26 @@ def _run_v2p_migration(task):
             # written since the last round (see _snapshot_iterative_rounds).
             _vmk_auto = (task.transfer_mode == 'auto')
             _iterative = (task.transfer_mode == 'snapshot_zero')
+            # MK Nov 2026 - Auto with the in-guest Windows preparation takes Snapshot-Iterative:
+            # what stage 1 writes after the clone (drivers, guest tools, several GB) is carried by
+            # the catch-up rounds while the source still runs. Live Clone copied it at the
+            # switchover: 34 min of downtime for a lab guest that SI moved with 9
+            _gp_on = isinstance(getattr(task, '_guest_prep', None), dict) and task._guest_prep.get('on')
+            if _vmk_auto and _gp_on:
+                _si_why = _snapshot_iterative_refusal(
+                    vmware_mgr, task.vm_id, disks,
+                    {str(d.get('key')) for _i, d in enumerate(disks) if task.disk_target(_i) is not None})
+                if _si_why:
+                    task.log(f"Auto stays on Live Clone for the in-guest preparation: {_si_why.split('. ')[0]}. "
+                             f"What the preparation writes is copied at the switchover, in the downtime")
+                else:
+                    _iterative = True
             class _VmkFallback(Exception):
                 pass
             class _VmkSwitchoverFailed(Exception):
                 pass
-            task.log(f"=== TRANSFER MODE: {'Auto -> vmkfstools_clone' if _vmk_auto else task.transfer_mode} "
+            _picked = 'Snapshot-Iterative' if _iterative else 'vmkfstools_clone'
+            task.log(f"=== TRANSFER MODE: {('Auto -> ' + _picked) if _vmk_auto else task.transfer_mode} "
                      f"({'live clone + change tracking rounds' if _iterative else 'VDDK-free live clone'}) ===")
             clone_bases = []  # (datastore, vm_dir, basename) to rm on every exit path (#561: per-disk)
             src_stopped = False        # we powered off a running source at the switchover
@@ -2219,22 +2234,32 @@ def _run_v2p_migration(task):
                     why = _snapshot_iterative_refusal(
                         vmware_mgr, task.vm_id, disks,
                         {str(d.get('key')) for _i, d in enumerate(disks) if task.disk_target(_i) is not None})
-                    if why:
+                    if why and _vmk_auto:
+                        # Auto picked it for the in-guest preparation: Live Clone still works
+                        task.log(f"Auto goes on with Live Clone: {why.split('. ')[0]}")
+                        _iterative = False
+                    elif why:
                         task.set_phase('failed', why)
                         _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
                         return
+                if _iterative:
                     if (vmware_mgr.change_tracking_state(task.vm_id).get('data') or {}).get('enabled'):
                         task.log("Change tracking is on for the source VM already")
                     else:
                         res = vmware_mgr.set_change_tracking(task.vm_id, True)
-                        if 'error' in res:
+                        if 'error' in res and _vmk_auto:
+                            task.log(f"Auto goes on with Live Clone: change tracking could not be switched on "
+                                     f"for the source VM ({res['error']})")
+                            _iterative = False
+                        elif 'error' in res:
                             task.set_phase('failed', f"Change tracking could not be switched on for the source VM: "
                                            f"{res['error']}. Nothing was copied, the source VM was not touched.")
                             _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
                             return
-                        tracking_on = True
-                        task.log("Change tracking switched on for the source VM (off again after the run), "
-                                 "it starts with the clone snapshot")
+                        else:
+                            tracking_on = True
+                            task.log("Change tracking switched on for the source VM (off again after the run), "
+                                     "it starts with the clone snapshot")
 
                 # --- freeze the base (VM keeps running) ---
                 task.log("Creating clone snapshot (freezes base VMDKs; VM stays up)...")
@@ -2712,6 +2737,9 @@ def _run_v2p_migration(task):
             except _VmkFallback:
                 # auto-mode: clone path bailed before any irreversible work — drop through to
                 # the legacy auto pre-sync/live-mirror flow below (do NOT return).
+                # MK Nov 2026 - Auto runs Snapshot-Iterative for the in-guest preparation: the
+                # change tracking it switched on goes back as on every other way out
+                _si_restore_tracking()
                 if folder_gap:
                     # that flow copies from the boot disk's folder listing, which does not
                     # hold every disk of the VM as it is now
