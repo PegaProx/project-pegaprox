@@ -725,12 +725,15 @@ def stage(root, windows, run, firstboot, pairs, driver_msi='', agent_msi='', uni
     from_hive = read_adapters(sys_ro)
     work, kept, aside = prepare_work_dir(root, run)
     from_guest = None
+    released = False
     if kept:
         # only what SYSTEM or the Administrators wrote; a run by hand counts only when the
         # copied registry has no static address left
         nc, flag = os.path.join(work, 'netconfig.json'), os.path.join(work, 'released.flag')
+        # stage 2 ran in the guest, by PegaProx or by hand: it uninstalled the guest tools too
+        released = plain_and_trusted(flag, False)
         if plain_and_trusted(nc, False):
-            from_guest = _guest_netconfig(nc, run, released=not from_hive and plain_and_trusted(flag, False))
+            from_guest = _guest_netconfig(nc, run, released=not from_hive and released)
         for name in STALE_STATE:
             p = os.path.join(work, name)
             if os.path.lexists(p) and not (os.path.isdir(p) and not os.path.islink(p)):
@@ -764,7 +767,8 @@ def stage(root, windows, run, firstboot, pairs, driver_msi='', agent_msi='', uni
     san_was = san_online(sys_rw)
     sys_rw.commit()
     return {'build': ver['build'], 'product': ver['product'], 'server': ver['server'],
-            'source': netconfig['source'], 'tools_code': bool(code), 'locked': True, 'service': sets,
+            'source': netconfig['source'], 'tools_code': bool(code), 'released': released, 'locked': True,
+            'service': sets,
             'kept': kept, 'moved_aside': aside, 'msis': names,
             'adapters': [{'mac': a['mac'], 'target_mac': a.get('target_mac') or '',
                           'ipv4': [f"{x['ip']}/{x['prefix']}" for x in a['ipv4']],

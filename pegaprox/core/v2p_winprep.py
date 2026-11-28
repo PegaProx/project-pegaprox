@@ -230,11 +230,12 @@ def parse_result(task, out):
             if got.get('stale'):
                 task.log(f"[Windows]   {got['stale']} static adapter(s) of hardware the guest no longer has stay as they are")
             # stage 2 in the guest uninstalls them before it shuts down: then no entry is left
-            # here, and they are gone rather than staying
+            # here, and they are gone rather than staying. A run of the script by hand says so
+            # with its released.flag only, PegaProx knows nothing of it
             if got.get('tools_code'):
                 tools = 'uninstalled at the first boot' if uninstall_tools_ok(task) else \
                     'stay installed, the VM keeps a device that runs on their drivers'
-            elif (getattr(task, '_guest_prep', None) or {}).get('state') == 'shut_down':
+            elif got.get('released') or (getattr(task, '_guest_prep', None) or {}).get('state') == 'shut_down':
                 tools = 'no uninstall entry left, the in-guest preparation uninstalled them before its shutdown'
             else:
                 tools = 'no uninstall entry found, they stay'

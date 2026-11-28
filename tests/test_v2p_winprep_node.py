@@ -527,6 +527,8 @@ def test_the_network_the_in_guest_preparation_saved_wins_over_the_released_regis
     got = _stage(volume, '005056aabbcc=bc2411000009')
     s = _sets((work / 'firstboot-data.cmd').read_bytes())
     assert got['source'] == 'guest' and got['kept'] is True and (s['KM_NIC1_IP1'], s['KM_NIC1_MAC']) == ('172.16.0.9', 'bc2411000009')
+    # no released.flag: stage 2 did not run, nothing says the guest tools went
+    assert got['released'] is False
     # the file of another run is not taken
     saved['run'] = 'other'
     (work / 'netconfig.json').write_text(json.dumps(saved))
@@ -761,6 +763,24 @@ def test_the_migration_log_says_what_the_san_policy_was(monkeypatch, was, said):
     assert (hits and said in hits[0]) if said else not hits, task.lines
 
 
+def test_a_run_by_hand_that_released_the_guest_is_reported(volume):
+    # the lab ran the manual script on ESXi (stage 1, stage 2, shutdown) and migrated the guest
+    # without a login: its stage 2 had uninstalled the guest tools, the log said "they stay"
+    volume.specs['SYSTEM'] = system_spec(ifaces={GUID_DHCP: {'@EnableDHCP': 1}})
+    work = volume.work
+    work.mkdir()
+    volume.acls[str(work)] = nh.security_descriptor(True)
+    trusted = make_sd('S-1-5-32-544', [(0, ALL, 'S-1-5-18'), (0, ALL, 'S-1-5-32-544')])
+    (work / 'released.flag').write_text('released')
+    volume.acls[str(work / 'released.flag')] = trusted
+    (work / 'netconfig.json').write_text(json.dumps({'source': 'guest', 'run': 'manual', 'adapters': [
+        {'setting_id': GUID_A, 'mac': '00:50:56:ba:d2:b5', 'index': 1, 'dhcp': False, 'instance': DEV_A,
+         'ipv4': [{'ip': '10.0.0.50', 'prefix': 24}], 'gateway': [], 'dns': []}]}))
+    volume.acls[str(work / 'netconfig.json')] = trusted
+    got = _stage(volume, '005056bad2b5=bc2411000002')
+    assert got['source'] == 'guest' and got['released'] is True
+
+
 @pytest.mark.parametrize('code,prep,nic,said', [
     (True, None, 'virtio', 'ESXi guest tools: uninstalled at the first boot'),
     (True, None, 'vmxnet3', 'ESXi guest tools: stay installed, the VM keeps a device that runs on their drivers'),
@@ -768,17 +788,21 @@ def test_the_migration_log_says_what_the_san_policy_was(monkeypatch, was, said):
     (False, 'shut_down', 'virtio', 'ESXi guest tools: no uninstall entry left, the in-guest preparation '
                                    'uninstalled them before its shutdown'),
     (False, 'aborted', 'virtio', 'ESXi guest tools: no uninstall entry found, they stay'),
+    # the script run by hand: only its released.flag on the disk says stage 2 ran
+    (False, 'released', 'virtio', 'ESXi guest tools: no uninstall entry left, the in-guest preparation '
+                                  'uninstalled them before its shutdown'),
     (False, None, 'virtio', 'ESXi guest tools: no uninstall entry found, they stay'),
 ])
 def test_the_migration_log_says_what_becomes_of_the_guest_tools(monkeypatch, code, prep, nic, said):
     from pegaprox.core import v2p_winprep
     task = _LogTask()
     task._net_model = nic
-    if prep:
+    if prep and prep != 'released':
         task._guest_prep = {'state': prep}
     monkeypatch.setattr(v2p_winprep, 'state', lambda t: {})
     out = 'WINPREP ' + json.dumps({'build': 26100, 'product': 'Windows Server 2025', 'adapters': [],
                                    'service': ['ControlSet001'], 'tools_code': code,
+                                   'released': prep == 'released',
                                    'source': 'guest' if prep else 'offline'}) + '\nWINPREP_OK\n'
     assert v2p_winprep.parse_result(task, out) is True
     hits = [ln for ln in task.lines if 'ESXi guest tools:' in ln]
