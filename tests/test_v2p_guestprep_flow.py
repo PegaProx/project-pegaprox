@@ -437,6 +437,16 @@ def test_over_rest_nothing_is_mounted_again(lab, monkeypatch):
     assert lab.esxi.actions == []
 
 
+def test_an_installer_esxi_took_out_after_the_install_is_not_unmounted_again(lab, monkeypatch):
+    # on the lab ESXi disconnected the CD when its installer was through, and the unmount after
+    # it was refused ("The operation is not allowed in the current state"), logged as a failure
+    _states(lab, monkeypatch, {'tools_running': True, 'installer_mounted': False})
+    assert gp._unmount_when_back(lab.esxi, lab.task, wait=60, poll=15) is True
+    assert lab.esxi.actions == []
+    assert any('ESXi took their installer out itself' in line for line in lab.task.log_lines)
+    assert not any('failed' in line for line in lab.task.log_lines)
+
+
 def test_the_installer_is_unmounted_once_the_tools_run_again(lab, monkeypatch):
     lab.esxi.state['tools_running'] = True
     assert gp._unmount_when_back(lab.esxi, lab.task, wait=60, poll=1) is True

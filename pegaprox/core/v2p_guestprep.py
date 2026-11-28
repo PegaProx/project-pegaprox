@@ -813,6 +813,11 @@ def _unmount_when_back(vmware_mgr, task, wait=None, poll=15, remounts=6):
                      f"ESXi had taken the installer of the guest tools out unused; mounting it again failed "
                      f"({str(res['error'])[:200]})")
         if gs.get('tools_running'):
+            if gs.get('installer_mounted') is False:
+                # ESXi ends the install itself once its installer ran: on the lab the unmount
+                # after it was refused as "not allowed in the current state"
+                task.log('The guest tools run again on the source VM, ESXi took their installer out itself')
+                return True
             res = vmware_mgr.unmount_tools_installer(task.vm_id)
             if isinstance(res, dict) and res.get('error'):
                 task.log(f"The guest tools run again; unmounting their installer failed ({str(res['error'])[:200]})")
