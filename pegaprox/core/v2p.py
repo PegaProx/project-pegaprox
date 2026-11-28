@@ -2736,6 +2736,9 @@ def _run_v2p_migration(task):
             # Stop VMware VM if running
             vm_state = vmware_mgr.get_vm(task.vm_id)
             is_running = 'data' in vm_state and vm_state['data'].get('power_state') == 'POWERED_ON'
+            # MK Nov 2026 - the downtime of a running source starts here (a prepared guest releases
+            # its address first); the mode with the most of it kept none at all
+            _off_t0 = time.time() if is_running else None
             
             if is_running and _source_off_for_cutover(vmware_mgr, pve_mgr, task):
                 # MK Nov 2026 - the guest prepared in ESXi shut itself down
@@ -2842,10 +2845,13 @@ def _run_v2p_migration(task):
             _maybe_convert_disks_to_qcow2(pve_mgr, task)
 
             # MK Nov 2026 - the two-stage boot of a Windows guest (with start_after off as well)
+            _up = False
             if _two_stage_stage(pve_mgr, task):
                 _ts_outcome, _ts_why = _two_stage_boot(pve_mgr, task)
                 if _ts_outcome not in ('running', 'stopped'):
                     task.log(f"Start failed: {_ts_why}")
+                # the two-stage boot returns once the guest is up on its final controller
+                _up = _ts_outcome == 'running'
             elif task.start_after:
                 task.log("Starting Proxmox VM...")
                 try:
@@ -2853,12 +2859,19 @@ def _run_v2p_migration(task):
                         f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}"
                         f"/qemu/{task.proxmox_vmid}/status/start")
                     task.log(f"VM {task.proxmox_vmid} started")
+                    _up = True
                     _guest_log_after_start(pve_mgr, task)
                 except Exception as e:
                     task.log(f"Start failed: {e}")
 
+            _dt = ''
+            if _off_t0 is not None and _up:
+                task.downtime_start = datetime.fromtimestamp(_off_t0)
+                task.downtime_end = datetime.now()
+                task.total_downtime_seconds = round(time.time() - _off_t0, 1)
+                _dt = f", downtime {task.total_downtime_seconds:.0f}s"
             task.set_phase('completed')
-            task.log(f"COMPLETED: {task.vm_name} -> VMID {task.proxmox_vmid} (offline copy)")
+            task.log(f"COMPLETED: {task.vm_name} -> VMID {task.proxmox_vmid} (offline copy{_dt})")
             return
         
         # ================================================================

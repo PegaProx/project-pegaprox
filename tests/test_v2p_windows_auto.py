@@ -280,6 +280,27 @@ def test_the_downtime_of_a_presync_run_takes_in_the_start_and_the_first_boot(mon
     assert not any('downtime ended with its first boot' in ln for ln in t.log_lines)
 
 
+def test_the_downtime_of_an_offline_copy_runs_from_the_stop_until_the_guest_is_up(monkeypatch):
+    # a lab run of the offline copy (Windows Server 2025, in-guest preparation) ended without any
+    # downtime, the mode with the most of it: the copy, the first boot and the switch to VirtIO
+    w = _slow_first_boot_run(monkeypatch, 'offline')
+    t = w.task
+    assert t.status == 'completed' and t._two_stage['state'] == 'switched', t.error
+    assert t.total_downtime_seconds >= 900, t.total_downtime_seconds
+    assert t.total_downtime_seconds == round(t.total_downtime_seconds, 1)
+    assert t.downtime_start is not None and t.downtime_end is not None
+    assert any(ln.endswith(f'(offline copy, downtime {t.total_downtime_seconds:.0f}s)') for ln in t.log_lines), \
+        t.log_lines[-3:]
+
+
+def test_an_offline_copy_of_a_source_that_was_off_has_no_downtime(monkeypatch):
+    import test_v2p_tpm_and_folder_copy as farm
+    r = farm.Run(monkeypatch, mode='offline', power='POWERED_OFF').go()
+    assert r.task.status == 'completed', r.task.error
+    assert r.task.total_downtime_seconds is None
+    assert any(ln.endswith('(offline copy)') for ln in r.task.log_lines)
+
+
 def test_the_package_plan_of_a_windows_run_downloads_the_iso_but_never_needs_it():
     plan = dict(pk.package_plan('offline', True, '', virtio_iso=True))
     assert plan['virtio_iso'] is False and plan['virtio'] is True
