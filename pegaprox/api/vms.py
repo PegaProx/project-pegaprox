@@ -5530,7 +5530,7 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
     try:
         pve_ws = ws_client.create_connection(
             pve_ws_url,
-            sslopt=({} if _verify_tls else {"cert_reqs": _ssl.CERT_NONE}),
+            sslopt=_pve_ws_sslopt(_verify_tls, host, target_host),
             header={"Cookie": f"PVEAuthCookie={pve_ticket}"},
             host=f"{host}:{port}",
             redirect_limit=0,
@@ -5773,7 +5773,7 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
         try:
             pve_ws = ws_client.create_connection(
                 pve_ws_url,
-                sslopt=({} if _verify_tls else {"cert_reqs": _ssl.CERT_NONE}),
+                sslopt=_pve_ws_sslopt(_verify_tls, host, target_host),
                 header=_pve_console_ws_auth(mgr, pve_ticket,
                                             reuse_manager_auth=_reuse_manager_auth),
                 host=f"{host}:{port}",          # the node, also through the tunnel
@@ -11957,6 +11957,16 @@ def _console_ssl_context(cluster_id, verify):
     return ctx
 
 
+def _pve_ws_sslopt(verify, host, target_host):
+    """sslopt of a console websocket to PVE. Through the cluster's SSH tunnel it dials
+    127.0.0.1: a verifying connection still checks the certificate against the node's own
+    name, or every console of a cluster with ssl_verify on and the tunnel failed on a name
+    the certificate never holds."""
+    if not verify:
+        return {"cert_reqs": ssl.CERT_NONE}
+    return {"server_hostname": host} if target_host != host else {}
+
+
 def _pve_socket_readable(s, timeout):
     """True once the socket under a PVE websocket has something to read, False after
     timeout. OpenSSL may already hold a decrypted record the socket no longer shows.
@@ -12078,7 +12088,7 @@ def _vnc_relay(ws, manager, cluster_id, node, vm_type, vmid, crypto_session=None
         _connect_started = time.monotonic()
         pve_ws = websocket.create_connection(
             f"wss://{target_host}:{target_port}{pve_ws_path}",
-            sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
+            sslopt=_pve_ws_sslopt(_verify_tls, host, target_host),
             header=_pve_console_ws_auth(manager, pve_ticket, reuse_manager_auth=_reuse_manager_auth),
             redirect_limit=0,
             timeout=VNC_PVE_CONNECT_TIMEOUT,
@@ -12513,7 +12523,7 @@ def _terminal_relay(ws, mgr, node, vm_type, vmid, pve_host, pve_port, pve_ticket
     try:
         pve_ws = websocket.create_connection(
             f"wss://{netloc}:{api_port}{path}",
-            sslopt=({} if verify else {"cert_reqs": ssl.CERT_NONE}),
+            sslopt=_pve_ws_sslopt(verify, pve_host, pve_host),
             header={'Cookie': f'PVEAuthCookie={pve_auth}'},
             redirect_limit=0,
             timeout=10,
