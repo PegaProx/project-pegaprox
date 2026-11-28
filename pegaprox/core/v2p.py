@@ -1177,7 +1177,9 @@ def _ensure_node_packages(pve_mgr, task, feature, install=True, trust_apt=False,
                  f"{pk.NODE_PACKAGES[feature]['purpose']}")
     elif verdict in ('FAILED', 'UNVERIFIED'):
         task.log(f"{prefix}apt-get could not install {' '.join(named)} on {node}: {said[-600:] or 'no output'}")
-    elif verdict in ('MISSING', 'UNKNOWN') and install and not allowed:
+    elif verdict == 'MISSING' and install and not allowed:
+        # MK Nov 2026 - only what the node said is missing: a check that got no answer said
+        # "is not installed" here, the node had not said so
         noted = getattr(task, '_packages_not_installed', None)
         if not isinstance(noted, set):
             noted = task._packages_not_installed = set()

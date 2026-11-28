@@ -649,6 +649,16 @@ def test_the_helper_without_installs_names_what_is_missing_and_runs_no_apt(tmp_p
                for ln in task.log_lines), task.log_lines
 
 
+def test_a_check_without_an_answer_is_not_called_missing_when_installs_are_off(monkeypatch):
+    # with installs off the check that got no answer within its time said "python3-hivex is not
+    # installed on pve1 and installing packages is turned off": the node had not said so
+    monkeypatch.setattr(v2p, '_pve_node_exec', lambda mgr, n, cmd, timeout=600, **kw: (124, '', 'no output within 20s'))
+    task = _task(False)
+    assert v2p._ensure_node_packages(None, task, 'virtio', trust_apt=True)[0] is False
+    assert not any('is not installed' in ln for ln in task.log_lines), task.log_lines
+    assert any('Could not check' in ln and 'on pve1' in ln and 'no output within 20s' in ln for ln in task.log_lines)
+
+
 def test_the_helper_takes_an_apt_run_without_the_tool_only_where_the_caller_trusts_apt(tmp_path, monkeypatch):
     box = Box(tmp_path, apt='noop')
     _shell_node(monkeypatch, box)
