@@ -2858,20 +2858,15 @@ def _run_v2p_migration(task):
             if _two_stage_stage(pve_mgr, task):
                 _ts_outcome, _ts_why = _two_stage_boot(pve_mgr, task)
                 if _ts_outcome not in ('running', 'stopped'):
-                    task.log(f"Start failed: {_ts_why}")
+                    _result_warning(task, f"The target VM {task.proxmox_vmid} did not start: {_ts_why}. Look at "
+                                          f"it on Proxmox VE and start it there.")
                 # the two-stage boot returns once the guest is up on its final controller
                 _up = _ts_outcome == 'running'
             elif task.start_after:
                 task.log("Starting Proxmox VM...")
-                try:
-                    pve_mgr._api_post(
-                        f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}"
-                        f"/qemu/{task.proxmox_vmid}/status/start")
-                    task.log(f"VM {task.proxmox_vmid} started")
-                    _up = True
+                _up = _start_or_warn(pve_mgr, task, f"VM {task.proxmox_vmid} started")
+                if _up:
                     _guest_log_after_start(pve_mgr, task)
-                except Exception as e:
-                    task.log(f"Start failed: {e}")
 
             _dt = ''
             if _off_t0 is not None and _up:
@@ -3153,24 +3148,27 @@ def _run_v2p_migration(task):
         _two_stage_on = _two_stage_stage(pve_mgr, task)
         if _two_stage_on:
             _ts_outcome, _ts_why = _two_stage_boot(pve_mgr, task)
-            if _ts_outcome == 'running':
+            _started = _ts_outcome == 'running'
+            if _started:
                 task.log(f"VM {task.proxmox_vmid} running (two-stage boot {task._two_stage.get('state')}) - DOWNTIME ENDS")
             elif _ts_outcome != 'stopped':
-                task.log(f"WARNING: Could not start VM: {_ts_why}")
+                _result_warning(task, f"The target VM {task.proxmox_vmid} did not start: {_ts_why}. Look at it on "
+                                      f"Proxmox VE and start it there.")
         elif task.start_after:
             task.log("Starting VM on Proxmox...")
-            try:
-                pve_mgr._api_post(
-                    f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}"
-                    f"/qemu/{task.proxmox_vmid}/status/start")
-                task.log(f"VM {task.proxmox_vmid} started - DOWNTIME ENDS")
-            except Exception as e:
-                task.log(f"WARNING: Could not start VM: {e}")
+            _started = _start_or_warn(pve_mgr, task, f"VM {task.proxmox_vmid} started - DOWNTIME ENDS")
+        else:
+            _started = False
         # MK Nov 2026 - the downtime of this path ended when the cutover began, before the
-        # driver injection, the start and a two-stage boot: it ends with the start now
-        if task.downtime_start and (_two_stage_on or task.start_after):
+        # driver injection, the start and a two-stage boot: it ends with the start now, and only
+        # with one that ran
+        if task.downtime_start and _started:
             task.downtime_end = datetime.now()
             task.total_downtime_seconds = round((task.downtime_end - task.downtime_start).total_seconds(), 1)
+        elif task.downtime_start:
+            # nothing runs, so the downtime is not over: the figure the phase hook took when the
+            # cutover began is none, and no later phase may take one either
+            task.downtime_start = task.downtime_end = task.total_downtime_seconds = None
         
         # ================================================================
         # VERIFY + CLEANUP
@@ -4919,6 +4917,21 @@ def _start_target_vm(pve_mgr, task, task_wait=300, run_wait=30, poll=2):
         return 'failed', why
     return 'unknown', why or f"status {state or 'unreadable'}"
 
+
+
+def _start_or_warn(pve_mgr, task, started_line):
+    """MK Nov 2026 - start the target VM where nothing comes back after a failed start: True
+    once it runs. A refusal was not even seen there (the API call raises only when there is no
+    answer), so the log said it started; and a failure was a log line under COMPLETED. It is a
+    warning of the result now."""
+    outcome, why = _start_target_vm(pve_mgr, task)
+    if outcome == 'running':
+        task.log(started_line)
+        return True
+    _result_warning(task, f"The target VM {task.proxmox_vmid} "
+                          + ("did not start" if outcome == 'failed' else "may not be running")
+                          + f": {why}. Look at it on Proxmox VE and start it there.")
+    return False
 
 def _descriptor_extents_are_local(pve_mgr, node, sshfs_descriptor_path):
     """True only if every extent a VMDK descriptor names is a plain file in its own directory.
@@ -8064,15 +8077,9 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 f"qm set {task.proxmox_vmid} --boot order={_slot(task._live_boot_di if task._live_boot_di is not None else 0)} 2>&1", timeout=10)
             
             # Start on local storage
-            try:
-                pve_mgr._api_post(
-                    f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}"
-                    f"/qemu/{task.proxmox_vmid}/status/start")
-                task.log(f"VM {task.proxmox_vmid} RESTARTED on local storage (full speed)")
+            if _start_or_warn(pve_mgr, task, f"VM {task.proxmox_vmid} RESTARTED on local storage (full speed)"):
                 _down_started('restart', _restart_t0, 'the VM stopped for the switch to its local disks',
                               report=False)
-            except Exception as e:
-                task.log(f"VM start failed: {e}")
             
             # Skip all remaining copy/config steps -- VM already reconfigured and running
             mirror_success = True
@@ -8566,19 +8573,12 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
 
         # Start VM on local storage
         if task.start_after or vm_running_on_ssh:
-            try:
-                pve_mgr._api_post(
-                    f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}"
-                    f"/qemu/{task.proxmox_vmid}/status/start")
-                if vm_running_on_ssh:
-                    task.log(f"VM {task.proxmox_vmid} RESTARTED on local storage (full speed)")
+            if vm_running_on_ssh:
+                if _start_or_warn(pve_mgr, task, f"VM {task.proxmox_vmid} RESTARTED on local storage (full speed)"):
                     _down_started('restart', _restart_t0, 'the VM stopped for the switch to its local disks',
                                   report=False)
-                else:
-                    task.log(f"VM {task.proxmox_vmid} STARTED on local storage")
-                    _down_started('boot', _down_t0, 'the source stopped')
-            except Exception as e:
-                task.log(f"VM start failed: {e}")
+            elif _start_or_warn(pve_mgr, task, f"VM {task.proxmox_vmid} STARTED on local storage"):
+                _down_started('boot', _down_t0, 'the source stopped')
         else:
             task.log(f"VM {task.proxmox_vmid} configured - not starting (start_after=false)")
     
@@ -8764,13 +8764,7 @@ def _do_offline_qemuimg_copy(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
 
     if task.start_after:
         task.log("Starting VM on local storage...")
-        try:
-            pve_mgr._api_post(
-                f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}"
-                f"/qemu/{task.proxmox_vmid}/status/start")
-            task.log(f"VM {task.proxmox_vmid} STARTED")
-        except Exception as e:
-            task.log(f"Start failed: {e}")
+        _start_or_warn(pve_mgr, task, f"VM {task.proxmox_vmid} STARTED")
 
     task.set_phase('completed')
     task.log(f"COMPLETED: {task.vm_name} -> VMID {task.proxmox_vmid} (offline copy)")
