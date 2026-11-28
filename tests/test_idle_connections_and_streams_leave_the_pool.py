@@ -711,8 +711,10 @@ def test_a_stream_holds_no_database_connection_while_it_waits(api, seed, serve, 
     seed.user('alice', role='user')
     srv, _ = serve(api.app, slots=4)
     socks = [_stream(srv.server_port, rt.create_sse_token('alice', None))[0] for _ in range(6)]
-    assert _until(lambda: len(rtu._left_pool()) == 6)
-    assert _until(lambda: db_conns() == 0), \
+    # windows with room for a loaded runner, as the idle connection tests have them: a full run
+    # next to a lab migration missed the 3 s once
+    assert _until(lambda: len(rtu._left_pool()) == 6, within=10)
+    assert _until(lambda: db_conns() == 0, within=10), \
         f'{db_conns()} database connections held by six open streams'
     for s in socks:
         s.close()
