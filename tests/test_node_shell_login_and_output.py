@@ -258,12 +258,14 @@ def test_the_nodes_output_reaches_the_page_as_text(api, seed, node):
 
 def test_what_the_page_types_goes_to_the_node_whole(api, seed, node):
     """A paste bigger than one SSH window goes out in full (sendall), a resize resizes,
-    and a line that only looks like JSON is typed as it is."""
+    and a line that only looks like JSON is typed as it is. So is a JSON object that is no
+    resize: a pasted {"a": 1} never reached the node, as the guest terminal always sent it."""
     paste = 'x' * 200000
     page = _run(api, seed, _Page(_login(username='root', password='pw'),
                                  'ls -la\r', json.dumps({'type': 'resize', 'cols': 132, 'rows': 50}),
-                                 paste, '{not json', b'\x03'))
-    assert node.channel.got == [b'ls -la\r', paste.encode(), b'{not json', b'\x03'], page.sent
+                                 paste, '{not json', '{"a": 1}', '{"type": "ping"}', b'\x03'))
+    assert node.channel.got == [b'ls -la\r', paste.encode(), b'{not json', b'{"a": 1}', b'{"type": "ping"}',
+                                b'\x03'], page.sent
     assert node.channel.resized == [(132, 50)]
 
 

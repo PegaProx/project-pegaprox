@@ -13028,13 +13028,13 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
                 logging.info("Client disconnected")
                 break
             # Handle JSON messages
+            # MK Nov 2026 - a resize is the one message the page sends; any other JSON is typed,
+            # as the guest terminal (_terminal_relay) does it: a pasted {"a": 1} never arrived
             if isinstance(data, str) and data.startswith('{'):
                 try:
                     msg = json.loads(data)
-                    if isinstance(msg, dict):
-                        # Handle resize
-                        if msg.get('type') == 'resize':
-                            channel.resize_pty(width=int(msg.get('cols', 120)), height=int(msg.get('rows', 40)))
+                    if isinstance(msg, dict) and msg.get('type') == 'resize':
+                        channel.resize_pty(width=int(msg.get('cols', 120)), height=int(msg.get('rows', 40)))
                         continue
                 except (ValueError, TypeError):
                     pass
