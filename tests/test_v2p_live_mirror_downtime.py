@@ -14,6 +14,7 @@ with the start. The pause of the pivot and each restart add their own stretch.
 import inspect
 import json
 import re
+import threading
 import time
 
 import pytest
@@ -29,10 +30,25 @@ FB = {'version': 1, 'run': 't1', 'platform': 'kvm', 'state': 'applied', 'boots':
       'devices': 'removed', 'adapters': []}
 
 
+_SLEEP = time.sleep
+
+
 def _guest(lb, monkeypatch, agent_after=None, report_after=None):
     """The VM runs from now on; its agent answers `agent_after` seconds later, its first boot
     report is there `report_after` seconds later (None: never)"""
     monkeypatch.setattr(time, 'time', time.monotonic)      # the lab's clock
+    # The lab's sleep only moves its clock, it never lets another greenlet run. A scanner the
+    # app of an earlier test in this process started (multi-SDN, drift) sleeps through the same
+    # module: once the join of a watch let it in, it spun on that sleep and the test hung. The
+    # test and its watches sleep on the lab's clock, everybody else for real.
+    lab_sleep = time.sleep
+
+    def sleep(seconds):
+        me = threading.current_thread()
+        if me is threading.main_thread() or me.name.startswith('v2p-downtime-'):
+            return lab_sleep(seconds)
+        return _SLEEP(seconds)
+    monkeypatch.setattr(time, 'sleep', sleep)
     t0 = time.monotonic()
     lb.pve.running = True
     lb.pve.boots = ['order=sata0']
