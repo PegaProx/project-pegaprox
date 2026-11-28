@@ -213,6 +213,18 @@ def test_the_static_adapters_are_read_with_their_device_and_mac_and_dhcp_is_left
     assert b['mac'] == '' and b['gateway'] == [] and b['dns'] == []
 
 
+def test_each_gateway_keeps_its_own_metric_when_an_entry_is_dropped_or_doubled():
+    # an entry no adapter can reach (0.0.0.0) or a doubled one in DefaultGateway: the gateways were
+    # filtered first and paired with the metrics by their new place, so one took its neighbour's
+    values = dict(EnableDHCP=0, IPAddress=['10.0.0.5'], SubnetMask=['255.255.255.0'],
+                  DefaultGateway=['0.0.0.0', '10.0.0.1', '10.0.0.1', '10.0.0.254'],
+                  DefaultGatewayMetric=['5', '20', '30', '256'], NameServer='')
+    spec = system_spec(ifaces={GUID_A: {'@' + k: v for k, v in values.items()}},
+                       adapters={GUID_A: (DEV_A, '0007', 'vmxnet3', None)})
+    a, = nh.read_adapters(hv(spec))
+    assert a['gateway'] == [{'ip': '10.0.0.1', 'metric': 20}, {'ip': '10.0.0.254', 'metric': 256}]
+
+
 def test_a_mac_set_on_the_adapter_wins_over_the_serial():
     spec = system_spec(adapters={GUID_A: (DEV_A, '0007', 'vmxnet3', '00-50-56-01-02-03'),
                                  GUID_B: (DEV_B, '0011', 'e1000', None),

@@ -275,10 +275,15 @@ def read_adapters(sys_hv):
         gws = [gws] if isinstance(gws, str) else gws
         metrics = sys_hv.value(node, 'DefaultGatewayMetric') or []
         metrics = [metrics] if isinstance(metrics, str) else metrics
-        gateway = []
-        for i, gw in enumerate(_ips(gws)):
+        # MK Nov 2026 - each metric goes with the gateway at the same place of the two lists:
+        # paired after _ips() dropped an unreachable or doubled entry, a gateway took its neighbour's
+        gateway, seen = [], set()
+        for i, raw in enumerate(gws):
             m = str(metrics[i]).strip() if i < len(metrics) else '0'
-            gateway.append({'ip': gw, 'metric': int(m) if m.isdigit() and int(m) < 10000 else 0})
+            for gw in _ips([raw]):
+                if gw not in seen:
+                    seen.add(gw)
+                    gateway.append({'ip': gw, 'metric': int(m) if m.isdigit() and int(m) < 10000 else 0})
         dns = _ips([sys_hv.value(node, 'NameServer') or ''])
         arrived, removed = device_dates(sys_hv, cs, instance)
         out.append({'guid': guid.upper(), 'name': str(sys_hv.value(conn, 'Name') or '')[:120],
