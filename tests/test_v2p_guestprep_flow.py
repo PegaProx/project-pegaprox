@@ -252,6 +252,10 @@ def test_a_guest_that_cannot_be_prepared_falls_back_to_the_offline_preparation(l
     assert any(word in w and 'prepared on Proxmox VE after the copy instead' in w for w in task.warnings), task.warnings
     assert lab.guest.names().count('validate') <= 1
     assert not [c for c in lab.guest.calls if c[0] == 'put' and 'go.flag' in c[1]]
+    # a source that is off is not said to keep running
+    off = change.get('state', {}).get('power_state') == 'POWERED_OFF'
+    assert any(w.endswith('The source VM was not changed by it.' if off else gp.KEEPS_RUNNING)
+               for w in task.warnings), task.warnings
 
 
 def test_a_guest_that_is_no_windows_is_not_checked_with_the_windows_login(lab):

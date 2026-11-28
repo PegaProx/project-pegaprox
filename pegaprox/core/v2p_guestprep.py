@@ -230,8 +230,10 @@ def fallback(task, why, step='the check'):
         task.install_virtio_drivers = True
         if isinstance(wp, dict):
             wp.update(on=True, state='planned')
+    # MK Nov 2026 - "keeps running" after "the source VM is not running" on a lab run
+    tail = 'The source VM was not changed by it.' if st.get('source_off') else KEEPS_RUNNING
     _result_warning(task, f"Windows preparation in the running guest left out at {step}: {why}. The guest is "
-                          f"prepared on Proxmox VE after the copy instead. {KEEPS_RUNNING}")
+                          f"prepared on Proxmox VE after the copy instead. {tail}")
 
 
 def _refuse(task, why, step='the check'):
@@ -275,8 +277,11 @@ def _probe(vmware_mgr, pve_mgr, task):
     from pegaprox.core import v2p
     node = task.target_node
     task.log('Windows preparation: checking the source guest')
-    why = state_refusal(guest_state(vmware_mgr, task.vm_id))
+    gs = guest_state(vmware_mgr, task.vm_id)
+    why = state_refusal(gs)
     if why:
+        # a source that is off does not keep running (fallback says so)
+        st['source_off'] = bool(gs.get('power_state')) and gs.get('power_state') != 'POWERED_ON'
         _refuse(task, why)
     iso = (getattr(task, '_winprep', None) or {}).get('iso')
     if not iso:
