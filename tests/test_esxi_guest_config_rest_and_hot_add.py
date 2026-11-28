@@ -39,6 +39,26 @@ def rest(monkeypatch):
     return mgr, calls
 
 
+def test_the_guest_state_over_rest_names_family_and_os_as_soap_does(rest):
+    # REST /guest/identity: family WINDOWS and the full name as a message object. The review of
+    # the in-guest preparation called a Windows guest no Windows and showed the object as its OS
+    mgr, _ = rest
+    mgr.get_vm = lambda vm_id: {'data': {'power_state': 'POWERED_ON', 'guest_OS': 'WINDOWS_9_SERVER_64'}}
+    mgr.get_vm_guest_info = lambda vm_id: {'data': {
+        'family': 'WINDOWS', 'name': 'WINDOWS_9_SERVER_64',
+        'full_name': {'args': [], 'default_message': 'Microsoft Windows Server 2019 (64-bit)',
+                      'id': 'vmsg.guestos.windows2019srv_64Guest.label'}}}
+    d = mgr.guest_state('vm-7')['data']
+    assert d['family'] == 'windowsGuest' and d['full_name'] == 'Microsoft Windows Server 2019 (64-bit)'
+    from pegaprox.core import v2p_guestprep
+    view = v2p_guestprep.plan_view(mgr, 'vm-7', {}, {'guest_prep': True})
+    assert view['windows'] is True and view['os'] == 'Microsoft Windows Server 2019 (64-bit)'
+    mgr.get_vm_guest_info = lambda vm_id: {'data': {'family': 'LINUX', 'full_name': 'Debian GNU/Linux 12'}}
+    assert mgr.guest_state('vm-7')['data']['family'] == 'linuxGuest'
+    mgr.get_vm_guest_info = lambda vm_id: {'error': 'HTTP 503: guest tools not running'}
+    assert mgr.guest_state('vm-7')['data']['full_name'] == 'WINDOWS_9_SERVER_64'
+
+
 @pytest.mark.parametrize('body', [
     {'cpu_count': 4},
     {'memory_mb': 4096},

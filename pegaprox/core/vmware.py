@@ -49,6 +49,11 @@ def esxi_target_refusal(host, allow_loopback: bool = True) -> str:
     return infra_target_refusal(bare, allow_loopback=allow_loopback, label='ESXi host')
 
 
+# the guest families of the REST guest identity, as the SOAP API names them
+_REST_GUEST_FAMILY = {'WINDOWS': 'windowsGuest', 'LINUX': 'linuxGuest', 'NETWARE': 'netwareGuest',
+                      'SOLARIS': 'solarisGuest', 'DARWIN': 'darwinGuestFamily', 'OTHER': 'otherGuestFamily'}
+
+
 class VMwareManager:
     """Manages connection to a vCenter Server or standalone ESXi host.
     
@@ -1133,9 +1138,16 @@ class VMwareManager:
                 return got
             d = got.get('data') or {}
             info = self.get_vm_guest_info(vm_id).get('data') or {}
+            # MK Nov 2026 - REST names the family WINDOWS and gives the full name as a message
+            # object: the review called a Windows guest no Windows and showed the object as its
+            # OS. Both as SOAP gives them
+            fam = info.get('family') if isinstance(info, dict) else None
+            fam = _REST_GUEST_FAMILY.get(str(fam).upper(), str(fam)) if fam else None
+            full = info.get('full_name') if isinstance(info, dict) else None
+            if isinstance(full, dict):
+                full = full.get('default_message')
             return {'data': {'power_state': d.get('power_state'), 'tools_running': None, 'ops_ready': None,
-                             'family': info.get('family'), 'full_name': info.get('full_name') or d.get('guest_OS'),
-                             'soap': False}}
+                             'family': fam, 'full_name': full or d.get('guest_OS'), 'soap': False}}
         try:
             vm, err = self._soap_vm(vm_id)
             if err:
