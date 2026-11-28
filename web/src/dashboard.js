@@ -2751,7 +2751,7 @@
                                         </summary>
                                         <div className="mt-2 ml-4 space-y-2">
                                             <label className="flex items-start gap-2 text-sm text-gray-400 cursor-pointer">
-                                                <input type="checkbox" checked={form.guest_prep} onChange={e => { set({guest_prep: e.target.checked}); if (!e.target.checked) { setGuestUser(''); setGuestPassword(''); setOwnLogins({}); } }} className="rounded mt-0.5" data-esxi-bulk-guest-prep />
+                                                <input type="checkbox" checked={form.guest_prep} onChange={e => { const on = e.target.checked; setForm(f => ({...f, guest_prep: on, ...(on && f.transfer_mode === 'vmkfstools_clone' ? {transfer_mode: 'auto'} : {})})); if (!on) { setGuestUser(''); setGuestPassword(''); setOwnLogins({}); } }} className="rounded mt-0.5" data-esxi-bulk-guest-prep />
                                                 <span>
                                                     <span className="text-gray-200">{t('v2pGuestPrep')}</span>
                                                     <span className="block text-xs text-gray-500 mt-0.5">{t('v2pGuestPrepDesc')}</span>
@@ -31339,7 +31339,10 @@
                                                                         <div className="mt-2 ml-4 space-y-2">
                                                                             <label className={`flex items-start gap-2 ${running || f.guest_prep ? 'cursor-pointer' : 'opacity-60'}`}>
                                                                                 <input type="checkbox" checked={!!f.guest_prep} disabled={!running && !f.guest_prep}
-                                                                                    onChange={e => { resetV2pGuestLogin(); setVmwareMigrateForm(x => ({...x, guest_prep: e.target.checked, ...(e.target.checked ? {} : {guest_user: '', guest_password: ''})})); }}
+                                                                                    onChange={e => { const on = e.target.checked; resetV2pGuestLogin(); setVmwareMigrateForm(x => ({...x, guest_prep: on, ...(on ? {} : {guest_user: '', guest_password: ''}),
+                                                                                        // LW Nov 2026 - Live Clone copies what the preparation writes in the downtime;
+                                                                                        // Auto takes Snapshot-Iterative for it, and Live Clone where that cannot run
+                                                                                        ...(on && x.transfer_mode === 'vmkfstools_clone' ? {transfer_mode: 'auto'} : {})})); }}
                                                                                     className="rounded mt-0.5" data-v2p-guest-prep />
                                                                                 <span className="flex-1 min-w-0">
                                                                                     <span className="text-sm text-gray-200">{t('v2pGuestPrep')}</span>

@@ -408,6 +408,26 @@ def test_runtime_the_login_in_the_guest_is_optional_sent_with_the_start_only_and
     assert not app.errors, app.errors
 
 
+@pytest.mark.parametrize('layout', ['modern', 'corporate-redesigned'])
+def test_runtime_the_in_guest_preparation_picks_auto_over_live_clone(wizard_win, layout):
+    # LW Nov 2026 - Live Clone copies what stage 1 writes (drivers, guest tools) in the downtime;
+    # Auto takes Snapshot-Iterative for it and Live Clone where that cannot run (an explicit
+    # Snapshot-Iterative refuses a VM with snapshots): ticking the preparation picks Auto
+    app, page = wizard_win(layout=layout)
+    mode = page.locator('select:has(option[value="snapshot_zero"])').first
+    assert mode.input_value() == 'vmkfstools_clone'
+    page.locator('[data-v2p-guest-prep-section] summary').click()
+    page.locator('[data-v2p-guest-prep]').check()
+    _wait_for(page, lambda: mode.input_value() == 'auto', 'the mode stayed ' + mode.input_value())
+    # unticked it keeps the mode, and a mode picked by hand is left alone
+    page.locator('[data-v2p-guest-prep]').uncheck()
+    assert mode.input_value() == 'auto'
+    mode.select_option('offline')
+    page.locator('[data-v2p-guest-prep]').check()
+    page.wait_for_timeout(200)
+    assert mode.input_value() == 'offline'
+
+
 def test_runtime_cancel_drops_the_typed_login(wizard_win):
     app, page = wizard_win()
     page.locator('[data-v2p-guest-prep-section] summary').click()
