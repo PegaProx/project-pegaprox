@@ -149,6 +149,16 @@ def test_the_tools_media_mode_takes_only_a_signed_installer_from_a_cd_drive_and_
     assert "'ToolsMedia' { Invoke-ToolsMedia }" in PS
 
 
+def test_the_tools_media_mode_takes_setup_exe_on_64_bit_when_there_is_no_setup64_exe():
+    # the guest tools ISO of ESXi 8.0.3 holds setup.exe alone, a 64-bit installer: a lab
+    # rollback that looked for setup64.exe only left the guest without its tools and network
+    tm = _fn('Invoke-ToolsMedia')
+    assert "if ($arch -ne 'x86') { $names = @('setup64.exe', 'setup.exe') }" in tm
+    assert "$names = @('setup.exe')" in tm
+    pick = tm[tm.index('foreach ($n in $names)'):tm.index('if (-not $src) { continue }')]
+    assert 'Test-Path -LiteralPath $p -PathType Leaf' in pick and 'break' in pick
+
+
 def test_the_config_from_pegaprox_is_typed_data():
     rc = _fn('Read-Config')
     assert "$run -notmatch '^[A-Za-z0-9-]{1,64}$'" in rc and '$NAME_RE' in rc and '-is [bool]' in rc

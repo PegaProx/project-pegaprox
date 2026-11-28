@@ -743,12 +743,18 @@ function Invoke-ToolsMedia {
     }
     $arch = $env:PROCESSOR_ARCHITECTURE
     if ($env:PROCESSOR_ARCHITEW6432) { $arch = $env:PROCESSOR_ARCHITEW6432 }
-    $name = 'setup.exe'
-    if ($arch -ne 'x86') { $name = 'setup64.exe' }
+    # MK Nov 2026 - the guest tools ISO of ESXi 8 has setup.exe alone, a 64-bit installer: a lab
+    # rollback looked for setup64.exe only, found nothing and left the guest without its tools
+    $names = @('setup.exe')
+    if ($arch -ne 'x86') { $names = @('setup64.exe', 'setup.exe') }
     foreach ($d in [IO.DriveInfo]::GetDrives()) {
         if ([string]$d.DriveType -ne 'CDRom' -or -not $d.IsReady) { continue }
-        $src = Join-Path $d.RootDirectory.FullName $name
-        if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { continue }
+        $src = $null
+        foreach ($n in $names) {
+            $p = Join-Path $d.RootDirectory.FullName $n
+            if (Test-Path -LiteralPath $p -PathType Leaf) { $src = $p; break }
+        }
+        if (-not $src) { continue }
         if ((Get-SignerOrg $src) -ne $want) {
             Write-Log ('tools media: {0} is not signed by {1}, not used' -f $src, $want)
             continue

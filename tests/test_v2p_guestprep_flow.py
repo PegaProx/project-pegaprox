@@ -393,6 +393,50 @@ def test_a_run_that_failed_after_the_release_brings_the_source_back_with_its_too
     assert lab.esxi.actions == ['start', 'mount_tools'], 'only once'
 
 
+def test_a_source_that_does_not_come_back_on_is_not_said_to_run(lab, monkeypatch):
+    # ESXi took the power-on and failed it with FileLocked on a lab run (a copy on the node still
+    # read a disk of the source); the run mounted nothing into a VM that was off and said it ran
+    _released(lab, monkeypatch)
+    monkeypatch.setattr(v2p, '_wait_power_state', Waits(lab.esxi, [False]))
+    gp.roll_back(lab.esxi, _Pve(running=False), lab.task)
+    assert lab.esxi.actions == ['start']
+    assert any('did not come back on in ESXi within 2 min' in w and 'locked' in w for w in lab.task.warnings)
+    assert not any('runs on ESXi again' in line for line in lab.task.log_lines)
+
+
+def _states(lab, monkeypatch, *seq):
+    """guest_state answers seq one by one, the last one from then on"""
+    seq = list(seq)
+    base = dict(lab.esxi.state, power_state='POWERED_ON')
+    monkeypatch.setattr(lab.esxi, 'guest_state', lambda vm_id: {'data': dict(base, **(seq.pop(0) if len(seq) > 1
+                                                                                         else seq[0]))})
+
+
+def test_the_installer_esxi_took_out_unused_is_mounted_again(lab, monkeypatch):
+    # ESXi takes it out after 5 min in which the guest read nothing from it, the first boot
+    # task looks for it for 15 min
+    _states(lab, monkeypatch, {'tools_running': False, 'installer_mounted': True},
+            {'tools_running': False, 'installer_mounted': False},
+            {'tools_running': False, 'installer_mounted': True},
+            {'tools_running': True, 'installer_mounted': True})
+    assert gp._unmount_when_back(lab.esxi, lab.task, wait=600, poll=15) is True
+    assert lab.esxi.actions == ['mount_tools', 'unmount_tools']
+    assert any('mounted again' in line for line in lab.task.log_lines)
+
+
+def test_the_installer_is_mounted_again_a_few_times_at_most(lab, monkeypatch):
+    _states(lab, monkeypatch, {'tools_running': False, 'installer_mounted': False})
+    assert gp._unmount_when_back(lab.esxi, lab.task, wait=1800, poll=15) is False
+    assert lab.esxi.actions == ['mount_tools'] * 6
+
+
+def test_over_rest_nothing_is_mounted_again(lab, monkeypatch):
+    # REST does not say whether the installer is in: nothing is mounted blind
+    _states(lab, monkeypatch, {'tools_running': False})
+    assert gp._unmount_when_back(lab.esxi, lab.task, wait=120, poll=15) is False
+    assert lab.esxi.actions == []
+
+
 def test_the_installer_is_unmounted_once_the_tools_run_again(lab, monkeypatch):
     lab.esxi.state['tools_running'] = True
     assert gp._unmount_when_back(lab.esxi, lab.task, wait=60, poll=1) is True

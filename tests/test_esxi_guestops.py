@@ -220,7 +220,7 @@ def _vmw(kind='soap'):
     m._connection_type = kind
     calls = []
     vm = types.SimpleNamespace(
-        runtime=types.SimpleNamespace(powerState='poweredOn'),
+        runtime=types.SimpleNamespace(powerState='poweredOn', toolsInstallerMounted=False),
         guest=types.SimpleNamespace(toolsRunningStatus='guestToolsRunning', guestOperationsReady=True,
                                     guestFamily='windowsGuest', guestFullName='Microsoft Windows Server 2022'),
         MountToolsInstaller=lambda: calls.append('mount'), UnmountToolsInstaller=lambda: calls.append('unmount'))
@@ -232,7 +232,10 @@ def test_guest_state_says_power_tools_and_whether_guest_operations_are_ready():
     m, _ = _vmw()
     assert m.guest_state('vm-1')['data'] == {'power_state': 'POWERED_ON', 'tools_running': True, 'ops_ready': True,
                                              'family': 'windowsGuest', 'full_name': 'Microsoft Windows Server 2022',
-                                             'soap': True}
+                                             'installer_mounted': False, 'soap': True}
+    # whether the installer of the guest tools is in its drive: ESXi takes it out unused after 5 min
+    m._soap_vm('vm-1')[0].runtime.toolsInstallerMounted = True
+    assert m.guest_state('vm-1')['data']['installer_mounted'] is True
 
 
 def test_the_tools_installer_is_mounted_and_unmounted_over_soap():

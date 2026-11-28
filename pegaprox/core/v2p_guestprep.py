@@ -771,7 +771,16 @@ def roll_back(vmware_mgr, pve_mgr, task):
             v2p._result_warning(task, f"The source VM could not be powered on again ({str(res['error'])[:200]}). "
                                       f"Power it on in ESXi: its first boot task puts its address back.")
             return
-        v2p._wait_power_state(vmware_mgr, task.vm_id, 'POWERED_ON', 120)
+        if not v2p._wait_power_state(vmware_mgr, task.vm_id, 'POWERED_ON', 120):
+            # MK Nov 2026 - ESXi took the power-on and failed it with FileLocked on a lab run: a copy
+            # on the node still read a disk of the source. The run went on and said the source ran
+            # again while it was off.
+            v2p._result_warning(task, "The source VM did not come back on in ESXi within 2 min: ESXi refuses "
+                                      "while a file of it is locked, a copy still reading one of its disks for "
+                                      "one. Power it on in ESXi once that is over and mount the installer of its "
+                                      "ESXi guest tools within 15 min: its first boot task reinstalls them and "
+                                      "puts its address back.")
+            return
     res = vmware_mgr.mount_tools_installer(task.vm_id) if hasattr(vmware_mgr, 'mount_tools_installer') else \
         {'error': 'not supported'}
     if isinstance(res, dict) and res.get('error'):
@@ -789,10 +798,20 @@ def roll_back(vmware_mgr, pve_mgr, task):
                      args=(vmware_mgr, task), daemon=True).start()
 
 
-def _unmount_when_back(vmware_mgr, task, wait=None, poll=15):
+def _unmount_when_back(vmware_mgr, task, wait=None, poll=15, remounts=6):
     deadline = time.monotonic() + (UNMOUNT_WAIT_SECONDS if wait is None else wait)
     while time.monotonic() < deadline:
         gs = guest_state(vmware_mgr, task.vm_id)
+        if not gs.get('tools_running') and gs.get('installer_mounted') is False and \
+                gs.get('power_state') == 'POWERED_ON' and remounts > 0:
+            # MK Nov 2026 - ESXi takes the installer out again when the guest read nothing from it
+            # for 5 min ("no guest I/O detected on media"): the first boot task waits longer
+            remounts -= 1
+            res = vmware_mgr.mount_tools_installer(task.vm_id)
+            task.log('ESXi had taken the installer of the guest tools out unused, it is mounted again'
+                     if not (isinstance(res, dict) and res.get('error')) else
+                     f"ESXi had taken the installer of the guest tools out unused; mounting it again failed "
+                     f"({str(res['error'])[:200]})")
         if gs.get('tools_running'):
             res = vmware_mgr.unmount_tools_installer(task.vm_id)
             if isinstance(res, dict) and res.get('error'):

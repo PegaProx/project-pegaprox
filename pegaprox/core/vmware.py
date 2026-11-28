@@ -1149,6 +1149,7 @@ class VMwareManager:
                 'ops_ready': bool(getattr(g, 'guestOperationsReady', False)),
                 'family': str(g.guestFamily) if getattr(g, 'guestFamily', None) else None,
                 'full_name': getattr(g, 'guestFullName', None),
+                'installer_mounted': bool(getattr(vm.runtime, 'toolsInstallerMounted', False)),
                 'soap': True,
             }}
         except Exception as e:
