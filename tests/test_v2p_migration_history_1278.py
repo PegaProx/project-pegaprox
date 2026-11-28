@@ -236,6 +236,31 @@ def test_a_run_a_stop_cut_off_reads_as_interrupted(db):
     assert db._v2p_swept and hist.mark_interrupted({'live1'}) == 0
 
 
+@pytest.mark.parametrize('guest_prep,said', [
+    # the in-guest preparation had released the guest: how it comes back on ESXi
+    ({'on': True, 'state': 'shut_down'}, 'mount the installer of its ESXi guest tools within 15 min'),
+    ({'on': True, 'state': 'shutting_down'}, 'its first boot task reinstalls them and puts the address back'),
+    # Live Mirror had run the guest from the source's disks: it stays off on ESXi
+    ({'on': True, 'state': 'shut_down', 'source_disks_used': True}, 'keep the source off on ESXi'),
+    ({'on': True, 'state': 'prepared'}, 'Check the source guest on ESXi'),
+    (None, 'Check the source guest on ESXi'),
+])
+def test_a_cut_off_run_says_what_to_do_with_its_source(db, guest_prep, said):
+    t = _task('cut2')
+    hist.track(t)
+    _fill(t, 2)
+    hist._save(t)
+    if guest_prep is not None:
+        row = db.conn.execute("SELECT summary FROM v2p_migration_runs WHERE id = 'cut2'").fetchone()
+        summary = json.loads(row['summary'])
+        summary['guest_prep'] = guest_prep
+        db.conn.execute("UPDATE v2p_migration_runs SET summary = ? WHERE id = 'cut2'", (json.dumps(summary),))
+        db.conn.commit()
+    assert hist.mark_interrupted(set()) == 1
+    last = hist.whole_stored(hist.load('cut2'))[-1]
+    assert 'INTERRUPTED' in last and said in last, last
+
+
 def test_the_newest_runs_of_the_last_days_are_kept(db, monkeypatch):
     monkeypatch.setattr(hist, 'KEEP_RUNS', 3)
     tasks = []

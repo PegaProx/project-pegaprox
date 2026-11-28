@@ -945,7 +945,8 @@ class V2PMigrationTask:
             'log': self.log_lines[-20:],  # Last 20 log lines
             'guest_prep': {'on': bool(gp.get('on')), 'state': str(gp.get('state') or 'off'),
                            'os': str(gp.get('os') or ''), 'drivers': str(gp.get('drivers') or ''),
-                           'why': str(gp.get('why') or '')},
+                           'why': str(gp.get('why') or ''),
+                           'source_disks_used': bool(getattr(self, '_source_disks_used', False))},
             'two_stage': {'on': bool(ts.get('on')), 'state': str(ts.get('state') or 'off'),
                           'boot_disk': ts.get('boot_disk'), 'why': str(ts.get('why') or '')},
             'windows_prep': _winprep_view(self),

@@ -361,6 +361,23 @@ def prune():
     return len(ids)
 
 
+def _interrupted_source(summary):
+    """MK Nov 2026 - what to do with the source of a run cut off by a stop of PegaProx. After the
+    in-guest preparation released the guest, the plain "check the source guest" left a lab
+    source off, without its address and its guest tools, and the way back unsaid."""
+    gp = summary.get('guest_prep') if isinstance(summary.get('guest_prep'), dict) else {}
+    if gp.get('source_disks_used'):
+        return ("Live Mirror had started the guest on Proxmox VE from the disks of the source: keep the source "
+                "off on ESXi, after the guest's first boot on Proxmox VE it has no network and no guest tools "
+                "there. Check the VM on Proxmox before you start the migration again.")
+    if gp.get('state') in ('shutting_down', 'shut_down'):
+        return ("The Windows preparation had released the source guest, its static address and its ESXi guest "
+                "tools are gone: power it on in ESXi and mount the installer of its ESXi guest tools within 15 "
+                "min, its first boot task reinstalls them and puts the address back. ESXi powers it on only once "
+                "no copy reads its disks any more. Check what was created on Proxmox before you start it again.")
+    return "Check the source guest on ESXi and what was created on Proxmox before you start it again."
+
+
 def mark_interrupted(live_ids):
     """Rows that say running while this process holds no task for them: PegaProx stopped
     while they ran. They read as interrupted from now on, with a line at the end of the log."""
@@ -373,15 +390,14 @@ def mark_interrupted(live_ids):
         if r['id'] in live_ids:
             continue
         phase = r['phase'] or '?'
-        line = (f"[{datetime.now().strftime('%H:%M:%S')}] INTERRUPTED: PegaProx stopped while this "
-                f"migration was in phase {phase} and it did not finish. Check the source guest on "
-                f"ESXi and what was created on Proxmox before you start it again.")
         try:
             summary = json.loads(r['summary'] or '{}')
         except (TypeError, ValueError):
             summary = {}
         if not isinstance(summary, dict):
             summary = {}
+        line = (f"[{datetime.now().strftime('%H:%M:%S')}] INTERRUPTED: PegaProx stopped while this "
+                f"migration was in phase {phase} and it did not finish. {_interrupted_source(summary)}")
         summary['status'] = INTERRUPTED
         summary['error'] = summary.get('error') or 'PegaProx stopped while this migration ran'
         summary['log'] = (list(summary.get('log') or []) + [line])[-20:]

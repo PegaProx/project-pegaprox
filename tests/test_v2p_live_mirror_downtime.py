@@ -201,6 +201,8 @@ def test_a_live_mirror_run_ends_with_its_downtime(monkeypatch):
     assert set(r.task._down_parts) == {'boot', 'restart'}
     # the guest ran from the source's disks: a rollback keeps that source off (v2p_guestprep.roll_back)
     assert r.task._source_disks_used is True
+    # and the run's row says so, for the line of a run cut off by a stop of PegaProx
+    assert r.task.to_dict()['guest_prep']['source_disks_used'] is True
 
 
 def test_a_source_that_was_off_has_no_downtime(monkeypatch):
