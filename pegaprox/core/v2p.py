@@ -2644,10 +2644,14 @@ def _run_v2p_migration(task):
                 # switch: a lab run said 162s for a Windows guest that was away for 643s.
                 _up_at = (getattr(task, '_two_stage', None) or {}).get('up_at') if _two_stage_on else None
                 actual_downtime = time.time() - cut_t0
-                if _src_was_off:
+                if _src_was_off or not target_running:
+                    # MK Nov 2026 - and with start_after off nothing runs at the end: the downtime
+                    # lasts until somebody starts the VM, no figure of this run is it
                     task.total_downtime_seconds = None
                     task.downtime_start = task.downtime_end = None
-                    task.log("=== SWITCHOVER DONE (the source VM was off already: no downtime counted) ===")
+                    task.log("=== SWITCHOVER DONE (" + ("the source VM was off already" if _src_was_off else
+                                                         "the target VM is not started (start_after is off), the "
+                                                         "downtime lasts until it is") + ": no downtime counted) ===")
                 else:
                     # the UI shows the figure as it comes
                     task.total_downtime_seconds = round(actual_downtime, 1)
@@ -2687,7 +2691,7 @@ def _run_v2p_migration(task):
                              "stays on ESXi, delete it there once the target runs")
 
                 task.set_phase('completed')
-                _dt = '' if _src_was_off else f", downtime ~{actual_downtime:.1f}s"
+                _dt = '' if (_src_was_off or not target_running) else f", downtime ~{actual_downtime:.1f}s"
                 task.log(f"COMPLETED ({'snapshot_zero' if _iterative else 'vmkfstools_clone'}{_dt}): "
                          f"{task.vm_name} -> VMID {task.proxmox_vmid}")
                 return

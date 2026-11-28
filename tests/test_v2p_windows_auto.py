@@ -305,6 +305,21 @@ def test_a_snapshot_mode_run_of_a_source_that_was_off_has_no_downtime(monkeypatc
         r.task.log_lines[-3:]
 
 
+@pytest.mark.parametrize('mode', ['vmkfstools_clone', 'snapshot_zero'])
+def test_a_snapshot_mode_run_with_start_after_off_counts_no_downtime(monkeypatch, mode):
+    # the switchover counted until its own end although nothing was started: the downtime of
+    # such a run lasts until somebody starts the VM
+    import test_v2p_tpm_and_folder_copy as farm
+    r = farm.Run(monkeypatch, mode=mode)
+    r.task.start_after = False
+    r.go()
+    assert r.task.status == 'completed', r.task.error
+    assert not r.pve.running and r.task.total_downtime_seconds is None
+    assert any('the target VM is not started (start_after is off)' in ln and 'no downtime counted' in ln
+               for ln in r.task.log_lines), r.task.log_lines[-8:]
+    assert any(ln.endswith(f'COMPLETED ({mode}): app01 -> VMID {r.task.proxmox_vmid}') for ln in r.task.log_lines)
+
+
 def test_an_offline_copy_of_a_source_that_was_off_has_no_downtime(monkeypatch):
     import test_v2p_tpm_and_folder_copy as farm
     r = farm.Run(monkeypatch, mode='offline', power='POWERED_OFF').go()
