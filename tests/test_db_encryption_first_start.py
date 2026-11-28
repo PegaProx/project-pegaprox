@@ -113,7 +113,10 @@ def plain_db(path, rows=50, blob=0):
 
 
 def errors(caplog):
-    return [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    # what the code under test said: a full run once caught the "Error loading schedules" line a
+    # scheduler of an earlier test's app logged on the root logger meanwhile, as the first error
+    return [r.getMessage() for r in caplog.records
+            if r.levelno >= logging.ERROR and r.name.startswith(('pegaprox.core.dbcrypto', 'pegaprox.cli.migrate_db'))]
 
 
 # --- a plain database is converted, and stays readable ------------------------------------------
