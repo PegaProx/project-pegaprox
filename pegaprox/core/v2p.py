@@ -6861,7 +6861,11 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         from pegaprox.core import v2p_twostage
         v2p_twostage.not_with_live_mirror(pve_mgr, task)
     except Exception as _lme:
-        task.log(f"Restoring the controller of the source failed: {_lme}")
+        # MK Nov 2026 - a warning of the run: as a log line the run said COMPLETED while a guest
+        # without its VirtIO drivers was booting on the VirtIO devices
+        _result_warning(task, f"Live Mirror could not give VM {task.proxmox_vmid} the disk controller and NICs "
+                              f"of the source ({str(_lme)[:200]}): a guest without its VirtIO drivers may not boot "
+                              f"on the VirtIO ones. Check its SCSI controller and NIC model on Proxmox VE.")
 
     # NS Apr 2026 — resolve bios at function entry. The live-pivot post-mirror block
     # references `bios` (line ~4055) which previously was only defined later in the
