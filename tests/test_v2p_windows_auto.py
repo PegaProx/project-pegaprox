@@ -293,6 +293,18 @@ def test_the_downtime_of_an_offline_copy_runs_from_the_stop_until_the_guest_is_u
         t.log_lines[-3:]
 
 
+@pytest.mark.parametrize('mode', ['vmkfstools_clone', 'snapshot_zero'])
+def test_a_snapshot_mode_run_of_a_source_that_was_off_has_no_downtime(monkeypatch, mode):
+    # a lab bulk run of a Debian guest that was off said "downtime ~31.0s"
+    import test_v2p_tpm_and_folder_copy as farm
+    r = farm.Run(monkeypatch, mode=mode, power='POWERED_OFF').go()
+    assert r.task.status == 'completed', r.task.error
+    assert r.task.total_downtime_seconds is None
+    assert any('the source VM was off already: no downtime counted' in ln for ln in r.task.log_lines)
+    assert any(ln.endswith(f'COMPLETED ({mode}): app01 -> VMID {r.task.proxmox_vmid}') for ln in r.task.log_lines), \
+        r.task.log_lines[-3:]
+
+
 def test_an_offline_copy_of_a_source_that_was_off_has_no_downtime(monkeypatch):
     import test_v2p_tpm_and_folder_copy as farm
     r = farm.Run(monkeypatch, mode='offline', power='POWERED_OFF').go()

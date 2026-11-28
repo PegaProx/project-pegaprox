@@ -2485,6 +2485,9 @@ def _run_v2p_migration(task):
                 task.set_phase('delta_sync')
                 cut_t0 = time.time()
                 src_state = _vm_power_state(vmware_mgr, task.vm_id)
+                # MK Nov 2026 - a source that is off here serves nothing: no downtime is counted for
+                # it (a lab bulk run of a guest that was off said 31s)
+                _src_was_off = src_state == 'POWERED_OFF'
                 if src_state != 'POWERED_OFF':
                     task.log(f"=== SWITCHOVER: stopping the source VM on ESXi ({src_state or 'state unknown'}), downtime starts ===")
                     # MK Nov 2026 - a guest prepared in ESXi shuts itself down after its stage 2
@@ -2639,11 +2642,16 @@ def _run_v2p_migration(task):
                 # switch: a lab run said 162s for a Windows guest that was away for 643s.
                 _up_at = (getattr(task, '_two_stage', None) or {}).get('up_at') if _two_stage_on else None
                 actual_downtime = time.time() - cut_t0
-                # the UI shows the figure as it comes
-                task.total_downtime_seconds = round(actual_downtime, 1)
-                task.log(f"=== SWITCHOVER DONE (downtime {actual_downtime:.1f}s"
-                         + (f": the target VM started after {_up_at - cut_t0:.0f}s, the first boot of the "
-                            f"guest and its switch to VirtIO took the rest" if _up_at else '') + ") ===")
+                if _src_was_off:
+                    task.total_downtime_seconds = None
+                    task.downtime_start = task.downtime_end = None
+                    task.log("=== SWITCHOVER DONE (the source VM was off already: no downtime counted) ===")
+                else:
+                    # the UI shows the figure as it comes
+                    task.total_downtime_seconds = round(actual_downtime, 1)
+                    task.log(f"=== SWITCHOVER DONE (downtime {actual_downtime:.1f}s"
+                             + (f": the target VM started after {_up_at - cut_t0:.0f}s, the first boot of the "
+                                f"guest and its switch to VirtIO took the rest" if _up_at else '') + ") ===")
 
                 # --- cleanup (clone artifacts + snapshot + source) ---
                 # the source is off by now: stopped above, or it was never running
@@ -2677,7 +2685,8 @@ def _run_v2p_migration(task):
                              "stays on ESXi, delete it there once the target runs")
 
                 task.set_phase('completed')
-                task.log(f"COMPLETED ({'snapshot_zero' if _iterative else 'vmkfstools_clone'}, downtime ~{actual_downtime:.1f}s): "
+                _dt = '' if _src_was_off else f", downtime ~{actual_downtime:.1f}s"
+                task.log(f"COMPLETED ({'snapshot_zero' if _iterative else 'vmkfstools_clone'}{_dt}): "
                          f"{task.vm_name} -> VMID {task.proxmox_vmid}")
                 return
             except V2PCutoverCancelled:
