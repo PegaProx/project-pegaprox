@@ -841,6 +841,9 @@ AUTOMATIONS = {
     # the unmount of the ESXi tools installer once a source brought back after a failed
     # migration runs its tools again (MK Nov 2026)
     ('pegaprox/core/v2p_guestprep.py', 'roll_back'): (1, 'job'),
+    # Live Mirror's downtime: the guest agent pinged and firstboot.json read until a prepared
+    # guest is up, while the mirror runs (MK Nov 2026)
+    ('pegaprox/core/v2p_twostage.py', 'live_started'): (1, 'job'),
     # one SSH login per node after a cluster was added, `sudo -n true` at most (#1136)
     ('pegaprox/core/node_creds.py', 'check_in_background'): (1, 'read'),
     ('pegaprox/core/ha.py', '_later'): (1, 'lease'),
