@@ -322,6 +322,17 @@ def test_a_move_qm_refuses_puts_the_disk_back_and_keeps_the_source_controller(la
     assert not [k for k in lb.qm.conf if k.startswith('unused')]
 
 
+def test_a_disk_that_could_not_be_put_back_either_stays_named_and_is_a_warning(lab):
+    # the attach to sata0 and the one back to scsi0 both refused: the unusedN line was the last
+    # thing that named the boot disk, and it was removed, while the run went on as if it were back
+    lb = lab(fail=['--sata0', '--scsi0'])
+    t = _task()
+    assert ts.stage(lb.pve, t) is False
+    assert BOOT_VOL in [v for k, v in lb.qm.conf.items() if k.startswith('unused')], lb.qm.conf
+    assert any('could not be put back on scsi0 either' in w and f'qm set {VMID} --scsi0 {BOOT_VOL}' in w
+               for w in t.warnings), t.warnings
+
+
 # --------------------------------------------------------------------------- boot
 
 FB = '{"version":1,"run":"t1","platform":"kvm","state":"applied","boots":1,"tools":"removed","devices":"removed",' \

@@ -237,8 +237,19 @@ def _move_boot_disk(pve_mgr, task, src, dst):
     if rc == 0 and conf and _volid(conf.get(f'{dst}0')) == volid:
         _drop_stale_unused(pve_mgr, task, conf, volid)
         return True, ''
-    _attach(pve_mgr, task, src, volid)
-    _drop_stale_unused(pve_mgr, task, qm_config(pve_mgr, task), volid)
+    rc_b, said_b = _attach(pve_mgr, task, src, volid)
+    conf_b = qm_config(pve_mgr, task)
+    if rc_b == 0 and conf_b and _volid(conf_b.get(f'{src}0')) == volid:
+        _drop_stale_unused(pve_mgr, task, conf_b, volid)
+    else:
+        # MK Nov 2026 - not back on <src>0 either: its unusedN line is all that still names the
+        # boot disk, so it stays, and the run says where the disk is. The callers went on as if
+        # it were back, and the line went, which left the volume out of the VM's config
+        from pegaprox.core.v2p import _result_warning
+        _result_warning(task, f"Two-stage boot: the boot disk {volid} did not go onto {dst}0 and could not be "
+                              f"put back on {src}0 either ({(said_b or 'the volume is not attached there')[-200:]}): "
+                              f"it is an unused disk of VM {_vmid(task)} now. Attach it as {src}0 by hand "
+                              f"(qm set {_vmid(task)} --{src}0 {volid}) before the VM is started.")
     return False, (said or 'the volume is not attached there')[-300:]
 
 
