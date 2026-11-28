@@ -5175,12 +5175,40 @@ def _drive_mirror_to_local(pve_mgr, task, node, vmid, drive_id, target_path, dis
     ok, out = _qm_monitor_cmd(pve_mgr, node, vmid, mirror_cmd, timeout=30)
     out_str = str(out or '').strip()
 
+    # MK Nov 2026 - an answer that came too late is no refusal: a lab node under load (a Windows
+    # guest booting from SSHFS) answered after the 30s while the job ran, the retry then met the
+    # job's own filter node ("Need a root block node") and every mirror was cancelled. What runs
+    # is asked before a retry and after a failure
+    def _job_runs():
+        # True / False from a reply of QEMU only; None while it gives none (a qm timeout is no
+        # "no job"). QEMU answers in order, so the first reply after the drive_mirror says
+        # whether it made the job
+        for _try in range(12):
+            okj, jobs = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
+            jobs = str(jobs or '')
+            if okj and ('No active jobs' in jobs or 'device ' in jobs):
+                return re.search(rf'(?<![\w-]){re.escape(drive_id)}(?![\w-])', jobs) is not None
+            time.sleep(5)
+        return None
+
     if not ok:
-        # Try without -f (older QEMU)
-        mirror_cmd = f"drive_mirror -n {drive_id} {target_path} raw"
-        task.log(f"  drive-mirror retry without -f: {mirror_cmd}")
-        ok, out = _qm_monitor_cmd(pve_mgr, node, vmid, mirror_cmd, timeout=30)
-        out_str = str(out or '').strip()
+        runs = _job_runs()
+        if runs:
+            task.log(f"  drive-mirror answered late ({out_str[:120]}), the job runs: {drive_id}")
+            ok, out_str = True, ''
+        elif runs is None:
+            task.log(f"  drive-mirror: QEMU did not answer ({out_str[:200]}), {drive_id} is not mirrored")
+            return False
+        else:
+            # Try without -f (older QEMU)
+            mirror_cmd = f"drive_mirror -n {drive_id} {target_path} raw"
+            task.log(f"  drive-mirror retry without -f: {mirror_cmd}")
+            ok, out = _qm_monitor_cmd(pve_mgr, node, vmid, mirror_cmd, timeout=30)
+            out_str = str(out or '').strip()
+
+    if (not ok or 'error' in out_str.lower()) and _job_runs():
+        task.log(f"  drive-mirror said {out_str[:200]!r}, but the job of {drive_id} runs")
+        ok, out_str = True, ''
 
     if not ok:
         task.log(f"  drive-mirror command failed: {out_str[:500]}")
@@ -5200,7 +5228,6 @@ def _drive_mirror_to_local(pve_mgr, task, node, vmid, drive_id, target_path, dis
     # Verify job actually started — poll up to 10s with three checks
     # (1s, then +3s, then +6s). Larger mirrors over slow storage can take a
     # while to register in block-jobs.
-    import time
     time.sleep(1)
     ok2, jobs = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
     if ok2 and drive_id in str(jobs):
@@ -7717,6 +7744,9 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 mirrors.append((drive_id, disk_total, di))
             else:
                 task.log(f"  Disk {di}: drive-mirror failed to start")
+                # MK Nov 2026 - a drive_mirror QEMU answered too late may still start its job:
+                # cancelled like the started ones, or it writes next to the fallback copy
+                _qm_block_job(pve_mgr, task.target_node, task.proxmox_vmid, 'cancel', drive_id)
                 all_started = False
                 break
         
