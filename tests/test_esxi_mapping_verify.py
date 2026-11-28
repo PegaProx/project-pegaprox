@@ -441,7 +441,10 @@ class Run:
 # attach, and the EFI disk a live pivot gives a guest left on Auto firmware. Then the package
 # checks and installs of the node behind one helper (#1252): only those steps changed. Then the
 # SSHFS mount with the ssh options inside its one ssh_command and without the FUSE 2 options:
-# only the mount step changed.
+# only the mount step changed. Then the live run whose mirror does not start (sshfs_boot_live):
+# the recording held the run that copied nothing and attached the empty volumes; it cancels the
+# disk's job, copies every disk from ESXi with the guest running, gives the guest 5 minutes to
+# shut down and brings each copy up to the source by block checksums before it is attached.
 LEGACY_SCENARIOS = {
     'offline': dict(mode='offline'),
     'vmkfstools_clone': dict(mode='vmkfstools_clone'),

@@ -245,6 +245,11 @@ def _md5_lines(path, n):
     return ''.join(f'sum-{path}-{b}\n' for b in range(n))
 
 
+def _dd_input(cmd):
+    """The file a block checksum loop reads: the if= of its dd, shell quoting undone"""
+    return next(t[3:] for t in shlex.split(cmd.split('dd ', 1)[1]) if t.startswith('if='))
+
+
 def _flat_size(path):
     base = path.rsplit('/', 1)[-1]
     for i, nm in enumerate(('app01', 'app01_1', 'app01_2')):
@@ -261,6 +266,7 @@ class Node:
         self.log = log
         self.vols = vols
         self.copied_from = {}   # target device path -> source flat basename
+        self.scripts = {}       # path of a script written on the node -> the command that wrote it
         self.freed = []
         self._n = 0
         self.runs = ''
@@ -272,7 +278,22 @@ class Node:
             self._n += 1
             if kw.get('stdin_data') is not None:
                 self.runs = kw['stdin_data']   # a list of areas to copy
+            self.scripts[f"{m.group(1)}{self._n:010d}"] = cmd
             return 0, f"{m.group(1)}{self._n:010d}\n", ''
+        m = re.match(r'bash (/tmp/v2p-bgssh-\S+)', cmd)
+        if m:
+            # the background copy of Live Mirror: each stream reads the source flat on ESXi and
+            # writes the target device, so the device holds that disk afterwards
+            body = self.scripts.get(m.group(1), '')
+            for line in body.splitlines():
+                if ' of=' not in line or ' ssh ' not in line:
+                    continue
+                toks = shlex.split(line)
+                remote = next(t for t in toks if ' if=' in t)
+                src = next(t[3:] for t in shlex.split(remote) if t.startswith('if='))
+                dst = next(t[3:] for t in toks if t.startswith('of='))
+                self.copied_from[dst] = src.rsplit('/', 1)[-1]
+            return 0, '', ''
         if 'bash /tmp/v2p-runs-' in cmd:
             # the copy of written areas: every run arrives and matches on both sides
             return 0, f"RUNS_MATCH {len(self.runs.splitlines())}\n", ''
@@ -313,7 +334,7 @@ class Node:
             return 2, f"no such volume '{vol}'\n", ''
         if 'md5sum' in cmd and 'while' in cmd:
             n = int(re.search(r'-lt (\d+) \]', cmd).group(1))
-            path = shlex.split(re.search(r'dd if=(\S+)', cmd).group(1))[0]
+            path = _dd_input(cmd)
             return 0, _md5_lines(self.copied_from.get(path, path), n), ''
         if 'curl' in cmd and 'FSIZE' in cmd:
             return 0, 'HTTP=000 DL=0 FSIZE=0', ''
@@ -372,7 +393,7 @@ class EsxiShell:
             return 0, ''.join(f'/vmfs/volumes/{ds}/{folder}/{n}\n' for n in names), ''
         if 'md5sum' in cmd:
             n = int(re.search(r'-lt (\d+) \]', cmd).group(1))
-            path = shlex.split(re.search(r'dd if=(\S+)', cmd).group(1))[0]
+            path = _dd_input(cmd)
             return 0, _md5_lines(_flat_size(path) and path.rsplit('/', 1)[-1], n), ''
         if cmd.startswith('df -k'):
             return 0, 'vmfs 900000000 1 800000000 1% /vmfs/volumes/ds\n', ''

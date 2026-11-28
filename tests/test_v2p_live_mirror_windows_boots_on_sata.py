@@ -219,7 +219,8 @@ def test_the_copy_fallback_asks_before_it_stops_the_guest_and_attaches_by_slot()
     # Windows guest must come back on the slot the check chose, not on scsi0 by default
     import inspect
     src = inspect.getsource(v2p._do_sshfs_boot_migration)
-    block = src[src.index('        if import_ok:'):src.index('            mirror_success = True\n            copy_ok = True')]
+    start = src.index('        if import_ok:')
+    block = src[start:src.index('mirror_success = True\n', start)]
     assert block.index('_decide_live_boot(vm_running_on_ssh)') < block.index('/status/shutdown')
     attaches = re.findall(r'qm set \{task\.proxmox_vmid\} --\{([^}]+)\}', block)
     assert attaches and all(a.startswith('_slot(') for a in attaches), attaches

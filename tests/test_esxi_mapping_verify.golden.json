@@ -2453,6 +2453,56 @@
    [
     "node",
     "pve1",
+    "echo 'block_job_cancel sshfs-disk0' | qm monitor 120 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; f=$(mktemp /tmp/v2p-bgssh-t1-d0-XXXXXXXXXX) && cat > \"$f\" << 'V2P_NODE_SCRIPT' && echo \"$f\"\n#!/bin/bash\necho $$ > /sys/fs/cgroup/v2p-copy-120/cgroup.procs 2>/dev/null; \necho 1000 > /proc/self/oom_score_adj 2>/dev/null || true\nnice -n 19 ionice -c 3 ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o Compression=no -o IPQoS=throughput -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=64M if=/vmfs/volumes/ds1/app01/app01-flat.vmdk skip=0 count=5 2>/dev/null | cat' | cat | nice -n 19 ionice -c 3 dd oflag=direct bs=64M conv=notrunc of=/dev/local-lvm/vm-120-disk-0 seek=0 2>/dev/null &\nnice -n 19 ionice -c 3 ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o Compression=no -o IPQoS=throughput -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=64M if=/vmfs/volumes/ds1/app01/app01-flat.vmdk skip=5 count=5 2>/dev/null | cat' | cat | nice -n 19 ionice -c 3 dd oflag=direct bs=64M conv=notrunc of=/dev/local-lvm/vm-120-disk-0 seek=5 2>/dev/null &\nnice -n 19 ionice -c 3 ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o Compression=no -o IPQoS=throughput -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=64M if=/vmfs/volumes/ds1/app01/app01-flat.vmdk skip=10 count=5 2>/dev/null | cat' | cat | nice -n 19 ionice -c 3 dd oflag=direct bs=64M conv=notrunc of=/dev/local-lvm/vm-120-disk-0 seek=10 2>/dev/null &\nnice -n 19 ionice -c 3 ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o Compression=no -o IPQoS=throughput -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=64M if=/vmfs/volumes/ds1/app01/app01-flat.vmdk skip=15 count=5 2>/dev/null | cat' | cat | nice -n 19 ionice -c 3 dd oflag=direct bs=64M conv=notrunc of=/dev/local-lvm/vm-120-disk-0 seek=15 2>/dev/null &\nnice -n 19 ionice -c 3 ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o Compression=no -o IPQoS=throughput -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=64M if=/vmfs/volumes/ds1/app01/app01-flat.vmdk skip=20 count=5 2>/dev/null | cat' | cat | nice -n 19 ionice -c 3 dd oflag=direct bs=64M conv=notrunc of=/dev/local-lvm/vm-120-disk-0 seek=20 2>/dev/null &\nnice -n 19 ionice -c 3 ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o Compression=no -o IPQoS=throughput -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=64M if=/vmfs/volumes/ds1/app01/app01-flat.vmdk skip=25 count=5 2>/dev/null | cat' | cat | nice -n 19 ionice -c 3 dd oflag=direct bs=64M conv=notrunc of=/dev/local-lvm/vm-120-disk-0 seek=25 2>/dev/null &\nnice -n 19 ionice -c 3 ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o Compression=no -o IPQoS=throughput -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=64M if=/vmfs/volumes/ds1/app01/app01-flat.vmdk skip=30 count=3 2>/dev/null | cat' | cat | nice -n 19 ionice -c 3 dd oflag=direct bs=64M conv=notrunc of=/dev/local-lvm/vm-120-disk-0 seek=30 2>/dev/null &\nwait\nV2P_NODE_SCRIPT\n"
+   ],
+   [
+    "node",
+    "pve1",
+    "bash /tmp/v2p-bgssh-t1-d0-0000000001 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-bgssh-t1-d0-0000000001"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; f=$(mktemp /tmp/v2p-bgssh-t1-d1-XXXXXXXXXX) && cat > \"$f\" << 'V2P_NODE_SCRIPT' && echo \"$f\"\n#!/bin/bash\necho $$ > /sys/fs/cgroup/v2p-copy-120/cgroup.procs 2>/dev/null; \necho 1000 > /proc/self/oom_score_adj 2>/dev/null || true\nnice -n 19 ionice -c 3 ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o Compression=no -o IPQoS=throughput -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=64M if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk skip=0 count=4 2>/dev/null | cat' | cat | nice -n 19 ionice -c 3 dd oflag=direct bs=64M conv=notrunc of=/dev/local-lvm/vm-120-disk-1 seek=0 2>/dev/null &\nnice -n 19 ionice -c 3 ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o Compression=no -o IPQoS=throughput -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=64M if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk skip=4 count=4 2>/dev/null | cat' | cat | nice -n 19 ionice -c 3 dd oflag=direct bs=64M conv=notrunc of=/dev/local-lvm/vm-120-disk-1 seek=4 2>/dev/null &\nnice -n 19 ionice -c 3 ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o Compression=no -o IPQoS=throughput -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=64M if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk skip=8 count=4 2>/dev/null | cat' | cat | nice -n 19 ionice -c 3 dd oflag=direct bs=64M conv=notrunc of=/dev/local-lvm/vm-120-disk-1 seek=8 2>/dev/null &\nnice -n 19 ionice -c 3 ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o Compression=no -o IPQoS=throughput -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=64M if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk skip=12 count=4 2>/dev/null | cat' | cat | nice -n 19 ionice -c 3 dd oflag=direct bs=64M conv=notrunc of=/dev/local-lvm/vm-120-disk-1 seek=12 2>/dev/null &\nwait\nV2P_NODE_SCRIPT\n"
+   ],
+   [
+    "node",
+    "pve1",
+    "bash /tmp/v2p-bgssh-t1-d1-0000000002 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-bgssh-t1-d1-0000000002"
+   ],
+   [
+    "node",
+    "pve1",
+    "umask 077; f=$(mktemp /tmp/v2p-bgssh-t1-d2-XXXXXXXXXX) && cat > \"$f\" << 'V2P_NODE_SCRIPT' && echo \"$f\"\n#!/bin/bash\necho $$ > /sys/fs/cgroup/v2p-copy-120/cgroup.procs 2>/dev/null; \necho 1000 > /proc/self/oom_score_adj 2>/dev/null || true\nnice -n 19 ionice -c 3 ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o Compression=no -o IPQoS=throughput -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=64M if=/vmfs/volumes/ds1/app01/app01_2-flat.vmdk skip=0 count=4 2>/dev/null | cat' | cat | nice -n 19 ionice -c 3 dd oflag=direct bs=64M conv=notrunc of=/dev/local-lvm/vm-120-disk-2 seek=0 2>/dev/null &\nnice -n 19 ionice -c 3 ssh -i /tmp/v2p-key-fixed -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 -o PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519 -o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 -o Compression=no -o IPQoS=throughput -c aes128-gcm@openssh.com root@esx1.lab 'nice -n 19 ionice -c 3 dd iflag=fullblock bs=64M if=/vmfs/volumes/ds1/app01/app01_2-flat.vmdk skip=4 count=4 2>/dev/null | cat' | cat | nice -n 19 ionice -c 3 dd oflag=direct bs=64M conv=notrunc of=/dev/local-lvm/vm-120-disk-2 seek=4 2>/dev/null &\nwait\nV2P_NODE_SCRIPT\n"
+   ],
+   [
+    "node",
+    "pve1",
+    "bash /tmp/v2p-bgssh-t1-d2-0000000003 2>&1"
+   ],
+   [
+    "node",
+    "pve1",
+    "rm -f /tmp/v2p-bgssh-t1-d2-0000000003"
+   ],
+   [
+    "node",
+    "pve1",
     "rmdir /sys/fs/cgroup/v2p-copy-120 2>/dev/null || true"
    ],
    [
@@ -2476,7 +2526,7 @@
     [
      [
       "timeout",
-      30
+      300
      ]
     ]
    ],
@@ -2489,6 +2539,38 @@
     "node",
     "pve1",
     "sync"
+   ],
+   [
+    "node",
+    "pve1",
+    "sync"
+   ],
+   [
+    "esxi_ssh",
+    "i=0; while [ $i -lt 9 ]; do dd if=/vmfs/volumes/ds1/app01/app01-flat.vmdk bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
+   ],
+   [
+    "node",
+    "pve1",
+    "i=0; while [ $i -lt 9 ]; do dd if=/dev/local-lvm/vm-120-disk-0 bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
+   ],
+   [
+    "esxi_ssh",
+    "i=0; while [ $i -lt 4 ]; do dd if=/vmfs/volumes/ds1/app01/app01_1-flat.vmdk bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
+   ],
+   [
+    "node",
+    "pve1",
+    "i=0; while [ $i -lt 4 ]; do dd if=/dev/local-lvm/vm-120-disk-1 bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
+   ],
+   [
+    "esxi_ssh",
+    "i=0; while [ $i -lt 2 ]; do dd if=/vmfs/volumes/ds1/app01/app01_2-flat.vmdk bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
+   ],
+   [
+    "node",
+    "pve1",
+    "i=0; while [ $i -lt 2 ]; do dd if=/dev/local-lvm/vm-120-disk-2 bs=268435456 skip=$i count=1 2>/dev/null | md5sum | cut -d' ' -f1; i=$((i+1)); done"
    ],
    [
     "node",

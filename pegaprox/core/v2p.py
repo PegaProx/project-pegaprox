@@ -6886,6 +6886,64 @@ def _log_efidisk_result(task, rc, out, pre_keys):
         _result_warning(task, f"EFI disk could not be allocated, boot entries will not persist: {str(out or '').strip()[-200:]}")
 
 
+def _catch_up_target(pve_mgr, task, vol_id):
+    """The block device (or raw file) of an imported volume the catch-up may compare and write, ''
+    when there is none. qm importdisk leaves its volume deactivated: a krbd image unmapped, a thick
+    LV inactive, and a librbd storage has no device at all; a dd onto the stale /dev path wrote a
+    regular file in /dev and its read-back passed (#538). Resolved the way an allocation is."""
+    node = task.target_node
+    rc, out, _ = _pve_node_exec(pve_mgr, node, f"pvesm path {shlex.quote(vol_id)} 2>/dev/null", timeout=15)
+    path = str(out or '').strip().splitlines()[-1].strip() if rc == 0 and str(out or '').strip() else ''
+    if path.startswith('rbd:'):
+        mapped = _map_rbd_uri_to_device(pve_mgr, node, vol_id, path)
+        if not mapped or not _ensure_block_device(pve_mgr, node, vol_id, mapped, 'rbd'):
+            return ''
+        _rbd_map_sink(task).append(mapped)    # unmapped by the teardown
+        return mapped
+    if path.startswith('/dev/'):
+        parts = path.split('/')
+        if len(parts) == 4 and not path.startswith('/dev/rbd'):
+            # a thick LV importdisk deactivated: the LVM plugin activates it the same way
+            rc_b, out_b, _ = _pve_node_exec(pve_mgr, node, f"test -b {shlex.quote(path)} && echo BLK || echo NOBLK",
+                                            timeout=10)
+            if 'NOBLK' in str(out_b or '') or 'BLK' not in str(out_b or ''):
+                _pve_node_exec(pve_mgr, node, f"lvchange -aly {shlex.quote(parts[2] + '/' + parts[3])} 2>&1",
+                               timeout=30)
+        return path if _ensure_block_device(pve_mgr, node, vol_id, path,
+                                            'rbd' if path.startswith('/dev/rbd') else '') else ''
+    if path.startswith('/') and not path.endswith(('.qcow2', '.vmdk')):
+        # a raw image file of a directory storage; a qcow2 file holds no disk block by block
+        rc_f, out_f, _ = _pve_node_exec(pve_mgr, node, f"test -f {shlex.quote(path)} && echo FILE", timeout=10)
+        return path if 'FILE' in str(out_f or '') else ''
+    return ''
+
+
+def _catch_up_live_copies(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore, vm_dir,
+                          descriptor_files, local_volumes):
+    """MK Nov 2026 - Live Mirror without a mirror copies the source disks while the guest runs on
+    them over SSH and writes to blocks that were copied already. With the VM stopped, what differs
+    goes over from the source files on ESXi before the copies are attached: True once every copy
+    holds what the source holds. A lab copy of 28 minutes was attached without it, a torn disk."""
+    _pve_node_exec(pve_mgr, task.target_node, "sync", timeout=120)
+    for di in task.kept_disks(len(descriptor_files)):
+        vol_id, dev_path = local_volumes[di] if di < len(local_volumes) else ('', '')
+        if not vol_id:
+            continue
+        if not dev_path:
+            dev_path = _catch_up_target(pve_mgr, task, vol_id)
+            if not dev_path:
+                task.log(f"  Disk {di}: {vol_id} has no device or raw file here to compare, its copy cannot be "
+                         f"brought up to date")
+                return False
+        flat_file = descriptor_files[di].replace('.vmdk', '-flat.vmdk')
+        task.log(f"  Disk {di}: copying what the guest wrote during the copy")
+        if not _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
+                                  f"/vmfs/volumes/{datastore}/{vm_dir}/{flat_file}", dev_path,
+                                  task.disk_progress[f'disk{di}']['total'], di):
+            return False
+    return True
+
+
 def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, esxi_pass,
                               datastore, vm_dir, descriptor_files, disk_bus, mnt_path,
                               v2p_tmpdir='/var/tmp'):
@@ -8079,18 +8137,20 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 pass  # Guest agent not available -- continue anyway
             
             # Try graceful ACPI shutdown first
+            # MK Nov 2026 - up to 5 min, as the snapshot modes wait for a guest: a Windows guest
+            # running from SSHFS did not get down in the 30s and was stopped hard (lab)
             task.log("  Sending ACPI shutdown...")
             try:
                 pve_mgr._api_post(
                     f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}"
                     f"/qemu/{task.proxmox_vmid}/status/shutdown",
-                    data={'timeout': 30})
+                    data={'timeout': 300})
             except:
                 pass
             
-            # Wait for clean shutdown (30s)
+            # Wait for clean shutdown (up to 5 min)
             stopped = False
-            for _w in range(15):
+            for _w in range(150):
                 time.sleep(2)
                 try:
                     st = pve_mgr._api_get(
@@ -8121,38 +8181,47 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                             break
                     except: pass
             
-            # Reconfigure: remove SSH args, set local disks, set boot order
-            _pve_node_exec(pve_mgr, task.target_node, f"sed -i '/^args:/d' {conf_path}", timeout=5)
-            _pve_node_exec(pve_mgr, task.target_node, f"sed -i '/^boot:/d' {conf_path}", timeout=5)
-            _pve_node_exec(pve_mgr, task.target_node, f"sed -i '/^unused/d' {conf_path}", timeout=5)
-            for di in range(len(descriptor_files)):
+            # MK Nov 2026 - the copies are brought up to what the guest wrote during them; copies
+            # that cannot be are not attached: the importdisk fallback below reads the stopped
+            # source in full instead
+            if not _catch_up_live_copies(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore, vm_dir,
+                                         descriptor_files, local_volumes):
+                task.log("  The copies could not be brought up to what the guest wrote: importing the disks "
+                         "again from the stopped source, the VM stays off until then")
+                copy_ok = False
+            else:
+                # Reconfigure: remove SSH args, set local disks, set boot order
+                _pve_node_exec(pve_mgr, task.target_node, f"sed -i '/^args:/d' {conf_path}", timeout=5)
+                _pve_node_exec(pve_mgr, task.target_node, f"sed -i '/^boot:/d' {conf_path}", timeout=5)
+                _pve_node_exec(pve_mgr, task.target_node, f"sed -i '/^unused/d' {conf_path}", timeout=5)
+                for di in range(len(descriptor_files)):
+                    _pve_node_exec(pve_mgr, task.target_node,
+                        f"sed -i '/^{disk_bus}{di}:/d' {conf_path}", timeout=5)
+                    _pve_node_exec(pve_mgr, task.target_node,
+                        f"sed -i '/^scsi{di}:/d' {conf_path}", timeout=5)
+                    _pve_node_exec(pve_mgr, task.target_node,
+                        f"sed -i '/^virtio{di}:/d' {conf_path}", timeout=5)
+            
+                for di in task.kept_disks(len(descriptor_files)):
+                    vol_id = local_volumes[di][0] if di < len(local_volumes) else ''
+                    task.record_disk_volume(di, vol_id)
+                    if vol_id:
+                        rc_set, out_set, _ = _pve_node_exec(pve_mgr, task.target_node,
+                            f"qm set {task.proxmox_vmid} --{_slot(di)} {shlex.quote(vol_id)}{_slot_opts(di)} 2>&1", timeout=15)
+                        task.log(f"  {_slot(di)}: {vol_id}")
+            
                 _pve_node_exec(pve_mgr, task.target_node,
-                    f"sed -i '/^{disk_bus}{di}:/d' {conf_path}", timeout=5)
-                _pve_node_exec(pve_mgr, task.target_node,
-                    f"sed -i '/^scsi{di}:/d' {conf_path}", timeout=5)
-                _pve_node_exec(pve_mgr, task.target_node,
-                    f"sed -i '/^virtio{di}:/d' {conf_path}", timeout=5)
+                    f"qm set {task.proxmox_vmid} --boot order={_slot(task._live_boot_di if task._live_boot_di is not None else 0)} 2>&1", timeout=10)
             
-            for di in task.kept_disks(len(descriptor_files)):
-                vol_id = local_volumes[di][0] if di < len(local_volumes) else ''
-                task.record_disk_volume(di, vol_id)
-                if vol_id:
-                    rc_set, out_set, _ = _pve_node_exec(pve_mgr, task.target_node,
-                        f"qm set {task.proxmox_vmid} --{_slot(di)} {shlex.quote(vol_id)}{_slot_opts(di)} 2>&1", timeout=15)
-                    task.log(f"  {_slot(di)}: {vol_id}")
+                # Start on local storage
+                if _start_or_warn(pve_mgr, task, f"VM {task.proxmox_vmid} RESTARTED on local storage (full speed)"):
+                    _down_started('restart', _restart_t0, 'the VM stopped for the switch to its local disks',
+                                  report=False)
             
-            _pve_node_exec(pve_mgr, task.target_node,
-                f"qm set {task.proxmox_vmid} --boot order={_slot(task._live_boot_di if task._live_boot_di is not None else 0)} 2>&1", timeout=10)
-            
-            # Start on local storage
-            if _start_or_warn(pve_mgr, task, f"VM {task.proxmox_vmid} RESTARTED on local storage (full speed)"):
-                _down_started('restart', _restart_t0, 'the VM stopped for the switch to its local disks',
-                              report=False)
-            
-            # Skip all remaining copy/config steps -- VM already reconfigured and running
-            mirror_success = True
-            copy_ok = True
-            vm_running_on_ssh = False  # VM was stopped and restarted on local storage
+                # Skip all remaining copy/config steps -- VM already reconfigured and running
+                mirror_success = True
+                copy_ok = True
+                vm_running_on_ssh = False  # VM was stopped and restarted on local storage
         else:
             copy_ok = False
     
@@ -8225,13 +8294,19 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     
     # ================================================================
     # DD-based copy fallback (offline or if both mirror + importdisk failed)
-    # Only for offline mode -- when VM is running on SSH, dd can't access ESXi directly
     # ================================================================
     if not copy_ok and not mirror_success and not vm_running_on_ssh:
         task.log("Falling back to SSH dd-based copy...")
         copy_ok = True
 
-    if not mirror_success and (not vm_running_on_ssh or not copy_ok):
+    # MK Nov 2026 - a guest running on the QEMU SSH, HTTPS or NBD backend has no SSHFS files for
+    # the two fallbacks above: with the mirror failed nothing copied its disks, "ALL DISKS COPIED"
+    # followed and the empty volumes were attached. The dd copy reads the source on ESXi while the
+    # guest runs; the switch below brings it up to date with the VM stopped
+    _nothing_copied = vm_running_on_ssh and not sshfs_boot and not sshfs_flat_paths
+    if _nothing_copied and not mirror_success:
+        task.log("drive-mirror failed - copying the disks from ESXi while the VM keeps running")
+    if not mirror_success and (not vm_running_on_ssh or not copy_ok or _nothing_copied):
       for di, desc_file in enumerate(descriptor_files):
         if task.disk_target(di) is None:
             continue
@@ -8440,16 +8515,16 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         except:
             pass  # Guest agent not available
         
-        # Try ACPI shutdown first
+        # Try ACPI shutdown first (MK Nov 2026: up to 5 min, as the snapshot modes wait)
         try:
             pve_mgr._api_post(
                 f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{task.target_node}"
                 f"/qemu/{task.proxmox_vmid}/status/shutdown",
-                data={'timeout': 30})
+                data={'timeout': 300})
         except: pass
         
         stopped = False
-        for attempt in range(15):
+        for attempt in range(150):
             time.sleep(2)
             try:
                 st = pve_mgr._api_get(
@@ -8480,6 +8555,19 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         
         time.sleep(2)
         _pve_node_exec(pve_mgr, task.target_node, "sync", timeout=10)
+        # MK Nov 2026 - the background copy and the importdisk fallback read the source while the
+        # guest ran on it: brought up to date now, or nothing torn is attached
+        if not _catch_up_live_copies(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore, vm_dir,
+                                     descriptor_files, local_volumes):
+            if nbd_sockets:
+                for sock in nbd_sockets:
+                    _pve_node_exec(pve_mgr, task.target_node, f"fuser -k {sock} 2>/dev/null; rm -f {sock}", timeout=5)
+            _cleanup_temp_ssh_key(pve_mgr, task.target_node, key_path, esxi_host, esxi_user)
+            task.set_phase('failed', f"The copied disks could not be brought up to what the guest wrote while they "
+                                     f"were copied, so they were not attached. VM {task.proxmox_vmid} is stopped; the "
+                                     f"source disks on ESXi hold the guest's data. Run the migration again (Offline "
+                                     f"Copy reads the stopped source in one go).")
+            return
     else:
         task.log("Configuring VM with local disks...")
 
