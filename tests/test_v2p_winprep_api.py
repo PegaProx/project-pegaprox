@@ -112,6 +112,22 @@ def test_the_dry_run_of_a_linux_guest_has_no_preparation(route, probe):
     assert {it['package'] for it in p['node_packages']['items']} == {'sshfs', 'sshpass'}
 
 
+def test_the_dry_run_of_a_linux_guest_with_guest_prep_says_it_once_and_checks_nothing(route, probe, monkeypatch):
+    # a lab bulk check of a Debian guest next to a Windows one warned "will fall back to the
+    # offline preparation: the source VM is not running" next to "does not look like Windows"
+    route.esxi.guest_state = lambda vm_id: {'data': {'power_state': 'POWERED_OFF', 'tools_running': False,
+                                                     'ops_ready': False, 'family': 'linuxGuest',
+                                                     'full_name': 'Debian GNU/Linux 12', 'soap': True}}
+    asked = []
+    monkeypatch.setattr(v2p, '_node_cannot_reach', lambda *a, **k: asked.append(a) or 'no answer within 5s')
+    p = route.post(dry_run=True, esxi_password=None, guest_prep=True).get_json()
+    assert p['ok'] is True, p['errors']
+    assert 'guest_prep' not in p and asked == []
+    assert not any('fall back to the offline preparation' in w for w in p['warnings']), p['warnings']
+    assert [w for w in p['warnings'] if 'Windows' in w] == ['The guest does not look like Windows: the Windows '
+                                                             'preparation does not run']
+
+
 def test_an_explicit_two_stage_boot_for_a_guest_that_is_no_windows_is_an_error_of_the_plan(route, probe):
     p = route.post(dry_run=True, esxi_password=None, two_stage_boot=True).get_json()
     assert p['ok'] is False and any('two_stage_boot: not a Windows guest' in e for e in p['errors'])

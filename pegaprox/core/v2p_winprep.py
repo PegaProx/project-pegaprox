@@ -135,6 +135,16 @@ def plan(pve_mgr, task, vm):
                            'final_bus': 'scsi', 'boot_disk': None}
         if getattr(task, 'install_virtio_drivers', False):
             task.log("VirtIO driver injection asked for, the guest does not look like Windows")
+        # MK Nov 2026 - the in-guest preparation stayed on: the check then tried the Windows login
+        # on the guest and the result said it was prepared on Proxmox VE instead (a lab bulk run
+        # of a Debian guest next to a Windows one). Off, and the login goes
+        gps = getattr(task, '_guest_prep', None)
+        if getattr(task, 'guest_prep', False) or (isinstance(gps, dict) and gps.get('on')):
+            if isinstance(gps, dict):
+                gps.update(on=False, state='off', why='not a Windows guest')
+            task.guest_prep = False
+            task._guest_password, task.guest_user = '', ''
+            task.log("Windows preparation in the guest left out: the guest does not look like Windows")
         return
     mirror = task.transfer_mode == 'sshfs_boot'
     if not getattr(task, '_virtio_explicit', False) and not mirror:

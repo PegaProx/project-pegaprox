@@ -1896,7 +1896,9 @@ def _winprep_views(mgr, vm_id, vm_detail, data, plan):
     if not win and (gp or data.get('two_stage_boot') is True):
         wp['warnings'].append('The guest does not look like Windows: the Windows preparation does not run')
     plan['windows_prep'], plan['two_stage'] = wp, ts
-    if gp:
+    # MK Nov 2026 - not for a guest that is no Windows: its check warned that it falls back to the
+    # offline preparation, which does not run for it either, and the bulk list tagged its tools
+    if gp and win:
         from pegaprox.core import v2p_guestprep
         plan['guest_prep'] = v2p_guestprep.plan_view(mgr, vm_id, vm_detail, data)
     for part in (ts, plan.get('guest_prep') or {}):

@@ -254,6 +254,20 @@ def test_a_guest_that_cannot_be_prepared_falls_back_to_the_offline_preparation(l
     assert not [c for c in lab.guest.calls if c[0] == 'put' and 'go.flag' in c[1]]
 
 
+def test_a_guest_that_is_no_windows_is_not_checked_with_the_windows_login(lab):
+    # a lab bulk run took a Debian guest along with guest_prep on: the plan left the preparation
+    # on, the check ran on it and the result said it was prepared on Proxmox VE instead
+    from pegaprox.core import v2p_winprep
+    task = lab.task
+    task._guest_password, task.guest_user = 'pw', 'Administrator'
+    v2p_winprep.plan(lab.pve, task, {'guest_id': 'debian12_64Guest', 'guest_OS': 'Debian GNU/Linux 12 (64-bit)'})
+    assert task.guest_prep is False and task._guest_prep['on'] is False and task._guest_prep['state'] == 'off'
+    assert task._guest_password == '' and task.guest_user == ''
+    assert gp.probe(lab.esxi, lab.pve, task) is False
+    assert task.warnings == [] and lab.guest.names() == []
+    assert any('does not look like Windows' in line for line in task.log_lines)
+
+
 # --------------------------------------------------------------------------- stage 1
 
 def _checked(lab):
