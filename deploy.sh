@@ -44,6 +44,12 @@ for arg in "$@"; do
     case $arg in
         --port=*)
             ACCESS_PORT="${arg#*=}"
+            # NS Nov 2026 - checked like the port typed at the prompt: a word went into $((...))
+            # further down, where bash evaluates it as an expression
+            if ! [[ "$ACCESS_PORT" =~ ^[0-9]{1,5}$ ]] || [ "$ACCESS_PORT" -lt 1 ] || [ "$ACCESS_PORT" -gt 65535 ]; then
+                echo "Invalid port: --port takes a number from 1 to 65535" >&2
+                exit 1
+            fi
             ;;
         --no-interactive)
             INTERACTIVE=false

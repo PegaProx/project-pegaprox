@@ -57,6 +57,24 @@ def test_deploy_sets_the_port_as_the_service_user_in_its_directory(tmp_path, ans
         assert 'WARN Set port manually' in r.stdout
 
 
+@pytest.mark.parametrize('port', ['a[$(touch {mark})]', '0', '65536', '443x', '', '0x1bb', '99999999999999999999'])
+def test_deploy_refuses_a_port_argument_that_is_no_port(tmp_path, port):
+    # --port= went unchecked into $((ACCESS_PORT+1)), which bash evaluates as an expression;
+    # the port typed at the prompt was checked already. --help after it: nothing else runs
+    mark = tmp_path / 'ran'
+    r = subprocess.run(['bash', os.path.join(ROOT, 'deploy.sh'), '--port=' + port.format(mark=mark), '--help'],
+                       capture_output=True, text=True, timeout=30, cwd=tmp_path)
+    assert r.returncode == 1 and 'Invalid port' in r.stderr, r.stdout[:200] + r.stderr
+    assert not mark.exists()
+
+
+@pytest.mark.parametrize('port', ['1', '443', '8443', '65535'])
+def test_deploy_takes_a_port_argument_that_is_a_port(tmp_path, port):
+    r = subprocess.run(['bash', os.path.join(ROOT, 'deploy.sh'), f'--port={port}', '--help'],
+                       capture_output=True, text=True, timeout=30, cwd=tmp_path)
+    assert r.returncode == 0 and 'Usage:' in r.stdout, r.stderr
+
+
 def test_no_installer_writes_the_database_with_the_sqlite3_cli():
     for rel in (('deploy.sh',), ('.github', 'workflows', 'release-images.yml')):
         text = _read(*rel)
