@@ -15250,6 +15250,10 @@
             // LW Nov 2026 - what the server says of the guest (windows_prep of a dry run), and the login check
             const [v2pWinSrv, setV2pWinSrv] = useState(null);
             const [v2pGuestLogin, setV2pGuestLogin] = useState(null);
+            // a check that answers after the guest or the login changed shows nothing: its answer
+            // was about the one before
+            const v2pGuestLoginSeq = useRef(0);
+            const resetV2pGuestLogin = () => { v2pGuestLoginSeq.current++; setV2pGuestLogin(null); };
             // LW Oct 2026 - the guests ticked in the ESXi VM list, and the bulk dialog: {vms} to
             // set one up, {runId} to follow one
             const [esxiBulkSel, setEsxiBulkSel] = useState([]);
@@ -20277,11 +20281,12 @@
             useEffect(() => {
                 setVmwareMigrateForm(f => (f.guest_prep || f.guest_user || f.guest_password || f.two_stage_boot !== null || f.install_virtio_drivers !== null
                     ? {...f, guest_prep: false, guest_user: '', guest_password: '', two_stage_boot: null, install_virtio_drivers: null} : f));
-                setV2pGuestLogin(null);
+                resetV2pGuestLogin();
                 setV2pWinSrv(null);
             }, [showVmwareMigrate, vmwareSelectedVm]);
             const checkV2pGuestLogin = async () => {
                 const f = vmwareMigrateForm;
+                const seq = ++v2pGuestLoginSeq.current;
                 setV2pGuestLogin({busy: true});
                 try {
                     const resp = await authFetch(`${API_URL}/vmware/${selectedVMware.id}/vms/${vmwareSelectedVm}/guest-login`, {
@@ -20289,8 +20294,10 @@
                         body: JSON.stringify({guest_user: f.guest_user, guest_password: f.guest_password})
                     });
                     const data = resp ? await resp.json().catch(() => ({})) : {};
+                    if (seq !== v2pGuestLoginSeq.current) return;
                     setV2pGuestLogin(resp?.ok ? data : {ok: false, error: data.error || ''});
                 } catch(e) {
+                    if (seq !== v2pGuestLoginSeq.current) return;
                     setV2pGuestLogin({ok: false, error: e.message});
                 }
             };
@@ -31332,7 +31339,7 @@
                                                                         <div className="mt-2 ml-4 space-y-2">
                                                                             <label className={`flex items-start gap-2 ${running || f.guest_prep ? 'cursor-pointer' : 'opacity-60'}`}>
                                                                                 <input type="checkbox" checked={!!f.guest_prep} disabled={!running && !f.guest_prep}
-                                                                                    onChange={e => { setV2pGuestLogin(null); setVmwareMigrateForm(x => ({...x, guest_prep: e.target.checked, ...(e.target.checked ? {} : {guest_user: '', guest_password: ''})})); }}
+                                                                                    onChange={e => { resetV2pGuestLogin(); setVmwareMigrateForm(x => ({...x, guest_prep: e.target.checked, ...(e.target.checked ? {} : {guest_user: '', guest_password: ''})})); }}
                                                                                     className="rounded mt-0.5" data-v2p-guest-prep />
                                                                                 <span className="flex-1 min-w-0">
                                                                                     <span className="text-sm text-gray-200">{t('v2pGuestPrep')}</span>
@@ -31345,13 +31352,13 @@
                                                                                         <div>
                                                                                             <label className="text-xs text-gray-500 mb-1 block">{t('v2pGuestUser')}</label>
                                                                                             <input type="text" autoComplete="off" spellCheck={false} value={f.guest_user}
-                                                                                                onChange={e => { setV2pGuestLogin(null); setVmwareMigrateForm(x => ({...x, guest_user: e.target.value})); }}
+                                                                                                onChange={e => { resetV2pGuestLogin(); setVmwareMigrateForm(x => ({...x, guest_user: e.target.value})); }}
                                                                                                 className={field} data-v2p-guest-user />
                                                                                         </div>
                                                                                         <div>
                                                                                             <label className="text-xs text-gray-500 mb-1 block">{t('v2pGuestPassword')}</label>
                                                                                             <input type="password" autoComplete="off" value={f.guest_password}
-                                                                                                onChange={e => { setV2pGuestLogin(null); setVmwareMigrateForm(x => ({...x, guest_password: e.target.value})); }}
+                                                                                                onChange={e => { resetV2pGuestLogin(); setVmwareMigrateForm(x => ({...x, guest_password: e.target.value})); }}
                                                                                                 className={field} data-v2p-guest-password />
                                                                                         </div>
                                                                                     </div>

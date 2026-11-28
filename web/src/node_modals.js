@@ -6279,6 +6279,13 @@
                                 forcePolling,
                                 onTransport: (t) => console.log('VNC: transport=' + t),
                             });
+                            // LW Nov 2026 - closed while it was connecting (the polling fallback takes
+                            // seconds): the cleanup found no RFB to end, so the console stayed open
+                            // behind the closed window, holding its PVE session
+                            if (cancelled) {
+                                try { secureSock.close(); } catch (e) {}
+                                return;
+                            }
                             secureSock.addEventListener('integrityerror', (ev) => {
                                 console.error('VNC: middlebox tampering detected:', ev.data);
                                 setConnectionStatus('integrity_failed');
