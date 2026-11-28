@@ -5340,9 +5340,23 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
                         break
                     time.sleep(0.5)
                 
-                # Step 5: Resume VM
-                _qm_monitor_cmd(pve_mgr, node, vmid, "cont", timeout=10)
-                paused_for = time.monotonic() - paused_at
+                # Step 5: Resume VM, asked until QEMU says it runs (MK Nov 2026): a cont the
+                # monitor did not take, one SSH round trip that failed, left the guest stopped
+                # while the log said it resumed
+                resumed, resumed_at = False, None
+                for _try in range(3):
+                    _qm_monitor_cmd(pve_mgr, node, vmid, "cont", timeout=10)
+                    resumed_at = time.monotonic()
+                    ok_s, st_s = _qm_monitor_cmd(pve_mgr, node, vmid, "info status", timeout=10)
+                    if ok_s and 'status: running' in str(st_s or ''):
+                        resumed = True
+                        break
+                    time.sleep(1)
+                paused_for = resumed_at - paused_at
+                if not resumed:
+                    _result_warning(task, f"Live Mirror: QEMU did not say the guest of VM {vmid} runs again after the "
+                                          f"pause for the switch to its local disks. Look at the VM on Proxmox VE and "
+                                          f"resume it there (qm resume {vmid}) if it is still paused.")
                 if getattr(task, '_down_parts', None) is not None:
                     from pegaprox.core import v2p_twostage
                     _resumed = time.time()
@@ -5352,12 +5366,15 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
                     elapsed = time.time() - start_t
                     total_gb = sum(m[1] for m in mirrors) / (1024**3)
                     task.log(f"  Pause-pivot-resume complete! "
-                             f"({total_gb:.1f} GB in {elapsed:.0f}s, guest paused {paused_for:.1f}s) - VM resumed on local storage ✓")
+                             f"({total_gb:.1f} GB in {elapsed:.0f}s, guest paused {paused_for:.1f}s) - "
+                             + ("VM resumed on local storage ✓" if resumed else "the VM is on local storage, its resume "
+                                                                               "is not confirmed"))
                     for drive_id, disk_total, di in mirrors:
                         task.update_progress(f'disk{di}', disk_total, disk_total)
                     return True
                 else:
-                    task.log(f"  Pivot during pause failed - VM resumed, falling back")
+                    task.log(f"  Pivot during pause failed - {'VM resumed' if resumed else 'resume not confirmed'}, "
+                             f"falling back")
                     return False
         
         # Log progress periodically

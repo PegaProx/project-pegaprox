@@ -39,8 +39,9 @@ class Qemu:
     """The monitor of the running guest. A job takes complete from `ready_at` on (None:
     never) and is gone `settle` seconds after it took it."""
 
-    def __init__(self, clock, ready_at, ended=(), dies=(), settle=0.3, verb_known=True):
+    def __init__(self, clock, ready_at, ended=(), dies=(), settle=0.3, verb_known=True, cont_lost=0):
         self.clock = clock
+        self.cont_lost = cont_lost      # how many cont the monitor does not take
         self.settle = settle
         self.verb_known = verb_known
         self.in_flight_at_cont = None
@@ -70,7 +71,13 @@ class Qemu:
             for d in self.dies:             # an I/O error ends the job without a pivot
                 self.jobs[d]['gone_at'] = self.clock.now
             return ''
+        if cmd == 'info status':
+            running = self.resumed_at is not None or self.stopped_at is None
+            return f"VM status: {'running' if running else 'paused'}"
         if cmd == 'cont':
+            if self.cont_lost:
+                self.cont_lost -= 1
+                return ''
             self.resumed_at = self.clock.now
             self.in_flight_at_cont = sorted(d for d, j in self._listed().items() if j['gone_at'] is not None)
             return ''
@@ -106,6 +113,7 @@ class Task:
     def __init__(self):
         self.lines = []
         self.progress = {}
+        self.warnings = []
 
     def log(self, msg):
         self.lines.append(msg)
@@ -170,6 +178,24 @@ def test_the_log_says_how_long_the_guest_was_paused(monkeypatch):
     assert ok is True
     done = [line for line in task.lines if 'Pause-pivot-resume complete' in line]
     assert done and f'guest paused {q.paused:.1f}s' in done[0], (done, q.paused)
+
+
+def test_a_cont_the_monitor_did_not_take_is_sent_again_until_the_guest_runs(monkeypatch):
+    # the resume was sent once and never checked: lost, it left the guest paused while the log
+    # said "VM resumed on local storage"
+    ok, q, task = _pivot(monkeypatch, {'drive-scsi0': 0}, cont_lost=2)
+    assert ok is True and q.resumed_at is not None, task.lines
+    assert [c for _, c in q.cmds].count('cont') == 3
+    assert task.warnings == []
+    done = [line for line in task.lines if 'Pause-pivot-resume complete' in line]
+    assert done and 'VM resumed on local storage' in done[0] and f'guest paused {q.paused:.1f}s' in done[0]
+
+
+def test_a_guest_that_never_runs_again_is_a_warning_and_not_called_resumed(monkeypatch):
+    ok, q, task = _pivot(monkeypatch, {'drive-scsi0': 0}, cont_lost=9)
+    assert q.resumed_at is None
+    assert any('did not say the guest of VM 120 runs again' in w and 'qm resume 120' in w for w in task.warnings)
+    assert not any('VM resumed' in line for line in task.lines), task.lines
 
 
 def test_a_job_that_ended_before_the_pause_fails_without_pausing(monkeypatch):
