@@ -220,7 +220,8 @@ def test_the_probe_checks_the_guest_with_one_login_and_the_script_from_a_private
 
 
 @pytest.mark.parametrize('change,word', [
-    ({'probe_code': 10}, 'elevated'),
+    ({'probe_code': 10}, 'a token UAC filters'),
+    ({'probe_code': 11}, 'no administrator of the guest'),
     ({'probe': {'build': 7601}}, '9200'),
     ({'probe': {'arch': 'ARM64'}}, 'ARM64'),
     ({'probe': {'free_mb': 100}}, 'MB free'),

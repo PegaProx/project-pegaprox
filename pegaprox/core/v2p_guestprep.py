@@ -316,10 +316,15 @@ def _probe(vmware_mgr, pve_mgr, task):
         code = sess.wait_exit(pid, PROBE_SECONDS)
         if code is None:
             raise _StepFailed(f'the check script did not end within {PROBE_SECONDS}s')
+        # MK Nov 2026 - two reasons apart: on the lab a local administrator other than the built-in
+        # one got its full token through the guest operations, with UAC on; an account that is no
+        # administrator was refused with the UAC text all the same
         if code == 10:
-            raise _StepFailed(f'the account has no elevated rights in the guest: with UAC on, only the '
-                              f'built-in Administrator (or a domain admin with UAC remote restrictions off) gets '
-                              f'them through the guest operations')
+            raise _StepFailed('the account is an administrator of the guest, but the guest operations gave it a '
+                              'token UAC filters: take an account they elevate, the built-in Administrator for '
+                              'one')
+        if code == 11:
+            raise _StepFailed('the account is no administrator of the guest (not in its Administrators group)')
         raw = sess.get(work + '\\probe.json', 64 * 1024) if code == 0 else None
         if raw is None:
             raise _StepFailed(f'PowerShell did not run the script (exit code {code}). An execution policy set by '

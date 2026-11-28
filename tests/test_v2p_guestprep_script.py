@@ -149,6 +149,19 @@ def test_the_tools_media_mode_takes_only_a_signed_installer_from_a_cd_drive_and_
     assert "'ToolsMedia' { Invoke-ToolsMedia }" in PS
 
 
+def test_the_probe_tells_a_filtered_token_from_an_account_that_is_no_administrator():
+    # on the lab (Windows Server 2025, UAC on) a local administrator other than the built-in one
+    # got its full token through the guest operations, and an account outside the Administrators
+    # was refused with the UAC text all the same; whoami lists the Administrators SID of a
+    # filtered token for deny only, and none for an account that is no member
+    fa = _fn('Test-FilteredAdmin')
+    assert '& whoami.exe /groups /fo csv /nh' in fa and "'\"' + $SID_ADMINS + '\"'" in fa
+    probe = _fn('Invoke-Probe')
+    gate = probe[probe.index('if (-not (Test-Elevated))'):probe.index('Initialize-WorkDir')]
+    assert gate.index('$filtered = Test-FilteredAdmin') < gate.index('if ($filtered) { exit 10 }') < \
+        gate.index('exit 11')
+
+
 def test_the_tools_media_mode_takes_setup_exe_on_64_bit_when_there_is_no_setup64_exe():
     # the guest tools ISO of ESXi 8.0.3 holds setup.exe alone, a 64-bit installer: a lab
     # rollback that looked for setup64.exe only left the guest without its tools and network

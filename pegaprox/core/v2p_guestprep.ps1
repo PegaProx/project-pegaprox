@@ -83,6 +83,15 @@ function Test-Elevated {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+# MK Nov 2026 - a token UAC filtered keeps the SID of the Administrators, for deny only: whoami
+# lists it then. An account that is no member of them has no such line.
+function Test-FilteredAdmin {
+    foreach ($row in @(& whoami.exe /groups /fo csv /nh 2>$null)) {
+        if ([string]$row -match ('"' + $SID_ADMINS + '"')) { return $true }
+    }
+    return $false
+}
+
 # console programs: wait, log what they print, hand back the exit code
 function Invoke-Native([string]$File, [string[]]$Arguments) {
     $old = $ErrorActionPreference
@@ -652,9 +661,11 @@ function Invoke-Stage2([bool]$Shutdown) {
 function Invoke-Probe {
     $here = Split-Path -Parent $PSCommandPath
     if (-not (Test-Elevated)) {
-        # without the work folder: a filtered token (UAC) is all the account got here
-        Write-JsonFile (Join-Path $here 'probe.json') @{ ok = $false; elevated = $false }
-        exit 10
+        # without the work folder: 10 a token UAC filtered, 11 an account that is no administrator
+        $filtered = Test-FilteredAdmin
+        Write-JsonFile (Join-Path $here 'probe.json') @{ ok = $false; elevated = $false; filtered = $filtered }
+        if ($filtered) { exit 10 }
+        exit 11
     }
     Initialize-WorkDir
     $script:LogReady = $true
